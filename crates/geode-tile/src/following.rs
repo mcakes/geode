@@ -26,9 +26,12 @@ use gpui::App;
 /// one workspace's lane, so a tile in a pinned workspace answers with its own
 /// lane's counters, never the shared lane's.
 pub trait Barrier {
-    /// The frame's counters now. An open barrier always carries the current
-    /// flip identity (`Frame::open_flip` captures it and a later change
-    /// replaces the barrier), so these are what a closing tile answers with.
+    /// This tile's reading of the frame's counters now. An open barrier
+    /// holds each awaited key to the identity its own tile reads: the shell
+    /// enrolls every tile under its reading (`Frame::open_flip_each`), a
+    /// later scope, grouping or as-of change replaces the barrier, and a
+    /// tile that starts or stops following a link group has its key
+    /// re-identified. So these are what a closing tile answers with.
     fn current(&self) -> FrameVersions;
     /// Whether an open barrier waits for `key` at `versions`.
     fn wants(&self, key: QueryKey, versions: FrameVersions) -> bool;
@@ -135,9 +138,9 @@ pub enum Unanswered {
 pub struct FollowingQuery<T> {
     /// The frame versions the last submission was made under; `None` before
     /// the first and after a refusal. The whole `FrameVersions`, though a
-    /// tile follows only some counters: the barrier is keyed by flip
-    /// identity, so answering it needs the versions the request was made
-    /// under.
+    /// tile follows only some counters: the barrier holds this tile's key
+    /// to a flip identity, so answering it needs the versions the request
+    /// was made under.
     acted: Option<FrameVersions>,
     /// When the unanswered submission went out; `None` once answered.
     in_flight: Option<Instant>,

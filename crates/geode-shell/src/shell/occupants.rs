@@ -202,13 +202,33 @@ impl ShellView {
         // dropping them, so they can release subscriptions and cancel their
         // queries with a live GPUI context. The visibility diff below can only
         // reach occupants still in the map.
+        let mut gone: Vec<TileId> = Vec::new();
         for (id, o) in self.occupants.iter() {
             if !all.contains(id) {
                 o.content.set_visible(false, cx);
                 o.content.closed(cx);
+                gone.push(*id);
             }
         }
         self.occupants.retain(|id, _| all.contains(id));
+        // A closed tile is in no link group. Unlinked after `closed`: a
+        // closing follower answers the flip barrier under its group's
+        // identity, which it reads only while still a member. The frame is
+        // written only for a tile that was in a group, so an ordinary render
+        // writes nothing, and that write waits until this render is over:
+        // GPUI drops a notification sent while the window draws, and the
+        // tiles reading the group's board would not hear a draft leave.
+        for id in &gone {
+            self.emit_subs.remove(id);
+        }
+        gone.retain(|id| !self.frame.read(cx).membership(*id).is_empty());
+        if !gone.is_empty() {
+            cx.defer_in(window, move |view, _, cx| {
+                for id in gone {
+                    view.unlink_tile(id, cx);
+                }
+            });
+        }
 
         // Compute visibility before creating occupants so even initially hidden
         // ones receive their state. Newly visible occupants may receive `true`

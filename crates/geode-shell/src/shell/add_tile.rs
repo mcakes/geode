@@ -40,6 +40,9 @@ impl ShellView {
                 o.content.set_visible(false, cx);
                 o.content.closed(cx);
             }
+            // After `closed`, as on the close path. The id stays in the tree
+            // for the new occupant, which starts in no group.
+            self.unlink_tile(tile, cx);
             // The new occupant owns this tile ID. Stop preserving any unrestorable
             // session record that previously occupied its placeholder.
             self.unplaced_records.remove(&tile.0);

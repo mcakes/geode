@@ -7191,6 +7191,7 @@ run_mutation "shell: MAJ-2 — ensure_occupants drops a vanished tile's occupant
             if !all.contains(id) {
                 o.content.set_visible(false, cx);
                 o.content.closed(cx);
+                gone.push(*id);
             }
         }
         self.occupants.retain(|id, _| all.contains(id));' \

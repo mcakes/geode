@@ -739,6 +739,18 @@ impl Frame {
         });
     }
 
+    /// `key`'s tile now answers under `versions`: it started or stopped
+    /// following a link group, which changes its scope generation. When an
+    /// open barrier awaits `key`, hold it to that identity from here on;
+    /// left under the old one the tile's next arrival would not match and
+    /// the flip would wait out its deadline. A key nothing awaits is left
+    /// out: this never opens, releases or notifies.
+    pub fn reidentify(&mut self, key: QueryKey, versions: FrameVersions) {
+        if let Some(awaited) = self.barrier.as_mut().and_then(|b| b.awaiting.get_mut(&key)) {
+            *awaited = versions;
+        }
+    }
+
     /// Past [`FLIP_DEADLINE`], release whatever arrived so far rather
     /// than waiting forever on a tile that never answers (a query the
     /// pool dropped, a tile torn down mid-flight). `true` when this call
@@ -2303,6 +2315,51 @@ mod tests {
         assert!(!f.arrived(k1, lane), "one of two has arrived");
         assert!(f.arrived(k2, other), "the last arrival releases");
         assert!(!f.barrier_open());
+    }
+
+    /// A tile that starts following a group while a barrier awaits it
+    /// answers under the group's identity from then on. Left enrolled under
+    /// the lane's, its arrival does not count and the flip waits out the
+    /// deadline.
+    #[test]
+    fn a_follow_under_an_open_barrier_arrives_once_reidentified() {
+        let (tile, key) = (TileId(1), QueryKey(1));
+        for reidentified in [false, true] {
+            let mut f = Frame::new(slots(), SavedScopes::new(), None);
+            f.shared_mut().set_scope(book_scope("b1"));
+            let lane = f.view_for(ws(1), tile).versions();
+            f.open_flip_each([(key, lane)], Instant::now());
+            assert!(f.follow(tile, Some(Group::A)));
+            let follower = f.view_for(ws(1), tile).versions();
+            assert_ne!(follower.scope, lane.scope, "the tile's identity moved");
+            if reidentified {
+                f.reidentify(key, follower);
+                assert!(!f.barrier_wants(key, lane));
+            }
+            assert_eq!(f.barrier_wants(key, follower), reidentified);
+            assert_eq!(f.arrived(key, follower), reidentified);
+            assert_eq!(f.barrier_open(), !reidentified);
+        }
+    }
+
+    /// Re-identifying is not enrolling: a key no barrier awaits stays out,
+    /// and with nothing open nothing opens.
+    #[test]
+    fn reidentify_touches_only_a_key_an_open_barrier_awaits() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let v = f.shared().versions();
+        let other = FrameVersions {
+            scope: v.scope + 100,
+            ..v
+        };
+        f.reidentify(QueryKey(1), other);
+        assert!(!f.barrier_open());
+
+        f.open_flip_each([(QueryKey(1), v)], Instant::now());
+        f.reidentify(QueryKey(2), other);
+        assert!(!f.barrier_wants(QueryKey(2), other));
+        assert!(f.barrier_wants(QueryKey(1), v));
+        assert_eq!(f.shared().versions().flip, v.flip, "and releases nothing");
     }
 
     #[test]

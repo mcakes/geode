@@ -318,6 +318,37 @@ pub trait TileContent {
     ) -> Result<(), &'static str> {
         Err(crate::colfit::NO_TABLE)
     }
+    /// Whether this tile can emit into a link group at all. The chooser
+    /// offers emitting only to tiles that answer `true`, and the shell
+    /// refuses to set any other tile emitting.
+    fn emits(&self) -> bool {
+        false
+    }
+    /// What this tile posts into the link group it emits into: the scope its
+    /// cursor names and the draft documents it holds. Pulled by the shell
+    /// when the tile joins a group and after `watch_emission`'s callback
+    /// fires, never from inside an update of this tile. Read-only, and cheap
+    /// when nothing changed: return the same `Arc` for an unchanged draft,
+    /// since the frame compares drafts by allocation and an equal emission
+    /// is not a write.
+    fn emission(&self, _cx: &App) -> geode_core::link::Emission {
+        geode_core::link::Emission::default()
+    }
+    /// Call `changed` whenever `emission()` may answer differently, until
+    /// the returned subscription is dropped. The shell holds it exactly
+    /// while the tile emits. `changed` carries nothing and writes nothing:
+    /// the shell pulls `emission()` once the update that called it has
+    /// finished, so it is safe to call from an observer of the tile's own
+    /// entity or from inside the tile's update. Calling it for a change that
+    /// left the emission equal costs one pull and no write. `None` from a
+    /// tile that never emits.
+    fn watch_emission(
+        &self,
+        _changed: Rc<dyn Fn(&mut App)>,
+        _cx: &mut App,
+    ) -> Option<gpui::Subscription> {
+        None
+    }
     /// Expose the last stack handle to hosting tests. Content is stored as
     /// `Box<dyn TileContent>`, so tests cannot access the concrete occupant's
     /// fields. Defaults to `None`; [`recording::RecordingContent`] returns its
@@ -882,11 +913,17 @@ pub mod placeholder {
 #[cfg(any(test, feature = "test-support"))]
 pub mod recording {
     use super::*;
+    use geode_core::link::{Emission, Group};
     use gpui::prelude::*;
     use gpui::{Context, FocusHandle, Focusable as _, Render, div};
     use gpui_component::input::{Input, InputEvent, InputState};
     use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
     use std::rc::Rc;
+
+    /// The link group each closing occupant still read as followed, in the
+    /// order `closed` reached them.
+    pub type FollowedAtClose = Rc<RefCell<Vec<(TileId, Option<Group>)>>>;
 
     #[derive(Debug, Clone, PartialEq)]
     pub enum Recorded {
@@ -986,6 +1023,29 @@ pub mod recording {
         /// that the occupant's view paints, and logs each row report as
         /// [`Recorded::FindRows`] — a module that formats only shown rows.
         pub find_table: bool,
+        /// What every occupant answers from `emits`. Off by default, so
+        /// every existing fixture is a tile that cannot emit.
+        pub emits: bool,
+        /// What every occupant answers from `emission`; shared and mutable
+        /// like `dimension_context`. An emitting occupant's
+        /// `watch_emission` observes its own view entity, as a module
+        /// does: a test changes this, notifies that view, and the shell
+        /// pulls.
+        pub emission: Rc<RefCell<Emission>>,
+        /// How many times `emission` was pulled, across every occupant: a
+        /// test's proof that a pull did, or did not, happen.
+        pub pulls: Rc<Cell<usize>>,
+        /// The frame handle each occupant was created with, by tile, for a
+        /// test to read through (`tile()`, `read(cx).following()`): the
+        /// content is boxed behind the trait and offers no other way in.
+        pub frame_handles: Rc<RefCell<HashMap<TileId, FrameRef>>>,
+        /// The link group each occupant's frame handle read as followed at
+        /// the moment `closed` reached it, in order: what a closing
+        /// following tile answers the flip barrier under.
+        pub followed_at_close: FollowedAtClose,
+        /// One entry per notification of an occupant's view entity, which
+        /// is what repaints it; the shell re-rendering does not.
+        pub repaints: Rc<RefCell<Vec<TileId>>>,
     }
 
     impl RecordingFactory {
@@ -1006,6 +1066,12 @@ pub mod recording {
                 edit_on_launch: false,
                 grid: false,
                 find_table: false,
+                emits: false,
+                emission: Rc::new(RefCell::new(Emission::default())),
+                pulls: Rc::new(Cell::new(0)),
+                frame_handles: Rc::new(RefCell::new(HashMap::new())),
+                followed_at_close: Rc::new(RefCell::new(Vec::new())),
+                repaints: Rc::new(RefCell::new(Vec::new())),
             }
         }
     }
@@ -1084,6 +1150,16 @@ pub mod recording {
         grid: bool,
         /// Shared with [`RecordingFactory::find_table`].
         find_table: bool,
+        /// The handle `create` received; `closed` reads through it.
+        frame: FrameRef,
+        /// Shared with [`RecordingFactory::emits`].
+        emits: bool,
+        /// Shared with [`RecordingFactory::emission`].
+        emission: Rc<RefCell<Emission>>,
+        /// Shared with [`RecordingFactory::pulls`].
+        pulls: Rc<Cell<usize>>,
+        /// Shared with [`RecordingFactory::followed_at_close`].
+        followed_at_close: FollowedAtClose,
     }
 
     impl TileContent for RecordingContent {
@@ -1279,8 +1355,28 @@ pub mod recording {
                 .borrow_mut()
                 .push(Recorded::Visible(self.tile, visible));
         }
-        fn closed(&self, _: &mut App) {
+        fn closed(&self, cx: &mut App) {
             self.log.borrow_mut().push(Recorded::Closed(self.tile));
+            self.followed_at_close
+                .borrow_mut()
+                .push((self.tile, self.frame.read(cx).following()));
+        }
+        fn emits(&self) -> bool {
+            self.emits
+        }
+        fn emission(&self, _: &App) -> Emission {
+            self.pulls.set(self.pulls.get() + 1);
+            self.emission.borrow().clone()
+        }
+        /// Observes the view entity, the way a module observes its own
+        /// tile: any notification of it may be an emission change.
+        fn watch_emission(
+            &self,
+            changed: Rc<dyn Fn(&mut App)>,
+            cx: &mut App,
+        ) -> Option<gpui::Subscription> {
+            self.emits
+                .then(|| cx.observe(&self.view, move |_, cx| changed(cx)))
         }
         fn set_stack(&self, stack: Option<StackHandle>, _: &mut App) {
             self.log.borrow_mut().push(Recorded::Stack(
@@ -1415,6 +1511,10 @@ pub mod recording {
                 input: None,
                 find: None,
             });
+            self.frame_handles.borrow_mut().insert(tile, frame.clone());
+            let repaints = self.repaints.clone();
+            cx.observe(&view, move |_, _| repaints.borrow_mut().push(tile))
+                .detach();
             TileOccupant {
                 kind: self.kind,
                 view: view.clone().into(),
@@ -1434,6 +1534,11 @@ pub mod recording {
                     edit_on_launch: self.edit_on_launch,
                     grid: self.grid,
                     find_table: self.find_table,
+                    frame,
+                    emits: self.emits,
+                    emission: self.emission.clone(),
+                    pulls: self.pulls.clone(),
+                    followed_at_close: self.followed_at_close.clone(),
                 }),
             }
         }

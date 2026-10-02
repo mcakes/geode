@@ -22,6 +22,7 @@ mod input;
 pub mod kbd;
 pub mod keybindings_view;
 pub mod keys;
+mod link;
 pub mod listrow;
 pub mod objectdialog;
 mod occupants;
@@ -619,6 +620,11 @@ pub struct ShellView {
     /// The tiles painted last frame, to diff visibility without touching
     /// every occupant every frame.
     visible_tiles: HashSet<TileId>,
+    /// One subscription per tile that emits into a link group, held exactly
+    /// while it does: the tile's `watch_emission` calls back through it and
+    /// the shell pulls. Dropped when the tile leaves its group or closes,
+    /// so a tile in no group is never pulled.
+    emit_subs: HashMap<TileId, gpui::Subscription>,
     /// The last `(index, len)` `ensure_occupants` delivered to each tile
     /// through `TileContent::set_stack` — a
     /// missing entry means "unsent", so a fresh occupant always hears its
@@ -1350,6 +1356,7 @@ impl ShellView {
             last_flip_groups,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
+            emit_subs: HashMap::new(),
             stack_sent: HashMap::new(),
             notice: None,
             stack_list: None,
