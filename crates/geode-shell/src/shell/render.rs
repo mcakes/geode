@@ -1372,15 +1372,12 @@ impl ShellView {
                                 }
                                 view.pending_focus_restore = true;
                                 cx.notify();
-                                // One beat later, so the module's own press
+                                // Two effects later, so the module's own press
                                 // handling (bubble phase, after this capture
                                 // listener: a cursor move and the recorded
-                                // press row) has landed before its context
-                                // is read.
-                                let at = event.position;
-                                cx.defer_in(window, move |view, window, cx| {
-                                    view.open_row_menu_from_press(id, at, window, cx);
-                                });
+                                // press row, delivered as an event) has landed
+                                // before its context is read.
+                                view.open_row_menu_after_press(id, event.position, window, cx);
                             },
                         )),
                 );
@@ -1452,10 +1449,7 @@ impl ShellView {
                                     }
                                     view.pending_focus_restore = true;
                                     cx.notify();
-                                    let at = event.position;
-                                    cx.defer_in(window, move |view, window, cx| {
-                                        view.open_row_menu_from_press(id, at, window, cx);
-                                    });
+                                    view.open_row_menu_after_press(id, event.position, window, cx);
                                 }),
                             ),
                     );

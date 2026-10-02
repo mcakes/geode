@@ -1115,10 +1115,15 @@ pub mod recording {
         /// the shell sends a tile whose membership changed. (The shell's
         /// own repaint re-renders every tile too; that is not counted.)
         pub repaints: Rc<RefCell<Vec<TileId>>>,
-        /// When set, every occupant's view stops propagation of a right
-        /// mouse-down, as gpui-component's selectable table does on a
-        /// cell: a shell test's proof that the tile's right-press listener
-        /// still sees the press.
+        /// When set, every occupant's view handles a right mouse-down as a
+        /// grid module with a selectable table does: it stops the press's
+        /// propagation (gpui-component's table does, on a cell) and records
+        /// its pressed row by an event, i.e. one effect later. The fixture
+        /// takes `press_context` on the press and puts it back through
+        /// `App::defer`, so the shell reads it only if its right-press beat
+        /// runs after the module's own handling. A shell test's proof that
+        /// the tile's listener still sees the press, and reads the context
+        /// late enough.
         pub stops_right_press: bool,
     }
 
@@ -1175,6 +1180,9 @@ pub mod recording {
         find: Option<gpui::WeakEntity<crate::fuzzyfind::FuzzyFind>>,
         /// Shared with [`RecordingFactory::stops_right_press`].
         stops_right_press: bool,
+        /// Shared with [`RecordingFactory::press_context`]: what a
+        /// `stops_right_press` view records on the press.
+        press_context: Rc<RefCell<Option<DimensionContext>>>,
     }
 
     impl Render for RecordingView {
@@ -1185,12 +1193,18 @@ pub mod recording {
                 .and_then(|f| f.upgrade())
                 .filter(|f| f.read(cx).is_active());
             let stops_right_press = self.stops_right_press;
+            let press_context = self.press_context.clone();
             div()
                 .size_full()
                 .track_focus(&self.focus)
                 .debug_selector(|| format!("tile-content-{}", self.tile.0))
                 .when(stops_right_press, |d| {
-                    d.on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                    d.on_mouse_down(gpui::MouseButton::Right, move |_, _, cx| {
+                        cx.stop_propagation();
+                        let recorded = press_context.borrow_mut().take();
+                        let press_context = press_context.clone();
+                        cx.defer(move |_| *press_context.borrow_mut() = recorded);
+                    })
                 })
                 .child(format!("rec {}", self.tile.0))
                 .children(self.input.as_ref().map(Input::new))
@@ -1630,6 +1644,7 @@ pub mod recording {
                 input: None,
                 find: None,
                 stops_right_press: self.stops_right_press,
+                press_context: self.press_context.clone(),
             });
             self.frame_handles.borrow_mut().insert(tile, frame.clone());
             self.followed_at_create

@@ -297,6 +297,27 @@ impl ShellView {
         }
     }
 
+    /// What the tile cell's captured right press schedules: the menu, two
+    /// effects later. The capture listener runs before the occupant sees
+    /// the press, and an occupant records its pressed row by an event its
+    /// own bubble-phase handler emits; both that event and a `defer` are
+    /// effects, flushed in order, so one `defer` queued in the capture
+    /// phase would run ahead of the event and read no row. The inner
+    /// `defer`, queued while the outer one runs, lands after the event.
+    pub(crate) fn open_row_menu_after_press(
+        &mut self,
+        id: TileId,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.defer_in(window, move |_, window, cx| {
+            cx.defer_in(window, move |view, window, cx| {
+                view.open_row_menu_from_press(id, at, window, cx);
+            });
+        });
+    }
+
     /// A right press on tile `id` at `at`: the menu on its pressed row, if
     /// the occupant opens one (`press_context`); otherwise nothing.
     pub(crate) fn open_row_menu_from_press(
