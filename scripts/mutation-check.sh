@@ -31665,8 +31665,15 @@ run_mutation "volslice: the barrier sees one arrival for both documents" \
 # A refused chain read fails the fetch, which still arrives.
 run_mutation "volslice: a refused chain read fails the fetch" \
   crates/geode-volslice/src/tile/data.rs \
-  '                        self.hand_over(tag, Err(format!("document request refused: {refusal}")), cx)' \
-  '                        { let _ = refusal; }' \
+  '                    Err(refusal) => self.hand_over(
+                        tag,
+                        &underlying,
+                        Err(format!("document request refused: {refusal}")),
+                        cx,
+                    ),' \
+  '                    Err(refusal) => {
+                        let _ = refusal;
+                    }' \
   geode-volslice a_refused_chain_submission_fails_the_fetch_with_the_refusal_worded
 
 run_mutation "volslice: an older vol tag is dropped" \
@@ -31732,6 +31739,62 @@ run_mutation "volslice: a saved view inside the extent stands" \
   '                if view.hi < full.0 || view.lo > full.1 {' \
   '                if true {' \
   geode-volslice a_restored_tile_requeries_once_and_paints_its_saved_expiries
+
+# The header names the underlying whose documents are on screen, never one
+# still being asked about.
+run_mutation "volslice: the header names the painted underlying" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '        self.loaded_for
+            .as_deref()
+            .or_else(|| self.underlying_str(cx))' \
+  '        self.underlying_str(cx)' \
+  geode-volslice the_header_names_the_painted_underlying_while_another_is_asked
+
+# A refused or failed read for another underlying clears the old picture;
+# one for the underlying on screen keeps it.
+run_mutation "volslice: a failed read for another underlying clears the picture" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        if self.loaded_for.as_deref() == Some(asked) {' \
+  '        if true {' \
+  geode-volslice a_refused_read_for_a_new_underlying_clears_the_old_picture
+
+run_mutation "volslice: a failed read for the same underlying keeps the picture" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        if self.loaded_for.as_deref() == Some(asked) {' \
+  '        if false {' \
+  geode-volslice a_failed_fetch_for_the_same_underlying_keeps_the_picture
+
+run_mutation "volslice: a refused cvi read for a new underlying clears the picture" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                self.picture_failed_for(&u);' \
+  '                let _ = &u;' \
+  geode-volslice a_refused_read_for_a_new_underlying_clears_the_old_picture
+
+run_mutation "volslice: a failed fetch for a new underlying clears the picture" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                self.picture_failed_for(underlying);' \
+  '                let _ = underlying;' \
+  geode-volslice a_failed_fetch_for_a_new_underlying_clears_the_old_picture
+
+# A refused batch clears curves built from another underlying's documents
+# and keeps the loaded underlying's own.
+run_mutation "volslice: a refused batch clears another underlying's curves" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                if self.model_for != self.loaded_for {' \
+  '                if false {' \
+  geode-volslice a_refused_batch_after_a_new_install_clears_the_old_curves
+
+run_mutation "volslice: a refused batch keeps the loaded underlying's curves" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                if self.model_for != self.loaded_for {' \
+  '                if true {' \
+  geode-volslice a_refused_batch_after_a_new_install_clears_the_old_curves
+
+run_mutation "volslice: a built model records its underlying" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        self.model_for = self.loaded_for.clone();' \
+  '        self.model_for = None;' \
+  geode-volslice a_refused_batch_after_a_new_install_clears_the_old_curves
 
 run_mutation "volslice: close cancels by key" \
   crates/geode-volslice/src/tile/data.rs \

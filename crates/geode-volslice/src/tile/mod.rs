@@ -106,6 +106,9 @@ pub struct VolsliceTile {
     /// The plan of the batch out under `vol_tag`: its answer is read by
     /// position against these roles.
     plan: Option<Plan>,
+    /// The underlying whose documents the painted model was built from;
+    /// `None` while the model is empty.
+    model_for: Option<String>,
     vol_tag: u64,
     model: Arc<XyModel>,
     version: u64,
@@ -270,6 +273,7 @@ impl VolsliceTile {
             loaded_for: None,
             strip: Vec::new(),
             plan: None,
+            model_for: None,
             vol_tag: 0,
             model: XyModel::empty(),
             version: 0,
@@ -300,7 +304,7 @@ impl VolsliceTile {
     /// are compared in place, so a notify that changed nothing (a wheel, a
     /// drag) allocates nothing.
     pub(crate) fn refresh_chrome(&mut self, cx: &App) {
-        let underlying = self.underlying_str(cx);
+        let underlying = self.painted_underlying(cx);
         let header_stale = self.chrome.header_key.as_ref().is_none_or(|k| {
             k.underlying.as_deref() != underlying
                 || k.coordinate != self.state.coordinate
@@ -366,6 +370,16 @@ impl VolsliceTile {
                 self.chrome.builds += 1;
             }
         }
+    }
+
+    /// The underlying the header names: the one whose documents are on
+    /// screen, so a name never stands over another underlying's strip and
+    /// curves while a change is in flight or after it failed; with nothing
+    /// on screen, the one the tile reads.
+    fn painted_underlying<'a>(&'a self, cx: &'a App) -> Option<&'a str> {
+        self.loaded_for
+            .as_deref()
+            .or_else(|| self.underlying_str(cx))
     }
 
     /// The underlying the tile reads, borrowed: the followed group's
@@ -685,6 +699,16 @@ impl VolsliceTile {
     #[cfg(test)]
     pub(crate) fn footer_notice(&self) -> Option<SharedString> {
         self.chrome.notice.clone()
+    }
+
+    /// The underlying the prepared header names.
+    #[cfg(test)]
+    pub(crate) fn header_underlying(&self) -> SharedString {
+        self.chrome
+            .header
+            .as_ref()
+            .map(|h| h.underlying.clone())
+            .unwrap_or_default()
     }
 
     #[cfg(test)]

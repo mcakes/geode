@@ -119,7 +119,9 @@ The footer shows the first notice and how many more stand behind it:
   scope names none or several.
 - `document request refused: …` when a read is refused: a refused CVI read
   asks again on the next change; a refused chain read fails the fetch,
-  which still answers the flip barrier. The last good documents stay.
+  which still answers the flip barrier. The last good documents stay when
+  they are the asked underlying's; another underlying's documents, strip
+  and curves clear, so none of them sits under the new name.
 - `no CVI document for <u>`, `no option chain for <u>`, or the reader's
   error for a snapshot it cannot read (`option_chain rows for <date> are
   not contiguous`); the other kind still paints.
@@ -134,8 +136,10 @@ The footer shows the first notice and how many more stand behind it:
 - `diff <pair>: <kind> is not loaded` when a restored or kept pair names a
   kind with nothing loaded (a draft that left with its group): no
   difference is asked, and the pair stays set for when the kind returns.
-- `vol request refused: …`: the painted model stays and the next change
-  retries.
+- `vol request refused: …`: the painted model stays when it was built from
+  the loaded underlying's documents, and the next change retries. Curves
+  left from another underlying (a refusal right after a new underlying's
+  documents installed) clear under the new strip.
 - `following A — set the underlying there` for `u` while following.
 
 ## Known limitations
@@ -145,7 +149,9 @@ The footer shows the first notice and how many more stand behind it:
 - One chain kind: source identity is absent from the chain's rows and
   provenance, so two chain sources cannot be told apart.
 - The flip barrier covers the documents only. The vol batch is a follow-on,
-  so the painted curves swap one vol round trip after the flip releases.
+  so the painted curves swap one vol round trip after the flip releases;
+  for that round trip the header, chips and strip already name the new
+  underlying over the old curves.
 - Expiry colors cycle the five chart colors by strip position, so two
   expiries five rows apart share a color, and a draft that adds a term
   shifts the colors of the rows after it.
@@ -166,6 +172,9 @@ The footer shows the first notice and how many more stand behind it:
 - The vol batch and the board are never staged behind a flip. A board
   draft reaches the batch only while it names the underlying whose
   documents are loaded.
+- The header names `loaded_for`, the underlying whose documents are on
+  screen, and the asked underlying only while nothing is: a change in
+  flight or a failed one never puts a new name over the old picture.
 - Following is compared through `FrameView::following()` on every frame
   notification; while following, the group's scope counts as a change. A
   change of group clears the model and moves the vol tag, so no old

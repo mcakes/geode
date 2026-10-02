@@ -223,6 +223,7 @@ impl VolsliceTile {
             Ok(()) => self.fetch = Fetch::Cvi { tag, underlying: u },
             Err(refusal) => {
                 self.fetch = Fetch::Idle;
+                self.picture_failed_for(&u);
                 self.notice(format!("document request refused: {refusal}"));
             }
         }
@@ -267,9 +268,12 @@ impl VolsliceTile {
                         }
                     }
                     // No answer is owed: fail the fetch, which arrives.
-                    Err(refusal) => {
-                        self.hand_over(tag, Err(format!("document request refused: {refusal}")), cx)
-                    }
+                    Err(refusal) => self.hand_over(
+                        tag,
+                        &underlying,
+                        Err(format!("document request refused: {refusal}")),
+                        cx,
+                    ),
                 }
             }
             Fetch::Chain {
@@ -279,22 +283,25 @@ impl VolsliceTile {
             } => {
                 let today = self.today(cx);
                 let chain = outcome.snapshot.and_then(|s| chain_expiries(&s, today));
+                let asked = underlying.clone();
                 let fetched = Fetched {
                     underlying,
                     cvi,
                     chain,
                 };
-                self.hand_over(tag, Ok(Arc::new(fetched)), cx);
+                self.hand_over(tag, &asked, Ok(Arc::new(fetched)), cx);
             }
             Fetch::Idle => {}
         }
         cx.notify();
     }
 
-    /// Hand the pair, or the fetch's failure, to the barrier.
+    /// Hand the pair for `underlying`, or the fetch's failure, to the
+    /// barrier.
     fn hand_over(
         &mut self,
         tag: u64,
+        underlying: &str,
         result: Result<Arc<Fetched>, String>,
         cx: &mut Context<Self>,
     ) {
@@ -314,9 +321,26 @@ impl VolsliceTile {
             // Held: the flip's promotion installs it. Stale or superseded:
             // an answer to a question nobody is asking.
             Delivered::Held | Delivered::Stale | Delivered::Superseded => {}
-            // The last good documents stay on screen.
-            Delivered::Failed(e) => self.notice(e),
+            // The last good documents stay on screen while they are the
+            // asked underlying's.
+            Delivered::Failed(e) => {
+                self.picture_failed_for(underlying);
+                self.notice(e);
+            }
         }
+    }
+
+    /// A read for `asked` was refused or failed. The last good picture
+    /// stays while it is `asked`'s; another underlying's goes, documents,
+    /// strip and curves, so none of it sits under the new name.
+    fn picture_failed_for(&mut self, asked: &str) {
+        if self.loaded_for.as_deref() == Some(asked) {
+            return;
+        }
+        self.loaded = Loaded::default();
+        self.loaded_for = None;
+        self.strip.clear();
+        self.clear_model();
     }
 
     /// Put a fetched pair on screen and ask for its batch.
@@ -381,6 +405,7 @@ impl VolsliceTile {
         // The tag moves so a batch still out cannot paint over the clear.
         self.vol_tag += 1;
         self.plan = None;
+        self.model_for = None;
         self.model = XyModel::empty();
         self.model_notices.clear();
     }
@@ -400,8 +425,17 @@ impl VolsliceTile {
         let params = plan.params(self.key(), self.vol_tag, Instant::now());
         match self.data.vol_slices(params) {
             Ok(()) => self.plan = Some(plan),
-            // The painted model stays; the next change retries.
-            Err(refusal) => self.model_notices = vec![format!("vol request refused: {refusal}")],
+            // The painted model stays while it is the loaded underlying's;
+            // the next change retries. Another underlying's (documents just
+            // installed for a new one) would sit under the new strip and
+            // header: it clears. The new documents stay, so the next change
+            // still has a batch to ask.
+            Err(refusal) => {
+                if self.model_for != self.loaded_for {
+                    self.clear_model();
+                }
+                self.model_notices = vec![format!("vol request refused: {refusal}")];
+            }
         }
         cx.notify();
     }
@@ -427,6 +461,7 @@ impl VolsliceTile {
         let narrowest = min_span(plan.coordinate, &self.loaded);
         self.version += 1;
         self.model = built.model;
+        self.model_for = self.loaded_for.clone();
         self.model_notices = built.notices;
         self.full = padded(built.full, narrowest);
         let full = self.full;

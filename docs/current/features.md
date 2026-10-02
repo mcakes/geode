@@ -1144,10 +1144,22 @@ failed job is one notice (`no cvi curve at <date>: <why>`) and the rest of
 the batch paints; one cause behind every job is said once, in the outcome's
 words, and a difference failing only because its source curve failed adds
 none. A pair naming a kind that is not loaded is the notice `diff <pair>:
-<kind> is not loaded` rather than an empty lower pane. A refused read or batch is worded `document request refused: …` or
-`vol request refused: …` and the last good picture stays; the next change
-retries. A refused chain read fails the fetch, which still answers the
-barrier.
+<kind> is not loaded` rather than an empty lower pane.
+
+The header names the underlying whose documents are on screen, not one
+still being asked about, so a name never stands over another underlying's
+strip and curves. A refused read or batch is worded `document request
+refused: …` or `vol request refused: …`, and the next change retries. What
+stays depends on whose picture is on screen:
+
+- A refused or failed read (a refused chain read fails the fetch, which
+  still answers the barrier) for the underlying on screen keeps its last
+  good picture. One for another underlying clears the documents, the strip
+  and the curves; the header then names the underlying asked for.
+- A refused batch keeps curves built from the loaded underlying's
+  documents. Curves left from another underlying, because new documents
+  were installed just before the refusal, clear; the new strip and header
+  stay, so the next change still has a batch to ask.
 
 **Session.** The tile saves its coordinate, hidden kinds, densities, split,
 and while set its underlying, active expiries, pair and view; the cursor is
@@ -1158,7 +1170,9 @@ not saved. An unreadable value drops its key with a notice.
 - Expiries before today are dropped by the viewer only; the dataset
   headline can still pin to an expired document.
 - The flip barrier covers the two documents. The vol batch follows them, so
-  the curves swap one vol round trip after the flip releases.
+  the curves swap one vol round trip after the flip releases; for that
+  round trip the header, chips and strip already name the new underlying
+  over the old curves.
 - An expiry's color is its strip position's, cycling every five rows, not
   its place among the active expiries. A draft that adds a term shifts every
   row after it, so those expiries change color while the draft is loaded.
