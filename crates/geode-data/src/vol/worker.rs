@@ -8,7 +8,8 @@
 
 use super::VolConfig;
 use geode_core::query::QueryKey;
-use geode_core::vol::{VolJob, VolResult, VolSliceOutcome, VolSliceParams};
+use geode_core::vol::{Grid, VolJob, VolResult, VolSliceOutcome, VolSliceParams};
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -107,11 +108,52 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| "non-string panic payload".to_string())
 }
 
+/// A `Job(j)` grid becomes `At` the strikes job `j` evaluated at. The
+/// model never sees `Job`: only the batch knows what job `j` answered.
+fn resolve<'a>(
+    index: usize,
+    job: &'a VolJob,
+    earlier: &[Result<VolResult, String>],
+) -> Result<Cow<'a, VolJob>, String> {
+    let VolJob::Slice { document, request } = job else {
+        return Ok(Cow::Borrowed(job));
+    };
+    let Grid::Job(of) = request.grid else {
+        return Ok(Cow::Borrowed(job));
+    };
+    let from = format!("job {index} takes its strikes from job {of}");
+    let strikes = match earlier.get(of).filter(|_| of < index) {
+        None => return Err(format!("{from}, which does not run before it")),
+        Some(Err(_)) => return Err(format!("{from}, which failed")),
+        Some(Ok(VolResult::Map(_))) => return Err(format!("{from}, which is not a slice")),
+        Some(Ok(VolResult::Slice(s))) => s.points.iter().map(|p| p.strike).collect(),
+    };
+    let mut request = request.clone();
+    request.grid = Grid::At(strikes);
+    Ok(Cow::Owned(VolJob::Slice {
+        document: *document,
+        request,
+    }))
+}
+
+/// Every job of `params` in order, on the calling thread, under the
+/// worker's rules (grid resolution, containment, the missing-model
+/// reason): what a batch answers when nothing cancels it.
+pub fn evaluate(config: &VolConfig, params: &VolSliceParams) -> Vec<Result<VolResult, String>> {
+    let mut results = Vec::with_capacity(params.jobs.len());
+    for (index, job) in params.jobs.iter().enumerate() {
+        let r = run_job(config, params, index, job, &results);
+        results.push(r);
+    }
+    results
+}
+
 fn run_job(
     config: &VolConfig,
     params: &VolSliceParams,
     index: usize,
     job: &VolJob,
+    earlier: &[Result<VolResult, String>],
 ) -> Result<VolResult, String> {
     let Some(model) = &config.model else {
         return Err(config.missing_reason());
@@ -124,8 +166,9 @@ fn run_job(
             params.documents.len()
         ));
     }
+    let job = resolve(index, job, earlier)?;
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        geode_core::panic::contained(|| match job {
+        geode_core::panic::contained(|| match &*job {
             VolJob::Slice { document, request } => model
                 .slice(&params.documents[*document], request)
                 .map(VolResult::Slice),
@@ -177,7 +220,7 @@ fn run(queue: Arc<(Mutex<Queue>, Condvar)>, config: VolConfig, sink: VolSink) {
                     break;
                 }
             }
-            let result = run_job(&config, &params, index, job);
+            let result = run_job(&config, &params, index, job, &results);
             if result.is_err() {
                 failures += 1;
             }
@@ -215,8 +258,8 @@ pub(crate) mod tests {
     use super::*;
     use geode_core::document::DocumentRows;
     use geode_core::vol::{
-        Coordinate, Grid, MapRequest, SliceRequest, SliceResult, VolError, VolJob, VolModel,
-        VolResult,
+        Coordinate, Grid, MapRequest, SlicePoint, SliceRequest, SliceResult, VolError, VolJob,
+        VolModel, VolResult,
     };
     use std::sync::Mutex;
     use std::sync::mpsc::channel;
@@ -242,12 +285,26 @@ pub(crate) mod tests {
             match req.expiry.format("%Y").to_string().as_str() {
                 "1999" => Err(VolError("refused".into())),
                 "2000" => panic!("the fake vol model exploded"),
-                _ => Ok(SliceResult {
-                    expiry: req.expiry,
-                    forward: 100.0,
-                    points: Vec::new(),
-                    density: None,
-                }),
+                _ => {
+                    let strikes: Vec<f64> = match &req.grid {
+                        Grid::Dense(n) => (0..*n).map(|i| 100.0 + i as f64).collect(),
+                        Grid::At(ks) => ks.clone(),
+                        Grid::Job(_) => return Err(VolError("unresolved job grid".into())),
+                    };
+                    Ok(SliceResult {
+                        expiry: req.expiry,
+                        forward: 100.0,
+                        points: strikes
+                            .into_iter()
+                            .map(|k| SlicePoint {
+                                strike: k,
+                                x: k,
+                                vol: 0.2,
+                            })
+                            .collect(),
+                        density: None,
+                    })
+                }
             }
         }
         fn coordinates(&self, req: &MapRequest) -> Result<Vec<f64>, VolError> {
@@ -483,5 +540,81 @@ pub(crate) mod tests {
             );
         }
         w.shutdown();
+    }
+
+    fn job_grid(document: usize, of: usize) -> VolJob {
+        let VolJob::Slice { mut request, .. } = slice_job(document, "2026-01-01") else {
+            unreachable!()
+        };
+        request.grid = Grid::Job(of);
+        VolJob::Slice { document, request }
+    }
+
+    fn strikes(r: &Result<VolResult, String>) -> Vec<f64> {
+        match r {
+            Ok(VolResult::Slice(s)) => s.points.iter().map(|p| p.strike).collect(),
+            other => panic!("not a slice: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_job_grid_takes_the_strikes_an_earlier_slice_evaluated() {
+        let (w, _, rx) = worker(Duration::ZERO);
+        let mut p = params(6, 1, &["2026-01-01"]); // job 0: Dense(3)
+        p.jobs.push(job_grid(0, 0));
+        assert!(w.request(p));
+        let o = next(&rx);
+        assert_eq!(strikes(&o.results[1]), strikes(&o.results[0]));
+        assert_eq!(strikes(&o.results[1]), vec![100.0, 101.0, 102.0]);
+        w.shutdown();
+    }
+
+    #[test]
+    fn a_job_grid_naming_a_later_failed_or_map_job_fails_alone() {
+        let (w, _, rx) = worker(Duration::ZERO);
+        let mut p = params(7, 1, &["1999-01-01"]); // job 0 fails
+        p.jobs.push(map_job(100.0)); // job 1 is a map
+        p.jobs.push(job_grid(0, 0)); // 2: names a failed job
+        p.jobs.push(job_grid(0, 1)); // 3: names a map
+        p.jobs.push(job_grid(0, 4)); // 4: names itself
+        p.jobs.push(job_grid(0, 9)); // 5: names a later job
+        assert!(w.request(p));
+        let o = next(&rx);
+        assert_eq!(o.results.len(), 6);
+        assert_eq!(
+            o.results[2].as_ref().unwrap_err(),
+            "job 2 takes its strikes from job 0, which failed"
+        );
+        assert_eq!(
+            o.results[3].as_ref().unwrap_err(),
+            "job 3 takes its strikes from job 1, which is not a slice"
+        );
+        assert_eq!(
+            o.results[4].as_ref().unwrap_err(),
+            "job 4 takes its strikes from job 4, which does not run before it"
+        );
+        assert_eq!(
+            o.results[5].as_ref().unwrap_err(),
+            "job 5 takes its strikes from job 9, which does not run before it"
+        );
+        w.shutdown();
+    }
+
+    #[test]
+    fn evaluate_runs_a_batch_in_place_with_the_workers_rules() {
+        let config = VolConfig::with(Arc::new(FakeVolModel {
+            asked: Arc::new(Mutex::new(Vec::new())),
+            delay: Duration::ZERO,
+        }));
+        let mut p = params(8, 1, &["2026-01-01"]);
+        p.jobs.push(job_grid(0, 0));
+        let results = evaluate(&config, &p);
+        assert_eq!(strikes(&results[1]), vec![100.0, 101.0, 102.0]);
+        assert_eq!(
+            evaluate(&VolConfig::missing("nope"), &p)[0]
+                .as_ref()
+                .unwrap_err(),
+            "vol model \"nope\" is not built into this binary"
+        );
     }
 }

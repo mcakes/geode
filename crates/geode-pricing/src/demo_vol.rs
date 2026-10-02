@@ -254,6 +254,11 @@ impl Curve {
                 }
                 strikes.clone()
             }
+            Grid::Job(_) => {
+                return Err(VolError(
+                    "a job grid is resolved by the vol worker, not the model".into(),
+                ));
+            }
         })
     }
 
@@ -359,6 +364,19 @@ fn density(points: &[SlicePoint], forward: f64, t: f64) -> Vec<(f64, f64)> {
             let h1 = points[i + 1].strike - points[i].strike;
             let pdf = 2.0 * ((prices[i + 1] - prices[i]) / h1 - (prices[i] - prices[i - 1]) / h0)
                 / (h0 + h1);
+            // Per unit x: the pdf in strike times |dK/dx|, by the central
+            // difference over the same neighbours. Exact for strike and
+            // moneyness (linear in K); a flat stretch of x (delta at 0 or
+            // 1) has no finite Jacobian and reads NaN, a gap, rather than
+            // a spike.
+            let jacobian = ((points[i + 1].strike - points[i - 1].strike)
+                / (points[i + 1].x - points[i - 1].x))
+                .abs();
+            let pdf = if jacobian.is_finite() {
+                pdf * jacobian
+            } else {
+                f64::NAN
+            };
             (points[i].x, pdf)
         })
         .collect()
@@ -1058,5 +1076,32 @@ pub(crate) mod tests {
         assert_eq!(d.len(), 198);
         assert!(d.iter().all(|(x, _)| *x > 0.7 && *x < 1.1), "moneyness x");
         assert!(d.iter().any(|(_, p)| *p < 0.0), "the negative lobe is kept");
+    }
+
+    #[test]
+    fn a_flat_smiles_density_integrates_to_about_one_in_every_coordinate() {
+        let doc = flat(0.2);
+        let strikes: Vec<f64> = (1..=3000).map(|i| i as f64 * 0.1).collect();
+        for coordinate in Coordinate::ALL {
+            let r = DemoVolModel
+                .slice(
+                    &doc,
+                    &SliceRequest {
+                        expiry: date("2027-04-16"),
+                        coordinate,
+                        grid: Grid::At(strikes.clone()),
+                        density: true,
+                    },
+                )
+                .unwrap();
+            let d = r.density.unwrap();
+            // Trapezoid over |dx|, skipping the NaN where delta saturates.
+            let mass: f64 = d
+                .windows(2)
+                .filter(|w| w[0].1.is_finite() && w[1].1.is_finite())
+                .map(|w| 0.5 * (w[0].1 + w[1].1) * (w[1].0 - w[0].0).abs())
+                .sum();
+            assert!((mass - 1.0).abs() < 0.03, "{coordinate:?}: {mass}");
+        }
     }
 }

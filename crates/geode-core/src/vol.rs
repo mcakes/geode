@@ -57,12 +57,16 @@ impl Coordinate {
 
 /// Where a slice is evaluated. `Dense(n)` is `n` strikes spanning the
 /// document's own strike range for that expiry; `At` is absolute strikes,
-/// in any order, echoed back in the same order. Density over an `At`
+/// in any order, echoed back in the same order. `Job(j)` is the strikes
+/// the batch's earlier `Slice` job `j` evaluated at: the vol worker
+/// resolves it to `At` before the model sees the request, so two curves
+/// can be compared at equal strikes in one batch. Density over an `At`
 /// grid is meaningful only for ascending strikes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Grid {
     Dense(usize),
     At(Vec<f64>),
+    Job(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,9 +93,9 @@ pub struct SliceResult {
     /// In the grid's order: ascending strike for `Dense`, as given for `At`.
     pub points: Vec<SlicePoint>,
     /// `(x, pdf)` at the grid's interior points, when asked for. The pdf
-    /// is per unit STRIKE while `x` is in the requested coordinate, so
-    /// its area over a non-strike `x` is not one (over moneyness it is
-    /// off by a factor of the forward).
+    /// is per unit of `x`, the requested coordinate, so its area over any
+    /// coordinate is about one; a point where `x` does not move between
+    /// its neighbours (delta saturating at 0 or 1) is `NaN`.
     pub density: Option<Vec<(f64, f64)>>,
 }
 
