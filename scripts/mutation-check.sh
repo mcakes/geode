@@ -28761,15 +28761,7 @@ run_mutation "link: forgetting a tile advances the generation" \
         if changed {' \
   '        let changed = self.links.forget(tile);
         if false {' \
-  geode-shell retaining_live_tiles_drops_a_closed_follower_and_marks_the_session_dirty
-
-run_mutation "link: retaining advances the generation" \
-  crates/geode-shell/src/frame.rs \
-  '        let changed = self.links.retain(live);
-        if changed {' \
-  '        let changed = self.links.retain(live);
-        if false {' \
-  geode-shell retaining_live_tiles_drops_a_closed_follower_and_marks_the_session_dirty
+  geode-shell forgetting_a_tile_advances_the_generation_only_when_it_was_linked
 
 # A repeat of a tile's last emission is skipped whole. Applied again it
 # would count as a newer post and retake a key another emitter posted
@@ -28870,49 +28862,6 @@ run_mutation "link: a board watch starts at the current revision" \
   '            let revision = Rc::new(Cell::new(self.board_rev));' \
   '            let revision = Rc::new(Cell::new(0));' \
   geode-shell a_board_watch_is_shared_while_held_and_reaped_once_dropped
-
-# Dropping several tiles re-derives each board once, from what is left.
-# Forgotten one at a time, a board counts a change per emitter and passes
-# through states it does not end in.
-run_mutation "link: retain rebuilds a group once" \
-  crates/geode-shell/src/link.rs \
-  '        let before = self.following.len() + self.emitting.len();
-        self.following.retain(|tile, _| live(*tile));
-        let mut lost_an_emitter = [false; 4];
-        let last = &mut self.last;
-        self.emitting.retain(|tile, g| {
-            let keep = live(*tile);
-            if !keep {
-                last.remove(tile);
-                lost_an_emitter[g.index()] = true;
-            }
-            keep
-        });
-        for g in Group::ALL {
-            if lost_an_emitter[g.index()] {
-                self.rebuild_board(g);
-            }
-        }
-        self.following.len() + self.emitting.len() != before' \
-  '        let gone: Vec<TileId> = self
-            .following
-            .keys()
-            .chain(self.emitting.keys())
-            .copied()
-            .filter(|tile| !live(*tile))
-            .collect();
-        let mut any = false;
-        for tile in gone {
-            any |= self.forget(tile);
-        }
-        any' \
-  geode-shell retaining_rebuilds_a_board_once_however_many_emitters_closed
-
-run_mutation "link: retaining drops a closed emitter's entries" \
-  crates/geode-shell/src/link.rs \
-  '            if lost_an_emitter[g.index()] {' \
-  '            if false {' \
-  geode-shell retaining_live_tiles_drops_the_rest_and_their_entries
 
 # Each awaited key is matched against its own identity. Matched against any,
 # a stale answer releases a flip it never answered.
@@ -29764,6 +29713,16 @@ run_mutation "link: a tile that neither follows nor emits has no chooser" \
   '    if !follows && !emits {' \
   '    if false {' \
   geode-shell the_chooser_offers_only_what_the_tile_can_do
+
+# The scope bar shows the workspace: its model is built from the lane even
+# when asked of a follower's view, which a module's own handle resolves to.
+run_mutation "link: the scope bar's model is built from the lane" \
+  crates/geode-shell/src/frame.rs \
+  '        let lane = self.lane_view();
+        // `flip` alone never changes what the bar shows' \
+  '        let lane = *self;
+        // `flip` alone never changes what the bar shows' \
+  geode-shell the_bar_model_asked_of_a_followers_view_describes_the_lane
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
