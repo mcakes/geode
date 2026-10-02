@@ -3113,8 +3113,8 @@ fn build(
         let row_el = super::super::listrow::paint_row(row_el, row_paint, is_selected);
 
         // A prefixed row paints `<prefix> · ` muted ahead of the name: one shared
-        // label with the prefix's byte length as its lead.
-        let lead = row.prefix.as_ref().map_or(0, |p| p.len() + " · ".len());
+        // label with the display name's own lead length.
+        let lead = row.display_lead();
         let head = lead_label(
             &text.primary,
             lead,

@@ -769,6 +769,10 @@ role = "value"
             .collect();
         assert_eq!(names, vec![(Some("risk"), "live"), (Some("vol"), "vols")]);
         assert_eq!(rows[0].display_name(), "risk · live");
+        // The muted lead is exactly the prefix and its separator.
+        let shown = rows[0].display_name();
+        assert_eq!(&shown[..rows[0].display_lead()], "risk · ");
+        assert_eq!(rows[1].display_lead(), "vol · ".len());
 
         // The fixture above's dataset order and name order happen to
         // agree ("risk" < "vol", "live" < "vols"), so it cannot tell a

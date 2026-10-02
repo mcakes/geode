@@ -139,6 +139,11 @@ pub struct ObjectRow {
     pub prefix: Option<String>,
 }
 
+/// The join between a browse row's prefix and its name in
+/// [`ObjectRow::display_name`]. [`ObjectRow::display_lead`] measures the same
+/// constant, so a changed separator cannot mis-size the muted lead.
+const PREFIX_SEPARATOR: &str = " · ";
+
 impl ObjectRow {
     /// What the browse row paints as its label: `"<prefix> · <name>"` for a prefixed
     /// row, the bare name otherwise. The one spelling of that join, shared by the
@@ -146,9 +151,18 @@ impl ObjectRow {
     /// inside the prefix ranks and highlights against the exact text on screen.
     pub fn display_name(&self) -> String {
         match &self.prefix {
-            Some(p) => format!("{p} · {}", self.name),
+            Some(p) => format!("{p}{PREFIX_SEPARATOR}{}", self.name),
             None => self.name.clone(),
         }
+    }
+
+    /// The byte length of [`display_name`](Self::display_name)'s
+    /// `"<prefix> · "` lead, which the browse painter mutes; zero for an
+    /// unprefixed row.
+    pub fn display_lead(&self) -> usize {
+        self.prefix
+            .as_ref()
+            .map_or(0, |p| p.len() + PREFIX_SEPARATOR.len())
     }
 }
 
