@@ -85,9 +85,10 @@ has none of them.
   chip or `⋯` off the tile — they leave it only when the tile is narrower
   than those three alone.
   A stale source time takes the warning text tone. It turns stale while the
-  tile is idle, too: market-data and the blotter arm one wake-up at the source
-  time plus `stale_after` (the blotter on its stalest dataset), re-armed by
-  each delivery, on show and on a frame flip, and dropped while hidden. A
+  tile is idle, too: market-data arms a wake-up at its source time plus
+  `stale_after`, and the blotter one per dataset time, each firing in turn so
+  every time run turns stale at its own deadline. They are re-armed by each
+  delivery, on show and on a frame flip, and dropped while hidden. A
   reload that changes `stale_after` sets the shared threshold before the
   frame flips, so that flip re-arms an idle tile against the new value. A newer delivery
   clears the wake-up's verdict, so it paints fresh. The health chip appears

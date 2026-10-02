@@ -1913,27 +1913,32 @@ impl BlotterTile {
         &mut t.stale_timer
     }
 
-    /// Arm the wake-up at which the snapshot's stalest dataset time turns
-    /// stale, while shown; a hidden tile holds none. Idempotent for an
-    /// unchanged (time, threshold) pair. `Provenance::stalest` compares
-    /// parsed instants and skips unparsable texts, as render does, so the run
-    /// render calls stalest is the one armed.
+    /// Arm a wake-up at each dataset time's deadline, while shown; a hidden
+    /// tile holds none. Each painted run turns stale at its own deadline, not
+    /// only the stalest one. Idempotent for unchanged (times, threshold).
+    /// Unparsable times are skipped, as render skips them.
     fn arm_stale(&mut self, cx: &mut Context<Self>) {
         if !self.visible {
             self.stale_timer.disarm();
             return;
         }
-        let stalest = self
+        let times = self
             .table
             .read(cx)
             .delegate()
             .snapshot
             .as_ref()
-            .and_then(|s| s.provenance().stalest())
-            .and_then(|f| chrono::DateTime::parse_from_rfc3339(f.as_of.as_deref()?).ok())
-            .map(|t| t.with_timezone(&chrono::Utc));
-        self.stale_timer.arm(
-            stalest,
+            .map(|s| {
+                s.provenance()
+                    .datasets
+                    .iter()
+                    .filter_map(|f| chrono::DateTime::parse_from_rfc3339(f.as_of.as_deref()?).ok())
+                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.stale_timer.arm_each(
+            times,
             self.stale_after.get(),
             chrono::Utc::now(),
             cx,
@@ -3185,8 +3190,8 @@ mod tests {
             .collect()
     }
 
-    /// The timer arms on the STALEST dataset time: that run turns stale by
-    /// itself a minute later; the fresher run does not. The wall clock
+    /// The stalest dataset time's run turns stale by itself a minute later;
+    /// the fresher run does not until its own deadline. The wall clock
     /// barely moves under the test clock, so only the wake-up can turn it.
     #[gpui::test]
     fn an_idle_blotter_turns_its_stalest_time_stale_without_another_event(
@@ -3222,6 +3227,14 @@ mod tests {
             painted_time_stale(&mut cx, 2),
             vec![Some(true), Some(false)],
             "the stalest run turned stale by itself; the fresher one did not"
+        );
+        // The fresher run's own deadline, still idle: it turns too.
+        cx.executor().advance_clock(stale_after);
+        cx.run_until_parked();
+        assert_eq!(
+            painted_time_stale(&mut cx, 2),
+            vec![Some(true), Some(true)],
+            "each run turns stale at its own deadline"
         );
     }
 

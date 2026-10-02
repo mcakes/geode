@@ -29313,15 +29313,15 @@ run_mutation "silence: a missing optional column is not noted" \
 # A fired stale timer is recorded, so render reads stale.
 run_mutation "silence: a fired stale timer is not recorded" \
   crates/geode-tile/src/stale.rs \
-  '                timer.fired = true;' \
-  '                timer.fired = false;' \
+  '                timer.fired = Some(at);' \
+  '                timer.fired = None;' \
   geode-tile \
   the_timer_fires_once_at_source_time_plus_threshold
 
 # Re-arming the same pair keeps the first deadline.
 run_mutation "silence: re-arming the same pair restarts the wait" \
   crates/geode-tile/src/stale.rs \
-  '        if self.armed == Some((at, after)) && (self.task.is_some() || self.fired) {' \
+  '        if self.times == times && self.after == after {' \
   '        if false {' \
   geode-tile \
   arming_the_same_pair_again_keeps_the_first_deadline
@@ -29329,9 +29329,9 @@ run_mutation "silence: re-arming the same pair restarts the wait" \
 # A new pair clears the old verdict, so a fresh delivery never reads stale.
 run_mutation "silence: a re-armed stale timer keeps its old verdict" \
   crates/geode-tile/src/stale.rs \
-  '        self.armed = None;
-        self.fired = false;' \
-  '        self.armed = None;' \
+  '        self.times.clear();
+        self.fired = None;' \
+  '        self.times.clear();' \
   geode-tile \
   re_arming_after_a_fire_clears_the_verdict
 
@@ -29399,8 +29399,12 @@ run_mutation "silence: a market-data flip never re-arms the stale timer" \
 # The blotter arms on its STALEST dataset.
 run_mutation "silence: the blotter arms on its freshest dataset" \
   crates/geode-blotter/src/tile.rs \
-  '            .and_then(|s| s.provenance().stalest())' \
-  '            .and_then(|s| s.provenance().datasets.iter().max_by_key(|f| f.as_of.clone()))' \
+  '                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .collect()' \
+  '                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .max()
+                    .into_iter()
+                    .collect()' \
   geode-blotter \
   an_idle_blotter_turns_its_stalest_time_stale_without_another_event
 
@@ -29429,11 +29433,11 @@ run_mutation "silence: a hidden blotter keeps its wake-up" \
             self.stale_timer.disarm();
             return;
         }
-        let stalest = self' \
+        let times = self' \
   '        if !self.visible {
             return;
         }
-        let stalest = self' \
+        let times = self' \
   geode-blotter \
   hiding_a_blotter_drops_its_stale_wake_up
 
@@ -29732,6 +29736,14 @@ run_mutation "silence: the event mailbox trims an error before warnings" \
   '                |_| false,' \
   geode-app \
   an_error_queued_before_a_flood_of_warnings_survives_the_mailbox
+
+# Each run turns stale at its own deadline: a fired wake-up arms the next.
+run_mutation "silence: a fired stale wake-up never arms the next time" \
+  crates/geode-tile/src/stale.rs \
+  '                let next = timer.times.iter().copied().find(|t| *t > at);' \
+  '                let next: Option<DateTime<Utc>> = None;' \
+  geode-blotter \
+  an_idle_blotter_turns_its_stalest_time_stale_without_another_event
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
