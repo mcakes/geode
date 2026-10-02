@@ -509,15 +509,16 @@ mod tests {
             "SPX Z26 2000 C",
         ]);
         price(&mut s, &[(0, 1.0), (3, 2.0)]);
-        let id = s.id(1);
-        let rev = s.revision(1);
+        let id = s.id(2);
+        let rev = s.revision(2);
         s.deliver(id, rev, Err("no vol".into()), at(0));
-        // Row 1 failed (`—`), row 2 unpriced (blank).
+        // Row 1 unpriced (blank), row 2 failed (`—`): the gap ranks first
+        // although the blank comes first in the sheet.
         for order in [SortOrder::Asc, SortOrder::Desc] {
             let got = ranked(&s, &[], spec("npv", order));
             assert_eq!(
                 &got[2..],
-                &["SPX Z26 4000 C", "SPX Z26 3000 C"],
+                &["SPX Z26 3000 C", "SPX Z26 4000 C"],
                 "{order:?}: the failed gap, then the blank"
             );
         }

@@ -50,7 +50,9 @@ fn press(h: &Harness, vcx: &mut VisualTestContext, key: &str) {
 
 /// Answer every pending batch, each line at `price(its shorthand)`.
 fn answer_by(h: &Harness, vcx: &mut VisualTestContext, price: impl Fn(&str) -> f64) {
-    for params in h.prices() {
+    let batches = h.prices();
+    assert!(!batches.is_empty(), "fixture: a price batch is pending");
+    for params in batches {
         let results = params
             .lines
             .iter()
@@ -379,8 +381,11 @@ fn a_price_refresh_re_ranks_a_measure_sort_and_the_cursor_stays_on_its_line(
         h.tree(&vcx),
         vec!["SPX Z26 2 C", "SPX Z26 3 C", "SPX Z26 1 C"]
     );
-    h.motion(&mut vcx, "bottom", None);
-    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 1 C"));
+    // The cursor and a `V` selection on line 3, painted second.
+    h.motion(&mut vcx, "top", None);
+    h.motion(&mut vcx, "down", None);
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 3 C"));
+    h.dispatch(&mut vcx, "visual_rows", None);
 
     // The same prices again: the order stands and nothing rebuilds.
     h.dispatch(&mut vcx, "price", None);
@@ -392,22 +397,29 @@ fn a_price_refresh_re_ranks_a_measure_sort_and_the_cursor_stays_on_its_line(
         "an unchanged order refills only"
     );
 
-    // Line 1 rallies past both.
+    // Line 3 rallies past both: an order that is not sheet order.
     h.dispatch(&mut vcx, "price", None);
     answer_by(&h, &mut vcx, |s| {
-        if s == "SPX Z26 1 C" { 50.0 } else { first(s) }
+        if s == "SPX Z26 3 C" { 50.0 } else { first(s) }
     });
     assert_eq!(
         h.tree(&vcx),
-        vec!["SPX Z26 1 C", "SPX Z26 2 C", "SPX Z26 3 C"],
+        vec!["SPX Z26 3 C", "SPX Z26 2 C", "SPX Z26 1 C"],
         "the live price re-ranked the rows"
     );
     assert_eq!(
         cursor_text(&h, &vcx).as_deref(),
-        Some("SPX Z26 1 C"),
+        Some("SPX Z26 3 C"),
         "the cursor rode its line to the top"
     );
     assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(0));
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, _| t.resolved.as_ref().map(|r| r.rows.clone())),
+        Some(0..1),
+        "the selection stayed on its line"
+    );
+    h.dispatch(&mut vcx, "escape", None);
     assert_eq!(
         h.cell(&vcx, 0, "npv"),
         "50.00",
