@@ -15,7 +15,7 @@ deliveries through `TileContent`.
 A module owns its domain state. It observes the shared `Frame`, requests data
 through `DataHandle`, and prepares the immutable or retained model used by its
 renderer. Hidden tiles may release subscriptions. A hidden following tile
-(blotter, market data, timeseries) keeps its in-flight query, whose reply
+(blotter, market data, timeseries, vol slice) keeps its in-flight query, whose reply
 applies when it lands unless a counter the tile follows moved since it asked;
 such a reply is dropped, not applied. On becoming visible these tiles compare
 followed versions and request anything stale. A closed following tile cancels
@@ -37,8 +37,8 @@ Every module follows these interaction rules:
 Modules build their popups, `.` action menus, in-tile y/n confirms and
 notice lines from `geode-tile`, so each rule below holds in every tile that
 has the surface. The pricer and market-data use all four, timeseries the
-popups, menus and notice line, and the blotter the notice line. Diagnostics
-has none of them.
+popups, menus and notice line, the vol slice viewer the popups and notice
+line, and the blotter the notice line. Diagnostics has none of them.
 
 - Grid motions and menu steps are the shared motion vocabulary; see
   [Motion](#motion).
@@ -238,6 +238,7 @@ pulls:
 | Pricer | Yes | The cursor row's one underlying, as a one-value `underlying_ref` scope | None | The sheet has no cursor row, or the row is a package across underlyings or a grouping row |
 | Market data | No | The panel's underlying, as a one-value `underlying_ref` scope | Its draft document, while the draft is not clean | The panel has no underlying |
 | Timeseries | No | Does not emit | | |
+| Vol slice | Yes | Does not emit | | |
 
 An emission with no scope leaves the group's scope as it was, so resting the
 cursor on a total or a mixed row does not clear what the group's followers
@@ -254,6 +255,13 @@ underlying from a group. A timeseries tile neither follows nor emits and
 has no chooser at all. A blotter or pricer set `:unscoped` ignores the
 scope of a group it follows, as it ignores the workspace's, while its
 header still shows the chip.
+
+The vol slice viewer follows without querying under the scope: it reads
+the group's one `underlying_ref` value (`underlying_of`) as its underlying,
+and reads the group's board for that underlying's `cvi_params` draft. The
+board entry's `DraftMark` is what its draft chip shows (`cvi draft`,
+`cvi draft · behind`, `cvi draft · sent`), since the rows cannot tell a live
+edit from a held or sent one. See [Vol slice](#vol-slice).
 
 ## Blotter
 
@@ -800,8 +808,9 @@ installed index and the draft, whole, as `:upload` would send them. It is
 posted while the draft is not clean, so an `Editing`, a `Behind` and a
 `Sent` draft are all on the board: the board shows exactly what the panel
 paints. The entry carries that state as its `DraftMark`, since a follower
-cannot tell the three apart from the rows. A clean panel posts no document, since a reader has the delivered
-one. `:revert` takes the document off the board. A draft the builder
+cannot tell the three apart from the rows. A clean panel posts no document,
+since a reader has the delivered one. `:revert` takes the document off the
+board. A draft the builder
 refuses (an inserted dividend row with no amount, say) posts no document;
 the scope is still posted.
 
@@ -945,8 +954,8 @@ point marks with a range bar over a linear x axis that can run reversed, with
 a crosshair that snaps to a quoted point. Both paint through gpui-component's
 plot surface in up to two panes. Paths and chrome are cached by the values
 that affect them; cursor movement does not rebuild the data model. The
-timeseries tile hosts the time chart; no tile hosts the xy element, whose
-only consumer is its example window.
+timeseries tile hosts the time chart and the vol slice viewer the xy
+element.
 
 The header's `⋯` button, a chip's right-click, and `.` open the action menu.
 It offers popup openers, actions for the selected slot, `Frequency…`, toggles,
@@ -1049,6 +1058,109 @@ still have incomplete pending digits: hosts call `complete_pending` before
 committing and report its segment error. Segment display text is allocated by
 `segments()` and cached by the host for painting. See the
 [widget integration contract](../../crates/geode-widgets/README.md#host-integration).
+
+## Vol slice
+
+`geode-volslice` paints one underlying's volatility smiles: a curve per
+active expiry for each loaded kind, over an x coordinate the trader picks.
+It computes no vol, coordinate or density. Every curve, chain x and density
+comes out of the data tier's vol door (`DataHandle::vol_slices`) as a
+`VolResult`; subtracting two delivered vols for the difference pane is the
+only arithmetic the module does.
+
+**Kinds.** Three, fixed, in header order with the digit that toggles each:
+`cvi` (`1`), the published CVI document as of the frame; `cvi draft` (`2`),
+the followed group's board draft for the underlying, read now whatever the
+as-of; and `chain` (`3`), the option chain's mid vols as points with the
+bid-ask range as a bar. A one-sided quote (an absent side is NaN) paints as
+a half bar. The published curve is solid and the draft dashed. A chip per
+loaded kind sits in the header; a hidden kind's chip is muted and its own
+jobs leave the batch. Source identity is absent from the chain's rows, so
+there is one chain kind however many sources publish chains.
+
+**Strip.** A column beside the chart lists the sorted union of every loaded
+kind's expiries, none before today, each with the digits of the kinds that
+have it and a dot in its palette color, filled when the expiry is active.
+`j`/`k` move the cursor, `enter` solos the cursor's row and `space` toggles
+it; the last active expiry cannot be toggled off. On a focused tile a click
+solos a row and a ctrl+click toggles it; the click that merely focuses the
+tile changes nothing else (`TileContent::set_focused`). An expiry's color is
+its strip position's, so it keeps its color as others are toggled; twelve
+expiries cycle the theme's five chart colors. The first strip, and a
+restored set naming no listed expiry, front the first row.
+
+**Coordinates.** `x` cycles moneyness, log-moneyness, delta and strike, and
+`:x` names one. Delta runs reversed, puts on the left; pans and zooms go
+through the axis's scale, so a reversed axis moves the way it reads. A
+coordinate change resets the view to the new extent, padded to that
+coordinate's narrowest span (a chain strike gap for strike).
+
+**Densities.** `shift+d` (the tile's binding beats the workspace's
+duplicate) asks each visible curve's density, painted on the right axis in
+the curve's color at a fixed lower opacity. The density is per unit of the
+shown coordinate, so its area is about one in each; where delta saturates
+the point is NaN and paints as a gap.
+
+**Difference.** `d` opens a chooser of `none` and every ordered pair of
+loaded kinds (`:diff <kind> - <kind> | none` too). The pair paints in a lower
+pane, its split stepped with `[`/`]` or the divider:
+
+- Curve minus curve is at equal strike: the minuend is evaluated dense and
+  the subtrahend at the minuend's strikes through `Grid::Job`, so the two
+  never interpolate; it is a line at the minuend's x.
+- Curve minus chain is at the chain's strikes: the curve is evaluated `At`
+  them and the difference sits at the chain's x as points, negated when the
+  chain is the minuend.
+- A pair keeps its jobs when one of its kinds is hidden.
+
+**Underlying and following.** The tile reads its own underlying (`u` opens
+a picker over the diagnostics catalog's `cvi_params` and `option_chain`
+underlyings; `:underlying` sets one) unless it follows a link group, when
+it reads the group's single `underlying_ref` value and `u` and
+`:underlying` are refused naming the group. A group naming none or several
+underlyings paints `no underlying in A`. A tile added with no underlying
+and no group prompts with the picker at once. Following is compared through
+`FrameView::following()` on every frame notification, since following a
+group whose scope was never written moves no version; while following, the
+group's scope generation counts as a change.
+
+**Data flow.** The CVI document (full key) and the chain (one-part prefix,
+every expiry) are read in sequence under one `FollowingQuery` tag, both
+keyed by the tile: the query pool keeps one request per key and the flip
+barrier one entry per key, so two concurrent reads would supersede each
+other. The pair is one barrier arrival. When both have landed the tile
+plans one vol batch for the active expiries and swaps the painted model
+when its answer lands, reading results by position against the plan. A
+board change (a new draft, or the same draft under a new mark) is never
+staged behind a flip: it submits a batch at once, and a draft joins only
+beside its own underlying's documents. Hiding keeps the reads in flight;
+closing cancels by key, the vol batch included.
+
+**Failures.** The footer shows the first notice and a count of the rest. A
+failed job is one notice (`no cvi curve at <date>: <why>`) and the rest of
+the batch paints; one cause behind every job is said once, in the outcome's
+words. A refused read or batch is worded `document request refused: …` or
+`vol request refused: …` and the last good picture stays; the next change
+retries. A refused chain read fails the fetch, which still answers the
+barrier.
+
+**Session.** The tile saves its coordinate, hidden kinds, densities, split,
+and while set its underlying, active expiries, pair and view; the cursor is
+not saved. An unreadable value drops its key with a notice.
+
+**Limitations.**
+
+- Expiries before today are dropped by the viewer only; the dataset
+  headline can still pin to an expired document.
+- The flip barrier covers the two documents. The vol batch follows them, so
+  the curves swap one vol round trip after the flip releases.
+- Expiry colors repeat past five active rows.
+- Keyboard zoom anchors at the view's centre, the wheel at the pointer.
+- There is no `.` action menu; the header chips and the palette carry the
+  actions.
+
+See the [crate guide](../../crates/geode-volslice/README.md) for the key
+table, session keys and module map.
 
 ## Diagnostics
 

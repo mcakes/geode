@@ -129,8 +129,8 @@ during its render, before the tiles render, and tells the tile that lost
 focus and the one that gained it; a fresh occupant under the focused id is
 told again. Focus is reported after visibility in the same render, so a tile
 hidden beneath an opening page hears `set_visible(false)` and then
-`set_focused(false)`. The call runs inside the draw, so a module keeps the flag and
-reads it when it paints, and must not notify the frame from it. A module
+`set_focused(false)`. The call runs inside the draw, so a module keeps the
+flag and reads it when it paints, and must not notify the frame from it. A module
 uses it to paint a focus-only state or to let a press that merely focused
 the tile do nothing else (the shell's own tile handler runs after the
 module's, so the flag still says whether the tile was focused before the
@@ -604,10 +604,11 @@ group that were both never written: both hold the empty scope at generation
 zero, equal content under an equal number, so nothing requeries and nothing
 needs to.)
 
-Only a tile whose queries take the frame's scope can follow: its module
-answers `TileContent::follows()` true, which the blotter and the pricer do.
-A timeseries tile and a market-data panel never read the scope and answer
-false, so the chooser offers them no follow row and `set_follow` refuses
+Only a tile whose reading takes the frame's scope can follow: its module
+answers `TileContent::follows()` true, which the blotter and the pricer do
+(they query under it) and the vol slice viewer does (it reads its underlying
+from it). A timeseries tile and a market-data panel never read the scope and
+answer false, so the chooser offers them no follow row and `set_follow` refuses
 them: a group's chip over content the group does not select would misreport
 what the tile shows.
 
@@ -656,9 +657,10 @@ alike), its draft document (see [features](features.md)). Each entry carries
 a `DraftMark` (`Editing`, `Behind` or `Sent`, with `label()` the word a
 follower shows, none for a live edit): the rows alone cannot tell a live
 edit from the old base held behind a newer document or an upload awaiting
-its echo. A tile's
-content is type-erased (`Box<dyn TileContent>` beside an `AnyView`), so the
-shell cannot observe the tile's entity. `TileContent::watch_emission(changed)`
+its echo. A follower shows the mark's word beside the draft (the vol slice
+viewer's `cvi draft · behind`). A tile's content is type-erased
+(`Box<dyn TileContent>` beside an `AnyView`), so the shell cannot observe
+the tile's entity. `TileContent::watch_emission(changed)`
 has the module subscribe to its own entity and call `changed`, which carries
 nothing. The shell holds that subscription exactly while the tile emits. On
 each call it defers a pull until the update that called it has finished, then
@@ -696,8 +698,9 @@ document key, or a key prefix at a part boundary) and compares its
 `revision()`; `Frame::board_entry` returns the posted `BoardEntry` (its rows
 and mark) and `board_gen` counts a board's changes. A key changes when its
 entry arrives, leaves, or holds another allocation or another mark, so a
-draft falling behind or being sent moves the watch with the same rows. Board changes move only these revisions. They never move the
-frame's `data` version, so a draft edited at typing speed does not requery
+draft falling behind or being sent moves the watch with the same rows.
+Board changes move only these revisions. They never move the frame's `data`
+version, so a draft edited at typing speed does not requery
 tiles that watch published data, and they are never staged behind a flip
 barrier: a draft is not a publish. Watches are held weakly and reaped at the
 next registration.

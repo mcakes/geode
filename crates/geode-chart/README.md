@@ -7,7 +7,9 @@ inside a pane. Series identities, sources, tiles, and shell state belong to the
 caller.
 
 The time chart's use in the timeseries module:
-[`docs/current/features.md`](../../docs/current/features.md#timeseries).
+[`docs/current/features.md`](../../docs/current/features.md#timeseries); the
+xy element's in the vol slice viewer:
+[`docs/current/features.md`](../../docs/current/features.md#vol-slice).
 
 ## Layout
 

@@ -31,6 +31,122 @@ data tier's vol door; the crate computes none of them.
   palette color (filled when active), the date and a digit per kind that
   has the expiry.
 
+## Commands
+
+```sh
+cargo test -p geode-volslice
+cargo bench -p geode-volslice
+```
+
+The `model_build` bench times `core::build::model` alone over twelve active
+expiries, the three kinds, densities and a `cvi draft − chain` difference,
+with the batch answered once outside the loop. Its target is under 1 ms; it
+has not been measured locally (see the performance guide).
+
+## What it paints
+
+The kinds are fixed, in header order: `cvi` (the published CVI document as
+of the frame, digit `1`), `cvi draft` (the followed group's board draft,
+`2`) and `chain` (the option chain, `3`). A curve kind is one solid
+(published) or dashed (draft) line per active expiry, evaluated `Dense(200)`
+on the document's strike range; the chain is its mid vols as points with the
+bid-ask range as a bar, a one-sided quote as a half bar. Each active expiry
+takes the chart palette color of its strip position, so twelve expiries
+cycle the theme's five chart colors. `shift+d` adds each visible curve's
+density on the right axis at a fixed lower opacity, per unit of the shown
+coordinate (a gap where delta saturates).
+
+A difference pair (`d`) paints in a lower pane under the vol pane:
+
+- Curve minus curve is at equal strike: the minuend is evaluated dense and
+  the subtrahend at the minuend's strikes (`Grid::Job`), plotted at the
+  minuend's x as a line.
+- Curve minus chain is at the chain's strikes: the curve is evaluated `At`
+  them and the difference sits at the chain's x as points, negated when the
+  chain is the minuend.
+- A hidden kind's own trace is not asked, but a pair that names it still
+  gets its jobs, so hiding a kind to read the difference works.
+
+The strip is the sorted union of every loaded kind's expiries, with none
+before today, each row marked with the digits of the kinds that have it.
+The first strip fronts its first row; a restored set that names no listed
+expiry fronts the first row too, and an empty strip keeps the set for when
+data returns.
+
+## Keys
+
+| Key | Action |
+|---|---|
+| `j` / `k`, `down` / `up` | Strip cursor |
+| `enter` | Show only the cursor's expiry |
+| `space` | Show or hide the cursor's expiry (the last active one stays) |
+| `1`..`3` | Show or hide a kind (`4`..`9` are bound and do nothing) |
+| `x` | Cycle the coordinate: moneyness, log-moneyness, delta, strike |
+| `shift+d` | Densities on or off (beats the workspace's duplicate in the tile) |
+| `d` | Difference chooser: `none` and every ordered pair of loaded kinds |
+| `u` | Underlying picker (refused while following) |
+| `h` / `l` | Pan by a tenth of the view, the way the axis reads |
+| `=` / `-` | Zoom about the view's centre |
+| `0` | Reset the view to the data's extent |
+| `[` / `]` | Shrink or grow the upper pane by a twentieth, within 0.2..0.8 |
+
+In the picker, `enter` commits, `escape` cancels, `up`/`down` step and every
+other bare key types; `tab` completes. In the chooser, `enter` commits,
+`escape` cancels and the shared `j`/`k` or arrows step. A strip click solos
+its row and a ctrl+click toggles it, on a focused tile; a kind chip click is
+its digit and the diff chip `d`; the wheel zooms about the pointer or pans,
+a plot drag pans and a divider drag sets the split.
+
+## Commands and session
+
+The `:` line takes `underlying <ref>` (refused while following), `x
+<strike|moneyness|log-moneyness|delta>` and `diff <kind> - <kind> | none`,
+where the minus is ` - ` or `−`; a pair naming a kind that is not loaded is
+refused `<kind> is not loaded`.
+
+The session table holds `version = 1`, `coordinate`, `hidden`, `density`
+and `split` always, and `underlying`, `expiries`, `diff` and `view` while
+set; the cursor is not saved. A value that cannot be read drops its key
+with `session: dropped <key>: <why>`; a split outside the chart's bounds is
+clamped with a notice. The launch table `{ underlying = "<u>" }` restores
+through the same reader.
+
+## Failure states
+
+The footer shows the first notice and how many more stand behind it:
+
+- `no underlying`, or `no underlying in A` while following a group whose
+  scope names none or several.
+- `document request refused: …` when a read is refused: a refused CVI read
+  asks again on the next change; a refused chain read fails the fetch,
+  which still answers the flip barrier. The last good documents stay.
+- `no CVI document for <u>`, `no option chain for <u>`, or the reader's
+  error for a snapshot it cannot read (`option_chain rows for <date> are
+  not contiguous`); the other kind still paints.
+- `no <kind> curve at <date>: <why>` and `no chain coordinates at <date>:
+  <why>` for a failed job, once each; the rest of the batch paints. One
+  cause behind every job is said once, in the outcome's words (`vol model
+  "demo" is not built into this binary`, `the vol queue is full;
+  resubmit`).
+- `vol request refused: …`: the painted model stays and the next change
+  retries.
+- `following A — set the underlying there` for `u` while following.
+
+## Known limitations
+
+- Expiries before today are dropped by the viewer, not the data tier: the
+  dataset headline can still pin to an expired document.
+- One chain kind: source identity is absent from the chain's rows and
+  provenance, so two chain sources cannot be told apart.
+- The flip barrier covers the documents only. The vol batch is a follow-on,
+  so the painted curves swap one vol round trip after the flip releases.
+- Expiry colors cycle the five chart colors by strip position, so two
+  expiries five rows apart share a color.
+- Keyboard zoom anchors at the view's centre; only the wheel anchors at the
+  pointer.
+- There is no `.` action menu: the header chips are clickable and the
+  palette lists every action.
+
 ## Invariants
 
 - The key context does not opt into counts: the bare digits are kind

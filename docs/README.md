@@ -21,7 +21,7 @@ Start with the documents that describe Geode **as it works now**:
 | [Shell](current/shell.md) | Window ownership, tiles, input, focus, modules, and persistence |
 | [Input and dialogs](current/input-and-dialogs.md) | Keyboard ownership, modal lifetime, palette, completion, choices, and frame pickers |
 | [Tiling and workspaces](current/tiling.md) | Layout geometry, region focus, stacks, transfers, resizing, and restoration limits |
-| [Feature modules](current/features.md) | Blotter, documents, timeseries, diagnostics, pricing, and demo behavior |
+| [Feature modules](current/features.md) | Blotter, documents, timeseries, vol slice, diagnostics, pricing, and demo behavior |
 | [Crate READMEs](../crates/) | Local module maps and crate contracts |
 | [Performance](current/performance.md) | Budgets, instrumentation, reference values, and known gaps |
 | [Measurement log](perf.md) | Chronological benchmark results and investigations |
