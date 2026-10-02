@@ -433,6 +433,12 @@ impl TileContent for PricerContent {
         self.tile.read(cx).dimension_context()
     }
 
+    /// A pricer hides the lines the frame's scope does not select, so
+    /// following a link group changes the lines it shows.
+    fn follows(&self) -> bool {
+        true
+    }
+
     /// A pricer can always emit: the answer is the kind's capability, not
     /// whether a sheet has loaded. The shell drops a restored membership
     /// for a tile that answers `false` right after create, before any load

@@ -3983,6 +3983,16 @@ fn the_header_is_the_shared_height(cx: &mut gpui::TestAppContext) {
     assert!((f32::from(header.size.height) - want).abs() < 0.5);
 }
 
+/// A timeseries tile charts the series it was given and never reads the
+/// frame's scope, and it has nothing to post: it neither follows a link
+/// group nor emits into one, so the shell offers it no chooser.
+#[gpui::test]
+fn a_timeseries_tile_neither_follows_nor_emits(cx: &mut gpui::TestAppContext) {
+    let (h, _vcx) = open(cx);
+    assert!(!h.content.follows());
+    assert!(!h.content.emits());
+}
+
 /// The header shows the link group the tile follows, read from the frame
 /// at each paint: following shows the chip inside the header and leaving
 /// removes it. The tile keeps no group of its own that could outlive a

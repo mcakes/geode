@@ -8184,6 +8184,16 @@ mod tests {
         assert_eq!(calls.get(), after_drop, "a dropped subscription is silent");
     }
 
+    /// A blotter queries under the frame's scope and names an underlying
+    /// with its cursor: it can follow a link group and emit into one. The
+    /// chooser offers each row on these answers.
+    #[gpui::test]
+    fn a_blotter_follows_and_emits(cx: &mut gpui::TestAppContext) {
+        let (h, _cx) = open(cx);
+        assert!(content_of(&h).follows());
+        assert!(content_of(&h).emits());
+    }
+
     /// A blotter can emit before it has rows (a restored membership is
     /// dropped for a tile that answers `false`), and until the first
     /// snapshot it posts nothing, which leaves the group's scope alone.

@@ -7,7 +7,7 @@
 use super::*;
 use crate::frame::Frame;
 use crate::module::recording::{Recorded, RecordingFactory};
-use crate::shell::choicedialog::{NO_TILE_TO_LINK, TILE_GONE, Target};
+use crate::shell::choicedialog::{NO_GROUP_TO_JOIN, NO_TILE_TO_LINK, TILE_GONE, Target};
 use crate::tiling::WorkspaceIx;
 use geode_core::document::DocumentRows;
 use geode_core::link::{BoardEntry, Emission, Group};
@@ -948,6 +948,69 @@ fn a_tile_that_cannot_emit_is_never_set_to_emit(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// Services whose "rec" tiles answer `follows` and `emits` as given.
+fn services_that(follows: bool, emits: bool) -> ShellServices {
+    let mut rec = RecordingFactory::new("rec");
+    rec.follows = follows;
+    rec.emits = emits;
+    services_with_recorders(vec![rec])
+}
+
+/// Only a tile whose queries take the frame's scope can follow. Set on any
+/// other, the header and the status bar would name a group that selects
+/// nothing the tile shows.
+#[gpui::test]
+fn a_tile_that_does_not_follow_is_never_set_following(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services_that(false, true));
+    let before = frame.read_with(&vcx, |f, _| f.generation());
+    let notified = frame_notifications(&frame, &mut vcx);
+
+    set_follow(&shell, &mut vcx, TileId(1), Some(Group::A));
+
+    assert!(frame.read_with(&vcx, |f, _| f.membership(TileId(1)).is_empty()));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.generation()),
+        before,
+        "the frame is not written"
+    );
+    assert_eq!(notified.get(), 0, "and nobody is told");
+}
+
+/// A session written by a build whose module followed, read by one whose
+/// module does not: the follow is cleared once the occupant exists, and
+/// the emit beside it kept.
+#[gpui::test]
+fn a_restored_follow_on_a_tile_that_does_not_follow_is_dropped(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rec = RecordingFactory::new("rec");
+    rec.follows = false;
+    rec.emits = true;
+    let repaints = rec.repaints.clone();
+    let mut services = services_with_recorders(vec![rec]);
+    services.session_path = Some(dir.path().join("session.toml"));
+    let services = restored(services, "module = \"rec\"\nfollow = \"b\"\nemit = \"a\"");
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    vcx.run_until_parked();
+
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(1))),
+        geode_core::link::Membership {
+            follow: None,
+            emit: Some(Group::A),
+        },
+        "the follow is dropped and the emit beside it kept"
+    );
+    assert!(
+        repaints.borrow().contains(&TileId(1)),
+        "through the door, which repaints the tile"
+    );
+    let text = session_text(&shell, &mut vcx).expect("the session is written");
+    assert!(text.contains("emit = \"a\""), "{text}");
+    assert!(!text.contains("follow"), "{text}");
+}
+
 /// Filling a placeholder replaces its occupant under the same tile id. The
 /// new occupant starts in no group: a membership left on the id would bind
 /// a tile the trader never linked.
@@ -1683,6 +1746,67 @@ fn a_viewer_like_tile_sees_no_emit_rows(cx: &mut gpui::TestAppContext) {
     );
     assert!(vcx.debug_bounds("link-choice-emit \u{00b7} A").is_none());
     assert!(vcx.debug_bounds("link-choice-emit \u{00b7} none").is_none());
+}
+
+/// The rows the open chooser lists, in declared order.
+fn chooser_rows(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Vec<String> {
+    shell.read_with(vcx, |s, _| {
+        s.choice_dialog
+            .as_ref()
+            .map(|d| d.list.options().to_vec())
+            .unwrap_or_default()
+    })
+}
+
+/// The chooser lists a change only for a tile that can make it: the follow
+/// rows for a tile whose queries take the frame's scope, the emit rows for
+/// one that emits. A tile that does neither has nothing to choose, so the
+/// chord opens no dialog and the status bar says why.
+#[gpui::test]
+fn the_chooser_offers_only_what_the_tile_can_do(cx: &mut gpui::TestAppContext) {
+    let follow = [
+        "follow \u{00b7} workspace",
+        "follow \u{00b7} A",
+        "follow \u{00b7} B",
+        "follow \u{00b7} C",
+        "follow \u{00b7} D",
+    ];
+    let emit = [
+        "emit \u{00b7} none",
+        "emit \u{00b7} A",
+        "emit \u{00b7} B",
+        "emit \u{00b7} C",
+        "emit \u{00b7} D",
+    ];
+    for (follows, emits) in [(true, true), (true, false), (false, true)] {
+        let (_window, mut vcx, shell, tile) = one_tile_in(cx, services_that(follows, emits));
+        press_mod_u(&mut vcx);
+        assert_eq!(chooser_tile(&shell, &vcx), Some(tile), "{follows} {emits}");
+        let mut expected: Vec<&str> = Vec::new();
+        if follows {
+            expected.extend(follow);
+        }
+        if emits {
+            expected.extend(emit);
+        }
+        assert_eq!(chooser_rows(&shell, &vcx), expected, "{follows} {emits}");
+        // Enter on the untouched chooser changes nothing: it opens on the
+        // row for what the tile does now, in whichever rows it has.
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+        let frame = frame_of(&shell, &vcx);
+        assert!(
+            frame.read_with(&vcx, |f, _| f.membership(tile).is_empty()),
+            "{follows} {emits}"
+        );
+    }
+
+    let (_window, mut vcx, shell, _tile) = one_tile_in(cx, services_that(false, false));
+    press_mod_u(&mut vcx);
+    assert_eq!(chooser_tile(&shell, &vcx), None);
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()), "no dialog");
+    assert_eq!(notice(&shell, &vcx).as_deref(), Some(NO_GROUP_TO_JOIN));
 }
 
 /// Picking an emit row goes through the shell's door: the tile is

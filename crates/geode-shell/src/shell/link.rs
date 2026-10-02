@@ -65,8 +65,12 @@ impl ShellView {
         }
     }
 
-    /// Follow `group`, or the workspace again with `None`. A tile no
-    /// module occupies is refused and the frame is not touched.
+    /// Follow `group`, or the workspace again with `None`. A tile whose
+    /// module does not follow is never set following: the chooser does not
+    /// offer it, and a membership that reached the frame some other way (a
+    /// session written when the module did) is cleared instead of left
+    /// showing a group's chip over content the group does not select. A
+    /// tile no module occupies is refused and the frame is not touched.
     ///
     /// Writes the frame: call this from the shell's own handlers, never
     /// from inside an update of the frame.
@@ -80,6 +84,18 @@ impl ShellView {
             tracing::debug!(target: "geode::shell", "follow refused for tile {}: {why}", tile.0);
             return;
         }
+        let follows = self
+            .occupants
+            .get(&tile)
+            .is_some_and(|o| o.content.follows());
+        if group.is_some() && !follows {
+            tracing::debug!(
+                target: "geode::shell",
+                "follow refused for tile {}: its module does not follow",
+                tile.0
+            );
+        }
+        let group = group.filter(|_| follows);
         // The tile's own workspace, the one its frame handle was bound to
         // at creation: that lane supplies the rest of its identity.
         let ws = self

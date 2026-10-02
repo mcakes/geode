@@ -318,6 +318,14 @@ pub trait TileContent {
     ) -> Result<(), &'static str> {
         Err(crate::colfit::NO_TABLE)
     }
+    /// Whether this tile's queries take the frame's scope, so following a
+    /// link group changes what it shows. The chooser offers the follow rows
+    /// only to tiles that answer `true`, and the shell refuses to set any
+    /// other tile following: its header would show a group's chip over
+    /// content the group does not select.
+    fn follows(&self) -> bool {
+        false
+    }
     /// Whether this tile can emit into a link group at all. The chooser
     /// offers emitting only to tiles that answer `true`, and the shell
     /// refuses to set any other tile emitting.
@@ -1023,6 +1031,11 @@ pub mod recording {
         /// that the occupant's view paints, and logs each row report as
         /// [`Recorded::FindRows`] — a module that formats only shown rows.
         pub find_table: bool,
+        /// What every occupant answers from `follows`. On by default: the
+        /// recorder stands in for a tile that queries under the frame's
+        /// scope, so a shell test can set one following without opting in.
+        /// A test about a tile that ignores the scope turns it off.
+        pub follows: bool,
         /// What every occupant answers from `emits`. Off by default, so
         /// every existing fixture is a tile that cannot emit.
         pub emits: bool,
@@ -1076,6 +1089,7 @@ pub mod recording {
                 edit_on_launch: false,
                 grid: false,
                 find_table: false,
+                follows: true,
                 emits: false,
                 emission: Rc::new(RefCell::new(Emission::default())),
                 pulls: Rc::new(Cell::new(0)),
@@ -1164,6 +1178,8 @@ pub mod recording {
         find_table: bool,
         /// The handle `create` received; `closed` reads through it.
         frame: FrameRef,
+        /// Shared with [`RecordingFactory::follows`].
+        follows: bool,
         /// Shared with [`RecordingFactory::emits`].
         emits: bool,
         /// Shared with [`RecordingFactory::emission`].
@@ -1373,6 +1389,9 @@ pub mod recording {
                 .borrow_mut()
                 .push((self.tile, self.frame.read(cx).following()));
         }
+        fn follows(&self) -> bool {
+            self.follows
+        }
         fn emits(&self) -> bool {
             self.emits
         }
@@ -1553,6 +1572,7 @@ pub mod recording {
                     grid: self.grid,
                     find_table: self.find_table,
                     frame,
+                    follows: self.follows,
                     emits: self.emits,
                     emission: self.emission.clone(),
                     pulls: self.pulls.clone(),

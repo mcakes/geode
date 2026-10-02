@@ -15,6 +15,7 @@ use crate::module::ModuleFactory as _;
 use crate::module::placeholder::PLACEHOLDER_KIND;
 use crate::session;
 use crate::tiling::TileId;
+use geode_core::link::Membership;
 use geode_core::query::QueryKey;
 
 use super::ShellView;
@@ -203,8 +204,8 @@ impl ShellView {
     /// A fresh `add_tile` occupant that is on screen and focused hears
     /// `TileContent::launched` once, deferred after the render.
     /// Nothing here writes the frame: every link-group write a pass finds
-    /// due (a closed tile, a restored emitter) is deferred until the render
-    /// is over.
+    /// due (a closed tile, a restored emitter, a restored follow on a tile
+    /// that does not follow) is deferred until the render is over.
     pub(super) fn ensure_occupants(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut all = std::mem::take(&mut self.scratch_all_tiles);
         self.fill_all_tiles(&mut all);
@@ -355,9 +356,27 @@ impl ShellView {
             // notification is not what the deferral saves. On a first
             // draw GPUI delivers it: a window tracks an entity only from
             // the end of a draw.)
-            if from_restore && self.frame.read(cx).membership(*id).emit.is_some() {
+            let restored_link = if from_restore {
+                self.frame.read(cx).membership(*id)
+            } else {
+                Membership::default()
+            };
+            if restored_link.emit.is_some() {
                 let id = *id;
                 cx.defer_in(window, move |view, _, cx| view.sync_emitter(id, cx));
+            }
+            // A follow restored for a tile whose module does not follow (a
+            // session written when it did) is cleared through the door,
+            // which repaints the tile. Left in place, its header would show
+            // a group's chip over content the group does not select. After
+            // the render, like the emitter's sync: the door notifies the
+            // frame, and a notification sent while the window draws is
+            // dropped for an entity that window read in its last draw.
+            if restored_link.follow.is_some()
+                && self.occupants.get(id).is_some_and(|o| !o.content.follows())
+            {
+                let id = *id;
+                cx.defer_in(window, move |view, _, cx| view.set_follow(id, None, cx));
             }
             // A fresh occupant under this id must hear its stack position
             // even when a previous occupant under the SAME id already did

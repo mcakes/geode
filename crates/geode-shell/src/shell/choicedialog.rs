@@ -29,12 +29,13 @@
 //! presented columns (Schema without derived ones), the cursor's column
 //! highlighted; a pick opens that dialog on the column's Column stage.
 //!
-//! `tile::link_group` lists what the focused tile may follow (the
-//! workspace or a group) and, for a tile whose module emits, what it may
-//! emit into (none or a group), opening on the row for what it follows
-//! now. The title names the groups it is in. A pick changes one of the two
-//! through the shell's link doors. With no tile focused, or a placeholder,
-//! nothing opens and the status bar says so.
+//! `tile::link_group` lists, for a tile whose module follows, what the
+//! focused tile may follow (the workspace or a group) and, for a tile whose
+//! module emits, what it may emit into (none or a group), opening on the
+//! row for what it follows now (or emits into, with no follow row). The
+//! title names the groups it is in. A pick changes one of the two through
+//! the shell's link doors. With no tile focused, a placeholder, or a tile
+//! whose module does neither, nothing opens and the status bar says so.
 
 use std::rc::Rc;
 
@@ -106,14 +107,15 @@ pub enum Target {
         targets: Vec<String>,
         chosen: Option<String>,
     },
-    /// `tile::link_group`: the link groups `tile` may follow and, when its
-    /// module `emits`, emit into. `tile` and its membership (`current`) are
-    /// captured at open, so a pick lands on the tile the chooser was opened
-    /// for even if focus has moved since. `changes[i]` is what declared
-    /// option `i` does: a row stands for its change by position, never by
-    /// its text.
+    /// `tile::link_group`: the link groups `tile` may follow, when its
+    /// module `follows`, and emit into, when it `emits`. `tile` and its
+    /// membership (`current`) are captured at open, so a pick lands on the
+    /// tile the chooser was opened for even if focus has moved since.
+    /// `changes[i]` is what declared option `i` does: a row stands for its
+    /// change by position, never by its text.
     LinkGroup {
         tile: TileId,
+        follows: bool,
         emits: bool,
         current: Membership,
         changes: Vec<LinkChange>,
@@ -128,7 +130,8 @@ pub enum LinkChange {
     Emit(Option<Group>),
 }
 
-/// The follow rows: the workspace, then each group in `Group::ALL` order.
+/// The follow rows, offered only to a tile whose module follows: the
+/// workspace, then each group in `Group::ALL` order.
 const FOLLOW_ROWS: [&str; 5] = [
     "follow \u{00b7} workspace",
     "follow \u{00b7} A",
@@ -153,10 +156,26 @@ fn link_row_group(ix: usize) -> Option<Group> {
     ix.checked_sub(1).map(|g| Group::ALL[g])
 }
 
-/// The row the link chooser opens on, and returns to when its query is
-/// emptied: the follow row for what the tile follows now.
-fn link_opening_row(current: Membership) -> &'static str {
+/// The follow row for what the tile follows now.
+fn current_follow_row(current: Membership) -> &'static str {
     FOLLOW_ROWS[current.follow.map_or(0, |g| g.index() + 1)]
+}
+
+/// The emit row for what the tile emits into now.
+fn current_emit_row(current: Membership) -> &'static str {
+    EMIT_ROWS[current.emit.map_or(0, |g| g.index() + 1)]
+}
+
+/// The row the link chooser opens on, and returns to when its query is
+/// emptied: the row for what the tile follows now, or, for a tile offered
+/// no follow row, the row for what it emits into now. Enter on an untouched
+/// chooser therefore changes nothing.
+fn link_opening_row(follows: bool, current: Membership) -> &'static str {
+    if follows {
+        current_follow_row(current)
+    } else {
+        current_emit_row(current)
+    }
 }
 
 /// The level rows, in severity order, as `[log]` spells them.
@@ -305,16 +324,20 @@ impl ChoiceDialogState {
         }
     }
 
-    /// The link rows for `tile`: the five follow rows, then the five emit
-    /// rows when its module `emits`. The highlight opens on the row for
-    /// what the tile follows now (`current`), so `enter` on an untouched
-    /// chooser changes nothing.
-    pub fn link_group(tile: TileId, emits: bool, current: Membership) -> Self {
+    /// The link rows for `tile`: the five follow rows when its module
+    /// `follows`, then the five emit rows when it `emits`. A tile that does
+    /// neither has no rows, and its chooser is never opened
+    /// ([`open_link_group`]). The highlight opens on the row for what the
+    /// tile does now (`current`, see [`link_opening_row`]), so `enter` on
+    /// an untouched chooser changes nothing.
+    pub fn link_group(tile: TileId, follows: bool, emits: bool, current: Membership) -> Self {
         let mut options: Vec<String> = Vec::with_capacity(10);
         let mut changes = Vec::with_capacity(10);
-        for (ix, text) in FOLLOW_ROWS.iter().enumerate() {
-            options.push((*text).to_string());
-            changes.push(LinkChange::Follow(link_row_group(ix)));
+        if follows {
+            for (ix, text) in FOLLOW_ROWS.iter().enumerate() {
+                options.push((*text).to_string());
+                changes.push(LinkChange::Follow(link_row_group(ix)));
+            }
         }
         if emits {
             for (ix, text) in EMIT_ROWS.iter().enumerate() {
@@ -323,11 +346,12 @@ impl ChoiceDialogState {
             }
         }
         let mut list = ChoiceList::new(options, choice::DEFAULT_CAP);
-        list.place(Some(link_opening_row(current)));
+        list.place(Some(link_opening_row(follows, current)));
         Self {
             list,
             target: Target::LinkGroup {
                 tile,
+                follows,
                 emits,
                 current,
                 changes,
@@ -418,9 +442,11 @@ impl ChoiceDialogState {
     /// Every other target keeps the lit row by text.
     pub fn set_query(&mut self, query: &str) -> bool {
         match &self.target {
-            Target::LinkGroup { current, .. } => self
+            Target::LinkGroup {
+                follows, current, ..
+            } => self
                 .list
-                .set_query_placing(query, Some(link_opening_row(*current))),
+                .set_query_placing(query, Some(link_opening_row(*follows, *current))),
             Target::Grouping { .. }
             | Target::TileKind { .. }
             | Target::TileKindWith { .. }
@@ -761,9 +787,15 @@ pub fn open_columns(
 /// on it would be dropped when a module fills it.
 pub(crate) const NO_TILE_TO_LINK: &str = "no tile to link";
 
+/// Status notice: `tile::link_group` on a tile whose module neither follows
+/// nor emits. No group would change what it shows and it has nothing to
+/// post, so the chooser would open with no row.
+pub(crate) const NO_GROUP_TO_JOIN: &str = "this tile has no link group to join";
+
 /// Open the link chooser on the focused tile (`tile::link_group`). The
-/// tile, whether its module emits, and its membership are read now and kept
-/// by the dialog.
+/// tile, whether its module follows and emits, and its membership are read
+/// now and kept by the dialog. A tile that does neither gets
+/// [`NO_GROUP_TO_JOIN`] and no dialog.
 pub fn open_link_group(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let focused = view
         .services
@@ -772,14 +804,19 @@ pub fn open_link_group(view: &mut ShellView, window: &mut Window, cx: &mut Conte
         .focused_tile()
         .and_then(|tile| view.occupants.get(&tile).map(|o| (tile, o)))
         .filter(|(_, o)| o.kind != PLACEHOLDER_KIND)
-        .map(|(tile, o)| (tile, o.content.emits()));
-    let Some((tile, emits)) = focused else {
+        .map(|(tile, o)| (tile, o.content.follows(), o.content.emits()));
+    let Some((tile, follows, emits)) = focused else {
         view.notice = Some(NO_TILE_TO_LINK.into());
         cx.notify();
         return;
     };
+    if !follows && !emits {
+        view.notice = Some(NO_GROUP_TO_JOIN.into());
+        cx.notify();
+        return;
+    }
     let current = view.frame.read(cx).membership(tile);
-    let state = ChoiceDialogState::link_group(tile, emits, current);
+    let state = ChoiceDialogState::link_group(tile, follows, emits, current);
     open(view, state, window, cx);
 }
 
@@ -1459,8 +1496,9 @@ mod tests {
 
     const TILE: TileId = TileId(7);
 
+    /// The chooser of a tile that follows; `emits` adds the emit rows.
     fn link(emits: bool, follow: Option<Group>, emit: Option<Group>) -> ChoiceDialogState {
-        ChoiceDialogState::link_group(TILE, emits, Membership { follow, emit })
+        ChoiceDialogState::link_group(TILE, true, emits, Membership { follow, emit })
     }
 
     fn link_pick(change: LinkChange) -> Option<Pick> {
@@ -1491,6 +1529,40 @@ mod tests {
         assert_eq!(emitter.list.options().len(), 10);
         assert_eq!(emitter.list.options()[..5], FOLLOW, "follow rows first");
         assert_eq!(emitter.list.options()[5..], EMIT);
+    }
+
+    /// A tile whose queries ignore the frame's scope is offered no follow
+    /// row: following would show a group's chip over content the group
+    /// does not select. Its chooser opens on the row for what it emits
+    /// into now, so `enter` on an untouched chooser still changes nothing.
+    #[test]
+    fn the_link_rows_offer_following_only_to_a_tile_that_follows() {
+        let emit_only = |emit| {
+            ChoiceDialogState::link_group(TILE, false, true, Membership { follow: None, emit })
+        };
+        let state = emit_only(None);
+        assert_eq!(state.list.options(), EMIT);
+        assert_eq!(state.highlighted_pick(), link_pick(LinkChange::Emit(None)));
+        assert_eq!(
+            state.pick_at_ranked(1),
+            link_pick(LinkChange::Emit(Some(Group::A))),
+            "a row still stands for its change by position"
+        );
+        let state = emit_only(Some(Group::C));
+        assert_eq!(
+            state.highlighted_pick(),
+            link_pick(LinkChange::Emit(Some(Group::C)))
+        );
+        let mut state = emit_only(Some(Group::C));
+        assert!(state.set_query("  "));
+        assert_eq!(
+            state.highlighted_pick(),
+            link_pick(LinkChange::Emit(Some(Group::C))),
+            "a blank query keeps the opening row"
+        );
+        let neither = ChoiceDialogState::link_group(TILE, false, false, Membership::default());
+        assert!(neither.list.options().is_empty());
+        assert_eq!(neither.highlighted_pick(), None);
     }
 
     /// The chooser opens on the row that says what the tile follows now,

@@ -183,6 +183,11 @@ impl TileContent for BlotterContent {
     fn dimension_context(&self, cx: &App) -> Option<geode_core::context::DimensionContext> {
         self.tile.read(cx).dimension_context(cx)
     }
+    /// A blotter's query is scoped by the frame, so following a link group
+    /// changes the rows it shows.
+    fn follows(&self) -> bool {
+        true
+    }
     /// A blotter can always emit: the answer is the kind's capability, not
     /// whether a snapshot has arrived. The shell drops a restored
     /// membership for a tile that answers `false` right after create,

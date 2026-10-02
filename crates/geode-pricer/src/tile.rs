@@ -6492,6 +6492,16 @@ pub(crate) mod tests {
         );
     }
 
+    /// A pricer hides the lines the frame's scope does not select and
+    /// names an underlying with its cursor: it can follow a link group and
+    /// emit into one. The chooser offers each row on these answers.
+    #[gpui::test]
+    fn a_pricer_follows_and_emits(cx: &mut gpui::TestAppContext) {
+        let (h, _vcx) = open(cx);
+        assert!(h.content.follows());
+        assert!(h.content.emits());
+    }
+
     /// A pricer can emit before it holds a line (a restored membership is
     /// dropped for a tile that answers `false`); with no cursor row it
     /// posts nothing.

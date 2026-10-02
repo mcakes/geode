@@ -16554,6 +16554,17 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         assert_eq!(*emission.board[0].rows, expected);
     }
 
+    /// A panel shows the document its own underlying names and never reads
+    /// the frame's scope, so it cannot follow a link group; it emits its
+    /// underlying and its draft. The chooser offers each row on these
+    /// answers.
+    #[gpui::test]
+    fn a_panel_emits_and_does_not_follow(cx: &mut gpui::TestAppContext) {
+        let (h, _vcx) = open(cx);
+        assert!(!h.content.follows());
+        assert!(h.content.emits());
+    }
+
     /// A panel can emit before it is given an underlying (a restored
     /// membership is dropped for a tile that answers `false`); until then
     /// it posts nothing, which leaves the group's scope alone.
