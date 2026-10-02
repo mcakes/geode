@@ -113,6 +113,8 @@ pub struct ScopeBarModel {
     pub as_of: Option<String>,
     /// `AS OF {as_of}` for the toolbar badge and tooltip detail.
     pub as_of_badge: Option<SharedString>,
+    /// `AS OF {as_of} · Return to live in the palette` for the status bar.
+    pub as_of_status: Option<SharedString>,
     /// Timestamp including seconds and zone on the configured clock
     /// (`Clock::full`). Toolbar and status-bar tooltips use this instead of
     /// the shorter label; fractional seconds are not displayed.
@@ -228,6 +230,9 @@ pub fn build_model(frame: &FrameView<'_>, clock: Clock, today: NaiveDate) -> Sco
         None => "view default".to_string(),
     };
     let as_of_badge: Option<SharedString> = as_of.as_ref().map(|t| format!("AS OF {t}").into());
+    let as_of_status: Option<SharedString> = as_of
+        .as_ref()
+        .map(|t| format!("AS OF {t} · Return to live in the palette").into());
     let savable = !scope.is_empty();
     ScopeBarModel {
         slot,
@@ -239,6 +244,7 @@ pub fn build_model(frame: &FrameView<'_>, clock: Clock, today: NaiveDate) -> Sco
         impossible,
         as_of,
         as_of_badge,
+        as_of_status,
         as_of_full,
         savable,
     }
@@ -413,6 +419,20 @@ mod tests {
             m.as_of_full.as_deref(),
             Some("2026-09-08 14:05:30 UTC"),
             "the full resolved timestamp, seconds included"
+        );
+        assert_eq!(
+            m.as_of_status.as_deref(),
+            Some("AS OF 14:05 · Return to live in the palette"),
+            "the status bar's label, prepared with the model"
+        );
+        assert!(
+            build_model(
+                &Frame::new(GroupingSlots::default(), SavedScopes::new(), None).shared(),
+                clock,
+                today
+            )
+            .as_of_status
+            .is_none()
         );
     }
 

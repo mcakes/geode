@@ -550,6 +550,24 @@ fn a_rejected_reload_emits_reload_rejected_with_the_errors(cx: &mut gpui::TestAp
     );
 }
 
+/// A rejected reload prepares its status text once; an accepted one clears it.
+#[gpui::test]
+fn a_rejected_reload_prepares_its_status_text(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.reload_status.is_none()));
+    shell.update(&mut vcx, |s, cx| {
+        s.apply_reload(config_with_mod("ctrl"), cx)
+    });
+    let status = shell.read_with(&vcx, |s, _| s.reload_status.clone());
+    assert_eq!(
+        status.as_deref(),
+        Some("config: 1 error(s) — keeping last good")
+    );
+    shell.update(&mut vcx, |s, cx| s.apply_reload(config_with_mod("alt"), cx));
+    assert!(shell.read_with(&vcx, |s, _| s.reload_status.is_none()));
+}
+
 /// `keymap.mod = "ctrl"` produces an error and rejects the reload, preserving the
 /// entire last-good config and modifier alias. A later valid alias applies and clears
 /// the error status.

@@ -286,7 +286,6 @@ impl Render for ShellView {
         self.refresh_link_label(cx);
         let active_index = self.services.workspaces.active_index();
         let non_empty = self.services.workspaces.non_empty_indices();
-        let reload_message = self.last_reload.status_message();
         // Share the cached scope bar model between toolbar and status bar.
         // Use the poll-updated date and configured clock, avoiding a fresh
         // clock read during rendering.
@@ -353,22 +352,22 @@ impl Render for ShellView {
         };
         let status_bar = status::status_bar(
             self.matcher.pending(),
-            self.matcher.count(),
-            reload_message.as_deref(),
-            self.config_write_error.as_deref(),
-            self.restart_required.as_deref(),
-            self.notice.as_deref(),
+            self.matcher.count_label(),
+            self.reload_status.as_ref(),
+            self.config_write_error.as_ref(),
+            self.restart_required.as_ref(),
+            self.notice.as_ref(),
             stopped,
-            (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_ref()),
+            (!diagnostics_summary.is_empty()).then_some(&diagnostics_summary),
             on_diagnostics_click,
             ingest,
             self.link_label.as_ref().map(|(_, label)| label),
             on_following_click,
             fullscreen_hidden,
             on_fullscreen_click,
-            bar_model.as_of.as_deref(),
+            bar_model.as_of_status.as_ref(),
             bar_model.as_of_full.as_ref(),
-            self.services.theme.active_name(),
+            self.services.theme.active_label(),
             cx,
         );
         let sidebar = sidebar::sidebar(

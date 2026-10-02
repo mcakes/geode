@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use gpui::Context;
+use gpui::{Context, SharedString};
 
 use crate::defaults::mod_alias_from_config;
 use crate::fontsize::FontSize;
@@ -388,7 +388,7 @@ impl ShellView {
                 // All restart-sensitive inputs match the running engine's baselines.
                 None
             };
-            self.restart_required = restart_message.clone();
+            self.restart_required = restart_message.clone().map(SharedString::from);
             // Expose the same restart state through the diagnostics model.
             self.diagnostics.update(cx, |d, cx| {
                 let before = d.version();
@@ -403,6 +403,7 @@ impl ShellView {
         }
 
         self.last_reload = outcome;
+        self.reload_status = self.last_reload.status_message().map(SharedString::from);
         // Log rejection errors as well as emitting them for dialogs and the bridge.
         if !rejected.is_empty() {
             for d in &rejected {

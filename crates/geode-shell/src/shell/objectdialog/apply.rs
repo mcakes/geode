@@ -584,9 +584,8 @@ pub(crate) fn finish_flush(
             // The write succeeded; separately report whether memory accepted its merge.
             match rejected {
                 Some(n) => {
-                    shell.config_write_error = Some(format!(
-                        "{REJECTED_STATUS}: {n} error(s) — keeping last good"
-                    ));
+                    shell.config_write_error =
+                        Some(format!("{REJECTED_STATUS}: {n} error(s) — keeping last good").into());
                     cx.notify();
                 }
                 None => {
@@ -655,7 +654,7 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
     let restored = Config::from_docs(pending.revert);
     shell.apply_reload(restored, cx);
     // Keep the failure visible even when the dialog that queued the write is closed.
-    shell.config_write_error = Some(format!("config not saved — reverted: {message}"));
+    shell.config_write_error = Some(format!("config not saved — reverted: {message}").into());
     // Only the drafts that contributed to the batch show it reverted. A covered
     // dialog of another domain keeps its unsaved draft: nothing of it was in the
     // batch, and rebuilding it would throw away the trader's place.

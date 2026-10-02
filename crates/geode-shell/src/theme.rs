@@ -22,7 +22,7 @@
 use std::path::Path;
 use std::rc::Rc;
 
-use gpui::App;
+use gpui::{App, SharedString};
 use gpui_component::{Theme, ThemeConfig, ThemeSet};
 use toml_edit::{Item, Table, value};
 
@@ -127,7 +127,8 @@ pub struct ThemeService {
     /// Dark) contributes one entry each, and nothing here groups them
     /// back into families — a theme is one named entry.
     entries: Vec<Rc<ThemeConfig>>,
-    active_name: String,
+    /// Shared, so the status bar paints the name by reference count.
+    active_name: SharedString,
 }
 
 /// Parse every `BUNDLED` theme JSON. A file that fails to parse becomes a
@@ -160,7 +161,7 @@ pub fn load_bundled() -> (ThemeService, Vec<String>) {
         // `apply_from_config` ever runs (`theme::mod.rs::init`:
         // `Theme::change(ThemeMode::Light, None, cx)`, and the registry's
         // default light theme is this same "Default Light").
-        active_name: "Default Light".to_string(),
+        active_name: SharedString::new_static("Default Light"),
     };
     (service, warnings)
 }
@@ -191,6 +192,11 @@ impl ThemeService {
     /// The fully qualified name of the theme last successfully applied
     /// (`apply` or `apply_from_config`) — what the status bar shows.
     pub fn active_name(&self) -> &str {
+        &self.active_name
+    }
+
+    /// [`Self::active_name`] as the status bar's prepared text.
+    pub fn active_label(&self) -> &SharedString {
         &self.active_name
     }
 
@@ -278,7 +284,7 @@ impl ThemeService {
         // gpui-component needs for its Base-layer projection — a property
         // of the theme, not a mode a trader chose (Geode has none).
         Theme::change(config.mode, None, cx);
-        self.active_name = config.name.to_string();
+        self.active_name = config.name.clone();
     }
 }
 

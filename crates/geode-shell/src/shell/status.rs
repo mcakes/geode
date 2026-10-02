@@ -1,5 +1,8 @@
 //! Bottom status bar prepared from arguments and the active theme, with no retained
-//! state or I/O. Stopped data threads, count, pending keys, configuration messages, diagnostics, ingestion,
+//! state or I/O. Every text argument arrives as a prepared `SharedString`, so a
+//! paint clones reference counts instead of formatting segment text (the
+//! pending-key chips still format through `shell::kbd`). Stopped data threads,
+//! count, pending keys, configuration messages, diagnostics, ingestion,
 //! and historical-time indicators occupy the left region. The right region is the
 //! view-state section: the link group the focused tile follows, the fullscreen
 //! indicator, then the active theme name.
@@ -93,17 +96,17 @@ pub fn following_label(group: Group, underlying: Option<&str>) -> SharedString {
 #[allow(clippy::too_many_arguments)]
 pub fn status_bar(
     pending: &[Keystroke],
-    count: Option<u32>,
-    reload_message: Option<&str>,
-    write_error_message: Option<&str>,
-    restart_message: Option<&str>,
+    count: Option<&SharedString>,
+    reload_message: Option<&SharedString>,
+    write_error_message: Option<&SharedString>,
+    restart_message: Option<&SharedString>,
     // A shell action's refusal, or its report of what it did (a row menu
     // action's `opened <url>`); cleared by the next dispatch.
-    notice: Option<&str>,
+    notice: Option<&SharedString>,
     // Stopped data threads, prepared by `Diagnostics::note_thread_stopped`;
     // None while every data thread lives.
     stopped: Option<&StoppedSegment>,
-    diagnostics_summary: Option<&str>,
+    diagnostics_summary: Option<&SharedString>,
     on_diagnostics_click: impl Fn(&mut Window, &mut App) + Clone + 'static,
     // Current ingestion activity, shown as a loading label and a two-pixel strip along
     // the bar's top edge. None hides both.
@@ -116,11 +119,13 @@ pub fn status_bar(
     // fullscreen.
     fullscreen_hidden: Option<usize>,
     on_fullscreen_click: impl Fn(&mut Window, &mut App) + 'static,
-    as_of: Option<&str>,
-    // Full resolved historical timestamp for the badge tooltip. Supply alongside as_of,
-    // whose shortened text is painted and repeated in the tooltip detail.
+    // The prepared `AS OF … · Return to live in the palette` badge text
+    // (`ScopeBarModel::as_of_status`); None while live.
+    as_of_label: Option<&SharedString>,
+    // Full resolved historical timestamp for the badge tooltip. Supply alongside
+    // as_of_label, which is painted and repeated in the tooltip detail.
     as_of_full: Option<&SharedString>,
-    theme_name: &str,
+    theme_name: &SharedString,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -167,7 +172,7 @@ pub fn status_bar(
             div()
                 .font_family(fonts::MONO)
                 .text_color(theme.muted_foreground)
-                .child(format!("{count}")),
+                .child(count.clone()),
         );
     }
     // Build pending chips only when nonempty, avoiding an empty status element and
@@ -176,7 +181,7 @@ pub fn status_bar(
         bar = bar.left(super::kbd::binding(pending));
     }
     if let Some(message) = reload_message {
-        bar = bar.left(div().text_color(theme.danger).child(message.to_string()));
+        bar = bar.left(div().text_color(theme.danger).child(message.clone()));
     }
     if let Some(message) = write_error_message {
         // Danger, not warning: unlike every other segment here this one
@@ -187,7 +192,7 @@ pub fn status_bar(
             div()
                 .text_color(theme.danger)
                 .debug_selector(|| "config-write-error".to_string())
-                .child(message.to_string()),
+                .child(message.clone()),
         );
     }
     if let Some(message) = restart_message {
@@ -195,7 +200,7 @@ pub fn status_bar(
             div()
                 .text_color(theme.warning)
                 .debug_selector(|| "restart-required".to_string())
-                .child(message.to_string()),
+                .child(message.clone()),
         );
     }
     if let Some(message) = notice {
@@ -208,7 +213,7 @@ pub fn status_bar(
                 .truncate()
                 .text_color(theme.muted_foreground)
                 .debug_selector(|| "shell-notice".to_string())
-                .child(message.to_string()),
+                .child(message.clone()),
         );
     }
     if let Some(message) = diagnostics_summary {
@@ -227,7 +232,7 @@ pub fn status_bar(
                     theme.warning,
                 ))
                 .debug_selector(|| "diagnostics-summary".to_string())
-                .child(message.to_string())
+                .child(message.clone())
                 .tooltip(crate::tips::tip(
                     "tip-diagnostics-summary",
                     DIAGNOSTICS_TIP_TITLE,
@@ -247,11 +252,10 @@ pub fn status_bar(
                 .child(activity.label.clone()),
         );
     }
-    if let Some((t, full)) = as_of.zip(as_of_full) {
+    if let Some((label, full)) = as_of_label.zip(as_of_full) {
         // Keep historical time visible even when a tile is maximised. Reuse the
         // prepared badge text in the tooltip detail and show the full resolved
         // timestamp as its title.
-        let as_of_text: SharedString = format!("AS OF {t} · Return to live in the palette").into();
         // Through the chip door (`shell::chip`): `warning_foreground` over
         // the tint is the background family on a barely-tinted background
         // at the pinned rev.
@@ -268,9 +272,9 @@ pub fn status_bar(
                     SharedString::new_static("tip-status-as-of"),
                     full.clone(),
                     Some("frame::as_of"),
-                    Some(as_of_text.clone()),
+                    Some(label.clone()),
                 ))
-                .child(as_of_text),
+                .child(label.clone()),
         );
     }
 
@@ -340,7 +344,7 @@ pub fn status_bar(
     let bar = bar.right(
         div()
             .text_color(theme.muted_foreground)
-            .child(theme_name.to_string()),
+            .child(theme_name.clone()),
     );
 
     // The bar is wrapped rather than grown: the loading strip is an

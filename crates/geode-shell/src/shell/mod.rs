@@ -499,6 +499,8 @@ pub struct ShellView {
     /// The result of the last reload attempt, `Unchanged` until the first
     /// one runs. Drives the status bar's reload indicator.
     last_reload: reload::ReloadOutcome,
+    /// The rejected-reload segment, prepared when `last_reload` is set.
+    pub(crate) reload_status: Option<SharedString>,
     /// Bumped by every applied reload — the one place `services.config` and
     /// `services.keymap` are replaced. Config dialog rows derived from either are
     /// keyed by it (`crate::prepared`).
@@ -701,7 +703,7 @@ pub struct ShellView {
     /// Reload compares restart-sensitive settings against their startup
     /// baselines; restoring those values clears the notice. The status bar
     /// paints it and the app bridge receives `ShellEvent::RestartRequired`.
-    restart_required: Option<String>,
+    restart_required: Option<SharedString>,
     /// The `sources` layered doc the running `DataService` was actually
     /// built from — captured once here at construction, since a reload
     /// never rebuilds the data engine (see `apply_reload`'s doc comment).
@@ -798,7 +800,7 @@ pub struct ShellView {
     /// Status notice for a failed config write or a disk write whose in-memory
     /// reload was rejected. Cleared by the next accepted flush. Kept on the
     /// shell because the debounced flush may finish after its dialog closes.
-    pub(crate) config_write_error: Option<String>,
+    pub(crate) config_write_error: Option<SharedString>,
     /// Today on the configured clock, refreshed by the reload poll. Rendering
     /// uses this cached date for the scope bar instead of reading the clock on
     /// every repaint. A date change triggers a new render.
@@ -1416,6 +1418,7 @@ impl ShellView {
             user_dir,
             last_snapshot: reload::Snapshot::default(),
             last_reload: reload::ReloadOutcome::Unchanged,
+            reload_status: None,
             config_revision: 0,
             session_dirty: false,
             last_tiles_written: crate::session::TileRecords::new(),

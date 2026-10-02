@@ -1,6 +1,7 @@
 use super::context::COUNTS;
 use super::{KeyContext, Keymap, Keystroke, Modifiers, UNBOUND_ACTION};
 use crate::actions::ActionId;
+use gpui::SharedString;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchResult {
@@ -28,6 +29,8 @@ pub const MAX_COUNT: u32 = 9999;
 pub struct Matcher {
     pending: Vec<Keystroke>,
     count: Option<u32>,
+    /// `count` as status-bar text, rebuilt only by [`Self::set_count`].
+    count_label: Option<SharedString>,
 }
 
 impl Matcher {
@@ -47,12 +50,12 @@ impl Matcher {
             && (digit != 0 || self.count.is_some())
         {
             let so_far = self.count.unwrap_or(0);
-            self.count = Some(
+            self.set_count(Some(
                 so_far
                     .saturating_mul(10)
                     .saturating_add(digit)
                     .min(MAX_COUNT),
-            );
+            ));
             return MatchResult::Pending;
         }
 
@@ -74,7 +77,8 @@ impl Matcher {
         }
         if let Some(binding) = exact {
             self.pending.clear();
-            let count = self.count.take();
+            let count = self.count;
+            self.set_count(None);
             if binding.action.0 == UNBOUND_ACTION {
                 return MatchResult::NoMatch;
             }
@@ -87,7 +91,7 @@ impl Matcher {
             return MatchResult::Pending;
         }
         self.pending.clear();
-        self.count = None;
+        self.set_count(None);
         MatchResult::NoMatch
     }
 
@@ -100,9 +104,22 @@ impl Matcher {
         self.count
     }
 
+    /// The count in flight as status-bar text.
+    pub fn count_label(&self) -> Option<&SharedString> {
+        self.count_label.as_ref()
+    }
+
+    /// The one writer of `count`, keeping its painted label in step.
+    fn set_count(&mut self, count: Option<u32>) {
+        if self.count != count {
+            self.count = count;
+            self.count_label = count.map(|n| SharedString::from(n.to_string()));
+        }
+    }
+
     pub fn cancel(&mut self) {
         self.pending.clear();
-        self.count = None;
+        self.set_count(None);
     }
 }
 
@@ -397,6 +414,22 @@ mod tests {
                 count: Some(10)
             }
         );
+    }
+
+    #[test]
+    fn a_count_prefix_prepares_its_label_once() {
+        let km = km_counts();
+        let mut m = Matcher::default();
+        assert!(m.count_label().is_none());
+        m.press(&km, ks("1"), &counting());
+        assert_eq!(m.count_label().map(|l| l.as_ref()), Some("1"));
+        m.press(&km, ks("2"), &counting());
+        // Held on the matcher: a read borrows the prepared text. (Short
+        // `SharedString`s are inline, so no pointer identity is asserted.)
+        let label = m.count_label().cloned().expect("a count in flight");
+        assert_eq!(label.as_ref(), "12");
+        m.press(&km, ks("j"), &counting());
+        assert!(m.count_label().is_none(), "consumed with the count");
     }
 
     #[test]

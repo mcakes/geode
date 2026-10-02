@@ -195,6 +195,12 @@ measure already reads. Re-measure on an idle machine before quoting them.
   nothing. Selection scrolling keeps the selected row in view
   (`ScrollStrategy::Nearest`). Ranking and frecency are unchanged: usage
   bonuses are fixed for the open palette, and a dispatch closes it first.
+- Status-bar text is prepared where its input changes (the matcher's count,
+  the reload outcome, write and restart messages, the cached diagnostics
+  summary, the cached scope-bar model's `AS OF` label, the theme service's
+  active name); the bar's signature takes `&SharedString`, so a paint clones
+  reference counts and formats no segment text. The pending-key chips still
+  format through `kbd` while a sequence is in flight.
 - Large module tables use virtualization or prepared visible rows.
 
 ## Known gaps

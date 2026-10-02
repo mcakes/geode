@@ -13,7 +13,6 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
-use std::rc::Rc;
 use std::time::SystemTime;
 
 use geode_core::config::{Diagnostic, Severity};
@@ -367,8 +366,8 @@ pub struct Diagnostics {
     pending_catalog_request: bool,
     pending_explicit_catalog: bool,
     /// Status summary cached by combined version. A cache hit shares the
-    /// `Rc<str>` allocation, avoiding formatting and buffer copies during paint.
-    summary_cache: RefCell<(u64, Rc<str>)>,
+    /// `SharedString` allocation, avoiding formatting and buffer copies during paint.
+    summary_cache: RefCell<(u64, SharedString)>,
 }
 
 /// The status summary's source labels, indexed by [`Health::severity`]:
@@ -403,7 +402,7 @@ impl Diagnostics {
             overlay_visible: false,
             pending_catalog_request: false,
             pending_explicit_catalog: false,
-            summary_cache: RefCell::new((u64::MAX, Rc::from(""))),
+            summary_cache: RefCell::new((u64::MAX, SharedString::default())),
         }
     }
 
@@ -865,19 +864,19 @@ impl Diagnostics {
     /// retained data-error, dropped-event, and refused-submission segments.
     /// Stopped data threads have their own segment ([`Self::stopped_segment`]). Zero counts are omitted;
     /// an empty string means there is nothing to show. A cache hit shares the
-    /// existing `Rc<str>` buffer.
+    /// existing `SharedString` buffer.
     ///
     /// Only sources with a health report are counted. Config history contributes
     /// no errors; data conditions are counted separately so config reloads
     /// cannot hide them. Restart-required text has its own status-bar segment.
-    pub fn summary(&self) -> Rc<str> {
+    pub fn summary(&self) -> SharedString {
         {
             let cache = self.summary_cache.borrow();
             if cache.0 == self.version {
                 return cache.1.clone();
             }
         }
-        let built: Rc<str> = Rc::from(self.build_summary());
+        let built: SharedString = self.build_summary().into();
         *self.summary_cache.borrow_mut() = (self.version, built.clone());
         built
     }
@@ -1594,10 +1593,21 @@ mod tests {
     fn summary_reuses_the_same_allocation_when_the_version_is_unchanged() {
         let mut d = Diagnostics::new(LogLevels::default());
         d.note_dropped(1);
+        // Longer than `SharedString`'s inline capacity (23 bytes), so the
+        // text lives on the heap and its address identifies the allocation.
+        d.note_refused(1);
+        d.note_health(
+            "a",
+            Health::Failed { reason: "r".into() },
+            "r".into(),
+            SystemTime::UNIX_EPOCH,
+        );
         let a = d.summary();
+        assert!(a.len() > 23, "{a}");
         let b = d.summary();
-        assert!(
-            Rc::ptr_eq(&a, &b),
+        assert_eq!(
+            a.as_ptr(),
+            b.as_ptr(),
             "a cache hit must clone a refcount, not rebuild"
         );
     }
