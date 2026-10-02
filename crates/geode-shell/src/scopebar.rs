@@ -108,8 +108,9 @@ pub struct ScopeBarModel {
     /// That name need not identify the dimension that caused the contradiction.
     pub impossible: Option<String>,
     /// `"14:05"` local time when the as-of date is today, otherwise
-    /// `"2026-09-05 14:05"`; `None` when live. The status bar's own as-of
-    /// segment reads this bare form directly (`shell/render.rs`).
+    /// `"2026-09-05 14:05"`; `None` when live. The bare form both prepared
+    /// labels are built from: the toolbar reads `as_of_badge` and the status
+    /// bar reads `as_of_status`, so no paint formats it.
     pub as_of: Option<String>,
     /// `AS OF {as_of}` for the toolbar badge and tooltip detail.
     pub as_of_badge: Option<SharedString>,
