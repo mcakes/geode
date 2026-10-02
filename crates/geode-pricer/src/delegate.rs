@@ -513,6 +513,11 @@ pub struct SheetDelegate {
     /// drag would re-run the tile's `pointer` on every frame. Stale after
     /// a drag no cell saw released, which costs one extra emission at most.
     drag_last: Option<(usize, Option<usize>)>,
+    /// The grid row the last right press landed on, recorded inside the
+    /// mouse-down listener itself, so it is in place before the shell's
+    /// deferred row-menu read whatever event hops the tile's own handling
+    /// takes. `PricerTile::press_context` takes it.
+    pub(crate) pressed_row: Option<usize>,
     /// `Some` while the primary button is down because of a press a cell,
     /// the tree cell or the gutter of this table caught — `true` when it
     /// was the tree cell or the gutter. `None` while another element owns
@@ -583,6 +588,7 @@ impl SheetDelegate {
             numbers_stamp: None,
             fitted: FittedWidths::new(),
             drag_last: None,
+            pressed_row: None,
             drag_origin: None,
             inner_press: None,
             grips: Vec::new(),
@@ -1293,7 +1299,8 @@ impl TableDelegate for SheetDelegate {
             // `Context` then this) would only re-record the same row.
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.delegate_mut().pressed_row = Some(row_ix);
                     cx.emit(CellPointer::Context { row: row_ix });
                 }),
             )
@@ -1739,9 +1746,11 @@ impl SheetDelegate {
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                if this.delegate().is_editor_cell(row_ix, col) {
+                let d = this.delegate_mut();
+                if d.is_editor_cell(row_ix, col) {
                     return;
                 }
+                d.pressed_row = Some(row_ix);
                 cx.emit(CellPointer::Context { row: row_ix });
             }),
         )

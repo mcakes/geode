@@ -296,9 +296,11 @@ pub trait TileContent {
     }
     /// The context of the row a right press just landed on, for the shell's
     /// row menu, or `None` for a tile that opens no menu on a right press.
-    /// Called once per right press, after the module's own press handling
-    /// has run; a module records the pressed row and column in its own
-    /// press handler and answers from them here.
+    /// Called once per right press, one deferred effect after the press's
+    /// dispatch. A module records the pressed row and column synchronously,
+    /// in a mouse-down listener (any phase), and answers from them here;
+    /// handling it routes through an event or a defer may land after the
+    /// menu opened, and must not move window focus.
     fn press_context(&self, _cx: &mut App) -> Option<DimensionContext> {
         None
     }
@@ -1118,13 +1120,16 @@ pub mod recording {
         /// When set, every occupant's view handles a right mouse-down as a
         /// grid module with a selectable table does: it stops the press's
         /// propagation (gpui-component's table does, on a cell) and records
-        /// its pressed row by an event, i.e. one effect later. The fixture
-        /// takes `press_context` on the press and puts it back through
-        /// `App::defer`, so the shell reads it only if its right-press beat
-        /// runs after the module's own handling. A shell test's proof that
-        /// the tile's listener still sees the press, and reads the context
-        /// late enough.
+        /// its pressed row in that bubble-phase listener, the
+        /// `press_context` contract. The fixture's `press_context` is
+        /// empty until that listener puts `pressed_context` there, so the
+        /// shell reads a context only if its right-press beat runs after
+        /// the occupant's listener. A shell test's proof that the tile's
+        /// listener still sees the press, and reads the context late
+        /// enough.
         pub stops_right_press: bool,
+        /// What a `stops_right_press` view records on a right press.
+        pub pressed_context: Option<DimensionContext>,
     }
 
     impl RecordingFactory {
@@ -1158,6 +1163,7 @@ pub mod recording {
                 generation_at_create: Rc::new(RefCell::new(Vec::new())),
                 repaints: Rc::new(RefCell::new(Vec::new())),
                 stops_right_press: false,
+                pressed_context: None,
             }
         }
     }
@@ -1180,9 +1186,11 @@ pub mod recording {
         find: Option<gpui::WeakEntity<crate::fuzzyfind::FuzzyFind>>,
         /// Shared with [`RecordingFactory::stops_right_press`].
         stops_right_press: bool,
-        /// Shared with [`RecordingFactory::press_context`]: what a
-        /// `stops_right_press` view records on the press.
+        /// Shared with [`RecordingFactory::press_context`]: where a
+        /// `stops_right_press` view records `pressed_context` on the press.
         press_context: Rc<RefCell<Option<DimensionContext>>>,
+        /// Shared with [`RecordingFactory::pressed_context`].
+        pressed_context: Option<DimensionContext>,
     }
 
     impl Render for RecordingView {
@@ -1194,6 +1202,7 @@ pub mod recording {
                 .filter(|f| f.read(cx).is_active());
             let stops_right_press = self.stops_right_press;
             let press_context = self.press_context.clone();
+            let pressed_context = self.pressed_context.clone();
             div()
                 .size_full()
                 .track_focus(&self.focus)
@@ -1201,9 +1210,7 @@ pub mod recording {
                 .when(stops_right_press, |d| {
                     d.on_mouse_down(gpui::MouseButton::Right, move |_, _, cx| {
                         cx.stop_propagation();
-                        let recorded = press_context.borrow_mut().take();
-                        let press_context = press_context.clone();
-                        cx.defer(move |_| *press_context.borrow_mut() = recorded);
+                        *press_context.borrow_mut() = pressed_context.clone();
                     })
                 })
                 .child(format!("rec {}", self.tile.0))
@@ -1645,6 +1652,7 @@ pub mod recording {
                 find: None,
                 stops_right_press: self.stops_right_press,
                 press_context: self.press_context.clone(),
+                pressed_context: self.pressed_context.clone(),
             });
             self.frame_handles.borrow_mut().insert(tile, frame.clone());
             self.followed_at_create

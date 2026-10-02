@@ -726,9 +726,6 @@ pub struct PricerTile {
     /// `chevron_anchor`, taken by the latest press: a double-click whose
     /// first press was the chevron's toggles no package a second time.
     pressed_chevron: bool,
-    /// The grid row the latest right press landed on, until the shell's
-    /// right-press beat takes it through `press_context`.
-    context_pressed: Option<usize>,
     /// A grip drag from its press to its drop, cancel or release
     /// elsewhere (`tile::reorder`).
     pub(crate) row_drag: Option<reorder::RowDragState>,
@@ -1134,7 +1131,6 @@ impl PricerTile {
             pressed: None,
             chevron_anchor: false,
             pressed_chevron: false,
-            context_pressed: None,
             row_drag: None,
             underlyings: Rc::from([]),
             underlyings_rev: None,
@@ -5393,14 +5389,17 @@ impl PricerTile {
         Some(ctx)
     }
 
-    /// The context of the row the latest right press landed on, taken: the
-    /// shell reads it once, one beat after the press, and hangs the menu
-    /// at the pointer (so no anchor). `None` when no press is pending.
+    /// The context of the row the latest right press landed on (the
+    /// delegate's listener recorded it), taken: the shell reads it once,
+    /// one beat after the press, and hangs the menu at the pointer (so no
+    /// anchor). `None` when no press is pending.
     pub(crate) fn press_context(
         &mut self,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<geode_core::context::DimensionContext> {
-        let row = self.context_pressed.take()?;
+        let row = self
+            .table
+            .update(cx, |t, _| t.delegate_mut().pressed_row.take())?;
         Some(self.context_at(row))
     }
 
@@ -5690,11 +5689,10 @@ impl PricerTile {
                 (row, col, Some(kind_for(tree)))
             }
             CellPointer::Context { row } => {
-                // The row the shell's row menu names (`press_context`).
-                self.context_pressed = Some(row);
-                // A right press on a row of a live `V` selection leaves the
-                // cursor and the selection alone: the menu acts on one of
-                // its rows.
+                // The delegate already recorded the row for the shell's row
+                // menu (`press_context`); this is the cursor's part. A right
+                // press on a row of a live `V` selection leaves the cursor
+                // and the selection alone: the menu acts on one of its rows.
                 if self
                     .resolved
                     .as_ref()

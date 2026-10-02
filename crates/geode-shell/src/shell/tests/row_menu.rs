@@ -328,7 +328,8 @@ fn a_right_press_is_seen_when_the_occupant_stops_propagation(cx: &mut gpui::Test
     let mut rec = RecordingFactory::new("rec");
     rec.accepts = &["underlying_ref"];
     rec.stops_right_press = true;
-    *rec.press_context.borrow_mut() = Some(spx_p7());
+    // Recorded by the occupant's own listener on the press: nothing until then.
+    rec.pressed_context = Some(spx_p7());
     let services = services_with_recorders(vec![rec]);
     let (window, mut vcx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut vcx);
@@ -345,6 +346,16 @@ fn a_right_press_is_seen_when_the_occupant_stops_propagation(cx: &mut gpui::Test
     assert_eq!(focused(&shell, &vcx), first, "the press focused its tile");
     let opened_at = shell.read_with(&vcx, |s, _| s.row_menu.as_ref().and_then(|m| m.at()));
     assert_eq!(opened_at, Some(at));
+    let tiles = shell.read_with(&vcx, |s, _| s.occupants.len());
+    // A mouse-opened surface must take typed keys (grouping-picker rule).
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.row_menu.is_none()));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupants.len()),
+        tiles + 1,
+        "enter picked Open Rec"
+    );
 }
 
 /// The captured listener sees every button; only a right press opens the
@@ -382,7 +393,8 @@ fn a_right_press_on_a_docked_tile_is_seen_when_the_occupant_stops_propagation(
     let mut rec = RecordingFactory::new("rec");
     rec.accepts = &["underlying_ref"];
     rec.stops_right_press = true;
-    *rec.press_context.borrow_mut() = Some(spx_p7());
+    // Recorded by the occupant's own listener on the press: nothing until then.
+    rec.pressed_context = Some(spx_p7());
     let services = services_with_recorders(vec![rec]);
     let (window, mut vcx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut vcx);
@@ -396,6 +408,16 @@ fn a_right_press_on_a_docked_tile_is_seen_when_the_occupant_stops_propagation(
     draw(&mut vcx);
     let opened_at = shell.read_with(&vcx, |s, _| s.row_menu.as_ref().and_then(|m| m.at()));
     assert_eq!(opened_at, Some(at));
+    let tiles = shell.read_with(&vcx, |s, _| s.occupants.len());
+    // A mouse-opened surface must take typed keys (grouping-picker rule).
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.row_menu.is_none()));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupants.len()),
+        tiles + 1,
+        "enter picked Open Rec"
+    );
 }
 
 /// A right press moves focus to the tile, so the menu it opens hands focus
