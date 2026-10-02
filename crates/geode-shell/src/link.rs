@@ -61,7 +61,7 @@ type BoardKey = (String, Vec<String>);
 struct Posted {
     rows: Arc<DocumentRows>,
     /// The tile whose emission put it there. Recorded for diagnostics;
-    /// nothing reads it yet.
+    /// nothing reads it.
     #[allow(dead_code)]
     emitter: TileId,
 }

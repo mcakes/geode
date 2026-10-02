@@ -166,7 +166,8 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
 - Emitting into a link group (`TileContent::emission`), a panel posts its
   underlying (the first part of its document key) as a one-value
   `underlying_ref` scope; with no underlying it posts nothing, which leaves
-  the group's scope as it was. The column name is a literal: every built-in
+  the group's scope as it was. The column is `geode_core::link::UNDERLYING`,
+  not read from the dataset: every built-in
   document dataset keys first on `underlying_ref`, as `accepts()` and the
   launch path also assume, and a panel over a dataset keyed first on another
   column would post under the wrong column. Its board entry is the draft the upload
@@ -177,7 +178,7 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   what the panel paints; a clean panel and a reverted draft post no
   document. A draft the builder refuses posts no document either, and the
   scope is still posted.
-- The assembled rows are cached (`Emitted`) on the underlying, the painted
+- The assembled rows are cached (`Emitted`) on the document key, the painted
   base snapshot's allocation and the draft. An unchanged pull returns the
   same `Arc`, which the frame compares by allocation and reads as no change;
   a republish at the same source time is another snapshot and is
@@ -185,7 +186,7 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   refuses is walked once, not once per pull. The cache is touched only
   inside `draft_rows`, never by an edit route. It keeps one snapshot, one
   rows allocation and one draft clone alive until the next pull replaces
-  them, or clears them because nothing is unsent: bounded at one document
+  them, or clears them because the draft is clean: bounded at one document
   per panel.
 - `emits` is true before an underlying is named or a document has arrived:
   the shell drops a restored membership for a tile that answers false right
@@ -193,10 +194,11 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   that moves the underlying, the draft or the painted document must notify
   it: a one-cell commit, which refills its cell through the table entity,
   notifies the tile as well.
-- A panel emits only. It can be set to follow a group and shows the chip,
-  but it does not take its underlying from the group and does not read the
-  frame's scope. The tile stores no group; its header reads `link_chips`
-  from its frame handle at paint.
+- A panel emits only. `follows` keeps its default, false: the panel does
+  not read the frame's scope and does not take its underlying from a group,
+  so the shell offers it no follow row and refuses to set it following. The
+  tile stores no group; its header reads `link_chips` from its frame handle
+  at paint.
 
 ## Input and popup contracts
 

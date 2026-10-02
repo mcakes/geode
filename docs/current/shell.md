@@ -552,15 +552,20 @@ or an unfollow changes the tile's scope generation, so the tile requeries by
 itself and nothing else waits for it. (The one exception is a lane and a
 group that were both never written: both hold the empty scope at generation
 zero, equal content under an equal number, so nothing requeries and nothing
-needs to.) Following has an effect only on a tile that queries under the
-frame's scope, which the blotter and the pricer do. A timeseries tile and a
-market-data panel can follow and show the chip, but neither reads the scope.
+needs to.)
+
+Only a tile whose queries take the frame's scope can follow: its module
+answers `TileContent::follows()` true, which the blotter and the pricer do.
+A timeseries tile and a market-data panel never read the scope and answer
+false, so the chooser offers them no follow row and `set_follow` refuses
+them: a group's chip over content the group does not select would misreport
+what the tile shows.
 
 Group scope generations come from the same frame-wide counter as the lanes',
 so a number names one scope in any lane or group.
 
 **Writing a group's scope.** A group's scope is written by its emitters (see
-below). Through a tile-bound writable view (`Frame::view_mut_for`),
+below). Through a following tile's own handle (`FrameRef::update`),
 `set_scope` and `clear_scope` also write the followed group's scope instead
 of the lane's; a group keeps no undo history, and no module calls them. Every
 other scope verb (the text session, undo and redo, dimension and term edits,
@@ -575,19 +580,29 @@ leave a stale copy in a tile. The shell's doors are `ShellView::set_follow`
 and `set_emit`. They refuse, with a debug log line naming the tile and the
 reason, a tile id with no occupant and a placeholder: a membership lives
 until its occupant closes or is replaced, and one written for either would
-have nothing to end it. `set_emit` never sets a tile emitting whose module
-answers `TileContent::emits()` false. Closing a tile, or filling a
+have nothing to end it. `set_follow` never sets a tile following whose
+module answers `TileContent::follows()` false, and `set_emit` never sets one
+emitting whose module answers `emits()` false. Closing a tile, or filling a
 placeholder in place, drops the tile's membership after `TileContent::closed`
 (a closing follower answers the flip barrier under its group's identity,
 which it reads only while still a member). Duplicating a tile copies its
 serialized module state, which holds no membership: the copy starts in no
 group.
 
-**Emission is a pull.** A module gets no route to write the frame. It
-answers `TileContent::emission()`: an optional scope and a list of board
-entries. The blotter and the pricer post the cursor row's one underlying as a
-one-value `underlying_ref` scope; a market-data panel posts its underlying
-and its unsent draft document (see [features](features.md)). A tile's
+**Emission is a pull.** A module has no door to a group. The frame's
+membership and emission writes (`follow`, `emit`, `post_emission`,
+`forget_tile`), the tile-bound writable view and the barrier's per-tile
+keying are private to the shell crate, so a module, which reaches the frame
+through its handle, cannot link a tile or post for one. Its only write for a
+group is `set_scope` / `clear_scope` through its own handle while it follows
+one. (A module does write the frame for other things through that handle:
+it reports its arrival at a flip barrier and registers its watches.) What a
+module does is answer `TileContent::emission()`: an optional scope and a
+list of board entries. The blotter and the pricer post the cursor row's one
+underlying as a one-value `underlying_ref` scope
+(`geode_core::link::underlying_scope`); a market-data panel posts its
+underlying and, while its draft is not clean (`Editing`, `Behind` and `Sent`
+alike), its draft document (see [features](features.md)). A tile's
 content is type-erased (`Box<dyn TileContent>` beside an `AnyView`), so the
 shell cannot observe the tile's entity. `TileContent::watch_emission(changed)`
 has the module subscribe to its own entity and call `changed`, which carries
@@ -651,7 +666,10 @@ still pending.
 **The chooser.** `tile::link_group` (`mod+u`, the palette, and a click on the
 status bar's `following` segment) opens the link chooser on the focused tile
 (see [input and dialogs](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices)).
-The header chip takes no press.
+It lists the follow rows for a tile whose module follows and the emit rows
+for one whose module emits. A tile that does neither (a timeseries tile) has
+nothing to choose: no dialog opens and the status bar reads `this tile has
+no link group to join`. The header chip takes no press.
 
 **The chip.** A tile in a group shows a solid chip per group in its header:
 the group's color as the fill, the letter and the role arrows as text floored
@@ -663,28 +681,45 @@ text to the 4.5:1 text ratio on that fill, and the four fills a minimum
 distance apart. A custom theme is not swept and can fall short. The letter
 is the identity; the color is a second cue.
 
-**Session.** A tile's record carries `follow` and `emit` (see
-[session format](#session-format)). A group's scope and board are not session
-state. After a restart a follower reads an empty group scope, which selects
-everything, until an emitter posts again; a restored emitter is subscribed
-and pulled once after the first render, so it posts as soon as its cursor
-names an underlying. Moving a group's scope advances the frame generation the
-session writer treats as dirt, so the writer skips a snapshot whose text
-equals the last one it extracted: an emitting tile's cursor does not rewrite
-`session.toml`.
+**Session.** A tile's record carries `follow` and `emit`, and each group's
+scope is saved under `[links.<letter>]` (see
+[session format](#session-format)). A group keeps its last scope across a
+restart: it is set on the group before any tile exists, so a restored
+follower's first query reads it with no emitter present. Restored empty, a
+follower that showed one underlying would show the whole book under the same
+chip, and an emitter restored on a total row posts no scope to correct it. A
+restored emitter is subscribed and pulled once after the first render, and
+moves the group only when its cursor names an underlying. A group's board is
+not session state: it is rebuilt from what its emitters post.
+
+Moving a group's scope advances the frame generation the session writer
+treats as dirt, but the writer compares its snapshot without the groups'
+scopes, so a group's scope alone writes nothing: an emitting tile's cursor
+does not rewrite `session.toml`. Every snapshot the writer does write, and
+the quit-time save, carry each group's scope as it is then. After a crash a
+group's scope is therefore the one in the last session write, which may be
+older than the last one the group held.
 
 **Known limitations.**
 
 - The 3:1 guarantee for a chip's fill is measured against the theme's
   background, which is the tile's. A chip painted on any other surface is not
   covered by the sweep.
-- A tile that closes while it is the last key an open flip awaits releases
-  the barrier during a render, where GPUI drops the frame's notification.
-  Tiles holding staged results then stay on their pre-flip data until the
-  next frame notification.
+- A flip barrier released during render-time reconciliation notifies
+  nobody: GPUI drops a notification sent, while a window draws, to an entity
+  that window read in its last draw, and the shell's render reads the frame.
+  Two routes release one there: a tile that closes while it is the last key
+  an open flip awaits, and a tile made visible (`set_visible(true)`) whose
+  query submission is refused, which answers the barrier at once. Tiles
+  holding staged results then stay on their pre-flip data until the next
+  frame notification.
+- A `:unscoped` blotter or pricer that follows a group ignores the group's
+  scope, as it ignores the workspace's, while its header still shows the
+  chip and the status bar still names the group.
 - No tile reads a board. Emitting panels post their drafts and the watch
   interface is exercised only by tests; nothing displays a posted draft.
-- A market-data panel does not take its underlying from a group it follows.
+- A market-data panel cannot follow a group: it does not take its underlying
+  from one.
 
 ## Module hosting and delivery
 
@@ -951,6 +986,7 @@ The writer emits `config_version = 1` and these records:
 | `workspaces.N.tiles.<id>` | Module name, its opaque state table, and the link groups the tile is in: `follow` and `emit`, each a group letter `"a"` to `"d"`, written only when set |
 | `frame` | Dimension selections, named-expression references, text/expression scope, grouping slot, and as-of |
 | `workspaces.N.frame` | Pinned lane for workspace N (same fields as `frame`); present iff workspace N is pinned |
+| `links.<letter>` | One link group's scope, under `scope`, in the encoding `frame` uses for its own (dimension selections, text, expression, named-expression references); written only for a group whose scope is not empty, and an absent table reads as an empty scope |
 | `palette.usage` | Per-row usage count and last-used timestamp |
 | `pages.<kind>` | One opaque table per page kind from `PageContent::serialize`, kept for kinds that never opened this session; the diagnostics page writes its `section` |
 
@@ -987,6 +1023,7 @@ a later save replaces it with the current state.
 | Main fullscreen combined with dock focus | Clear fullscreen and keep dock focus, with a warning |
 | Malformed or locally dangling tile record | Warn and drop the record |
 | A tile's `follow` or `emit` is not a string or names no group | Warn and read that key as unset; keep the tile, its module and its state |
+| `links` is not a table, a key under it names no group, a group's entry or its `scope` is not a table | Warn and read that group's scope as empty; the other groups and the rest of the file still read. A scope's own fields recover as `frame`'s do |
 | Invalid optional frame or palette data | Retain usable fields/entries and warn for the errors their readers report |
 | `workspaces.N.frame` is not a table | Warn; the workspace restores unpinned |
 
@@ -1023,12 +1060,20 @@ They are applied only to a record whose module has a factory and whose tile
 is placed in some workspace, on screen or not: any other tile will never have
 a module occupant to end the membership. A record behind a placeholder keeps
 its two keys as read and writes them back on every save, so the membership
-returns with the module. A restored `emit` on a tile whose module does not
-emit is cleared. A restored emitter is subscribed, and its emission pulled,
-after the render that created the occupants: pulled between two occupants of
-one pass, a follower would start on a different scope according to whether
-its tile id sorts before or after its emitter's. Restoring a membership
-moves no lane version and no group scope generation, so it opens no flip.
+returns with the module. A restored `follow` on a tile whose module does not
+follow, and a restored `emit` on one whose module does not emit, are cleared
+once the occupant exists. A restored emitter is subscribed, and its emission
+pulled, after the render that created the occupants: pulled between two
+occupants of one pass, a follower would start on a different scope according
+to whether its tile id sorts before or after its emitter's. Restoring a
+membership moves no lane version and no group scope generation, so it opens
+no flip.
+
+Each `links.<letter>` scope is set on its group before the memberships are
+applied and before the flip baseline is seeded, without a notification. It
+draws the group a scope generation from the frame's counter like any group
+scope write; because the baseline is seeded after it, the restored scope is
+not read as a change and opens no flip.
 
 ### Saving and failure behavior
 
@@ -1038,9 +1083,11 @@ before any configuration-scan early return. It also compares serialized module
 state, the frame's generation counter, and palette usage versions, so those
 changes can trigger a save independently of layout dirt. This is periodic
 coalescing, not a timer reset after each action; other work adds to the
-interval. The frame's generation also advances for state the session does
-not hold (a link group's scope moves with an emitter's cursor), so a
-snapshot whose text equals the last one extracted is not written again.
+interval. A link group's scope moves with an emitter's cursor and advances
+the frame's generation each time, so the snapshot is compared, as text
+without the `links` tables, with the last one extracted, and an equal one is
+not written again. A group's scope alone therefore never causes a write; the
+text handed to the file includes the `links` tables whenever one is written.
 
 Snapshot collection and TOML serialization run on the UI thread. The watcher
 awaits the file write on the background executor before continuing its loop.
@@ -1050,7 +1097,8 @@ but does not retry unchanged state on the next tick. A serialization failure
 leaves comparison baselines unchanged, but a layout-only change can lose its
 dirty flag. These baselines track extracted snapshots, not confirmed saves.
 
-The quit hook saves current state synchronously regardless of dirty flags.
+The quit hook saves current state synchronously regardless of dirty flags,
+the link groups' scopes included.
 Session writes use the shared atomic replacement primitive: a unique sibling
 temporary file, file sync, then rename. Readers see a complete old or new file;
 the directory is not synced, so durability across system failure is best-effort.

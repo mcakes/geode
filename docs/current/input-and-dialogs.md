@@ -183,16 +183,19 @@ text when still present; duplicate labels resolve to the first match. The
 option text therefore serves as identity within a choice list. Tab completes
 the highlighted option and Enter chooses it through `choice::route`.
 
-The link chooser is the one exception (`ChoiceList::set_query_placing`). Its
-opening row is the tile's current follow row, `follow · workspace` for a tile
-that was never linked, and that row's text survives `a` and `c`: kept lit by
-text it would stay lit over `follow · A`, and Enter would follow nothing. So
-a changed query there lights the row it ranks first. The current follow row
-stays lit only when nothing outranks it: under a blank query (empty or all
-whitespace, which ranks every row level), and under a query that ranks it
-level with the top row, such as `f` or `follow`, which every follow row
-matches alike. Lit on the first of those level rows, Enter after a shared
-prefix would unfollow. A highlight moved with the arrows after typing is
+The link chooser is the one exception (`ChoiceList::set_query_placing_with`).
+Its opening row is the tile's current follow row, `follow · workspace` for a
+tile that was never linked, and that row's text survives `a` and `c`: kept
+lit by text it would stay lit over `follow · A`, and Enter would follow
+nothing. So a changed query there lights the row it ranks first. The tile's
+current row stays lit only when nothing outranks it: under a blank query
+(empty or all whitespace, which ranks every row level), and under a query
+that ranks it level with the top row. The current row is taken from the
+section the top-ranked row belongs to: the current follow row under `f` or
+`follow`, which every follow row matches alike, and the current emit row
+(`emit · none` for a tile emitting into no group) under `e` or `emit`. Lit
+on the first of those level rows, Enter after a shared prefix would unfollow,
+or stop the tile emitting. A highlight moved with the arrows after typing is
 kept until the query text changes again.
 
 The choice model retains every match. Its `painted` slice is a moving window,
@@ -439,7 +442,7 @@ level stage.
 | Tile kind with context (`tile::open_with`) | The same rows, pre-filtered to kinds whose factory accepts a column of the focused tile's captured dimension context, titled `Open {subject} in…` (the first context value of an accepted column). Commit always splits, passing the factory's translated `launch_state` as the new tile's restored record. |
 | Column (`config::view_column`, `config::schema_column`) | The focused tile's presented columns from `TileContent::tile_columns`, captured at open; a row reads the header label, then ` · name` when they differ. Schema omits columns no dataset of the view declares in current configuration (derived view columns, and derived dimensions a view lists as plain dimension columns). Opens on the cursor's column, else the first row. Before the list opens, a tile with no columns refuses with "this tile has no dataset columns", a Schema list with nothing left with "no schema columns in this tile's view", and a target dialog already in the stack with the stack's own refusal. Commit closes the list, then opens the dialog on that column's Column stage (see [configuration dialogs](configuration-dialogs.md#stages-and-ownership)). Palette-only, no default binding. |
 | Log level | Choose a logging target, then its level. Escape or the Back button from levels returns to a rebuilt target list and clears the filter; a level choice submits `Diagnostics::request_level`. |
-| Link group (`tile::link_group`, `mod+u`, and the status bar's `following` segment) | The [link groups](shell.md#link-groups) of the focused tile, which is captured at open with its membership, so a pick lands on that tile even if focus has moved. Rows are `follow · workspace`, then `follow · A` to `follow · D`; a tile whose module emits also gets `emit · none` and `emit · A` to `emit · D`. A row stands for its change by position, not by its text. The title is `Link group`, with ` · following A` and ` · emitting B` appended for the groups the tile is in. Opens on the row for what the tile follows, so Enter on an untouched chooser changes nothing; a typed query places the highlight by the chooser's own rule (see [filtering, choice, and movement](#filtering-choice-and-movement)). Digits type into the filter. Commit closes the chooser, then follows or emits through the shell's link doors; one pick changes one of the two. With no focused tile, or a placeholder focused, nothing opens and the status bar reads `no tile to link`. A tile closed under the open chooser (the palette still reaches `Close tile`) is linked to nothing, and the pick reports `that tile is no longer open`. Refused while a page is open. |
+| Link group (`tile::link_group`, `mod+u`, and the status bar's `following` segment) | The [link groups](shell.md#link-groups) of the focused tile, which is captured at open with its membership, so a pick lands on that tile even if focus has moved. A tile whose module follows (`TileContent::follows`) gets `follow · workspace`, then `follow · A` to `follow · D`; a tile whose module emits gets `emit · none` and `emit · A` to `emit · D`; a tile whose module does both gets the follow rows, then the emit rows. A row stands for its change by position, not by its text. The title is `Link group`, with ` · following A` and ` · emitting B` appended for the groups the tile is in. Opens on the row for what the tile follows (for a tile with no follow row, on the row for what it emits into), so Enter on an untouched chooser changes nothing; a typed query places the highlight by the chooser's own rule (see [filtering, choice, and movement](#filtering-choice-and-movement)). Digits type into the filter. Commit closes the chooser, then follows or emits through the shell's link doors; one pick changes one of the two. With no focused tile, or a placeholder focused, nothing opens and the status bar reads `no tile to link`; on a tile whose module neither follows nor emits nothing opens and it reads `this tile has no link group to join`. A tile closed under the open chooser (the palette still reaches `Close tile`) is linked to nothing, and the pick reports `that tile is no longer open`. Refused while a page is open. |
 
 Closing and reopening creates fresh dialog state. These pickers apply on
 Enter; they do not use Normal/Filter mode's keep-query Enter.

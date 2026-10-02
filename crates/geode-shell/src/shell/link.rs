@@ -1,7 +1,9 @@
 //! The shell's doors onto link groups: who follows and emits, and the pull
-//! that carries an emitting tile's emission into the frame. Modules never
-//! write the frame; they answer `emission()` and say when it changed. The
-//! status bar's `following` label for the focused tile is cached here.
+//! that carries an emitting tile's emission into the frame. A module has no
+//! door to a group: the frame's membership and emission writes are private
+//! to this crate, and a module answers `emission()` and says when it
+//! changed. The status bar's `following` label for the focused tile is
+//! cached here.
 
 use std::rc::Rc;
 
@@ -215,10 +217,10 @@ impl ShellView {
 
     /// Notify a tile's own view when its membership changes: its header
     /// shows the membership, and whatever observes the view hears that it
-    /// changed. Tile views are not cached today, so the shell's own repaint
-    /// already re-renders every tile and the chip would appear without
-    /// this. It is kept so the header stays right if a tile view is ever
-    /// cached, when only a notification to the view itself repaints it.
+    /// changed. Tile views are not cached, so the shell's own repaint
+    /// re-renders every tile and the chip would appear without this. The
+    /// notification keeps the header right independently of that: a cached
+    /// view repaints only when the view itself is notified.
     fn repaint_tile(&self, tile: TileId, cx: &mut Context<Self>) {
         if let Some(o) = self.occupants.get(&tile) {
             App::notify(cx, o.view.entity_id());

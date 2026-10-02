@@ -221,14 +221,16 @@ A tile may follow one of the shell's four link groups and emit into one (see
 [link groups](shell.md#link-groups)). The shell owns membership and the
 chooser (`mod+u`); a module stores no group. Every module tile paints the
 shared header's link chips from its frame handle. What a module contributes
-is its emission, which the shell pulls:
+is two capabilities, `TileContent::follows()` and `emits()`, which decide
+the rows the chooser offers its tiles, and its emission, which the shell
+pulls:
 
-| Module | Scope it posts | Board it posts | Posts nothing when |
-|---|---|---|---|
-| Blotter | The cursor row's one `underlying_ref`, as a one-value scope | None | No snapshot has arrived, or the cursor row names no single underlying |
-| Pricer | The cursor row's one underlying, as a one-value `underlying_ref` scope | None | The sheet has no cursor row, or the row is a package across underlyings or a grouping row |
-| Market data | The panel's underlying, as a one-value `underlying_ref` scope | Its unsent draft document | The panel has no underlying |
-| Timeseries | Does not emit | | |
+| Module | Follows | Scope it posts | Board it posts | Posts nothing when |
+|---|---|---|---|---|
+| Blotter | Yes | The cursor row's one `underlying_ref`, as a one-value scope | None | No snapshot has arrived, or the cursor row names no single underlying |
+| Pricer | Yes | The cursor row's one underlying, as a one-value `underlying_ref` scope | None | The sheet has no cursor row, or the row is a package across underlyings or a grouping row |
+| Market data | No | The panel's underlying, as a one-value `underlying_ref` scope | Its draft document, while the draft is not clean | The panel has no underlying |
+| Timeseries | No | Does not emit | | |
 
 An emission with no scope leaves the group's scope as it was, so resting the
 cursor on a total or a mixed row does not clear what the group's followers
@@ -237,10 +239,14 @@ on loaded state, so a restored membership survives a tile whose first
 answer has not arrived.
 
 Following replaces the frame scope a tile reads with the group's. The
-blotter and the pricer query under that scope; the timeseries tile and the
-market-data panel do not read the frame's scope, so following changes
-nothing they show beyond the chip. A market-data panel does not take its
-underlying from a group it follows.
+blotter and the pricer query under that scope, so they can follow. The
+market-data panel and the timeseries tile never read the frame's scope: a
+group would change nothing they show, so they cannot follow, the chooser
+offers them no follow row, and a market-data panel does not take its
+underlying from a group. A timeseries tile neither follows nor emits and
+has no chooser at all. A blotter or pricer set `:unscoped` ignores the
+scope of a group it follows, as it ignores the workspace's, while its
+header still shows the chip.
 
 ## Blotter
 
@@ -313,8 +319,10 @@ has exactly one. A row above the column's grouping level, a mixed or NULL
 value, and a tile with no snapshot yet post no scope, which leaves the
 group's scope as it was. Only the cursor row is read, never the selection: a
 selection does not change which underlying the cursor is on. Every cursor
-move, tree change and delivery tells the shell to pull, and a pull that
-finds the same underlying writes nothing. The blotter posts no documents.
+move, tree change and delivery tells the shell to pull, and so does the
+promotion of a snapshot held behind a flip barrier, which no delivery
+paints; a pull that finds the same underlying writes nothing. The blotter
+posts no documents.
 Following a group, it queries under the group's scope in place of the
 workspace's, composed with its own `:filter` layer.
 
@@ -738,8 +746,8 @@ cannot mark it Sent.
 
 ### Link group emission
 
-A panel emitting into a [link group](#link-groups) posts where it is and
-what it holds unsent.
+A panel emitting into a [link group](#link-groups) posts where it is and,
+while its draft is not clean, the draft document it paints.
 
 The scope is the panel's underlying (the first part of its document key) as
 a one-value `underlying_ref` scope. A panel with no underlying posts
@@ -755,8 +763,8 @@ one. `:revert` takes the document off the board. A draft the builder
 refuses (an inserted dividend row with no amount, say) posts no document;
 the scope is still posted.
 
-The assembled rows are cached on the underlying, the painted base snapshot
-(by allocation) and the draft. A pull with none of the three moved hands
+The assembled rows are cached on the document key, the painted base
+snapshot (by allocation) and the draft. A pull with none of the three moved hands
 back the same allocation, which the frame reads as no change: no document
 walk and no board write. A republish at the same source time is a different
 snapshot under an unchanged draft and is reassembled. A refusal is cached
@@ -770,9 +778,10 @@ one-cell commit, which refills its cell through the table entity, and a
 refused `:upload` that cancels an open selection editor and takes its live
 steps back out of the draft.
 
-A panel emits only. It can follow a group and show the chip, but it does not
-take its underlying from the group, and it does not read the frame's scope.
-No tile reads the board, so a posted draft is not displayed anywhere else.
+A panel emits only. It does not read the frame's scope and does not take
+its underlying from a group, so it cannot follow one: its chooser lists the
+emit rows alone. No tile reads the board, so a posted draft is not displayed
+anywhere else.
 
 ## Timeseries
 

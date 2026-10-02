@@ -123,7 +123,7 @@ measure already reads. Re-measure on an idle machine before quoting them.
   builds nothing.
 - A market-data panel emitting into a link group assembles its draft
   document once per changed draft, not once per pull: the rows are cached on
-  the underlying, the painted base snapshot and the draft, and a pull with
+  the document key, the painted base snapshot and the draft, and a pull with
   none of them moved returns the same allocation. An edit costs nothing
   until the shell pulls. The assembly itself walks the whole document and is
   unmeasured.
@@ -136,8 +136,9 @@ measure already reads. Re-measure on an idle machine before quoting them.
   watches published data, and it is not staged behind a flip barrier.
 - A link group's scope change advances the frame generation the session
   writer polls, and the writer then serializes a snapshot on its 500 ms
-  tick; a snapshot whose text equals the last one extracted is not written,
-  so an emitting tile's cursor does not rewrite `session.toml`.
+  tick; a snapshot whose text, without the groups' scopes, equals the last
+  one extracted is not written and is not serialized a second time with
+  them, so an emitting tile's cursor does not rewrite `session.toml`.
 - `ChartKey` contains everything timeseries chart preparation reads. Cursor
   movement and fetch-state changes reuse value vectors. Per-slot visibility
   changes rebuild the model; theme and named-color changes can trigger that

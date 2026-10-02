@@ -856,6 +856,12 @@ impl Deref for FrameView<'_> {
 
 impl<'a> FrameView<'a> {
     /// The link group this view's tile follows, if any.
+    ///
+    /// A module that keeps state keyed on the group (a board watch, say)
+    /// compares this on every frame notification. `versions()` alone does
+    /// not say the group changed: following a group whose scope was never
+    /// written moves no version, since the lane it leaves and the group it
+    /// joins both hold the empty scope at generation zero.
     pub fn following(&self) -> Option<Group> {
         self.group.map(|(g, _)| g)
     }

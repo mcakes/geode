@@ -186,6 +186,23 @@ impl std::fmt::Debug for StackHandle {
     }
 }
 
+/// What the shell asks of a tile's occupant and tells it.
+///
+/// Two rules bind every implementation.
+///
+/// `set_visible`, `closed` and `set_stack` are called while the shell
+/// reconciles occupants inside its render. A notification sent to the frame
+/// from one of them is not heard by the frame's observers: GPUI drops a
+/// notification sent, while a window draws, to an entity that window read
+/// in its last draw, and the shell's render reads the frame. An occupant
+/// defers any work whose effect depends on the frame's observers hearing
+/// it.
+///
+/// State keyed on the link group the tile follows is compared on every
+/// frame notification through `frame.read(cx).following()`. Following a
+/// group whose scope was never written moves no version (the lane and the
+/// group both hold the empty scope at generation zero), so an occupant that
+/// waits for `versions()` to move keeps its old group's state.
 pub trait TileContent {
     /// Pushed onto the keymap context stack while this tile is focused,
     /// e.g. `blotter` with `mode = normal`, opted into counts.

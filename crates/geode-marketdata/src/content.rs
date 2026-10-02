@@ -252,12 +252,16 @@ impl TileContent for MarketDataContent {
     /// A panel can always emit: the answer is the kind's capability, not
     /// whether an underlying is named or a document has arrived. The shell
     /// drops a restored membership for a tile that answers `false` right
-    /// after create, before either can have happened.
+    /// after create, before either can have happened. `follows` keeps its
+    /// default, false: a panel shows the document its own underlying names
+    /// and never reads the frame's scope, so a group would change nothing
+    /// it shows.
     fn emits(&self) -> bool {
         true
     }
-    /// The panel's underlying as a one-value scope and, while it holds
-    /// unsent work the upload builder can assemble, that draft document.
+    /// The panel's underlying as a one-value scope and, while its draft is
+    /// not clean (`Editing`, `Behind` or `Sent`) and the upload builder can
+    /// assemble it, that draft document.
     fn emission(&self, cx: &App) -> geode_core::link::Emission {
         self.tile.read(cx).emission()
     }

@@ -1778,8 +1778,9 @@ impl MarketDataTile {
     }
 
     /// What the panel posts into the link group it emits into: where it is
-    /// (its underlying, as a one-value scope) and, while it holds unsent
-    /// work the upload builder can assemble, that whole document. The same
+    /// (its underlying, as a one-value scope) and, while its draft is not
+    /// clean (`Editing`, `Behind` or `Sent`) and the upload builder can
+    /// assemble it, that whole document. The same
     /// answer whether or not the panel is emitting. With no underlying it
     /// posts nothing, which leaves the group's scope as it is.
     pub(crate) fn emission(&self) -> Emission {
@@ -1796,11 +1797,12 @@ impl MarketDataTile {
             .into_iter()
             .collect();
         Emission {
-            // The column is a literal, not read from the dataset: every
-            // built-in document dataset keys first on `underlying_ref`, and
-            // the panel's `accepts()` and launch path assume the same. A
-            // panel over a dataset keyed first on another column would post
-            // that key's value under the wrong column.
+            // The column is `geode_core::link::UNDERLYING`, not read from
+            // the dataset: every built-in document dataset keys first on
+            // `underlying_ref`, and the panel's `accepts()` and launch path
+            // assume the same. A panel over a dataset keyed first on
+            // another column would post that key's value under the wrong
+            // column.
             scope: key.first().map(|u| underlying_scope(u)),
             board,
         }
@@ -1809,13 +1811,15 @@ impl MarketDataTile {
     /// The draft document for the board: the rows `:upload` would assemble
     /// from the painted base, the installed index and the draft, in the
     /// same allocation until the underlying, the base or the draft moves
-    /// (the frame reads a new allocation as a changed draft). `None` with
-    /// nothing unsent, with no document, and for a draft the builder
+    /// (the frame reads a new allocation as a changed draft). `None` while
+    /// the draft is clean, with no document, and for a draft the builder
     /// refuses.
     fn draft_rows(&self, key: &[String]) -> Option<Arc<DocumentRows>> {
         let mut emitted = self.emitted.borrow_mut();
-        let unsent = self.draft.state != DraftState::Clean;
-        let Some(snapshot) = self.painted_snapshot().filter(|_| unsent) else {
+        // `Editing`, `Behind` and `Sent` all post: the board shows what the
+        // panel paints.
+        let not_clean = self.draft.state != DraftState::Clean;
+        let Some(snapshot) = self.painted_snapshot().filter(|_| not_clean) else {
             // Nothing to post: let go of the rows and the snapshot they pin.
             *emitted = None;
             return None;

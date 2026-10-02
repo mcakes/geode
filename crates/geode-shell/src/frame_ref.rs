@@ -6,6 +6,12 @@
 //!
 //! A handle bound to no tile (`FrameRef::new`) reads the workspace alone:
 //! pages, the shell's own doors and tests hold one.
+//!
+//! A module that keeps state keyed on the group its tile follows compares
+//! `read(cx).following()` on every frame notification. Comparing
+//! `versions()` is not enough: following a group whose scope was never
+//! written moves no version (the lane and the group both hold the empty
+//! scope at generation zero), so the tile would keep its old group's state.
 
 use gpui::{App, AppContext, Context, Entity};
 

@@ -118,13 +118,16 @@ follows in place of the lane's (see
 [the shared frame](shell.md#the-shared-frame)).
 
 `geode_core::link` is the link-group vocabulary the shell and the modules
-share: the four groups, a tile's membership, and the `Emission` (a scope and
-board entries) a module answers. It is pure. The frame in `geode-shell` holds
-every group's scope and board and every tile's membership; a module owns
-none of it, stores no group, and has no route to write the frame. Emission is
-a pull: a module says its emission may have changed through a callback that
-carries nothing, and the shell reads `TileContent::emission()` and posts it
-(see [link groups](shell.md#link-groups)).
+share: the four groups, a tile's membership, the `Emission` (a scope and
+board entries) a module answers, and the one column a group's scope is named
+by. It is pure. The frame in `geode-shell` holds every group's scope and
+board and every tile's membership; a module owns none of it, stores no
+group, and has no door to a group: the frame's membership and emission
+writes are private to the shell crate, and a module's only write for a group
+is `set_scope` / `clear_scope` through its own handle while it follows one.
+Emission is a pull: a module says its emission may have changed through a
+callback that carries nothing, and the shell reads `TileContent::emission()`
+and posts it (see [link groups](shell.md#link-groups)).
 
 Financial calculation is outside the application layer. An in-process
 calculation crate remains behind the same request/outcome seam that an external

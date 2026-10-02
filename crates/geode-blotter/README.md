@@ -106,6 +106,11 @@ cargo bench -p geode-blotter   # the pure core
   `v` block; `g m` opens on the cursor row's values alone. Its `anchor` is the
   cursor row's lower-left in window space, recorded at paint and cleared when
   that row scrolls out of view.
+- A blotter can follow a link group (`TileContent::follows`): its query is
+  scoped by the frame, so following one queries under the group's scope
+  composed with the tile's own `:filter`, in place of the workspace's. An
+  `:unscoped` tile ignores a followed group's scope as it ignores the
+  workspace's, while its header still shows the chip.
 - Emitting into a link group (`TileContent::emission`), the tile posts the
   cursor row's one `underlying_ref` as a one-value scope and no board.
   `cursor_underlying` reads that one row's single-valued columns and skips

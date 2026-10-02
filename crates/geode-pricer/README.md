@@ -279,7 +279,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   create. `watch_emission` observes the tile entity, which every cursor
   move, edit and load notifies. The tile stores no group; its header reads
   `link_chips` from its frame handle at paint, and a pricer that follows a
-  group applies that group's scope as its frame scope.
+  group (`TileContent::follows` is true) applies that group's scope as its
+  frame scope. An `:unscoped` pricer ignores a followed group's scope as it
+  ignores the workspace's, while its header still shows the chip.
 - The tile arrives at flip barriers itself; it submits no view query
   (`geode_tile::following::arrive_immediately`).
 - An empty sheet is never saved. A sheet whose load failed is never saved

@@ -532,7 +532,7 @@ impl BlotterTile {
         let row = *d.shown.get(d.cursor.row)? as usize;
         crate::core::context::values_at(snapshot, plan, row)
             .into_iter()
-            .find_map(|(column, value)| (column == "underlying_ref").then_some(value))
+            .find_map(|(column, value)| (column == geode_core::link::UNDERLYING).then_some(value))
     }
 
     /// The row a right press just landed on, for the shell's row menu:
