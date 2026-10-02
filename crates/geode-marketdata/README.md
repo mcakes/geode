@@ -163,6 +163,34 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   moved`, any other draft change closes silently. Every commit that keeps its
   value takes the `Bulk` out before `close_editor`, which would otherwise
   undo it, and every verb that reads the draft closes the editor first.
+- Emitting into a link group (`TileContent::emission`), a panel posts its
+  underlying (the first part of its document key) as a one-value
+  `underlying_ref` scope; with no underlying it posts nothing, which leaves
+  the group's scope as it was. Its board entry is the draft the upload
+  builder assembles (`core::upload::assemble` over the painted base, the
+  installed index and the draft): the panel's dataset, its document key and
+  the whole document's rows. The entry is posted while the draft is not
+  clean, a `Behind` or `Sent` draft included, so the board holds exactly
+  what the panel paints; a clean panel and a reverted draft post no
+  document. A draft the builder refuses posts no document either, and the
+  scope is still posted.
+- The assembled rows are cached (`Emitted`) on the underlying, the painted
+  base snapshot's allocation and the draft. An unchanged pull returns the
+  same `Arc`, which the frame compares by allocation and reads as no change;
+  a republish at the same source time is another snapshot and is
+  reassembled; a refusal is cached like a result. The cache is touched only
+  inside `draft_rows`, never by an edit route, and is dropped when there is
+  nothing unsent, which also lets go of the snapshot it pins.
+- `emits` is true before an underlying is named or a document has arrived:
+  the shell drops a restored membership for a tile that answers false right
+  after create. `watch_emission` observes the tile entity, so every route
+  that moves the underlying, the draft or the painted document must notify
+  it: a one-cell commit, which refills its cell through the table entity,
+  notifies the tile as well.
+- A panel emits only. It can be set to follow a group and shows the chip,
+  but it does not take its underlying from the group and does not read the
+  frame's scope. The tile stores no group; its header reads `link_chips`
+  from its frame handle at paint.
 
 ## Input and popup contracts
 

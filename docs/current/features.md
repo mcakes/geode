@@ -215,6 +215,33 @@ default widths. Each tile runs one method for both doors.
   column dragged wider still returns to its fitted or configured width on
   the next refresh.
 
+### Link groups
+
+A tile may follow one of the shell's four link groups and emit into one (see
+[link groups](shell.md#link-groups)). The shell owns membership and the
+chooser (`mod+u`); a module stores no group. Every module tile paints the
+shared header's link chips from its frame handle. What a module contributes
+is its emission, which the shell pulls:
+
+| Module | Scope it posts | Board it posts | Posts nothing when |
+|---|---|---|---|
+| Blotter | The cursor row's one `underlying_ref`, as a one-value scope | None | No snapshot has arrived, or the cursor row names no single underlying |
+| Pricer | The cursor row's one underlying, as a one-value `underlying_ref` scope | None | The sheet has no cursor row, or the row is a package across underlyings or a grouping row |
+| Market data | The panel's underlying, as a one-value `underlying_ref` scope | Its unsent draft document | The panel has no underlying |
+| Timeseries | Does not emit | | |
+
+An emission with no scope leaves the group's scope as it was, so resting the
+cursor on a total or a mixed row does not clear what the group's followers
+show. A module can emit before it has data: the capability does not depend
+on loaded state, so a restored membership survives a tile whose first
+answer has not arrived.
+
+Following replaces the frame scope a tile reads with the group's. The
+blotter and the pricer query under that scope; the timeseries tile and the
+market-data panel do not read the frame's scope, so following changes
+nothing they show beyond the chip. A market-data panel does not take its
+underlying from a group it follows.
+
 ## Blotter
 
 `geode-blotter` renders any configured view as a collapsible hierarchy. The
@@ -279,6 +306,17 @@ column, or the hidden context column the data service adds; a row above the
 column's grouping level, a mixed value, or a NULL value leaves it absent, and
 a row holding no registered context column (an `lhu` subtotal, say) opens the
 plain tile picker.
+
+Emitting into a [link group](#link-groups), the blotter posts that same
+value as the group's scope: the cursor row's `underlying_ref`, where the row
+has exactly one. A row above the column's grouping level, a mixed or NULL
+value, and a tile with no snapshot yet post no scope, which leaves the
+group's scope as it was. Only the cursor row is read, never the selection: a
+selection does not change which underlying the cursor is on. Every cursor
+move, tree change and delivery tells the shell to pull, and a pull that
+finds the same underlying writes nothing. The blotter posts no documents.
+Following a group, it queries under the group's scope in place of the
+workspace's, composed with its own `:filter` layer.
 
 `g .` opens the shell's [row menu](shell.md#row-menu) on the cursor row,
 hung just under it: a section per value that some panel or action takes
@@ -697,6 +735,44 @@ wins. A generation that arrives upstream after the panel's last delivery can
 be overwritten. An echo delivered before transport success follows the
 ordinary Editing update policy. If that changes the draft, the later success
 cannot mark it Sent.
+
+### Link group emission
+
+A panel emitting into a [link group](#link-groups) posts where it is and
+what it holds unsent.
+
+The scope is the panel's underlying (the first part of its document key) as
+a one-value `underlying_ref` scope. A panel with no underlying posts
+nothing, which leaves the group's scope as it was.
+
+The board entry is the panel's draft document: its dataset, its document
+key, and the rows the upload builder assembles from the painted base, the
+installed index and the draft, whole, as `:upload` would send them. It is
+posted while the draft is not clean, so an `Editing`, a `Behind` and a
+`Sent` draft are all on the board: the board shows exactly what the panel
+paints. A clean panel posts no document, since a reader has the delivered
+one. `:revert` takes the document off the board. A draft the builder
+refuses (an inserted dividend row with no amount, say) posts no document;
+the scope is still posted.
+
+The assembled rows are cached on the underlying, the painted base snapshot
+(by allocation) and the draft. A pull with none of the three moved hands
+back the same allocation, which the frame reads as no change: no document
+walk and no board write. A republish at the same source time is a different
+snapshot under an unchanged draft and is reassembled. A refusal is cached
+the same way, so a draft that cannot be assembled is not re-walked on every
+pull. No edit route touches the cache; an edit costs nothing here until the
+shell pulls.
+
+Every route that moves the underlying, the draft or the painted document
+notifies the tile, which is what tells the shell to pull. That includes a
+one-cell commit, which refills its cell through the table entity, and a
+refused `:upload` that cancels an open selection editor and takes its live
+steps back out of the draft.
+
+A panel emits only. It can follow a group and show the chip, but it does not
+take its underlying from the group, and it does not read the frame's scope.
+No tile reads the board, so a posted draft is not displayed anywhere else.
 
 ## Timeseries
 
@@ -1255,6 +1331,14 @@ tile's top-left (the pricer records no row anchor); a line with no single
 underlying shows `no actions for this row`. A right-click opens no row
 menu in the pricer.
 
+Emitting into a [link group](#link-groups), the pricer posts the same
+underlying `g m` opens on, as the group's scope, so the two never name
+different underlyings for one row: a line's or a leg's own, a package's when
+its legs share one. A package across underlyings, a grouping row, and a
+sheet with no cursor row post no scope, which leaves the group's scope as it
+was. Every cursor move, edit and load tells the shell to pull. The pricer
+posts no documents.
+
 The action menu offers repricing, packaging, unpackaging, undo, redo, deletion,
 the sheet verbs (Open sheet…, Rename sheet…, New sheet, Remove sheet…; see
 [sheets by pointer](#sheets-by-pointer)), and view selection. Key hints are
@@ -1457,7 +1541,8 @@ line as a row of the `pricer` dataset; that evaluator is pinned to the SQL a
 blotter's query runs (see [the parity contract](data-path.md#queries-and-time-travel)),
 so a scope means the same thing on both. The scope is the frame's effective
 scope with its named expressions resolved; the pricer has no tile scope
-layer (`:filter`).
+layer (`:filter`). A pricer following a [link group](#link-groups) reads
+that group's scope in place of its workspace's.
 
 A line's values are the ones its cells paint. Text columns read the painted
 text; `strike` and `barrier` read the number as typed (a percent strike reads

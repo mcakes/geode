@@ -37,8 +37,8 @@ on `geode-tile` only for the flip-barrier arrival.
 ownership. Typed interpretation and merging are I/O-free; its configuration
 loader reads disk documents through `Config::read_docs` and `Config::load`.
 Types shared across a forbidden dependency boundary live there: scopes,
-schema, query outcomes, snapshots, health, document rows, series requests,
-pricing requests, and vol-slice requests.
+link groups, schema, query outcomes, snapshots, health, document rows, series
+requests, pricing requests, and vol-slice requests.
 
 `geode-shell` owns the window and interaction model. It does not depend on the
 data service or on feature modules. `geode-data` owns sources, DuckDB, and
@@ -112,8 +112,19 @@ follow or override parts of that state. Version counters let a module decide
 which changes require a query or rebuild without comparing whole documents.
 
 A module receives the frame as a `FrameRef`, not the bare frame entity. A
-tile's `FrameRef` is bound to its workspace for life; reads resolve to that
-workspace's lane (see [the shared frame](shell.md#the-shared-frame)).
+tile's `FrameRef` is bound to the tile and its workspace for life; reads
+resolve to that workspace's lane, with the scope of the link group the tile
+follows in place of the lane's (see
+[the shared frame](shell.md#the-shared-frame)).
+
+`geode_core::link` is the link-group vocabulary the shell and the modules
+share: the four groups, a tile's membership, and the `Emission` (a scope and
+board entries) a module answers. It is pure. The frame in `geode-shell` holds
+every group's scope and board and every tile's membership; a module owns
+none of it, stores no group, and has no route to write the frame. Emission is
+a pull: a module says its emission may have changed through a callback that
+carries nothing, and the shell reads `TileContent::emission()` and posts it
+(see [link groups](shell.md#link-groups)).
 
 Financial calculation is outside the application layer. An in-process
 calculation crate remains behind the same request/outcome seam that an external

@@ -127,6 +127,11 @@ keymap binds `escape` to `page::close` in the `page` context and binds the
 workspace switches `mod+1` to `mod+9` context-free, beside the palette
 toggle and the other application-wide chords, because a switch is
 navigation that must reach from a page as well as from the tile surface.
+`mod+u` (`tile::link_group`, the
+[link group chooser](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices))
+sits in the same context-free block beside `mod+g` and `mod+o`. It acts on
+the focused tile, so over a page the chord still dispatches and the action
+is refused with `close the page first (esc)`.
 Predicates support flags, comparisons, boolean operators, and parentheses:
 
 ```text

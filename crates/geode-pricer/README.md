@@ -268,6 +268,18 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   only when all its legs share one; a mixed-underlying package gives an empty
   context and an empty sheet (no cursor row) gives none, so both open the
   plain tile picker.
+- Emitting into a link group (`TileContent::emission`), the tile posts that
+  same underlying (`cursor_underlying`, which `g m` also reads, so the two
+  cannot name different underlyings for one row) as a one-value
+  `underlying_ref` scope, and no board. A package across underlyings, a
+  grouping row and an empty sheet post no scope, which leaves the group's
+  scope as it was. It is read from the sheet on each pull: one row, nothing
+  to keep in step. `emits` is true before a sheet has loaded: the shell
+  drops a restored membership for a tile that answers false right after
+  create. `watch_emission` observes the tile entity, which every cursor
+  move, edit and load notifies. The tile stores no group; its header reads
+  `link_chips` from its frame handle at paint, and a pricer that follows a
+  group applies that group's scope as its frame scope.
 - The tile arrives at flip barriers itself; it submits no view query
   (`geode_tile::following::arrive_immediately`).
 - An empty sheet is never saved. A sheet whose load failed is never saved

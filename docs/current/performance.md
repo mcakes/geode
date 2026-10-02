@@ -121,6 +121,23 @@ measure already reads. Re-measure on an idle machine before quoting them.
   (labels and row facts, no cell text) and refills only the window the table
   last reported; a one-cell commit refills one window cell. The session tick
   builds nothing.
+- A market-data panel emitting into a link group assembles its draft
+  document once per changed draft, not once per pull: the rows are cached on
+  the underlying, the painted base snapshot and the draft, and a pull with
+  none of them moved returns the same allocation. An edit costs nothing
+  until the shell pulls. The assembly itself walks the whole document and is
+  unmeasured.
+- An emitting blotter or pricer recomputes one row per pull: the cursor
+  row's underlying, with no selection walk. The shell pulls on every
+  notification of an emitting tile; an emission equal to the tile's last
+  writes nothing and notifies nobody.
+- A draft edit on an emitting panel bumps the board watches of the keys it
+  changed, never the frame's `data` version, so it requeries no tile that
+  watches published data, and it is not staged behind a flip barrier.
+- A link group's scope change advances the frame generation the session
+  writer polls, and the writer then serializes a snapshot on its 500 ms
+  tick; a snapshot whose text equals the last one extracted is not written,
+  so an emitting tile's cursor does not rewrite `session.toml`.
 - `ChartKey` contains everything timeseries chart preparation reads. Cursor
   movement and fetch-state changes reuse value vectors. Per-slot visibility
   changes rebuild the model; theme and named-color changes can trigger that

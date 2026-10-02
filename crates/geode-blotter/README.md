@@ -106,6 +106,19 @@ cargo bench -p geode-blotter   # the pure core
   `v` block; `g m` opens on the cursor row's values alone. Its `anchor` is the
   cursor row's lower-left in window space, recorded at paint and cleared when
   that row scrolls out of view.
+- Emitting into a link group (`TileContent::emission`), the tile posts the
+  cursor row's one `underlying_ref` as a one-value scope and no board.
+  `cursor_underlying` reads that one row's single-valued columns and skips
+  the selection walk `dimension_context` does: the shell pulls on every
+  notification while the tile emits, and a selection never changes which
+  underlying the cursor is on. It posts no scope before the first snapshot
+  and on a row naming no single underlying (above the column's grouping
+  level, mixed or NULL), which leaves the group's scope as it was. `emits`
+  is true before any snapshot: the shell drops a restored membership for a
+  tile that answers false right after create. `watch_emission` observes the
+  tile entity, which every cursor move, tree change and delivery notifies.
+  The tile stores no group; its header reads `link_chips` from its frame
+  handle at paint.
 - `g .` opens the shell's row menu on that context. A right press on a cell,
   or on a row beside its cells, emits `CellPointer::Context`; the tile then
   keeps the cursor and selection when the row is inside a `V` selection, and
