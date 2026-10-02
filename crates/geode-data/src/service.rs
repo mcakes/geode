@@ -3224,6 +3224,7 @@ mod tests {
             documents,
             egress: Vec::new(),
             clock: geode_core::clock::Clock::utc(),
+            positions: None,
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         };
@@ -3574,6 +3575,7 @@ mod tests {
             documents: Default::default(),
             egress: Vec::new(),
             clock: geode_core::clock::Clock::utc(),
+            positions: None,
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -7288,6 +7290,7 @@ source_name = "NPV"
             documents: Default::default(),
             egress: Vec::new(),
             clock: geode_core::clock::Clock::utc(),
+            positions: None,
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })

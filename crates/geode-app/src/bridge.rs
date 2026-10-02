@@ -5474,6 +5474,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
