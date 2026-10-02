@@ -1742,7 +1742,7 @@ run_mutation "scheduler: ready files reach the runner" \
 run_mutation "scheduler: pending-too-long surfaces as health" \
   crates/geode-data/src/ingest/scheduler.rs \
   '            CandidateState::PendingTooLong => Health::PendingTooLong,' \
-  '            CandidateState::PendingTooLong => continue,' \
+  '            CandidateState::PendingTooLong => return None,' \
   geode-data \
   a_csv_pending_past_its_timeout_is_a_health_event
 
