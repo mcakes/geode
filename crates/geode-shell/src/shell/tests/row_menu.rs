@@ -602,6 +602,14 @@ struct Moving {
 /// A shell on a row `{position_ref: P7, lhu: L1}` with [`MovingAction`]
 /// registered, after `g . enter` ran it.
 fn moving(cx: &mut gpui::TestAppContext) -> Moving {
+    let mut m = moving_unopened(cx);
+    m.vcx.simulate_keystrokes("g . enter");
+    draw(&mut m.vcx);
+    m
+}
+
+/// [`moving`] before anything opened the row menu.
+fn moving_unopened(cx: &mut gpui::TestAppContext) -> Moving {
     let mut rec = RecordingFactory::new("rec");
     rec.fragment = Some(ROW_FRAGMENT);
     *rec.dimension_context.borrow_mut() = Some(DimensionContext::of(&[
@@ -626,8 +634,6 @@ fn moving(cx: &mut gpui::TestAppContext) -> Moving {
         .detach();
     });
     vcx.simulate_keystrokes("ctrl-v");
-    draw(&mut vcx);
-    vcx.simulate_keystrokes("g . enter");
     draw(&mut vcx);
     Moving {
         shell,
@@ -789,6 +795,64 @@ fn no_or_escape_closes_the_confirm_and_runs_nothing(cx: &mut gpui::TestAppContex
         assert!(m.confirmed.borrow().is_empty(), "{key}: nothing ran");
         assert_eq!(m.depth(), 0, "{key}: no dialog left open");
     }
+}
+
+/// The same choose-then-confirm driven by the mouse: a click on the row
+/// menu's action opens the choice, typing reaches its field, a click on a
+/// value opens the confirm, and a typed `y` answers it. The field keeps
+/// focus through the opening mouse-down because the menu row stops
+/// propagation inside an occluding menu; the dialog open's
+/// `prevent_default` is a second guard, not the one this path relies on.
+#[gpui::test]
+fn a_clicked_action_takes_typing_in_its_choice_and_its_confirm(cx: &mut gpui::TestAppContext) {
+    let mut m = moving_unopened(cx);
+    m.vcx.simulate_keystrokes("g .");
+    draw(&mut m.vcx);
+    let titles = row_menu_titles(&m.shell, &m.vcx).expect("the row menu is open");
+    let at = titles
+        .iter()
+        .position(|t| t == "Move to LHU\u{2026}")
+        .expect("the action's row");
+    let row = m
+        .vcx
+        .debug_bounds(Box::leak(format!("row-menu-row-{at}").into_boxed_str()))
+        .expect("the action's row paints");
+    m.vcx.simulate_click(row.center(), gpui::Modifiers::none());
+    draw(&mut m.vcx);
+    assert!(row_menu_titles(&m.shell, &m.vcx).is_none(), "the menu closed");
+    assert_eq!(m.requested.borrow().len(), 1, "the click asked for values");
+
+    m.deliver_three();
+    assert_eq!(m.rows(), Some(vec!["L2".to_string(), "L3".to_string()]));
+    m.vcx.simulate_input("3");
+    draw(&mut m.vcx);
+    assert!(m.vcx.debug_bounds("action-choice-L2").is_none(), "narrowed");
+    assert!(m.vcx.debug_bounds("action-choice-L3").is_some());
+    let shell = m.shell.clone();
+    let focused = m.vcx.update(|window, cx| {
+        let input = shell.read(cx).dialog_input.clone();
+        input.read(cx).focus_handle(cx).is_focused(window)
+    });
+    assert!(focused, "the choice's field holds focus after the click");
+
+    let choice = m
+        .vcx
+        .debug_bounds("action-choice-L3")
+        .expect("the L3 row paints");
+    m.vcx.simulate_click(choice.center(), gpui::Modifiers::none());
+    draw(&mut m.vcx);
+    assert!(
+        m.vcx
+            .debug_bounds("action-question-Move to LHU L3?")
+            .is_some(),
+        "the click asks to confirm"
+    );
+    assert!(m.confirmed.borrow().is_empty(), "nothing runs before yes");
+    m.vcx.simulate_keystrokes("y");
+    draw(&mut m.vcx);
+    assert_eq!(m.confirmed.borrow().as_slice(), &["L3".to_string()]);
+    assert_eq!(m.notice().as_deref(), Some("confirmed L3"));
+    assert_eq!(m.depth(), 0, "closed");
 }
 
 /// A position-service answer, as the app's drain hands it to the shell.
