@@ -230,7 +230,8 @@ pub struct DatasetState {
 pub const CONFIG_HISTORY_CAP: usize = 16;
 
 /// How many entries [`Diagnostics::data_diagnostics`] keeps, oldest
-/// first (a plain append cap, not "batches" — see that field's doc).
+/// first (an append cap, not "batches" — see that field's doc). Above it the
+/// oldest non-error is evicted before any error.
 pub const DATA_DIAGNOSTICS_CAP: usize = 256;
 
 /// Section-specific change counters alongside [`Diagnostics::version`], which
@@ -550,8 +551,9 @@ impl Diagnostics {
 
     /// Append data-layer conditions, deduplicating against retained entries.
     /// Each event reports individual conditions rather than a replacement batch.
-    /// Drop the oldest entries above `DATA_DIAGNOSTICS_CAP`; bump versions only
-    /// when a new condition is appended.
+    /// Above `DATA_DIAGNOSTICS_CAP`, drop the oldest warning or info first and
+    /// an error only when the ring holds nothing but errors; bump versions
+    /// only when a new condition is appended.
     pub fn note_data_diagnostics(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
         let mut changed = false;
         for d in diags {
@@ -566,7 +568,16 @@ impl Diagnostics {
             changed = true;
         }
         while self.data_diagnostics.len() > DATA_DIAGNOSTICS_CAP {
-            self.data_diagnostics.pop_front();
+            // A flood of benign warnings must not evict an error (schema
+            // drift, a worker failure) from the page: the oldest non-error
+            // goes first, and errors go oldest-first only once nothing else
+            // is left.
+            let evict = self
+                .data_diagnostics
+                .iter()
+                .position(|(_, d)| d.severity != Severity::Error)
+                .unwrap_or(0);
+            self.data_diagnostics.remove(evict);
         }
         if changed {
             self.version += 1;
@@ -1730,6 +1741,41 @@ mod tests {
         assert_eq!(
             d.data_diagnostics.back().unwrap().1.message,
             "e259",
+            "newest kept at the back"
+        );
+    }
+
+    #[test]
+    fn a_flood_of_warnings_never_evicts_an_older_error() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_data_diagnostics(
+            vec![Diagnostic::error(
+                Layer::Builtin,
+                PathBuf::new(),
+                "schema drift in 'risk'",
+            )],
+            SystemTime::UNIX_EPOCH,
+        );
+        for i in 0..300u64 {
+            d.note_data_diagnostics(
+                vec![Diagnostic::warning(
+                    Layer::Builtin,
+                    PathBuf::new(),
+                    format!("w{i}"),
+                )],
+                SystemTime::UNIX_EPOCH + Duration::from_secs(i + 1),
+            );
+        }
+        assert_eq!(d.data_diagnostics.len(), DATA_DIAGNOSTICS_CAP);
+        assert!(
+            d.data_diagnostics
+                .iter()
+                .any(|(_, x)| x.message == "schema drift in 'risk'"),
+            "the error outlives the warnings that followed it"
+        );
+        assert_eq!(
+            d.data_diagnostics.back().unwrap().1.message,
+            "w299",
             "newest kept at the back"
         );
     }

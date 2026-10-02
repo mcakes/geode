@@ -29060,6 +29060,14 @@ run_mutation "silence: a blotter flip never re-arms the stale timer" \
   geode-blotter \
   a_reloaded_stale_after_moves_the_blotter_wake_up
 
+# The data-diagnostics ring evicts a warning before an error.
+run_mutation "silence: the diagnostics ring evicts its oldest error first" \
+  crates/geode-shell/src/diagnostics.rs \
+  '                .position(|(_, d)| d.severity != Severity::Error)' \
+  '                .position(|_| true)' \
+  geode-shell \
+  a_flood_of_warnings_never_evicts_an_older_error
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
