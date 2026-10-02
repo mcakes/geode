@@ -370,20 +370,30 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
     }
     roster.add(Box::new(bridge.timeseries.clone()));
     roster.add(Box::new(bridge.pricer.clone()));
-    // Dimension actions: Open in Nemo on a position or an instrument.
-    add_dimension_actions(roster);
+    // Dimension actions: Open in Nemo on a position or an instrument, and
+    // Move LHU on a position.
+    add_dimension_actions(roster, &bridge.handle, bridge.positions_configured);
     // Last, once every factory and every dimension action is registered:
     // each row then carries the values they open on.
     bridge.handle.set_context_columns(roster.context_columns());
 }
 
 /// The row menu's dimension actions: Open in Nemo on a position or an
-/// instrument. Its own function so the bridge's end-to-end tests register
-/// exactly what startup registers.
-fn add_dimension_actions(roster: &mut ModuleRoster) {
+/// instrument, then Move LHU on a position, sent through `data` and
+/// disabled unless `positions_configured`. Its own function so the
+/// bridge's end-to-end tests register exactly what startup registers.
+fn add_dimension_actions(
+    roster: &mut ModuleRoster,
+    data: &geode_data::DataHandle,
+    positions_configured: bool,
+) {
     for action in geode_nemo::actions() {
         roster.add_action(action);
     }
+    roster.add_action(Rc::new(geode_positions::MoveLhu::new(
+        data.clone(),
+        positions_configured,
+    )));
 }
 
 /// Every builtin config doc: the shell's keymap, the pricer's two bundled
@@ -1175,7 +1185,7 @@ label = "skew"
 
     /// The production roster exposes `underlying_ref`-based launch state for
     /// every accepted panel (the builtin CVI and dividend here), registers
-    /// the two Open in Nemo row actions, names every column those open on
+    /// the two Open in Nemo row actions and Move LHU, names every column those open on
     /// in `context_columns`, and startup hands that list to the data
     /// handle. Exercising startup's registration path checks that shared
     /// factory forwarding preserves `accepts` and `launch_state`.
@@ -1208,7 +1218,14 @@ label = "skew"
             .collect();
         assert_eq!(accepting, vec!["cvi", "dividend"]);
         let ids: Vec<&str> = roster.actions().iter().map(|a| a.id()).collect();
-        assert_eq!(ids, vec!["nemo::open_position", "nemo::open_instrument"]);
+        assert_eq!(
+            ids,
+            vec![
+                "nemo::open_position",
+                "nemo::open_instrument",
+                "positions::move_lhu"
+            ]
+        );
         for kind in ["cvi", "dividend"] {
             let f = roster.factory(kind).unwrap();
             assert_eq!(f.accepts(), &["underlying_ref"], "{kind}");

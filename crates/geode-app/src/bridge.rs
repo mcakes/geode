@@ -602,13 +602,7 @@ pub struct Bridge {
     pub pricer_key: Option<PricerConfigKey>,
     /// Whether the service started with a position service: `positions.toml`
     /// named one and its adapter resolved. Fixed for the run, since
-    /// `positions.toml` is restart-required.
-    // Read only by tests until the Move LHU action is registered against it;
-    // that change removes this attribute (an unfulfilled `expect` fails).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read when the Move LHU action is registered")
-    )]
+    /// `positions.toml` is restart-required. Gates the Move LHU row action.
     pub positions_configured: bool,
 }
 
@@ -3342,6 +3336,10 @@ role = "key"
         vcx: gpui::VisualTestContext,
         tile: Entity<geode_blotter::tile::BlotterTile>,
         shell: Entity<ShellView>,
+        window: WindowHandle<Root>,
+        /// What the tile and the shell's actions asked the data service
+        /// for after the first query.
+        requests: std::sync::mpsc::Receiver<geode_data::Request>,
     }
 
     /// A [`ShellBlotter`] snapshot column's metadata: additive at both
@@ -3361,7 +3359,7 @@ role = "key"
         cx: &mut gpui::TestAppContext,
         views_toml: &str,
         view: &str,
-        roster_hook: impl FnOnce(&mut ModuleRoster),
+        roster_hook: impl FnOnce(&mut ModuleRoster, &DataHandle),
         columns: Vec<(
             geode_core::snapshot::ColumnMeta,
             geode_core::snapshot::TestColumn,
@@ -3378,7 +3376,7 @@ role = "key"
         let mut roster = ModuleRoster::new();
         roster.add(Box::new(KeepingBlotter {
             factory: BlotterFactory::new(
-                handle,
+                handle.clone(),
                 views,
                 NamedColours::default(),
                 SchemaSpec::default(),
@@ -3388,7 +3386,7 @@ role = "key"
             ),
             tiles: tiles.clone(),
         }));
-        roster_hook(&mut roster);
+        roster_hook(&mut roster, &handle);
         roster.register_actions(&mut services.registry);
         let (fragments, diags) = roster.keymap_fragments();
         assert!(diags.is_empty(), "{diags:?}");
@@ -3467,7 +3465,13 @@ role = "key"
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        ShellBlotter { vcx, tile, shell }
+        ShellBlotter {
+            vcx,
+            tile,
+            shell,
+            window,
+            requests: rx,
+        }
     }
 
     impl ShellBlotter {
@@ -3714,7 +3718,7 @@ role = "key"
             cx,
             FLAT_VIEW,
             "flat",
-            |roster| roster.add(Box::new(rec)),
+            |roster, _| roster.add(Box::new(rec)),
             vec![
                 (shell_blotter_meta("lhu"), dict("L1", "L2")),
                 (shell_blotter_meta("underlying_ref"), dict("SPX", "NDX")),
@@ -3789,7 +3793,7 @@ role = "key"
             FLAT_VIEW,
             "flat",
             // The same call `add_bridge_modules` makes.
-            crate::add_dimension_actions,
+            |roster, data| crate::add_dimension_actions(roster, data, true),
             vec![
                 (
                     meta("lhu"),
