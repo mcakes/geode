@@ -29827,6 +29827,85 @@ run_mutation "link: the emitted column is underlying_ref" \
   'pub const UNDERLYING: &str = "underlying";' \
   geode-core an_underlying_scope_names_its_underlying_and_nothing_else_does
 
+# An emitter's change reaches the group's followers through the frame's
+# observers: a post that changed something notifies the frame, which is what
+# opens the barrier over the followers.
+run_mutation "link: a post that changed something notifies the frame" \
+  crates/geode-shell/src/shell/link.rs \
+  '            if f.post_emission(tile, emission) {
+                cx.notify();
+            }' \
+  '            if f.post_emission(tile, emission) {
+                let _ = &cx;
+            }' \
+  geode-shell an_emitters_change_flips_the_groups_followers_and_not_the_emitter
+
+# The pull waits for the update that announced the change: a module calls
+# `changed` from inside its own update, and its `emission` reads its own
+# entity, which GPUI refuses while that entity is being updated.
+run_mutation "link: the pull is deferred" \
+  crates/geode-shell/src/shell/link.rs \
+  '            cx.defer(move |cx| {
+                let _ = weak.update(cx, |view, cx| view.pull_emission(tile, cx));
+            });' \
+  '            let _ = weak.update(cx, |view, cx| view.pull_emission(tile, cx));' \
+  geode-shell a_change_announced_inside_the_tiles_update_is_pulled_after_it
+
+# A production follower's query is composed from its group's scope and its
+# own filter, never the lane's.
+run_mutation "link: a follower's query is scoped by its group" \
+  crates/geode-shell/src/frame.rs \
+  '        self.scope().and_then(tile).resolve(&self.frame.named)' \
+  '        self.lane.scope.and_then(tile).resolve(&self.frame.named)' \
+  geode-blotter a_following_blotter_queries_under_its_groups_scope
+
+run_mutation "link: the production follower queries under its group's scope" \
+  crates/geode-shell/src/frame.rs \
+  '        self.scope().and_then(tile).resolve(&self.frame.named)' \
+  '        self.lane.scope.and_then(tile).resolve(&self.frame.named)' \
+  geode-app the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows
+
+# A follower in a pinned workspace keeps that workspace's grouping and as-of:
+# the group replaces the scope alone.
+run_mutation "link: a follower in a pinned workspace reads its own lane" \
+  crates/geode-shell/src/frame.rs \
+  '    pub fn view_for(&self, ws: WorkspaceIx, tile: TileId) -> FrameView<'\''_> {
+        FrameView {
+            frame: self,
+            lane: self.lane(Some(ws)),' \
+  '    pub fn view_for(&self, ws: WorkspaceIx, tile: TileId) -> FrameView<'\''_> {
+        let _ = ws;
+        FrameView {
+            frame: self,
+            lane: &self.shared,' \
+  geode-shell a_follower_in_a_pinned_workspace_reads_its_group_and_its_own_lane
+
+# Duplicating a tile copies its module state, never its membership.
+run_mutation "link: duplication copies no membership" \
+  crates/geode-shell/src/shell/add_tile.rs \
+  '            Some(state),
+            window,
+            cx,
+        );
+    }
+
+    /// Focus an existing occupant of `kind`' \
+  '            Some(state),
+            window,
+            cx,
+        );
+        let link = self.frame.read(cx).membership(tile);
+        if let Some(copy) = self.services.workspaces.active().focused_tile() {
+            self.frame.update(cx, |f, _| {
+                f.follow(copy, link.follow);
+                f.emit(copy, link.emit);
+            });
+        }
+    }
+
+    /// Focus an existing occupant of `kind`' \
+  geode-shell a_duplicated_tile_is_in_no_group
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
