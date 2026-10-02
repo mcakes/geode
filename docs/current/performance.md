@@ -165,20 +165,23 @@ measure already reads. Re-measure on an idle machine before quoting them.
   or a NaN group value rebuilds. The scope and the rollup are still
   re-derived on every delivery, because a price can move a line in or out of
   the scope or between groups.
-- The keybindings dialog holds prepared rows (`geode_shell::prepared::Prepared`):
+- The keybindings dialog and the object dialog's Browse stage hold prepared
+  rows (`geode_shell::prepared::Prepared`):
   derived from exactly the inputs they read, ranked for the query, and read by
   render and by every handler, so a key or click acts on the painted rows. A
   query change re-ranks without re-deriving. The shell refreshes them at its
   event seams (`ShellView::refresh_dialog_rows`: open, each dialog key, the
-  dialog input's Change, each dialog pointer transition, an applied reload);
-  render never refreshes, and a debug-build assertion in the dialog's `build`
-  refuses a stale list. The list is keyed by the config revision that every
-  applied reload bumps; the action registry is fixed once the shell is built.
-  An in-dialog rebind, unbind or reset changes nothing in memory: it writes
-  through the ordered writer and the reload re-derives. Settings and object
-  dialogs still derive their rows at each render, key-handling and
-  click-resolution call site; their measured costs are in the tens of
-  microseconds. See the [measurement log](../perf.md).
+  dialog input's Change, each dialog pointer transition, an applied reload,
+  and the reveal of a covered object dialog); render never refreshes, and a
+  debug-build assertion in the dialog's `build` refuses a stale list. Both
+  lists are keyed by the config revision that every applied reload bumps; the
+  action registry is fixed once the shell is built, and an object dialog's
+  domain is fixed for its life. An in-dialog rebind, unbind or reset, and an
+  object create, delete, revert or fork, change the configuration only through
+  `apply_reload`. Settings and the object dialog's Edit, Column and Values
+  stages still derive their rows at each render, key-handling and
+  click-resolution call site; their measured costs are 2 to 13 microseconds.
+  See the [measurement log](../perf.md).
 - Large module tables use virtualization or prepared visible rows.
 
 ## Known gaps

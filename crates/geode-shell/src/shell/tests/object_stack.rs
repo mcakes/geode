@@ -556,3 +556,35 @@ fn an_open_color_typeahead_lists_a_color_created_above_it(cx: &mut gpui::TestApp
     assert_eq!(lit.as_deref(), Some("ember"));
     assert_eq!(input_state(&shell, &cx).0, "emb");
 }
+
+/// A filtered views list parked under a Colors dialog; a reload adds a view
+/// while it is covered. Popping the cover must paint the new list, still filtered.
+#[gpui::test]
+fn a_reload_under_a_covering_object_dialog_repaints_the_revealed_list(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, views_with_colors(), dir.path(), "config::views");
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("r");
+    cx.simulate_keystrokes("enter");
+    dispatch_action(&shell, "config::colors", &mut cx);
+    assert_eq!(domains(&shell, &cx), vec![Domain::Views, Domain::Colors]);
+    std::fs::write(
+        dir.path().join("views.toml"),
+        "config_version = 1\n[wider]\ndataset = \"risk_snapshot\"\n[[wider.columns]]\nname = \"npv\"\n",
+    )
+    .unwrap();
+    let builtin = shell.read_with(&cx, |s, _| s.services.builtin.clone());
+    let config = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
+    shell.update(&mut cx, |s, cx| s.apply_reload(config, cx));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| (s.domain, s.query.clone())),
+        (Domain::Views, "r".to_string())
+    );
+    assert!(super::objectdialog::fresh_browse_names(&shell, &cx).contains(&"wider".to_string()));
+    super::objectdialog::assert_browse_rows_are_fresh(&shell, &mut cx);
+}

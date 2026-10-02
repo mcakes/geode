@@ -116,9 +116,11 @@ change most often hits:
   reconciles the shared input's text and focus after state transitions.
   Expression completion replaces the selected range directly to preserve input
   undo, then updates the object draft before synchronization.
-- Keybinding dialog rows are prepared (`crate::prepared`); refresh them
-  through `ShellView::refresh_dialog_rows` at any new seam that changes a key
-  input. Render asserts, never refreshes.
+- Keybinding dialog rows and object-dialog browse rows are prepared
+  (`crate::prepared`); refresh them through `ShellView::refresh_dialog_rows`
+  at any new seam that changes a key input. A parked object dialog is
+  re-keyed when `close_modal` reveals it. Render asserts, never refreshes.
+  Object edit-stage rows still derive in render.
 - A multi-screen dialog registers its back step with `dialog::set_back`.
   The title row paints the Back button only while the step is available, and
   the step uses Escape's parent-stage transition. One Back click also discards

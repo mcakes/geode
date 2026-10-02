@@ -1491,6 +1491,8 @@ impl ShellView {
         if let Some(top) = self.modals.pop() {
             self.clear_dialog_state(top.kind);
         }
+        // A revealed dialog may have missed reloads while it was covered.
+        self.refresh_dialog_rows(cx);
         if self.modals.is_empty() {
             // A same-kind refusal's notice names a kind lower in the stack; once
             // the stack is empty that kind no longer exists, so the notice must

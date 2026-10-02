@@ -57,7 +57,7 @@ use super::super::colours as colour_theme;
 use super::super::control::{self, PointerStates as _};
 use super::super::dialog;
 use super::super::kbd;
-use super::super::keybindings_view::{highlighted_text, split_label_indices};
+use super::super::keybindings_view::highlighted_text;
 use super::super::scale;
 
 /// Browse row height estimate used to size its capped viewport. Scroll following uses
@@ -191,7 +191,7 @@ pub(crate) fn crumb_text(shell: &ShellView) -> String {
         // Values stage is a projection over one column exactly as the column stage is.
         Stage::Values { object, column } => format!("{object} › {column}"),
         Stage::Browse | Stage::Naming => {
-            let n = derive_rows(shell).len();
+            let n = state.rows.rows().len();
             format!("{n} {}", state.domain.crumb_noun())
         }
     }
@@ -227,7 +227,6 @@ fn handle_key(
 /// a literal tab into the filter. The ladder's close rung remains unclaimed for the
 /// shell's modal handler.
 fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
-    let rows = derive_rows(shell);
     // read before `state` takes its `&mut` borrow of `shell.object_dialog` below, whose
     // lifetime spans the rest of this function — `seed_dataset_under_cursor` needs a
     // plain `&ShellView`, which a live sibling `&mut` borrow would refuse. `None` on
@@ -251,7 +250,6 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
     if state.notice.take().is_some() {
         cx.notify();
     }
-    let visible = super::visible_rows(state, &rows);
 
     // A confirmation owns input in browse as well as edit, ahead of the Escape ladder
     // and ordinary commands.
@@ -326,7 +324,7 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
         };
         match cmd {
             NormalCommand::Nav(nav) => {
-                state.selected = vimnav::apply(state.selected, visible.len(), nav);
+                state.selected = vimnav::apply(state.selected, state.rows.len(), nav);
                 let selected = state.selected;
                 shell.object_dialog_scroll.scroll_to_item(selected);
             }
@@ -355,7 +353,7 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
             // falls through to the `_` arm below like any other letter with no meaning
             // here.
             NormalCommand::Verb('c') if state.domain.duplicable() => {
-                let name = selected_row(state, &rows, &visible).map(|r| r.name.clone());
+                let name = state.rows.at(state.selected).map(|r| r.name.clone());
                 match name {
                     Some(name) => begin_copy(shell, name),
                     None => set_notice(shell, "nothing selected to copy".to_string()),
@@ -414,7 +412,7 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
     }
 
     if let Some(cmd) = listfilter::nav_command(ks) {
-        state.selected = vimnav::apply(state.selected, visible.len(), cmd);
+        state.selected = vimnav::apply(state.selected, state.rows.len(), cmd);
         let selected = state.selected;
         shell.object_dialog_scroll.scroll_to_item(selected);
         cx.notify();
@@ -490,7 +488,11 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         // different remedies. Only an existing object can be opened from this list.
         let notice = if domain.is_reserved(&name) {
             format!("'{name}' is reserved")
-        } else if derive_rows(shell).iter().any(|row| row.name == name) {
+        } else if shell
+            .object_dialog
+            .as_ref()
+            .is_some_and(|state| state.rows.rows().iter().any(|row| row.name == name))
+        {
             format!("'{name}' already exists — open it instead")
         } else {
             format!(
@@ -589,18 +591,6 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     cx.notify();
 }
 
-/// The rows for whatever domain is open, derived fresh from the live
-/// config — never cached, see [`super`]'s module doc. `Vec::new()` when
-/// no dialog is open, which only happens if a keystroke arrives between
-/// the modal closing and this handler being dropped.
-fn derive_rows(shell: &ShellView) -> Vec<ObjectRow> {
-    shell
-        .object_dialog
-        .as_ref()
-        .map(|state| state.domain.objects(&shell.services.config))
-        .unwrap_or_default()
-}
-
 /// Begin naming through the same route for keyboard and pointer actions. Refuse
 /// read-only domains and fixed rosters. Capture the Sources dataset seed before
 /// borrowing state, clear the old filter, and let shared input synchronization focus
@@ -687,6 +677,7 @@ pub(in crate::shell) fn open_save_scope(
     // shared `Input` the keys — `sync_dialog_text` is the only thing allowed to move
     // focus onto it, and `open` above already called it once for the browse stage it
     // opened in, so this second call is what actually focuses the name field.
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -725,6 +716,7 @@ pub(in crate::shell) fn open_object(
     }
     // `open` synchronized the shared input for Browse; the edit stage needs its own
     // pass so focus and text match the stage now on screen.
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -818,6 +810,7 @@ pub(in crate::shell) fn open_column(
     }
     // `open` synchronized the shared input for Browse; the stage now on screen needs
     // its own pass.
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -830,13 +823,11 @@ fn seed_dataset_under_cursor(shell: &ShellView) -> Option<String> {
     if state.domain != Domain::Sources {
         return None;
     }
-    let rows = derive_rows(shell);
-    let visible = super::visible_rows(state, &rows);
-    let row = visible.get(state.selected).and_then(|m| rows.get(m.row))?;
+    let row = state.rows.at(state.selected)?;
     row.prefix.clone()
 }
 
-/// Resolve the clicked object's name against freshly derived filtered rows, then open
+/// Resolve the clicked object's name against the prepared filtered rows, then open
 /// it through the same transition as Enter. Synchronize text and focus afterward so
 /// pointer input obeys the current mode.
 fn on_row_clicked(
@@ -845,7 +836,6 @@ fn on_row_clicked(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let rows = derive_rows(shell);
     let Some(state) = shell.object_dialog.as_mut() else {
         return;
     };
@@ -860,8 +850,7 @@ fn on_row_clicked(
     if state.confirm.is_some() {
         return;
     }
-    let visible = super::visible_rows(state, &rows);
-    let Some(ix) = super::filtered_position(&visible, &rows, clicked) else {
+    let Some(ix) = state.rows.position(|r| r.name == clicked) else {
         return;
     };
     state.selected = ix;
@@ -879,6 +868,7 @@ fn on_row_clicked(
             state.click_opened_stage = true;
         }
     }
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -895,14 +885,10 @@ fn on_row_clicked(
 /// emptied and blurred to match by [`dialog::sync_dialog_text`], never
 /// here.
 fn open_selected(shell: &mut ShellView, cx: &mut Context<ShellView>) {
-    let rows = derive_rows(shell);
-    let name = shell.object_dialog.as_ref().and_then(|state| {
-        let visible = super::visible_rows(state, &rows);
-        visible
-            .get(state.selected)
-            .and_then(|m| rows.get(m.row))
-            .map(|row| row.name.clone())
-    });
+    let name = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.rows.at(state.selected).map(|row| row.name.clone()));
     let Some(name) = name else {
         // Only reachable with the filter hiding every row, which is not a
         // row the user was pointing at — said out loud rather than
@@ -2496,7 +2482,7 @@ fn landing_rows(shell: &ShellView) -> Vec<ObjectRow> {
     };
     match apply::config_with_pending(shell) {
         Some(config) => state.domain.objects(&config),
-        None => derive_rows(shell),
+        None => state.rows.rows().to_vec(),
     }
 }
 
@@ -2514,7 +2500,14 @@ fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     // its position in the rows as they still stand, clamped to the list
     // the removal leaves — so an edit-stage delete lands exactly where a
     // browse delete does (`after_removal`), never on row 0.
-    let before = derive_rows(shell);
+    // The browse rows as painted before the stage closed (the prepared list is not
+    // re-keyed until this handler returns): where a deleted object's neighbour is
+    // found, since the pending-aware rows no longer hold it.
+    let before: Vec<ObjectRow> = shell
+        .object_dialog
+        .as_ref()
+        .map(|state| state.rows.rows().to_vec())
+        .unwrap_or_default();
     if let Some(state) = shell.object_dialog.as_mut() {
         let visible = super::visible_rows(state, &rows);
         state.selected = super::filtered_position(&visible, &rows, &name).unwrap_or_else(|| {
@@ -2541,11 +2534,7 @@ fn target_object(shell: &ShellView) -> Option<String> {
     let state = shell.object_dialog.as_ref()?;
     match &state.stage {
         Stage::Edit { object } | Stage::Column { object, .. } => Some(object.clone()),
-        Stage::Browse => {
-            let rows = derive_rows(shell);
-            let visible = super::visible_rows(state, &rows);
-            selected_row(state, &rows, &visible).map(|row| row.name.clone())
-        }
+        Stage::Browse => state.rows.at(state.selected).map(|row| row.name.clone()),
         // Values-stage rows do not expose whole-scope destructive operations.
         Stage::Naming | Stage::Values { .. } => None,
     }
@@ -2553,20 +2542,19 @@ fn target_object(shell: &ShellView) -> Option<String> {
 
 /// The browse row for [`target_object`] — where `layer` and `overridden`
 /// come from, so `d` and `r` are gated by the one tested derivation
-/// rather than by a second guess made here. One `derive_rows` per call,
-/// whichever stage: a paint-path caller that already holds the rows
-/// (`browse_action_bar`) reads [`selected_row`] instead.
+/// rather than by a second guess made here. Read from the prepared browse rows
+/// in every stage, so the edit stage's `d`/`r` gate on the same derivation the
+/// browse list paints.
 fn target_row(shell: &ShellView) -> Option<ObjectRow> {
     let state = shell.object_dialog.as_ref()?;
-    let rows = derive_rows(shell);
     match &state.stage {
-        Stage::Edit { object } | Stage::Column { object, .. } => {
-            rows.into_iter().find(|row| &row.name == object)
-        }
-        Stage::Browse => {
-            let visible = super::visible_rows(state, &rows);
-            selected_row(state, &rows, &visible).cloned()
-        }
+        Stage::Edit { object } | Stage::Column { object, .. } => state
+            .rows
+            .rows()
+            .iter()
+            .find(|row| &row.name == object)
+            .cloned(),
+        Stage::Browse => state.rows.at(state.selected).cloned(),
         // Same reasoning as `target_object`'s own `Values` arm.
         Stage::Naming | Stage::Values { .. } => None,
     }
@@ -2590,18 +2578,6 @@ fn no_target_notice(shell: &ShellView) -> String {
     } else {
         "nothing is open".to_string()
     }
-}
-
-/// The browse row under the cursor — `state.selected` is an index into
-/// the FILTERED list, resolved back through `rows`. Pure over what the
-/// caller already derived, so `build` can hand its own `rows`/`visible`
-/// to the bar without deriving them a second time per frame.
-fn selected_row<'a>(
-    state: &ObjectDialogState,
-    rows: &'a [ObjectRow],
-    visible: &[crate::listfilter::Ranked],
-) -> Option<&'a ObjectRow> {
-    visible.get(state.selected).and_then(|m| rows.get(m.row))
 }
 
 /// Collect keys actually present in the user layer for deletion or reversion, including
@@ -2797,6 +2773,7 @@ fn on_inherit_clicked(
         draft.selected = position;
     }
     inherit_row(shell, cx);
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
 }
 
@@ -3084,10 +3061,10 @@ fn build(
     ) {
         return build_edit(shell, entity, cx);
     }
-    // The same one derivation path `handle_key` uses — a second spelling
-    // here is how a render and its key handling come to disagree about
-    // which rows exist.
-    let rows = derive_rows(shell);
+    // The prepared list every browse handler reads; a stale one is refused here,
+    // never repaired.
+    #[cfg(debug_assertions)]
+    shell.assert_rows_current(cx);
     let theme = cx.theme();
     // Copied out so the row closures below don't hold the `theme` borrow.
     let row_paint = super::super::listrow::row_paint(theme);
@@ -3109,32 +3086,23 @@ fn build(
         )
     });
 
-    let visible = super::visible_rows(state, &rows);
-
     let mut list = v_flex()
         .id("objectdialog-list")
         .w(scale::design(WIDTH))
         .h(scale::design(
-            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
+            (state.rows.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
         ))
         .overflow_y_scroll()
         .track_scroll(&shell.object_dialog_scroll)
         .debug_selector(|| "objectdialog-list".to_string());
 
-    for (position, m) in visible.iter().enumerate() {
-        let Some(row) = rows.get(m.row) else { continue };
+    for (position, shown) in state.rows.shown().iter().enumerate() {
+        let row = &state.rows.rows()[shown.row];
+        let text = &state.rows.texts()[shown.row];
         let is_selected = position == state.selected;
 
-        let display = row.display_name();
-        let name_len = display.chars().count();
-        // The same `"{a} {b}"` split both list dialogs use — this is its
-        // third consumer, and the reason it lives in one place: the
-        // arithmetic is only correct while every `searchable_text` in the
-        // crate keeps that exact shape.
-        let (name_ix, summary_ix) = split_label_indices(&m.indices, name_len);
-
         let row_el = h_flex()
-            .id(("objectdialog-row", m.row))
+            .id(("objectdialog-row", shown.row))
             .w_full()
             .justify_between()
             .items_center()
@@ -3144,41 +3112,24 @@ fn build(
             .rounded(theme.radius);
         let row_el = super::super::listrow::paint_row(row_el, row_paint, is_selected);
 
-        // a prefixed row paints `<prefix> · ` dimmed and the name after it, as two runs
-        // of one highlighted label — the indices are split at the prefix's end so a hit
-        // inside the dataset still highlights there. `cut` is the prefix run's length
-        // in the painted `display` text (`"{prefix} · "`, three chars for the
-        // separator), matching `ObjectRow::display_name`'s own join.
-        let head: AnyElement = match &row.prefix {
-            Some(prefix) => {
-                let cut = prefix.chars().count() + 3;
-                let (in_prefix, in_name): (Vec<usize>, Vec<usize>) =
-                    name_ix.iter().copied().partition(|i| *i < cut);
-                let in_name: Vec<usize> = in_name.into_iter().map(|i| i - cut).collect();
-                h_flex()
-                    .child(
-                        div()
-                            .text_color(theme.muted_foreground)
-                            .child(highlighted_text(
-                                &format!("{prefix} · "),
-                                &in_prefix,
-                                row_paint.accent,
-                            )),
-                    )
-                    .child(highlighted_text(&row.name, &in_name, row_paint.accent))
-                    .into_any_element()
-            }
-            None => highlighted_text(&row.name, &name_ix, row_paint.accent),
-        };
-
+        // A prefixed row paints `<prefix> · ` muted ahead of the name: one shared
+        // label with the prefix's byte length as its lead.
+        let lead = row.prefix.as_ref().map_or(0, |p| p.len() + " · ".len());
+        let head = lead_label(
+            &text.primary,
+            lead,
+            &shown.primary,
+            theme.muted_foreground,
+            row_paint.accent,
+        );
         let label = v_flex().gap_0p5().child(head).child(
             div()
                 .font_family(crate::fonts::MONO)
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(highlighted_text(
-                    &row.summary,
-                    &summary_ix,
+                .child(crate::palette::highlighted_runs(
+                    &text.secondary,
+                    &shown.secondary,
                     row_paint.accent,
                 )),
         );
@@ -3251,14 +3202,14 @@ fn build(
         list = list.child(row_el);
     }
 
-    if visible.is_empty() {
+    if state.rows.is_empty() {
         // Two different empty states, said differently on purpose: an
         // over-narrow filter is a state the user can back out of, while
         // a domain with nothing in it is a fact about the config — and
         // an empty state names the next action (design guide) where
         // there is one: `n` creates an object on every writable domain,
         // while the schema's rows come from `datasets.toml` alone.
-        let message = if rows.is_empty() {
+        let message = if state.rows.rows().is_empty() {
             let word = state.domain.title().to_lowercase();
             if state.domain.writable(&Stage::Browse) {
                 format!("no {word} are configured — n creates one")
@@ -3418,7 +3369,7 @@ fn build(
             let name = state.confirm_target.clone().unwrap_or_default();
             confirm_row(confirm, &name, state.confirm_detail.as_deref(), entity, cx)
         }
-        None => browse_action_bar(state, &rows, &visible, entity),
+        None => browse_action_bar(state, entity),
     };
 
     v_flex()
@@ -4522,6 +4473,53 @@ fn section_header_text(domain: Domain, key: &str, own: bool) -> (&'static str, &
     }
 }
 
+/// A browse label whose first `lead` bytes (a dataset prefix and its separator)
+/// paint muted, with the match runs in the accent over both parts.
+fn lead_label(
+    text: &gpui::SharedString,
+    lead: usize,
+    runs: &[std::ops::Range<usize>],
+    muted: gpui::Hsla,
+    accent: gpui::Hsla,
+) -> gpui::StyledText {
+    let hit = gpui::HighlightStyle {
+        color: Some(accent),
+        font_weight: Some(gpui::FontWeight::BOLD),
+        ..Default::default()
+    };
+    let dim = gpui::HighlightStyle {
+        color: Some(muted),
+        ..Default::default()
+    };
+    let styles = lead_styles(lead, runs)
+        .into_iter()
+        .map(|(range, is_hit)| (range, if is_hit { hit } else { dim }));
+    gpui::StyledText::new(text.clone()).with_highlights(styles)
+}
+
+/// [`lead_label`]'s ranges, ascending and non-overlapping: each match run (`true`)
+/// and the parts of `0..lead` no run covers (`false`). `runs` are ascending,
+/// non-overlapping byte ranges (`palette::highlight_runs`).
+fn lead_styles(
+    lead: usize,
+    runs: &[std::ops::Range<usize>],
+) -> Vec<(std::ops::Range<usize>, bool)> {
+    let mut styles = Vec::with_capacity(runs.len() * 2 + 1);
+    let mut at = 0;
+    for run in runs {
+        let gap_end = lead.min(run.start);
+        if at < gap_end {
+            styles.push((at..gap_end, false));
+        }
+        styles.push((run.clone(), true));
+        at = run.end;
+    }
+    if at < lead {
+        styles.push((at..lead, false));
+    }
+    styles
+}
+
 /// What a field row shows on its right-hand side.
 fn field_value(field: &super::Field) -> String {
     match &field.kind {
@@ -4603,18 +4601,13 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>) -> AnyElement {
 /// without a fixed roster, copy for eligible Scopes rows, and delete/revert from the
 /// selected row's provenance. Hide them while naming. Each pointer action uses its
 /// key's transition and then synchronizes input text and focus.
-fn browse_action_bar(
-    state: &ObjectDialogState,
-    rows: &[ObjectRow],
-    visible: &[crate::listfilter::Ranked],
-    entity: &Entity<ShellView>,
-) -> AnyElement {
+fn browse_action_bar(state: &ObjectDialogState, entity: &Entity<ShellView>) -> AnyElement {
     let naming = matches!(state.stage, Stage::Naming);
     let writable = state.domain.writable(&state.stage);
     let offers_n = !naming && writable && state.domain.roster().is_none();
     // Delete and revert use the same provenance gates as the edit action bar.
     let row = (!naming && writable)
-        .then(|| selected_row(state, rows, visible))
+        .then(|| state.rows.at(state.selected))
         .flatten();
     let offers_d = row.is_some_and(|r| r.layer == Some(Layer::User));
     let offers_r = row.is_some_and(|r| r.overridden);
@@ -4658,6 +4651,7 @@ fn browse_action_bar(
                                     Domain::Sources.name_taken(&shell.services.config, d)
                                 });
                                 begin_new_object(shell, seed, seed_taken);
+                                shell.refresh_dialog_rows(cx);
                                 dialog::sync_dialog_text(shell, window, cx);
                                 cx.notify();
                             });
@@ -4693,6 +4687,7 @@ fn browse_action_bar(
                                     cx.notify();
                                 }
                                 begin_copy(shell, copy_name.clone());
+                                shell.refresh_dialog_rows(cx);
                                 dialog::sync_dialog_text(shell, window, cx);
                                 cx.notify();
                             });
@@ -4875,6 +4870,7 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
         "o" => overwrite_scope(shell, cx),
         _ => {}
     }
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -4970,6 +4966,7 @@ fn on_edit_row_clicked(
             set_notice(shell, READ_ONLY_NOTICE.to_string());
         }
     }
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -5020,6 +5017,7 @@ pub(in crate::shell) fn on_value_chip_clicked(
     } else {
         set_notice(shell, READ_ONLY_NOTICE.to_string());
     }
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -5061,6 +5059,7 @@ fn on_tick_clicked(
     }
     draft.selected = position;
     step_selected_row(shell, true, false, cx);
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -5092,6 +5091,7 @@ fn on_completion_clicked(
     } else {
         set_notice(shell, "nothing to complete here".to_string());
     }
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -5106,6 +5106,7 @@ fn on_choice_row_clicked(
     if let Some(draft) = draft_mut(shell) {
         draft.choice_click(row);
     }
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -5207,6 +5208,7 @@ pub(in crate::shell) fn on_row_dropped(
         Step::Inert if !resolves => set_notice(shell, "that row is gone".to_string()),
         Step::Inert => {}
     }
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -5376,5 +5378,22 @@ mod column_route_tests {
                 Err("view 'gone' is not defined".to_string())
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod lead_label_tests {
+    use super::lead_styles;
+
+    #[test]
+    // `&[1..2]` is a slice of one run, not a range to expand.
+    #[allow(clippy::single_range_in_vec_init)]
+    fn a_lead_splits_around_a_hit_inside_it() {
+        assert_eq!(
+            lead_styles(9, &[2..4, 10..12]),
+            vec![(0..2, false), (2..4, true), (4..9, false), (10..12, true)]
+        );
+        assert_eq!(lead_styles(0, &[1..2]), vec![(1..2, true)]);
+        assert_eq!(lead_styles(5, &[]), vec![(0..5, false)]);
     }
 }

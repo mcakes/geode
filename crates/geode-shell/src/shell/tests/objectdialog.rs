@@ -9539,9 +9539,8 @@ fn a_reload_under_an_armed_confirm_refuses_the_answer(cx: &mut gpui::TestAppCont
     // risk·mina, risk·mine — so the index now names `mina`.
     let reloaded = services_with_user_sources(&[("mina", "risk"), ("mine", "risk")]);
     shell.update(&mut cx, |shell, cx| {
-        shell.services.config = reloaded.config;
         shell.services.builtin = reloaded.builtin;
-        cx.notify();
+        shell.apply_reload(reloaded.config, cx);
     });
     cx.run_until_parked();
 
@@ -9706,9 +9705,8 @@ fn the_armed_prompt_names_the_recorded_target(cx: &mut gpui::TestAppContext) {
 
     let reloaded = services_with_user_sources(&[("mina", "risk"), ("mine", "risk")]);
     shell.update(&mut cx, |shell, cx| {
-        shell.services.config = reloaded.config;
         shell.services.builtin = reloaded.builtin;
-        cx.notify();
+        shell.apply_reload(reloaded.config, cx);
     });
     cx.run_until_parked();
     assert!(
@@ -10357,4 +10355,255 @@ fn hovering_the_back_button_names_escape(cx: &mut gpui::TestAppContext) {
         cx.debug_bounds("tip-shell-modal-back-chord-escape")
             .is_some()
     );
+}
+
+// ---- Prepared browse rows ---------------------------------------------
+
+/// The rows a fresh derivation shows now, in display order.
+fn fresh_browse_rows(
+    shell: &Entity<ShellView>,
+    cx: &gpui::VisualTestContext,
+) -> Vec<objectdialog::ObjectRow> {
+    shell.read_with(cx, |shell, _| {
+        let state = shell.object_dialog.as_ref().unwrap();
+        let rows = state.domain.objects(&shell.services.config);
+        objectdialog::visible_rows(state, &rows)
+            .into_iter()
+            .map(|m| rows[m.row].clone())
+            .collect()
+    })
+}
+
+/// Object names a fresh derivation shows now, in display order.
+pub(super) fn fresh_browse_names(
+    shell: &Entity<ShellView>,
+    cx: &gpui::VisualTestContext,
+) -> Vec<String> {
+    fresh_browse_rows(shell, cx)
+        .into_iter()
+        .map(|r| r.name)
+        .collect()
+}
+
+/// Painted object names, top to bottom, from `objectdialog-row-{name}`.
+fn painted_browse_names(cx: &mut gpui::VisualTestContext, candidates: &[String]) -> Vec<String> {
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let mut painted: Vec<(gpui::Pixels, String)> = candidates
+        .iter()
+        .filter_map(|name| {
+            let selector: &'static str =
+                Box::leak(format!("objectdialog-row-{name}").into_boxed_str());
+            cx.debug_bounds(selector)
+                .map(|b| (b.origin.y, name.clone()))
+        })
+        .collect();
+    painted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    painted.into_iter().map(|(_, n)| n).collect()
+}
+
+/// The painted names, and every prepared row the handlers read (layer, override
+/// and drift included), equal a fresh derivation.
+pub(super) fn assert_browse_rows_are_fresh(
+    shell: &Entity<ShellView>,
+    cx: &mut gpui::VisualTestContext,
+) {
+    let fresh = fresh_browse_rows(shell, cx);
+    let prepared: Vec<objectdialog::ObjectRow> = shell.read_with(cx, |s, _| {
+        let state = s.object_dialog.as_ref().unwrap();
+        (0..state.rows.len())
+            .filter_map(|i| state.rows.at(i).cloned())
+            .collect()
+    });
+    assert_eq!(
+        prepared, fresh,
+        "the prepared browse rows are a fresh derivation"
+    );
+    let all: Vec<String> = shell.read_with(cx, |s, _| {
+        let state = s.object_dialog.as_ref().unwrap();
+        state
+            .domain
+            .objects(&s.services.config)
+            .into_iter()
+            .map(|r| r.name)
+            .collect()
+    });
+    let names: Vec<String> = fresh.into_iter().map(|r| r.name).collect();
+    assert_eq!(
+        painted_browse_names(cx, &all),
+        names,
+        "the painted browse rows are a fresh derivation"
+    );
+}
+
+#[gpui::test]
+fn typing_reranks_browse_rows_without_re_deriving(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = open_views_dialog(cx);
+    let derives = dialog_state(&shell, &cx, |s| s.rows.derives);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("wi");
+    cx.run_until_parked();
+    assert_eq!(fresh_browse_names(&shell, &cx), vec!["wide".to_string()]);
+    assert_browse_rows_are_fresh(&shell, &mut cx);
+    assert_eq!(dialog_state(&shell, &cx, |s| s.rows.derives), derives);
+}
+
+/// A reload that adds a view while the browse list is open, filtered.
+#[gpui::test]
+fn a_reload_adding_a_view_repaints_the_browse_list(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_views(), dir.path(), "config::views");
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("w");
+    cx.simulate_keystrokes("enter");
+    std::fs::write(
+        dir.path().join("views.toml"),
+        "config_version = 1\n[wider]\ndataset = \"risk\"\n[[wider.columns]]\nname = \"npv\"\n",
+    )
+    .unwrap();
+    let builtin = shell.read_with(&cx, |s, _| s.services.builtin.clone());
+    let config = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
+    shell.update(&mut cx, |s, cx| s.apply_reload(config, cx));
+    cx.run_until_parked();
+    assert!(fresh_browse_names(&shell, &cx).contains(&"wider".to_string()));
+    assert_browse_rows_are_fresh(&shell, &mut cx);
+}
+
+/// The Back button out of naming clears the typed name, so the list re-expands.
+#[gpui::test]
+fn the_back_button_out_of_naming_repaints_the_full_list(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = open_views_dialog(cx);
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("zz");
+    cx.run_until_parked();
+    let back = cx
+        .debug_bounds("shell-modal-back")
+        .expect("the back button paints in naming");
+    cx.simulate_click(back.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert_eq!(fresh_browse_names(&shell, &cx).len(), 2);
+    assert_browse_rows_are_fresh(&shell, &mut cx);
+}
+
+/// A click on a row of a filtered list opens it; the stage change clears the
+/// browse query, and the pointer path must re-key the list for that.
+#[gpui::test]
+fn a_filtered_row_click_opens_it_and_the_rows_stay_fresh(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = open_views_dialog(cx);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("wi");
+    cx.simulate_keystrokes("enter");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let row = cx
+        .debug_bounds("objectdialog-row-wide")
+        .expect("the filtered row paints");
+    cx.simulate_click(row.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { .. }
+    ));
+    shell.read_with(&cx, |s, _| {
+        let state = s.object_dialog.as_ref().unwrap();
+        assert!(
+            state.rows.is_current(&s.config_revision, &state.query),
+            "the click re-keyed the browse list for the cleared query"
+        );
+    });
+}
+
+/// `n` creates a view through the zero-delay batch, whose in-memory application
+/// reaches `apply_reload`; back in browse the new row is prepared and painted.
+#[gpui::test]
+fn a_created_view_is_in_the_prepared_browse_list(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("mine");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(fresh_browse_names(&shell, &cx).contains(&"mine".to_string()));
+    assert_browse_rows_are_fresh(&shell, &mut cx);
+}
+
+/// A fork from the edit stage changes the row's provenance; back in browse the
+/// prepared row carries the user layer and the override, as a fresh one does.
+#[gpui::test]
+fn a_fork_repaints_the_browse_row_as_overridden(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("j j space");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert!(
+        fresh_browse_rows(&shell, &cx)
+            .iter()
+            .any(|r| r.name == "tree" && r.layer == Some(Layer::User)),
+        "the fork reached the config"
+    );
+    assert_browse_rows_are_fresh(&shell, &mut cx);
+}
+
+/// A browse delete goes through the batch and `apply_reload`; the deleted row
+/// leaves the prepared list.
+#[gpui::test]
+fn a_browse_delete_drops_the_row_from_the_prepared_list(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_user_source(),
+        dir.path(),
+        "config::sources",
+    );
+    cx.simulate_keystrokes("j d enter");
+    cx.run_until_parked();
+    assert!(!fresh_browse_names(&shell, &cx).contains(&"mine".to_string()));
+    assert_browse_rows_are_fresh(&shell, &mut cx);
+}
+
+/// A browse revert goes the same way; the row stays, without its override.
+#[gpui::test]
+fn a_browse_revert_repaints_the_row_without_its_override(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = desk_view_services(&[("view_presentation", "[tree]\nhidden = [\"book\"]\n")]);
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("r enter");
+    cx.run_until_parked();
+    assert!(
+        fresh_browse_rows(&shell, &cx)
+            .iter()
+            .any(|r| r.name == "tree" && !r.overridden)
+    );
+    assert_browse_rows_are_fresh(&shell, &mut cx);
+}
+
+/// A missed refresh is refused at render, never repaired there.
+#[cfg(debug_assertions)]
+#[gpui::test]
+#[should_panic(expected = "prepared rows are stale")]
+fn render_refuses_browse_rows_a_refresh_missed(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = open_views_dialog(cx);
+    shell.update(&mut cx, |s, _| {
+        s.object_dialog.as_mut().unwrap().query = "w".into();
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
 }

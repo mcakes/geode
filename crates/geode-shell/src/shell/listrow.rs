@@ -214,6 +214,7 @@ mod tests {
                 "highlighted_text(",
                 "highlighted_title(",
                 "highlighted_runs(",
+                "lead_label(",
             ] {
                 for (at, _) in text.match_indices(needle) {
                     // Skip the definitions themselves.
@@ -230,7 +231,7 @@ mod tests {
             }
         }
         assert!(
-            calls >= 15,
+            calls >= 13,
             "the scan saw only {calls} highlight calls — a file moved?"
         );
         assert!(

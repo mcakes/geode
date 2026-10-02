@@ -3165,6 +3165,11 @@ pub struct ObjectDialogState {
     /// field never shows values fetched under another scope. Read only while
     /// [`expression_entry_open`] holds.
     pub expr: Option<crate::exprcomplete::ExprCompletion>,
+    /// The browse rows derived from the config at `ShellView::config_revision`,
+    /// ranked for `query`. Render and every browse handler read this list; the
+    /// shell refreshes it. A parked state is refreshed when it is revealed. The
+    /// edit stage's rows are the draft's and still derive in render.
+    pub rows: crate::prepared::Prepared<u64, String, ObjectRow>,
 }
 
 /// The delete question's "Used by …" sentence for a named expression: `scopes` in
@@ -3215,7 +3220,36 @@ impl ObjectDialogState {
             naming_seed: NameSeed::Empty,
             values_tag: 0,
             expr: None,
+            rows: crate::prepared::Prepared::new(),
         }
+    }
+
+    /// Re-key the browse rows. The key is the config revision alone: the domain
+    /// is fixed for this state's life, and `Domain::objects` reads nothing but the
+    /// config (summaries and prefixes come from each object's own table, the
+    /// roster is static). The query ranks; in naming it is the typed name, which
+    /// narrows the list as a filter does.
+    pub fn refresh_rows(&mut self, config: &Config, config_revision: u64) {
+        let domain = self.domain;
+        self.rows.refresh(
+            &config_revision,
+            &self.query,
+            || {
+                domain
+                    .objects(config)
+                    .into_iter()
+                    .map(|row| {
+                        let text = crate::prepared::RowText {
+                            primary: row.display_name().into(),
+                            secondary: row.summary.clone().into(),
+                        };
+                        (row, text)
+                    })
+                    .collect()
+            },
+            crate::prepared::RowText::two_line,
+            |_, texts, query| crate::listfilter::rank(texts, query),
+        );
     }
 
     /// Drop the open question, if any, and the target it recorded — the
@@ -3493,10 +3527,9 @@ pub fn searchable_text(row: &ObjectRow) -> String {
     format!("{} {}", row.display_name(), row.summary)
 }
 
-/// The rows this dialog currently shows, ranked by
-/// [`crate::listfilter::rank`] — derived fresh at every call site
-/// (render, key handling, click resolution), never cached, for the same
-/// reason [`Domain::objects`] is not.
+/// The fresh ranking the prepared browse list must equal (tests and the bench
+/// compare against it), and the one-shot ranking a removal landing resolves its
+/// cursor against.
 pub fn visible_rows(
     state: &ObjectDialogState,
     rows: &[ObjectRow],

@@ -625,6 +625,18 @@ fn bench_chrome_rows(c: &mut Criterion) {
     group.bench_function("rank_typed", |b| {
         b.iter(|| black_box(rank_all(black_box(&texts), black_box("vw 42"))))
     });
+    // A query change on the prepared browse list: re-rank only, no re-derivation.
+    group.bench_function("prepared_rerank", |b| {
+        let mut state = objectdialog::ObjectDialogState::new(Domain::Views);
+        state.refresh_rows(&config, 1);
+        let mut flip = false;
+        b.iter(|| {
+            flip = !flip;
+            state.set_query(if flip { "vw 42".into() } else { "vw 4".into() });
+            state.refresh_rows(black_box(&config), 1);
+            black_box(state.rows.len())
+        })
+    });
     group.finish();
 
     // Object edit: the largest demo draft; `rows()` then `visible_rows()` (which

@@ -5321,13 +5321,11 @@ run_mutation "objectdialog: a browse row click answers the question with a shrug
   '    if state.confirm.is_some() {
         return;
     }
-    let visible = super::visible_rows(state, &rows);
-    let Some(ix) = super::filtered_position(&visible, &rows, clicked) else {' \
+    let Some(ix) = state.rows.position(|r| r.name == clicked) else {' \
   '    if false {
         return;
     }
-    let visible = super::visible_rows(state, &rows);
-    let Some(ix) = super::filtered_position(&visible, &rows, clicked) else {' \
+    let Some(ix) = state.rows.position(|r| r.name == clicked) else {' \
   geode-shell \
   a_row_click_is_dropped_while_a_browse_confirm_is_armed
 
@@ -9194,10 +9192,12 @@ run_mutation "objectdialog: an edit-stage click takes the keyboard off the filte
   '            set_notice(shell, READ_ONLY_NOTICE.to_string());
         }
     }
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);' \
   '            set_notice(shell, READ_ONLY_NOTICE.to_string());
         }
     }
+    shell.refresh_dialog_rows(cx);
     shell.focus_handle.focus(window, cx);' \
   geode-shell \
   clicking_an_edit_row_while_filtering_keeps_the_filter_focused
@@ -9592,9 +9592,9 @@ run_mutation "objectdialog: a tick click toggles through space's path" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    draft.selected = position;
     step_selected_row(shell, true, false, cx);
-    dialog::sync_dialog_text(shell, window, cx);' \
+    shell.refresh_dialog_rows(cx);' \
   '    draft.selected = position;
-    dialog::sync_dialog_text(shell, window, cx);' \
+    shell.refresh_dialog_rows(cx);' \
   geode-shell clicking_a_tick_hides_the_column_and_parks_the_cursor_there
 
 # Clicking an available Scopes dimension's tick opens Values through
@@ -9926,6 +9926,7 @@ run_mutation "dblclick: the browse click that opened a stage does not also open 
             state.click_opened_stage = true;
         }
     }
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -9935,6 +9936,7 @@ run_mutation "dblclick: the browse click that opened a stage does not also open 
             state.click_opened_stage = false;
         }
     }
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -13736,10 +13738,12 @@ run_mutation "listrow: the match accent is floored against the active row" \
 # scan detects a call site bypassing the builder with raw primary text.
 run_mutation "listrow: every highlight run takes the door's accent" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                                &in_prefix,
-                                row_paint.accent,' \
-  '                                &in_prefix,
-                                theme.primary,' \
+  '            theme.muted_foreground,
+            row_paint.accent,
+        );' \
+  '            theme.muted_foreground,
+            theme.primary,
+        );' \
   geode-shell \
   every_highlight_run_takes_the_doors_accent
 
@@ -15068,10 +15072,12 @@ run_mutation "objectdialog: press_verb syncs the dialog text after a verb (spec 
   '        "o" => overwrite_scope(shell, cx),
         _ => {}
     }
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);' \
   '        "o" => overwrite_scope(shell, cx),
         _ => {}
-    }' \
+    }
+    shell.refresh_dialog_rows(cx);' \
   geode-shell \
   i_and_n_have_buttons_that_do_what_their_keys_do
 

@@ -14,6 +14,16 @@ validation diagnostics, edit selection, and queued-change baselines. The
 shared input is a text and focus bridge; `sync_dialog_text` reconciles it to
 the current state after keyboard and pointer actions.
 
+`ObjectDialogState::rows` holds the browse list prepared from the active
+configuration at its config revision and ranked for the query (in Naming, the
+typed name); render and every browse key and click read it. A covered object
+dialog is re-keyed when it is revealed, so a reload while it was parked shows
+on the first paint. Landing the cursor after a removal still ranks the
+pending-aware configuration, because the painted list catches up only when the
+batch applies. The Edit, Column and Values rows are the draft's and still
+derive at each render and handler call; their measured cost is 2 to 13
+microseconds.
+
 | Stage | Content and return path |
 |---|---|
 | Browse | Effective objects and provenance, filtered by visible name and summary |
