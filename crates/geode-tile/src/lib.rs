@@ -12,6 +12,7 @@ pub mod grid;
 pub mod header;
 pub mod motion;
 pub mod notice;
+pub mod stale;
 
 /// The menu and popover live in the shell (it paints the row menu over a
 /// tile whose module answers `dimension_context` or `press_context`);

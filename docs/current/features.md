@@ -84,7 +84,12 @@ has none of them.
   clips, so neither a long left side nor a long notice pushes the times, the
   chip or `⋯` off the tile — they leave it only when the tile is narrower
   than those three alone.
-  A stale source time takes the warning text tone. The health chip appears
+  A stale source time takes the warning text tone. It turns stale while the
+  tile is idle, too: market-data and the blotter arm one wake-up at the source
+  time plus `stale_after` (the blotter on its stalest dataset), re-armed by
+  each delivery, on show and on a frame flip (a reload that changed
+  `stale_after` arrives as one), and dropped while hidden. A newer delivery
+  clears the wake-up's verdict, so it paints fresh. The health chip appears
   only while a source the tile reads is PendingTooLong (`pending`), Degraded
   (`degraded`) or Failed (`failed`); its tooltip names the worst source and
   its reason, with `+N more` for other unhealthy sources. Clicking it opens
@@ -1075,7 +1080,9 @@ dense header: the sheet name (a control: see [sheets by pointer](#sheets-by-poin
 (`spot +2.0%`, `vol -1.0`, spelled as the shift cells spell them), `N pricing…`
 while lines are stale, `N failed` in danger text while any line's last answer
 was a failure, `pricer <name>`, the last priced time, which reads `stale` once
-it is older than the shell's `stale_after`, and a `⋯` button at the trailing
+it is older than the shell's `stale_after` — re-evaluated on each repaint: the
+reprice timer's ticks repaint it, and with `refresh = "off"` an idle pricer's
+`stale` waits for its next repaint (known limitation) — and a `⋯` button at the trailing
 edge that opens and closes the action menu (the pointer's `.`). The header is
 the [shared frame](#shared-tile-interaction): notices paint after the status
 items, and the health chip sits between the time and `⋯`. The health chip

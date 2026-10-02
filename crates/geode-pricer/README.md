@@ -482,6 +482,11 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 
 ## Known limitations
 
+- The idle stale tone waits for a repaint. The last priced time's `stale`
+  is decided when the tile renders, and the pricer does not use
+  `geode_tile::stale::StaleTimer`: its timer is a reprice interval whose
+  ticks repaint. With `refresh = "off"` an idle pricer is not stale-toned
+  until its next repaint.
 - The health chip never shows in production today. Its question is the
   `pricer_sheets` dataset, which is local: no source loads into it, so no
   source's health maps to it, and the pricer behind the pricing door reads

@@ -566,6 +566,10 @@ pub struct MarketDataTile {
     /// header's own time text so the staleness rule is a comparison per
     /// frame rather than an RFC-3339 parse.
     source_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The one wake-up at which `source_at` turns stale: armed by every
+    /// mutation door ([`Self::changed`]) while shown, dropped while hidden
+    /// (`geode_tile::stale`).
+    stale_timer: geode_tile::stale::StaleTimer,
     /// The header's floored tone colours, refreshed at the top of `render`
     /// (see [`FlooredTones`]).
     tones: FlooredTones,
@@ -797,6 +801,9 @@ impl MarketDataTile {
             if !this.visible {
                 return;
             }
+            // A reload that changed `stale_after` arrives as a flip; the
+            // wake-up moves to the new threshold here.
+            this.arm_stale(cx);
             // Only `as_of` and `data` are followed (see the module doc);
             // a scope keystroke bumps `scope` on every character and must
             // not cost this panel a requery.
@@ -928,6 +935,7 @@ impl MarketDataTile {
                 stale: false,
             },
             source_at: None,
+            stale_timer: geode_tile::stale::StaleTimer::new(),
             tones,
             popup: None,
             menu_tip_selector: format!("tip-marketdata-menu-button-{}", id.0).into(),
@@ -2077,6 +2085,7 @@ impl MarketDataTile {
     /// formats, and so must never happen in `render`) and notify.
     fn changed(&mut self, cx: &mut Context<Self>) {
         self.rebuild_chrome();
+        self.arm_stale(cx);
         cx.notify();
     }
 
@@ -2131,10 +2140,35 @@ impl MarketDataTile {
         });
     }
 
-    /// Whether the painted generation exceeds this panel's stale_after interval.
+    fn stale_slot(t: &mut Self) -> &mut geode_tile::stale::StaleTimer {
+        &mut t.stale_timer
+    }
+
+    /// Arm the wake-up at which the painted generation turns stale, while
+    /// shown; a hidden panel holds none. Idempotent for an unchanged
+    /// (generation time, threshold) pair, so every mutation door may call it:
+    /// a delivery, a staged answer promoted on a flip, a show, and a frame
+    /// flip carrying a reloaded threshold all re-arm through it.
+    fn arm_stale(&mut self, cx: &mut Context<Self>) {
+        if !self.visible {
+            self.stale_timer.disarm();
+            return;
+        }
+        self.stale_timer.arm(
+            self.source_at,
+            self.stale_after.get(),
+            chrono::Utc::now(),
+            cx,
+            Self::stale_slot,
+        );
+    }
+
+    /// Whether the painted generation exceeds this panel's stale_after interval,
+    /// by the clock or by the stale timer having fired for it.
     fn is_stale(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
         self.source_at.is_some_and(|at| {
             now.signed_duration_since(at).to_std().unwrap_or_default() > self.stale_after.get()
+                || self.stale_timer.fired_for(at, self.stale_after.get())
         })
     }
 
@@ -6433,6 +6467,164 @@ label = "skew"
         assert!(
             stale.iter().any(|c| c == &format!("{local} stale")),
             "stale one second past stale_after: {stale:?}"
+        );
+    }
+
+    /// Whether the panel's time run PAINTED the stale tone, read from the
+    /// selector the shared header derives from the same flag as the run's
+    /// colour (`geode_tile::header::time_selector`); `None` if it did not
+    /// paint exactly once.
+    fn painted_time_stale(vcx: &mut gpui::VisualTestContext) -> Option<bool> {
+        draw(vcx);
+        let mut painted = |stale: bool| {
+            let selector: &'static str =
+                Box::leak(geode_tile::header::time_selector(TILE, 0, stale).into_boxed_str());
+            vcx.debug_bounds(selector).is_some()
+        };
+        match (painted(true), painted(false)) {
+            (true, false) => Some(true),
+            (false, true) => Some(false),
+            _ => None,
+        }
+    }
+
+    /// An idle panel turns stale by itself: one wake-up at source time plus
+    /// stale_after, with no delivery or other event behind it. The wall
+    /// clock barely moves under the test clock, so only the wake-up can
+    /// turn the painted chip.
+    #[gpui::test]
+    fn an_idle_panel_turns_stale_without_another_event(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().expect("one request").tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(cvi(&chrono::Utc::now().to_rfc3339())),
+        );
+        assert_eq!(
+            painted_time_stale(&mut vcx),
+            Some(false),
+            "fresh at delivery"
+        );
+        let stale_after = h.tile.read_with(&vcx, |t, _| t.stale_after.get());
+        vcx.executor()
+            .advance_clock(stale_after - Duration::from_secs(5));
+        vcx.run_until_parked();
+        assert_eq!(painted_time_stale(&mut vcx), Some(false), "not yet");
+        vcx.executor().advance_clock(Duration::from_secs(10));
+        vcx.run_until_parked();
+        assert_eq!(
+            painted_time_stale(&mut vcx),
+            Some(true),
+            "the painted chip turned stale with no other event"
+        );
+    }
+
+    /// A fired verdict belongs to the generation it fired for: a newer
+    /// delivery after the wake-up paints fresh again.
+    #[gpui::test]
+    fn a_delivery_after_the_wake_up_paints_fresh(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().expect("one request").tag;
+        let first = chrono::Utc::now();
+        h.deliver(&mut vcx, tag, Arc::new(cvi(&first.to_rfc3339())));
+        let stale_after = h.tile.read_with(&vcx, |t, _| t.stale_after.get());
+        vcx.executor()
+            .advance_clock(stale_after + Duration::from_secs(1));
+        vcx.run_until_parked();
+        assert_eq!(
+            painted_time_stale(&mut vcx),
+            Some(true),
+            "the wake-up fired"
+        );
+        let later = first + chrono::Duration::seconds(1);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(&later.to_rfc3339())));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.source_at),
+            Some(later),
+            "the newer generation is painted"
+        );
+        assert_eq!(
+            painted_time_stale(&mut vcx),
+            Some(false),
+            "a fresh delivery never paints stale"
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.stale_timer.is_armed()));
+    }
+
+    /// A reload that shortens `stale_after` reaches an idle panel as a frame
+    /// flip, which moves the wake-up to the new threshold.
+    #[gpui::test]
+    fn a_reloaded_stale_after_moves_the_panel_wake_up(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().expect("one request").tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(cvi(&chrono::Utc::now().to_rfc3339())),
+        );
+        h.tile
+            .read_with(&vcx, |t, _| t.stale_after.clone())
+            .set(Duration::from_secs(60));
+        h.frame.update(&mut vcx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        vcx.executor().advance_clock(Duration::from_secs(61));
+        vcx.run_until_parked();
+        assert_eq!(
+            painted_time_stale(&mut vcx),
+            Some(true),
+            "stale at the reloaded threshold, not the old one"
+        );
+    }
+
+    /// A newer generation moves the wake-up; hiding drops it, and a hidden
+    /// panel past its deadline paints nothing stale from the timer.
+    #[gpui::test]
+    fn a_new_delivery_rearms_and_hiding_drops_the_wake_up(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().expect("one request").tag;
+        let first = chrono::Utc::now();
+        h.deliver(&mut vcx, tag, Arc::new(cvi(&first.to_rfc3339())));
+        let stale_after = h.tile.read_with(&vcx, |t, _| t.stale_after.get());
+        vcx.executor().advance_clock(stale_after / 3 * 2);
+        vcx.run_until_parked();
+        // A newer generation lands: the wake-up moves with it.
+        let later = first + chrono::Duration::seconds(1);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(&later.to_rfc3339())));
+        vcx.executor().advance_clock(stale_after / 2);
+        vcx.run_until_parked();
+        assert_eq!(
+            painted_time_stale(&mut vcx),
+            Some(false),
+            "re-armed for the new generation"
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.stale_timer.is_armed()));
+        h.visible(&mut vcx, false);
+        assert!(
+            !h.tile.read_with(&vcx, |t, _| t.stale_timer.is_armed()),
+            "hiding drops it"
+        );
+        vcx.executor().advance_clock(stale_after * 2);
+        vcx.run_until_parked();
+        assert!(
+            !h.tile
+                .read_with(&vcx, |t, _| t.stale_timer.fired_for(later, stale_after))
+        );
+        assert_eq!(
+            painted_time_stale(&mut vcx),
+            Some(false),
+            "no wake-up fired for a hidden panel"
         );
     }
 

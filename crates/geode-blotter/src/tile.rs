@@ -126,6 +126,10 @@ pub struct BlotterTile {
     /// Configured freshness threshold, shared through the factory so reloads
     /// update open tiles without recreating them.
     pub stale_after: Rc<Cell<Duration>>,
+    /// The one wake-up at which the snapshot's stalest dataset time turns
+    /// stale: armed on each applied snapshot, on show and on a frame flip
+    /// while shown, dropped while hidden (`geode_tile::stale`).
+    stale_timer: geode_tile::stale::StaleTimer,
     table: Entity<TableState<BlotterDelegate>>,
     view_name: String,
     pin: Pin,
@@ -472,6 +476,7 @@ impl BlotterTile {
             dims,
             find_style,
             stale_after,
+            stale_timer: geode_tile::stale::StaleTimer::new(),
             table,
             view_name,
             pin,
@@ -706,6 +711,9 @@ impl BlotterTile {
         if !self.visible {
             return;
         }
+        // A reload that changed `stale_after` arrives as a flip; the wake-up
+        // moves to the new threshold here.
+        self.arm_stale(cx);
         if self.following.follows_changed(now, differs) {
             self.requery(cx);
         } else {
@@ -758,6 +766,7 @@ impl BlotterTile {
             self.take_selection_notice(cx);
             self.prepare_header(cx);
         }
+        self.arm_stale(cx);
         self.delivered_at = Some(Instant::now());
         self.refresh_fuzzy_find(true, cx);
     }
@@ -973,6 +982,7 @@ impl BlotterTile {
                 self.requery(cx);
             }
         }
+        self.arm_stale(cx);
     }
 
     /// The shell is removing this tile: cancel its view query by key and
@@ -1898,9 +1908,49 @@ impl BlotterTile {
         }
     }
 
-    /// Whether a parseable freshness timestamp is older than `stale_after`.
-    /// Missing or malformed timestamps are not marked stale; future timestamps
-    /// have zero age.
+    fn stale_slot(t: &mut Self) -> &mut geode_tile::stale::StaleTimer {
+        &mut t.stale_timer
+    }
+
+    /// Arm the wake-up at which the snapshot's stalest dataset time turns
+    /// stale, while shown; a hidden tile holds none. Idempotent for an
+    /// unchanged (time, threshold) pair. The earliest instant is taken over
+    /// parsed times rather than `Provenance::stalest`'s text order, which
+    /// misorders times written with different offsets; render parses the
+    /// same texts, so the run it calls stalest is the one armed.
+    fn arm_stale(&mut self, cx: &mut Context<Self>) {
+        if !self.visible {
+            self.stale_timer.disarm();
+            return;
+        }
+        let stalest = self
+            .table
+            .read(cx)
+            .delegate()
+            .snapshot
+            .as_ref()
+            .and_then(|s| {
+                s.provenance()
+                    .datasets
+                    .iter()
+                    .filter_map(|f| f.as_of.as_deref())
+                    .filter_map(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .min()
+            });
+        self.stale_timer.arm(
+            stalest,
+            self.stale_after.get(),
+            chrono::Utc::now(),
+            cx,
+            Self::stale_slot,
+        );
+    }
+
+    /// Whether a parseable freshness timestamp is older than `stale_after`,
+    /// by the clock or by the stale timer having fired for a time at least
+    /// as fresh. Missing or malformed timestamps are not marked stale; future
+    /// timestamps have zero age.
     pub(crate) fn is_stale(&self, as_of: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
         as_of
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
@@ -1909,6 +1959,9 @@ impl BlotterTile {
                     .to_std()
                     .unwrap_or_default()
                     > self.stale_after.get()
+                    || self
+                        .stale_timer
+                        .fired_for(t.with_timezone(&chrono::Utc), self.stale_after.get())
             })
     }
 
@@ -3080,6 +3133,186 @@ mod tests {
             after,
             vec!["risk 14:00".to_string()],
             "the observer refreshed and repainted: {after:?}"
+        );
+    }
+
+    fn two_dataset_snapshot(older: &str, newer: &str) -> Arc<Snapshot> {
+        let meta = ColumnMeta {
+            name: "lhu".into(),
+            attribution_by_depth: vec![Attribution::Additive],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: false,
+            mixed_flag: None,
+        };
+        let provenance = Provenance {
+            datasets: vec![
+                Freshness {
+                    dataset: "risk".into(),
+                    as_of: Some(older.into()),
+                    generation: Some(1),
+                },
+                Freshness {
+                    dataset: "ref".into(),
+                    as_of: Some(newer.into()),
+                    generation: Some(1),
+                },
+            ],
+            as_of_request: None,
+        };
+        Arc::new(Snapshot::for_tests_with_provenance(
+            vec![(meta, TestColumn::Dict(vec![Some("X".into())]))],
+            1,
+            provenance,
+        ))
+    }
+
+    /// Each header time run's PAINTED tone after a draw, oldest first, read
+    /// from the selector the shared header derives from the same flag as the
+    /// run's colour (`geode_tile::header::time_selector`): `Some(true)` for
+    /// the warning tone, `Some(false)` for muted, `None` unless it painted
+    /// exactly once.
+    fn painted_time_stale(cx: &mut gpui::VisualTestContext, runs: usize) -> Vec<Option<bool>> {
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (0..runs)
+            .map(|i| {
+                let mut painted = |stale: bool| {
+                    let selector: &'static str =
+                        Box::leak(geode_tile::header::time_selector(7, i, stale).into_boxed_str());
+                    cx.debug_bounds(selector).is_some()
+                };
+                match (painted(true), painted(false)) {
+                    (true, false) => Some(true),
+                    (false, true) => Some(false),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// The timer arms on the STALEST dataset time: that run turns stale by
+    /// itself a minute later; the fresher run does not. The wall clock
+    /// barely moves under the test clock, so only the wake-up can turn it.
+    #[gpui::test]
+    fn an_idle_blotter_turns_its_stalest_time_stale_without_another_event(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let tag = next_query(&h.requests).tag;
+        let stale_after = h.tile.read_with(&cx, |t, _| t.stale_after.get());
+        let now = chrono::Utc::now();
+        let older =
+            now - chrono::Duration::from_std(stale_after).unwrap() + chrono::Duration::seconds(60);
+        deliver(
+            &h,
+            &mut cx,
+            tag,
+            Ok(two_dataset_snapshot(&older.to_rfc3339(), &now.to_rfc3339())),
+        );
+        assert_eq!(
+            painted_time_stale(&mut cx, 2),
+            vec![Some(false), Some(false)]
+        );
+        cx.executor().advance_clock(Duration::from_secs(55));
+        cx.run_until_parked();
+        assert_eq!(
+            painted_time_stale(&mut cx, 2),
+            vec![Some(false), Some(false)],
+            "not yet"
+        );
+        cx.executor().advance_clock(Duration::from_secs(10));
+        cx.run_until_parked();
+        assert_eq!(
+            painted_time_stale(&mut cx, 2),
+            vec![Some(true), Some(false)],
+            "the stalest run turned stale by itself; the fresher one did not"
+        );
+    }
+
+    /// A fired verdict belongs to the snapshot it fired for: a newer
+    /// delivery after the wake-up paints fresh again.
+    #[gpui::test]
+    fn a_blotter_delivery_after_the_wake_up_paints_fresh(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let tag = next_query(&h.requests).tag;
+        let first = chrono::Utc::now();
+        deliver(
+            &h,
+            &mut cx,
+            tag,
+            Ok(two_dataset_snapshot(
+                &first.to_rfc3339(),
+                &first.to_rfc3339(),
+            )),
+        );
+        let stale_after = h.tile.read_with(&cx, |t, _| t.stale_after.get());
+        cx.executor()
+            .advance_clock(stale_after + Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(
+            painted_time_stale(&mut cx, 2),
+            vec![Some(true), Some(true)],
+            "the wake-up fired"
+        );
+        let later = (first + chrono::Duration::seconds(1)).to_rfc3339();
+        deliver(&h, &mut cx, tag, Ok(two_dataset_snapshot(&later, &later)));
+        assert_eq!(
+            painted_time_stale(&mut cx, 2),
+            vec![Some(false), Some(false)],
+            "a fresh delivery never paints stale"
+        );
+        assert!(h.tile.read_with(&cx, |t, _| t.stale_timer.is_armed()));
+    }
+
+    /// A reload that shortens `stale_after` reaches an idle tile as a frame
+    /// flip, which moves the wake-up to the new threshold even before the
+    /// requery it causes is answered.
+    #[gpui::test]
+    fn a_reloaded_stale_after_moves_the_blotter_wake_up(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let tag = next_query(&h.requests).tag;
+        let now = chrono::Utc::now().to_rfc3339();
+        deliver(&h, &mut cx, tag, Ok(two_dataset_snapshot(&now, &now)));
+        h.tile
+            .read_with(&cx, |t, _| t.stale_after.clone())
+            .set(Duration::from_secs(60));
+        h.frame.update(&mut cx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(61));
+        cx.run_until_parked();
+        assert_eq!(
+            painted_time_stale(&mut cx, 2),
+            vec![Some(true), Some(true)],
+            "stale at the reloaded threshold, not the old one"
+        );
+    }
+
+    /// Hiding drops the wake-up: a hidden tile past its deadline has no
+    /// timer verdict, and its chips paint fresh.
+    #[gpui::test]
+    fn hiding_a_blotter_drops_its_stale_wake_up(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let tag = next_query(&h.requests).tag;
+        let now = chrono::Utc::now().to_rfc3339();
+        deliver(&h, &mut cx, tag, Ok(two_dataset_snapshot(&now, &now)));
+        assert!(h.tile.read_with(&cx, |t, _| t.stale_timer.is_armed()));
+        h.tile.update(&mut cx, |t, cx| t.set_visible(false, cx));
+        assert!(!h.tile.read_with(&cx, |t, _| t.stale_timer.is_armed()));
+        let stale_after = h.tile.read_with(&cx, |t, _| t.stale_after.get());
+        cx.executor().advance_clock(stale_after * 2);
+        cx.run_until_parked();
+        assert_eq!(
+            painted_time_stale(&mut cx, 2),
+            vec![Some(false), Some(false)],
+            "no wake-up fired for a hidden tile"
         );
     }
 

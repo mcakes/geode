@@ -28922,6 +28922,144 @@ run_mutation "silence: a missing optional column is not noted" \
   geode-data \
   the_load_note_names_the_file_dataset_and_both_lists
 
+# A fired stale timer is recorded, so render reads stale.
+run_mutation "silence: a fired stale timer is not recorded" \
+  crates/geode-tile/src/stale.rs \
+  '                timer.fired = true;' \
+  '                timer.fired = false;' \
+  geode-tile \
+  the_timer_fires_once_at_source_time_plus_threshold
+
+# Re-arming the same pair keeps the first deadline.
+run_mutation "silence: re-arming the same pair restarts the wait" \
+  crates/geode-tile/src/stale.rs \
+  '        if self.armed == Some((at, after)) && (self.task.is_some() || self.fired) {' \
+  '        if false {' \
+  geode-tile \
+  arming_the_same_pair_again_keeps_the_first_deadline
+
+# A new pair clears the old verdict, so a fresh delivery never reads stale.
+run_mutation "silence: a re-armed stale timer keeps its old verdict" \
+  crates/geode-tile/src/stale.rs \
+  '        self.armed = None;
+        self.fired = false;' \
+  '        self.armed = None;' \
+  geode-tile \
+  re_arming_after_a_fire_clears_the_verdict
+
+# The run's selector names the tone it paints.
+run_mutation "silence: a stale time run paints under the fresh selector" \
+  crates/geode-tile/src/header.rs \
+  '            .debug_selector(move || time_selector(tile, i, stale))' \
+  '            .debug_selector(move || time_selector(tile, i, false))' \
+  geode-tile \
+  a_stale_run_paints_its_stale_label
+
+# Market-data arms on its painted generation.
+run_mutation "silence: an idle market-data panel never arms" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.stale_timer.arm(
+            self.source_at,' \
+  '        self.stale_timer.arm(
+            None,' \
+  geode-marketdata \
+  an_idle_panel_turns_stale_without_another_event
+
+# Every mutation door re-arms, so a delivery arms.
+run_mutation "silence: market-data mutation doors never arm the stale timer" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.rebuild_chrome();
+        self.arm_stale(cx);' \
+  '        self.rebuild_chrome();' \
+  geode-marketdata \
+  an_idle_panel_turns_stale_without_another_event
+
+# Render reads the timer's verdict.
+run_mutation "silence: market-data render ignores the stale timer" \
+  crates/geode-marketdata/src/tile.rs \
+  '                || self.stale_timer.fired_for(at, self.stale_after.get())' \
+  '                || false' \
+  geode-marketdata \
+  an_idle_panel_turns_stale_without_another_event
+
+# Hiding drops the wake-up.
+run_mutation "silence: a hidden market-data panel keeps its wake-up" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if !self.visible {
+            self.stale_timer.disarm();
+            return;
+        }
+        self.stale_timer.arm(
+            self.source_at,' \
+  '        if !self.visible {
+            return;
+        }
+        self.stale_timer.arm(
+            self.source_at,' \
+  geode-marketdata \
+  a_new_delivery_rearms_and_hiding_drops_the_wake_up
+
+# A reloaded threshold arrives as a flip and re-arms.
+run_mutation "silence: a market-data flip never re-arms the stale timer" \
+  crates/geode-marketdata/src/tile.rs \
+  '            // wake-up moves to the new threshold here.
+            this.arm_stale(cx);' \
+  '            // wake-up moves to the new threshold here.' \
+  geode-marketdata \
+  a_reloaded_stale_after_moves_the_panel_wake_up
+
+# The blotter arms on its STALEST dataset.
+run_mutation "silence: the blotter arms on its freshest dataset" \
+  crates/geode-blotter/src/tile.rs \
+  '                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .min()' \
+  '                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .max()' \
+  geode-blotter \
+  an_idle_blotter_turns_its_stalest_time_stale_without_another_event
+
+# An applied snapshot arms.
+run_mutation "silence: an applied blotter snapshot never arms" \
+  crates/geode-blotter/src/tile.rs \
+  '        self.arm_stale(cx);
+        self.delivered_at = Some(Instant::now());' \
+  '        self.delivered_at = Some(Instant::now());' \
+  geode-blotter \
+  an_idle_blotter_turns_its_stalest_time_stale_without_another_event
+
+# Render reads the timer's verdict.
+run_mutation "silence: blotter render ignores the stale timer" \
+  crates/geode-blotter/src/tile.rs \
+  '                    || self
+                        .stale_timer
+                        .fired_for(t.with_timezone(&chrono::Utc), self.stale_after.get())' \
+  '                    || false' \
+  geode-blotter \
+  an_idle_blotter_turns_its_stalest_time_stale_without_another_event
+
+run_mutation "silence: a hidden blotter keeps its wake-up" \
+  crates/geode-blotter/src/tile.rs \
+  '        if !self.visible {
+            self.stale_timer.disarm();
+            return;
+        }
+        let stalest = self' \
+  '        if !self.visible {
+            return;
+        }
+        let stalest = self' \
+  geode-blotter \
+  hiding_a_blotter_drops_its_stale_wake_up
+
+# A reloaded threshold arrives as a flip and re-arms.
+run_mutation "silence: a blotter flip never re-arms the stale timer" \
+  crates/geode-blotter/src/tile.rs \
+  '        // moves to the new threshold here.
+        self.arm_stale(cx);' \
+  '        // moves to the new threshold here.' \
+  geode-blotter \
+  a_reloaded_stale_after_moves_the_blotter_wake_up
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
