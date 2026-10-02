@@ -5548,7 +5548,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_footer_rows_label_follows_a_fold_and_is_shared_across_renders(
+    fn the_footer_rows_label_follows_a_fold_and_is_unchanged_by_a_render(
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut cx) = delivered(cx);

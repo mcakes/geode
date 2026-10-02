@@ -31411,7 +31411,7 @@ run_mutation "blotter footer: a fold leaves the rows label" \
   '    if label.0 != n {' \
   '    if label.0 != n && false {' \
   geode-blotter \
-  the_footer_rows_label_follows_a_fold_and_is_shared_across_renders
+  the_footer_rows_label_follows_a_fold_and_is_unchanged_by_a_render
 
 run_mutation "blotter stale: an unparsable time parses as the epoch" \
   crates/geode-blotter/src/header.rs \
