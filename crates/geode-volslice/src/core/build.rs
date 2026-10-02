@@ -899,9 +899,12 @@ mod tests {
 
     #[test]
     fn failed_jobs_become_deduplicated_notices() {
-        // 2027-06-18 is past the last term: both curves refuse there.
+        // 2027-06-18 is past the last term: both curves refuse there, and
+        // the cvi's evaluation at the chain strikes for the difference
+        // refuses with the very same words as its dense curve.
         let mut st = State {
             active: Some([d("2026-10-16"), d("2027-06-18")].into()),
+            diff: Pair::new(Kind::Cvi, Kind::Chain),
             ..State::default()
         };
         let b = built(&mut st);
