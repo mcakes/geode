@@ -172,8 +172,14 @@ impl TileContent for VolsliceContent {
         }
     }
 
+    /// The shell calls this inside its draw, where the tile's notify is
+    /// dropped and its self-observer never runs: the chrome is refreshed
+    /// here, so the show's own notices and strip are painted this frame.
     fn set_visible(&self, visible: bool, cx: &mut App) {
-        self.tile.update(cx, |t, cx| t.set_visible(visible, cx))
+        self.tile.update(cx, |t, cx| {
+            t.set_visible(visible, cx);
+            t.refresh_chrome(cx);
+        })
     }
 
     fn closed(&self, cx: &mut App) {
@@ -199,7 +205,7 @@ impl TileContent for VolsliceContent {
     /// Kept for the strip: a press acts only on a focused tile, and the
     /// cursor row is lit only on one.
     fn set_focused(&self, focused: bool, cx: &mut App) {
-        self.tile.update(cx, |t, cx| t.set_focused(focused, cx))
+        self.tile.update(cx, |t, _| t.set_focused(focused))
     }
 
     /// A tile added with no underlying is useless: it asks for one at once.

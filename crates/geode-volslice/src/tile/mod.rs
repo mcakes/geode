@@ -293,16 +293,35 @@ impl VolsliceTile {
     }
 
     /// Rebuild each prepared part whose inputs changed since it was built.
-    fn refresh_chrome(&mut self, cx: &App) {
-        let key = HeaderKey {
-            underlying: self.underlying(cx),
-            coordinate: self.state.coordinate,
-            kinds: self.loaded.kinds(),
-            mark: self.loaded.draft.as_ref().map(|(_, m)| *m),
-            hidden: self.state.hidden.clone(),
-            diff: self.state.diff,
-        };
-        if self.chrome.header_key.as_ref() != Some(&key) {
+    ///
+    /// Runs from the tile's self-observer after every notify, and directly
+    /// from each door the shell calls inside its draw (`set_visible`),
+    /// where the notify is dropped and the observer never runs. The inputs
+    /// are compared in place, so a notify that changed nothing (a wheel, a
+    /// drag) allocates nothing.
+    pub(crate) fn refresh_chrome(&mut self, cx: &App) {
+        let underlying = self.underlying_str(cx);
+        let header_stale = self.chrome.header_key.as_ref().is_none_or(|k| {
+            k.underlying.as_deref() != underlying
+                || k.coordinate != self.state.coordinate
+                || !k
+                    .kinds
+                    .iter()
+                    .copied()
+                    .eq(Kind::ALL.into_iter().filter(|kind| self.loaded.has(*kind)))
+                || k.mark != self.loaded.draft.as_ref().map(|(_, m)| *m)
+                || k.hidden != self.state.hidden
+                || k.diff != self.state.diff
+        });
+        if header_stale {
+            let key = HeaderKey {
+                underlying: underlying.map(str::to_string),
+                coordinate: self.state.coordinate,
+                kinds: self.loaded.kinds(),
+                mark: self.loaded.draft.as_ref().map(|(_, m)| *m),
+                hidden: self.state.hidden.clone(),
+                diff: self.state.diff,
+            };
             self.chrome.header = Some(HeaderModel::prepare(
                 key.underlying.as_deref(),
                 &self.state,
@@ -349,14 +368,24 @@ impl VolsliceTile {
         }
     }
 
-    /// The shell's word on whether this is the focused tile. Called from
-    /// the shell's render, before this tile's own, so the flag is painted
-    /// this frame.
-    pub fn set_focused(&mut self, focused: bool, cx: &mut Context<Self>) {
-        if self.focused != focused {
-            self.focused = focused;
-            cx.notify();
+    /// The underlying the tile reads, borrowed: the followed group's
+    /// single value, else the tile's own. `underlying` is the owned form.
+    fn underlying_str<'a>(&'a self, cx: &'a App) -> Option<&'a str> {
+        let frame = self.frame.read(cx);
+        match frame.following() {
+            Some(_) => geode_core::link::underlying_of(frame.scope()),
+            None => self.state.underlying.as_deref(),
         }
+    }
+
+    /// The shell's word on whether this is the focused tile, given from
+    /// its render before this tile renders. No notify: one sent there is
+    /// dropped. The flag is still painted this frame because the tile's
+    /// view is an uncached child of the shell's, re-rendered whenever the
+    /// shell renders; a cached tile view would paint the old flag until
+    /// its next notify.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
     }
 
     /// The key context's `mode`: `insert` while the picker's field holds

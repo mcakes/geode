@@ -259,6 +259,18 @@ impl VolsliceTile {
         true
     }
 
+    /// The picker field's text and the query its list is ranked by.
+    #[cfg(test)]
+    pub(crate) fn picker_text(&self, cx: &App) -> Option<(String, String)> {
+        match &self.popup {
+            Some(Popup::Picker(p)) => Some((
+                p.input.read(cx).value().to_string(),
+                p.list.query().to_string(),
+            )),
+            _ => None,
+        }
+    }
+
     /// The open popup's rows and highlighted row, as painted.
     #[cfg(test)]
     pub(crate) fn chooser_rows(&self) -> Option<(Vec<String>, usize)> {

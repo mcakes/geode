@@ -317,7 +317,8 @@ pub trait TileContent {
     fn launched(&self, _window: &mut Window, _cx: &mut App) {}
     /// Whether this tile is now the focused tile of the active workspace's
     /// focused region. Called from the shell's render whenever that changes
-    /// (and once for a fresh occupant that is focused), before the tile's
+    /// (and once for a fresh occupant that is focused), after that render's
+    /// `set_visible` calls and before the tile's
     /// own render in the same frame, so a module keeps the flag and reads
     /// it when it paints; it must not notify the frame from here. A module
     /// that paints a focus-dependent state, or acts on a press only when the

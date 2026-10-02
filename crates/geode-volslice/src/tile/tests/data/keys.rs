@@ -289,6 +289,46 @@ fn u_picks_an_underlying_from_the_catalog_and_requeries(cx: &mut gpui::TestAppCo
     assert!(h.requests().is_empty());
 }
 
+/// With the picker open, a bare `j` is text for the field, not the strip's
+/// step and not a list step; the arrows step the list through the tile's
+/// own insert bindings.
+#[gpui::test]
+fn the_picker_types_j_and_steps_with_the_arrows(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = loaded(cx);
+    h.diagnostics.update(&mut vcx, |d, cx| {
+        d.catalog = Some(catalog());
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("u");
+    h.draw(&mut vcx);
+    assert_eq!(
+        h.chooser(&vcx).unwrap(),
+        (vec!["NDX.Z".into(), "RUT.Z".into(), "SPX.Z".into()], 0)
+    );
+    vcx.simulate_keystrokes("down");
+    assert_eq!(h.chooser(&vcx).unwrap().1, 1, "down steps the list");
+    vcx.simulate_keystrokes("down up");
+    assert_eq!(h.chooser(&vcx).unwrap().1, 1, "and up steps it back");
+    assert_eq!(
+        h.dispatched(&vcx)[1..],
+        [
+            "volslice::list_down",
+            "volslice::list_down",
+            "volslice::list_up"
+        ]
+    );
+    vcx.simulate_keystrokes("j");
+    let (text, query) = vcx.update(|_, cx| h.tile.read(cx).picker_text(cx)).unwrap();
+    assert_eq!(
+        (text.as_str(), query.as_str()),
+        ("j", "j"),
+        "typed, and ranked by"
+    );
+    assert_eq!(h.state(&vcx).cursor, 0, "the strip did not move");
+    assert_eq!(h.dispatched(&vcx).len(), 4, "j reached no binding");
+}
+
 /// A tile the shell launched with no underlying prompts at once; one
 /// launched on an underlying does not.
 #[gpui::test]

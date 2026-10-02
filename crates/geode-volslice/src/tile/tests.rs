@@ -35,16 +35,30 @@ const TILE: u64 = 7;
 /// the shell's insert branch for bare keys: they resolve against the tile
 /// context alone, so a field's `enter` and `escape` reach its verbs and
 /// typing stays text. Chords in insert mode are not modelled.
+///
+/// Draw-time doors: the shell tells an occupant its visibility and focus
+/// from inside its own render, where a notify is dropped. A test queues
+/// either here and the next draw delivers it from this render, so the tile
+/// is exercised on the path production takes.
 struct ShellStandIn {
     focus: gpui::FocusHandle,
     tile: Entity<VolsliceTile>,
+    content: Rc<dyn TileContent>,
     keymap: Rc<Keymap>,
     matcher: Matcher,
+    pending_visible: Option<bool>,
+    pending_focused: Option<bool>,
 }
 
 impl gpui::Render for ShellStandIn {
     fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+        if let Some(visible) = self.pending_visible.take() {
+            self.content.set_visible(visible, cx);
+        }
+        if let Some(focused) = self.pending_focused.take() {
+            self.content.set_focused(focused, cx);
+        }
         gpui::div()
             .size_full()
             .track_focus(&self.focus)
@@ -100,7 +114,8 @@ fn app_keymap(factory: &Rc<VolsliceFactory>) -> Keymap {
 /// What the window closure hands back: it can return only one value, so
 /// everything a test drives or reads is parked here on the way out.
 struct Built {
-    content: Box<dyn TileContent>,
+    content: Rc<dyn TileContent>,
+    host: Entity<ShellStandIn>,
     tile: Entity<VolsliceTile>,
     frame: Entity<Frame>,
     diagnostics: Entity<Diagnostics>,
@@ -111,7 +126,9 @@ struct Harness {
     tile: Entity<VolsliceTile>,
     /// Driven through the trait, never by poking the entity: the shell's
     /// own door is what a key, a `:` line and a delivery all arrive through.
-    content: Box<dyn TileContent>,
+    content: Rc<dyn TileContent>,
+    /// The shell stand-in, for the draw-time doors.
+    host: Entity<ShellStandIn>,
     factory: Rc<VolsliceFactory>,
     /// The frame entity the tile's handle reads, for the shell doors a
     /// test drives (`link_for_test`, `post_for_test`, `open_flip`).
@@ -162,21 +179,26 @@ fn open_framed(
                 assert_eq!(occupant.kind, crate::KIND);
                 let tile = occupant.view.clone().downcast::<VolsliceTile>().unwrap();
                 let shell_focus = cx.focus_handle();
-                *slot.borrow_mut() = Some(Built {
-                    content: occupant.content,
-                    tile: tile.clone(),
-                    frame: frame.clone(),
-                    diagnostics,
-                    shell_focus: shell_focus.clone(),
-                });
+                let content: Rc<dyn TileContent> = occupant.content.into();
                 // Wrapped in `Root`, as `main.rs` wraps the shell: a tile
                 // that opens a field needs one for focus to behave here as
                 // it does in the app.
                 let host = cx.new(|_| ShellStandIn {
-                    focus: shell_focus,
-                    tile,
+                    focus: shell_focus.clone(),
+                    tile: tile.clone(),
+                    content: content.clone(),
                     keymap,
                     matcher: Matcher::default(),
+                    pending_visible: None,
+                    pending_focused: None,
+                });
+                *slot.borrow_mut() = Some(Built {
+                    content,
+                    host: host.clone(),
+                    tile,
+                    frame: frame.clone(),
+                    diagnostics,
+                    shell_focus,
                 });
                 cx.new(|cx| gpui_component::Root::new(host, window, cx))
             })
@@ -192,6 +214,7 @@ fn open_framed(
         Harness {
             tile: built.tile,
             content: built.content,
+            host: built.host,
             factory,
             frame: built.frame,
             data,
@@ -203,6 +226,24 @@ fn open_framed(
 }
 
 impl Harness {
+    /// Deliver visibility and focus as the shell does: from inside its
+    /// render, on the next draw.
+    fn in_draw(
+        &self,
+        vcx: &mut gpui::VisualTestContext,
+        visible: Option<bool>,
+        focused: Option<bool>,
+    ) {
+        self.host.update(vcx, |h, cx| {
+            h.pending_visible = visible;
+            h.pending_focused = focused;
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
     /// Everything submitted since the last drain.
     fn requests(&self) -> Vec<Request> {
         match self.rx.borrow().as_ref() {

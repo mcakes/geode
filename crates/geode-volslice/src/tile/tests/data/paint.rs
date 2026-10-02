@@ -31,9 +31,9 @@ impl Harness {
                 .collect()
         })
     }
-    /// The shell's word that this tile is focused, as its render gives it.
+    /// The shell's word that this tile is focused, given from its render.
     fn focus(&self, vcx: &mut gpui::VisualTestContext) {
-        vcx.update(|_, cx| self.content.set_focused(true, cx));
+        self.in_draw(vcx, None, Some(true));
         self.draw(vcx);
     }
     fn view(&self, vcx: &gpui::VisualTestContext) -> View {
@@ -375,4 +375,22 @@ fn render_formats_nothing_per_frame(cx: &mut gpui::TestAppContext) {
     h.draw(&mut vcx);
     assert_eq!(geode_chart::rebuilds(), paths);
     assert_eq!(h.tile.read_with(&vcx, |t, _| t.chrome_builds()), builds);
+}
+
+/// Showing runs inside the shell's draw, where the tile's notify is dropped
+/// and its self-observer never hears it. A hidden tile with no underlying,
+/// shown that way, still paints the notice the show produced, with no
+/// further notify.
+#[gpui::test]
+fn a_tile_shown_from_the_shells_draw_paints_its_chrome_at_once(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.draw(&mut vcx);
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.footer_notice()), None);
+    h.in_draw(&mut vcx, Some(true), None);
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.footer_notice()),
+        Some("no underlying".into()),
+        "prepared by the show itself"
+    );
+    assert!(painted(&mut vcx, &format!("volslice-notice-{TILE}")));
 }

@@ -58,7 +58,11 @@ data tier's vol door; the crate computes none of them.
   refused, and a launched follower is not prompted.
 - Paint formats nothing. The header text, the strip rows and the footer
   notice are rebuilt when the tile is notified and an input they were
-  built from changed; the hints when the chords change.
+  built from changed, and directly from `set_visible`, which the shell
+  calls inside its draw where the notify is dropped; the hints when the
+  chords change. `set_focused` sends no notify for the same reason: the
+  flag is painted in that frame because the tile's view is an uncached
+  child of the shell's.
 - Every pointer action has its key: a strip press is `enter` (ctrl: `space`),
   a kind chip its digit, the diff chip `d`, the wheel `=`/`-` and `h`/`l`, a
   drag `h`/`l`, the divider `[`/`]`. A strip press acts only on a tile the
