@@ -801,7 +801,10 @@ fn enter_while_loading_does_nothing(cx: &mut gpui::TestAppContext) {
     assert!(m.confirmed.borrow().is_empty());
     assert_eq!(m.notice(), None);
     m.deliver_three();
-    assert!(m.vcx.debug_bounds("action-hints").is_some(), "the full footer");
+    assert!(
+        m.vcx.debug_bounds("action-hints").is_some(),
+        "the full footer"
+    );
     assert!(m.vcx.debug_bounds("action-loading-hints").is_none());
 }
 
@@ -933,7 +936,10 @@ fn a_clicked_action_takes_typing_in_its_choice_and_its_confirm(cx: &mut gpui::Te
         .expect("the action's row paints");
     m.vcx.simulate_click(row.center(), gpui::Modifiers::none());
     draw(&mut m.vcx);
-    assert!(row_menu_titles(&m.shell, &m.vcx).is_none(), "the menu closed");
+    assert!(
+        row_menu_titles(&m.shell, &m.vcx).is_none(),
+        "the menu closed"
+    );
     assert_eq!(m.requested.borrow().len(), 1, "the click asked for values");
 
     m.deliver_three();
@@ -953,7 +959,8 @@ fn a_clicked_action_takes_typing_in_its_choice_and_its_confirm(cx: &mut gpui::Te
         .vcx
         .debug_bounds("action-choice-L3")
         .expect("the L3 row paints");
-    m.vcx.simulate_click(choice.center(), gpui::Modifiers::none());
+    m.vcx
+        .simulate_click(choice.center(), gpui::Modifiers::none());
     draw(&mut m.vcx);
     assert!(
         m.vcx
