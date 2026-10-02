@@ -39,7 +39,7 @@ use crate::keymap_edit::{
     Displacement, Rebind, ResetOutcome, Unbind, apply_rebind_clearing, apply_reset,
     apply_reset_all, apply_unbind_clearing,
 };
-use crate::listfilter::{self, Ranked};
+use crate::listfilter;
 use crate::palette;
 use crate::prepared::{Prepared, RowText};
 // Share the palette's title/category match-index splitter with settings.
@@ -148,12 +148,13 @@ impl KeybindingConfirm {
     }
 }
 
-/// Build the displayed confirmation from the selected row and loaded keymap. Reset
-/// names the key or override count; ResetAll names the parsed user-key count.
+/// Build the displayed confirmation from the selected row and the prepared user-key
+/// count. Reset names the key or override count; ResetAll names `user_bindings`
+/// ([`KeybindingsState::user_bindings`]), counted at derivation, never in render.
 pub fn confirm_prompt(
     confirm: KeybindingConfirm,
     row: Option<&KeybindingRow>,
-    bindings: &[Binding],
+    user_bindings: usize,
 ) -> String {
     let title = row.map(|r| r.title.as_str()).unwrap_or_default();
     match confirm {
@@ -172,7 +173,7 @@ pub fn confirm_prompt(
         KeybindingConfirm::ResetAll => format!(
             "Remove all {} of your keyboard shortcut overrides? Desk and built-in bindings \
              are untouched.",
-            user_binding_count(bindings)
+            user_bindings
         ),
     }
 }
@@ -290,7 +291,8 @@ impl KeybindingsState {
 
 /// Rank rows against their visible title/category text: the fresh ranking the
 /// prepared rows must agree with. Render and handlers read [`KeybindingsState::rows`].
-pub fn visible_rows(state: &KeybindingsState, rows: &[KeybindingRow]) -> Vec<Ranked> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn visible_rows(state: &KeybindingsState, rows: &[KeybindingRow]) -> Vec<listfilter::Ranked> {
     let texts: Vec<String> = rows.iter().map(searchable_text).collect();
     listfilter::rank(&texts, &state.query)
 }
@@ -300,8 +302,9 @@ pub fn visible_rows(state: &KeybindingsState, rows: &[KeybindingRow]) -> Vec<Ran
 /// [`ActionId`] — identity, never position, so a row survives the list
 /// being reordered under it — and this is the one place that identity is
 /// turned back into the index [`KeybindingsState::selected`] speaks.
+#[cfg(any(test, feature = "test-support"))]
 pub fn filtered_position(
-    visible: &[Ranked],
+    visible: &[listfilter::Ranked],
     rows: &[KeybindingRow],
     clicked: &ActionId,
 ) -> Option<usize> {
@@ -1074,7 +1077,6 @@ fn press_verb(shell: &mut ShellView, key: char, window: &mut Window, cx: &mut Co
 fn action_block(
     state: &KeybindingsState,
     row: Option<&KeybindingRow>,
-    bindings: &[Binding],
     entity: &Entity<ShellView>,
     cx: &mut App,
 ) -> AnyElement {
@@ -1092,7 +1094,7 @@ fn action_block(
             }
         });
         return dialog::confirm_row(
-            confirm_prompt(confirm, row, bindings),
+            confirm_prompt(confirm, row, state.user_bindings),
             confirm.yes_label(),
             "keybindings",
             entity,
@@ -1371,13 +1373,7 @@ fn build(
         // The mode pill is supplied by the modal title-extra builder.
         .child(dialog::filter_row(&shell.dialog_input, frozen_query, cx))
         .child(list)
-        .child(action_block(
-            state,
-            row,
-            shell.services.keymap.bindings(),
-            entity,
-            cx,
-        ))
+        .child(action_block(state, row, entity, cx))
         .child(footer)
         .into_any_element()
 }

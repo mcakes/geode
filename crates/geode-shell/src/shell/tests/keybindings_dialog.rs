@@ -1467,7 +1467,7 @@ fn r_on_a_rebound_builtin_removes_the_new_key_and_lifts_the_shadow(cx: &mut gpui
         keybindings_view::confirm_prompt(
             keybindings_view::KeybindingConfirm::Reset,
             Some(&rows[visible[state.selected].row]),
-            s.services.keymap.bindings(),
+            state.user_bindings,
         )
     });
     assert!(
@@ -1544,7 +1544,7 @@ fn shift_r_asks_and_y_removes_every_user_binding(cx: &mut gpui::TestAppContext) 
         keybindings_view::confirm_prompt(
             keybindings_view::KeybindingConfirm::ResetAll,
             None,
-            s.services.keymap.bindings(),
+            s.keybindings.as_ref().unwrap().user_bindings,
         )
     });
     assert!(
@@ -2785,6 +2785,8 @@ fn a_keymap_reload_repaints_the_keybinding_rows(cx: &mut gpui::TestAppContext) {
 }
 
 /// A missed refresh is refused at render, never repaired there.
+// The assertion is debug-only; a release test build paints the stale rows.
+#[cfg(debug_assertions)]
 #[gpui::test]
 #[should_panic(expected = "prepared rows are stale")]
 fn render_refuses_keybinding_rows_a_refresh_missed(cx: &mut gpui::TestAppContext) {
