@@ -5850,10 +5850,10 @@ run_mutation "M12: the bar-model cache key includes today's date" \
 
 run_mutation "M13: FrameRecord omits an empty dimensions table" \
   crates/geode-shell/src/session.rs \
-  '        if !dims.is_empty() {
-            t.insert("dimensions".into(), toml::Value::Table(dims));
-        }' \
-  '        t.insert("dimensions".into(), toml::Value::Table(dims));' \
+  '    if !dims.is_empty() {
+        t.insert("dimensions".into(), toml::Value::Table(dims));
+    }' \
+  '    t.insert("dimensions".into(), toml::Value::Table(dims));' \
   geode-shell a_frame_record_with_no_dimension_selections_writes_no_dimensions_key
 
 # ---- Default view selection -------------------------------------------
@@ -29154,13 +29154,14 @@ run_mutation "link: restore links only a tile whose module exists" \
   '                    if services.workspaces.workspace_of(tile).is_some()' \
   geode-shell a_saved_membership_survives_a_build_without_the_module
 
-# A group's scope advances the generation the session writer polls and is
-# not session state: identical text is not written again, or an emitting
-# tile's cursor would rewrite the file on every move.
+# A group's scope advances the generation the session writer polls; a
+# snapshot whose text, compared without the groups' scopes, equals the last
+# is not written again, or an emitting tile's cursor would rewrite the file
+# on every move.
 run_mutation "link: identical session text is not rewritten" \
   crates/geode-shell/src/shell/session_io.rs \
-  '                if self.last_session_text.as_deref() == Some(text.as_str()) {' \
-  '                if false {' \
+  '            if self.last_session_text.as_deref() == Some(bare.as_str()) {' \
+  '            if false {' \
   geode-shell a_group_scope_change_writes_no_session_file
 
 run_mutation "link: a follow is written to the session" \
@@ -29723,6 +29724,73 @@ run_mutation "link: the scope bar's model is built from the lane" \
   '        let lane = *self;
         // `flip` alone never changes what the bar shows' \
   geode-shell the_bar_model_asked_of_a_followers_view_describes_the_lane
+
+# A group's scope is session state: `[links.<letter>]` in the frame record's
+# scope encoding, an empty scope writing no table. Lost, a follower restored
+# on one underlying shows the whole book under the same chip.
+run_mutation "link: a group scope is written to the session" \
+  crates/geode-shell/src/session.rs \
+  '        scope_to_toml(&links[group.index()], &mut scope);' \
+  '        scope_to_toml(&Scope::default(), &mut scope);' \
+  geode-shell a_group_scope_round_trips_and_an_empty_one_writes_no_table
+
+run_mutation "link: a group scope is read from the session" \
+  crates/geode-shell/src/session.rs \
+  '                links[group.index()] =
+                    scope_from_toml(scope, &format!("links.{key}.scope"), warnings);' \
+  '                let _ = scope_from_toml(scope, &format!("links.{key}.scope"), warnings);' \
+  geode-shell a_group_scope_round_trips_and_an_empty_one_writes_no_table
+
+run_mutation "link: an empty group scope writes no table" \
+  crates/geode-shell/src/session.rs \
+  '        scope_to_toml(&links[group.index()], &mut scope);
+        if scope.is_empty() {' \
+  '        scope_to_toml(&links[group.index()], &mut scope);
+        if false {' \
+  geode-shell a_group_scope_round_trips_and_an_empty_one_writes_no_table
+
+run_mutation "link: a malformed group scope warns" \
+  crates/geode-shell/src/session.rs \
+  '            Some(_) => warnings.push(format!("links.{key}.scope is not a table; ignored")),' \
+  '            Some(_) => {}' \
+  geode-shell a_malformed_group_scope_is_dropped_with_a_warning_and_the_rest_reads
+
+# The periodic writer compares its snapshot without the groups' scopes, so
+# an emitting tile's cursor alone rewrites nothing, and writes them whenever
+# it writes; the quit-time save always writes them.
+run_mutation "link: a group-scope change alone writes nothing" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '        let serialized = session::table_to_string(&table).and_then(|bare| {' \
+  '        session::insert_links(&mut table, &self.group_scopes(cx));
+        let serialized = session::table_to_string(&table).and_then(|bare| {' \
+  geode-shell a_group_scope_change_writes_no_session_file
+
+run_mutation "link: a written snapshot carries the groups' scopes" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '            let text = if session::insert_links(&mut table, &self.group_scopes(cx)) {' \
+  '            let text = if false {' \
+  geode-shell a_group_scope_change_writes_no_session_file
+
+run_mutation "link: the quit-time save writes the groups' scopes" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '            &self.group_scopes(cx),' \
+  '            &Default::default(),' \
+  geode-shell save_session_writes_the_groups_scopes
+
+# A saved group scope is on its group before any occupant exists, and
+# before the flip baseline is seeded, so it is the scope of a restored
+# follower's first query and is not read as a change.
+run_mutation "link: a restored group scope is applied before the first frame" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                        f.restore_group_scope(group, scope.clone());' \
+  '                        let _ = (&f, group, scope);' \
+  geode-shell a_restored_follower_reads_the_saved_group_scope_on_its_first_frame
+
+run_mutation "link: a restored group scope is not a flip" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        let last_flip_groups = frame.read(cx).group_scope_gens();' \
+  '        let last_flip_groups = [0; 4];' \
+  geode-shell a_restored_group_scope_opens_no_barrier_on_the_first_frame_notification
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
