@@ -5,12 +5,6 @@
 //! with a notice rather than guessing a neighbour.
 
 use super::*;
-
-/// A selection a verb took before its edit, and the order it held.
-pub(crate) type TakenSelection = (
-    Option<Selection<At, &'static str>>,
-    Option<crate::core::sort::Held>,
-);
 use crate::core::cell::READ_ONLY;
 use crate::core::package::{self, package_qty};
 use crate::core::select::{
@@ -21,6 +15,12 @@ use crate::core::sheet::OwnShifts;
 use geode_core::grid::selection::Lost;
 use geode_core::pricing::{Instrument, Measure};
 use std::collections::BTreeMap;
+
+/// A selection a verb took before its edit, and the order it held.
+pub(crate) type TakenSelection = (
+    Option<Selection<At, &'static str>>,
+    Option<crate::core::sort::Held>,
+);
 
 /// The strongest of several targets' read-only reasons: [`SPLIT`] over
 /// [`PARTLY_HIDDEN`], so a selection holding both names the grouping.
@@ -89,7 +89,6 @@ impl PricerTile {
         }
     }
 
-    /// Drop the selection and everything prepared from it.
     /// End the selection before a verb's edit, keeping it — with the
     /// painted order it holds under a sort — for [`Self::restore_selection`]
     /// should the edit refuse. The edit's rebuild runs selection-less and
@@ -110,6 +109,7 @@ impl PricerTile {
         self.rebuild(cx);
     }
 
+    /// Drop the selection and everything prepared from it.
     pub(crate) fn clear_selection(&mut self) {
         self.selection = None;
         self.resolved = None;
