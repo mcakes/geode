@@ -916,17 +916,11 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     .doc("dimensions")
                     .map(DerivedDimensions::from_doc)
                     .unwrap_or_default();
-                // Refresh factory settings on ConfigReloaded. A stale_after-only edit does
-                // not emit this event; it takes effect on a later view/presentation/dimensions/
-                // colors reload or restart.
+                // Refresh factory settings on ConfigReloaded. The stale
+                // threshold lives in `app` and arrives with
+                // `AppSettingsReloaded` instead.
                 factory.set_views(views.clone());
                 factory.set_find_style(FindStyle::from_config(config));
-                let stale_after = stale_after_from_config(config);
-                factory.set_stale_after(stale_after);
-                // Every panel shares the one stale threshold and reload trigger.
-                for panel in &panels {
-                    panel.set_stale_after(stale_after);
-                }
                 // Refresh the factory's validation schema from current config. Dataset-only
                 // edits require restart and do not emit ConfigReloaded; a later eligible
                 // reload can update this factory before the service's schema is rebuilt.
@@ -987,6 +981,17 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         }),
                     };
                     shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
+                }
+            }
+            // Queued before the frame's revision notification, so the new
+            // threshold is in the shared cell when each tile's flip re-arms
+            // its stale wake-up.
+            ShellEvent::AppSettingsReloaded => {
+                let stale_after = stale_after_from_config(shell.read(cx).config());
+                factory.set_stale_after(stale_after);
+                // Every panel shares the one stale threshold.
+                for panel in &panels {
+                    panel.set_stale_after(stale_after);
                 }
             }
             ShellEvent::RestartRequired(_) => {}
@@ -5228,6 +5233,88 @@ role = "key"
         assert!(
             reported,
             "the reload path must report the stale presentation name"
+        );
+    }
+
+    /// An edit that changes only `[blotter] stale_after` reaches the blotter
+    /// and panel factories through the real reload route, whose shared cell
+    /// every open tile reads — not only at the next views reload or restart.
+    #[gpui::test]
+    fn a_stale_after_only_reload_reaches_the_tiles(cx: &mut gpui::TestAppContext) {
+        let builtin = vec![
+            LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+            LayerDoc::builtin("app", "[blotter]\nstale_after = \"15m\"\n").unwrap(),
+        ];
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: builtin.clone(),
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let panel = Rc::new(MarketDataFactory::new(
+            handle.clone(),
+            builtin_panel("cvi"),
+            Duration::from_secs(900),
+        ));
+        let (_tx, rx) = crate::events::channel();
+        let bridge = Bridge {
+            panels: vec![panel.clone()],
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
+            pricer: test_pricer(&handle),
+            handle,
+            factory: factory.clone(),
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+            local_datasets: Default::default(),
+            pricer_key: None,
+            underlyings: Default::default(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("app.toml"),
+            "[blotter]\nstale_after = \"2m\"\n",
+        )
+        .unwrap();
+        let candidate = Config::load(&ConfigSources {
+            builtin,
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        shell.update(&mut vcx, |s, cx| s.apply_reload_for_test(candidate, cx));
+        vcx.run_until_parked();
+        assert_eq!(
+            factory.stale_after(),
+            Duration::from_secs(120),
+            "the blotter tiles' shared threshold follows the reload"
+        );
+        assert_eq!(
+            panel.stale_after(),
+            Duration::from_secs(120),
+            "every panel's shared threshold follows the reload"
         );
     }
 

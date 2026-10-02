@@ -266,6 +266,11 @@ impl BlotterFactory {
     pub fn set_stale_after(&self, d: Duration) {
         self.stale_after.set(d);
     }
+
+    /// The threshold every tile from this factory reads (one shared cell).
+    pub fn stale_after(&self) -> Duration {
+        self.stale_after.get()
+    }
 }
 
 impl ModuleFactory for BlotterFactory {

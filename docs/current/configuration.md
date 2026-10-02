@@ -538,6 +538,7 @@ Accepted candidates update runtime state according to their inputs:
 | `expressions`, `datasets`, or `dimensions` | Rebuild named expressions; a changed or redefined entry bumps the frame's config version so a tile whose scope references it requeries |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, or colors | Emit `ConfigReloaded` for the app bridge |
+| `app` | Emit `AppSettingsReloaded`; the bridge hands `blotter.stale_after` to the blotter and panel factories |
 | Sources, datasets, egress, panels, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
@@ -549,7 +550,9 @@ Every accepted reload advances the frame's config revision and republishes
 `Chords`. `UiSettings`, `SeriesSettings`, and `AppClock` are published only
 when their values change. The view-related event is queued before any frame
 notification so the bridge refreshes factory/handle views before tiles observe
-the new revision and submit queries.
+the new revision and submit queries. `AppSettingsReloaded` is queued the same
+way, so a tile's frame flip re-arms its stale wake-up against the new
+threshold.
 
 View and derived-dimension replacements use a latest-value mailbox into the
 data service, so a full request queue cannot permanently lose a configuration
@@ -562,10 +565,11 @@ to the service. This is not an atomic update across factories and workers;
 the handle acknowledges retention, not application. See
 [view replacement](request-delivery.md#view-replacement-and-shutdown).
 
-That handler also rereads the stale threshold and factory validation schema.
-A stale-threshold-only edit does not trigger it, and dataset edits require
-restart. A later eligible reload can therefore update factory settings or
-schema before the running service is rebuilt. Presentation and color-reader
+That handler also rereads the factory validation schema. Dataset edits
+require restart, so a later eligible reload can update the factory schema
+before the running service is rebuilt. The stale threshold lives in `app` and
+reaches the blotter and panel factories through `AppSettingsReloaded`, on its
+own; the pricer reads it in its own revision observer. Presentation and color-reader
 diagnostics append to the retained data-diagnostics lane; the shell remains
 responsible for replacing the current config-diagnostics batch.
 

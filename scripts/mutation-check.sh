@@ -29076,6 +29076,28 @@ run_mutation "silence: the load-note cap warning omits its source" \
   geode-data \
   load_notes_stop_growing_at_the_cap_with_one_last_warning
 
+# A stale_after-only edit reaches the tiles' shared thresholds.
+run_mutation "silence: an app-only reload emits no settings event" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                cx.emit(ShellEvent::AppSettingsReloaded);' \
+  '                let _ = ();' \
+  geode-app \
+  a_stale_after_only_reload_reaches_the_tiles
+
+run_mutation "silence: the settings reload skips the blotter threshold" \
+  crates/geode-app/src/bridge.rs \
+  '                factory.set_stale_after(stale_after);' \
+  '                let _ = stale_after;' \
+  geode-app \
+  a_stale_after_only_reload_reaches_the_tiles
+
+run_mutation "silence: the settings reload skips the panel thresholds" \
+  crates/geode-app/src/bridge.rs \
+  '                    panel.set_stale_after(stale_after);' \
+  '                    let _ = panel;' \
+  geode-app \
+  a_stale_after_only_reload_reaches_the_tiles
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

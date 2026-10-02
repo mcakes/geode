@@ -318,6 +318,11 @@ impl MarketDataFactory {
         self.stale_after.set(d);
     }
 
+    /// The threshold every tile from this factory reads (one shared cell).
+    pub fn stale_after(&self) -> Duration {
+        self.stale_after.get()
+    }
+
     pub fn spec(&self) -> &Arc<PanelSpec> {
         &self.spec
     }

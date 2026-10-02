@@ -87,8 +87,9 @@ has none of them.
   A stale source time takes the warning text tone. It turns stale while the
   tile is idle, too: market-data and the blotter arm one wake-up at the source
   time plus `stale_after` (the blotter on its stalest dataset), re-armed by
-  each delivery, on show and on a frame flip (a reload that changed
-  `stale_after` arrives as one), and dropped while hidden. A newer delivery
+  each delivery, on show and on a frame flip, and dropped while hidden. A
+  reload that changes `stale_after` sets the shared threshold before the
+  frame flips, so that flip re-arms an idle tile against the new value. A newer delivery
   clears the wake-up's verdict, so it paints fresh. The health chip appears
   only while a source the tile reads is PendingTooLong (`pending`), Degraded
   (`degraded`) or Failed (`failed`); its tooltip names the worst source and
