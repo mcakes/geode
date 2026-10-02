@@ -517,9 +517,12 @@ moved since it asked, in which case it is dropped, as a superseded stage is)
 and still answers any barrier the tile was enrolled in, and on return the tile
 requeries only if a counter it follows moved while it was hidden. Closing is
 different: removal calls `TileContent::closed`, and a following tile cancels
-its query by key and answers any open barrier still waiting on it, so closing
-a tile during a scope, grouping or as-of change never holds the others to the
-deadline. `closed` fires only for removal while the window lives; quitting the
+its query by key and answers any open barrier still waiting on it. The shell
+calls `closed` inside its render, where a notify to the frame is dropped: the
+vol slice viewer defers its closing arrival, so the release reaches the other
+tiles at once, while the blotter, timeseries and market-data tiles arrive
+inline and can hold staged tiles to the deadline or the next frame
+notification. `closed` fires only for removal while the window lives; quitting the
 application calls it for no occupant. A tile with its own error and no query
 to send (a blotter whose view is no longer configured, or whose scope names an
 undefined expression) answers the barrier at once, as a failed query does.
