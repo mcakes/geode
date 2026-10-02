@@ -227,6 +227,10 @@ measure already reads. Re-measure on an idle machine before quoting them.
   drift badges; field and provenance ids) and resolves the Colors browse
   swatches per paint; the rows themselves are prepared. Bounded by the
   domain's object count.
+- The keybindings list is not virtualized: each repaint builds elements for
+  every row and formats each row's binding chips (`kbd::binding`), though it
+  derives and ranks nothing. Bounded by the action registry (about 500
+  actions).
 - A real painted frame is not covered by headless Criterion benchmarks. Exact
   GPU submission, text, popup, and whole-window costs need display profiling.
 - Series statistics repeat the bucketing prefix for points, percentiles, and
