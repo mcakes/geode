@@ -31392,6 +31392,14 @@ run_mutation "volslice: a chain-first difference is negated" \
   '                    let sign = 1.0;' \
   geode-volslice swapping_a_curve_chain_pair_negates_the_difference
 
+# Curve minus chain is the curve's vol less the mid: a sign inverted in
+# both orders still negates on a swap.
+run_mutation "volslice: curve minus chain is the curve less the mid" \
+  crates/geode-volslice/src/core/build.rs \
+  '                    let sign = if pair.minuend == kind { 1.0 } else { -1.0 };' \
+  '                    let sign = if pair.minuend == kind { -1.0 } else { 1.0 };' \
+  geode-volslice a_curve_minus_chain_difference_is_the_curve_vol_less_the_mid
+
 # An outcome shorter than its plan (a cancelled batch) builds nothing:
 # indexed, it would pair answers with the wrong roles.
 run_mutation "volslice: a short outcome is not indexed" \

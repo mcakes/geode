@@ -897,6 +897,41 @@ mod tests {
         assert_eq!(curve_first, negated);
     }
 
+    /// `cvi − chain` is the curve's vol at a chain strike less that
+    /// strike's mid, in value and sign: swapping alone cannot tell a
+    /// difference painted upside down in both orders.
+    #[test]
+    fn a_curve_minus_chain_difference_is_the_curve_vol_less_the_mid() {
+        let l = fixture();
+        let s = strip(&l, d(TODAY));
+        let mut st = State {
+            active: Some([d("2026-11-20")].into()),
+            diff: Pair::new(Kind::Cvi, Kind::Chain),
+            ..State::default()
+        };
+        st.reconcile(&s);
+        let p = batch(&st, &l, &s);
+        let o = answer(&p);
+        let b = model(&p, &o, &l, &palette(), st.split, 1).unwrap();
+        let at = p
+            .roles
+            .iter()
+            .position(|r| matches!(r, Role::DiffCurve { .. }))
+            .unwrap();
+        let Ok(VolResult::Slice(curve)) = &o.results[at] else {
+            panic!("the curve at the chain strikes")
+        };
+        let mid = &l.chain_at(d("2026-11-20")).unwrap().mid;
+        let diff = b.model.slots.iter().find(|s| s.axis == Axis::BottomLeft);
+        let SlotKind::Points { mid: ys, .. } = &diff.unwrap().kind else {
+            panic!()
+        };
+        let k = 0;
+        let expected = curve.points[k].vol - mid[k];
+        assert!(expected.abs() > 1e-6, "the fixture separates them");
+        assert_eq!(ys[k], expected);
+    }
+
     #[test]
     fn failed_jobs_become_deduplicated_notices() {
         // 2027-06-18 is past the last term: both curves refuse there, and
