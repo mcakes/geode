@@ -100,6 +100,7 @@ fn app_keymap(factory: &Rc<VolsliceFactory>) -> Keymap {
 struct Built {
     content: Box<dyn TileContent>,
     tile: Entity<VolsliceTile>,
+    frame: Entity<Frame>,
     shell_focus: gpui::FocusHandle,
 }
 
@@ -109,6 +110,11 @@ struct Harness {
     /// own door is what a key, a `:` line and a delivery all arrive through.
     content: Box<dyn TileContent>,
     factory: Rc<VolsliceFactory>,
+    /// The frame entity the tile's handle reads, for the shell doors a
+    /// test drives (`link_for_test`, `post_for_test`, `open_flip`).
+    frame: Entity<Frame>,
+    /// The factory's data handle, for the refusal knob.
+    data: DataHandle,
     /// Every `Request` the tile submitted, in order. Held for the harness's
     /// whole life: dropping the receiver closes the channel and
     /// `DataHandle::send` starts refusing.
@@ -128,7 +134,7 @@ fn open_framed(
 ) -> (Harness, gpui::VisualTestContext) {
     cx.update(gpui_component::init);
     let (data, rx) = DataHandle::for_tests();
-    let factory = Rc::new(VolsliceFactory::new(data));
+    let factory = Rc::new(VolsliceFactory::new(data.clone()));
     let keymap = Rc::new(app_keymap(&factory));
     let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
     let window = cx
@@ -143,7 +149,7 @@ fn open_framed(
                 let occupant = factory.create(
                     TileId(TILE),
                     restored.as_ref(),
-                    bind(frame),
+                    bind(frame.clone()),
                     diagnostics,
                     window,
                     cx,
@@ -154,6 +160,7 @@ fn open_framed(
                 *slot.borrow_mut() = Some(Built {
                     content: occupant.content,
                     tile: tile.clone(),
+                    frame: frame.clone(),
                     shell_focus: shell_focus.clone(),
                 });
                 // Wrapped in `Root`, as `main.rs` wraps the shell: a tile
@@ -180,6 +187,8 @@ fn open_framed(
             tile: built.tile,
             content: built.content,
             factory,
+            frame: built.frame,
+            data,
             rx: RefCell::new(Some(rx)),
         },
         vcx,
@@ -260,3 +269,5 @@ fn a_fresh_tile_asks_nothing_and_shows_no_underlying(cx: &mut gpui::TestAppConte
         SharedString::new_static("no underlying")
     );
 }
+
+mod data;

@@ -138,19 +138,21 @@ impl TileContent for VolsliceContent {
     fn find(&self, _event: FindEvent, _window: &mut Window, _cx: &mut App) {}
 
     fn deliver(&self, delivery: Delivery, window: &mut Window, cx: &mut App) {
+        let _ = window;
         match delivery {
-            // The documents' snapshots and the vol batch's answer: the
-            // tile asks both once it reads an underlying.
-            Delivery::Query(_) => {}
-            Delivery::VolSlices(_) => {}
-            // This tile prices nothing, asks no series and uploads nothing;
-            // an outcome of these addressed here is a routing bug.
+            // The documents' snapshots and the vol batch's answer.
+            Delivery::Query(outcome) => self.tile.update(cx, |t, cx| t.deliver_query(outcome, cx)),
+            Delivery::VolSlices(outcome) => {
+                self.tile.update(cx, |t, cx| t.deliver_vol(outcome, cx))
+            }
+            // This tile prices nothing, asks no series and uploads nothing,
+            // so none of these is ever addressed to it; one that were would
+            // answer nothing it asked.
             Delivery::Price(_) => {}
             Delivery::Series(_) => {}
             Delivery::SeriesFetched { .. } => {}
             Delivery::Upload(_) => {}
         }
-        let _ = (window, cx);
     }
 
     fn set_visible(&self, visible: bool, cx: &mut App) {
