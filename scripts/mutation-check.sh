@@ -28591,9 +28591,15 @@ run_mutation "demo positions: the sentinel is not later" \
 # startup registers the action.
 run_mutation "move lhu: a subtotal in the selection is moved anyway" \
   crates/geode-positions/src/lib.rs \
-  '        return ctx.selection_values(POSITION);' \
-  '        return Ok(ctx.selection.iter().filter_map(|r| r.iter().find(|(c, _)| c == POSITION).map(|(_, v)| v.clone())).collect());' \
+  '        let mut positions = ctx.selection_values(POSITION)?;' \
+  '        let mut positions: Vec<String> = ctx.selection.iter().filter_map(|r| r.iter().find(|(c, _)| c == POSITION).map(|(_, v)| v.clone())).collect();' \
   geode-positions a_selection_with_a_subtotal_disables_move_lhu
+
+run_mutation "move lhu: a position on two selected rows moves twice" \
+  crates/geode-positions/src/lib.rs \
+  '        positions.retain(|p| seen.insert(p.clone()));' \
+  '        positions.retain(|p| seen.insert(p.clone()) || true);' \
+  geode-positions a_position_on_two_selected_rows_moves_once
 
 run_mutation "move lhu: the selection is ignored" \
   crates/geode-positions/src/lib.rs \

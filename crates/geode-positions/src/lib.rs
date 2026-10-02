@@ -21,12 +21,16 @@ const POSITION: &str = "position_ref";
 const LHU: &str = "lhu";
 
 /// The moving positions: the selection's when the target row is inside one
-/// (every row must name one `position_ref`), else the target row's.
-/// `Err(n)`: `n` acting rows name no single position (a subtotal over
-/// several, or a row without one).
+/// (every row must name one `position_ref`), else the target row's. Each
+/// position once, in first-seen order: one position shown on two selected
+/// rows moves (and counts) once. `Err(n)`: `n` acting rows name no single
+/// position (a subtotal over several, or a row without one).
 pub fn moving_positions(ctx: &DimensionContext) -> Result<Vec<String>, usize> {
     if !ctx.selection.is_empty() {
-        return ctx.selection_values(POSITION);
+        let mut seen = std::collections::HashSet::new();
+        let mut positions = ctx.selection_values(POSITION)?;
+        positions.retain(|p| seen.insert(p.clone()));
+        return Ok(positions);
     }
     match ctx.get(POSITION) {
         Some(p) => Ok(vec![p.to_string()]),
@@ -175,6 +179,21 @@ mod tests {
             "every selected row, in selection order, not the target row alone"
         );
         assert_eq!(action(true).available(&ctx), Ok(()));
+    }
+
+    #[test]
+    fn a_position_on_two_selected_rows_moves_once() {
+        let mut ctx = DimensionContext::of(&[("position_ref", "P8")]);
+        ctx.selection = vec![
+            row(&[("lhu", "L1"), ("position_ref", "P8")]),
+            row(&[("lhu", "L1"), ("position_ref", "P7")]),
+            row(&[("lhu", "L1"), ("position_ref", "P8")]),
+        ];
+        assert_eq!(
+            moving_positions(&ctx),
+            Ok(vec!["P8".to_string(), "P7".to_string()]),
+            "each position once, in first-seen order"
+        );
     }
 
     #[test]
