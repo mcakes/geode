@@ -31653,6 +31653,7 @@ run_mutation "volslice: the barrier sees one arrival for both documents" \
                     }' \
   '                    Ok(()) => self.hand_over(
                         tag,
+                        &underlying.clone(),
                         Ok(Arc::new(Fetched {
                             underlying,
                             cvi,
