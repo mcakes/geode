@@ -5692,12 +5692,19 @@ impl PricerTile {
                 // The delegate already recorded the row for the shell's row
                 // menu (`press_context`); this is the cursor's part. A right
                 // press on a row of a live `V` selection leaves the cursor
-                // and the selection alone: the menu acts on one of its rows.
+                // and the selection alone (the menu acts on one of its
+                // rows), but closes an open editor, the bulk one included,
+                // as every gesture does.
                 if self
                     .resolved
                     .as_ref()
                     .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row))
                 {
+                    self.close_editor(window, cx);
+                    if snapshot(self) != before {
+                        self.rebuild_chrome();
+                        cx.notify();
+                    }
                     return;
                 }
                 // Otherwise a plain press's move. No `SelectCell` follows a

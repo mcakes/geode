@@ -2108,3 +2108,23 @@ fn a_right_press_inside_the_open_editor_keeps_it_open(cx: &mut gpui::TestAppCont
     assert_eq!(press_underlying(&h, &mut vcx), None);
     release_the_table_menu(&mut vcx);
 }
+
+/// Inside a `V` selection a right press keeps the selection but closes an
+/// open bulk editor, as every gesture does: a close is a cancel, so its
+/// live steps roll back.
+#[gpui::test]
+fn a_right_press_inside_a_rows_selection_closes_the_bulk_editor(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    step_setup(&h, &mut vcx); // the editor on the 4000 P's strike, rows 0..3
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5001", "fixture: a live step");
+    let before = resolved(&h, &vcx);
+    let t = table_col(&h, &vcx, "strike");
+    right_press_cell(&mut vcx, &format!("pricer-cell-1-{t}"));
+    assert_eq!(h.mode(&mut vcx), "visual", "the editor closed");
+    assert!(h.tile.read_with(&vcx, |t, _| t.editor.is_none()));
+    assert_eq!(resolved(&h, &vcx), before, "the selection stays");
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5000", "the steps rolled back");
+    assert_eq!(press_underlying(&h, &mut vcx), Some(Some("SPX".into())));
+    release_the_table_menu(&mut vcx);
+}
