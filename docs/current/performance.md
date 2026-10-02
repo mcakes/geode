@@ -97,6 +97,11 @@ the measurement log for fixture and hardware details.
 | Line-pricer sorted grouped rebuild | the grouped rebuild above under the same sort (the unsorted one measured 834 µs in the same run; the rank alone 102 µs) | 923 µs |
 | In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
+| Keybinding rows | builtin + 400 synthetic module actions, 200 user overrides: derive and rank, per input change | 667 µs |
+| Keybinding filter keystroke | the same, prepared re-rank | 113 µs |
+| Object browse rows | 500 views: derive and rank, per input change | 188 µs |
+| Object browse filter keystroke | the same, prepared re-rank | 240 µs |
+| Palette paint | 551 items, the rows in view, prepared labels | 275 ns |
 
 Production view queries also carry the roster's context columns
 (`underlying_ref`, `position_ref`, `instrument_ref`; see
@@ -185,10 +190,16 @@ measure already reads. Re-measure on an idle machine before quoting them.
   action registry is fixed once the shell is built, and an object dialog's
   domain is fixed for its life. An in-dialog rebind, unbind or reset, and an
   object create, delete, revert or fork, change the configuration only through
-  `apply_reload`. Settings and the object dialog's Edit, Column and Values
-  stages still derive their rows at each render, key-handling and
-  click-resolution call site; their measured costs are 2 to 13 microseconds.
-  See the [measurement log](../perf.md).
+  `apply_reload`. A refresh after an input change derives and ranks: about
+  0.67 to 0.78 ms for 507 keybinding actions with 200 user overrides, 0.19 to
+  0.40 ms for 500 browse objects. A filter keystroke re-ranks without
+  deriving: 113 µs and 235 to 245 µs. A repaint derives and ranks nothing.
+  Settings and the object dialog's Edit, Column and Values stages are not
+  prepared: they derive their rows at each render, key-handling and
+  click-resolution call site, because one derivation and rank costs 2 to
+  3.5 µs for settings and 2 to 13 µs for the largest demo edit draft, too
+  little to repay a cache key and its refresh seams. See the
+  [measurement log](../perf.md).
 - The palette prepares each item's title and category once per open and its
   highlight ranges once per query, beside the cached ranking; the list is a
   `uniform_list`, so a paint touches only the rows in view and formats no
@@ -206,6 +217,10 @@ measure already reads. Re-measure on an idle machine before quoting them.
 
 ## Known gaps
 
+- Object-dialog paint still formats per-row element ids (layer, override,
+  drift badges; field and provenance ids) and resolves the Colors browse
+  swatches per paint; the rows themselves are prepared. Bounded by the
+  domain's object count.
 - A real painted frame is not covered by headless Criterion benchmarks. Exact
   GPU submission, text, popup, and whole-window costs need display profiling.
 - Series statistics repeat the bucketing prefix for points, percentiles, and

@@ -2586,3 +2586,49 @@ key and click handler paid again: rows derived and ranked from scratch.
 | `palette_rows/paint_rows_typed` | 7.053 µs | 7.183 µs |
 
 Headless model work only: no layout, paint or text shaping.
+
+## Prepared chrome models: after — 2026-10-02
+
+Apple M5 Pro, 18 cores, macOS 26.4, rustc 1.96.0 (ac68faa20 2026-05-25), bench
+profile. The before binary (from the entry above) and the after binary were run
+alternately, before, after, after, before, filtered to `_rows/`, sharing one
+Criterion baseline directory: the printed medians are compared, never the
+"change:" lines. Load average: before round 1 start 5.97 2.74 2.85 (a
+transient; it fell to 2.43 by its end); after round 1 end 3.04 2.67 2.77;
+after round 2 end 1.71 2.31 2.61; before round 2 end 1.67 2.08 2.48. Fixtures
+as in the before entry; the keybinding registry is synthetic (builtin plus 400
+module actions), because `geode-shell` cannot depend on the composition root.
+
+| Benchmark | Before (round 1 / 2) | After (round 1 / 2) | What after measures |
+|---|---:|---:|---|
+| `keybindings_rows/derive_rank_empty` | 692.1 / 691.7 µs | 668.2 / 666.1 µs | one refresh after an input change (open, applied reload) |
+| `keybindings_rows/derive_rank_typed` | 807.9 / 780.2 µs | 779.6 / 775.3 µs | the same with a query |
+| `keybindings_rows/rank_typed` | 108.0 / 106.2 µs | 104.9 / 103.8 µs | ranking alone |
+| `keybindings_rows/prepared_rerank` | — | 113.0 / 113.1 µs | one filter keystroke: `set_query` + re-rank, no derivation |
+| `settings_rows/derive_rank_empty` | 2.20 / 2.22 µs | 2.23 / 2.22 µs | unchanged: settings still derive per render (dropped from the slice) |
+| `settings_rows/derive_rank_typed` | 3.48 / 3.30 µs | 3.34 / 3.39 µs | unchanged |
+| `object_browse_rows/derive_rank_empty` | 196.2 / 189.7 µs | 187.4 / 189.2 µs | one refresh after an input change |
+| `object_browse_rows/derive_rank_typed` | 411.3 / 396.0 µs | 398.0 / 400.3 µs | the same with a query |
+| `object_browse_rows/rank_typed` | 224.4 / 219.9 µs | 203.5 / 213.3 µs | ranking alone |
+| `object_browse_rows/prepared_rerank` | — | 234.9 / 245.5 µs | one filter keystroke: `set_query` + re-rank, no derivation |
+| `object_edit_rows/derive_rank_empty` | 1.79 / 1.79 µs | 1.83 / 1.89 µs | unchanged: the Edit stage still derives per render (dropped) |
+| `object_edit_rows/derive_rank_typed` | 13.24 / 13.42 µs | 13.14 / 12.95 µs | unchanged |
+| `palette_rows/paint_rows_empty` | 39.28 / 40.34 µs | 0.277 / 0.273 µs | one paint: the rows in view (`VISIBLE_ROWS`), prepared labels |
+| `palette_rows/paint_rows_typed` | 7.30 / 6.97 µs | 0.790 / 0.775 µs | the same with a query |
+
+Read per path, not per bench. Per repaint, before paid a `derive_rank_*`
+(keybindings about 0.7 to 0.8 ms, object browse 0.19 to 0.41 ms) and the
+palette paid `paint_rows_*` over every result; after, render reads the
+prepared slices, deriving and ranking nothing, and the palette paints at most
+`VISIBLE_ROWS` rows (0.27 to 0.79 µs, 50 to 140 times less). Per filter
+keystroke, before paid `derive_rank_typed` at least twice (the handler and the
+render): about 1.6 ms for keybindings and 0.8 ms for browse. After, one
+`prepared_rerank`: 113 µs and 235 to 245 µs. The derive-and-rank cost is
+unchanged per refresh and is now paid only when an input changes.
+
+`object_browse_rows/prepared_rerank` is 20 to 30 µs above `rank_typed`: it also
+builds the shown rows (`Shown`, with the highlight ranges) that ranking alone
+does not. No regression otherwise; the settings and object-edit rows are within
+run-to-run noise of before, as expected for paths this slice left alone.
+
+Headless model work only: no layout, paint or text shaping.
