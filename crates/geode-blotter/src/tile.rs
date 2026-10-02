@@ -428,6 +428,15 @@ impl BlotterTile {
             // table selects the row before emitting this, so the cursor
             // is already there; `toggle_row` moves it again regardless.
             TableEvent::DoubleClickedRow(row) => this.toggle_row(*row, cx),
+            // `/`'s headers paint live from the plan (`render_th`) while its
+            // cells come from the display it was installed with; a move
+            // re-installs `/` against the moved plan so the two agree. The
+            // header is not painted while `/` is open, so today this is a
+            // guard for any route that moves a column under an open `/`.
+            TableEvent::MoveColumn(..) => {
+                let complete = this.find_complete(cx);
+                this.refresh_fuzzy_find(complete, cx);
+            }
             _ => {}
         })
         .detach();
@@ -1667,23 +1676,29 @@ impl BlotterTile {
             });
         }
         cx.notify();
-        let complete =
-            self.table
-                .read(cx)
-                .delegate()
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| {
-                    self.find_cache.as_ref().is_some_and(|cache| {
-                        cache.complete && Arc::ptr_eq(&cache.snapshot, snapshot)
-                    }) || snapshot.grouping().is_empty()
-                        || (0..snapshot.rows())
-                            .any(|row| snapshot.tree().depth(row) == snapshot.grouping().len())
-                });
+        let complete = self.find_complete(cx);
         self.refresh_fuzzy_find(complete, cx);
         if !complete {
             self.requery(cx);
         }
+    }
+
+    /// Whether the loaded snapshot already holds every leaf `/` searches:
+    /// a complete cached index for it, no grouping, or a leaf-depth row.
+    fn find_complete(&self, cx: &App) -> bool {
+        self.table
+            .read(cx)
+            .delegate()
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| {
+                self.find_cache
+                    .as_ref()
+                    .is_some_and(|cache| cache.complete && Arc::ptr_eq(&cache.snapshot, snapshot))
+                    || snapshot.grouping().is_empty()
+                    || (0..snapshot.rows())
+                        .any(|row| snapshot.tree().depth(row) == snapshot.grouping().len())
+            })
     }
 
     fn cancel_find_preparation(&mut self) {
@@ -5241,6 +5256,12 @@ mod tests {
     /// A grouped snapshot whose `count` contracts each carry a distinct delta, so
     /// every painted value cell names its row.
     fn fzf_valued_snapshot(count: usize, base: f64) -> Arc<Snapshot> {
+        fzf_measured_snapshot(count, &[("delta01", base)])
+    }
+
+    /// [`fzf_valued_snapshot`]'s tree with one measure column per
+    /// `(name, base)`, each row's value `base + row`.
+    fn fzf_measured_snapshot(count: usize, measures: &[(&str, f64)]) -> Arc<Snapshot> {
         let meta = |name: &str| ColumnMeta {
             name: name.into(),
             attribution_by_depth: vec![Attribution::Additive; 3],
@@ -5276,11 +5297,15 @@ mod tests {
                             .collect(),
                     ),
                 ),
+            ]
+            .into_iter()
+            .chain(measures.iter().map(|&(name, base)| {
                 (
-                    meta("delta01"),
+                    meta(name),
                     TestColumn::F64((0..count + 2).map(|i| Some(base + i as f64)).collect()),
-                ),
-            ],
+                )
+            }))
+            .collect(),
             2,
         ))
     }
@@ -5442,6 +5467,84 @@ mod tests {
             &replacement
         ));
         assert_find_paints_the_formatter(&h.tile, &cx);
+    }
+
+    /// A column move with `/` open re-installs it against the moved plan:
+    /// the header painted over column i (read live from the plan by
+    /// `render_th`) names the column whose values are painted under it.
+    #[gpui::test]
+    fn fzf_follows_a_column_move(cx: &mut gpui::TestAppContext) {
+        use geode_shell::fuzzyfind::FuzzyFind;
+        let (h, mut cx) = open(cx);
+        let grouping = vec!["lhu".to_string(), "underlying_ref".to_string()];
+        // Two measures with disjoint values, so a cell names its column.
+        let snapshot =
+            fzf_measured_snapshot(20, &[("delta01", 0.0), ("daily_trading_pnl", 5000.0)]);
+        h.tile
+            .update(&mut cx, |tile, cx| tile.apply(snapshot, grouping, cx));
+        let results = cx.new(|_| FuzzyFind::default());
+        h.tile.update_in(&mut cx, |tile, window, cx| {
+            tile.start_fuzzy_find(results.downgrade(), window, cx)
+        });
+        cx.run_until_parked();
+        let total = results.read_with(&cx, |r, _| r.result_count());
+        let _ = find_positions(&mut cx, total);
+        let names = |h: &Harness, cx: &gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                let d = t.table.read(cx).delegate();
+                (0..d.columns_count(cx))
+                    .map(|i| d.column(i, cx).name.to_string())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = names(&h, &cx);
+        assert_eq!(before[1..], ["delta01", "daily_trading_pnl"], "{before:?}");
+
+        // The table's own move: the delegate reorders the plan, then the
+        // table emits the event the tile subscribes to.
+        h.tile.update_in(&mut cx, |tile, window, cx| {
+            tile.table.update(cx, |t, cx| {
+                t.delegate_mut().move_column(1, 2, window, cx);
+                cx.emit(TableEvent::MoveColumn(1, 2));
+            })
+        });
+        cx.run_until_parked();
+        let headers = names(&h, &cx);
+        assert_eq!(
+            headers[1..],
+            ["daily_trading_pnl", "delta01"],
+            "{headers:?}"
+        );
+        let cells = h.tile.read_with(&cx, |t, _| t.find_cells.clone().unwrap());
+        cells.borrow().painted.borrow_mut().clear();
+        let _ = find_positions(&mut cx, total);
+        h.tile.read_with(&cx, |t, cx| {
+            let live = t.table.read(cx).delegate().plan.clone().unwrap();
+            let cells = cells.borrow();
+            let prepared = cells.prepared().expect("installed");
+            let painted = cells.painted.borrow();
+            let mut checked = 0;
+            for (&(row, col), text) in painted.iter() {
+                if col == 0 || !cells.cells().contains(row) {
+                    continue;
+                }
+                let expected = crate::core::cache::cell(
+                    &prepared.snapshot,
+                    &live,
+                    prepared.rows[row] as usize,
+                    col,
+                )
+                .map(|c| c.text.to_string())
+                .unwrap_or_default();
+                assert_eq!(
+                    text, &expected,
+                    "cell ({row}, {col}) under header {}",
+                    headers[col]
+                );
+                checked += 1;
+            }
+            assert!(checked > 0, "measure cells painted");
+        });
     }
 
     #[gpui::test]

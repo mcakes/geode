@@ -30,7 +30,10 @@ cargo bench -p geode-blotter   # the pure core
 - `/` cells are formatted in `on_rows` only (`delegate::FindCells`), for the
   rows the result table reports; paint reads. A snapshot landing while `/`
   is open re-indexes and drops every held cell, so no cell of the old
-  snapshot paints under the new rows.
+  snapshot paints under the new rows. A column move (`TableEvent::MoveColumn`)
+  re-installs `/` against the moved plan, because `/`'s headers read the
+  live plan through `render_th`; the main header is not painted while `/` is
+  open, so this guards any future route that moves a column under it.
 - The blotter always groups: `:group none` (the pricer's flat-sheet pin),
   and `none` anywhere in a column list, is refused
   (`core::commands::GROUP_NONE_REFUSED`), because an empty grouping is one
