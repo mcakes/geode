@@ -217,6 +217,9 @@ pub enum CellPointer {
         col: Option<usize>,
         tree: bool,
     },
+    /// A right press on grid row `row` (a cell, the tree cell or beside
+    /// the cells): the tile records it for the shell's row menu.
+    Context { row: usize },
 }
 
 impl EventEmitter<CellPointer> for TableState<SheetDelegate> {}
@@ -1284,6 +1287,16 @@ impl TableDelegate for SheetDelegate {
                     });
                 }),
             )
+            // A right press beside the cells. The table stops a cell's
+            // right press before it bubbles here, so this hears only
+            // presses outside a cell; a double report (the cell's own
+            // `Context` then this) would only re-record the same row.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                    cx.emit(CellPointer::Context { row: row_ix });
+                }),
+            )
     }
 
     /// Paint loading or entry guidance in full-opacity muted text contrast-adjusted
@@ -1710,6 +1723,23 @@ impl SheetDelegate {
                     col,
                     shift: e.modifiers.shift,
                 });
+            }),
+        )
+        // A right press reports its row for the shell's row menu, except
+        // in the open editor's own cell (the editor's, as the left press
+        // rule above). It stops nothing: the shell captures its own.
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                let d = this.delegate_mut();
+                if col.is_some()
+                    && d.editor
+                        .as_ref()
+                        .is_some_and(|ed| ed.row == row_ix && Some(ed.col) == col)
+                {
+                    return;
+                }
+                cx.emit(CellPointer::Context { row: row_ix });
             }),
         )
         .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {

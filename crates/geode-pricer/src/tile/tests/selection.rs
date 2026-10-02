@@ -1923,3 +1923,188 @@ fn the_header_shows_the_mode_icon_while_editing_or_selecting(cx: &mut gpui::Test
         "esc cleared the selection"
     );
 }
+
+// ---- the right press: the shell's row menu at the pointer ----
+
+/// Three lines on three underlyings: grid rows SPX=0, SX5E=1, NDX=2.
+const THREE: [&str; 3] = ["SPX Z26 5000 C", "SX5E Z26 5000 C", "NDX Z26 20000 C"];
+
+fn right_press(vcx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+    vcx.simulate_event(gpui::MouseDownEvent {
+        position: at,
+        modifiers: gpui::Modifiers::default(),
+        button: gpui::MouseButton::Right,
+        click_count: 1,
+        first_mouse: false,
+    });
+    vcx.simulate_event(gpui::MouseUpEvent {
+        position: at,
+        modifiers: gpui::Modifiers::default(),
+        button: gpui::MouseButton::Right,
+        click_count: 1,
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+}
+
+fn right_press_cell(vcx: &mut VisualTestContext, selector: &str) {
+    let at = centre_of(vcx, selector);
+    right_press(vcx, at);
+}
+
+/// gpui-component's table builds its context menu (empty here: the
+/// shell's row menu stands in for it) on every right press, and that
+/// menu's dismiss subscription holds it in a cycle only the table's next
+/// right press breaks, so a test ending after a right press leaks it (the
+/// blotter's tests have the same helper). This breaks it: one more right
+/// press, whose deferred rebuild never runs because the window closes in
+/// the same update.
+fn release_the_table_menu(vcx: &mut VisualTestContext) {
+    let at = centre_of(vcx, "pricer-cell-0-0");
+    vcx.update(|window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Right,
+                position: at,
+                modifiers: gpui::Modifiers::default(),
+                click_count: 1,
+                first_mouse: false,
+            }),
+            cx,
+        );
+        window.remove_window();
+    });
+    vcx.run_until_parked();
+}
+
+/// What the shell's right-press beat reads, through the content.
+fn press_underlying(h: &Harness, vcx: &mut VisualTestContext) -> Option<Option<String>> {
+    vcx.update(|_, cx| h.content.press_context(cx))
+        .map(|ctx| ctx.get("underlying_ref").map(str::to_string))
+}
+
+/// A right press on a row moves the cursor there (a plain press's move)
+/// and records the row: `press_context` names its underlying once.
+#[gpui::test]
+fn a_right_press_moves_the_cursor_and_names_that_rows_underlying(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &THREE);
+    let t = table_col(&h, &vcx, "strike");
+    assert_eq!(press_underlying(&h, &mut vcx), None, "nothing pressed yet");
+    right_press_cell(&mut vcx, &format!("pricer-cell-2-{t}"));
+    assert_eq!(
+        h.cursor(&vcx).map(|c| c.0),
+        Some(2),
+        "the cursor moved to the row"
+    );
+    assert_eq!(press_underlying(&h, &mut vcx), Some(Some("NDX".into())));
+    assert_eq!(press_underlying(&h, &mut vcx), None, "consumed");
+    // The tree cell is a press on its row too.
+    right_press_cell(&mut vcx, "pricer-cell-1-0");
+    assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
+    assert_eq!(press_underlying(&h, &mut vcx), Some(Some("SX5E".into())));
+    release_the_table_menu(&mut vcx);
+}
+
+/// Beside the cells the row itself hears the press.
+#[gpui::test]
+fn a_right_press_beside_the_cells_names_that_row(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &THREE);
+    let views = slim_views(&["qty", "strike"]);
+    vcx.update(|_, cx| {
+        h.factory.reload(
+            views,
+            TemplateSet::builtin(),
+            geode_core::colour::NamedColours::default(),
+            None,
+            std::time::Duration::from_secs(60),
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    let _ = centre_of(&mut vcx, "pricer-cell-1-2");
+    let bounds = vcx
+        .debug_bounds("pricer-cell-1-2")
+        .expect("the last cell is painted");
+    let beside = gpui::point(bounds.right() + gpui::px(20.), bounds.center().y);
+    right_press(&mut vcx, beside);
+    assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
+    assert_eq!(press_underlying(&h, &mut vcx), Some(Some("SX5E".into())));
+    release_the_table_menu(&mut vcx);
+}
+
+/// Inside a `V` selection a right press keeps the cursor and the
+/// selection (the menu acts on a row of it), and the context names the
+/// pressed row, not the cursor's.
+#[gpui::test]
+fn a_right_press_inside_a_rows_selection_keeps_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &THREE);
+    let t = table_col(&h, &vcx, "strike");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "down", Some(2));
+    let before = resolved(&h, &vcx);
+    assert_eq!(
+        before.as_ref().map(|r| (r.0, r.1.clone())),
+        Some((SelectKind::Rows, 0..3))
+    );
+    let cursor = h.cursor(&vcx);
+    assert_eq!(cursor.map(|c| c.0), Some(2));
+    right_press_cell(&mut vcx, &format!("pricer-cell-1-{t}"));
+    assert_eq!(resolved(&h, &vcx), before, "the selection stays");
+    assert_eq!(h.cursor(&vcx), cursor, "the cursor stays");
+    assert_eq!(h.mode(&mut vcx), "visual");
+    assert_eq!(press_underlying(&h, &mut vcx), Some(Some("SX5E".into())));
+    release_the_table_menu(&mut vcx);
+}
+
+/// Outside the selection, or over a `v` block, a right press is a plain
+/// press: the selection clears and the cursor moves.
+#[gpui::test]
+fn a_right_press_outside_the_selection_clears_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &THREE);
+    let t = table_col(&h, &vcx, "strike");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "down", None);
+    assert!(resolved(&h, &vcx).is_some());
+    right_press_cell(&mut vcx, &format!("pricer-cell-2-{t}"));
+    assert_eq!(resolved(&h, &vcx), None);
+    assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2));
+    assert_eq!(press_underlying(&h, &mut vcx), Some(Some("NDX".into())));
+    // A block holding the pressed row is not a row selection.
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.motion(&mut vcx, "up", Some(2));
+    assert_eq!(resolved(&h, &vcx).map(|r| r.0), Some(SelectKind::Block));
+    right_press_cell(&mut vcx, &format!("pricer-cell-1-{t}"));
+    assert_eq!(resolved(&h, &vcx), None);
+    assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
+    release_the_table_menu(&mut vcx);
+}
+
+/// A right press elsewhere cancels an open editor, as a plain press does.
+#[gpui::test]
+fn a_right_press_on_another_cell_cancels_the_open_editor(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &THREE);
+    goto_column(&h, &mut vcx, "strike");
+    let t = table_col(&h, &vcx, "strike");
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.mode(&mut vcx), "insert");
+    right_press_cell(&mut vcx, &format!("pricer-cell-2-{t}"));
+    assert_eq!(h.mode(&mut vcx), "normal");
+    assert_eq!(h.cursor(&vcx), Some((2, t - 1)));
+    assert!(!can_undo(&h, &vcx));
+    release_the_table_menu(&mut vcx);
+}
+
+/// A right press in the open editor's own cell is the editor's: the edit
+/// stays open and no row is recorded.
+#[gpui::test]
+fn a_right_press_inside_the_open_editor_keeps_it_open(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &THREE);
+    goto_column(&h, &mut vcx, "strike");
+    let t = table_col(&h, &vcx, "strike");
+    h.dispatch(&mut vcx, "edit", None);
+    right_press_cell(&mut vcx, &format!("pricer-editor-0-{t}"));
+    assert_eq!(h.mode(&mut vcx), "insert");
+    assert_eq!(press_underlying(&h, &mut vcx), None);
+    release_the_table_menu(&mut vcx);
+}

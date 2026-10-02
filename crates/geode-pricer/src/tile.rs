@@ -719,6 +719,9 @@ pub struct PricerTile {
     /// press's own `DoubleClickedCell` (every press emits `SelectCell`
     /// first, which overwrites it).
     pressed: Option<Option<At>>,
+    /// The grid row the latest right press landed on, until the shell's
+    /// right-press beat takes it through `press_context`.
+    context_pressed: Option<usize>,
     /// A grip drag from its press to its drop, cancel or release
     /// elsewhere (`tile::reorder`).
     pub(crate) row_drag: Option<reorder::RowDragState>,
@@ -1122,6 +1125,7 @@ impl PricerTile {
             last_press_on_name: false,
             click_anchor: None,
             pressed: None,
+            context_pressed: None,
             row_drag: None,
             underlyings: Rc::from([]),
             underlyings_rev: None,
@@ -5373,15 +5377,31 @@ impl PricerTile {
         &self,
         cx: &App,
     ) -> Option<geode_core::context::DimensionContext> {
-        let g = self.cursor_row()?;
-        let mut ctx = match self.underlying_at(g) {
-            Some(u) => geode_core::context::DimensionContext::of(&[("underlying_ref", &u)]),
-            None => geode_core::context::DimensionContext::default(),
-        };
+        let mut ctx = self.context_at(self.cursor_row()?);
         // Where `g .` hangs the row menu: the cursor row's painted
         // lower-left, or `None` (the tile's top-left) while it is off screen.
         ctx.anchor = self.table.read(cx).delegate().cursor_anchor.get();
         Some(ctx)
+    }
+
+    /// The context of the row the latest right press landed on, taken: the
+    /// shell reads it once, one beat after the press, and hangs the menu
+    /// at the pointer (so no anchor). `None` when no press is pending.
+    pub(crate) fn press_context(
+        &mut self,
+        _cx: &mut Context<Self>,
+    ) -> Option<geode_core::context::DimensionContext> {
+        let row = self.context_pressed.take()?;
+        Some(self.context_at(row))
+    }
+
+    /// Grid row `g`'s context: its sole underlying as `underlying_ref`, or
+    /// an empty context when it names none.
+    fn context_at(&self, g: usize) -> geode_core::context::DimensionContext {
+        match self.underlying_at(g) {
+            Some(u) => geode_core::context::DimensionContext::of(&[("underlying_ref", &u)]),
+            None => geode_core::context::DimensionContext::default(),
+        }
     }
 
     /// The one underlying the cursor row names, or `None` with no cursor
@@ -5658,6 +5678,26 @@ impl PricerTile {
                 }
                 self.close_entry(window, cx);
                 (row, col, Some(kind_for(tree)))
+            }
+            CellPointer::Context { row } => {
+                // The row the shell's row menu names (`press_context`).
+                self.context_pressed = Some(row);
+                // A right press on a row of a live `V` selection leaves the
+                // cursor and the selection alone: the menu acts on one of
+                // its rows.
+                if self
+                    .resolved
+                    .as_ref()
+                    .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row))
+                {
+                    return;
+                }
+                // Otherwise a plain press's move. No `SelectCell` follows a
+                // right press, so the bar closes here, as on a drag; the
+                // cursor keeps its column.
+                self.clear_selection();
+                self.close_entry(window, cx);
+                (row, None, None)
             }
         };
         if self.editor.is_some() {
