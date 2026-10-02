@@ -3485,9 +3485,9 @@ run_mutation "commandline: word_at clamps a non-char-boundary cursor down before
 # when the effective configuration no longer requires a restart.
 run_mutation "frame: restart_required clears once sources/datasets match the baseline again (M8)" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '            self.restart_required = restart_message.clone();' \
+  '            self.restart_required = restart_message.clone().map(SharedString::from);' \
   '            if restart_message.is_some() {
-                self.restart_required = restart_message.clone();
+                self.restart_required = restart_message.clone().map(SharedString::from);
             }' \
   geode-shell \
   reverting_a_sources_edit_back_to_the_baseline_clears_restart_required
@@ -5578,7 +5578,7 @@ run_mutation "objectdialog: an edit carries the previous config's diagnostics fo
 # dialog-only notice cannot reach the user on that path.
 run_mutation "objectdialog: a failed write reports only through the dialog notice" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    shell.config_write_error = Some(format!("config not saved — reverted: {message}"));' \
+  '    shell.config_write_error = Some(format!("config not saved — reverted: {message}").into());' \
   '' \
   geode-shell \
   a_write_that_fails_after_the_dialog_closed_still_reports_itself
