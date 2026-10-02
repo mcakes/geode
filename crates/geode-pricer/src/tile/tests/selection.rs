@@ -2128,3 +2128,36 @@ fn a_right_press_inside_a_rows_selection_closes_the_bulk_editor(cx: &mut gpui::T
     assert_eq!(press_underlying(&h, &mut vcx), Some(Some("SPX".into())));
     release_the_table_menu(&mut vcx);
 }
+
+/// Inside a `V` selection the table's own right-press row outline is
+/// dropped: the selection already marks the rows the menu acts on.
+#[gpui::test]
+fn a_right_press_inside_a_rows_selection_drops_the_row_outline(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &THREE);
+    let views = slim_views(&["qty", "strike"]);
+    vcx.update(|_, cx| {
+        h.factory.reload(
+            views,
+            TemplateSet::builtin(),
+            geode_core::colour::NamedColours::default(),
+            None,
+            std::time::Duration::from_secs(60),
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "down", Some(2));
+    let _ = centre_of(&mut vcx, "pricer-cell-1-2");
+    let bounds = vcx
+        .debug_bounds("pricer-cell-1-2")
+        .expect("the last cell is painted");
+    let beside = gpui::point(bounds.right() + gpui::px(20.), bounds.center().y);
+    right_press(&mut vcx, beside);
+    assert!(resolved(&h, &vcx).is_some(), "the selection stays");
+    let outlined = h
+        .tile
+        .read_with(&vcx, |t, cx| t.table.read(cx).right_clicked_row());
+    assert_eq!(outlined, None);
+    release_the_table_menu(&mut vcx);
+}

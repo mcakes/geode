@@ -5694,13 +5694,16 @@ impl PricerTile {
                 // press on a row of a live `V` selection leaves the cursor
                 // and the selection alone (the menu acts on one of its
                 // rows), but closes an open editor, the bulk one included,
-                // as every gesture does.
+                // as every gesture does, and drops the table's own
+                // right-press row outline.
                 if self
                     .resolved
                     .as_ref()
                     .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row))
                 {
                     self.close_editor(window, cx);
+                    self.table
+                        .update(cx, |t, cx| t.set_right_clicked_row(None, cx));
                     if snapshot(self) != before {
                         self.rebuild_chrome();
                         cx.notify();
