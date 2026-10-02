@@ -28543,6 +28543,18 @@ run_mutation "action choose: an empty reply leaves a covered choice loading" \
   '        let _ = at;' \
   geode-shell an_empty_reply_to_a_covered_choice_removes_it
 
+run_mutation "action choose: the loading footer offers enter" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  $'    } else if loading {\n        ("action-loading-hints", ACTION_LOADING_HINTS)' \
+  $'    } else if false {\n        ("action-loading-hints", ACTION_LOADING_HINTS)' \
+  geode-shell enter_while_loading_does_nothing
+
+run_mutation "action confirm: a refused confirm is silent" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '            self.notice(CONFIRM_REFUSED);' \
+  '            let _ = CONFIRM_REFUSED;' \
+  geode-shell a_confirm_under_a_plain_dialog_is_refused_with_a_notice
+
 run_mutation "action confirm: no runs the action" \
   crates/geode-shell/src/shell/row_menu.rs \
   '                Some(ConfirmAnswer::No) => no(shell, window, cx),' \

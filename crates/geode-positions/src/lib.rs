@@ -100,7 +100,6 @@ impl DimensionAction for MoveLhu {
     /// moving positions already share.
     fn run(&self, ctx: &DimensionContext, acx: &mut ActionCx<'_, '_>) {
         acx.choose_value(
-            acx.action_index(),
             ctx.clone(),
             LHU,
             "Move to LHU".into(),

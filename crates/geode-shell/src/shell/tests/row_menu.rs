@@ -566,7 +566,6 @@ impl crate::dimension::DimensionAction for MovingAction {
     }
     fn run(&self, ctx: &DimensionContext, acx: &mut crate::shell::row_menu::ActionCx<'_, '_>) {
         acx.choose_value(
-            acx.action_index(),
             ctx.clone(),
             "lhu",
             "Move to LHU".into(),
@@ -785,6 +784,58 @@ impl Moving {
             .update(|window, cx| shell.update(cx, |s, cx| s.close_modal(window, cx)));
         draw(&mut self.vcx);
     }
+}
+
+/// While loading there is nothing to choose: the footer offers only the
+/// way out, and `enter` changes nothing.
+#[gpui::test]
+fn enter_while_loading_does_nothing(cx: &mut gpui::TestAppContext) {
+    let mut m = moving(cx);
+    assert!(m.vcx.debug_bounds("action-loading-hints").is_some());
+    assert!(m.vcx.debug_bounds("action-hints").is_none());
+    let before = m.target();
+    m.vcx.simulate_keystrokes("enter");
+    draw(&mut m.vcx);
+    assert_eq!(m.depth(), 1, "still open");
+    assert_eq!(m.target(), before, "still loading");
+    assert!(m.confirmed.borrow().is_empty());
+    assert_eq!(m.notice(), None);
+    m.deliver_three();
+    assert!(m.vcx.debug_bounds("action-hints").is_some(), "the full footer");
+    assert!(m.vcx.debug_bounds("action-loading-hints").is_none());
+}
+
+/// A confirm asked while a plain dialog is on top is refused with a
+/// notice, not silently.
+#[gpui::test]
+fn a_confirm_under_a_plain_dialog_is_refused_with_a_notice(cx: &mut gpui::TestAppContext) {
+    let mut m = moving_unopened(cx);
+    m.cover();
+    let shell = m.shell.clone();
+    m.vcx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            let at = s
+                .services
+                .roster
+                .actions()
+                .iter()
+                .position(|a| a.id() == "test::move")
+                .expect("registered");
+            let ctx = DimensionContext::of(&[("position_ref", "P7"), ("lhu", "L1")]);
+            s.run_action_chosen(at, &ctx, "L2", window, cx);
+        })
+    });
+    draw(&mut m.vcx);
+    assert_eq!(m.depth(), 1, "only the cover");
+    assert!(
+        m.vcx
+            .debug_bounds("action-question-Move to LHU L2?")
+            .is_none()
+    );
+    assert_eq!(
+        m.notice().as_deref(),
+        Some(crate::shell::row_menu::CONFIRM_REFUSED)
+    );
 }
 
 /// An empty reply to a choice another dialog covers drops the choice from

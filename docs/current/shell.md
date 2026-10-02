@@ -168,24 +168,27 @@ and `notice(text)` sets the status notice. The notice takes any text, so an
 action can report what it did, not only a fixed refusal. Nothing reports
 whether a handler took a URL, so a notice says only what Geode did.
 
-`choose_value(action, context, column, title, exclude, empty)` opens the
+`choose_value(context, column, title, exclude, empty)` opens the
 shared choice dialog, titled `title`, over `column`'s distinct live values,
 unscoped, minus `exclude`. It asks for them with a `Request::Distinct`
 under the reserved `ACTION_KEY` and a fresh tag, and reads `loading…` until
-they arrive; a query typed meanwhile filters the rows when they do.
+they arrive, its footer offering only `escape`; `enter` does nothing while
+loading, and a query typed meanwhile filters the rows when they do.
 `ShellView::deliver_distinct` routes `ACTION_KEY` replies to the open
 dialog, which drops one whose tag or column is not its own. No values left
 after the exclusion closes the dialog with the notice `empty`; a failed
 fetch closes it with `could not load {column} values: {reason}`. Nothing is
 asked when a choice dialog is already open. A pick closes the dialog first,
-then calls the roster action at index `action` (`ActionCx::action_index`
-for the running action) with `chosen(context, value)`, so a dialog that
+then calls the action that asked (the running one) with
+`chosen(context, value)`, so a dialog that
 `chosen` opens lands on the stack the list was opened over.
 
 `confirm(question, on_yes)` opens a plain y/n dialog asking `question`. `y`,
 `enter`, or the Yes button closes it and then runs `on_yes` with a fresh
 `ActionCx`; `n`, `escape`, or Cancel closes it. Any other bare key is
-consumed; a chord passes to the matcher.
+consumed; a chord or a shift-modified key passes to the matcher. A confirm
+asked while a plain dialog is already on top is refused with the notice
+`another dialog is already open`.
 
 `ShellView::note_command` shows a position-system command's answer as the
 status notice, worded by `geode_core::positions::outcome_notice`, which

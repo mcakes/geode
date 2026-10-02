@@ -25,6 +25,10 @@ use crate::tiling::TileId;
 /// Status notice: the row names no value any kind or action takes.
 pub const NO_ROW_ACTIONS: &str = "no actions for this row";
 
+/// Status notice: an action's confirm was refused because a plain dialog
+/// is already on top.
+pub const CONFIRM_REFUSED: &str = "another dialog is already open";
+
 /// The open row menu.
 pub struct RowMenu {
     menu: Menu<RowPick>,
@@ -76,20 +80,14 @@ pub struct ActionCx<'a, 'b> {
 pub type OnYes = Rc<dyn Fn(&mut ActionCx<'_, '_>)>;
 
 impl ActionCx<'_, '_> {
-    /// The roster index of the action now running (set by `menu_pick`).
-    pub fn action_index(&self) -> usize {
-        self.action
-    }
-
     /// A choice dialog titled `title` over `column`'s distinct live values
     /// (unscoped), minus `exclude`; loading until they arrive. A pick calls
-    /// the roster action at `action`'s `chosen` with the picked value. No
+    /// the running action's `chosen` with the picked value. No
     /// values left closes it with the notice `empty`; a failed fetch closes
     /// it with `could not load {column} values: {reason}`. Asks for nothing
     /// when a choice list is already open.
     pub fn choose_value(
         &mut self,
-        action: usize,
         context: DimensionContext,
         column: &str,
         title: SharedString,
@@ -100,7 +98,7 @@ impl ActionCx<'_, '_> {
         let tag = self.shell.next_picker_tag;
         let opened = choicedialog::open_action_values(
             self.shell,
-            action,
+            self.action,
             context,
             column.to_string(),
             title,
@@ -123,8 +121,16 @@ impl ActionCx<'_, '_> {
 
     /// A y/n dialog asking `question`; yes (`y`, `enter`, the button) runs
     /// `on_yes` with a fresh ActionCx after the dialog closes; no (`n`,
-    /// `escape`, Cancel) closes it. Any other bare key is consumed.
+    /// `escape` with or without modifiers, Cancel) closes it. Any other bare
+    /// key is consumed; a chord or a shift-modified key passes on. Refused,
+    /// with the notice [`CONFIRM_REFUSED`], while a plain dialog (another
+    /// confirm among them) is already on top: the stack holds one plain
+    /// dialog at a time, and a refusal must not read as a silent no.
     pub fn confirm(&mut self, question: SharedString, on_yes: OnYes) {
+        if self.shell.top_kind() == Some(DialogKind::Plain) {
+            self.notice(CONFIRM_REFUSED);
+            return;
+        }
         let action = self.action;
         let yes: ConfirmHandler = Rc::new(move |shell, window, cx| {
             shell.close_modal(window, cx);
@@ -160,8 +166,10 @@ impl ActionCx<'_, '_> {
                 Some(ConfirmAnswer::No) => no(shell, window, cx),
                 None => {}
             }
-            // Chords pass on (a dialog chord may push over the confirm);
-            // every bare key is the confirm's.
+            // Chords pass on (a dialog chord may push over the confirm),
+            // and so does a shift-modified key, whose mods are not NONE;
+            // every bare key, and escape with any modifiers, is the
+            // confirm's.
             ks.mods == crate::keymap::Modifiers::NONE || ConfirmAnswer::from_key(ks).is_some()
         });
         dialog::open_shell_dialog_with_key(

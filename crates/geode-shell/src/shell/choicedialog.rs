@@ -507,6 +507,10 @@ const SCOPE_HINTS: &[Hint] = &[
 /// nothing for Enter to load, so only the way out is offered.
 const SCOPE_EMPTY_HINTS: &[Hint] = &[Hint::Key("escape"), Hint::Text("close")];
 
+/// An action's value choice while its values load: no row to move over and
+/// nothing for Enter to choose, so only the way out is offered.
+const ACTION_LOADING_HINTS: &[Hint] = &[Hint::Key("escape"), Hint::Text("close")];
+
 const ACTION_HINTS: &[Hint] = &[
     Hint::Text("type to filter ·"),
     Hint::Key("up"),
@@ -1059,8 +1063,11 @@ fn build(
     };
     let (_, prefix, hints_selector, hints) = chrome(&state.target);
     let no_scopes = matches!(state.target, Target::Scope { .. }) && state.list.options().is_empty();
+    let loading = matches!(state.target, Target::ActionValue { values: None, .. });
     let (hints_selector, hints) = if no_scopes {
         ("scope-empty-hints", SCOPE_EMPTY_HINTS)
+    } else if loading {
+        ("action-loading-hints", ACTION_LOADING_HINTS)
     } else {
         (hints_selector, hints)
     };
@@ -1085,7 +1092,6 @@ fn build(
         },
     );
     // No saved scope at all: in place of an empty list, say how to make one.
-    let loading = matches!(state.target, Target::ActionValue { values: None, .. });
     let body = if no_scopes {
         no_scopes_hint(muted, cx)
     } else if loading {
