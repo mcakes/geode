@@ -43,14 +43,18 @@ data need not be available in the first frame. Demo series use fixed weekday
 sessions from 14:30 to 21:00 UTC, without holiday or daylight-saving rules.
 `demo_kdb` advertises identities; `demo_rest` exercises manual identity entry.
 
+`demo_positions` carries a Move LHU by rewriting the risk CSVs in the source
+directory, so a move persists across `--demo` launches until the directory is
+deleted. A move to another book's LHU leaves the position's `Book` unchanged.
+
 ## What lives here
 
 | Module | Holds |
 |---|---|
-| `main` | Startup composition: logging, config, registry and keymap, roster (module factories, then the row menu's actions: `add_dimension_actions` registers `geode-nemo`'s two Open in Nemo actions), service, and window. Pure argument parsing and user-path resolution; `config_dirs` reads the environment. |
-| `bridge` | Service setup and module factories (loads `panels` against the registered document kinds and kind actions and builds one market-data factory per accepted panel; refused panels, including one named after another module's kind, become composition diagnostics in the shell's config section), window event routing (including stopped data threads, and the handle's `Busy`-refusal total read on each drained event into `Diagnostics`), catalog refresh/retry (a `Stopped` refusal drops the demand), and forwarding view reloads to the data service (a refused hand-off is a diagnostic). |
-| `events` | Coalesced pending state with a one-slot wakeup channel. Retains publication book unions and highest-tagged query results; upload outcomes have separate `(tile key, tag)` entries; local-write outcomes never coalesce. |
-| `demo` | `--demo`: the temp directory, the emitted sources, the compiled-in demo config layer. |
+| `main` | Startup composition: logging, config, registry and keymap, roster (module factories, then the row menu's actions: `add_dimension_actions` registers `geode-nemo`'s two Open in Nemo actions, then `geode-positions`' Move LHU, disabled unless startup resolved a position service), service, and window. Pure argument parsing and user-path resolution; `config_dirs` reads the environment. |
+| `bridge` | Service setup and module factories (loads `panels` against the registered document kinds and kind actions and builds one market-data factory per accepted panel; refused panels, including one named after another module's kind, become composition diagnostics in the shell's config section), window event routing (including stopped data threads, and the handle's `Busy`-refusal total read on each drained event into `Diagnostics`), catalog refresh/retry (a `Stopped` refusal drops the demand), position-service resolution from `positions.toml` (`positions_configured`), each `DataEvent::Command` routed to `ShellView::note_command`, and forwarding view reloads to the data service (a refused hand-off is a diagnostic). |
+| `events` | Coalesced pending state with a one-slot wakeup channel. Retains publication book unions and highest-tagged query results; upload outcomes have separate `(tile key, tag)` entries; local-write and position-command outcomes never coalesce. |
+| `demo` | `--demo`: the temp directory, the emitted sources, the compiled-in demo config layer (including `positions.toml`), and `DemoPositions` (`demo_positions`), the demo position system: a Move LHU rewrites the `LHU` field in the same risk CSV, then its sentinel with a strictly later `as_of`, after refusing any unknown position before writing. `Book` is not rewritten. |
 | `demo_bus` | Demo-only CVI, dividend and option-chain producers publishing through `ChannelAdapter` and the normal document writers/parsers. The startup burst publishes each key `startup_repeats` times, so the chain producer, which rotates through one expiry per publish, sends every expiry of every underlying before the first cadence wait. A producer's `next` returns `None` to skip a publish: the chain producer prices off the latest CVI document the CVI producer stored for that underlying (`cvi_next`/`chain_next`) and skips until there is one. The same adapter accepts configured uploads, whose bus messages follow subscription ingestion. |
 | `demo_series` | Demo mode's fetch adapter: seeded, span-independent one-minute bars for two dozen identities, behind two sources (`demo_kdb` with a catalogue, `demo_rest` without). |
 | `crash` | Log-file trimming at startup and the process panic hook: marked containment boundaries log without a report; other panics attempt a report before chaining the previous hook. |

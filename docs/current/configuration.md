@@ -63,6 +63,7 @@ The main configuration documents have distinct owners:
 | `views.toml` | Queryable views, joins, columns, expressions, grouping, and sorting |
 | `sources.toml` | File, subscription, and fetch sources with readiness and adapter settings |
 | `egress.toml` | Upload targets: adapter and a per-document address template |
+| `positions.toml` | The one position service: the adapter that takes position commands such as Move LHU |
 | `panels.toml` | Market-data panels: the dataset, document kind, layout, formats, and kind actions of each panel tile kind |
 | `dimensions.toml` | Derived dimensions used for grouping and scope |
 | `groupings.toml` | The nine shared grouping slots |
@@ -313,6 +314,44 @@ Egress changes require restart. Reload can update the active configuration
 representation, but running workers and panel target lists retain their startup
 configuration. The restart indicator compares the layered egress document with
 its startup baseline; restoring those inputs clears the indicator.
+
+## Position service configuration
+
+`positions.toml` names the one position service, the adapter that takes
+position commands (the blotter row menu's [Move
+LHU](features.md#move-lhu)):
+
+```toml
+[service]
+adapter = "demo_positions"
+```
+
+The document is not in the whole-object list above, so layers merge it
+recursively: a higher layer's `adapter` replaces a lower one's.
+
+No document, or a document without a `[service]` table, configures no
+service and reports nothing. A `service` entry that is not a table is an
+error at `positions.service`; a `[service]` without a string `adapter` is an
+error at `positions.service.adapter`. Either configures no service. Unknown
+keys, at the top level or inside `[service]`, are warnings at
+`positions.<key>` or `positions.service.<key>` and are ignored. The reserved
+`config_version` entry is skipped.
+
+Startup adapter resolution separately drops a service whose adapter is not
+registered in this build or exposes no position capability, with an error at
+`positions.service.adapter`. Without a surviving service, Move LHU is
+disabled with `no position service configured`. Resolution does not
+guarantee that the worker starts or that the position system accepts a
+command. See [position commands](data-path.md#position-commands) and
+[`positions.rs`](../../crates/geode-core/src/positions.rs).
+
+Position-service changes require restart. The worker and the action's
+enabled state keep their startup configuration. The restart indicator
+compares the layered positions document with its startup baseline; restoring
+those inputs clears the indicator.
+
+The `--demo` layer supplies `adapter = "demo_positions"`, the demo position
+system that rewrites the demo risk CSVs.
 
 ## Market-data panels
 

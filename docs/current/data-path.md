@@ -55,6 +55,7 @@ The ingestion boundaries have different capacity and replacement rules:
 | Subscription coalescer | One pending document per key; newer documents replace it without moving its release deadline. Already submitted jobs are unaffected. |
 | Fetch worker | Up to 64 waiting requests per source; a refused fetch is reported as an outcome. |
 | Egress worker | Up to 8 waiting uploads per target, behind the one in flight; queue refusal emits an upload error naming the target. |
+| Position worker | Up to 8 waiting commands behind the one in flight; a full queue is refused `position service busy` at once, answered as a command outcome. |
 | Ingest runner | No fixed capacity. Documents and series are FIFO within their queues; files deduplicate by path, size, and source time. |
 
 For queued files, resubmission can promote priority without adding another
@@ -85,7 +86,8 @@ resend. Submission to the runner itself has no shutdown refusal, so producer
 ordering is required. Egress workers close their queue
 first (refusing further submissions), then join; jobs already queued still
 run and answer, so shutdown can wait on a slow or stuck transport — see
-[egress and uploads](#egress-and-uploads) below. Shutdown is not a flush
+[egress and uploads](#egress-and-uploads) below. The position worker stops
+next, the same way. Shutdown is not a flush
 guarantee: the app's quit hook runs the shutdown on the background executor,
 and gpui waits for quit hooks only up to its `SHUTDOWN_TIMEOUT` (200 ms). A
 local write still running or queued when the process exits is lost; DuckDB's
@@ -110,9 +112,10 @@ request loop (`geode-data`), the ingest writer (`geode-ingest`), discovery
 (`geode-pricing`), the vol worker (`geode-vol`), and one thread per fetch
 source (`geode-fetch-<source>`),
 subscribed source (`geode-subscribe-<source>`), and egress target
-(`geode-egress-<target>`). A body that unwinds past every containment boundary
-emits one `DataEvent::ThreadStopped { thread, reason }` carrying the panic
-payload, logs an error, and ends. Nothing restarts it, because a panic that
+(`geode-egress-<target>`), plus the position worker (`geode-positions`). A
+body that unwinds past every containment boundary emits one
+`DataEvent::ThreadStopped { thread, reason }` carrying the panic payload,
+logs an error, and ends. Nothing restarts it, because a panic that
 repeats on every request would otherwise crash-loop. The body runs outside the
 `contained` marker, so the app's panic hook still writes a crash file for it. A
 body that returns — a deliberate shutdown — declares nothing.
@@ -139,6 +142,7 @@ success, and the loop goes on to the next request:
 | Catalog | `Catalog` error for its key and tag |
 | Pricing | `Price` outcome with the error on every submitted line |
 | Upload | `Upload` error for its key, tag, and target |
+| Move LHU | `Command` outcome with the error for its tag |
 | History fetch | The pair's load lane reports `Failed`, then `SeriesFetched` carries the error |
 | Local publish | Error diagnostic and `LocalPublishFailed` |
 | Local forget | Error diagnostic and `ForgetFailed` |
@@ -303,7 +307,8 @@ empty discovery result therefore cannot establish that every path was
 accessible. See [`discovery.rs`](../../crates/geode-data/src/source/discovery.rs)
 and [`sentinel.rs`](../../crates/geode-data/src/source/sentinel.rs).
 
-Adapters expose independent subscription, upload, and fetch capabilities.
+Adapters expose independent subscription, upload, fetch, and position-command
+capabilities.
 The app registers them by name; a duplicate registration warns and replaces
 the earlier adapter. A message sink's successful push acknowledges queue
 admission only. Full or disconnected queues refuse, drop, and count the
@@ -392,6 +397,84 @@ subscription workers, but this does not guarantee that an echoed document
 reaches storage: subscriptions and ingest do not flush all pending work.
 Joining can wait indefinitely on transport I/O and belongs off the UI thread.
 See [`egress.rs`](../../crates/geode-data/src/egress.rs).
+
+## Position commands
+
+A position command asks the position system to change positions; Move LHU
+(`MoveLhuParams`: a tag, the positions, the target LHU) is the one command.
+The service resolves at startup from
+[`positions.toml`](configuration.md#position-service-configuration), which
+names one adapter. The capability is `Adapter::positions()`, which returns
+`None` by default. Like `egress()`, it must return a fresh
+`PositionCommands` handle on each call: `positions::resolve` probes one and
+discards it, then `PositionWorker::spawn` takes another for its thread.
+
+`DataHandle::move_lhu` uses the bounded service channel (`Request::MoveLhu`):
+an `Err(Refusal)` means nothing was admitted and no outcome is owed. Once
+admitted, the service queues the command on the one position worker. A
+refusal there is decided synchronously, as a string, and answered from the
+service thread:
+
+| Refusal | When |
+|---|---|
+| `no position service configured` | `positions.toml` named no surviving service |
+| `position service unavailable: <why>` | The adapter is missing or has no position side at spawn, or the worker thread could not start |
+| `position service busy` | Eight commands already wait behind the one in flight |
+| `position service stopped` | The worker has shut down or died |
+
+The worker (`geode-positions`, supervised) runs one command at a time, in
+submission order, calling the adapter's `move_lhu` inside a panic boundary.
+`Ok` means the position system accepted the move; an adapter error is a
+refusal whose message is the reason; a panic answers `position service
+panicked`, and the worker goes on to the next command. Each outcome is logged
+under `geode::ingest`.
+
+Every admitted command is answered by exactly one `DataEvent::Command`
+(`CommandOutcome`: the requester's tag, the position count, the LHU, and the
+result), a refusal included. A panic in the service's own step is answered
+by the request loop (see [the request loop](#the-request-loop)). The app
+mailbox never coalesces command outcomes, and the bridge hands each to
+`ShellView::note_command`, which sets the status notice (see
+[the row menu](shell.md#row-menu)). A worker that dies outside its boundary
+is declared stopped; commands queued behind it are never answered. There is
+no timeout, retry, or cancellation: an adapter must bound its own calls, or
+a hung call holds every later command and shutdown.
+
+An accepted command changes nothing on screen by itself. The grid learns of
+a move only when a later snapshot carries it, through the source that
+publishes positions. Shutdown closes the queue and joins the worker after
+the commands already queued have run and answered. See
+[`positions.rs`](../../crates/geode-data/src/positions.rs).
+
+### The demo position system
+
+`--demo` registers `demo_positions` (`DemoPositions` in
+[`demo.rs`](../../crates/geode-app/src/demo.rs)), which moves positions by
+rewriting the risk CSVs the `demo` source polls:
+
+- It validates first. Every named position must appear in some CSV, or the
+  whole move is refused `unknown position <p>`, naming the first missing
+  one, before anything is written. The writes that follow are not
+  transactional: a failed write part-way leaves earlier files rewritten.
+- Each affected file keeps its name, so its batch, and only the `LHU` field
+  of the moved rows changes. A file whose rows already name the target LHU
+  is not rewritten.
+- The CSV is replaced before its `.done` sentinel, each through a `.tmp`
+  file and a rename, so the poller never reads a half-written file and the
+  temp file never matches `*.csv`. A CSV newer than its sentinel reads as
+  pending until the sentinel lands.
+- The sentinel's `as_of` advances to the current time in whole seconds, or
+  one second past the previous `as_of` when that is later, so it is
+  strictly later. The next poll (every two seconds) loads the file as a
+  newer generation of the same partitions, replacing the live rows rather
+  than adding a partition.
+
+Only `LHU` is rewritten. The demo LHUs belong to books (`BK000_LHU0`), so a
+move to another book's LHU leaves the position's `Book` field, and its file,
+on the old book: a blotter grouped `book / lhu` shows the new LHU under the
+old book. Moves persist: the demo reuses its `$TMPDIR/geode-demo/<rows>-42`
+directory across `--demo` launches, so delete it to restore the generated
+LHUs.
 
 ## Queries and time travel
 
