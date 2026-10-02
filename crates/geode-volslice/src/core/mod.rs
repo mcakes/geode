@@ -2,3 +2,4 @@
 //! without gpui.
 
 pub mod docs;
+pub mod model;
