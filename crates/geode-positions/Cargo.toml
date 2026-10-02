@@ -1,0 +1,24 @@
+[package]
+name = "geode-positions"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+# Row actions that command the position system (Move LHU). Registered on
+# the roster by geode-app; the shell runs them; the command goes out
+# through the data handle.
+[dependencies]
+geode-core.workspace = true
+geode-shell.workspace = true
+geode-data.workspace = true
+gpui.workspace = true
+
+[dev-dependencies]
+# Match the workspace test features so crate-local tests share its dependency graph.
+geode-core = { workspace = true, features = ["test-support"] }
+geode-shell = { workspace = true, features = ["test-support"] }
+geode-data = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }

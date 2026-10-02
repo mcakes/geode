@@ -39,6 +39,8 @@ geode-timeseries.workspace = true
 geode-pricer.workspace = true
 # Row menu actions registered at the composition root: Open in Nemo.
 geode-nemo.workspace = true
+# Row menu actions registered at the composition root: Move LHU.
+geode-positions.workspace = true
 geode-diagnostics = { path = "../geode-diagnostics" }
 geode-demo-data = { path = "../geode-demo-data" }
 # Register concrete document parsers at the application boundary. Demo producers

@@ -16,6 +16,7 @@ members = [
     "crates/geode-pricer",
     "crates/geode-demo-data",
     "crates/geode-nemo",
+    "crates/geode-positions",
     "crates/geode-app",
 ]
 
@@ -29,6 +30,8 @@ geode-core = { path = "crates/geode-core" }
 geode-shell = { path = "crates/geode-shell" }
 geode-widgets = { path = "crates/geode-widgets" }
 geode-nemo = { path = "crates/geode-nemo" }
+geode-positions = { path = "crates/geode-positions" }
+geode-data = { path = "crates/geode-data" }
 geode-tile = { path = "crates/geode-tile" }
 geode-pricing = { path = "crates/geode-pricing" }
 geode-chart = { path = "crates/geode-chart" }
