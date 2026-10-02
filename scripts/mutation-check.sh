@@ -3941,12 +3941,12 @@ run_mutation "delegate: narrowed positions actually filter what is shown" \
         }
     }
 
-    pub fn set_narrowed' \
+    /// Re-prepare the rows label after `shown` changed.' \
   '            Some(_positions) => self.shown.extend_from_slice(&self.visible),
         }
     }
 
-    pub fn set_narrowed' \
+    /// Re-prepare the rows label after `shown` changed.' \
   geode-blotter \
   narrowing_changes_what_is_shown_and_the_cache_window_follows_shown_rows
 
@@ -3960,7 +3960,7 @@ run_mutation "delegate: narrowed values are positions into visible, not row ids"
         }
     }
 
-    pub fn set_narrowed' \
+    /// Re-prepare the rows label after `shown` changed.' \
   '            Some(positions) => self.shown.extend(
                 self.visible
                     .iter()
@@ -3970,7 +3970,7 @@ run_mutation "delegate: narrowed values are positions into visible, not row ids"
         }
     }
 
-    pub fn set_narrowed' \
+    /// Re-prepare the rows label after `shown` changed.' \
   geode-blotter \
   narrowing_uses_positions_into_visible_not_row_ids_even_when_they_differ
 
@@ -4113,8 +4113,8 @@ run_mutation "tile: a query error keeps the last snapshot" \
 
 run_mutation "tile: the configured threshold is the one used" \
   crates/geode-blotter/src/tile.rs \
-  '                    > self.stale_after.get()' \
-  '                    > Duration::from_secs(15 * 60)' \
+  '            now.signed_duration_since(t).to_std().unwrap_or_default() > self.stale_after.get()' \
+  '            now.signed_duration_since(t).to_std().unwrap_or_default() > Duration::from_secs(15 * 60)' \
   geode-blotter \
   a_tiles_stale_threshold_is_the_factorys_configured_value
 
@@ -30829,12 +30829,8 @@ run_mutation "silence: a market-data flip never re-arms the stale timer" \
 # The blotter arms on its STALEST dataset.
 run_mutation "silence: the blotter arms on its freshest dataset" \
   crates/geode-blotter/src/tile.rs \
-  '                    .map(|t| t.with_timezone(&chrono::Utc))
-                    .collect()' \
-  '                    .map(|t| t.with_timezone(&chrono::Utc))
-                    .max()
-                    .into_iter()
-                    .collect()' \
+  '        let times = self.header.times.iter().filter_map(|t| t.at).collect();' \
+  '        let times = self.header.times.iter().filter_map(|t| t.at).max().into_iter().collect();' \
   geode-blotter \
   an_idle_blotter_turns_its_stalest_time_stale_without_another_event
 
@@ -30850,10 +30846,8 @@ run_mutation "silence: an applied blotter snapshot never arms" \
 # Render reads the timer's verdict.
 run_mutation "silence: blotter render ignores the stale timer" \
   crates/geode-blotter/src/tile.rs \
-  '                    || self
-                        .stale_timer
-                        .fired_for(t.with_timezone(&chrono::Utc), self.stale_after.get())' \
-  '                    || false' \
+  '                || self.stale_timer.fired_for(t, self.stale_after.get())' \
+  '                || false' \
   geode-blotter \
   an_idle_blotter_turns_its_stalest_time_stale_without_another_event
 
@@ -31340,6 +31334,54 @@ run_mutation "chrome rows: palette open ignores recorded usage" \
   $'            &crate::palette_usage::PaletteUsage::new(),\n            unix_now(),' \
   geode-shell \
   a_dispatched_item_leads_the_next_palette_open
+
+# The blotter's `/` cells: a re-index against another display drops every
+# held cell, so no cell of the old snapshot paints under the new rows.
+run_mutation "blotter find: an install keeps the old snapshot's cells" \
+  crates/geode-blotter/src/delegate.rs \
+  $'        if !same {\n            self.cells.clear();\n        }' \
+  '        let _ = same;' \
+  geode-blotter \
+  fzf_repaints_a_replaced_snapshot_from_the_new_values
+
+# The search index arriving for the display `/` opened on keeps its cells;
+# re-formatting them doubles the open's work.
+run_mutation "blotter find: the arriving index re-formats the opened rows" \
+  crates/geode-blotter/src/delegate.rs \
+  '        let same = self.cols == cols' \
+  '        let same = false && self.cols == cols' \
+  geode-blotter \
+  fzf_formats_only_the_rows_it_paints
+
+run_mutation "blotter find: the row report formats nothing" \
+  crates/geode-blotter/src/delegate.rs \
+  '            cell(&p.snapshot, &p.plan, row, c)' \
+  '            { let _ = (p, row, c); None }' \
+  geode-blotter \
+  fzf_formats_only_the_rows_it_paints
+
+run_mutation "blotter footer: a fold leaves the rows label" \
+  crates/geode-blotter/src/delegate.rs \
+  '    if label.0 != n {' \
+  '    if label.0 != n && false {' \
+  geode-blotter \
+  the_footer_rows_label_follows_a_fold_and_is_shared_across_renders
+
+run_mutation "blotter stale: an unparsable time parses as the epoch" \
+  crates/geode-blotter/src/header.rs \
+  '                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())' \
+  '                    .map(|t| chrono::DateTime::parse_from_rfc3339(t).unwrap_or(chrono::DateTime::UNIX_EPOCH.fixed_offset()))' \
+  geode-blotter \
+  prepare_parses_each_time_once_and_leaves_garbage_unparsed
+
+# The stale timer arms on the header model's parsed times, the values render
+# compares; arming on none leaves an idle tile fresh past its deadline.
+run_mutation "blotter stale: the timer arms on no prepared time" \
+  crates/geode-blotter/src/tile.rs \
+  '        let times = self.header.times.iter().filter_map(|t| t.at).collect();' \
+  '        let times = Vec::new();' \
+  geode-blotter \
+  an_idle_blotter_turns_its_stalest_time_stale_without_another_event
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
