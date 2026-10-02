@@ -135,7 +135,9 @@ cargo bench -p geode-blotter   # the pure core
   the cursor, so the emission follows a sort. The tile stores no group; its header reads `link_chips` from its frame
   handle at paint.
 - `g .` opens the shell's row menu on that context. A right press on a cell,
-  or on a row beside its cells, emits `CellPointer::Context`; the tile then
+  or on a row beside its cells, records the cell in the delegate's
+  `pressed_cell` inside the listener (the `press_context` contract) and
+  emits `CellPointer::Context`; the tile then
   keeps the cursor and selection when the row is inside a `V` selection, and
   otherwise clears the selection and moves the cursor there, as a plain
   press does. `press_context` answers that row's context once, with `first`

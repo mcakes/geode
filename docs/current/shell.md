@@ -151,9 +151,12 @@ its one `dimension_context`. Two routes open it:
   asks the occupant's `TileContent::press_context` for the pressed row. The
   tile cell hears the press in the capture phase, so an occupant that stops
   its propagation (gpui-component's table does, on a cell) cannot hide it.
-  Capture runs before the occupant sees the press, and an occupant records
-  its pressed row through an event, so the shell reads `press_context` two
-  deferred effects later (`open_row_menu_after_press`), after that event.
+  The shell reads `press_context` one deferred effect later
+  (`open_row_menu_after_press`): every mouse-down listener, capture and
+  bubble, has run by then, so an occupant records its pressed row
+  synchronously in a mouse-down listener (any phase). Handling it routes
+  through an event may land after the menu opens, and must not move window
+  focus.
   The default answers `None` and nothing opens; an answer opens the menu at
   the pointer. The blotter and the pricer answer it.
 

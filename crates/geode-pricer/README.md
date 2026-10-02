@@ -280,6 +280,12 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   on screen, so the second press of the same double-click lands on a lower
   row. A double-click (and its tree-column cursor move) uses the handed-on
   line.
+- A double-click on a package row's tree cell runs `tree_verb(None)` on it
+  (`space`); only on a package's own row, since `tree_verb` takes a leg to
+  its parent. A chevron press sets `chevron_anchor` to the line it toggled,
+  which the next press's `SelectCell` moves into `pressed_chevron`, so a
+  double-click whose first press was that line's chevron (already a toggle)
+  toggles nothing more.
 - `add_below` with the bar already open (a palette dispatch) refocuses its
   field: the palette's commit focuses the shell root first, and an open bar
   without focus reads `insert` while shell bindings take shifted letters.
@@ -541,11 +547,14 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `CellPointer::Context` (not in the open editor's own cell, whose press is
   the editor's; `is_editor_cell` is the one check for both buttons). The
   table stops a cell's right press after the cell's own listener, so the row
-  hears only presses beside the cells; the shell captures its own. The tile
-  records the row in `context_pressed`; inside a live `V` selection holding
-  it the cursor and selection stay, otherwise it is a plain press's move
-  (selection cleared, editor and entry bar closed, the cursor's column
-  kept). `press_context` takes that row once and answers its context
+  hears only presses beside the cells; the shell captures its own. The
+  listener records the row in the delegate's `pressed_row` before the emit
+  (the `press_context` contract). On the event, inside a live `V` selection
+  holding the row the cursor and selection stay, an open editor (the bulk
+  one included) closes and the table's right-press row outline clears;
+  otherwise it is a plain press's move (selection cleared, editor and entry
+  bar closed, the cursor's column kept). `press_context` takes
+  `pressed_row` once and answers its context
   (`context_at`, which `dimension_context` shares), with no anchor: the
   shell hangs the menu at the pointer.
 

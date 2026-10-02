@@ -1505,7 +1505,7 @@ Normal-mode keys:
 |---|---|
 | `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end; a package typed inside a package lands just after that package) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
 | `shift+o` | The same bar, but the first line lands above the cursor row (on a leg, before that leg in its package; on a package or a top-level line, before it; on the first row, `at top`; on a grouping row, `at end`); each further line lands after the one just added, so a typed run reads top to bottom |
-| `i`, `enter`, double-click | Edit the cell in place (a double-click on a package's tree cell opens or closes it instead; on a group row, anywhere, it does too) with the caret at the end of text; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
+| `i`, `enter`, double-click | Edit the cell in place (a double-click on a package's tree cell, or anywhere on a group row, opens or closes it instead) with the caret at the end of text; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `I` (`shift+i`) | Edit the cell with the caret at the start of text, without selecting it; date fields and choice pickers open as usual |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
@@ -1528,8 +1528,9 @@ out of view); a row with no single underlying shows `no actions for this
 row`. A right-click on a row's cell, its tree cell, or the row beside its
 cells opens the same menu at the pointer, on the clicked row's underlying.
 A right-click inside a `V` row selection keeps the cursor and the
-selection; anywhere else it clears any selection, closes an open editor or
-entry bar, and moves the cursor to the clicked row, keeping its column. A
+selection, closing an open editor (a bulk edit's live steps roll back);
+anywhere else it clears any selection, closes an open editor or entry bar,
+and moves the cursor to the clicked row, keeping its column. A
 right-click inside the open editor's own cell is the editor's and opens no
 row menu; blank space below the lines opens nothing.
 

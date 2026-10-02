@@ -21632,12 +21632,12 @@ run_mutation "shell: the docked tile's captured press ignores the button" \
   $'cx| {\n                                    if false && event.button != MouseButton::Right {' \
   geode-shell a_left_press_never_opens_the_row_menu
 
-# The capture listener runs before the occupant records its press by an
-# event; one defer reads the context ahead of that event.
-run_mutation "shell: a captured right press reads its context one effect early" \
+# The capture listener runs before the occupant's own listener records its
+# press; reading in the capture phase, with no defer, reads nothing.
+run_mutation "shell: a captured right press reads its context before the occupant records it" \
   crates/geode-shell/src/shell/row_menu.rs \
-  $'        cx.defer_in(window, move |_, window, cx| {\n            cx.defer_in(window, move |view, window, cx| {\n                view.open_row_menu_from_press(id, at, window, cx);\n            });\n        });' \
   $'        cx.defer_in(window, move |view, window, cx| {\n            view.open_row_menu_from_press(id, at, window, cx);\n        });' \
+  '        self.open_row_menu_from_press(id, at, window, cx);' \
   geode-shell a_right_press_is_seen_when_the_occupant_stops_propagation
 
 # A verb outside the menu's own closes it first.
@@ -23901,8 +23901,8 @@ run_mutation "row menu: a right press inside the selection drops it" \
 # press_context takes the press: a later call (a stale beat) opens nothing.
 run_mutation "row menu: the press is not consumed" \
   crates/geode-blotter/src/tile.rs \
-  '        let (row, col) = self.pressed.take()?;' \
-  '        let (row, col) = self.pressed?;' \
+  '            .update(cx, |t, _| t.delegate_mut().pressed_cell.take())?;' \
+  '            .update(cx, |t, _| t.delegate_mut().pressed_cell)?;' \
   geode-blotter a_right_press_moves_the_cursor_and_names_the_column
 
 # A press inside a V selection leaves the cursor where it was; the menu is
@@ -23938,6 +23938,20 @@ run_mutation "row menu: a right press beside the cells opens nothing" \
 
 # The row bubbles after a cell's right press; reporting it again at the old
 # cursor column overwrites the pressed column.
+# The press is recorded in the listener itself (the press_context
+# contract), at the cell and beside the cells.
+run_mutation "row menu: a cell's right press records nothing" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    d.pressed_cell = Some((row_ix, col_ix));' \
+  '                    let _ = (row_ix, col_ix);' \
+  geode-blotter a_right_press_moves_the_cursor_and_names_the_column
+
+run_mutation "row menu: a right press beside the cells records nothing" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    d.pressed_cell = Some((row_ix, col));' \
+  '                    let _ = (row_ix, col);' \
+  geode-blotter a_right_press_beside_the_cells_opens_the_rows_context
+
 run_mutation "row menu: a cell's right press is reported twice" \
   crates/geode-blotter/src/delegate.rs \
   '                    if std::mem::take(&mut d.context_reported) {' \
@@ -25014,22 +25028,43 @@ run_mutation "pricer select: a press inside the editor's cell cancels it" \
 # menu); it records no row and never cancels the edit.
 run_mutation "pricer right press: the editor's cell reports a row" \
   crates/geode-pricer/src/delegate.rs \
-  $'                if this.delegate().is_editor_cell(row_ix, col) {\n                    return;\n                }\n                cx.emit(CellPointer::Context { row: row_ix });' \
-  $'                cx.emit(CellPointer::Context { row: row_ix });' \
+  $'                if d.is_editor_cell(row_ix, col) {\n                    return;\n                }\n                d.pressed_row = Some(row_ix);' \
+  '                d.pressed_row = Some(row_ix);' \
   geode-pricer a_right_press_inside_the_open_editor_keeps_it_open
 
-# A right press records its row for the shell's row menu.
-run_mutation "pricer right press: the Context arm records nothing" \
-  crates/geode-pricer/src/tile.rs \
-  '                self.context_pressed = Some(row);' \
-  '                let _ = &self.context_pressed;' \
+# A right press records its row for the shell's row menu in the listener
+# itself (the press_context contract): on a cell, and beside the cells.
+run_mutation "pricer right press: a cell's press records nothing" \
+  crates/geode-pricer/src/delegate.rs \
+  '                d.pressed_row = Some(row_ix);' \
+  '                let _ = &d.pressed_row;' \
   geode-pricer a_right_press_moves_the_cursor_and_names_that_rows_underlying
+
+run_mutation "pricer right press: a press beside the cells records nothing" \
+  crates/geode-pricer/src/delegate.rs \
+  '                    this.delegate_mut().pressed_row = Some(row_ix);' \
+  '                    let _ = this.delegate_mut();' \
+  geode-pricer a_right_press_beside_the_cells_names_that_row
+
+# Inside a V selection the press still closes an open (bulk) editor.
+run_mutation "pricer right press: inside a V selection the bulk editor stays open" \
+  crates/geode-pricer/src/tile.rs \
+  $'                {\n                    self.close_editor(window, cx);\n                    self.table\n                        .update(cx, |t, cx| t.set_right_clicked_row(None, cx));' \
+  $'                {\n                    self.table\n                        .update(cx, |t, cx| t.set_right_clicked_row(None, cx));' \
+  geode-pricer a_right_press_inside_a_rows_selection_closes_the_bulk_editor
+
+# Inside a V selection the table's own right-press row outline is dropped.
+run_mutation "pricer right press: inside a V selection the row outline stays" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    self.close_editor(window, cx);\n                    self.table\n                        .update(cx, |t, cx| t.set_right_clicked_row(None, cx));' \
+  '                    self.close_editor(window, cx);' \
+  geode-pricer a_right_press_inside_a_rows_selection_drops_the_row_outline
 
 # press_context takes the press: a later call (a stale beat) opens nothing.
 run_mutation "pricer right press: the press is not consumed" \
   crates/geode-pricer/src/tile.rs \
-  '        let row = self.context_pressed.take()?;' \
-  '        let row = self.context_pressed?;' \
+  '            .update(cx, |t, _| t.delegate_mut().pressed_row.take())?;' \
+  '            .update(cx, |t, _| t.delegate_mut().pressed_row)?;' \
   geode-pricer a_right_press_moves_the_cursor_and_names_that_rows_underlying
 
 # Inside a V selection holding the pressed row, the cursor and the
@@ -25069,7 +25104,7 @@ run_mutation "pricer double-click: a leg's tree cell collapses its package" \
 # A double-click whose first press was the chevron's toggles once.
 run_mutation "pricer double-click: a chevron's double-click toggles twice" \
   crates/geode-pricer/src/tile.rs \
-  '                    if !self.pressed_chevron' \
+  '                    if !chevron_toggled' \
   '                    if true' \
   geode-pricer a_chevron_double_click_while_the_bar_is_open_keeps_the_package
 
