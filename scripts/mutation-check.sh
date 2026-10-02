@@ -2222,7 +2222,7 @@ run_mutation "keybindings: shift+r resets all without asking" \
 # only report that there is nothing to reset.
 run_mutation "keybindings: the reset-all button paints with nothing to reset" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '        if user_binding_count(bindings) > 0 {
+  '        if state.user_bindings > 0 {
             verbs.push(("shift+r", '"'"'R'"'"', "Reset all"));
         }' \
   '        verbs.push(("shift+r", '"'"'R'"'"', "Reset all"));' \
@@ -2237,10 +2237,10 @@ run_mutation "keybindings: a notice outlives the keystroke it reports on" \
   '    if state.notice.take().is_some() {
         cx.notify();
     }
-    let visible = visible_rows(state, &rows);
+    let visible_len = state.rows.len();
 
     if let Some(pending)' \
-  '    let visible = visible_rows(state, &rows);
+  '    let visible_len = state.rows.len();
 
     if let Some(pending)' \
   geode-shell \
@@ -2258,14 +2258,12 @@ run_mutation "keybindings: a click leaves the previous row's notice standing" \
     if state.confirm.is_some() {
         return;
     }
-    let visible = visible_rows(state, &rows);
-    let Some(ix)' \
+    let Some(ix) = state.rows.position(|r| &r.action == clicked) else {' \
   '    // An armed question owns input until answered; ignore list clicks.
     if state.confirm.is_some() {
         return;
     }
-    let visible = visible_rows(state, &rows);
-    let Some(ix)' \
+    let Some(ix) = state.rows.position(|r| &r.action == clicked) else {' \
   geode-shell \
   clicking_a_row_clears_a_standing_notice
 
@@ -2395,10 +2393,8 @@ run_mutation "keybindings: a row click is dropped while a confirm is armed (spec
   '    if state.confirm.is_some() {
         return;
     }
-    let visible = visible_rows(state, &rows);
-    let Some(ix) = filtered_position(&visible, &rows, clicked) else {' \
-  '    let visible = visible_rows(state, &rows);
-    let Some(ix) = filtered_position(&visible, &rows, clicked) else {' \
+    let Some(ix) = state.rows.position(|r| &r.action == clicked) else {' \
+  '    let Some(ix) = state.rows.position(|r| &r.action == clicked) else {' \
   geode-shell \
   a_row_click_while_a_confirm_is_armed_is_dropped
 
@@ -31179,6 +31175,73 @@ run_mutation "silence: an ended subscription leaves its queue Degraded" \
   '    }' \
   geode-data \
   a_flooded_subscription_reports_its_drops_as_degraded_source_health
+
+# ---- Prepared chrome models ---------------------------------------------
+
+# Every applied reload bumps the revision config dialog rows are keyed by.
+run_mutation "chrome rows: a reload leaves the config revision" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            self.config_revision += 1;' \
+  '            let _ = self.config_revision;' \
+  geode-shell \
+  a_keymap_reload_repaints_the_keybinding_rows
+
+# The reload re-derives every open dialog's rows before anything paints.
+run_mutation "chrome rows: the reload applier leaves dialog rows unrefreshed" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  $'        // Every open dialog re-derives against what this reload applied.\n        self.refresh_dialog_rows(cx);' \
+  '        // Every open dialog re-derives against what this reload applied.' \
+  geode-shell \
+  a_keymap_reload_repaints_the_keybinding_rows
+
+# An in-dialog rebind only writes; the reload it triggers must bump the
+# revision for the row to show the captured binding.
+run_mutation "chrome rows: an in-dialog rebind's reload leaves the config revision" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            self.config_revision += 1;' \
+  '            let _ = self.config_revision;' \
+  geode-shell \
+  a_rebind_inside_the_dialog_repaints_its_row_on_the_reload
+
+# Every dialog key refreshes the rows after the handler, claimed or not.
+run_mutation "chrome rows: a dialog key handler skips the row refresh" \
+  crates/geode-shell/src/shell/dialog.rs \
+  $'        shell.refresh_dialog_rows(cx);\n        claimed' \
+  '        claimed' \
+  geode-shell \
+  escape_clears_the_keybinding_query_and_the_rows_follow
+
+# Typing re-ranks the top dialog's rows from the input's Change.
+run_mutation "chrome rows: typing into a dialog filter skips the row refresh" \
+  crates/geode-shell/src/shell/mod.rs \
+  $'            // Typing changed the top dialog\'s query: re-rank its prepared rows.\n            view.refresh_dialog_rows(cx);' \
+  $'            // Typing changed the top dialog\'s query: re-rank its prepared rows.' \
+  geode-shell \
+  typing_reranks_keybinding_rows_without_re_deriving
+
+# A query change re-ranks the rows already derived; it never re-derives.
+run_mutation "chrome rows: a query change re-derives" \
+  crates/geode-shell/src/prepared.rs \
+  '        let derive_now = self.derived_for.as_ref() != Some(key);' \
+  '        let derive_now = true;' \
+  geode-shell \
+  a_query_change_reranks_without_re_deriving
+
+# The dialog-level twin: typing must not re-derive through the shell seam.
+run_mutation "chrome rows: typing in the keybindings dialog re-derives" \
+  crates/geode-shell/src/prepared.rs \
+  '        let derive_now = self.derived_for.as_ref() != Some(key);' \
+  '        let derive_now = true;' \
+  geode-shell \
+  typing_reranks_keybinding_rows_without_re_deriving
+
+# A missed refresh is refused at render, never painted.
+run_mutation "chrome rows: render never checks the prepared key" \
+  crates/geode-shell/src/shell/rows.rs \
+  '    pub(crate) fn assert_rows_current(&self, _cx: &App) {' \
+  $'    pub(crate) fn assert_rows_current(&self, _cx: &App) {\n        #[allow(unreachable_code)]\n        return;' \
+  geode-shell \
+  render_refuses_keybinding_rows_a_refresh_missed
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
