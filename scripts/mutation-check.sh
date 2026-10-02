@@ -29011,10 +29011,8 @@ run_mutation "silence: a market-data flip never re-arms the stale timer" \
 # The blotter arms on its STALEST dataset.
 run_mutation "silence: the blotter arms on its freshest dataset" \
   crates/geode-blotter/src/tile.rs \
-  '                    .map(|t| t.with_timezone(&chrono::Utc))
-                    .min()' \
-  '                    .map(|t| t.with_timezone(&chrono::Utc))
-                    .max()' \
+  '            .and_then(|s| s.provenance().stalest())' \
+  '            .and_then(|s| s.provenance().datasets.iter().max_by_key(|f| f.as_of.clone()))' \
   geode-blotter \
   an_idle_blotter_turns_its_stalest_time_stale_without_another_event
 
@@ -29097,6 +29095,14 @@ run_mutation "silence: the settings reload skips the panel thresholds" \
   '                    let _ = panel;' \
   geode-app \
   a_stale_after_only_reload_reaches_the_tiles
+
+# Provenance::stalest compares instants, not RFC 3339 text.
+run_mutation "silence: stalest compares offset text" \
+  crates/geode-core/src/snapshot.rs \
+  '            .min_by_key(|(at, _)| *at)' \
+  '            .min_by_key(|(_, f)| f.as_of.clone())' \
+  geode-core \
+  the_stalest_input_compares_instants_not_offset_text
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

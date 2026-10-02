@@ -1914,10 +1914,9 @@ impl BlotterTile {
 
     /// Arm the wake-up at which the snapshot's stalest dataset time turns
     /// stale, while shown; a hidden tile holds none. Idempotent for an
-    /// unchanged (time, threshold) pair. The earliest instant is taken over
-    /// parsed times rather than `Provenance::stalest`'s text order, which
-    /// misorders times written with different offsets; render parses the
-    /// same texts, so the run it calls stalest is the one armed.
+    /// unchanged (time, threshold) pair. `Provenance::stalest` compares
+    /// parsed instants and skips unparsable texts, as render does, so the run
+    /// render calls stalest is the one armed.
     fn arm_stale(&mut self, cx: &mut Context<Self>) {
         if !self.visible {
             self.stale_timer.disarm();
@@ -1929,15 +1928,9 @@ impl BlotterTile {
             .delegate()
             .snapshot
             .as_ref()
-            .and_then(|s| {
-                s.provenance()
-                    .datasets
-                    .iter()
-                    .filter_map(|f| f.as_of.as_deref())
-                    .filter_map(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                    .map(|t| t.with_timezone(&chrono::Utc))
-                    .min()
-            });
+            .and_then(|s| s.provenance().stalest())
+            .and_then(|f| chrono::DateTime::parse_from_rfc3339(f.as_of.as_deref()?).ok())
+            .map(|t| t.with_timezone(&chrono::Utc));
         self.stale_timer.arm(
             stalest,
             self.stale_after.get(),
