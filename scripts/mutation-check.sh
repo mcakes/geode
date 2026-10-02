@@ -29571,6 +29571,16 @@ run_mutation "link: a blotter cursor move tells the shell" \
         }))' \
   geode-blotter a_cursor_move_tells_the_shell_the_emission_changed
 
+# A result held behind the flip barrier is painted by the frame observer,
+# not by a delivery: that promotion must notify the tile, or a link group
+# keeps the scope of the snapshot it replaced.
+run_mutation "link: a promoted snapshot tells the shell the emission changed" \
+  crates/geode-blotter/src/tile.rs \
+  '            // underlying, and a link group keeps the old scope.
+            cx.notify();' \
+  '            // underlying, and a link group keeps the old scope.' \
+  geode-blotter a_snapshot_promoted_by_a_flip_tells_the_shell_the_emission_changed
+
 # A pricer posts its cursor line's underlying, the one `g m` opens on.
 run_mutation "link: the pricer emits the cursor line's underlying" \
   crates/geode-pricer/src/content.rs \

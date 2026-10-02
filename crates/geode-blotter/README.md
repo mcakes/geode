@@ -116,8 +116,11 @@ cargo bench -p geode-blotter   # the pure core
   level, mixed or NULL), which leaves the group's scope as it was. `emits`
   is true before any snapshot: the shell drops a restored membership for a
   tile that answers false right after create. `watch_emission` observes the
-  tile entity, which every cursor move, tree change and delivery notifies.
-  The tile stores no group; its header reads `link_chips` from its frame
+  tile entity, so each route that can change the cursor row's underlying
+  must notify it: a delivery, the cursor sync every motion, press, sort and
+  tree change ends in, and the frame observer's promotion of a result held
+  behind a flip, which no delivery paints. The row read is the shown row at
+  the cursor, so the emission follows a sort. The tile stores no group; its header reads `link_chips` from its frame
   handle at paint.
 - `g .` opens the shell's row menu on that context. A right press on a cell,
   or on a row beside its cells, emits `CellPointer::Context`; the tile then

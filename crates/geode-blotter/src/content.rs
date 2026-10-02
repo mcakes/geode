@@ -203,8 +203,11 @@ impl TileContent for BlotterContent {
             board: Vec::new(),
         }
     }
-    /// Every cursor move, tree change and delivery notifies the tile, so
-    /// observing it covers each way the cursor row's underlying can change.
+    /// The shell hears only what notifies the tile entity. The routes that
+    /// can change the cursor row's underlying each do: a delivery
+    /// (`deliver`), the cursor sync every motion, press, sort and tree
+    /// change ends in (`sync_cursor`), and the promotion of a result held
+    /// behind a flip (`on_frame_changed`), which no delivery paints.
     fn watch_emission(
         &self,
         changed: Rc<dyn Fn(&mut App)>,

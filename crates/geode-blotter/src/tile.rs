@@ -718,6 +718,11 @@ impl BlotterTile {
         let promoted = self.following.on_flip(now, differs);
         if let Promotion::Apply((snapshot, grouping)) = promoted {
             self.apply(snapshot, grouping, cx);
+            // `apply` refreshes the table, not this entity. A held answer
+            // is painted here and by no delivery, so without this the
+            // shell never hears that the cursor row may now name another
+            // underlying, and a link group keeps the old scope.
+            cx.notify();
         }
         if !self.visible {
             return;
@@ -8189,6 +8194,135 @@ mod tests {
         assert_eq!(
             emission_of(&h, &mut cx),
             geode_core::link::Emission::default()
+        );
+    }
+
+    /// The row the emission names is the row on screen. Sorted, the
+    /// display order and the snapshot's part ways: reading the snapshot row
+    /// at the cursor's display index would post the wrong underlying.
+    #[gpui::test]
+    fn the_emission_is_the_shown_rows_underlying_under_a_sort(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered_with_a_dimension(cx);
+        let on = |u: &str| Some(Scope::one("underlying_ref", u));
+        // Ascending on `underlying_ref`: NDX (snapshot row 2) above SPX
+        // (snapshot row 1).
+        assert!(content_act(&h, &mut cx, "motion::right"));
+        assert!(content_act(&h, &mut cx, "blotter::sort_cycle"));
+        let shown = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().shown.clone());
+        assert_eq!(shown, vec![0, 2, 1], "sanity: the sort reordered the rows");
+
+        assert!(content_act(&h, &mut cx, "motion::top"));
+        assert!(content_act(&h, &mut cx, "motion::down"));
+        assert_eq!(
+            emission_of(&h, &mut cx).scope,
+            on("NDX"),
+            "display row 1 is NDX's"
+        );
+        assert!(content_act(&h, &mut cx, "motion::down"));
+        assert_eq!(emission_of(&h, &mut cx).scope, on("SPX"));
+    }
+
+    /// [`delivered_flat`]'s document alone: a root and one `lhu` row per
+    /// `(lhu, underlying_ref)` pair, for a second generation under the same
+    /// view.
+    fn dimension_snapshot(rows: &[(&str, &str)]) -> Arc<Snapshot> {
+        let meta = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: n == "delta01",
+            mixed_flag: None,
+        };
+        let column = |values: Vec<&str>| {
+            TestColumn::Dict(
+                std::iter::once(None)
+                    .chain(values.into_iter().map(|v| Some(v.to_string())))
+                    .collect(),
+            )
+        };
+        let n = rows.len() + 1;
+        Arc::new(Snapshot::for_tests(
+            vec![
+                (meta("lhu"), column(rows.iter().map(|r| r.0).collect())),
+                (
+                    meta("underlying_ref"),
+                    column(rows.iter().map(|r| r.1).collect()),
+                ),
+                (
+                    meta("row_depth"),
+                    TestColumn::I32((0..n).map(|i| i32::from(i > 0)).collect()),
+                ),
+                (meta("delta01"), TestColumn::F64(vec![Some(1.0); n])),
+            ],
+            1,
+        ))
+    }
+
+    /// A result held behind the flip barrier is painted later, by the frame
+    /// observer, not by the delivery that brought it. That promotion must
+    /// reach the shell too: beside another tile answering the same flip, the
+    /// cursor row can name another underlying in the promoted snapshot, and
+    /// the group would keep the old scope until some unrelated repaint.
+    #[gpui::test]
+    fn a_snapshot_promoted_by_a_flip_tells_the_shell_the_emission_changed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut cx) = delivered_with_a_dimension(cx);
+        let on = |u: &str| Some(Scope::one("underlying_ref", u));
+        assert!(content_act(&h, &mut cx, "motion::down"));
+        assert_eq!(emission_of(&h, &mut cx).scope, on("SPX"));
+        let content = content_of(&h);
+        let calls = Rc::new(Cell::new(0u32));
+        let _subscription = cx
+            .update(|_, cx| {
+                let calls = calls.clone();
+                content.watch_emission(Rc::new(move |_| calls.set(calls.get() + 1)), cx)
+            })
+            .expect("an emitter hands the shell a subscription");
+
+        // A scope change, behind a barrier awaiting this tile and another.
+        h.frame.update(&mut cx, |f, cx| {
+            f.shared_mut().set_text(Some("A".into()));
+            f.shared_mut()
+                .open_flip([QueryKey(7), QueryKey(8)], Instant::now());
+            cx.notify();
+        });
+        let asked = next_query(&h.requests);
+        deliver(
+            &h,
+            &mut cx,
+            asked.tag,
+            Ok(dimension_snapshot(&[("L1", "DAX"), ("L2", "NDX")])),
+        );
+        cx.run_until_parked();
+        assert!(
+            h.tile.read_with(&cx, |t, _| t.following.is_staged()),
+            "sanity: the answer waits for the other tile"
+        );
+        assert_eq!(
+            emission_of(&h, &mut cx).scope,
+            on("SPX"),
+            "held, so the painted row still names the old underlying"
+        );
+        let before = calls.get();
+
+        // The other tile answers: the barrier releases and this tile's
+        // frame observer paints the held snapshot.
+        h.frame.update(&mut cx, |f, cx| {
+            f.arrived(QueryKey(8), f.shared().versions());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            emission_of(&h, &mut cx).scope,
+            on("DAX"),
+            "the promoted snapshot's cursor row"
+        );
+        assert!(
+            calls.get() > before,
+            "the promotion announces the change to the shell"
         );
     }
 }
