@@ -564,6 +564,18 @@ fn a_rejected_reload_prepares_its_status_text(cx: &mut gpui::TestAppContext) {
         status.as_deref(),
         Some("config: 1 error(s) — keeping last good")
     );
+    // A second rejection with a different error count re-prepares the text
+    // rather than keeping the first rejection's.
+    let user = tempfile::tempdir().unwrap();
+    std::fs::write(user.path().join("first.toml"), "this is [not toml").unwrap();
+    std::fs::write(user.path().join("second.toml"), "also [not toml").unwrap();
+    let two_errors = reload::load_config(Vec::new(), None, Some(user.path().to_path_buf()));
+    shell.update(&mut vcx, |s, cx| s.apply_reload(two_errors, cx));
+    let status = shell.read_with(&vcx, |s, _| s.reload_status.clone());
+    assert_eq!(
+        status.as_deref(),
+        Some("config: 2 error(s) — keeping last good")
+    );
     shell.update(&mut vcx, |s, cx| s.apply_reload(config_with_mod("alt"), cx));
     assert!(shell.read_with(&vcx, |s, _| s.reload_status.is_none()));
 }
