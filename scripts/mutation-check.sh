@@ -28531,6 +28531,18 @@ run_mutation "action choose: the excluded value is offered" \
   '                .filter(|_| exclude.is_some() || true)' \
   geode-shell delivered_values_fill_the_dialog_without_the_excluded_one
 
+run_mutation "action choose: a covered choice filters by the cover's query" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            .map(|saved| saved.text.clone())' \
+  '            .map(|_| String::new())' \
+  geode-shell a_covered_choice_filters_by_its_own_query
+
+run_mutation "action choose: an empty reply leaves a covered choice loading" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        view.modals.remove(at);' \
+  '        let _ = at;' \
+  geode-shell an_empty_reply_to_a_covered_choice_removes_it
+
 run_mutation "action confirm: no runs the action" \
   crates/geode-shell/src/shell/row_menu.rs \
   '                Some(ConfirmAnswer::No) => no(shell, window, cx),' \

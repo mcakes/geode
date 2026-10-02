@@ -758,6 +758,69 @@ fn a_failed_value_fetch_says_so(cx: &mut gpui::TestAppContext) {
     );
 }
 
+impl Moving {
+    /// Push a plain dialog over whatever is open.
+    fn cover(&mut self) {
+        let shell = self.shell.clone();
+        self.vcx.update(|window, cx| {
+            shell.update(cx, |s, cx| {
+                crate::shell::dialog::open_shell_dialog_with_key(
+                    s,
+                    window,
+                    cx,
+                    crate::shell::dialog::DialogKind::Plain,
+                    "Cover",
+                    |_, _, _| gpui::div().into_any_element(),
+                    None,
+                    false,
+                )
+            })
+        });
+        draw(&mut self.vcx);
+    }
+    /// Close the top dialog.
+    fn close_top(&mut self) {
+        let shell = self.shell.clone();
+        self.vcx
+            .update(|window, cx| shell.update(cx, |s, cx| s.close_modal(window, cx)));
+        draw(&mut self.vcx);
+    }
+}
+
+/// An empty reply to a choice another dialog covers drops the choice from
+/// the stack at once: closing the cover leaves no dead "loading…" dialog.
+#[gpui::test]
+fn an_empty_reply_to_a_covered_choice_removes_it(cx: &mut gpui::TestAppContext) {
+    let mut m = moving(cx);
+    let tag = m.tag();
+    m.cover();
+    assert_eq!(m.depth(), 2, "the cover sits on the loading choice");
+    m.deliver(tag, Ok(vec![("L1", 3)]));
+    assert_eq!(m.notice().as_deref(), Some("no LHU values to move to"));
+    assert_eq!(m.depth(), 1, "only the cover is left");
+    assert!(m.target().is_none(), "the choice state is gone");
+    m.close_top();
+    assert_eq!(m.depth(), 0, "no dead loading dialog under the cover");
+    assert!(m.vcx.debug_bounds("action-loading").is_none());
+    assert_eq!(m.notice().as_deref(), Some("no LHU values to move to"));
+}
+
+/// A query typed while loading still filters the values when they arrive
+/// under a cover: it is read from the choice's own stack entry, not from
+/// the cover's field.
+#[gpui::test]
+fn a_covered_choice_filters_by_its_own_query(cx: &mut gpui::TestAppContext) {
+    let mut m = moving(cx);
+    m.vcx.simulate_input("3");
+    draw(&mut m.vcx);
+    m.cover();
+    m.deliver_three();
+    m.close_top();
+    assert_eq!(m.depth(), 1, "the choice is back on top");
+    assert!(m.vcx.debug_bounds("action-choice-L2").is_none(), "filtered");
+    assert!(m.vcx.debug_bounds("action-choice-L3").is_some());
+}
+
 #[gpui::test]
 fn picking_a_value_asks_to_confirm_and_yes_runs(cx: &mut gpui::TestAppContext) {
     let mut m = moving(cx);

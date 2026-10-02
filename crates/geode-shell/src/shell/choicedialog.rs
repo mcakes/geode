@@ -703,15 +703,32 @@ pub(crate) fn action_values_failed(column: &str, reason: &str) -> String {
 
 /// An `ACTION_KEY` reply. Applied only while the open choice dialog waits
 /// on this tag; anything else is dropped. The values minus the excluded
-/// one, in delivered order, replace the loading row. None left, or a
-/// failed fetch, closes the dialog with the target's notice. The close is
-/// deferred to the target's window: a delivery arrives without one.
+/// one, in delivered order, replace the loading row, filtered by the query
+/// typed while loading: the shared field's text on top, the stack entry's
+/// saved text when another dialog covers the choice. None left, or a failed
+/// fetch, sets the target's notice and removes the dialog: on top, the
+/// close is deferred to the target's window (a delivery arrives without
+/// one); covered, its entry is dropped from the stack at once, since focus
+/// belongs to the cover.
 pub(crate) fn deliver_action_values(
     view: &mut ShellView,
     outcome: DistinctOutcome,
     cx: &mut Context<ShellView>,
 ) {
-    let live = view.dialog_input.read(cx).value().to_string();
+    // The choice's stack entry when another dialog covers it.
+    let covered_at = view
+        .modals
+        .iter()
+        .position(|m| m.kind == dialog::DialogKind::Choice)
+        .filter(|&at| at + 1 < view.modals.len());
+    let live = match covered_at {
+        Some(at) => view.modals[at]
+            .saved_input
+            .as_ref()
+            .map(|saved| saved.text.clone())
+            .unwrap_or_default(),
+        None => view.dialog_input.read(cx).value().to_string(),
+    };
     let Some(state) = view.choice_dialog.as_mut() else {
         return;
     };
@@ -754,6 +771,14 @@ pub(crate) fn deliver_action_values(
     };
     let (window, tag) = (*window, *tag);
     view.notice = Some(notice.into());
+    if let Some(at) = covered_at {
+        // Covered: focus belongs to the cover, so no window is needed. The
+        // entries beneath keep their saved input.
+        view.modals.remove(at);
+        view.choice_dialog = None;
+        cx.notify();
+        return;
+    }
     let entity = cx.entity();
     cx.defer(move |cx| {
         let _ = window.update(cx, |_, window, cx| {
