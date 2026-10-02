@@ -1052,8 +1052,9 @@ pub mod recording {
         /// `create`, in order: a test's proof that nothing wrote the frame
         /// between two occupants of one reconciliation pass.
         pub generation_at_create: Rc<RefCell<Vec<(TileId, u64)>>>,
-        /// One entry per notification of an occupant's view entity, which
-        /// is what repaints it; the shell re-rendering does not.
+        /// One entry per notification of an occupant's view entity: what
+        /// the shell sends a tile whose membership changed. (The shell's
+        /// own repaint re-renders every tile too; that is not counted.)
         pub repaints: Rc<RefCell<Vec<TileId>>>,
     }
 

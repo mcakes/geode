@@ -750,8 +750,10 @@ fn a_tile_that_follows_and_emits_one_group_does_not_loop(cx: &mut gpui::TestAppC
     assert_eq!(notified.get(), 3, "one notification for the one change");
 }
 
-/// The tile's header shows its membership, and the tile's view is its own
-/// entity: the shell repainting does not repaint it.
+/// The tile's header shows its membership, so a membership change notifies
+/// the tile's own view, once, and no other tile's. (The shell's repaint
+/// re-renders every tile as well while tile views are uncached; this pins
+/// the notification, which a cached view would depend on.)
 #[gpui::test]
 fn set_follow_repaints_the_tile(cx: &mut gpui::TestAppContext) {
     let mut rec = RecordingFactory::new("rec");
@@ -1840,6 +1842,56 @@ fn the_status_bar_names_the_group_the_focused_tile_follows(cx: &mut gpui::TestAp
     );
 }
 
+/// The segment belongs to whichever tile holds focus. When the focused
+/// follower closes, focus lands on another tile and the segment is that
+/// tile's: its group if it follows one, absent if it follows nothing. A
+/// label left naming the closed tile's group would point at nothing.
+#[gpui::test]
+fn closing_the_focused_follower_hands_the_segment_to_the_next_focused_tile(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_window, mut vcx, shell, frame) = two_tiles(cx);
+    add_tile(&mut vcx);
+    let focused = |vcx: &gpui::VisualTestContext| {
+        shell.read_with(vcx, |s, _| s.services.workspaces.active().focused_tile())
+    };
+    assert_eq!(focused(&vcx), Some(TileId(3)), "fixture");
+    set_follow(&shell, &mut vcx, TileId(3), Some(Group::A));
+    set_follow(&shell, &mut vcx, TileId(2), Some(Group::B));
+    assert_eq!(following(&shell, &vcx).as_deref(), Some("following A"));
+    assert!(vcx.debug_bounds("status-following").is_some());
+
+    vcx.simulate_keystrokes("ctrl-w");
+    draw(&mut vcx);
+    vcx.run_until_parked();
+    assert_eq!(
+        focused(&vcx),
+        Some(TileId(2)),
+        "focus moved to the tile beside it"
+    );
+    assert!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(3)).is_empty()),
+        "fixture: the closed tile left its group"
+    );
+    assert_eq!(
+        following(&shell, &vcx).as_deref(),
+        Some("following B"),
+        "the segment names the newly focused tile's group"
+    );
+    assert!(vcx.debug_bounds("status-following").is_some());
+
+    vcx.simulate_keystrokes("ctrl-w");
+    draw(&mut vcx);
+    vcx.run_until_parked();
+    assert_eq!(focused(&vcx), Some(TileId(1)), "focus moved again");
+    assert_eq!(
+        following(&shell, &vcx),
+        None,
+        "the newly focused tile follows nothing"
+    );
+    assert!(vcx.debug_bounds("status-following").is_none());
+}
+
 /// The segment names what the tile follows. A tile that only emits takes
 /// nothing from its group, so the bar says nothing about it.
 #[gpui::test]
@@ -1859,9 +1911,10 @@ fn emitting_alone_shows_no_following_segment(cx: &mut gpui::TestAppContext) {
 }
 
 /// The label carries the single underlying the group's scope names, and
-/// follows it. The second change reaches the frame from the emitting tile
-/// with no shell handler in between: the frame's notification alone has to
-/// repaint the bar.
+/// follows it. The second change starts at the emitting tile, with no shell
+/// door called: the tile notifies, the shell's deferred pull posts its
+/// emission to the frame, and the frame's notification reaches
+/// `on_frame_changed`, which notifies the shell. The bar repaints from that.
 #[gpui::test]
 fn the_following_segment_tracks_the_groups_scope(cx: &mut gpui::TestAppContext) {
     let (services, emitter) = emitting_services(Emission {

@@ -118,17 +118,20 @@ pub fn chip_paint_on(theme: &Theme, tone: Tone, surface: Hsla) -> ChipPaint {
     paint
 }
 
-/// A neutral chip whose text carries `color`: an identity the trader
-/// assigned (a link group), not a state. The fill is the neutral chip's;
-/// the text is `color` floored to the small-text ratio against that fill on
-/// `surface`. A generated hue arrives floored only for a graphic against
-/// the background, which is short of what chip text on a fill needs.
+/// A solid chip in `color`: an identity the trader assigned (a link
+/// group), not a state. The fill is `color` exactly as given, so whatever
+/// the caller guarantees about it (its contrast against the surface, its
+/// distance from its siblings) holds for what is painted; a floor applied
+/// to the color here would move it out from under that guarantee. The text
+/// starts from the theme's background, the pair a color floored against
+/// that background already contrasts with, and is floored to the
+/// small-text ratio against the fill on `surface`, as the solid `Active`
+/// chip's text is.
 pub fn colored(theme: &Theme, color: Hsla, surface: Hsla) -> ChipPaint {
-    let neutral = chip_paint_on(theme, Tone::Neutral, surface);
     let surface = to_hsla(over(surface, to_rgb(theme.background)));
     ChipPaint {
-        fill: neutral.fill,
-        text: text_on(color, neutral.fill, surface),
+        fill: Some(color),
+        text: text_on(theme.background, Some(color), surface),
     }
 }
 
@@ -303,15 +306,17 @@ mod tests {
         );
     }
 
-    /// A group's color is the text of its header chip. The generated hue
-    /// is floored for a graphic (3:1) against the background, not for small
-    /// text on the chip's fill, so `colored` must bring it to the text
-    /// floor on every bundled theme.
+    /// A colored chip's fill is the color it was given, unchanged: what a
+    /// caller guards (a link group's color and its separation from the
+    /// other groups) is then what is painted. The text on it clears the
+    /// text floor on every bundled theme, whatever lightness the theme's
+    /// floor left the fill at.
     #[gpui::test]
     fn a_colored_chip_is_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
         use geode_core::link::Group;
         cx.update(gpui_component::init);
-        let (service, _) = crate::theme::load_bundled();
+        let (service, warnings) = crate::theme::load_bundled();
+        assert!(warnings.is_empty(), "{warnings:?}");
         let mut failures = Vec::new();
         let mut checked = 0;
         for name in service.names() {
@@ -323,19 +328,17 @@ mod tests {
                     checked += 1;
                     let color = crate::link::group_color(theme, group);
                     let paint = colored(theme, color, theme.background);
-                    assert_eq!(
-                        paint.fill,
-                        chip_paint(theme, Tone::Neutral).fill,
-                        "{name}: the neutral chip's fill"
-                    );
+                    assert_eq!(paint.fill, Some(color), "{name}: the fill is the color");
                     if !is_readable(theme, &paint) {
                         failures.push(format!("{name}: group {}", group.letter()));
                     }
                 }
             });
         }
+        // Four groups on each of the 44 bundled themes: a theme that drops
+        // out of the bundle fails here instead of passing unseen.
         assert!(
-            checked >= 4 * 40,
+            checked >= 4 * 44,
             "the sweep saw {checked} checks: bundled themes missing?"
         );
         assert!(

@@ -184,8 +184,12 @@ impl ShellView {
         });
     }
 
-    /// Repaint a tile whose header shows its membership. The tile's view is
-    /// its own entity; the shell re-rendering does not repaint it.
+    /// Notify a tile's own view when its membership changes: its header
+    /// shows the membership, and whatever observes the view hears that it
+    /// changed. Tile views are not cached today, so the shell's own repaint
+    /// already re-renders every tile and the chip would appear without
+    /// this. It is kept so the header stays right if a tile view is ever
+    /// cached, when only a notification to the view itself repaints it.
     fn repaint_tile(&self, tile: TileId, cx: &mut Context<Self>) {
         if let Some(o) = self.occupants.get(&tile) {
             App::notify(cx, o.view.entity_id());

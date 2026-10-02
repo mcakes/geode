@@ -28,18 +28,20 @@ use crate::shell::colours::{anchors_from_theme, to_hsla, tokens_from_theme};
 use crate::tiling::TileId;
 
 /// Each group's hue in degrees on the theme's own wheel, in `Group::ALL`
-/// order. Themes name no group colors, so these are generated: spread
-/// around the wheel so that, after the readability floor has moved their
-/// lightness, the four still read apart. Guarded on every bundled theme by
-/// `every_bundled_theme_keeps_the_group_colors_readable_and_distinct`; a
-/// hue changed here without that sweep can merge two groups on a theme
-/// nobody looked at. These four are the best the sweep found near an even
-/// spread: a few degrees either way brings two groups together on a
-/// low-chroma or light theme.
+/// order. Themes name no group colors, so these are generated, spread
+/// around the wheel. The readability floor then moves each one's lightness
+/// toward the foreground, which on a low-chroma or light theme brings hues
+/// together. `every_bundled_theme_keeps_the_group_colors_readable_and_distinct`
+/// holds the four a minimum distance apart, as painted, on every bundled
+/// theme; a hue changed here without that sweep can merge two groups on a
+/// theme nobody looked at. These four are the nearest to an even spread
+/// that the sweep passes: a few degrees either way fails it.
 const HUES: [f32; 4] = [215.0, 25.0, 285.0, 130.0];
 
 /// A group's color under `theme`: its hue between the theme's anchors,
 /// floored to the generated-color contrast against the theme's background.
+/// A surface paints it unchanged (a chip's fill through `chip::colored`):
+/// a second floor applied to it would move it out from under the sweep.
 /// Resolved per call from the live theme, so a theme change shows on the
 /// next paint; a caller painting many marks per frame resolves once.
 pub fn group_color(theme: &Theme, group: Group) -> Hsla {
@@ -437,31 +439,39 @@ mod tests {
         assert_eq!(generation, 0, "a board post draws no scope generation");
     }
 
-    /// How far apart two group colors must stay in OKLab. Lower than the
-    /// chart palette's 0.07 because a group's mark always carries its
+    /// How far apart two group chips' fills must stay in OKLab. Lower than
+    /// the chart palette's 0.07 because a group's mark always carries its
     /// letter: the letter is the identity and the color a second cue,
-    /// where a chart series has its color alone. 0.07 is also out of
-    /// reach: no four hues floored for readability hold it on every
-    /// bundled theme, and the best tuple on a 5-degree grid reaches about
-    /// 0.054.
+    /// where a chart series has its color alone. 0.07 is also out of reach
+    /// for four `Tone::Normal` hues: none hold it on every bundled theme,
+    /// and the best tuple on a 5-degree grid reaches about 0.054.
     const GROUP_SEPARATION: f32 = 0.05;
 
-    /// On every bundled theme each group color must clear the
-    /// generated-color floor against the background and stand apart from
-    /// the other three, or two groups read as one at a glance. The
-    /// separation is measured after the floor, which moves lightness and
-    /// can bring two hues together.
+    /// The bundled themes today. A theme file that fails to parse is
+    /// absent from the service without an error, so a sweep that only
+    /// counted "many" would pass with one missing.
+    const BUNDLED_THEMES: usize = 44;
+
+    /// The sweep measures the chip as painted (`chip::colored` over the
+    /// header's surface), not the color it starts from: a floor applied
+    /// between the two would otherwise go unguarded. On every bundled
+    /// theme each group's fill must clear the generated-color floor
+    /// against the surface, its text must clear the text floor on that
+    /// fill, and the four fills must stand apart, or two groups read as
+    /// one at a glance.
     #[gpui::test]
     fn every_bundled_theme_keeps_the_group_colors_readable_and_distinct(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::shell::colours::to_rgb;
+        use crate::shell::chip;
+        use crate::shell::colours::{over, to_rgb};
         use geode_core::colour::oklab::srgb_to_oklab;
         use geode_core::colour::{READABLE_RATIO, contrast_ratio};
         use gpui_component::ActiveTheme as _;
 
         cx.update(gpui_component::init);
-        let (service, _) = crate::theme::load_bundled();
+        let (service, warnings) = crate::theme::load_bundled();
+        assert!(warnings.is_empty(), "{warnings:?}");
         let mut failures = Vec::new();
         let mut themes = 0;
         for name in service.names() {
@@ -470,11 +480,17 @@ mod tests {
                 Theme::global_mut(cx).apply_config(&entry);
                 let theme = cx.theme();
                 themes += 1;
-                let colors = Group::ALL.map(|g| to_rgb(group_color(theme, g)));
+                let surface = to_rgb(theme.background);
+                let paints = Group::ALL
+                    .map(|g| chip::colored(theme, group_color(theme, g), theme.background));
+                let colors = paints.map(|p| over(p.fill.expect("a group chip is filled"), surface));
                 for (i, g) in Group::ALL.into_iter().enumerate() {
-                    let ratio = contrast_ratio(colors[i], to_rgb(theme.background));
+                    let ratio = contrast_ratio(colors[i], surface);
                     if ratio < READABLE_RATIO {
                         failures.push(format!("{name}: group {} at {ratio:.2}:1", g.letter()));
+                    }
+                    if !chip::is_readable(theme, &paints[i]) {
+                        failures.push(format!("{name}: group {} text is unreadable", g.letter()));
                     }
                     let a = srgb_to_oklab(colors[i]);
                     for (j, other) in Group::ALL.into_iter().enumerate().skip(i + 1) {
@@ -494,7 +510,7 @@ mod tests {
             });
         }
         assert!(
-            themes >= 40,
+            themes >= BUNDLED_THEMES,
             "the sweep saw {themes} themes: bundled themes missing?"
         );
         assert!(failures.is_empty(), "{failures:#?}");

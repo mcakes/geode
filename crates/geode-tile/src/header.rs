@@ -1,10 +1,10 @@
 //! The header strip every tile paints: one height, the shared stack marker
 //! first, the module's own left side taking the free width (clipped when it
 //! runs out), and a right cluster in a fixed order — the mode icon, status,
-//! notices, times, health, `⋯`. The mode icon shows only while the tile is
+//! notices, times, link chips, health, `⋯`. The mode icon shows only while the tile is
 //! in edit or visual mode ([`Mode`]). Status and notices are text of any
 //! length: they shrink, one line each and cut with an ellipsis, within at
-//! most [`TEXT_SHARE`] of the header; times, health and `⋯` never shrink. The frame formats nothing: every
+//! most [`TEXT_SHARE`] of the header; times, link chips, health and `⋯` never shrink. The frame formats nothing: every
 //! string arrives prepared, and a time run's stale flag is the only thing a
 //! tile decides per frame.
 //!
@@ -324,7 +324,7 @@ pub fn frame(
     // The left side has no basis of its own: it takes what the cluster
     // leaves and clips. The cluster's text takes its natural width up to
     // TEXT_SHARE and then cuts, so neither side collapses the other; the
-    // tail (times, health, `⋯`) never shrinks, so it stays on the tile
+    // tail (times, link chips, health, `⋯`) never shrinks, so it stays on the tile
     // unless the tile is narrower than the tail alone.
     let slot = h_flex().min_w_0().overflow_hidden();
     h_flex()
@@ -396,13 +396,17 @@ fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> (Option<Stateful<Div>>, Div) 
     (text, row)
 }
 
-/// A link chip: the group's letter and its role's arrows (down for what
-/// the tile takes from the group, up for what it sends) on the neutral
-/// chip's fill, in the group's color floored to text contrast on that
-/// fill. The letter and the arrows carry the meaning; the color only
-/// repeats the group. It takes no press, so a click on it focuses the tile
-/// like the rest of the header; the tooltip names the chooser's key. Ids
-/// derive from the tile and the role, which two chips never share.
+/// A link chip: a solid chip in the group's color, carrying the group's
+/// letter and its role's arrows (down for what the tile takes from the
+/// group, up for what it sends) in text readable on that fill. The fill is
+/// the group's color unchanged, the value the bundled-theme sweep holds
+/// apart from the other groups; painting the color as text instead puts it
+/// through a second floor that merges groups on low-chroma themes. The
+/// letter and the arrows carry the meaning; the color repeats the group.
+/// It takes no press and so has no pointer states: a click on it focuses
+/// the tile like the rest of the header, and the tooltip names the
+/// chooser's key. Ids derive from the tile and the role, which two chips
+/// never share.
 fn link_chip(chip: LinkChip, tile: u64, theme: &Theme) -> Stateful<Div> {
     let paint = chip::colored(theme, group_color(theme, chip.group), theme.background);
     let (name, role, follows, emits) = match chip.role {
@@ -985,6 +989,13 @@ mod tests {
         assert!(time.right() <= chip.left(), "{time:?} vs {chip:?}");
         assert!(chip.right() <= health.left(), "{chip:?} vs {health:?}");
         assert!(health.right() <= menu.left(), "{health:?} vs {menu:?}");
+        // Two filled chips side by side: one a pixel taller than the other
+        // shows as a step along the strip.
+        let same_height = |a: gpui::Bounds<gpui::Pixels>, b: gpui::Bounds<gpui::Pixels>| {
+            (f32::from(a.size.height) - f32::from(b.size.height)).abs() < 0.5
+                && (f32::from(a.top()) - f32::from(b.top())).abs() < 0.5
+        };
+        assert!(same_height(chip, health), "{chip:?} vs {health:?}");
 
         // Two groups: the follow chip, then the emit chip.
         link(&view, vcx, Some(Group::A), Some(Group::B));
@@ -994,9 +1005,12 @@ mod tests {
         assert!(follow.right() <= emit.left(), "{follow:?} vs {emit:?}");
         assert!(emit.right() <= health.left(), "{emit:?} vs {health:?}");
 
-        // One group both ways is one chip under its own selector.
+        // One group both ways is one chip under its own selector, its two
+        // arrows making it no taller.
         link(&view, vcx, Some(Group::B), Some(Group::B));
-        assert!(vcx.debug_bounds("tile-link-3-B-both").is_some());
+        let both = vcx.debug_bounds("tile-link-3-B-both").unwrap();
+        let health = vcx.debug_bounds("tile-health-3").unwrap();
+        assert!(same_height(both, health), "{both:?} vs {health:?}");
         assert!(vcx.debug_bounds("tile-link-3-B-follow").is_none());
         assert!(vcx.debug_bounds("tile-link-3-B-emit").is_none());
 
@@ -1031,11 +1045,34 @@ mod tests {
         }
     }
 
-    /// Hovering the chip shows that title: the chip takes no press, so the
-    /// tooltip is where the chooser's key is named.
+    /// Publish the builtin keymap as the live `Chords`, with `mod` as alt,
+    /// the way the shell does at startup. Without it a tooltip resolves no
+    /// chord and a test could not tell an action named from none.
+    fn publish_chords(vcx: &mut VisualTestContext) {
+        let mut registry = geode_shell::actions::ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
+        let builtin =
+            geode_core::config::LayerDoc::builtin("keymap", geode_shell::defaults::BUILTIN_KEYMAP)
+                .unwrap();
+        let docs = geode_shell::keymap::fragments::splice(&[builtin], &[]);
+        let (keymap, diags) = geode_shell::keymap::build_keymap(
+            &docs,
+            geode_shell::keymap::Modifiers::ALT,
+            &registry,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let bindings = keymap.bindings().to_vec();
+        vcx.update(|_, cx| cx.set_global(tips::Chords(std::sync::Arc::new(bindings))));
+        vcx.run_until_parked();
+    }
+
+    /// Hovering the chip shows that title and the chooser's key: the chip
+    /// takes no press, so the tooltip is the only place its keyboard route
+    /// is named.
     #[gpui::test]
     fn hovering_the_link_chip_names_the_group(cx: &mut TestAppContext) {
         let (view, _, _, vcx) = open_strip(cx);
+        publish_chords(vcx);
         link(&view, vcx, Some(Group::C), None);
         let at = centre(vcx, "tile-link-3-C-follow");
         vcx.simulate_mouse_move(at, None, gpui::Modifiers::none());
@@ -1043,7 +1080,10 @@ mod tests {
             .advance_clock(std::time::Duration::from_millis(600));
         vcx.run_until_parked();
         assert!(vcx.debug_bounds("tip-tile-link-title").is_some());
-        assert_eq!(LINK_ACTION, "tile::link_group");
+        assert!(
+            vcx.debug_bounds("tip-tile-link-chord-alt+u").is_some(),
+            "the tooltip names the link group key"
+        );
     }
 
     /// A press on the chip is not the chip's: it reaches the tile's own
