@@ -633,11 +633,6 @@ pub struct ShellView {
     /// and rebuilt only when that key changes, so a repaint formats
     /// nothing. `None` while the focused tile follows no group.
     link_label: Option<(link::LinkLabelKey, gpui::SharedString)>,
-    /// Whether the first occupant reconciliation has dropped the link
-    /// memberships restored for tiles no workspace holds. Set by that pass,
-    /// so no later render looks again: a membership can only outlive its
-    /// tile by arriving from the session.
-    linked_pruned: bool,
     /// The last `(index, len)` `ensure_occupants` delivered to each tile
     /// through `TileContent::set_stack` — a
     /// missing entry means "unsent", so a fresh occupant always hears its
@@ -954,7 +949,7 @@ impl ShellView {
                     if let Some(state) = view.choice_dialog.as_mut() {
                         // A choice list re-ranks on every keystroke and the lit
                         // row is followed, as the settings dialog's choice does.
-                        state.list.set_query(&query);
+                        state.set_query(&query);
                         view.choice_dialog_scroll
                             .scroll_to_item(state.list.ranked_highlighted());
                     }
@@ -1286,10 +1281,14 @@ impl ShellView {
         }
         // A restored tile is in its link groups before its occupant exists,
         // so the first query it sends is already scoped by the group it
-        // follows. Only a record this build has a module for: a placeholder
-        // is in no group, and its record carries the membership to the next
-        // save. Like the lanes above this is where the session starts, not
-        // a change, so it notifies nobody and runs before the flip seed.
+        // follows. Two conditions, each for a tile that will never have a
+        // module occupant to end the membership. The record's kind has a
+        // factory: without one the tile paints a placeholder, which is in
+        // no group, and the record carries the membership to the next save.
+        // The tile is placed in some workspace, on screen or not: a record
+        // the layout's healing left behind gets no occupant at all.
+        // Nothing is notified. A membership moves no lane version and no
+        // group's scope generation, so it is not a flip either.
         if services
             .restored_tiles
             .values()
@@ -1297,9 +1296,12 @@ impl ShellView {
         {
             frame.update(cx, |f, _| {
                 for (id, record) in &services.restored_tiles {
-                    if services.roster.factory(&record.kind).is_some() {
-                        f.follow(TileId(*id), record.link.follow);
-                        f.emit(TileId(*id), record.link.emit);
+                    let tile = TileId(*id);
+                    if services.roster.factory(&record.kind).is_some()
+                        && services.workspaces.workspace_of(tile).is_some()
+                    {
+                        f.follow(tile, record.link.follow);
+                        f.emit(tile, record.link.emit);
                     }
                 }
             });
@@ -1391,7 +1393,6 @@ impl ShellView {
             visible_tiles: HashSet::new(),
             emit_subs: HashMap::new(),
             link_label: None,
-            linked_pruned: false,
             stack_sent: HashMap::new(),
             notice: None,
             stack_list: None,

@@ -153,6 +153,12 @@ fn link_row_group(ix: usize) -> Option<Group> {
     ix.checked_sub(1).map(|g| Group::ALL[g])
 }
 
+/// The row the link chooser opens on, and returns to when its query is
+/// emptied: the follow row for what the tile follows now.
+fn link_opening_row(current: Membership) -> &'static str {
+    FOLLOW_ROWS[current.follow.map_or(0, |g| g.index() + 1)]
+}
+
 /// The level rows, in severity order, as `[log]` spells them.
 pub const LEVEL_WORDS: [(&str, Level); 5] = [
     ("error", Level::ERROR),
@@ -317,9 +323,7 @@ impl ChoiceDialogState {
             }
         }
         let mut list = ChoiceList::new(options, choice::DEFAULT_CAP);
-        list.place(Some(
-            FOLLOW_ROWS[current.follow.map_or(0, |g| g.index() + 1)],
-        ));
+        list.place(Some(link_opening_row(current)));
         Self {
             list,
             target: Target::LinkGroup {
@@ -396,6 +400,31 @@ impl ChoiceDialogState {
                 targets: Vec::new(),
                 chosen: Some(target),
             },
+        }
+    }
+
+    /// Feed the filter's text to the list: the route for every query
+    /// change, per keystroke and at commit. `false` when the text is
+    /// unchanged, which moves nothing.
+    ///
+    /// The link chooser lights the top-ranked row on a non-empty query and
+    /// its opening row on an empty one. Its opening row is the tile's
+    /// current follow, `follow \u{00b7} workspace` for every tile that was
+    /// never linked, and that text survives `a` and `c`: kept lit by text
+    /// it would sit over `follow \u{00b7} A` and Enter would follow
+    /// nothing. Every other target keeps the lit row by text.
+    pub fn set_query(&mut self, query: &str) -> bool {
+        match &self.target {
+            Target::LinkGroup { current, .. } => {
+                let opening = query.is_empty().then(|| link_opening_row(*current));
+                self.list.set_query_placing(query, opening)
+            }
+            Target::Grouping { .. }
+            | Target::TileKind { .. }
+            | Target::TileKindWith { .. }
+            | Target::Column { .. }
+            | Target::Scope { .. }
+            | Target::LogLevel { .. } => self.list.set_query(query),
         }
     }
 
@@ -591,8 +620,8 @@ const LOG_HINTS: &[Hint] = &[
     Hint::Text("back / close"),
 ];
 
-/// The link chooser's footer. Enter here changes a membership, it adds
-/// nothing, so the tile picker's verb would misstate it.
+/// The link chooser's footer. Each key is named for what it does here:
+/// Enter chooses the lit row's group for the tile.
 const LINK_HINTS: &[Hint] = &[
     Hint::Text("type to filter \u{00b7}"),
     Hint::Key("up"),
@@ -954,7 +983,7 @@ fn handle_key(
             // it before trusting the highlight.
             let live = shell.dialog_input.read(cx).value().to_string();
             let pick = shell.choice_dialog.as_mut().and_then(|state| {
-                state.list.set_query(&live);
+                state.set_query(&live);
                 state.highlighted_pick()
             });
             // Nothing lit (every row filtered out): the picker stays open
@@ -1505,7 +1534,7 @@ mod tests {
 
         for query in ["emit b", "b emit"] {
             let mut state = link(true, None, None);
-            state.list.set_query(query);
+            state.set_query(query);
             let first = state.list.ranked().first().map(|r| r.row);
             assert_eq!(
                 first.map(|row| state.list.options()[row].as_str()),
@@ -1523,6 +1552,84 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    /// The chooser opens on the row for what the tile follows now, and
+    /// every tile starts following the workspace. That row's text contains
+    /// `a` and `c`, so a highlight kept by text would stay on it through
+    /// `a` or `follow c`, and Enter would follow nothing.
+    #[test]
+    fn a_typed_query_lights_its_top_ranked_row() {
+        let follow = |g| link_pick(LinkChange::Follow(Some(g)));
+        for (query, expected) in [
+            ("a", follow(Group::A)),
+            ("follow a", follow(Group::A)),
+            ("fa", follow(Group::A)),
+            ("c", follow(Group::C)),
+            ("follow c", follow(Group::C)),
+            ("b", follow(Group::B)),
+            ("d", follow(Group::D)),
+        ] {
+            let mut state = link(false, None, None);
+            assert!(state.set_query(query));
+            assert_eq!(state.highlighted_pick(), expected, "{query}");
+        }
+        for (query, expected) in [
+            ("emit a", link_pick(LinkChange::Emit(Some(Group::A)))),
+            ("emit none", link_pick(LinkChange::Emit(None))),
+        ] {
+            let mut state = link(true, None, None);
+            assert!(state.set_query(query));
+            assert_eq!(state.highlighted_pick(), expected, "{query}");
+        }
+    }
+
+    /// A highlight the trader moved after typing is theirs: re-reading the
+    /// same text at commit keeps it. The next query change lights the top
+    /// rank again, and an emptied query returns to the opening row.
+    #[test]
+    fn a_moved_highlight_is_kept_until_the_query_changes() {
+        let mut state = link(false, Some(Group::C), None);
+        assert!(state.set_query("follow"));
+        assert_eq!(
+            state.highlighted_pick(),
+            link_pick(LinkChange::Follow(None))
+        );
+        state.list.nav(crate::vimnav::NavCommand::Move(1));
+        let moved = link_pick(LinkChange::Follow(Some(Group::A)));
+        assert_eq!(state.highlighted_pick(), moved);
+        assert!(!state.set_query("follow"), "the commit's re-read");
+        assert_eq!(state.highlighted_pick(), moved);
+
+        assert!(state.set_query("follow d"));
+        assert_eq!(
+            state.highlighted_pick(),
+            link_pick(LinkChange::Follow(Some(Group::D)))
+        );
+        assert!(state.set_query(""));
+        assert_eq!(
+            state.highlighted_pick(),
+            link_pick(LinkChange::Follow(Some(Group::C))),
+            "the opening row: what the tile follows now"
+        );
+    }
+
+    /// The other choice dialogs keep the highlight by text across a query
+    /// change, as `ChoiceList::set_query` does.
+    #[test]
+    fn other_targets_keep_the_highlight_by_text() {
+        let mut state = ChoiceDialogState::grouping(&slots(), Some(3));
+        assert!(state.set_query("d"));
+        assert_eq!(
+            state.highlighted_slot(),
+            Some(Some(3)),
+            "`3 \u{00b7} underlying_ref` still matches and stays lit"
+        );
+        assert_ne!(
+            state.list.ranked_highlighted(),
+            0,
+            "fixture: it is not the top-ranked row"
+        );
     }
 
     #[test]

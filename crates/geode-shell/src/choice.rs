@@ -112,6 +112,22 @@ impl ChoiceList {
         true
     }
 
+    /// Rerank a changed query and put the highlight on `value`, or on the
+    /// top-ranked row when `value` is `None` or the query filters it out.
+    /// Unlike [`Self::set_query`] the row lit before is not kept: for a
+    /// list whose opening row is a default the user did not choose, a row
+    /// that merely survives the query must not stay lit over the one the
+    /// query ranks first. An unchanged query returns false and moves
+    /// nothing, so a highlight moved since the last change is kept.
+    pub fn set_query_placing(&mut self, query: &str, value: Option<&str>) -> bool {
+        if query == self.query {
+            return false;
+        }
+        self.query = query.to_string();
+        self.place(value);
+        true
+    }
+
     /// Swap in a new option list, keeping the highlight by text. The
     /// text is captured BEFORE `options` is overwritten — an index into
     /// the old list means nothing in the new one.
@@ -280,6 +296,46 @@ mod tests {
             rivals.highlighted_text(),
             Some("Bamboo"),
             "kept by text even though it no longer ranks first"
+        );
+    }
+
+    /// A list opened on a row that is the default, not the user's choice,
+    /// must not keep that row lit through a query it merely survives:
+    /// Enter would then commit a row the user did not type towards.
+    #[test]
+    fn set_query_placing_lights_the_named_row_or_the_top_rank() {
+        let mut list = ChoiceList::new(opts(&["Bamboo", "Ambrose", "Nord"]), 12);
+        assert_eq!(list.highlighted_text(), Some("Bamboo"));
+        assert!(list.set_query_placing("am", None));
+        assert_eq!(
+            list.highlighted_text(),
+            list.ranked()
+                .first()
+                .map(|r| list.options()[r.row].as_str()),
+            "the top-ranked row, not the one lit before"
+        );
+        assert_eq!(list.highlighted_text(), Some("Ambrose"));
+        assert_eq!(list.query(), "am");
+
+        list.nav(NavCommand::Move(1));
+        assert_eq!(list.highlighted_text(), Some("Bamboo"));
+        assert!(
+            !list.set_query_placing("am", None),
+            "an unchanged query moves nothing"
+        );
+        assert_eq!(
+            list.highlighted_text(),
+            Some("Bamboo"),
+            "a highlight moved since the last query change is kept"
+        );
+
+        assert!(list.set_query_placing("", Some("Nord")));
+        assert_eq!(list.highlighted_text(), Some("Nord"), "the named row");
+        assert!(list.set_query_placing("b", Some("Nord")));
+        assert_eq!(
+            list.highlighted_text(),
+            Some("Bamboo"),
+            "a named row the query filters out falls back to the top rank"
         );
     }
 

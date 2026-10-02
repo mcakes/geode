@@ -59,10 +59,9 @@ pub(crate) const NO_MODULE_OPENS: &str = "no module opens on the context at the 
 /// The action ids refused with [`CLOSE_PAGE_FIRST`] while a page is open:
 /// the transient tile chrome (the `:` line, find, the stack list, the row
 /// menu, the link chooser) and every layout edit — add, open-with,
-/// autosize, and the whole
-/// `workspace::`, `dock::`, and `stack::` families, which close,
-/// fullscreen, move, resize, refocus, dock, or restack tiles nobody can see
-/// (`Close tile` would destroy an unseen tile with no undo).
+/// autosize, and the whole `workspace::`, `dock::`, and `stack::` families,
+/// which close, fullscreen, move, resize, refocus, dock, or restack tiles
+/// nobody can see (`Close tile` would destroy an unseen tile with no undo).
 /// `workspace::switch_*` is the one exception: a switch closes the page
 /// first and is the route home.
 fn refused_over_a_page(id: &str) -> bool {

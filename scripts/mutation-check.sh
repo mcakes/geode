@@ -16801,7 +16801,7 @@ run_mutation "grouping: the highlight opens on the active slot" \
 # (`set_value` emits no `Change`).
 run_mutation "grouping: enter picks the HIGHLIGHTED row, re-fed from the live text" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '                state.list.set_query(&live);
+  '                state.set_query(&live);
                 state.highlighted_pick()' \
   '                let _ = &live;
                 state.highlighted_pick()' \

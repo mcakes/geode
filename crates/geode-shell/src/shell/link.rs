@@ -11,6 +11,7 @@ use geode_core::link::Group;
 use geode_core::query::QueryKey;
 
 use super::{ShellView, status};
+use crate::module::placeholder::PLACEHOLDER_KIND;
 use crate::tiling::TileId;
 
 /// What the status bar's `following` label was built from: the focused
@@ -52,7 +53,18 @@ impl ShellView {
         });
     }
 
-    /// Follow `group`, or the workspace again with `None`.
+    /// Whether a module occupies `tile`: the only tiles the doors below
+    /// link. A membership lives until its occupant closes or is replaced,
+    /// so one written for an id with no occupant, or for a placeholder,
+    /// would have nothing to end it.
+    fn has_module_occupant(&self, tile: TileId) -> bool {
+        self.occupants
+            .get(&tile)
+            .is_some_and(|o| o.kind != PLACEHOLDER_KIND)
+    }
+
+    /// Follow `group`, or the workspace again with `None`. A tile no
+    /// module occupies is refused and the frame is not touched.
     ///
     /// Writes the frame: call this from the shell's own handlers, never
     /// from inside an update of the frame.
@@ -62,6 +74,9 @@ impl ShellView {
         group: Option<Group>,
         cx: &mut Context<Self>,
     ) {
+        if !self.has_module_occupant(tile) {
+            return;
+        }
         // The tile's own workspace, the one its frame handle was bound to
         // at creation: that lane supplies the rest of its identity.
         let ws = self
@@ -92,12 +107,16 @@ impl ShellView {
     /// Emit into `group`, or into none. A tile that cannot emit is never
     /// set emitting: the chooser does not offer it, and a membership that
     /// reached the frame some other way (a session written when the module
-    /// could) is cleared instead of left subscribing to nothing.
+    /// could) is cleared instead of left subscribing to nothing. A tile no
+    /// module occupies is refused and the frame is not touched.
     ///
     /// Joining pulls the tile's emission at once, which reads the tile and
     /// writes the frame: call this from the shell's own handlers, never
     /// from inside an update of that tile or of the frame.
     pub(super) fn set_emit(&mut self, tile: TileId, group: Option<Group>, cx: &mut Context<Self>) {
+        if !self.has_module_occupant(tile) {
+            return;
+        }
         let can = self.occupants.get(&tile).is_some_and(|o| o.content.emits());
         let group = group.filter(|_| can);
         let changed = self.frame.update(cx, |f, cx| {
@@ -188,19 +207,6 @@ impl ShellView {
         }
         self.frame.update(cx, |f, cx| {
             if f.forget_tile(tile) {
-                cx.notify();
-            }
-        });
-    }
-
-    /// Drop the membership of every tile no workspace holds: what the
-    /// session restored for a record whose tile the layout does not have.
-    /// Such a tile never gets an occupant, so nothing would ever unlink it.
-    /// Writes the frame, so it runs after a render, never inside one.
-    pub(super) fn prune_links(&mut self, cx: &mut Context<Self>) {
-        let workspaces = &self.services.workspaces;
-        self.frame.update(cx, |f, cx| {
-            if f.retain_linked(|tile| workspaces.workspace_of(tile).is_some()) {
                 cx.notify();
             }
         });

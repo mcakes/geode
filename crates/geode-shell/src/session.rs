@@ -35,13 +35,14 @@
 //! `workspaces.N.tiles.<id>` stores a module name, opaque state, and the link
 //! groups the tile is in: `follow` and `emit`, each a group letter (`"a"` to
 //! `"d"`), written only when set. A value that names no group warns and reads
-//! as unset; the tile is kept. `[frame]`
-//! stores the shared lane's scope, grouping slot, and as-of; `workspaces.N.frame`
-//! stores a pinned workspace's own lane in the same format, and its presence
-//! means workspace N is pinned. `[palette.usage]` stores usage counts and
-//! timestamps; `[pages.<kind>]` stores one opaque table per page kind (whether
-//! a page was open is not recorded). Unknown keys are ignored on read and not
-//! preserved on save.
+//! as unset; the tile is kept.
+//!
+//! `[frame]` stores the shared lane's scope, grouping slot, and as-of;
+//! `workspaces.N.frame` stores a pinned workspace's own lane in the same
+//! format, and its presence means workspace N is pinned. `[palette.usage]`
+//! stores usage counts and timestamps; `[pages.<kind>]` stores one opaque
+//! table per page kind (whether a page was open is not recorded). Unknown
+//! keys are ignored on read and not preserved on save.
 //!
 //! An invalid main tree or session header rejects the entire session. Docks,
 //! tile records, frame fields, palette usage, and page tables recover locally
@@ -1327,6 +1328,55 @@ mod tests {
         tiles.insert(ids[0].0, linked(Some(Group::D), None));
         tiles.insert(ids[1].0, linked(None, Some(Group::C)));
         let restored = from_toml(&session_of(&ws, &tiles)).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        assert_eq!(restored.tiles, tiles);
+    }
+
+    /// A tile's `state` is a sub-table, and TOML reads every key after a
+    /// table header into that table. The file form therefore depends on
+    /// the serializer printing `follow` and `emit` above the `state`
+    /// header: below it they would be read back as module state.
+    #[test]
+    fn a_linked_tile_with_state_round_trips_through_the_file_text() {
+        let ws = two_tile_workspaces();
+        let ids = ws.active().tree().tiles();
+        let mut state = toml::Table::new();
+        state.insert("view".into(), toml::Value::String("tree".into()));
+        let mut nested = toml::Table::new();
+        nested.insert("npv".into(), toml::Value::Integer(120));
+        state.insert("widths".into(), toml::Value::Table(nested));
+        let mut tiles = TileRecords::new();
+        tiles.insert(
+            ids[0].0,
+            TileRecord {
+                kind: "blotter".into(),
+                state,
+                link: Membership {
+                    follow: Some(Group::A),
+                    emit: Some(Group::B),
+                },
+            },
+        );
+        tiles.insert(ids[1].0, linked(None, None));
+
+        let text = to_string_pretty(
+            &ws,
+            &tiles,
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        )
+        .unwrap();
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle} is written: {text}"))
+        };
+        let state_header = at(&format!("[workspaces.1.tiles.{}.state]", ids[0].0));
+        assert!(at("follow = \"a\"") < state_header, "{text}");
+        assert!(at("emit = \"b\"") < state_header, "{text}");
+
+        let restored = from_toml(&text.parse().unwrap()).unwrap();
         assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
         assert_eq!(restored.tiles, tiles);
     }

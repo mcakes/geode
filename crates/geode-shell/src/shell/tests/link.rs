@@ -910,8 +910,10 @@ fn filling_a_placeholder_drops_the_membership_its_tile_had(cx: &mut gpui::TestAp
         shell.read_with(&vcx, |s, _| s.occupant_kind(tile)),
         Some(crate::module::placeholder::PLACEHOLDER_KIND)
     );
-    set_follow(&shell, &mut vcx, tile, Some(Group::A));
+    // Written through the frame: the shell's door refuses a placeholder,
+    // so a membership can only be on one by some other route.
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    follow(&frame, &mut vcx, tile, Some(Group::A));
     assert_eq!(
         frame.read_with(&vcx, |f, _| f.membership(tile).follow),
         Some(Group::A)
@@ -927,10 +929,10 @@ fn filling_a_placeholder_drops_the_membership_its_tile_had(cx: &mut gpui::TestAp
 
 // --- Membership in the session --------------------------------------
 
-/// `services` as a restart hands them over: workspace 1 holds one leaf,
-/// tile 1, whose session record is `record` (the lines under
-/// `[workspaces.1.tiles.1]`), read back through the session reader.
-fn restored(mut services: ShellServices, record: &str) -> ShellServices {
+/// `services` as a restart hands them over. Each `(index, body)` is one
+/// workspace's table as the session file spells it, read back through the
+/// session reader; workspace 1 is the active one.
+fn restored_layout(mut services: ShellServices, workspaces: &[(u8, &str)]) -> ShellServices {
     let mut table = crate::session::to_toml(
         &Workspaces::new(),
         &crate::session::TileRecords::new(),
@@ -939,18 +941,37 @@ fn restored(mut services: ShellServices, record: &str) -> ShellServices {
         &crate::palette_usage::PaletteUsage::new(),
         &crate::session::PageRecords::new(),
     );
-    let ws1: toml::Table =
-        format!("focused = 1\n[node]\nkind = \"leaf\"\nid = 1\n[tiles.1]\n{record}\n")
-            .parse()
-            .unwrap();
     if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
-        ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        for (ix, body) in workspaces {
+            let body: toml::Table = body.parse().unwrap();
+            ws_table.insert(ix.to_string(), toml::Value::Table(body));
+        }
     }
     let restored = crate::session::from_toml(&table).unwrap();
     assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
     services.workspaces = restored.workspaces;
     services.restored_tiles = restored.tiles;
     services
+}
+
+/// [`restored_layout`] with one leaf in workspace 1, tile 1, whose session
+/// record is `record` (the lines under `[workspaces.1.tiles.1]`).
+fn restored(services: ShellServices, record: &str) -> ShellServices {
+    let ws1 = format!("focused = 1\n[node]\nkind = \"leaf\"\nid = 1\n[tiles.1]\n{record}\n");
+    restored_layout(services, &[(1, &ws1)])
+}
+
+/// Workspace 1 as two leaves side by side, tiles 1 and 2, with these
+/// session records.
+fn two_restored(services: ShellServices, first: &str, second: &str) -> ShellServices {
+    let ws1 = format!(
+        "focused = 1\n\
+         [node]\nkind = \"split\"\norientation = \"horizontal\"\nratios = [0.5, 0.5]\n\
+         [[node.children]]\nkind = \"leaf\"\nid = 1\n\
+         [[node.children]]\nkind = \"leaf\"\nid = 2\n\
+         [tiles.1]\n{first}\n[tiles.2]\n{second}\n"
+    );
+    restored_layout(services, &[(1, &ws1)])
 }
 
 fn frame_of(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Entity<Frame> {
@@ -993,11 +1014,12 @@ fn a_restored_follower_reads_its_group_on_its_first_frame(cx: &mut gpui::TestApp
     );
 }
 
-/// A restored membership is where the session starts, not a change: it is
-/// applied before the flip baseline is taken, so the first notification of
-/// the frame, whatever it is for, opens no barrier.
+/// A restored membership is not a group-scope change. Following or
+/// emitting moves no lane version and no group's scope generation, which
+/// are the two things a flip is detected by, so the first notification of
+/// the frame after a restore, whatever it is for, opens no barrier.
 #[gpui::test]
-fn a_restored_follower_and_an_unrelated_frame_notification_open_no_barrier(
+fn a_restored_membership_is_not_a_group_scope_change_and_opens_no_barrier(
     cx: &mut gpui::TestAppContext,
 ) {
     let services = restored(test_services(), "module = \"rec\"\nfollow = \"a\"");
@@ -1128,13 +1150,12 @@ fn a_saved_membership_survives_a_build_without_the_module(cx: &mut gpui::TestApp
     );
 }
 
-/// A membership restored for a tile no workspace holds (a record the
-/// layout's healing left behind) would otherwise stay in its group for the
-/// life of the shell, emitting nothing and following nothing. It is
-/// dropped once the first frame has reconciled the tiles, and no later
-/// render touches the frame for it.
+/// A record for a tile no workspace holds (one the layout's healing left
+/// behind) restores no membership. Such a tile never has an occupant, so
+/// nothing would ever unlink it and it would sit in its group for the life
+/// of the shell.
 #[gpui::test]
-fn a_restored_membership_for_a_tile_in_no_workspace_is_dropped(cx: &mut gpui::TestAppContext) {
+fn a_record_for_a_tile_in_no_workspace_restores_no_membership(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
     services.restored_tiles.insert(
         9,
@@ -1150,19 +1171,172 @@ fn a_restored_membership_for_a_tile_in_no_workspace_is_dropped(cx: &mut gpui::Te
     let (window, mut vcx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut vcx);
     let frame = frame_of(&shell, &vcx);
-    vcx.run_until_parked();
-
     assert!(frame.read_with(&vcx, |f, _| f.membership(TileId(9)).is_empty()));
 
-    let generation = frame.read_with(&vcx, |f, _| f.generation());
     add_tile(&mut vcx);
     draw(&mut vcx);
     vcx.run_until_parked();
-    assert_eq!(
-        frame.read_with(&vcx, |f, _| f.generation()),
-        generation,
-        "an ordinary render writes nothing to the frame"
+    assert!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(9)).is_empty()),
+        "and none appears later"
     );
+}
+
+/// "Placed" means in any workspace, not the one on screen: a follower in a
+/// workspace the trader is not looking at is still a follower when they
+/// switch to it.
+#[gpui::test]
+fn a_membership_in_an_inactive_workspace_survives_restore(cx: &mut gpui::TestAppContext) {
+    let rec = RecordingFactory::new("rec");
+    let at_create = rec.followed_at_create.clone();
+    let leaf = |id: u8, record: &str| {
+        format!(
+            "focused = {id}\n[node]\nkind = \"leaf\"\nid = {id}\n\
+             [tiles.{id}]\nmodule = \"rec\"\n{record}\n"
+        )
+    };
+    let services = restored_layout(
+        services_with_recorders(vec![rec]),
+        &[(1, &leaf(1, "")), (2, &leaf(2, "follow = \"a\""))],
+    );
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    assert_eq!(shell.read_with(&vcx, |s, _| s.active_ix()), WS1);
+    draw(&mut vcx);
+    vcx.run_until_parked();
+    draw(&mut vcx);
+
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(2)).follow),
+        Some(Group::A)
+    );
+    assert!(
+        at_create.borrow().contains(&(TileId(2), Some(Group::A))),
+        "its occupant read the group at create: {:?}",
+        at_create.borrow()
+    );
+}
+
+/// A tile in a hidden dock is placed too.
+#[gpui::test]
+fn a_membership_in_a_hidden_dock_survives_restore(cx: &mut gpui::TestAppContext) {
+    let rec = RecordingFactory::new("rec");
+    let at_create = rec.followed_at_create.clone();
+    let ws1 = "focused = 1\n\
+               [node]\nkind = \"leaf\"\nid = 1\n\
+               [docks.left]\nfocused = 3\nvisible = false\nsize = 0.25\n\
+               [docks.left.node]\nkind = \"leaf\"\nid = 3\n\
+               [tiles.1]\nmodule = \"rec\"\n\
+               [tiles.3]\nmodule = \"rec\"\nfollow = \"b\"\n";
+    let services = restored_layout(services_with_recorders(vec![rec]), &[(1, ws1)]);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    assert!(
+        shell.read_with(&vcx, |s, _| {
+            let dock = s.services.workspaces.active().docks();
+            let left = dock.get(crate::tiling::DockSide::Left);
+            !left.visible() && left.tree().tiles() == vec![TileId(3)]
+        }),
+        "fixture: tile 3 is in the hidden left dock"
+    );
+    draw(&mut vcx);
+    vcx.run_until_parked();
+    draw(&mut vcx);
+
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(3)).follow),
+        Some(Group::B)
+    );
+    assert!(
+        at_create.borrow().contains(&(TileId(3), Some(Group::B))),
+        "its occupant read the group at create: {:?}",
+        at_create.borrow()
+    );
+}
+
+/// The frame is not written while occupants are being created. A restored
+/// emitter posts once the render is over, so every occupant of that first
+/// pass reads the same frame whatever order the tile ids sort in: a
+/// follower created after its emitter does not start on a scope the one
+/// created before it never saw.
+#[gpui::test]
+fn a_restored_emitter_posts_after_every_occupant_exists(cx: &mut gpui::TestAppContext) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.emits = true;
+    *rec.emission.borrow_mut() = Emission {
+        scope: Some(underlying("SPX.Z")),
+        board: Vec::new(),
+    };
+    let at_create = rec.generation_at_create.clone();
+    let services = two_restored(
+        services_with_recorders(vec![rec]),
+        "module = \"rec\"\nemit = \"a\"",
+        "module = \"rec\"\nfollow = \"a\"",
+    );
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    vcx.run_until_parked();
+
+    let seen = at_create.borrow().clone();
+    assert_eq!(
+        seen.iter().map(|(tile, _)| *tile).collect::<Vec<_>>(),
+        vec![TileId(1), TileId(2)],
+        "fixture: the emitter is created first"
+    );
+    assert_eq!(
+        seen[0].1, seen[1].1,
+        "both occupants read the same frame generation at create"
+    );
+    assert!(
+        frame.read_with(&vcx, |f, _| f.generation()) > seen[0].1,
+        "the post came afterwards"
+    );
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("SPX.Z")
+    );
+}
+
+/// The doors act on a tile a module occupies. An id with no occupant, or a
+/// placeholder's, is refused before the frame is touched: nothing would
+/// ever unlink a membership written for it.
+#[gpui::test]
+fn the_doors_refuse_a_tile_with_no_occupant(cx: &mut gpui::TestAppContext) {
+    let (services, _emitter) = emitting_services(Emission::default());
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    shell.update(&mut vcx, |s, cx| {
+        s.services
+            .workspaces
+            .split_active(crate::tiling::Orientation::Horizontal);
+        cx.notify();
+    });
+    draw(&mut vcx);
+    vcx.run_until_parked();
+    let placeholder = shell.read_with(&vcx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupant_kind(placeholder)),
+        Some(crate::module::placeholder::PLACEHOLDER_KIND)
+    );
+    let unknown = TileId(99);
+    assert_eq!(shell.read_with(&vcx, |s, _| s.occupant_kind(unknown)), None);
+    let generation = frame.read_with(&vcx, |f, _| f.generation());
+    let notified = frame_notifications(&frame, &mut vcx);
+
+    for tile in [unknown, placeholder] {
+        set_follow(&shell, &mut vcx, tile, Some(Group::A));
+        set_emit(&shell, &mut vcx, tile, Some(Group::B));
+        assert!(
+            frame.read_with(&vcx, |f, _| f.membership(tile).is_empty()),
+            "{tile:?}"
+        );
+    }
+    assert_eq!(frame.read_with(&vcx, |f, _| f.generation()), generation);
+    assert_eq!(notified.get(), 0);
 }
 
 /// The other half of `a_group_scope_change_writes_no_session_file`: who
@@ -1285,13 +1459,15 @@ fn mod_u_opens_the_chooser_for_the_focused_tile_and_enter_follows(cx: &mut gpui:
         Some("Link group".to_string())
     );
 
-    vcx.simulate_input("follow b");
+    // The opening row, `follow workspace`, still matches these words. The
+    // typed query lights the row it ranks first, so Enter follows A.
+    vcx.simulate_input("follow a");
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
 
     assert_eq!(
         frame.read_with(&vcx, |f, _| f.membership(tile).follow),
-        Some(Group::B)
+        Some(Group::A)
     );
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 
@@ -1300,7 +1476,7 @@ fn mod_u_opens_the_chooser_for_the_focused_tile_and_enter_follows(cx: &mut gpui:
     press_mod_u(&mut vcx);
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.modals.last().map(|m| m.title.to_string())),
-        Some("Link group \u{00b7} following B".to_string())
+        Some("Link group \u{00b7} following A".to_string())
     );
     assert_eq!(
         shell
@@ -1309,8 +1485,18 @@ fn mod_u_opens_the_chooser_for_the_focused_tile_and_enter_follows(cx: &mut gpui:
                 list.highlighted_text().map(str::to_owned)
             })
             .as_deref(),
-        Some("follow \u{00b7} B")
+        Some("follow \u{00b7} A")
     );
+
+    // A second pick, typed over a different opening row.
+    vcx.simulate_input("follow b");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(tile).follow),
+        Some(Group::B)
+    );
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
 /// A tile that cannot emit (a viewer) is offered the follow rows alone.
@@ -1368,7 +1554,7 @@ fn picking_an_emit_row_subscribes_and_posts(cx: &mut gpui::TestAppContext) {
         Some("NDX")
     );
 
-    // `emit · none` leaves the group again.
+    // The `emit none` row leaves the group again.
     press_mod_u(&mut vcx);
     vcx.simulate_input("emit none");
     vcx.simulate_keystrokes("enter");
@@ -1525,6 +1711,57 @@ fn a_pick_for_a_tile_closed_under_the_chooser_links_nothing(cx: &mut gpui::TestA
     assert!(frame.read_with(&vcx, |f, _| f.membership(tile).is_empty()));
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert_eq!(notice(&shell, &vcx).as_deref(), Some(TILE_GONE));
+}
+
+/// The chord is bound in no context, so it still dispatches over a page.
+/// There the tiles are covered: no chooser opens, and the status bar says
+/// to close the page.
+#[gpui::test]
+fn mod_u_over_a_page_is_refused_with_the_page_notice(cx: &mut gpui::TestAppContext) {
+    let page = crate::module::recording::RecordingPageFactory::new("diagnostics");
+    let (_window, mut vcx, shell, _tile) = one_tile_in(cx, services_with_page(page));
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut vcx);
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.page_open()));
+
+    press_mod_u(&mut vcx);
+
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| s.page_open()));
+    assert_eq!(
+        notice(&shell, &vcx).as_deref(),
+        Some(crate::shell::input::CLOSE_PAGE_FIRST)
+    );
+}
+
+/// The pointer route to the emit door. A row's click handler holds no
+/// update of the tile or of the frame, so the pull that joining makes can
+/// read the one and write the other.
+#[gpui::test]
+fn a_click_on_an_emit_row_emits(cx: &mut gpui::TestAppContext) {
+    let (services, _emitter) = emitting_services(Emission {
+        scope: Some(underlying("SPX.Z")),
+        board: Vec::new(),
+    });
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, services);
+    let frame = frame_of(&shell, &vcx);
+    press_mod_u(&mut vcx);
+    let row = vcx
+        .debug_bounds("link-choice-emit \u{00b7} A")
+        .expect("the row is painted");
+    vcx.simulate_click(row.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(tile).emit),
+        Some(Group::A)
+    );
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("SPX.Z")
+    );
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
 // --- The status segment ---------------------------------------------

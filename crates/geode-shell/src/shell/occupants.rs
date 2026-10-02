@@ -203,8 +203,8 @@ impl ShellView {
     /// A fresh `add_tile` occupant that is on screen and focused hears
     /// `TileContent::launched` once, deferred after the render.
     /// Nothing here writes the frame: every link-group write a pass finds
-    /// due (a closed tile, a restored emitter, the first pass's prune) is
-    /// deferred until the render is over.
+    /// due (a closed tile, a restored emitter) is deferred until the render
+    /// is over.
     pub(super) fn ensure_occupants(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut all = std::mem::take(&mut self.scratch_all_tiles);
         self.fill_all_tiles(&mut all);
@@ -234,19 +234,10 @@ impl ShellView {
             self.emit_subs.remove(id);
         }
         gone.retain(|id| !self.frame.read(cx).membership(*id).is_empty());
-        // The first pass also drops what the session restored for a tile no
-        // workspace holds. Such a tile never has an occupant, so the loop
-        // above never sees it close, and its membership would sit in the
-        // group for the life of the shell. Once, and on the same deferral:
-        // later renders have nothing of the kind to find.
-        let prune = !std::mem::replace(&mut self.linked_pruned, true);
-        if !gone.is_empty() || prune {
+        if !gone.is_empty() {
             cx.defer_in(window, move |view, _, cx| {
                 for id in gone {
                     view.unlink_tile(id, cx);
-                }
-                if prune {
-                    view.prune_links(cx);
                 }
             });
         }
@@ -356,11 +347,14 @@ impl ShellView {
                 fresh.push(*id);
             }
             // A restored tile that emits into a group is listened to from
-            // here on, without the trader touching it. After the render:
-            // the first pull writes the frame, which a render must not, and
-            // GPUI drops a notification sent while the window draws for an
-            // entity the window already tracks, so the group's followers
-            // could miss the post.
+            // here on, without the trader touching it. After the render,
+            // for ordering: the first pull writes the group's scope, and
+            // written here, between two occupants of this pass, a follower
+            // would start on a different scope according to whether its
+            // tile id sorts before or after its emitter's. (The post's
+            // notification is not what the deferral saves. On a first
+            // draw GPUI delivers it: a window tracks an entity only from
+            // the end of a draw.)
             if from_restore && self.frame.read(cx).membership(*id).emit.is_some() {
                 let id = *id;
                 cx.defer_in(window, move |view, _, cx| view.sync_emitter(id, cx));

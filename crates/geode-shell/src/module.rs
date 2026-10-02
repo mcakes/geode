@@ -923,7 +923,7 @@ pub mod recording {
 
     /// The link group each occupant read as followed at one moment of its
     /// life (`create`, `closed`), in the order the moments came.
-    pub type FollowedAtClose = Rc<RefCell<Vec<(TileId, Option<Group>)>>>;
+    pub type FollowLog = Rc<RefCell<Vec<(TileId, Option<Group>)>>>;
 
     #[derive(Debug, Clone, PartialEq)]
     pub enum Recorded {
@@ -1042,11 +1042,16 @@ pub mod recording {
         /// The link group each occupant's frame handle read as followed at
         /// the moment `closed` reached it, in order: what a closing
         /// following tile answers the flip barrier under.
-        pub followed_at_close: FollowedAtClose,
+        pub followed_at_close: FollowLog,
         /// The link group each occupant's frame handle read as followed
         /// inside `create`, in order: what a tile's first query is scoped
-        /// by. Kept out of `log` so no existing log assertion changes.
-        pub followed_at_create: FollowedAtClose,
+        /// by. A log of its own, read only by the tests about restored
+        /// membership; `log` records what the shell told a tile.
+        pub followed_at_create: FollowLog,
+        /// The frame generation each occupant's frame handle read inside
+        /// `create`, in order: a test's proof that nothing wrote the frame
+        /// between two occupants of one reconciliation pass.
+        pub generation_at_create: Rc<RefCell<Vec<(TileId, u64)>>>,
         /// One entry per notification of an occupant's view entity, which
         /// is what repaints it; the shell re-rendering does not.
         pub repaints: Rc<RefCell<Vec<TileId>>>,
@@ -1076,6 +1081,7 @@ pub mod recording {
                 frame_handles: Rc::new(RefCell::new(HashMap::new())),
                 followed_at_close: Rc::new(RefCell::new(Vec::new())),
                 followed_at_create: Rc::new(RefCell::new(Vec::new())),
+                generation_at_create: Rc::new(RefCell::new(Vec::new())),
                 repaints: Rc::new(RefCell::new(Vec::new())),
             }
         }
@@ -1164,7 +1170,7 @@ pub mod recording {
         /// Shared with [`RecordingFactory::pulls`].
         pulls: Rc<Cell<usize>>,
         /// Shared with [`RecordingFactory::followed_at_close`].
-        followed_at_close: FollowedAtClose,
+        followed_at_close: FollowLog,
     }
 
     impl TileContent for RecordingContent {
@@ -1520,6 +1526,9 @@ pub mod recording {
             self.followed_at_create
                 .borrow_mut()
                 .push((tile, frame.read(cx).following()));
+            self.generation_at_create
+                .borrow_mut()
+                .push((tile, frame.read(cx).generation()));
             let repaints = self.repaints.clone();
             cx.observe(&view, move |_, _| repaints.borrow_mut().push(tile))
                 .detach();
