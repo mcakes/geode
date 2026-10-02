@@ -182,6 +182,12 @@ measure already reads. Re-measure on an idle machine before quoting them.
   stages still derive their rows at each render, key-handling and
   click-resolution call site; their measured costs are 2 to 13 microseconds.
   See the [measurement log](../perf.md).
+- The palette prepares each item's title and category once per open and its
+  highlight ranges once per query, beside the cached ranking; the list is a
+  `uniform_list`, so a paint touches only the rows in view and formats
+  nothing. Selection scrolling keeps the selected row in view
+  (`ScrollStrategy::Nearest`). Ranking and frecency are unchanged: usage
+  bonuses are fixed for the open palette, and a dispatch closes it first.
 - Large module tables use virtualization or prepared visible rows.
 
 ## Known gaps

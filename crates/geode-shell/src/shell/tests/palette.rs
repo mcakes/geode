@@ -410,7 +410,7 @@ fn arrow_down_past_visible_rows_advances_selection_and_scrolls_it_into_view(
         .expect("the results list container should have painted");
     let row_bounds = cx
         .debug_bounds("palette-row-20")
-        .expect("row 20 should still be part of the layout tree (no virtualization)");
+        .expect("row 20 should paint once the virtualized list scrolls it into view");
     assert!(
         list_bounds.intersects(&row_bounds),
         "row 20 {row_bounds:?} should be scrolled into the visible list \
@@ -1562,5 +1562,284 @@ fn a_pointer_entering_a_result_row_repaints_at_once(cx: &mut gpui::TestAppContex
     assert!(
         notified.get() > 0,
         "entering a non-highlighted row must notify its view, or the hover fill waits for an unrelated repaint"
+    );
+}
+
+// -- prepared, virtualized list ------------------------------------------
+
+/// The filtered-row indices whose `palette-row-{i}` element painted.
+fn painted_palette_rows(cx: &mut gpui::VisualTestContext, total: usize) -> Vec<usize> {
+    (0..total)
+        .filter(|i| {
+            let selector: &'static str = Box::leak(format!("palette-row-{i}").into_boxed_str());
+            cx.debug_bounds(selector).is_some()
+        })
+        .collect()
+}
+
+/// The open palette's prepared rows against a fresh preparation from the
+/// shell's own inputs (registry, themes, keymap badges, saved scopes, usage)
+/// and its current query: a stale view would paint rows a key no longer acts on.
+fn assert_palette_view_is_fresh(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) {
+    shell.read_with(cx, |s, cx| {
+        let open = s.palette.as_ref().expect("the palette is open");
+        let bindings = crate::palette::build_binding_index(&s.services.keymap);
+        let items = crate::palette::build_items(
+            &s.services.registry,
+            &s.services.theme,
+            &bindings,
+            s.frame.read(cx).saved_scopes(),
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut fresh = PaletteState::with_usage(items, &s.palette_usage, now);
+        fresh.set_query(open.query());
+        let (view, fresh) = (open.view(), fresh.view());
+        assert_eq!(view.rows, fresh.rows, "query {:?}", open.query());
+        assert_eq!(view.titles, fresh.titles);
+        assert_eq!(view.categories, fresh.categories);
+        assert_eq!(view.items, fresh.items);
+    });
+}
+
+/// A long result list paints only the rows in view, and those rows are a
+/// fresh preparation's.
+#[gpui::test]
+fn the_palette_paints_only_the_visible_rows(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-k");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let total = shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().filtered().len());
+    assert!(
+        total > 2 * crate::palette::VISIBLE_ROWS,
+        "fixture has {total} rows"
+    );
+    let painted = painted_palette_rows(&mut vcx, total);
+    assert!(
+        painted.len() <= crate::palette::VISIBLE_ROWS + 2,
+        "{} of {total} rows painted",
+        painted.len()
+    );
+    assert_eq!(painted.first(), Some(&0), "{painted:?}");
+    assert_palette_view_is_fresh(&shell, &vcx);
+
+    vcx.simulate_input("th gr");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_palette_view_is_fresh(&shell, &vcx);
+    let typed = shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().filtered().len());
+    assert!(typed > 0, "the typed fixture query matches");
+    let narrowed = painted_palette_rows(&mut vcx, total);
+    assert_eq!(
+        narrowed,
+        (0..narrowed.len()).collect::<Vec<_>>(),
+        "the narrowed list paints from its top"
+    );
+    assert!(
+        narrowed.len() >= typed.min(crate::palette::VISIBLE_ROWS)
+            && narrowed.len() <= typed.min(crate::palette::VISIBLE_ROWS + 2),
+        "{} of {typed} narrowed rows painted",
+        narrowed.len()
+    );
+}
+
+/// Paging past the viewport keeps the selected row painted inside the list.
+#[gpui::test]
+fn paging_the_palette_keeps_the_selected_row_painted(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-k ctrl-f ctrl-f ctrl-f");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let selected = shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().selected());
+    assert!(selected >= 20, "three pages down: {selected}");
+    let list = vcx.debug_bounds("palette-list").expect("the list paints");
+    let selector: &'static str = Box::leak(format!("palette-row-{selected}").into_boxed_str());
+    let row = vcx.debug_bounds(selector).expect("the selected row paints");
+    assert!(list.intersects(&row), "row {row:?} inside {list:?}");
+}
+
+/// Holding `ctrl-n` walks the selection one row at a time past the viewport's
+/// bottom edge; after every step the selected row is painted inside the list.
+#[gpui::test]
+fn holding_ctrl_n_keeps_each_selected_row_painted(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-k");
+    let steps = 2 * crate::palette::VISIBLE_ROWS + 3;
+    for step in 1..=steps {
+        vcx.simulate_keystrokes("ctrl-n");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let selected = shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().selected());
+        assert_eq!(selected, step, "ctrl-n steps one row");
+        let list = vcx.debug_bounds("palette-list").expect("the list paints");
+        let selector: &'static str = Box::leak(format!("palette-row-{selected}").into_boxed_str());
+        let row = vcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("row {selected} paints after step {step}"));
+        // Wholly inside, not merely clipped at the edge: Nearest scrolls the
+        // row's bottom to the list's bottom.
+        assert!(
+            row.top() >= list.top() - px(0.5) && row.bottom() <= list.bottom() + px(0.5),
+            "row {row:?} inside {list:?} at step {step}"
+        );
+    }
+}
+
+/// `up` from row 0 wraps to the last row, which must scroll into view.
+#[gpui::test]
+fn wrapping_up_from_the_top_paints_the_last_row(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-k up");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let (selected, total) = shell.read_with(&vcx, |s, _| {
+        let p = s.palette.as_ref().unwrap();
+        (p.selected(), p.filtered().len())
+    });
+    assert_eq!(selected, total - 1);
+    let selector: &'static str = Box::leak(format!("palette-row-{selected}").into_boxed_str());
+    assert!(
+        vcx.debug_bounds(selector).is_some(),
+        "the last row paints after the wrap"
+    );
+}
+
+/// An item chosen once leads the next open's empty query: the usage a
+/// dispatch records reaches the next open's prepared rows, not only its
+/// ranking cache.
+#[gpui::test]
+fn a_dispatched_item_leads_the_next_palette_open(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-k");
+    let before = shell.read_with(&vcx, |s, _| {
+        let view = s.palette.as_ref().unwrap().view();
+        view.items[view.rows[0].item].clone()
+    });
+    assert_ne!(
+        before,
+        crate::palette::PaletteItem::Theme("Gruvbox Light".into()),
+        "the fixture must not already lead with the row under test"
+    );
+    vcx.simulate_input("theme gruvbox light");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("ctrl-k");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let first = shell.read_with(&vcx, |s, _| {
+        let view = s.palette.as_ref().unwrap().view();
+        view.items[view.rows[0].item].clone()
+    });
+    assert_eq!(
+        first,
+        crate::palette::PaletteItem::Theme("Gruvbox Light".into())
+    );
+    assert!(vcx.debug_bounds("palette-row-0").is_some());
+    assert_palette_view_is_fresh(&shell, &vcx);
+}
+
+/// A wheel scroll moves the painted window and leaves the selection alone;
+/// the next selection step scrolls the selected row back into view.
+#[gpui::test]
+fn a_wheel_scroll_moves_the_palette_rows_and_not_the_selection(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-k");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let total = shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().filtered().len());
+    let list = vcx.debug_bounds("palette-list").expect("the list paints");
+    vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: list.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-600.))),
+        modifiers: gpui::Modifiers::default(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let painted = painted_palette_rows(&mut vcx, total);
+    assert!(
+        painted.first().is_some_and(|&first| first > 1),
+        "the wheel scrolled the list: {painted:?}"
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().selected()),
+        0,
+        "the wheel does not move the selection"
+    );
+
+    vcx.simulate_keystrokes("down");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        vcx.debug_bounds("palette-row-1").is_some(),
+        "a step brings the selected row back into view"
+    );
+}
+
+/// A click on a row scrolled into view dispatches that row: the click
+/// carries the filtered-row index, not the row's position in the viewport.
+#[gpui::test]
+fn a_click_on_a_scrolled_palette_row_dispatches_that_row(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-k");
+    vcx.simulate_input("theme:");
+    vcx.simulate_keystrokes("ctrl-f ctrl-f");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let (selected, total) = shell.read_with(&vcx, |s, _| {
+        let p = s.palette.as_ref().unwrap();
+        (p.selected(), p.filtered().len())
+    });
+    assert_eq!(selected, 20, "two pages down over {total} theme rows");
+    let target = selected - 3;
+    let painted = painted_palette_rows(&mut vcx, total);
+    assert!(
+        !painted.contains(&0) && painted.contains(&target),
+        "the list scrolled and row {target} is in view: {painted:?}"
+    );
+    let item = shell.read_with(&vcx, |s, _| {
+        let view = s.palette.as_ref().unwrap().view();
+        view.items[view.rows[target].item].clone()
+    });
+    let crate::palette::PaletteItem::Theme(name) = item else {
+        panic!("row {target} is a theme row: {item:?}");
+    };
+    assert_ne!(
+        shell.read_with(&vcx, |s, _| s.services.theme.active_name().to_string()),
+        name
+    );
+    let selector: &'static str = Box::leak(format!("palette-row-{target}").into_boxed_str());
+    let bounds = vcx.debug_bounds(selector).expect("the target row paints");
+    vcx.simulate_mouse_down(
+        gpui::point(bounds.origin.x + px(10.0), bounds.origin.y + px(10.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.palette.is_none()));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.services.theme.active_name().to_string()),
+        name,
+        "the click dispatched the row under the pointer"
     );
 }

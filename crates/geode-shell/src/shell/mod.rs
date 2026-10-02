@@ -464,10 +464,10 @@ pub struct ShellView {
     /// Scroll state for the open settings dialog's row list — the
     /// `keybindings_scroll` split, one dialog over.
     settings_scroll: ScrollHandle,
-    /// Stable scroll handle for the open palette. Each open creates a new
-    /// handle; every render tracks that same handle. Selection changes call
-    /// `sync_palette_scroll` to keep the highlighted row visible.
-    palette_scroll: ScrollHandle,
+    /// Stable scroll handle for the open palette's virtualized list. Each open
+    /// creates a new handle; every render tracks that same handle. Selection
+    /// changes call `sync_palette_scroll` to keep the highlighted row visible.
+    palette_scroll: UniformListScrollHandle,
     /// The palette query input, built once so its focus handle, selection, and
     /// change subscription survive close/reopen. Opening the palette resets its
     /// value and focuses it; closing returns focus through
@@ -1404,7 +1404,7 @@ impl ShellView {
             keybindings_scroll: ScrollHandle::new(),
             settings: None,
             settings_scroll: ScrollHandle::new(),
-            palette_scroll: ScrollHandle::new(),
+            palette_scroll: UniformListScrollHandle::new(),
             palette_input,
             command_input,
             command_line: None,

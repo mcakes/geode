@@ -11,6 +11,9 @@
 //! snapshot is fixed while open; changing the query does not refresh usage or rows.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
+
+use gpui::SharedString;
 
 use crate::actions::{ActionId, ActionRegistry};
 use crate::keymap::{Keymap, Keystroke};
@@ -355,12 +358,39 @@ pub(crate) fn highlight_runs(title: &str, indices: &[usize]) -> Vec<std::ops::Ra
     runs
 }
 
+/// One ranked palette row as painted: its index into the items and its
+/// highlight byte ranges over the prepared title and category.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteRow {
+    pub item: usize,
+    pub title_runs: Vec<std::ops::Range<usize>>,
+    pub category_runs: Vec<std::ops::Range<usize>>,
+}
+
+/// What the virtualized list closure owns: shared slices, so a paint clones
+/// four reference counts and formats nothing.
+#[derive(Clone)]
+pub struct PaletteView {
+    pub items: Rc<[PaletteItem]>,
+    pub titles: Rc<[SharedString]>,
+    pub categories: Rc<[SharedString]>,
+    pub rows: Rc<[PaletteRow]>,
+}
+
 /// A fixed item/usage snapshot with cached fuzzy ranking and selection.
-/// Construction and every set_query call recompute matches. Selection and render
-/// accessors read the cache; item text and usage bonuses cannot change in place.
-/// The shell constructs fresh state for each palette session.
+/// Construction and every set_query call recompute matches and the prepared
+/// rows ([`view`](Self::view)). Selection and render accessors read the cache;
+/// item text and usage bonuses cannot change in place, so the query is the only
+/// ranking input that moves while the palette is open. The shell constructs
+/// fresh state for each palette session, which is where new usage enters.
 pub struct PaletteState {
-    items: Vec<PaletteItem>,
+    items: Rc<[PaletteItem]>,
+    /// Each item's display title (`"Theme: …"`, `"Scope: …"` formatted here,
+    /// once per open) and category, shared with the painted list.
+    titles: Rc<[SharedString]>,
+    categories: Rc<[SharedString]>,
+    /// The ranked rows as the list paints them, rebuilt with `filtered`.
+    view_rows: Rc<[PaletteRow]>,
     /// Each item's lowercased match text — `"{title} {category}"`, the
     /// same `searchable_text` shape the keybindings and settings dialogs
     /// filter over — built once at construction so a filter pass does no
@@ -413,15 +443,24 @@ impl PaletteState {
     fn with_bonus(items: Vec<PaletteItem>, bonus: Vec<u32>) -> Self {
         let mut lowered = Vec::with_capacity(items.len());
         let mut title_len = Vec::with_capacity(items.len());
+        let mut titles = Vec::with_capacity(items.len());
+        let mut categories = Vec::with_capacity(items.len());
         for item in &items {
-            let mut text = item.title().to_lowercase();
+            let title = SharedString::from(item.title());
+            let category = SharedString::from(item.category().to_string());
+            let mut text = title.to_lowercase();
             title_len.push(text.chars().count());
             text.push(' ');
-            text.push_str(&item.category().to_lowercase());
+            text.push_str(&category.to_lowercase());
             lowered.push(text);
+            titles.push(title);
+            categories.push(category);
         }
         let mut state = PaletteState {
-            items,
+            items: items.into(),
+            titles: titles.into(),
+            categories: categories.into(),
+            view_rows: Rc::from(Vec::new()),
             lowered,
             title_len,
             bonus,
@@ -454,6 +493,42 @@ impl PaletteState {
             .into_iter()
             .map(|(i, _, indices)| (i, indices))
             .collect();
+        // The painted rows follow the ranking they were split from: each
+        // label's highlight ranges, once per query, never per paint. The
+        // indices are over `"{title} {category}"`, ascending, so the title's
+        // are a prefix and the category's are rebased past the separating
+        // space; a category match glows in the category, not off the end of
+        // the title.
+        self.view_rows = self
+            .filtered
+            .iter()
+            .map(|(i, indices)| {
+                let title_len = self.title_len[*i];
+                let split = indices.partition_point(|&ix| ix < title_len);
+                let category: Vec<usize> = indices[split..]
+                    .iter()
+                    .filter(|&&ix| ix > title_len)
+                    .map(|&ix| ix - title_len - 1)
+                    .collect();
+                PaletteRow {
+                    item: *i,
+                    title_runs: highlight_runs(&self.titles[*i], &indices[..split]),
+                    category_runs: highlight_runs(&self.categories[*i], &category),
+                }
+            })
+            .collect::<Vec<_>>()
+            .into();
+    }
+
+    /// The prepared list for the painter: shared slices, so taking it clones
+    /// four reference counts.
+    pub fn view(&self) -> PaletteView {
+        PaletteView {
+            items: self.items.clone(),
+            titles: self.titles.clone(),
+            categories: self.categories.clone(),
+            rows: self.view_rows.clone(),
+        }
     }
 
     #[cfg(test)]
@@ -499,13 +574,13 @@ impl PaletteState {
             .collect()
     }
 
-    /// [`filtered`](Self::filtered) without the clones — the render's
-    /// per-frame walk: each row's index into the unfiltered items (its
-    /// stable element id), the item, its matched indices over
-    /// `"{title} {category}"`, and the title length the matcher scored
-    /// against (the lowered title's char count), which is what
-    /// `split_label_indices` must split at for the highlight to agree
-    /// with the alignment by construction.
+    /// [`filtered`](Self::filtered) without the clones — the raw cache the
+    /// prepared [`view`](Self::view) is split from: each row's index into the
+    /// unfiltered items (its stable element id), the item, its matched
+    /// indices over `"{title} {category}"`, and the title length the matcher
+    /// scored against (the lowered title's char count), which is what
+    /// `split_label_indices` must split at for the highlight to agree with
+    /// the alignment by construction.
     pub fn rows(&self) -> impl Iterator<Item = (usize, &PaletteItem, &[usize], usize)> {
         self.filtered
             .iter()
@@ -612,21 +687,21 @@ pub(crate) fn split_label_indices(indices: &[usize], title_len: usize) -> (Vec<u
 
 use gpui::prelude::*;
 use gpui::{
-    App, Entity, FontWeight, HighlightStyle, IntoElement, MouseButton, Pixels, ScrollHandle,
-    StyledText, Window, div, px,
+    App, Entity, FontWeight, HighlightStyle, IntoElement, MouseButton, Pixels, StyledText,
+    UniformListScrollHandle, Window, div, px, uniform_list,
 };
 use gpui_component::input::{Input, InputState};
-use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex};
 
 /// Target panel width at the design rem size.
 const WIDTH: f32 = 560.0;
 
 /// Maximum viewport height in estimated rows. This does not truncate
 /// results or clamp selection; the full result list is scrollable.
-pub(crate) const VISIBLE_ROWS: usize = 12;
+pub const VISIBLE_ROWS: usize = 12;
 
 /// Estimated row height at the design rem size, used to size the viewport.
-/// Scroll-follow uses measured item positions through ScrollHandle.
+/// Scroll-follow uses the uniform list's measured row height.
 pub(crate) const ROW_HEIGHT: f32 = 28.0;
 
 /// What [`render`] needs to know about the window it paints into: the
@@ -674,8 +749,10 @@ pub fn highlighted_runs(
 }
 
 /// Render a centered palette panel with Input and a scrollable full result
-/// list. The viewport shows at most VISIBLE_ROWS estimated rows; rows are not
-/// virtualized. Selection scrolling is the controller's responsibility.
+/// list. The viewport shows at most VISIBLE_ROWS estimated rows; the list is a
+/// `uniform_list` over the prepared [`PaletteView`], so only rows in view build
+/// elements. Selection scrolling is the controller's responsibility
+/// (`ScrollStrategy::Nearest` through the same handle).
 ///
 /// Row clicks call the supplied handler with a filtered-row index; the shell
 /// selects and commits through its ordinary palette dispatch path. The panel
@@ -684,7 +761,7 @@ pub fn highlighted_runs(
 /// scroll handle but does not mutate selection, focus, query, or scroll position.
 pub fn render(
     state: &PaletteState,
-    scroll_handle: &ScrollHandle,
+    scroll_handle: &UniformListScrollHandle,
     query_input: &Entity<InputState>,
     on_row_click: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
     viewport: Viewport,
@@ -705,83 +782,86 @@ pub fn render(
     // Use the same proportional top position as shell modal dialogs.
     let top = (viewport_height * crate::shell::dialog::MODAL_TOP_RATIO).max(0.0);
 
-    let row_count = state.filtered.len();
+    let view = state.view();
+    let selected = state.selected();
+    let row_count = view.rows.len();
 
-    // Scroll the full list in a viewport capped at VISIBLE_ROWS estimates.
-    // Short results shrink the viewport; empty results retain one message row.
-    let mut list = v_flex()
-        .id("palette-results")
+    // A viewport capped at VISIBLE_ROWS estimates over a virtualized list:
+    // only the rows in view build elements. Short results shrink the
+    // viewport; empty results keep one message row.
+    let list = if row_count == 0 {
+        div()
+            .id("palette-results")
+            .w_full()
+            .h(px(row_height))
+            // Expose the list bounds to UI tests without changing production behavior.
+            .debug_selector(|| "palette-list".to_string())
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_color(theme.muted_foreground)
+                    .child("no matches"),
+            )
+            .into_any_element()
+    } else {
+        let muted = theme.muted_foreground;
+        let radius = theme.radius;
+        uniform_list("palette-results", row_count, move |range, _window, _cx| {
+            range
+                .map(|i| {
+                    let shown = &view.rows[i];
+                    let item_ix = shown.item;
+                    let row = h_flex()
+                        .id(("palette-row", item_ix))
+                        .w_full()
+                        .justify_between()
+                        .items_center()
+                        .gap_3()
+                        .px_2()
+                        .py_1()
+                        .rounded(radius);
+                    // The list-row tokens through the one door (`shell::listrow`):
+                    // the highlighted row is the state, the hovered row is the
+                    // pointer, and they are distinct fills.
+                    let row = crate::shell::listrow::paint_row(row, row_paint, i == selected);
+                    // Test-only, see `palette-list`'s `debug_selector` above.
+                    let row = row.debug_selector(move || format!("palette-row-{i}"));
+                    // The shell callback selects and commits this filtered row.
+                    // Clone the callback so each closure keeps its own row index.
+                    let click = on_row_click.clone();
+                    let row = row.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                        click(i, window, cx);
+                    });
+                    // Prepared text and highlight ranges (`PaletteState::view`):
+                    // the paint clones shared strings and formats nothing.
+                    let label = h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().child(highlighted_runs(
+                            &view.titles[item_ix],
+                            &shown.title_runs,
+                            row_paint.accent,
+                        )))
+                        .child(div().text_color(muted).child(highlighted_runs(
+                            &view.categories[item_ix],
+                            &shown.category_runs,
+                            row_paint.accent,
+                        )));
+                    let binding = crate::shell::kbd::binding(
+                        view.items[item_ix].binding().unwrap_or_default(),
+                    );
+                    row.child(label).child(binding).into_any_element()
+                })
+                .collect::<Vec<_>>()
+        })
         .w_full()
-        .h(px(
-            (row_count.max(1) as f32 * row_height).min(VISIBLE_ROWS as f32 * row_height)
-        ))
-        .overflow_y_scroll()
+        .h(px(row_count.min(VISIBLE_ROWS) as f32 * row_height))
         .track_scroll(scroll_handle)
         // Expose the list bounds to UI tests without changing production behavior.
-        .debug_selector(|| "palette-list".to_string());
-    if row_count == 0 {
-        list = list.child(
-            div()
-                .px_2()
-                .py_1()
-                .text_color(theme.muted_foreground)
-                .child("no matches"),
-        );
-    } else {
-        for (i, (item_ix, item, indices, title_len)) in state.rows().enumerate() {
-            let is_selected = i == state.selected();
-            let row = h_flex()
-                .id(("palette-row", item_ix))
-                .w_full()
-                .justify_between()
-                .items_center()
-                .gap_3()
-                .px_2()
-                .py_1()
-                .rounded(theme.radius);
-            // The list-row tokens through the one door (`shell::listrow`):
-            // the highlighted row is the state, the hovered row is the
-            // pointer, and they are distinct fills.
-            let row = crate::shell::listrow::paint_row(row, row_paint, is_selected);
-            // Test-only, see `list`'s `debug_selector` comment above.
-            let row = row.debug_selector(move || format!("palette-row-{i}"));
-            // The shell callback selects and commits this filtered row. Clone the
-            // callback so each closure retains its own row index.
-            let click = on_row_click.clone();
-            let row = row.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                click(i, window, cx);
-            });
-            // The indices are over `"{title} {category}"`, ascending, so
-            // each label paints only its own half: the title's are a
-            // prefix slice (no allocation) and the category's are rebased
-            // past the separating space — the same split
-            // `split_label_indices` makes for the dialogs, done in place
-            // here because this runs once per row per frame. A category
-            // match glows in the category, not off the end of the title.
-            let split = indices.partition_point(|&ix| ix < title_len);
-            let title_ix = &indices[..split];
-            let cat_ix: Vec<usize> = indices[split..]
-                .iter()
-                .filter(|&&ix| ix > title_len)
-                .map(|&ix| ix - title_len - 1)
-                .collect();
-            let label = h_flex()
-                .gap_2()
-                .items_center()
-                .child(div().child(highlighted_title(&item.title(), title_ix, row_paint.accent)))
-                .child(
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .child(highlighted_title(
-                            item.category(),
-                            &cat_ix,
-                            row_paint.accent,
-                        )),
-                );
-            let binding = crate::shell::kbd::binding(item.binding().unwrap_or_default());
-            list = list.child(row.child(label).child(binding));
-        }
-    }
+        .debug_selector(|| "palette-list".to_string())
+        .into_any_element()
+    };
 
     // Input supplies its own padding and search prefix. The outer row draws
     // only the separator so the query is not boxed inside another panel.
@@ -1749,5 +1829,64 @@ mod tests {
             assert_eq!(indices, row_indices);
             assert_eq!(*title_len, item.title().chars().count());
         }
+    }
+
+    /// The prepared view is exactly what the old per-render loop computed:
+    /// same order, same title and category highlight ranges, for a fixed
+    /// query set — and the same under a usage snapshot that reorders it.
+    #[test]
+    fn the_prepared_palette_rows_match_the_old_render_loop() {
+        let items = vec![
+            action(
+                "workspace::focus_left",
+                "Focus left",
+                "Workspace",
+                Some("alt+h"),
+            ),
+            action(
+                "palette::toggle",
+                "Toggle palette",
+                "Palette",
+                Some("ctrl+k"),
+            ),
+            PaletteItem::Theme("Gruvbox Dark".into()),
+            PaletteItem::Scope("my book".into()),
+        ];
+        let mut usage = crate::palette_usage::PaletteUsage::new();
+        usage.record(&items[3].usage_key(), 1_000);
+        let fresh = || PaletteState::new(items.clone());
+        let used = || PaletteState::with_usage(items.clone(), &usage, 1_000);
+        for make in [&fresh as &dyn Fn() -> PaletteState, &used] {
+            for query in ["", "fo", "th gr", "pal wk", "scope", "zzz"] {
+                let mut state = make();
+                state.set_query(query);
+                let view = state.view();
+                let old: Vec<PaletteRow> = state
+                    .rows()
+                    .map(|(ix, item, indices, title_len)| {
+                        let split = indices.partition_point(|&i| i < title_len);
+                        let cat: Vec<usize> = indices[split..]
+                            .iter()
+                            .filter(|&&i| i > title_len)
+                            .map(|&i| i - title_len - 1)
+                            .collect();
+                        PaletteRow {
+                            item: ix,
+                            title_runs: highlight_runs(&item.title(), &indices[..split]),
+                            category_runs: highlight_runs(item.category(), &cat),
+                        }
+                    })
+                    .collect();
+                assert_eq!(view.rows.to_vec(), old, "query {query:?}");
+                for r in view.rows.iter() {
+                    assert_eq!(view.titles[r.item].as_ref(), items[r.item].title());
+                    assert_eq!(view.categories[r.item].as_ref(), items[r.item].category());
+                    assert_eq!(view.items[r.item], items[r.item]);
+                }
+            }
+        }
+        // The usage snapshot reorders the prepared rows, not only the cache.
+        let state = used();
+        assert_eq!(state.view().rows[0].item, 3);
     }
 }

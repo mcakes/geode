@@ -3,7 +3,9 @@
 //! The Input owns query text. Unconsumed keys reach palette navigation and commit
 //! handling without entering the ordinary shell matcher.
 
-use gpui::{Context, Focusable as _, KeyDownEvent, ScrollHandle, Window};
+use gpui::{
+    Context, Focusable as _, KeyDownEvent, ScrollStrategy, UniformListScrollHandle, Window,
+};
 
 use crate::listfilter;
 use crate::palette::{self, PaletteItem, PaletteState};
@@ -47,7 +49,7 @@ impl ShellView {
         // left over from a previous open (a different query, a different
         // scroll position) must not carry over now that the results list
         // scrolls a real viewport instead of always fitting on screen.
-        self.palette_scroll = ScrollHandle::new();
+        self.palette_scroll = UniformListScrollHandle::new();
         self.palette_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         // Recorded before the palette takes focus, for `close_palette`
@@ -79,10 +81,12 @@ impl ShellView {
         }
     }
 
-    /// Scroll to the selected result after query or selection changes; no-op when closed.
+    /// Scroll the selected result into view after query or selection changes,
+    /// moving the list only as far as the nearest edge; no-op when closed.
     pub(super) fn sync_palette_scroll(&self) {
         if let Some(palette) = self.palette.as_ref() {
-            self.palette_scroll.scroll_to_item(palette.selected());
+            self.palette_scroll
+                .scroll_to_item(palette.selected(), ScrollStrategy::Nearest);
         }
     }
 

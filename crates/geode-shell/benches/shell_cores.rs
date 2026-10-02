@@ -662,8 +662,9 @@ fn bench_chrome_rows(c: &mut Criterion) {
     });
     group.finish();
 
-    // Palette: the per-render row walk — an owned `title()` per row, the
-    // category index split, and two highlighted labels — over every result.
+    // Palette: what a paint does — read the prepared view and build two
+    // highlighted labels for each row in view. The preparation itself (titles
+    // per open, highlight ranges per query) is in `palette/set_query_*`.
     let mut palette_registry = ActionRegistry::default();
     register_builtin_actions(&mut palette_registry);
     for i in 0..MODULE_ACTIONS {
@@ -684,17 +685,19 @@ fn bench_chrome_rows(c: &mut Criterion) {
         state.set_query(query);
         group.bench_function(name, |b| {
             b.iter(|| {
+                let view = state.view();
                 let mut painted = 0usize;
-                for (_ix, item, indices, title_len) in state.rows() {
-                    let split = indices.partition_point(|&ix| ix < title_len);
-                    let cat: Vec<usize> = indices[split..]
-                        .iter()
-                        .filter(|&&ix| ix > title_len)
-                        .map(|&ix| ix - title_len - 1)
-                        .collect();
-                    let title =
-                        palette::highlighted_title(&item.title(), &indices[..split], gpui::black());
-                    let category = palette::highlighted_title(item.category(), &cat, gpui::black());
+                for row in view.rows.iter().take(palette::VISIBLE_ROWS) {
+                    let title = palette::highlighted_runs(
+                        &view.titles[row.item],
+                        &row.title_runs,
+                        gpui::black(),
+                    );
+                    let category = palette::highlighted_runs(
+                        &view.categories[row.item],
+                        &row.category_runs,
+                        gpui::black(),
+                    );
                     black_box((title, category));
                     painted += 1;
                 }
