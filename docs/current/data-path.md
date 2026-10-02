@@ -737,6 +737,49 @@ alongside the grouping, so `position_ref` usually costs a position-grain
 scan, and `instrument_ref` an instrument-grain scan, unless a shown measure
 already reads that grain.
 
+## The vol door
+
+`DataHandle::vol_slices` carries a batch: the documents it evaluates
+(`cvi_params` rows the tile already holds, each an `Arc`) and an ordered list
+of jobs. A `Slice` job evaluates one document at one expiry in one x
+coordinate; a `Map` job places given strikes and vols (a chain's quotes) in a
+coordinate, from the forward and the date the quotes were taken. The vol
+worker (`geode-vol`) runs the configured model ([`[vol] model`](configuration.md#vol))
+job by job and answers `VolSlices` with one result per job, in job order, so
+a tile reads results by position. A failed job fails alone. A batch the
+worker's queue refuses answers every job `the vol queue is full; resubmit`;
+a model the binary lacks answers every job with that reason. Batches
+coalesce by key, and cancellation by key stops a running batch at its next
+job boundary.
+
+A slice's grid is `Dense(n)` (n strikes over the document's strike range for
+that expiry), `At(strikes)` (echoed in the given order), or `Job(j)`: the
+strikes an earlier `Slice` job `j` of the same batch evaluated at. The worker
+resolves `Job(j)` to `At` before the model sees the request, so two curves
+compare at equal strikes in one round trip without the tile knowing the
+first curve's strikes in advance. A `Job` grid naming a failed job, a `Map`
+job, or a job that does not run before it fails naming why (`job 4 takes
+its strikes from job 2, which failed`); the demo model refuses a `Job` grid
+that reaches it unresolved. `geode_data::vol::evaluate` runs a batch in place on the
+calling thread under the same rules, for tests and benches.
+
+A slice asked with `density` carries `(x, pdf)` at its interior points. The
+pdf is per unit of the requested coordinate: the strike density times
+|dK/dx| by a central difference over the same neighbours, so its area is
+about one in every coordinate and two coordinates' densities compare. Where
+x does not move between neighbours (delta saturating at 0 or 1) the point is
+NaN, which a chart paints as a gap rather than a spike.
+
+An `option_chain` quote carries each side, its vol and its price, whole or
+not at all, and at least one side; `mid_vol` is required and finite. The
+document family has no NULL, so an absent side is NaN in both of its value
+columns, and the writer omits that side's children. Half a side or no side
+is refused naming the strike. `DocumentRows::validate` enforces no
+finiteness (a kind's parser refuses NaN where it must, as the CVI parser does
+on every number it reads), so a one-sided quote passes it. The slice viewer
+reads only `bid_vol` and `ask_vol`, and treats a NaN or NULL side vol as that
+side absent.
+
 ## Retention and maintenance
 
 The live/archive retention API works per table pair and partition, so a busy

@@ -8,7 +8,7 @@ use geode_core::vol::VolModel;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub use worker::{VOL_BOUND, VolSink, VolWorker};
+pub use worker::{VOL_BOUND, VolSink, VolWorker, evaluate};
 
 /// The service's selected vol model. With `model: None`, every job of a
 /// batch returns [`Self::missing_reason`] instead of preventing startup.

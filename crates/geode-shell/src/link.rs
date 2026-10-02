@@ -15,11 +15,10 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::{Rc, Weak};
-use std::sync::Arc;
 
 use geode_core::colour::{Definition, Tone, resolve};
-use geode_core::document::{DocumentRows, is_key_prefix, join_key};
-use geode_core::link::{Emission, Group, Membership};
+use geode_core::document::{is_key_prefix, join_key};
+use geode_core::link::{BoardEntry, Emission, Group, Membership};
 use geode_core::scope::Scope;
 use gpui::Hsla;
 use gpui_component::Theme;
@@ -59,7 +58,8 @@ type BoardKey = (String, Vec<String>);
 /// One draft on a group's board.
 #[derive(Debug)]
 struct Posted {
-    rows: Arc<DocumentRows>,
+    /// The entry as posted: its rows by allocation and its mark.
+    entry: BoardEntry,
     /// The tile whose emission put it there. Recorded for diagnostics;
     /// nothing reads it.
     #[allow(dead_code)]
@@ -238,7 +238,7 @@ impl Links {
                 next.insert(
                     (entry.dataset.clone(), entry.key.clone()),
                     Posted {
-                        rows: Arc::clone(&entry.rows),
+                        entry: entry.clone(),
                         emitter,
                     },
                 );
@@ -246,13 +246,11 @@ impl Links {
         }
         let lane = &mut self.groups[g.index()];
         // A key changed when it left, arrived, or now holds another
-        // allocation; the dataset and joined key are what a watch matches.
+        // allocation or mark (`BoardEntry`'s equality); the dataset and
+        // joined key are what a watch matches.
         let mut touched: Vec<(String, String)> = Vec::new();
         for (key, old) in &lane.board {
-            if !next
-                .get(key)
-                .is_some_and(|new| Arc::ptr_eq(&new.rows, &old.rows))
-            {
+            if !next.get(key).is_some_and(|new| new.entry == old.entry) {
                 touched.push((key.0.clone(), join_key(&key.1)));
             }
         }
@@ -312,20 +310,17 @@ impl Links {
         }
     }
 
-    /// The draft on `g`'s board for exactly this dataset and document key.
-    pub(crate) fn entry(
-        &self,
-        g: Group,
-        dataset: &str,
-        key: &[String],
-    ) -> Option<Arc<DocumentRows>> {
+    /// The draft on `g`'s board for exactly this dataset and document key:
+    /// a clone of the posted entry (an `Arc`, two short strings and its
+    /// mark).
+    pub(crate) fn entry(&self, g: Group, dataset: &str, key: &[String]) -> Option<BoardEntry> {
         // A board holds a handful of drafts: scanning them costs less than
         // building an owned key to look one up.
         self.groups[g.index()]
             .board
             .iter()
             .find(|((d, k), _)| d == dataset && k.as_slice() == key)
-            .map(|(_, posted)| Arc::clone(&posted.rows))
+            .map(|(_, posted)| posted.entry.clone())
     }
 
     pub(crate) fn board_gen(&self, g: Group) -> u64 {
@@ -336,7 +331,9 @@ impl Links {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geode_core::link::BoardEntry;
+    use geode_core::document::DocumentRows;
+    use geode_core::link::DraftMark;
+    use std::sync::Arc;
 
     fn rows() -> Arc<DocumentRows> {
         Arc::new(DocumentRows {
@@ -354,6 +351,7 @@ mod tests {
                 dataset: dataset.into(),
                 key: key.iter().map(|part| part.to_string()).collect(),
                 rows: rows(),
+                mark: DraftMark::Editing,
             }],
         }
     }

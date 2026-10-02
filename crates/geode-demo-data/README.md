@@ -89,7 +89,10 @@ per publish within ±0.005, and the mid is floored at 0.005. The half-spread
 widens in the wings and is capped at half the mid, so the bid vol stays
 positive at the floor. Bid and ask prices are Black out-of-the-money option
 prices at the expiry's own time to expiry (from the CVI anchor, never less
-than half a day), not the clamped curve date's. The quote time is the `now`
+than half a day), not the clamped curve date's. A quote whose bid price
+would fall under `MIN_BID` (0.05, the minimum tick) has no bid side: its bid
+vol and bid are both NaN and the quote carries its ask alone, so the far
+call wing of the near expiries is one-sided. The quote time is the `now`
 the caller passes.
 
 ## Demo configuration

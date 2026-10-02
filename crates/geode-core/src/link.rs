@@ -73,23 +73,50 @@ impl Membership {
     }
 }
 
-/// One draft document an emitter posts on its group's board.
+/// Where a posted draft stands against what is published. A follower
+/// cannot tell these apart from the rows: a `Behind` draft is the OLD
+/// base generation plus edits while a newer document is published, and a
+/// `Sent` one is what was uploaded until its echo lands.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DraftMark {
+    #[default]
+    Editing,
+    Behind,
+    Sent,
+}
+
+impl DraftMark {
+    /// The word a follower shows beside the draft; `None` for a live edit.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            DraftMark::Editing => None,
+            DraftMark::Behind => Some("behind"),
+            DraftMark::Sent => Some("sent"),
+        }
+    }
+}
+
+/// One draft document an emitter posts on its group's board, with where
+/// that draft stands.
 #[derive(Debug, Clone)]
 pub struct BoardEntry {
     pub dataset: String,
     pub key: Vec<String>,
     pub rows: Arc<DocumentRows>,
+    pub mark: DraftMark,
 }
 
-/// Equal when it is the same document under the same key: the rows compare
-/// by allocation. An emitter allocates rows only when its draft changed, so
-/// this is exact and costs a pointer compare instead of a document compare
-/// on every pull.
+/// Equal when it is the same document under the same key and mark: the
+/// rows compare by allocation. An emitter allocates rows only when its
+/// draft changed, so this is exact and costs a pointer compare instead of
+/// a document compare on every pull. The mark compares too: the same rows
+/// falling behind or being sent is a change a follower must hear.
 impl PartialEq for BoardEntry {
     fn eq(&self, other: &Self) -> bool {
         self.dataset == other.dataset
             && self.key == other.key
             && Arc::ptr_eq(&self.rows, &other.rows)
+            && self.mark == other.mark
     }
 }
 
@@ -163,6 +190,7 @@ mod tests {
             dataset: "cvi_params".into(),
             key: vec!["SPX.Z".into()],
             rows: Arc::clone(rows),
+            mark: DraftMark::Editing,
         };
         assert_eq!(entry(&shared), entry(&shared));
         // Equal content in a fresh allocation is a new draft: emitters
@@ -179,6 +207,26 @@ mod tests {
     }
 
     #[test]
+    fn a_board_entry_differs_by_its_mark() {
+        let shared = rows("SPX.Z");
+        let entry = |mark: DraftMark| BoardEntry {
+            dataset: "cvi_params".into(),
+            key: vec!["SPX.Z".into()],
+            rows: Arc::clone(&shared),
+            mark,
+        };
+        assert_eq!(entry(DraftMark::Behind), entry(DraftMark::Behind));
+        // The same rows held behind a newer document are not the live
+        // edit a follower painted: the mark alone is a change.
+        assert_ne!(entry(DraftMark::Editing), entry(DraftMark::Behind));
+        assert_ne!(entry(DraftMark::Behind), entry(DraftMark::Sent));
+        assert_eq!(DraftMark::default(), DraftMark::Editing);
+        assert_eq!(DraftMark::Editing.label(), None);
+        assert_eq!(DraftMark::Behind.label(), Some("behind"));
+        assert_eq!(DraftMark::Sent.label(), Some("sent"));
+    }
+
+    #[test]
     fn an_emission_compares_scope_and_board() {
         let r = rows("SPX.Z");
         let e = |u: Option<&str>, board: bool| Emission {
@@ -188,6 +236,7 @@ mod tests {
                     dataset: "cvi_params".into(),
                     key: vec!["SPX.Z".into()],
                     rows: Arc::clone(&r),
+                    mark: DraftMark::Editing,
                 }]
             } else {
                 Vec::new()

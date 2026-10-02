@@ -85,6 +85,51 @@ fn an_add_that_is_not_focused_on_its_first_render_is_not_launched(cx: &mut gpui:
     assert_eq!(launched(&log, second), 0, "{:?}", log.borrow());
 }
 
+fn focus_told(log: &Log) -> Vec<(TileId, bool)> {
+    log.borrow()
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Focused(t, f) => Some((*t, *f)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The focused tile is told it is, and the one it took focus from that it
+/// no longer is, once per change and never on a render that moved nothing.
+#[gpui::test]
+fn the_focused_tile_hears_set_focused_on_each_change(cx: &mut gpui::TestAppContext) {
+    let (services, log) = test_services_with_log();
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let first = focused(&shell, &vcx);
+    assert_eq!(focus_told(&log), [(first, true)]);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let second = focused(&shell, &vcx);
+    assert_ne!(second, first);
+    assert_eq!(
+        focus_told(&log),
+        [(first, true), (first, false), (second, true)]
+    );
+    draw(&mut vcx);
+    assert_eq!(focus_told(&log).len(), 3, "an idle render tells nobody");
+    vcx.update(|_, cx| {
+        shell.update(cx, |s, cx| {
+            s.services.workspaces.active_mut().focus_main_tile(first);
+            cx.notify();
+        })
+    });
+    draw(&mut vcx);
+    assert_eq!(
+        focus_told(&log)[3..],
+        [(second, false), (first, true)],
+        "focus moving back is told both ways"
+    );
+}
+
 /// A restored session never hears `launched`: startup takes focus from
 /// nothing, however many tiles were saved.
 #[gpui::test]

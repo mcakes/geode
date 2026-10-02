@@ -637,10 +637,21 @@ fn tiles_beneath_are_hidden_on_open_and_shown_on_close(cx: &mut gpui::TestAppCon
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
+    // Focus is reported after visibility, so the last visibility entry is
+    // the one that says the tile went under the page.
+    let last_visible = |log: &[Recorded]| {
+        log.iter()
+            .rev()
+            .find(|r| matches!(r, Recorded::Visible(..)))
+            .cloned()
+    };
     assert!(
-        matches!(tile_log.borrow().last(), Some(Recorded::Visible(_, false))),
+        matches!(
+            last_visible(&tile_log.borrow()),
+            Some(Recorded::Visible(_, false))
+        ),
         "hidden beneath the page: {:?}",
-        tile_log.borrow().last()
+        tile_log.borrow()
     );
     // The tiles leaving the screen must not pull focus off the page: the
     // render's "a tile left the screen" net is for tiles, not the page.
@@ -659,7 +670,7 @@ fn tiles_beneath_are_hidden_on_open_and_shown_on_close(cx: &mut gpui::TestAppCon
         let _ = window.draw(cx);
     });
     assert!(matches!(
-        tile_log.borrow().last(),
+        last_visible(&tile_log.borrow()),
         Some(Recorded::Visible(_, true))
     ));
 }

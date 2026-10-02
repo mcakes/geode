@@ -36,6 +36,7 @@ cancellation can suppress query outcomes, and UI delivery may coalesce them.
 | Distinct values | `Distinct`, with key, tag, and requested column. |
 | Catalog | `Catalog`, read on the service thread and addressed by key/tag. |
 | Pricing | `Price`, addressed by key/tag; downstream queue refusal produces per-line errors. |
+| Vol slices | `VolSlices`, addressed by key/tag, one result per job in job order; a full vol queue answers every job `the vol queue is full; resubmit`. |
 | Local publish | Storage produces `Published` then `LocalPublished`. Any refusal or failure — the service refusing a dataset that is not local, the writer's validation or store error, a contained panic — produces an error diagnostic and `LocalPublishFailed`. Every admitted local publish answers exactly once. |
 | Local forget | `Forgotten` (including a key that held nothing) or `ForgetFailed`. The service refuses a dataset that is not local or a key of the wrong arity with an error diagnostic and `ForgetFailed`; nothing is queued. |
 | Document upload | `Upload`, addressed by tile key and upload tag; target validation and target-queue refusal (from the service thread), and encoding and transport results (from the target's worker) use the same outcome. |
@@ -43,15 +44,19 @@ cancellation can suppress query outcomes, and UI delivery may coalesce them.
 | Identity refresh | Updates a cache read by a later catalog request; worker refusal is logged, with no dedicated completion event. |
 
 Tiles word a refusal by its kind, for example `query refused: the data
-service is busy` or `upload refused: the data service has stopped`. The
-blotter, market-data, and timeseries tiles do not retry on their own: the next
-frame change or command submits again and repeats the notice. The pricer
+service is busy`, `upload refused: the data service has stopped`, or the vol
+slice viewer's `document request refused: …` and `vol request refused: …`.
+The blotter, market-data, timeseries and vol slice tiles do not retry on
+their own: the next frame change or command submits again and repeats the
+notice. The pricer
 retries a busy pricing refusal with backoff and stops asking altogether after
 a stopped one (see [the line pricer](features.md#pricing-and-the-line-pricer)).
 
 Cancellation is itself an ordinary queued request and can be refused. It
-targets query-pool and pricing work by key, does not cancel uploads, fetch,
-or ingest work, and cannot retract a result already emitted. It has no acknowledgement.
+targets query-pool, pricing and vol work by key (a running pricing or vol
+batch stops at its next line or job boundary), does not cancel uploads,
+fetch, or ingest work, and cannot retract a result already emitted. It has
+no acknowledgement.
 Receivers still need stale-result checks. See
 [`handle.rs`](../../crates/geode-data/src/handle.rs).
 

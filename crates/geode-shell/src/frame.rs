@@ -30,9 +30,9 @@ use crate::perf::RequeryStats;
 use crate::scopebar::{self, ScopeBarModel};
 use crate::tiling::{TileId, WorkspaceIx};
 use geode_core::config::Layer;
-use geode_core::document::{DocumentRows, KEY_SEPARATOR, is_key_prefix};
+use geode_core::document::{KEY_SEPARATOR, is_key_prefix};
 use geode_core::groupings::GroupingSlots;
-use geode_core::link::{Emission, Group, Membership};
+use geode_core::link::{BoardEntry, Emission, Group, Membership};
 use geode_core::named::NamedExpressions;
 use geode_core::query::{AsOf, QueryKey};
 use geode_core::scope::{Expr, Scope};
@@ -42,7 +42,6 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use toml_edit::value;
 
@@ -492,12 +491,7 @@ impl Frame {
     /// `key` is the key's parts, every one of them: not the joined string
     /// [`Self::watch_board`] takes (`geode_core::document::join_key`), and
     /// never a prefix.
-    pub fn board_entry(
-        &self,
-        group: Group,
-        dataset: &str,
-        key: &[String],
-    ) -> Option<Arc<DocumentRows>> {
+    pub fn board_entry(&self, group: Group, dataset: &str, key: &[String]) -> Option<BoardEntry> {
         self.links.entry(group, dataset, key)
     }
 
@@ -1474,7 +1468,7 @@ mod tests {
     use crate::tiling::{TileId, WorkspaceIx};
     use geode_core::clock::Clock;
     use geode_core::document::DocumentRows;
-    use geode_core::link::{BoardEntry, Emission, Group};
+    use geode_core::link::{BoardEntry, DraftMark, Emission, Group};
     use geode_core::scope::{DimensionSelection, Scope};
     use std::sync::Arc;
 
@@ -2882,12 +2876,14 @@ mod tests {
                 dataset: "cvi_params".into(),
                 key: vec![u.to_string()],
                 rows: Arc::clone(rows),
+                mark: DraftMark::Editing,
             }],
         }
     }
 
     fn on_board(f: &Frame, g: Group, u: &str) -> Option<Arc<DocumentRows>> {
         f.board_entry(g, "cvi_params", &[u.to_string()])
+            .map(|e| e.rows)
     }
 
     #[test]
@@ -3048,6 +3044,30 @@ mod tests {
             Arc::ptr_eq(&on_board(&f, Group::A, "SPX.Z").unwrap(), &r1),
             "the first emitter still lists it"
         );
+    }
+
+    /// The same rows re-posted under another mark (a draft falling behind
+    /// a newer document, or being sent) must reach a follower: a board
+    /// that compared allocations alone would hold the old mark.
+    #[test]
+    fn a_mark_change_alone_is_a_board_change() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let panel = TileId(1);
+        f.emit(panel, Some(Group::A));
+        let rows = doc("SPX.Z");
+        assert!(f.post_emission(panel, draft("SPX.Z", &rows)));
+        let watch = f.watch_board(Group::A, "cvi_params", Some("SPX.Z"));
+        let before = watch.revision();
+
+        let mut behind = draft("SPX.Z", &rows);
+        behind.board[0].mark = DraftMark::Behind;
+        assert!(f.post_emission(panel, behind));
+        assert!(watch.revision() > before, "the mark moved the board");
+        let entry = f
+            .board_entry(Group::A, "cvi_params", &["SPX.Z".to_string()])
+            .unwrap();
+        assert!(Arc::ptr_eq(&entry.rows, &rows), "the same allocation");
+        assert_eq!(entry.mark, DraftMark::Behind);
     }
 
     #[test]

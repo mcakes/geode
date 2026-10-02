@@ -38,8 +38,14 @@ cargo bench -p geode-documents     # document parse and write
   tags with column names for both parser and writer.
 - Option-chain quotes are sorted by strike at parse, and a repeated strike is
   refused naming it, so a chain's strikes are always strictly ascending. Every
-  quote must carry all five values: vols arrive computed upstream, so a quote
-  missing one is refused rather than filled by averaging bid and ask. A
+  quote must carry its mid vol: vols arrive computed upstream, so a quote
+  missing it is refused rather than filled by averaging bid and ask. A side
+  is its vol and its price together. A quote may lack one whole side (a
+  one-sided market, NaN in both of that side's columns since the family has
+  no NULL, and written back with that side's children absent); half a side,
+  or neither side, is refused naming the strike, by the parser and the
+  writer alike. Consumers of `bid_vol`, `ask_vol`, `bid` and `ask` must treat
+  NaN as an absent side; `mid_vol` is always finite. A
   negative vol or price and a non-positive `spotRef` are refused as
   impossible; zero values and crossed or locked quotes (bid vol above ask vol,
   mid outside bid and ask) are plausible market states and pass. `quoteTime`

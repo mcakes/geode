@@ -53,6 +53,7 @@ cargo bench -p geode-documents
 cargo bench -p geode-marketdata
 cargo bench -p geode-chart
 cargo bench -p geode-timeseries
+cargo bench -p geode-volslice
 cargo bench -p geode-pricer
 cargo bench --workspace --no-run
 ```
@@ -159,6 +160,11 @@ measure already reads. Re-measure on an idle machine before quoting them.
   rebuild during render.
 - Chart data paths and chrome are cached. A view move invalidates geometry but
   does not rebuild the module's data model.
+- A vol slice tile builds its xy model when a vol batch answers
+  (`core::build::model`), never in render. Its header text, strip rows and
+  footer notice are prepared when an input they read changes; a cursor step
+  rebuilds no chart path and formats no strip text. A split step is the same
+  slots under a new model version, and a view move keeps the model.
 - Chart decimation reuses buffers and retains up to two extrema per finite
   run in each pixel column. Gaps can increase output beyond two points per
   column. Warm paints still allocate for path submission, labels, and tooltips.
@@ -249,6 +255,14 @@ measure already reads. Re-measure on an idle machine before quoting them.
   pipeline. Concurrent staging is on hold until the real path and a network
   share are measured.
 - CI compiles benchmarks but has no stable regression baseline.
+- The vol slice `model_build` bench (`cargo bench -p geode-volslice`) has
+  not been measured locally; CI compiles it. It times `core::build::model`
+  alone, the work a repaint does on the UI thread when a batch answers, over
+  twelve active monthly expiries with the published CVI, a draft and a
+  60-strike chain at each, densities on and a `cvi draft − chain`
+  difference, in moneyness, the batch answered once by the stand-in model
+  outside the timed loop. Its target is under 1 ms. The delta coordinate
+  (reversed, with NaN density gaps) is not benchmarked.
 - The pricer's `/` cells read the live sheet through the index `/` built. A
   price-only delivery (the refill-only path) drops them and has the table
   re-report, so the rows shown refill from the new prices before the next

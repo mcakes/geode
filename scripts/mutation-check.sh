@@ -29260,8 +29260,8 @@ run_mutation "link: a repeated emission does not restore a scope" \
 # generation and its watches must move.
 run_mutation "link: a draft's new allocation is a board change" \
   crates/geode-shell/src/link.rs \
-  '                .is_some_and(|new| Arc::ptr_eq(&new.rows, &old.rows))' \
-  '                .is_some_and(|_| true)' \
+  '            if !next.get(key).is_some_and(|new| new.entry == old.entry) {' \
+  '            if !next.get(key).is_some_and(|_| true) {' \
   geode-shell an_unchanged_emission_writes_nothing
 
 # A tile that leaves or switches group takes what it posted with it. Kept,
@@ -31428,6 +31428,676 @@ run_mutation "blotter stale: the timer arms on no prepared time" \
   '        let times = Vec::new();' \
   geode-blotter \
   an_idle_blotter_turns_its_stalest_time_stale_without_another_event
+
+# ---- Vol slice viewer: the vol door, one-sided chains, the board's mark ----
+#
+# The data side the slice viewer stands on. A `Grid::Job(j)` slice is
+# resolved by the vol worker to the strikes earlier job `j` evaluated at, so
+# two curves compare at equal strikes in one batch; the model never sees it.
+# Density is per unit of the requested x. A chain quote carries each side
+# whole or not at all. A board entry carries its draft's state.
+
+# An unresolved job grid reaches the model, which cannot know what an
+# earlier job answered: the comparison curve would fail at every expiry.
+run_mutation "vol door: a job grid is resolved before the model sees it" \
+  crates/geode-data/src/vol/worker.rs \
+  '    let job = resolve(index, job, earlier)?;' \
+  '    let job = Cow::Borrowed(job);' \
+  geode-data a_job_grid_takes_the_strikes_an_earlier_slice_evaluated
+
+# A grid naming no earlier job (itself, a later one) fails naming why,
+# rather than reaching the model unresolved.
+run_mutation "vol door: a job grid naming no earlier job fails naming why" \
+  crates/geode-data/src/vol/worker.rs \
+  '        None => return Err(format!("{from}, which does not run before it")),' \
+  '        None => return Ok(Cow::Borrowed(job)),' \
+  geode-data a_job_grid_naming_a_later_failed_or_map_job_fails_alone
+
+# A grid naming a failed job fails too: read as no strikes, the curve
+# would be an empty success and the difference would silently vanish.
+run_mutation "vol door: a job grid naming a failed job fails" \
+  crates/geode-data/src/vol/worker.rs \
+  '        Some(Err(_)) => return Err(format!("{from}, which failed")),' \
+  '        Some(Err(_)) => Vec::new(),' \
+  geode-data a_job_grid_naming_a_later_failed_or_map_job_fails_alone
+
+# The pdf is per unit x: per unit strike, its area over moneyness is off by
+# the forward, and densities in two coordinates do not compare.
+run_mutation "vol door: density is per unit of the requested x" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '                pdf * jacobian' \
+  '                pdf' \
+  geode-pricing a_flat_smiles_density_integrates_to_about_one_in_every_coordinate
+
+# Half a side is a malformed quote, not a one-sided market.
+run_mutation "vol chain: half a side is refused" \
+  crates/geode-documents/src/chain.rs \
+  '                            (Some(_), None) => Err(missing(pt)),' \
+  '                            (Some(_), None) => Ok(None),' \
+  geode-documents half_a_side_or_no_side_is_refused_naming_the_strike
+
+run_mutation "vol chain: a quote with neither side is refused" \
+  crates/geode-documents/src/chain.rs \
+  '                        if b.is_none() && a.is_none() {' \
+  '                        if false {' \
+  geode-documents half_a_side_or_no_side_is_refused_naming_the_strike
+
+# The writer omits an absent side's children, so what it writes is what
+# the parser could have read.
+run_mutation "vol chain: the writer omits an absent side" \
+  crates/geode-documents/src/chain.rs \
+  '            if column[i].is_nan() {
+                continue;
+            }' \
+  '            if false {
+                continue;
+            }' \
+  geode-documents a_one_sided_quote_round_trips_with_its_side_absent
+
+run_mutation "vol chain: the writer refuses half a side" \
+  crates/geode-documents/src/chain.rs \
+  '            if vol[i].is_nan() != price[i].is_nan() {' \
+  '            if false {' \
+  geode-documents write_refuses_half_a_side_and_a_missing_mid
+
+# A wing bid priced under the tick is no bid: dropped whole, vol and price.
+run_mutation "vol chain: a sub-tick bid is dropped" \
+  crates/geode-demo-data/src/documents.rs \
+  '                if b_price < MIN_BID {' \
+  '                if b_price < 0.0 {' \
+  geode-demo-data a_bid_under_the_minimum_tick_is_dropped_whole
+
+run_mutation "vol chain: a dropped bid takes its vol with it" \
+  crates/geode-demo-data/src/documents.rs \
+  '                    bid_vol.push(f64::NAN);' \
+  '                    bid_vol.push(b);' \
+  geode-demo-data a_bid_under_the_minimum_tick_is_dropped_whole
+
+# The same rows falling behind or being sent is a change a follower must
+# hear: equality on rows alone would hold the old mark.
+run_mutation "link: a board entry's mark is part of its equality" \
+  crates/geode-core/src/link.rs \
+  '            && self.mark == other.mark' \
+  '            && true' \
+  geode-core a_board_entry_differs_by_its_mark
+
+run_mutation "link: the panel marks a draft held behind" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    DraftState::Behind { .. } => DraftMark::Behind,' \
+  '                    DraftState::Behind { .. } => DraftMark::Editing,' \
+  geode-marketdata the_board_entry_marks_the_drafts_state
+
+run_mutation "link: the panel marks a sent draft" \
+  crates/geode-marketdata/src/tile.rs \
+  '                    DraftState::Sent { .. } => DraftMark::Sent,' \
+  '                    DraftState::Sent { .. } => DraftMark::Editing,' \
+  geode-marketdata the_board_entry_marks_the_drafts_state
+
+# The board's touched test compares whole entries: by allocation alone a
+# mark change moves no watch.
+run_mutation "link: a mark change alone moves the board" \
+  crates/geode-shell/src/link.rs \
+  '            if !next.get(key).is_some_and(|new| new.entry == old.entry) {' \
+  '            if !next.get(key).is_some_and(|new| std::sync::Arc::ptr_eq(&new.entry.rows, &old.entry.rows)) {' \
+  geode-shell a_mark_change_alone_is_a_board_change
+
+# ---- Vol slice viewer ----
+#
+# geode-volslice: one underlying's smiles per expiry and kind. The pure core
+# plans the batch and reads its answers by position; the tile fetches both
+# documents under one barrier tag, follows a group's board, and owns keys,
+# choosers and pointer gestures.
+
+# The shell tells a tile when it gains or loses focus, so a strip press
+# that merely focused the tile changes nothing else.
+run_mutation "volslice: the shell tells the focused tile" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if focused_now != self.focused_sent {' \
+  '        if false {' \
+  geode-shell the_focused_tile_hears_set_focused_on_each_change
+
+run_mutation "volslice: the shell tells the tile that lost focus" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '                o.content.set_focused(false, cx);' \
+  '                let _ = o;' \
+  geode-shell the_focused_tile_hears_set_focused_on_each_change
+
+# Expiries before today are the viewer's to drop (no data-tier retirement).
+run_mutation "volslice: the strip drops the past" \
+  crates/geode-volslice/src/core/model.rs \
+  '        if expiry >= today {' \
+  '        if true {' \
+  geode-volslice the_strip_is_the_sorted_union_with_kind_marks_and_no_past
+
+run_mutation "volslice: the chain drops the past" \
+  crates/geode-volslice/src/core/docs.rs \
+  '    out.retain(|c| c.expiry >= today);' \
+  '    out.retain(|_| true);' \
+  geode-volslice a_prefix_snapshot_splits_into_one_chain_per_expiry_and_drops_the_past
+
+# An expiry in two runs would mean two documents under one key: refused,
+# never merged.
+run_mutation "volslice: a chain expiry split across runs is refused" \
+  crates/geode-volslice/src/core/docs.rs \
+  '            if out.iter().any(|c| c.expiry == expiry) {' \
+  '            if false {' \
+  geode-volslice an_expiry_split_across_runs_is_refused
+
+# A restored set naming no listed expiry fronts the first row: an expired
+# front month must not leave an empty plot.
+run_mutation "volslice: an emptied active set fronts the first row" \
+  crates/geode-volslice/src/core/model.rs \
+  '        self.active = Some(if kept.is_empty() {' \
+  '        self.active = Some(if false {' \
+  geode-volslice a_restored_set_naming_no_listed_expiry_fronts_the_first
+
+# The last active expiry cannot be toggled off: an emptied set paints blank.
+run_mutation "volslice: the last active expiry stays" \
+  crates/geode-volslice/src/core/model.rs \
+  '            if set.len() == 1 {' \
+  '            if false {' \
+  geode-volslice toggling_the_last_active_expiry_is_refused
+
+# A hidden kind's own trace jobs leave the batch.
+run_mutation "volslice: a hidden kind asks no curve" \
+  crates/geode-volslice/src/core/build.rs \
+  '            if trace || minuend {' \
+  '            if true {' \
+  geode-volslice hidden_kinds_are_omitted_and_density_rides_visible_curves
+
+# Curve minus curve is at equal strike: the subtrahend at the minuend's.
+run_mutation "volslice: a curve difference evaluates at the minuend's strikes" \
+  crates/geode-volslice/src/core/build.rs \
+  '                request: slice(expiry, Grid::Job(of), false),' \
+  '                request: slice(expiry, Grid::Dense(GRID_N), false),' \
+  geode-volslice curve_minus_curve_evaluates_the_subtrahend_at_the_minuends_strikes
+
+# Each expiry's difference names its own expiry's minuend job; found by
+# kind alone it would take the first expiry's strikes.
+run_mutation "volslice: each expiry's difference names its own minuend" \
+  crates/geode-volslice/src/core/build.rs \
+  '                dense_job[pair.minuend.index()],' \
+  '                roles.iter().position(|r| matches!(r, Role::Curve { kind, .. } if *kind == pair.minuend)),' \
+  geode-volslice each_expirys_difference_names_its_own_minuend_and_a_hidden_subtrahend_still_gets_one
+
+# A hidden subtrahend still gets its difference job: hiding a kind to read
+# the difference is a use.
+run_mutation "volslice: a hidden subtrahend still gets its difference" \
+  crates/geode-volslice/src/core/build.rs \
+  '                doc_of[pair.subtrahend.index()],' \
+  '                doc_of[pair.subtrahend.index()].filter(|_| state.visible(loaded, pair.subtrahend)),' \
+  geode-volslice each_expirys_difference_names_its_own_minuend_and_a_hidden_subtrahend_still_gets_one
+
+# Curve minus chain is at the chain's strikes, placed at the chain's x.
+run_mutation "volslice: a curve-chain difference evaluates at the chain strikes" \
+  crates/geode-volslice/src/core/build.rs \
+  '                request: slice(expiry, Grid::At(c.strikes.clone()), false),' \
+  '                request: slice(expiry, Grid::Dense(GRID_N), false),' \
+  geode-volslice curve_minus_chain_evaluates_the_curve_at_the_chain_strikes
+
+run_mutation "volslice: a chain-first difference is negated" \
+  crates/geode-volslice/src/core/build.rs \
+  '                    let sign = if pair.minuend == kind { 1.0 } else { -1.0 };' \
+  '                    let sign = 1.0;' \
+  geode-volslice swapping_a_curve_chain_pair_negates_the_difference
+
+# Curve minus chain is the curve's vol less the mid: a sign inverted in
+# both orders still negates on a swap.
+run_mutation "volslice: curve minus chain is the curve less the mid" \
+  crates/geode-volslice/src/core/build.rs \
+  '                    let sign = if pair.minuend == kind { 1.0 } else { -1.0 };' \
+  '                    let sign = if pair.minuend == kind { -1.0 } else { 1.0 };' \
+  geode-volslice a_curve_minus_chain_difference_is_the_curve_vol_less_the_mid
+
+# An outcome shorter than its plan (a cancelled batch) builds nothing:
+# indexed, it would pair answers with the wrong roles.
+run_mutation "volslice: a short outcome is not indexed" \
+  crates/geode-volslice/src/core/build.rs \
+  '    if outcome.results.len() < n || plan.roles.len() < n {' \
+  '    if plan.roles.len() < n {' \
+  geode-volslice a_short_outcome_is_superseded_not_indexed
+
+run_mutation "volslice: failed-job notices are deduplicated" \
+  crates/geode-volslice/src/core/build.rs \
+  '            if !notices.contains(&notice) {' \
+  '            if true {' \
+  geode-volslice failed_jobs_become_deduplicated_notices
+
+# One cause behind every job (no model, a full queue) is said once.
+run_mutation "volslice: one cause behind every job is said once" \
+  crates/geode-volslice/src/core/build.rs \
+  '    if let Some(Err(first)) = results.first()' \
+  '    if let Some(Err(first)) = results.first().filter(|_| false)' \
+  geode-volslice one_message_for_every_job_is_said_once
+
+# A difference failing only because its strike source failed adds no
+# notice: the source's own notice says why.
+run_mutation "volslice: a difference whose strikes failed adds no notice" \
+  crates/geode-volslice/src/core/build.rs \
+  '                && results.get(of).is_some_and(Result::is_err)' \
+  '                && false' \
+  geode-volslice a_difference_whose_strikes_failed_adds_no_notice
+
+# A chain whose coordinates miscount its quotes is skipped with a notice,
+# not painted at other strikes' x.
+run_mutation "volslice: a chain miscounting its quotes is skipped" \
+  crates/geode-volslice/src/core/build.rs \
+  '                if xs.len() != c.mid.len() {' \
+  '                if false {' \
+  geode-volslice a_chain_whose_coordinates_miscount_its_quotes_is_skipped
+
+# A pair naming an unloaded kind is a notice, not a silent empty pane.
+run_mutation "volslice: a pair naming an unloaded kind says so" \
+  crates/geode-volslice/src/core/build.rs \
+  '            .find(|k| !loaded.has(*k))' \
+  '            .find(|_| false)' \
+  geode-volslice a_pair_naming_an_unloaded_kind_says_so
+
+run_mutation "volslice: a restored pair naming an unloaded kind is a notice" \
+  crates/geode-volslice/src/core/build.rs \
+  '            "diff {}: {} is not loaded",' \
+  '            "diff {}: {} is loaded",' \
+  geode-volslice a_restored_pair_naming_an_unloaded_kind_is_a_notice
+
+run_mutation "volslice: the draft curve is dashed" \
+  crates/geode-volslice/src/core/build.rs \
+  '                let style = if kind == Kind::Draft {' \
+  '                let style = if false {' \
+  geode-volslice curves_and_chains_become_slots_by_kind_style_and_expiry_color
+
+# An expiry's color is its strip position's, so it keeps its color as
+# other expiries come and go from the active set.
+run_mutation "volslice: an expiry's color is its strip position's" \
+  crates/geode-volslice/src/core/build.rs \
+  '            .map_or_else(|| palette.colour(0), |(pos, _)| palette.colour(*pos));' \
+  '            .map_or_else(|| palette.colour(0), |_| palette.colour(0));' \
+  geode-volslice curves_and_chains_become_slots_by_kind_style_and_expiry_color
+
+run_mutation "volslice: the narrowest view is per coordinate" \
+  crates/geode-volslice/src/core/build.rs \
+  '        Coordinate::Delta => 0.02,' \
+  '        Coordinate::Delta => 0.01,' \
+  geode-volslice the_view_is_rebuilt_with_the_coordinates_min_span
+
+run_mutation "volslice: the session writes the difference" \
+  crates/geode-volslice/src/core/session.rs \
+  '    if let Some(p) = state.diff {' \
+  '    if let Some(p) = state.diff.filter(|_| false) {' \
+  geode-volslice a_state_round_trips_through_its_table
+
+# The saved split is clamped to the chart's own bounds, so the saved and
+# the painted split agree.
+run_mutation "volslice: a restored split is clamped to the chart's bounds" \
+  crates/geode-volslice/src/core/session.rs \
+  '        let clamped = (s as f32).clamp(SPLIT_MIN, SPLIT_MAX);' \
+  '        let clamped = s as f32;' \
+  geode-volslice a_split_out_of_bounds_is_clamped_with_a_notice
+
+# The bare digits are kind toggles: a counting context would swallow them.
+run_mutation "volslice: the key context takes no counts" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '        let ctx = KeyContext::new(crate::KIND).pair("mode", self.mode());' \
+  '        let ctx = KeyContext::new(crate::KIND).pair("mode", self.mode()).counts();' \
+  geode-volslice bare_digits_reach_the_tile_not_a_count
+
+# Only the fieldless diff chooser publishes `tilelist`: under the picker the
+# shared steps would claim the `j` and `k` its field must type.
+run_mutation "volslice: the picker publishes no tilelist" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '        if matches!(self.popup, Some(Popup::Diff(_))) {' \
+  '        if self.popup.is_some() {' \
+  geode-volslice the_picker_types_j_and_steps_with_the_arrows
+
+run_mutation "volslice: the diff chooser publishes tilelist" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '        if matches!(self.popup, Some(Popup::Diff(_))) {' \
+  '        if false {' \
+  geode-volslice d_chooses_a_pair_and_the_batch_carries_its_diff_jobs
+
+# The tile's `shift+d` beats the workspace's duplicate inside the tile.
+run_mutation "volslice: shift+d is the density toggle in the tile" \
+  crates/geode-volslice/src/content.rs \
+  '"shift+d" = "volslice::density"' \
+  '"ctrl+shift+d" = "volslice::density"' \
+  geode-volslice shift_d_resolves_to_density_over_the_workspace_duplicate
+
+# While following, the underlying is the group's.
+run_mutation "volslice: u is refused while following" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '            "underlying" => match self.frame.read(cx).following() {' \
+  '            "underlying" => match None::<Group> {' \
+  geode-volslice following_a_group_with_no_single_underlying_paints_the_notice_and_refuses_u
+
+run_mutation "volslice: :underlying is refused while following" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '                    return Err(following_refusal(g));' \
+  '                    let _ = g;' \
+  geode-volslice underlying_is_refused_while_following
+
+run_mutation "volslice: a launched follower is not prompted" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '            && self.frame.read(cx).following().is_none()' \
+  '            && true' \
+  geode-volslice underlying_is_refused_while_following
+
+# A pair naming a kind with nothing loaded would ask and paint nothing.
+run_mutation "volslice: :diff refuses a kind not loaded" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '                        if !self.loaded.has(k) {' \
+  '                        if false {' \
+  geode-volslice commands_set_the_underlying_coordinate_and_pair_and_refuse_bad_input
+
+run_mutation "volslice: a coordinate change resets the view" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '                self.state.cycle_coordinate();
+                self.reset_view = true;' \
+  '                self.state.cycle_coordinate();' \
+  geode-volslice x_resets_the_view_to_the_new_extent
+
+# Keyboard zoom anchors at the view's centre: the host cannot read the
+# element's crosshair.
+run_mutation "volslice: keyboard zoom anchors at the centre" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '            "zoom_in" => view.zoom(ZOOM_FACTOR, scale.about(0.5), full),' \
+  '            "zoom_in" => view.zoom(ZOOM_FACTOR, scale.about(0.0), full),' \
+  geode-volslice view_keys_zoom_pan_and_reset
+
+# A split change is the same slots under a new version: the element's
+# caches tell models apart by version alone.
+run_mutation "volslice: a split step is a new model version" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '        self.version += 1;
+        self.model = with_split(&self.model, split, self.version);' \
+  '        self.model = with_split(&self.model, split, self.version);' \
+  geode-volslice split_keys_step_the_split_as_a_new_model_version
+
+# Wheel and drag go through the x axis's scale, so a reversed delta axis
+# zooms about the pointer and pans the way it reads.
+run_mutation "volslice: the wheel zooms about the pointer through the scale" \
+  crates/geode-volslice/src/tile/pointer.rs \
+  '                scale.about(fraction as f64),' \
+  '                fraction as f64,' \
+  geode-volslice the_wheel_zooms_about_the_pointer_on_a_reversed_axis_too
+
+run_mutation "volslice: a drag pans by the axis's sign" \
+  crates/geode-volslice/src/tile/pointer.rs \
+  '                view.pan(-((x - last_x) / w) as f64 * scale.pan_sign(), full);' \
+  '                view.pan(-((x - last_x) / w) as f64, full);' \
+  geode-volslice a_drag_pans_against_the_axis_direction
+
+# A strip press acts only on a tile the shell had already told it is
+# focused: the press that focuses a tile changes nothing else.
+run_mutation "volslice: a strip press is gated on focus" \
+  crates/geode-volslice/src/tile/pointer.rs \
+  '        if !self.focused {' \
+  '        if false {' \
+  geode-volslice a_click_on_a_strip_row_solos_and_ctrl_click_toggles_when_focused
+
+run_mutation "volslice: a kind chip dispatches its own digit's action" \
+  crates/geode-volslice/src/header.rs \
+  '                    action: KIND_ACTIONS[i],' \
+  '                    action: KIND_ACTIONS[0],' \
+  geode-volslice a_kind_chip_click_toggles_the_kind
+
+run_mutation "volslice: the draft chip names its mark" \
+  crates/geode-volslice/src/header.rs \
+  '        Some(word) => format!("{kind} \u{00b7} {word}"),' \
+  '        Some(_) => kind.to_string(),' \
+  geode-volslice the_header_names_each_loaded_kind_with_its_digit_and_the_mark
+
+# The diff chooser opens on the pair in force.
+run_mutation "volslice: the diff chooser opens on the pair in force" \
+  crates/geode-volslice/src/tile/picker.rs \
+  '        list.place(current.as_deref());' \
+  '        let _ = current;' \
+  geode-volslice d_chooses_a_pair_and_the_batch_carries_its_diff_jobs
+
+# The picker lists the two datasets' underlyings, nothing else's.
+run_mutation "volslice: the picker lists only the two datasets' underlyings" \
+  crates/geode-volslice/src/tile/picker.rs \
+  '.filter(|ds| ds.name == CVI || ds.name == CHAIN)' \
+  '.filter(|_| true)' \
+  geode-volslice u_picks_an_underlying_from_the_catalog_and_requeries
+
+# `set_visible` runs inside the shell's draw, where the notify (and so the
+# self-observer's chrome refresh) is dropped: the show refreshes it itself.
+run_mutation "volslice: a show from the draw refreshes the chrome" \
+  crates/geode-volslice/src/content.rs \
+  '            t.refresh_chrome(cx);' \
+  '            let _ = &t;' \
+  geode-volslice a_tile_shown_from_the_shells_draw_paints_its_chrome_at_once
+
+# Paint formats nothing: the strip's text is rebuilt only when its inputs
+# moved.
+run_mutation "volslice: the strip's prepared rows are cached on their inputs" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '                *rows != self.strip || *active != self.state.active || *palette != self.palette_key' \
+  '                true || *rows != self.strip || *active != self.state.active || *palette != self.palette_key' \
+  geode-volslice render_formats_nothing_per_frame
+
+# The two document reads run in sequence under one tag, keyed by the tile:
+# the pool keeps one request per key and the barrier one entry per key.
+run_mutation "volslice: the chain is asked under the cvi's tag" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                    key: self.key(),
+                    tag,
+                    submitted: Instant::now(),
+                    dataset: CHAIN.to_string(),' \
+  '                    key: self.key(),
+                    tag: tag + 1,
+                    submitted: Instant::now(),
+                    dataset: CHAIN.to_string(),' \
+  geode-volslice first_load_asks_cvi_then_the_chain_under_one_tag
+
+# The pair is one barrier arrival: handing the cvi over alone would release
+# the flip before the chain landed.
+run_mutation "volslice: the barrier sees one arrival for both documents" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                    Ok(()) => {
+                        self.fetch = Fetch::Chain {
+                            tag,
+                            underlying,
+                            cvi,
+                        }
+                    }' \
+  '                    Ok(()) => self.hand_over(
+                        tag,
+                        &underlying.clone(),
+                        Ok(Arc::new(Fetched {
+                            underlying,
+                            cvi,
+                            chain: Ok(Vec::new()),
+                        })),
+                        cx,
+                    ),' \
+  geode-volslice the_barrier_sees_one_arrival_for_both_documents
+
+# A refused chain read fails the fetch, which still arrives.
+run_mutation "volslice: a refused chain read fails the fetch" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                    Err(refusal) => self.hand_over(
+                        tag,
+                        &underlying,
+                        Err(format!("document request refused: {refusal}")),
+                        cx,
+                    ),' \
+  '                    Err(refusal) => {
+                        let _ = refusal;
+                    }' \
+  geode-volslice a_refused_chain_submission_fails_the_fetch_with_the_refusal_worded
+
+run_mutation "volslice: an older vol tag is dropped" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        if outcome.tag != self.vol_tag {' \
+  '        if false {' \
+  geode-volslice an_older_vol_tag_is_dropped
+
+# While following, the group's scope names the underlying: a group scope
+# change must count as a change of what the documents depend on.
+run_mutation "volslice: the scope counts while following" \
+  crates/geode-volslice/src/tile/data.rs \
+  '    move |a, b| a.as_of != b.as_of || a.data != b.data || (following && a.scope != b.scope)' \
+  '    move |a, b| a.as_of != b.as_of || a.data != b.data' \
+  geode-volslice a_group_scope_change_flips_the_follower
+
+# A follow between never-written scopes moves no version: `following()`
+# itself is compared.
+run_mutation "volslice: a change of followed group is noticed" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        if following == self.last_following {' \
+  '        if true {' \
+  geode-volslice leaving_a_group_drops_the_draft_and_returns_to_the_own_underlying
+
+# A follow change clears the model and moves the vol tag: the old group's
+# draft trace goes, and a batch out for it cannot land after the leave.
+run_mutation "volslice: a follow change clears the painted draft" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        self.loaded.draft = None;
+        self.loaded_gen += 1;
+        self.clear_model();' \
+  '        self.loaded.draft = None;
+        self.loaded_gen += 1;' \
+  geode-volslice leaving_a_group_drops_the_draft_and_returns_to_the_own_underlying
+
+# Leaving a never-written group moves no version: the follow change itself
+# asks for the own underlying.
+run_mutation "volslice: leaving a never-written group requeries" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        if self.sync_following(cx) {
+            if self.visible {
+                self.requery(cx);' \
+  '        if self.sync_following(cx) {
+            if self.visible {' \
+  geode-volslice leaving_a_never_written_group_asks_for_the_own_underlying
+
+# A board draft joins the batch only beside its own underlying's documents.
+run_mutation "volslice: a draft joins only its own underlying's documents" \
+  crates/geode-volslice/src/tile/data.rs \
+  '            .filter(|(u, _, _)| self.loaded_for.as_ref() == Some(u))' \
+  '            .filter(|_| true)' \
+  geode-volslice leaving_a_group_drops_the_draft_and_returns_to_the_own_underlying
+
+# A mark change alone on the same rows is a board change the chip shows.
+run_mutation "volslice: a mark change alone resubmits" \
+  crates/geode-volslice/src/tile/data.rs \
+  '            (Some((a, ma)), Some((b, mb))) => Arc::ptr_eq(a, b) && ma == mb,' \
+  '            (Some((a, _)), Some((b, _))) => Arc::ptr_eq(a, b),' \
+  geode-volslice a_board_bump_issues_a_batch_with_the_draft
+
+# A kept view wholly outside the new extent resets; one overlapping it
+# stays where the trader left it.
+run_mutation "volslice: a saved view inside the extent stands" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                if view.hi < full.0 || view.lo > full.1 {' \
+  '                if true {' \
+  geode-volslice a_restored_tile_requeries_once_and_paints_its_saved_expiries
+
+# The header names the underlying whose documents are on screen, never one
+# still being asked about.
+run_mutation "volslice: the header names the painted underlying" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '        self.loaded_for
+            .as_deref()
+            .or_else(|| self.underlying_str(cx))' \
+  '        self.underlying_str(cx)' \
+  geode-volslice the_header_names_the_painted_underlying_while_another_is_asked
+
+# A refused or failed read for another underlying clears the old picture;
+# one for the underlying on screen keeps it.
+run_mutation "volslice: a failed read for another underlying clears the picture" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        if self.loaded_for.as_deref() == Some(asked) {' \
+  '        if true {' \
+  geode-volslice a_refused_read_for_a_new_underlying_clears_the_old_picture
+
+run_mutation "volslice: a failed read for the same underlying keeps the picture" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        if self.loaded_for.as_deref() == Some(asked) {' \
+  '        if false {' \
+  geode-volslice a_failed_fetch_for_the_same_underlying_keeps_the_picture
+
+run_mutation "volslice: a refused cvi read for a new underlying clears the picture" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                self.picture_failed_for(&u);' \
+  '                let _ = &u;' \
+  geode-volslice a_refused_read_for_a_new_underlying_clears_the_old_picture
+
+run_mutation "volslice: a failed fetch for a new underlying clears the picture" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                self.picture_failed_for(underlying);' \
+  '                let _ = underlying;' \
+  geode-volslice a_failed_fetch_for_a_new_underlying_clears_the_old_picture
+
+# A refused batch clears curves built from another underlying's documents
+# and keeps the loaded underlying's own.
+run_mutation "volslice: a refused batch clears another underlying's curves" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                if self.model_gen != Some(self.loaded_gen) {' \
+  '                if false {' \
+  geode-volslice a_refused_batch_after_a_new_install_clears_the_old_curves
+
+run_mutation "volslice: a refused batch keeps the loaded underlying's curves" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                if self.model_gen != Some(self.loaded_gen) {' \
+  '                if true {' \
+  geode-volslice a_refused_batch_after_a_new_install_clears_the_old_curves
+
+run_mutation "volslice: a built model records its documents' generation" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        self.model_gen = Some(self.loaded_gen);' \
+  '        self.model_gen = None;' \
+  geode-volslice a_refused_batch_after_a_new_install_clears_the_old_curves
+
+# A refused show from inside the shell's draw defers its arrival: inline,
+# the release's notify falls in the draw and frame observers never hear it.
+run_mutation "volslice: a refused show from the draw arrives deferred" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                self.requery_with(Arrival::Deferred, cx);' \
+  '                self.requery_with(Arrival::Now, cx);' \
+  geode-volslice a_refused_show_from_the_draw_releases_the_flip_to_frame_observers
+
+# A close from inside the shell's draw defers its arrival the same way.
+run_mutation "volslice: a close from the draw arrives deferred" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        self.following.close(
+            &mut DeferredDoor {
+                frame: &self.frame,
+                cx,
+            },
+            key,
+        );' \
+  '        self.following
+            .close(&mut FrameDoor::new(&self.frame, cx), key);' \
+  geode-volslice a_close_from_the_draw_releases_the_flip_to_frame_observers
+
+# An empty state is the muted status tone; a failure or refusal is danger.
+run_mutation "volslice: an empty state is not painted as a failure" \
+  crates/geode-volslice/src/header.rs \
+  '    let tone = if notices.clone().all(|n| is_empty_state(n)) {' \
+  '    let tone = if false {' \
+  geode-volslice the_footer_paints_the_first_notice_and_counts_the_rest
+
+run_mutation "volslice: a refusal beside an empty state is danger" \
+  crates/geode-volslice/src/header.rs \
+  '    let tone = if notices.clone().all(|n| is_empty_state(n)) {' \
+  '    let tone = if notices.clone().any(|n| is_empty_state(n)) {' \
+  geode-volslice the_footer_paints_the_first_notice_and_counts_the_rest
+
+# A draft joining or leaving moves the documents' generation, so a refused
+# batch under one underlying still clears curves built with the old draft.
+run_mutation "volslice: a draft change moves the documents' generation" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        if !same {
+            self.loaded_gen += 1;
+        }' \
+  '        let _ = same;' \
+  geode-volslice a_refused_batch_after_the_draft_left_clears_its_trace
+
+run_mutation "volslice: close cancels by key" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        self.data.cancel(key);' \
+  '        let _ = &self.data;' \
+  geode-volslice hide_keeps_the_query_and_close_cancels
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

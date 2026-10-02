@@ -263,10 +263,13 @@ The grid rules in `geode_tile::motion`:
   column.
 - On an empty axis every motion leaves the position unchanged.
 
-Three tiles publish `tilelist`: the market-data panel and the line pricer while
-their `.` action menu is open (beside `mode == menu`), and the timeseries tile
+Four tiles publish `tilelist`: the market-data panel and the line pricer while
+their `.` action menu is open (beside `mode == menu`), the timeseries tile
 while its series list or one of its menus (action, range, frequency) is open
-(beside `popup == series|menu`). The timeseries tile never publishes `grid`,
+(beside `popup == series|menu`), and the vol slice viewer while its fieldless
+difference chooser is open (beside `mode == menu`). The vol slice viewer's
+underlying picker is a field and publishes no `tilelist`, since the shared
+steps would take the `j` and `k` it must type. The timeseries tile never publishes `grid`,
 so its own `h`/`l` pan and `g`/`shift+g` jump are never shadowed. With no list
 open the flag is absent and `j`/`k` fall through to the grid (or to nothing).
 The retired menu and list step ids are renames of
@@ -312,6 +315,13 @@ them, beside the shell's `g g`: a first `g` waits for the second key), its
 `mode == insert` field keys and its `mode == menu` pick and close keys.
 The timeseries fragment binds its popups' `enter`, `escape` and `.`; their
 row steps are the shared ones under `tilelist`.
+The vol slice fragment binds its verbs under `mode == normal`, among them
+the bare digits `1`..`9` (its key context does not opt into counts, so a
+digit reaches its kind toggle rather than starting a count) and `shift+d`,
+which beats the workspace's duplicate inside the tile. Under `mode ==
+insert` (the underlying picker's field) it binds `enter`, `escape` and
+`up`/`down` (`volslice::list_down`/`list_up`); under `mode == menu` (the
+difference chooser) `enter` and `escape`, its steps being the shared ones.
 The diagnostics page's fragment binds only its verbs (`[`/`]`, `z o`/`z c`,
 `enter`, `/`) under `mode == normal` and `escape` under `mode == insert`; the
 page publishes `grid` beside its mode, so the shared motions reach its cursor

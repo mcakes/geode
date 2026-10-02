@@ -23,7 +23,9 @@ moneyness through knots the node ladder places (`node/100`), lifted by
 `atm + skew·k + param/100`, total variance linear in time between terms,
 the forward log-linear. It refuses an expiry outside the document's
 terms rather than extrapolating, floors vol at `0.01`, places points by
-Black call delta and returns a Breeden–Litzenberger density unclamped.
+Black call delta and returns a Breeden–Litzenberger density unclamped,
+per unit of the requested coordinate (`NaN` where delta saturates). It
+refuses a `Grid::Job`, which only the vol worker can resolve.
 Any other `VolModel` implementation registered by `geode-app` in
 `geode-data`'s `VolModelRegistry` is selected by name through `[vol] model`.
 

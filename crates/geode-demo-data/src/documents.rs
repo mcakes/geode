@@ -1052,6 +1052,9 @@ pub mod chain {
     pub const RESIDUAL_BOUND: f64 = 0.005;
     /// No mid vol below this, whatever the curve plus residual says.
     pub const MIN_VOL: f64 = 0.005;
+    /// The minimum tick: a wing quote whose bid would price under it has
+    /// no bid, and the quote carries its ask side alone.
+    pub const MIN_BID: f64 = 0.05;
 
     /// One underlying's rotation position, residual walks and RNG.
     struct State {
@@ -1222,11 +1225,19 @@ pub mod chain {
                 let mid = (p.vol + residuals[i]).max(MIN_VOL);
                 let h = half_spread(mid, p.strike, forward);
                 let (b, a) = (mid - h, mid + h);
+                let b_price = otm(p.strike, b).max(0.0);
                 mid_vol.push(mid);
-                bid_vol.push(b);
                 ask_vol.push(a);
-                bid.push(otm(p.strike, b).max(0.0));
                 ask.push(otm(p.strike, a).max(0.0));
+                // A sub-tick bid is no bid: the side goes whole (vol and
+                // price NaN together), as the chain document requires.
+                if b_price < MIN_BID {
+                    bid_vol.push(f64::NAN);
+                    bid.push(f64::NAN);
+                } else {
+                    bid_vol.push(b);
+                    bid.push(b_price);
+                }
             }
 
             let spot_ref = f64_attr(cvi, "spot_ref").expect("a demo CVI document has a spot");
@@ -1381,8 +1392,9 @@ pub mod chain {
                     f64s(&doc, "ask_vol"),
                 );
                 for i in 0..bid.len() {
+                    // A dropped bid side is NaN; where present it brackets.
                     assert!(
-                        bid[i] > 0.0 && bid[i] < mid[i] && mid[i] < ask[i],
+                        (bid[i].is_nan() || (bid[i] > 0.0 && bid[i] < mid[i])) && mid[i] < ask[i],
                         "{i}: {} {} {}",
                         bid[i],
                         mid[i],
@@ -1390,8 +1402,42 @@ pub mod chain {
                     );
                 }
                 let (bp, ap) = (f64s(&doc, "bid"), f64s(&doc, "ask"));
-                assert!(bp.iter().zip(&ap).all(|(b, a)| *b >= 0.0 && b <= a));
+                assert!(
+                    bp.iter()
+                        .zip(&ap)
+                        .all(|(b, a)| b.is_nan() || (*b >= 0.0 && b <= a))
+                );
             }
+        }
+
+        #[test]
+        fn a_bid_under_the_minimum_tick_is_dropped_whole() {
+            let mut g = ChainGenerator::new(1, vec!["SPX".into()], anchor());
+            let cvi = cvi();
+            let mut one_sided = Vec::new();
+            for _ in 0..EXPIRIES {
+                let doc = g.next_document("SPX", &cvi, now());
+                let (bid, bid_vol) = (f64s(&doc, "bid"), f64s(&doc, "bid_vol"));
+                let (ask, ask_vol) = (f64s(&doc, "ask"), f64s(&doc, "ask_vol"));
+                let strikes = f64s(&doc, "strike");
+                let forward = f64_attr(&doc, "forward").unwrap();
+                for i in 0..bid.len() {
+                    assert_eq!(bid[i].is_nan(), bid_vol[i].is_nan(), "{i}");
+                    assert!(bid[i].is_nan() || bid[i] >= MIN_BID, "{i}: {}", bid[i]);
+                    assert!(ask[i].is_finite() && ask_vol[i].is_finite(), "{i}");
+                    if bid[i].is_nan() {
+                        assert!(strikes[i] > forward, "only the far call wing");
+                        one_sided.push((doc.key[1].clone(), strikes[i]));
+                    }
+                }
+            }
+            // Seed 1 from the 2026-09-12 anchor: the two nearest expiries'
+            // top call strikes (8300-8450 for 2026-10-16, 8450 for
+            // 2026-11-20) price under the tick and go one-sided.
+            assert!(
+                one_sided.contains(&("2026-10-16".to_string(), 8450.0)),
+                "{one_sided:?}"
+            );
         }
 
         #[test]
@@ -1484,9 +1530,23 @@ pub mod chain {
             let mut a = ChainGenerator::new(7, vec!["SPX".into(), "NDX".into()], anchor());
             let mut b = ChainGenerator::new(7, vec!["SPX".into(), "NDX".into()], anchor());
             b.next_document("NDX", &cvi, now());
+            // By bit pattern: a dropped bid side is NaN, which `==` never
+            // matches.
+            let bits = |d: DocumentRows| {
+                let cols: Vec<Vec<u64>> = d
+                    .values
+                    .iter()
+                    .chain(d.axes.iter())
+                    .map(|(_, c)| match c {
+                        Column::F64(v) => v.iter().map(|x| x.to_bits()).collect(),
+                        _ => panic!("chain columns are f64"),
+                    })
+                    .collect();
+                (d.key, d.attributes, cols)
+            };
             assert_eq!(
-                a.next_document("SPX", &cvi, now()),
-                b.next_document("SPX", &cvi, now())
+                bits(a.next_document("SPX", &cvi, now())),
+                bits(b.next_document("SPX", &cvi, now()))
             );
         }
     }

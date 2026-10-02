@@ -55,9 +55,9 @@ never depends on it. A tile mechanism two modules would otherwise each write
 lives there.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
-`geode-timeseries`, `geode-diagnostics`, and `geode-pricer` implement the
-shell's module contract and may ask the data service through `DataHandle`.
-They do not depend on sibling features. `geode-app` constructs shared
+`geode-timeseries`, `geode-volslice`, `geode-diagnostics`, and
+`geode-pricer` implement the shell's module contract and may ask the data
+service through `DataHandle`. They do not depend on sibling features. `geode-app` constructs shared
 services, registers module factories (one market-data factory per accepted
 `panels` entry), adapters, document kinds, kind actions, and pricers, and
 opens the window. Market-data panels are configuration checked there against

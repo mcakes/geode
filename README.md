@@ -83,6 +83,7 @@ crates/
   geode-blotter      any view as a collapsible keyboard-driven hierarchy
   geode-marketdata   market-data document panels with an edit draft (CVI)
   geode-timeseries   fetchable series, expressions, statistics and chart tile
+  geode-volslice     vol smiles per expiry: CVI, a group's draft and the chain
   geode-diagnostics  the diagnostics page over health, generations, config and the log
   geode-documents    typed parsers and writers per document wire format
   geode-pricing      implementations of the pricing trait

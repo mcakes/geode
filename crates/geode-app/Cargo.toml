@@ -35,6 +35,8 @@ geode-blotter = { path = "../geode-blotter" }
 geode-marketdata = { path = "../geode-marketdata" }
 # The bridge owns the series factory's data handle and config reload routing.
 geode-timeseries.workspace = true
+# The vol slice viewer's factory shares the bridge's DataHandle.
+geode-volslice.workspace = true
 # The bridge routes pricing and local-sheet outcomes to this factory.
 geode-pricer.workspace = true
 # Row menu actions registered at the composition root: Open in Nemo.

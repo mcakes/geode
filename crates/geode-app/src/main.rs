@@ -94,6 +94,7 @@ fn main() {
             // The range popup owns Tab navigation between its date fields. Its key
             // context overrides Root focus cycling while the popup is active.
             geode_timeseries::init(cx);
+            geode_volslice::init(cx);
             // Keep table bindings from consuming the pricer's editing keys.
             geode_pricer::init(cx);
 
@@ -369,6 +370,7 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
         roster.add(Box::new(panel.clone()));
     }
     roster.add(Box::new(bridge.timeseries.clone()));
+    roster.add(Box::new(bridge.volslice.clone()));
     roster.add(Box::new(bridge.pricer.clone()));
     // Dimension actions: Open in Nemo on a position or an instrument, and
     // Move LHU on a position.
@@ -1032,6 +1034,54 @@ label = "skew"
         bridge.handle.shutdown();
     }
 
+    /// The production roster hosts the vol slice viewer: the shell derives
+    /// its add-tile rows from the roster's kinds, and the `Rc` forwarder
+    /// reaches the factory's actions and fragment.
+    #[gpui::test]
+    fn the_roster_lists_volslice_and_registers_its_add_action(cx: &mut gpui::TestAppContext) {
+        use geode_shell::actions::ActionId;
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _) = ShellServices::config_and_builtin(ConfigSources {
+            builtin: builtin_layer(Some(dir.path())),
+            ..ConfigSources::default()
+        });
+        let setup = bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .unwrap();
+        let bridge =
+            cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let mut roster = ModuleRoster::new();
+        add_bridge_modules(&mut roster, &bridge);
+        assert!(roster.kinds().contains(&"volslice"));
+        let mut registry = ActionRegistry::default();
+        register_add_actions(&mut registry, &roster.kinds());
+        roster.register_actions(&mut registry);
+        assert_eq!(
+            registry
+                .get(&ActionId("tile::add_volslice".to_string()))
+                .expect("the volslice kind gets an add-tile row")
+                .title,
+            "Volslice: Split"
+        );
+        assert!(
+            registry
+                .get(&ActionId("volslice::kind_1".to_string()))
+                .is_some()
+        );
+        let (docs, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            docs.iter()
+                .any(|d| d.file.to_string_lossy() == "<module:volslice>")
+        );
+        bridge.handle.shutdown();
+    }
+
     /// The timeseries forwarder must expose the factory's kind, registered
     /// actions, and keymap fragment. Check `timeseries::add` explicitly because
     /// the shipped fragment binds it to `a`.
@@ -1186,7 +1236,8 @@ label = "skew"
     }
 
     /// The production roster exposes `underlying_ref`-based launch state for
-    /// every accepted panel (the builtin CVI and dividend here), registers
+    /// every accepted panel (the builtin CVI and dividend here) and the vol
+    /// slice viewer, registers
     /// the two Open in Nemo row actions and Move LHU, names every column those open on
     /// in `context_columns`, and startup hands that list to the data
     /// handle. Exercising startup's registration path checks that shared
@@ -1218,7 +1269,7 @@ label = "skew"
             .into_iter()
             .filter(|k| roster.factory(k).is_some_and(|f| spx.offers(f.accepts())))
             .collect();
-        assert_eq!(accepting, vec!["cvi", "dividend"]);
+        assert_eq!(accepting, vec!["cvi", "dividend", "volslice"]);
         let ids: Vec<&str> = roster.actions().iter().map(|a| a.id()).collect();
         assert_eq!(
             ids,
@@ -1253,6 +1304,16 @@ label = "skew"
                 "{kind}"
             );
         }
+        // The slice viewer restores one underlying, not a display key.
+        let state = roster
+            .factory("volslice")
+            .unwrap()
+            .launch_state(&spx)
+            .expect("a state for an underlying");
+        assert_eq!(
+            state.get("underlying"),
+            Some(&toml::Value::String("SPX".into()))
+        );
         assert_eq!(
             bridge.handle.context_columns(),
             vec![

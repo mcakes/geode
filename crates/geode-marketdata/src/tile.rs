@@ -38,7 +38,7 @@ use crate::popup::{ChoicePopup, PickerRows, PickerState, Popup, render_picker};
 use geode_core::colour::{Rgb, contrast_ratio, readable_on};
 use geode_core::document::{DocumentRows, Value, split_key};
 use geode_core::grid::selection::{Resolved, SelectKind, Selection};
-use geode_core::link::{BoardEntry, Emission, underlying_scope};
+use geode_core::link::{BoardEntry, DraftMark, Emission, underlying_scope};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
@@ -1789,7 +1789,8 @@ impl MarketDataTile {
     /// What the panel posts into the link group it emits into: where it is
     /// (its underlying, as a one-value scope) and, while its draft is not
     /// clean (`Editing`, `Behind` or `Sent`) and the upload builder can
-    /// assemble it, that whole document. The same
+    /// assemble it, that whole document, marked with the draft's state so
+    /// a follower can tell a live edit from a held or sent one. The same
     /// answer whether or not the panel is emitting. With no underlying it
     /// posts nothing, which leaves the group's scope as it is.
     pub(crate) fn emission(&self) -> Emission {
@@ -1802,6 +1803,11 @@ impl MarketDataTile {
                 dataset: self.spec.dataset.clone(),
                 key: key.to_vec(),
                 rows,
+                mark: match self.draft.state {
+                    DraftState::Behind { .. } => DraftMark::Behind,
+                    DraftState::Sent { .. } => DraftMark::Sent,
+                    DraftState::Clean | DraftState::Editing => DraftMark::Editing,
+                },
             })
             .into_iter()
             .collect();
@@ -16756,6 +16762,34 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         let emission = emission_of(&h, &mut vcx);
         assert_eq!(emission.board.len(), 1);
         assert_eq!(*emission.board[0].rows, expected);
+    }
+
+    /// A follower cannot tell a live edit, a draft held behind a newer
+    /// document and a sent one apart from the rows: the entry carries the
+    /// draft's state, through the panel's own routes to each.
+    #[gpui::test]
+    fn the_board_entry_marks_the_drafts_state(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        let tag = h.with_document_tagged(&mut vcx);
+        h.motion(&mut vcx, "right", None);
+        commit_cell(&h, &mut vcx, "0.25");
+        let mark = |h: &Harness, vcx: &mut gpui::VisualTestContext| {
+            let emission = emission_of(h, vcx);
+            assert_eq!(emission.board.len(), 1, "one draft on the board");
+            emission.board[0].mark
+        };
+        assert_eq!(mark(&h, &mut vcx), DraftMark::Editing);
+
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+        assert_eq!(mark(&h, &mut vcx), DraftMark::Behind);
+
+        h.command(&mut vcx, "rebase")
+            .expect("behind: rebase applies");
+        assert_eq!(mark(&h, &mut vcx), DraftMark::Editing);
+
+        h.upload_ok(&mut vcx);
+        assert_eq!(mark(&h, &mut vcx), DraftMark::Sent);
     }
 
     /// A panel shows the document its own underlying names and never reads
