@@ -15,6 +15,8 @@
 //! Messages the bounded queue refused are reported on the load lane under
 //! `<source>:queue` (`health::condition_key`): `Degraded "N messages dropped
 //! since HH:MM:SS"` while drops continue, `Ok` after `DROP_QUIET` without one.
+//! Only this receiver clears that slot, so a `Degraded` standing when the
+//! subscription ends (disconnect or stop) stays until restart.
 //!
 //! Parsed columns move into DocumentJob without per-row copies. Shutdown
 //! unsubscribes, sets the stop flag, and joins; pending coalesced documents are
@@ -703,6 +705,17 @@ mod tests {
                 dropped: 2,
                 since: wall(65)
             })
+        );
+        // The second episode grows; its count is still from its own base
+        // (4), not from the subscription's lifetime total.
+        e.observe(9, t0 + DROP_QUIET + Duration::from_secs(5), wall(65));
+        assert_eq!(
+            e.observe(9, t0 + DROP_QUIET + Duration::from_secs(6), wall(66)),
+            Some(DropReport::Dropping {
+                dropped: 5,
+                since: wall(65)
+            }),
+            "a growing count in a later episode counts from that episode's base"
         );
     }
 

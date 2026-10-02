@@ -28842,6 +28842,14 @@ run_mutation "silence: a refusal change leaves the perf section stale" \
   geode-shell \
   refused_submissions_move_the_perf_version
 
+# A growing count in a later episode counts from that episode's base.
+run_mutation "silence: a later episode's growing count ignores its base" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '                dropped: self.seen - open.base,' \
+  '                dropped: self.seen,' \
+  geode-data \
+  a_drop_after_a_clear_opens_a_new_episode_counted_from_zero
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
