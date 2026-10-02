@@ -165,7 +165,10 @@ pub trait Egress: Send {
 /// user as the reason. The worker sets no deadline: an implementation must
 /// bound its own calls, or a hung call holds every later command.
 pub trait PositionCommands: Send {
-    /// Move every one of `positions` to LHU `lhu`, all or nothing.
+    /// Move every one of `positions` to LHU `lhu`. All or nothing with
+    /// respect to validation: a refusal found before writing changes
+    /// nothing. A write that fails part-way can leave earlier writes in
+    /// place; the `Err` then says so only as far as its message does.
     fn move_lhu(&mut self, positions: &[String], lhu: &str) -> Result<(), AdapterError>;
 }
 

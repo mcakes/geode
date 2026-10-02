@@ -113,8 +113,10 @@ fn advanced_sentinel(csv: &Path, now: DateTime<Utc>) -> Result<(PathBuf, String)
 }
 
 /// Move every one of `positions` to LHU `lhu` in the risk CSVs under `dir`,
-/// all or nothing: a position no CSV holds refuses the whole move,
-/// `unknown position {p}` naming the first, before anything is written.
+/// all or nothing with respect to validation: a position no CSV holds
+/// refuses the whole move, `unknown position {p}` naming the first, before
+/// anything is written. A write that fails part-way through can leave the
+/// files rewritten before it in place.
 ///
 /// Each affected file keeps its name (the same batch), with only the `LHU`
 /// field of the moved positions' rows changed, then its sentinel is

@@ -146,8 +146,9 @@ pub enum DataEvent {
     /// admitted upload request answers exactly one.
     Upload(UploadOutcome),
     /// A position-system command's answer, addressed by the requester's tag.
-    /// Every command `DataHandle::move_lhu` admits answers exactly one,
-    /// including a refusal decided before it reached the position service.
+    /// Every command `DataHandle::move_lhu` admits normally answers exactly
+    /// one, including a refusal decided before it reached the position
+    /// service; worker and event-delivery failures can prevent that.
     Command(geode_core::positions::CommandOutcome),
     /// A local publish (`DataHandle::publish`) was stored as generation
     /// `gen_id` of document `batch`. Sent beside, not instead of, that

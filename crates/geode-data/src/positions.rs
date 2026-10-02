@@ -19,7 +19,7 @@
 use crate::adapter::{AdapterRegistry, PositionCommands};
 use crate::service::{DataEvent, EventSink};
 use geode_core::config::{Diagnostic, Severity};
-use geode_core::positions::{CommandOutcome, MoveLhuParams, PositionsSpec};
+use geode_core::positions::{CommandOutcome, MoveLhuParams, PositionsSpec, noun};
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
@@ -84,11 +84,17 @@ fn work(mut commands: Box<dyn PositionCommands>, jobs: Receiver<MoveLhuParams>, 
         match &outcome.result {
             Ok(()) => tracing::info!(
                 target: "geode::ingest",
-                "move of {} positions to LHU {} accepted", outcome.count, outcome.lhu
+                "move of {} {} to LHU {} accepted",
+                outcome.count,
+                noun(outcome.count),
+                outcome.lhu
             ),
             Err(e) => tracing::info!(
                 target: "geode::ingest",
-                "move of {} positions to LHU {} refused: {e}", outcome.count, outcome.lhu
+                "move of {} {} to LHU {} refused: {e}",
+                outcome.count,
+                noun(outcome.count),
+                outcome.lhu
             ),
         }
         let _ = sink(DataEvent::Command(outcome));

@@ -30,6 +30,8 @@ pub fn moving_positions(ctx: &DimensionContext) -> Result<Vec<String>, usize> {
     }
     match ctx.get(POSITION) {
         Some(p) => Ok(vec![p.to_string()]),
+        // Unreachable from the row menu: the action sits in the
+        // `position_ref` section, offered only on a row naming one.
         None => Err(1),
     }
 }
