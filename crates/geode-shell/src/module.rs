@@ -933,6 +933,10 @@ pub mod recording {
     /// life (`create`, `closed`), in the order the moments came.
     pub type FollowLog = Rc<RefCell<Vec<(TileId, Option<Group>)>>>;
 
+    /// A call that announces an emission change from inside an update of
+    /// the announcing tile's own entity; `None` while no tile is watched.
+    pub type Announce = Rc<RefCell<Option<Rc<dyn Fn(&mut App)>>>>;
+
     #[derive(Debug, Clone, PartialEq)]
     pub enum Recorded {
         Created(TileId, Option<toml::Table>),
@@ -1048,6 +1052,17 @@ pub mod recording {
         /// How many times `emission` was pulled, across every occupant: a
         /// test's proof that a pull did, or did not, happen.
         pub pulls: Rc<Cell<usize>>,
+        /// When set, an emitting occupant stands in for a module that
+        /// announces a change from inside its own update: `emission` reads
+        /// the occupant's view entity, and `watch_emission` observes
+        /// nothing, leaving in `announce` a call that runs `changed` from
+        /// inside an update of that view. A pull made inside that call
+        /// reads an entity that is being updated, which GPUI refuses with
+        /// a panic.
+        pub announces_inside_update: bool,
+        /// The call `announces_inside_update` leaves for the test, held
+        /// while the shell holds the occupant's emission subscription.
+        pub announce: Announce,
         /// The frame handle each occupant was created with, by tile, for a
         /// test to read through (`tile()`, `read(cx).following()`): the
         /// content is boxed behind the trait and offers no other way in.
@@ -1096,6 +1111,8 @@ pub mod recording {
                 emits: false,
                 emission: Rc::new(RefCell::new(Emission::default())),
                 pulls: Rc::new(Cell::new(0)),
+                announces_inside_update: false,
+                announce: Rc::new(RefCell::new(None)),
                 frame_handles: Rc::new(RefCell::new(HashMap::new())),
                 followed_at_close: Rc::new(RefCell::new(Vec::new())),
                 followed_at_create: Rc::new(RefCell::new(Vec::new())),
@@ -1190,6 +1207,10 @@ pub mod recording {
         emission: Rc<RefCell<Emission>>,
         /// Shared with [`RecordingFactory::pulls`].
         pulls: Rc<Cell<usize>>,
+        /// Shared with [`RecordingFactory::announces_inside_update`].
+        announces_inside_update: bool,
+        /// Shared with [`RecordingFactory::announce`].
+        announce: Announce,
         /// Shared with [`RecordingFactory::followed_at_close`].
         followed_at_close: FollowLog,
     }
@@ -1399,19 +1420,37 @@ pub mod recording {
         fn emits(&self) -> bool {
             self.emits
         }
-        fn emission(&self, _: &App) -> Emission {
+        fn emission(&self, cx: &App) -> Emission {
             self.pulls.set(self.pulls.get() + 1);
+            if self.announces_inside_update {
+                // A module's emission reads its own tile entity.
+                let _ = self.view.read(cx).tile;
+            }
             self.emission.borrow().clone()
         }
         /// Observes the view entity, the way a module observes its own
-        /// tile: any notification of it may be an emission change.
+        /// tile: any notification of it may be an emission change. With
+        /// `announces_inside_update` it observes nothing and leaves the
+        /// call for the test instead.
         fn watch_emission(
             &self,
             changed: Rc<dyn Fn(&mut App)>,
             cx: &mut App,
         ) -> Option<gpui::Subscription> {
-            self.emits
-                .then(|| cx.observe(&self.view, move |_, cx| changed(cx)))
+            if !self.emits {
+                return None;
+            }
+            if self.announces_inside_update {
+                let view = self.view.clone();
+                *self.announce.borrow_mut() = Some(Rc::new(move |cx: &mut App| {
+                    view.update(cx, |_, cx| changed(cx));
+                }));
+                let announce = self.announce.clone();
+                return Some(gpui::Subscription::new(move || {
+                    announce.borrow_mut().take();
+                }));
+            }
+            Some(cx.observe(&self.view, move |_, cx| changed(cx)))
         }
         fn set_stack(&self, stack: Option<StackHandle>, _: &mut App) {
             self.log.borrow_mut().push(Recorded::Stack(
@@ -1583,6 +1622,8 @@ pub mod recording {
                     emits: self.emits,
                     emission: self.emission.clone(),
                     pulls: self.pulls.clone(),
+                    announces_inside_update: self.announces_inside_update,
+                    announce: self.announce.clone(),
                     followed_at_close: self.followed_at_close.clone(),
                 }),
             }

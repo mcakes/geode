@@ -3866,17 +3866,17 @@ role = "key"
     /// module's `emits`, `emission` and `watch_emission`, and that the
     /// frame handle it gives a tile reads the group that tile follows.
     ///
-    /// The blotter (tile 1) emits into A and the pricer (tile 2) follows A
-    /// and emits into B. Moving the blotter's cursor moves A's scope, the
-    /// pricer hides the line A no longer selects, and the pricer's own
-    /// cursor line names B's scope.
+    /// The blotter (tile 1) emits into A; the pricer (tile 2) follows A and
+    /// emits into B; a second blotter (tile 3) follows A. Moving the first
+    /// blotter's cursor moves A's scope: the second blotter queries under
+    /// it, the pricer hides the line A no longer selects, and the pricer's
+    /// own cursor line names B's scope.
     #[gpui::test]
     fn the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows(
         cx: &mut gpui::TestAppContext,
     ) {
-        use geode_core::link::{Group, Membership};
+        use geode_core::link::{Group, Membership, underlying_of};
         use geode_core::snapshot::TestColumn;
-        use geode_shell::frame::FrameRef;
         use geode_shell::tiling::WorkspaceIx;
 
         let (handle, rx) = DataHandle::for_tests();
@@ -3913,8 +3913,8 @@ role = "key"
         services.keymap = keymap;
         services.roster = roster;
 
-        // A session with the blotter on the left and the pricer, focused,
-        // on the right; neither is in a group.
+        // A session with a blotter on the left, the pricer, focused, in the
+        // middle and a second blotter on the right; none is in a group.
         let mut table = geode_shell::session::to_toml(
             &Workspaces::new(),
             &TileRecords::new(),
@@ -3928,13 +3928,16 @@ role = "key"
             [node]
             kind = "split"
             orientation = "horizontal"
-            ratios = [0.5, 0.5]
+            ratios = [0.34, 0.33, 0.33]
             [[node.children]]
             kind = "leaf"
             id = 1
             [[node.children]]
             kind = "leaf"
             id = 2
+            [[node.children]]
+            kind = "leaf"
+            id = 3
             [tiles.1]
             module = "blotter"
             [tiles.1.state]
@@ -3943,6 +3946,10 @@ role = "key"
             module = "pricer"
             [tiles.2.state]
             sheet = "book"
+            [tiles.3]
+            module = "blotter"
+            [tiles.3.state]
+            view = "flat"
         "#
         .parse()
         .unwrap();
@@ -3971,27 +3978,39 @@ role = "key"
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
-        let (blotter, pricer) = (TileId(1), TileId(2));
+        let (blotter, pricer, follower) = (TileId(1), TileId(2), TileId(3));
         assert_eq!(
             shell.read_with(&vcx, |s, _| (
                 s.occupant_kind(blotter),
-                s.occupant_kind(pricer)
+                s.occupant_kind(pricer),
+                s.occupant_kind(follower)
             )),
-            (Some("blotter"), Some("pricer"))
+            (Some("blotter"), Some("pricer"), Some("blotter"))
         );
         let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
 
-        // The blotter's first query, answered through the drain: the root,
-        // then L1 on SPX and L2 on NDX.
-        let tag = loop {
-            match rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("the blotter asks for its rows")
-            {
-                geode_data::Request::Query(p) if p.key == QueryKey(blotter.0) => break p.tag,
-                _ => continue,
+        // The next query `tile` sent. Another tile's queries met on the way
+        // are kept for that tile's own call.
+        let kept: RefCell<Vec<geode_data::QueryParams>> = RefCell::new(Vec::new());
+        let next_query = |tile: TileId| -> geode_data::QueryParams {
+            let held = kept.borrow().iter().position(|p| p.key == QueryKey(tile.0));
+            if let Some(ix) = held {
+                return kept.borrow_mut().remove(ix);
+            }
+            loop {
+                match rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the tile asks for its rows")
+                {
+                    geode_data::Request::Query(p) if p.key == QueryKey(tile.0) => return p,
+                    geode_data::Request::Query(p) => kept.borrow_mut().push(p),
+                    _ => continue,
+                }
             }
         };
+
+        // Each blotter's first query, answered through the drain: the root,
+        // then L1 on SPX and L2 on NDX.
         let dict = |a: &str, b: &str| TestColumn::Dict(vec![None, Some(a.into()), Some(b.into())]);
         let snapshot = Arc::new(geode_core::snapshot::Snapshot::for_tests(
             vec![
@@ -4008,14 +4027,23 @@ role = "key"
             ],
             1,
         ));
-        tx.try_send(DataEvent::Query(geode_core::query::QueryOutcome {
-            key: QueryKey(blotter.0),
-            tag,
-            snapshot: Ok(snapshot),
-            submitted: std::time::Instant::now(),
-        }))
-        .unwrap();
-        draw(&mut vcx);
+        let answer = |vcx: &mut gpui::VisualTestContext, query: &geode_data::QueryParams| {
+            tx.try_send(DataEvent::Query(geode_core::query::QueryOutcome {
+                key: query.key,
+                tag: query.tag,
+                snapshot: Ok(snapshot.clone()),
+                submitted: std::time::Instant::now(),
+            }))
+            .unwrap();
+            draw(vcx);
+        };
+        answer(&mut vcx, &next_query(blotter));
+        let unlinked = next_query(follower);
+        assert!(
+            unlinked.scope.is_empty(),
+            "fixture: in no group, the second blotter queries the whole book"
+        );
+        answer(&mut vcx, &unlinked);
 
         // Two lines in the pricer, one per underlying; the cursor rests on
         // the NDX line, the last typed.
@@ -4060,7 +4088,18 @@ role = "key"
             Some("NDX"),
             "joining pulls the pricer's emission: its cursor line's underlying"
         );
-        vcx.simulate_keystrokes("alt-h");
+        vcx.simulate_keystrokes("alt-l");
+        draw(&mut vcx);
+        link(&mut vcx, "follow a");
+        assert_eq!(
+            membership(&vcx, follower),
+            Membership {
+                follow: Some(Group::A),
+                emit: None,
+            },
+            "the blotter's content answers `follows`, or it is offered no follow row"
+        );
+        vcx.simulate_keystrokes("alt-h alt-h");
         draw(&mut vcx);
         link(&mut vcx, "emit a");
         assert_eq!(
@@ -4084,37 +4123,51 @@ role = "key"
             "tile-link-1-A-emit",
             "tile-link-2-A-follow",
             "tile-link-2-B-emit",
+            "tile-link-3-A-follow",
         ] {
             assert!(vcx.debug_bounds(chip).is_some(), "{chip} is painted");
         }
 
-        // The blotter's cursor moves to L1: the shell pulls its emission,
-        // A's scope names SPX, and the pricer, reading A through its own
-        // handle, hides its NDX line. `follower_reads` is a handle bound as
-        // the shell binds the pricer's.
-        let follower_reads = |vcx: &gpui::VisualTestContext| {
-            let handle = FrameRef::for_tile(frame.clone(), WorkspaceIx::FIRST, pricer);
-            vcx.read(|cx| {
-                handle
-                    .read(cx)
-                    .scope()
-                    .sole("underlying_ref")
-                    .map(str::to_owned)
-            })
-        };
+        // The first blotter's cursor moves to L1: the shell pulls its
+        // emission and A's scope names SPX. The second blotter, reading A
+        // through its own handle, sends a query scoped to SPX; answering it
+        // releases the flip the group's change opened over A's followers.
         vcx.simulate_keystrokes("j");
         draw(&mut vcx);
         assert_eq!(group_underlying(&vcx, Group::A).as_deref(), Some("SPX"));
-        assert_eq!(follower_reads(&vcx).as_deref(), Some("SPX"));
+        let on_spx = next_query(follower);
+        assert_eq!(
+            underlying_of(&on_spx.scope),
+            Some("SPX"),
+            "the production follower queries under its group's scope"
+        );
+        answer(&mut vcx, &on_spx);
+        // The pricer hides its NDX line. Its cursor rested there and can
+        // rest only on a shown line, so it moves to the SPX line, which is
+        // what the pricer now emits into B: the SPX line is the one shown.
         assert!(
             vcx.debug_bounds("pricer-hidden").is_some(),
             "the pricer applies the scope of the group it follows"
         );
-        // And on to L2.
+        assert_eq!(
+            group_underlying(&vcx, Group::B).as_deref(),
+            Some("SPX"),
+            "the NDX line is the hidden one"
+        );
+
+        // And on to L2: the lines change places.
         vcx.simulate_keystrokes("j");
         draw(&mut vcx);
         assert_eq!(group_underlying(&vcx, Group::A).as_deref(), Some("NDX"));
-        assert_eq!(follower_reads(&vcx).as_deref(), Some("NDX"));
+        let on_ndx = next_query(follower);
+        assert_eq!(underlying_of(&on_ndx.scope), Some("NDX"));
+        answer(&mut vcx, &on_ndx);
+        assert!(vcx.debug_bounds("pricer-hidden").is_some());
+        assert_eq!(
+            group_underlying(&vcx, Group::B).as_deref(),
+            Some("NDX"),
+            "the SPX line is the hidden one now"
+        );
         assert!(
             frame.read_with(&vcx, |f, _| f.view(WorkspaceIx::FIRST).scope().is_empty()),
             "the workspace's own scope is untouched"

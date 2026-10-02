@@ -340,6 +340,125 @@ fn a_group_change_pending_across_a_workspace_switch_still_flips(cx: &mut gpui::T
     );
 }
 
+/// A follower in a pinned workspace takes its scope from its group and
+/// everything else from its own, pinned, lane: a group carries no grouping
+/// and no as-of. While its workspace is hidden a change to the group opens
+/// no barrier, there being nobody on screen to flip, and the follower reads
+/// the group's scope as it is when its workspace is shown again.
+#[gpui::test]
+fn a_follower_in_a_pinned_workspace_reads_its_group_and_its_own_lane(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.emits = true;
+    *rec.emission.borrow_mut() = Emission {
+        scope: Some(underlying("SPX.Z")),
+        board: Vec::new(),
+    };
+    let (emission, handles) = (rec.emission.clone(), rec.frame_handles.clone());
+    let (window, mut vcx) = open_shell(cx, services_with_recorders(vec![rec]));
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    frame.update(&mut vcx, |f, cx| {
+        let mut slots = geode_core::groupings::GroupingSlots::default();
+        slots.set(1, vec!["book".into()]);
+        slots.set(2, vec!["lhu".into()]);
+        f.replace_slots(slots);
+        cx.notify();
+    });
+    // The emitter in workspace 1; the follower in workspace 2, pinned.
+    add_tile(&mut vcx);
+    let emitter = TileId(1);
+    super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
+    add_tile(&mut vcx);
+    let follower = TileId(2);
+    super::occupants::dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace");
+    let ws2 = shell.read_with(&vcx, |s, _| s.active_ix());
+    assert!(frame.read_with(&vcx, |f, _| f.is_pinned(ws2)));
+    let pinned_as_of = AsOf::At(chrono::Utc::now());
+    frame.update(&mut vcx, |f, cx| {
+        // The two lanes differ in everything a lane holds.
+        assert!(f.shared_mut().set_active_slot(Some(2)));
+        assert!(f.shared_mut().set_text(Some("shared".into())));
+        let mut lane = f.view_mut(ws2);
+        assert!(lane.set_active_slot(Some(1)));
+        assert!(lane.set_as_of(pinned_as_of.clone()));
+        assert!(lane.set_text(Some("pinned".into())));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    set_follow(&shell, &mut vcx, follower, Some(Group::A));
+    set_emit(&shell, &mut vcx, emitter, Some(Group::A));
+    settle(&frame, &mut vcx);
+
+    // What the follower's own handle reads, as its queries do.
+    let handle = handles.borrow()[&follower].clone();
+    let reads = |vcx: &gpui::VisualTestContext| {
+        vcx.read(|cx| {
+            let view = handle.read(cx);
+            (
+                view.following(),
+                view.scope().clone(),
+                view.active_grouping().map(<[String]>::to_vec),
+                view.as_of().clone(),
+            )
+        })
+    };
+    assert_eq!(
+        reads(&vcx),
+        (
+            Some(Group::A),
+            underlying("SPX.Z"),
+            Some(vec!["book".to_string()]),
+            pinned_as_of.clone(),
+        ),
+        "the group's scope; the pinned lane's grouping and as-of"
+    );
+    let (reading, pinned, shared, group) = frame.read_with(&vcx, |f, _| {
+        (
+            f.view_for(ws2, follower).versions(),
+            f.view(ws2).versions(),
+            f.shared().versions(),
+            f.group_scope_gens()[Group::A.index()],
+        )
+    });
+    assert_eq!(reading.scope, group);
+    assert_eq!(
+        (reading.grouping, reading.as_of),
+        (pinned.grouping, pinned.as_of)
+    );
+    assert_ne!(
+        (pinned.grouping, pinned.as_of),
+        (shared.grouping, shared.as_of),
+        "fixture: the lanes differ"
+    );
+
+    // Hidden: the group moves and nothing is flipped.
+    super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_1");
+    emission.borrow_mut().scope = Some(underlying("NDX"));
+    tile_changed(&shell, &mut vcx, emitter);
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("NDX")
+    );
+    assert!(
+        !frame.read_with(&vcx, |f, _| f.barrier_open()),
+        "no barrier for a follower nobody can see"
+    );
+
+    // Shown again, it reads the scope the group holds now.
+    super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
+    assert_eq!(
+        reads(&vcx),
+        (
+            Some(Group::A),
+            underlying("NDX"),
+            Some(vec!["book".to_string()]),
+            pinned_as_of,
+        )
+    );
+}
+
 /// A group whose followers are all off screen has nobody to flip. Opening
 /// over an empty set would also clear a lane barrier that is still waiting
 /// on the visible tiles.
@@ -578,6 +697,112 @@ fn an_emitting_tile_posts_at_once_and_again_when_it_says_it_changed(cx: &mut gpu
         Some("NDX"),
         "and again when the tile says it changed"
     );
+}
+
+/// The two halves joined: an emitter's change, announced the way a module
+/// announces one, moves the group's scope and flips the group's visible
+/// followers through the barrier. The emitter is not awaited: it requeries
+/// nothing for its own emission. A post that moved the scope without
+/// telling the frame's observers would leave the follower on the old scope
+/// with no flip.
+#[gpui::test]
+fn an_emitters_change_flips_the_groups_followers_and_not_the_emitter(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, emitter) = emitting_services(Emission {
+        scope: Some(underlying("SPX.Z")),
+        board: Vec::new(),
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+    set_follow(&shell, &mut vcx, TileId(2), Some(Group::A));
+    settle(&frame, &mut vcx);
+    let before = frame.read_with(&vcx, |f, _| f.view_for(WS1, TileId(2)).versions());
+
+    emitter.emission.borrow_mut().scope = Some(underlying("NDX"));
+    tile_changed(&shell, &mut vcx, TileId(1));
+
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("NDX"),
+        "the group's scope moved"
+    );
+    let (follower, emitting, lane) = frame.read_with(&vcx, |f, _| {
+        (
+            f.view_for(WS1, TileId(2)).versions(),
+            f.view_for(WS1, TileId(1)).versions(),
+            f.view(WS1).versions(),
+        )
+    });
+    assert_ne!(
+        follower.scope, before.scope,
+        "and with it the follower's identity"
+    );
+    assert!(
+        frame.read_with(&vcx, |f, _| f.barrier_open()),
+        "the shell heard the post and opened a barrier"
+    );
+    assert!(
+        frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(2), follower)),
+        "over the follower, under its new identity"
+    );
+    assert!(!frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(2), before)));
+    for identity in [emitting, lane, follower, before] {
+        assert!(
+            !frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(1), identity)),
+            "the emitter follows nothing and is not awaited"
+        );
+    }
+}
+
+/// A module may announce a change from inside an update of its own tile,
+/// and its `emission` reads that tile. The pull therefore waits for the
+/// update to finish: made inside the announcement it would read an entity
+/// that is being updated, which GPUI refuses with a panic.
+#[gpui::test]
+fn a_change_announced_inside_the_tiles_update_is_pulled_after_it(cx: &mut gpui::TestAppContext) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.emits = true;
+    rec.announces_inside_update = true;
+    *rec.emission.borrow_mut() = Emission {
+        scope: Some(underlying("SPX.Z")),
+        board: Vec::new(),
+    };
+    let (emission, pulls, announce) = (
+        rec.emission.clone(),
+        rec.pulls.clone(),
+        rec.announce.clone(),
+    );
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, services_with_recorders(vec![rec]));
+    let frame = frame_of(&shell, &vcx);
+    set_emit(&shell, &mut vcx, tile, Some(Group::A));
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("SPX.Z")
+    );
+    let joined = pulls.get();
+
+    emission.borrow_mut().scope = Some(underlying("NDX"));
+    let announce_inside_update = announce
+        .borrow()
+        .clone()
+        .expect("the shell watches the emitting tile");
+    vcx.update(|_, cx| {
+        announce_inside_update(cx);
+        assert_eq!(pulls.get(), joined, "nothing is pulled inside the update");
+    });
+    vcx.run_until_parked();
+
+    assert_eq!(pulls.get(), joined + 1, "one pull, once the update is over");
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("NDX"),
+        "the group hears the emission after the update"
+    );
+
+    // Leaving the group drops the subscription, and the call with it.
+    set_emit(&shell, &mut vcx, tile, None);
+    assert!(announce.borrow().is_none());
 }
 
 /// A tile notifies for many reasons; the shell pulls each time and an
@@ -1017,6 +1242,53 @@ fn a_restored_follow_on_a_tile_that_does_not_follow_is_dropped(cx: &mut gpui::Te
     let text = session_text(&shell, &mut vcx).expect("the session is written");
     assert!(text.contains("emit = \"a\""), "{text}");
     assert!(!text.contains("follow"), "{text}");
+}
+
+/// Duplicating a tile copies its serialized module state, which holds no
+/// membership: the copy starts in no group and the original keeps its own.
+/// A copy that joined its original's groups would post a second emission
+/// into a group the trader linked one tile to.
+#[gpui::test]
+fn a_duplicated_tile_is_in_no_group(cx: &mut gpui::TestAppContext) {
+    let (services, _emitter) = emitting_services(Emission {
+        scope: Some(underlying("SPX.Z")),
+        board: Vec::new(),
+    });
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, services);
+    let frame = frame_of(&shell, &vcx);
+    set_follow(&shell, &mut vcx, tile, Some(Group::B));
+    set_emit(&shell, &mut vcx, tile, Some(Group::A));
+    let linked = geode_core::link::Membership {
+        follow: Some(Group::B),
+        emit: Some(Group::A),
+    };
+    assert_eq!(frame.read_with(&vcx, |f, _| f.membership(tile)), linked);
+
+    dispatch_action(&shell, "workspace::duplicate_horizontal", &mut vcx);
+    draw(&mut vcx);
+    vcx.run_until_parked();
+
+    let copy = shell.read_with(&vcx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_ne!(copy, tile);
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupant_kind(copy)),
+        Some("rec"),
+        "fixture: the copy exists"
+    );
+    assert!(frame.read_with(&vcx, |f, _| f.membership(copy).is_empty()));
+    assert_eq!(frame.read_with(&vcx, |f, _| f.membership(tile)), linked);
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.emit_subs.keys().copied().collect::<Vec<_>>()),
+        vec![tile],
+        "only the original is listened to"
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, cx| s.current_tiles(cx)[&copy.0].link),
+        geode_core::link::Membership::default(),
+        "and the copy's session record carries no group"
+    );
 }
 
 /// Filling a placeholder replaces its occupant under the same tile id. The

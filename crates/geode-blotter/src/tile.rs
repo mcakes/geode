@@ -8190,6 +8190,115 @@ mod tests {
         assert_eq!(calls.get(), after_drop, "a dropped subscription is silent");
     }
 
+    /// A blotter that follows a link group queries under the group's scope
+    /// composed with its own filter, never the workspace lane's: it
+    /// requeries when the group's scope moves, sits still when only the
+    /// lane's does, and answers a lane as-of flip under its group identity,
+    /// the one the shell enrolls a follower under. Reading the lane, it
+    /// would show the workspace's rows under a group's chip.
+    #[gpui::test]
+    fn a_following_blotter_queries_under_its_groups_scope(cx: &mut gpui::TestAppContext) {
+        use geode_core::link::{Emission, Group, Membership, underlying_of, underlying_scope};
+        let (h, mut vcx) = open_bound(cx);
+        let (tile, emitter) = (TileId(7), TileId(9));
+        // The tile's own handle, as the shell binds it.
+        let bound = FrameRef::for_tile(h.frame.clone(), WorkspaceIx::FIRST, tile);
+        let book = |b: &str| Scope::one("book", b);
+        let names_no_book =
+            |p: &geode_data::QueryParams| p.scope.dimensions.iter().all(|d| d.column != "book");
+        let filter =
+            |p: &geode_data::QueryParams| p.scope.expression.as_ref().map(ToString::to_string);
+        let own = Some("model_code = 'EURP'".to_string());
+
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let first = next_query(&h.requests);
+        deliver(&h, &mut vcx, first.tag, Ok(snapshot()));
+        h.tile.update_in(&mut vcx, |t, window, cx| {
+            t.command("filter model_code = 'EURP'", window, cx).unwrap()
+        });
+        let _ = next_query(&h.requests);
+
+        // Following nothing, it queries under the lane's scope.
+        h.frame.update(&mut vcx, |f, cx| {
+            assert!(f.shared_mut().set_scope(book("BK001")));
+            cx.notify();
+        });
+        let under_lane = next_query(&h.requests);
+        assert_eq!(under_lane.scope.sole("book"), Some("BK001"));
+        assert_eq!(filter(&under_lane), own);
+
+        // Following A, whose scope nothing has written: the lane's scope is
+        // gone from the query and the tile's own filter stays.
+        h.frame.update(&mut vcx, |f, cx| {
+            f.link_for_test(
+                tile,
+                Membership {
+                    follow: Some(Group::A),
+                    emit: None,
+                },
+            );
+            f.link_for_test(
+                emitter,
+                Membership {
+                    follow: None,
+                    emit: Some(Group::A),
+                },
+            );
+            cx.notify();
+        });
+        let following = next_query(&h.requests);
+        assert!(names_no_book(&following), "{:?}", following.scope);
+        assert_eq!(underlying_of(&following.scope), None);
+        assert_eq!(filter(&following), own);
+
+        // The group's scope moves: a requery under it.
+        h.frame.update(&mut vcx, |f, cx| {
+            assert!(f.post_for_test(
+                emitter,
+                Emission {
+                    scope: Some(underlying_scope("SPX.Z")),
+                    board: Vec::new(),
+                },
+            ));
+            cx.notify();
+        });
+        let under_group = next_query(&h.requests);
+        assert_eq!(underlying_of(&under_group.scope), Some("SPX.Z"));
+        assert!(names_no_book(&under_group), "{:?}", under_group.scope);
+        assert_eq!(filter(&under_group), own);
+        deliver(&h, &mut vcx, under_group.tag, Ok(snapshot()));
+
+        // Only the lane's scope moves: nothing the follower reads changed.
+        h.frame.update(&mut vcx, |f, cx| {
+            assert!(f.shared_mut().set_scope(book("BK002")));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(
+            h.requests.try_recv().is_err(),
+            "a lane scope edit is not a change to a follower"
+        );
+
+        // A lane as-of flip. The barrier awaits the tile under its own
+        // reading (the group's scope generation, the lane's as-of), and the
+        // tile's answer carries that identity and releases it.
+        bound.update(&mut vcx, |f, cx| {
+            assert!(f.set_as_of(AsOf::At(chrono::Utc::now())));
+            f.open_flip([QueryKey(tile.0)], std::time::Instant::now());
+            cx.notify();
+        });
+        let flipped = next_query(&h.requests);
+        assert!(matches!(flipped.as_of, AsOf::At(_)));
+        assert_eq!(underlying_of(&flipped.scope), Some("SPX.Z"));
+        assert!(names_no_book(&flipped), "{:?}", flipped.scope);
+        assert!(h.frame.read_with(&vcx, |f, _| f.barrier_open()));
+        deliver(&h, &mut vcx, flipped.tag, Ok(snapshot()));
+        assert!(
+            !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "the follower's answer matches the identity the barrier holds for it"
+        );
+    }
+
     /// A blotter queries under the frame's scope and names an underlying
     /// with its cursor: it can follow a link group and emit into one. The
     /// chooser offers each row on these answers.
