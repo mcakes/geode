@@ -431,7 +431,7 @@ under `geode::ingest`.
 
 Every admitted command is answered by exactly one `DataEvent::Command`
 (`CommandOutcome`: the requester's tag, the position count, the LHU, and the
-result), a refusal included. A panic in the service's own step is answered
+result), a refusal included, unless the event sink refuses it. A panic in the service's own step is answered
 by the request loop (see [the request loop](#the-request-loop)). The app
 mailbox never coalesces command outcomes, and the bridge hands each to
 `ShellView::note_command`, which sets the status notice (see

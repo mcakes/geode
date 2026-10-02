@@ -185,7 +185,8 @@ then calls the action that asked (the running one) with
 
 `confirm(question, on_yes)` opens a plain y/n dialog asking `question`. `y`,
 `enter`, or the Yes button closes it and then runs `on_yes` with a fresh
-`ActionCx`; `n`, `escape`, or Cancel closes it. Any other bare key is
+`ActionCx`; `n`, `escape` (with any modifiers: shift or ctrl with escape
+is consumed as No too), or Cancel closes it. Any other bare key is
 consumed; a chord or a shift-modified key passes to the matcher. A confirm
 asked while a plain dialog is already on top is refused with the notice
 `another dialog is already open`.
@@ -193,8 +194,8 @@ asked while a plain dialog is already on top is refused with the notice
 `ShellView::note_command` shows a position-system command's answer as the
 status notice, worded by `geode_core::positions::outcome_notice`, which
 shares its wording with the action's `sent_notice`. The app's bridge calls
-it for every `DataEvent::Command`. It replaces whatever the status line
-shows, as any notice does, and checks no tag: the latest answer wins.
+it for every `DataEvent::Command`. It replaces the current status notice,
+as any notice does, and checks no tag: the latest answer wins.
 
 Three actions are registered, in this order. Two are from `geode-nemo` and
 both titled "Open in Nemo": `nemo::open_position` on `position_ref`, opening

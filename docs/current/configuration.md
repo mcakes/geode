@@ -330,7 +330,8 @@ The document is not in the whole-object list above, so layers merge it
 recursively: a higher layer's `adapter` replaces a lower one's.
 
 No document, or a document without a `[service]` table, configures no
-service and reports nothing. A `service` entry that is not a table is an
+service and reports nothing beyond its unknown keys, which still warn as
+below without a `[service]`. A `service` entry that is not a table is an
 error at `positions.service`; a `[service]` without a string `adapter` is an
 error at `positions.service.adapter`. Either configures no service. Unknown
 keys, at the top level or inside `[service]`, are warnings at
