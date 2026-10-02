@@ -719,13 +719,13 @@ pub struct PricerTile {
     /// press's own `DoubleClickedCell` (every press emits `SelectCell`
     /// first, which overwrites it).
     pressed: Option<Option<At>>,
-    /// The latest press was a chevron's, which toggled its package. Every
-    /// press's `SelectCell` moves it into `pressed_chevron`, so it lives
-    /// for exactly one following press, as `click_anchor` does.
-    chevron_anchor: bool,
+    /// The line the latest press's chevron toggled, if it was a chevron's.
+    /// Every press's `SelectCell` moves it into `pressed_chevron`, so it
+    /// lives for exactly one following press, as `click_anchor` does.
+    chevron_anchor: Option<At>,
     /// `chevron_anchor`, taken by the latest press: a double-click whose
-    /// first press was the chevron's toggles no package a second time.
-    pressed_chevron: bool,
+    /// first press was that line's chevron toggles it no second time.
+    pressed_chevron: Option<At>,
     /// A grip drag from its press to its drop, cancel or release
     /// elsewhere (`tile::reorder`).
     pub(crate) row_drag: Option<reorder::RowDragState>,
@@ -1129,8 +1129,8 @@ impl PricerTile {
             last_press_on_name: false,
             click_anchor: None,
             pressed: None,
-            chevron_anchor: false,
-            pressed_chevron: false,
+            chevron_anchor: None,
+            pressed_chevron: None,
             row_drag: None,
             underlyings: Rc::from([]),
             underlyings_rev: None,
@@ -5549,7 +5549,7 @@ impl PricerTile {
         // second press must still resolve the package, not the row that
         // slid up. A press takes any older anchor, as `SelectCell` does.
         self.click_anchor = self.entry.is_some().then(|| line.clone());
-        self.chevron_anchor = true;
+        self.chevron_anchor = line.clone();
         self.close_entry(window, cx);
         self.close_editor(window, cx);
         if let Some(at) = line {
@@ -5754,7 +5754,7 @@ impl PricerTile {
                 // two presses of one double-click: hand this press's line
                 // to the next press only, whatever row that one lands on.
                 self.pressed = self.click_anchor.take();
-                self.pressed_chevron = std::mem::take(&mut self.chevron_anchor);
+                self.pressed_chevron = self.chevron_anchor.take();
                 if self.entry.is_some() {
                     self.click_anchor = Some(line.clone());
                 }
@@ -5819,10 +5819,12 @@ impl PricerTile {
                     // it. Only a package's own row: `tree_verb` takes a
                     // leg to its parent, and a leg's name must not
                     // collapse the package it sits in. Not when the first
-                    // press was the chevron's: that already toggled it
-                    // (the second press lands here when closing the
+                    // press was this line's chevron: that already toggled
+                    // it (the second press lands here when closing the
                     // entry bar slid the table up under the pointer).
-                    if !self.pressed_chevron
+                    let chevron_toggled =
+                        self.pressed_chevron.is_some() && self.pressed_chevron == self.cursor.at;
+                    if !chevron_toggled
                         && matches!(
                             self.cursor_row().and_then(|g| self.model.kind(g)),
                             Some(GridRowKind::Package { .. })
