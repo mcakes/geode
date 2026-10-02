@@ -1865,7 +1865,7 @@ run_mutation "matcher: a leading zero is a key" \
 run_mutation "matcher: a dead end clears the count" \
   crates/geode-shell/src/keymap/matcher.rs \
   '        self.pending.clear();
-        self.count = None;
+        self.set_count(None);
         MatchResult::NoMatch' \
   '        self.pending.clear();
         MatchResult::NoMatch' \
@@ -1878,6 +1878,34 @@ run_mutation "matcher: the count is capped" \
   '                    ,' \
   geode-shell \
   the_count_is_capped
+
+# ---- status bar: text prepared where its input changes
+#
+# The bar paints `&SharedString`s; each entry blanks one preparation site so
+# the segment would vanish (or never clear) without a render-time format.
+
+run_mutation "status: a rejected reload prepares no status text" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '        self.reload_status = self.last_reload.status_message().map(SharedString::from);' \
+  '        self.reload_status = None;' \
+  geode-shell \
+  a_rejected_reload_prepares_its_status_text
+
+run_mutation "status: a count digit leaves its label behind" \
+  crates/geode-shell/src/keymap/matcher.rs \
+  '            self.count_label = count.map(|n| SharedString::from(n.to_string()));' \
+  '            self.count_label = None;' \
+  geode-shell \
+  a_count_prefix_prepares_its_label_once
+
+run_mutation "status: the scope bar model omits the as-of status label" \
+  crates/geode-shell/src/scopebar.rs \
+  '    let as_of_status: Option<SharedString> = as_of
+        .as_ref()
+        .map(|t| format!("AS OF {t} · Return to live in the palette").into());' \
+  '    let as_of_status: Option<SharedString> = None;' \
+  geode-shell \
+  as_of_full_is_the_unelided_local_timestamp_while_as_of_elides_it
 
 # ---- keymap editing: unbind
 #
