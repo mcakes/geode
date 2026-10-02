@@ -2249,11 +2249,13 @@ mod tests {
         // Queue order: feed_a 1..=60, feed_b 0..5, feed_a 61..=65, feed_b
         // 5..65. Each source clears on its own second pop (65 → 63), and
         // only then: feed_a after feed_a 0 and 1 published, feed_b after
-        // feed_a 0..=60 and feed_b 0 published.
+        // feed_a 0..=60 and feed_b 0 published. Read to the drain, so a
+        // missing clear fails the assertion below rather than a timeout.
         let mut published: Vec<String> = Vec::new();
         let mut cleared: Vec<(String, usize, usize)> = Vec::new();
-        while cleared.len() < 2 {
+        loop {
             match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                IngestEvent::PlanComplete => break,
                 IngestEvent::Published { source, .. } => published.push(source),
                 IngestEvent::Backlog {
                     source,
