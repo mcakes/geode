@@ -3920,7 +3920,7 @@ role = "key"
         let bridge = test_bridge(f.handle.clone());
         let window = f.window;
         // Outside the window's update: `attach` reads the window's root.
-        gpui::TestAppContext::update(&mut f.vcx, |cx| attach(&bridge, window, cx));
+        gpui::TestAppContext::update(&f.vcx, |cx| attach(&bridge, window, cx));
         f.type_keys("j j j shift-v k");
         f.right_press("blotter-cell-3-2");
         f.type_keys("j enter");
