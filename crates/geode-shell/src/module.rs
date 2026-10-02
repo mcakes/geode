@@ -1115,6 +1115,11 @@ pub mod recording {
         /// the shell sends a tile whose membership changed. (The shell's
         /// own repaint re-renders every tile too; that is not counted.)
         pub repaints: Rc<RefCell<Vec<TileId>>>,
+        /// When set, every occupant's view stops propagation of a right
+        /// mouse-down, as gpui-component's selectable table does on a
+        /// cell: a shell test's proof that the tile's right-press listener
+        /// still sees the press.
+        pub stops_right_press: bool,
     }
 
     impl RecordingFactory {
@@ -1147,6 +1152,7 @@ pub mod recording {
                 scope_at_create: Rc::new(RefCell::new(Vec::new())),
                 generation_at_create: Rc::new(RefCell::new(Vec::new())),
                 repaints: Rc::new(RefCell::new(Vec::new())),
+                stops_right_press: false,
             }
         }
     }
@@ -1167,6 +1173,8 @@ pub mod recording {
         input: Option<Entity<InputState>>,
         /// The `/` results a table-hosting occupant paints in its body.
         find: Option<gpui::WeakEntity<crate::fuzzyfind::FuzzyFind>>,
+        /// Shared with [`RecordingFactory::stops_right_press`].
+        stops_right_press: bool,
     }
 
     impl Render for RecordingView {
@@ -1176,10 +1184,14 @@ pub mod recording {
                 .as_ref()
                 .and_then(|f| f.upgrade())
                 .filter(|f| f.read(cx).is_active());
+            let stops_right_press = self.stops_right_press;
             div()
                 .size_full()
                 .track_focus(&self.focus)
                 .debug_selector(|| format!("tile-content-{}", self.tile.0))
+                .when(stops_right_press, |d| {
+                    d.on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                })
                 .child(format!("rec {}", self.tile.0))
                 .children(self.input.as_ref().map(Input::new))
                 .children(find)
@@ -1617,6 +1629,7 @@ pub mod recording {
                 focus,
                 input: None,
                 find: None,
+                stops_right_press: self.stops_right_press,
             });
             self.frame_handles.borrow_mut().insert(tile, frame.clone());
             self.followed_at_create
