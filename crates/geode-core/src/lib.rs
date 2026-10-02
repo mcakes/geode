@@ -29,6 +29,7 @@ pub mod scope;
 pub mod scopes;
 pub mod series;
 pub mod snapshot;
+pub mod sort;
 pub mod source_config;
 pub mod tile_columns;
 pub mod tree;

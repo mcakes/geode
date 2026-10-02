@@ -438,7 +438,8 @@ reported, refilled over that range on every install. A one-cell commit refills
 that one window cell; editing a
 Sent draft rebuilds to clear sent styling throughout the grid. Yank, a
 selection's TSV and find format through `MatrixIndex::format_cell` on demand,
-so they include rows off screen.
+so they include rows off screen. A fuzzy `/` result table formats only the
+rows it shows, through `MatrixIndex::md_cell`, as the table reports them.
 
 Edits live in a `Draft` whose `DocumentBase` contains source time and an
 optional store generation. Different source times indicate different data;
@@ -1124,7 +1125,8 @@ takes no motion. A motion dispatched from the palette while the entry bar, the
 cell editor or the action menu is open closes it first, then moves.
 
 Column headers are words carrying their unit (`spot %`, `vol pt`, `barrier
-type`, `priced at`), and default widths are checked against labels and representative large
+type`, `priced at`), and default widths are checked against labels (beside the
+header's sort icon) and representative large
 values (`-1,234,567.8900` for a greek, `-1,234,567.89` for npv) at the
 largest supported font size. These examples do not bound every possible
 value. A view's `label` and `width` override the defaults. Columns are
@@ -1273,8 +1275,9 @@ Normal-mode keys:
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
 | `y y` / `y c` | Copy the shorthand of what the row shows (and remember it for `p`): a line or package its own, a grouping row its lines, a split package row its legs under that group / the column's cells |
 | `p` / `shift+p` | Put the remembered rows below / above as one undo entry, the cursor on the first landed row; when any of them is a package the whole run lands at a root boundary. On a grouping row both put at the end of the sheet and say so |
-| `shift+j` / `shift+k` | Move the row within its parent (refused under a value grouping) |
-| `g p` / `g u` | Package the cursor row and the next `count − 1` roots into a custom package / unpackage it (`:package [n]` / `:unpackage`) |
+| `shift+j` / `shift+k` | Move the row within its parent (refused under a value grouping or a sort) |
+| `s` / `shift+s` | Sort by the cursor column: asc → desc → off / abs desc → abs asc → off (see [Sorting](#sorting)) |
+| `g p` / `g u` | Package the cursor row and the next `count − 1` roots into a custom package / unpackage it (`:package [n]` / `:unpackage`; a counted one refused under a value grouping or a sort) |
 | `g m` | Open a panel on the cursor row's underlying |
 | `g .` | Open the row menu on the cursor row |
 | `.` | Open the action menu |
@@ -1737,6 +1740,78 @@ absolute and a percent strike of the same number) label by the first; a
 cursor on a group row is not saved (a restored tile starts on row 0).
 Blotter group rows have no ground of their own, so the two tiles' group
 rows look different.
+
+### Sorting
+
+The pricer sorts as the blotter does, on the same surface: `s` walks the
+cursor column through asc → desc → off and `shift+s` through abs desc → abs
+asc → off (either key, pressed while the other's order shows, starts its own
+cycle); a header's sort icon walks desc → asc → abs desc → abs asc → off, a
+column with no magnitude skipping the absolute pair; `:sort <column> [asc |
+desc | abs [asc | desc]]` and `:sort clear` complete the planned columns and
+the order words. Only the result measures (`npv`, the greeks and their `_usd`
+twins) have a magnitude: `shift+s` on any other column does nothing, and
+`:sort <column> abs` on one is its signed direction. The tree column never
+sorts and has no icon. The sorted column's header shows the direction's
+arrow, and an absolute order adds `|x|` to its label (`npv |x|`).
+
+A sort is display order alone. The sheet's own order, the order lines were
+entered and moved into, never changes, and `:sort clear` restores it exactly.
+The sort is not saved with the session or the sheet and is not an undoable
+edit. It names its column, so a column move keeps it; a view switch or
+reload whose plan lacks the column drops it, the rows go back to sheet order,
+and the header warns `sort on '<column>' dropped: the column is no longer in
+this view`.
+
+Every sibling set ranks on its own, at every level of the tree: grouping rows
+among their siblings by their own value in the sorted column (a measure's
+fold, a dimension's unanimous value or `mixed`), packages and lines among
+theirs by their row's value. A package moves with its legs, which keep sheet
+order beneath it. A package split by the grouping or partly hidden by the
+scope ranks by the value its row paints, over the legs its node holds. Keys
+are typed, never the formatted text: numbers compare as numbers, an expiry
+as a date (a tenor, which the pricer never resolves, after every date by its
+nominal length), a strike by number (percent strikes after absolute ones),
+text by byte order. A package whose legs disagree compares by its distinct
+values in leg order, the parts its cell joins with `/`; a shift cell's parts
+are its painted ones, legs that spell alike as one part and an unset group's
+`—` at its place, after any value. Values come first, then cells with no
+single value (`mixed`, a failed line's `—`, a local figure over unlike
+currencies, a `NaN` result), then blanks such as an unpriced line, in both
+directions; ties keep sheet order.
+
+Prices re-rank a measure sort live: a delivery that changes the order moves
+the rows, the cursor staying on its line, and one that leaves the order
+alone refills only the window. With no sort, a price delivery does no
+ranking work. While a `V` or `v` selection is live the order freezes
+instead: a selection spans the painted rows between its ends, so a line
+re-ranked into that range would join it unasked (and `d` would delete it).
+Values refill in place, and the order the ticks earned applies when the
+selection ends (`escape`, a verb that consumes it, a click that clears it).
+A sort change (`s`, `shift+s`, a header click, `:sort`, or a view switch or
+reload that drops the sort) with a live selection ends the selection first,
+with `selection cleared: the sort reordered its rows` in the footer. A
+selection verb that refuses (`d`, `g p`, `g u` over a selection) puts the
+selection back with the order it held.
+
+The verbs that read sheet adjacency refuse while a sort applies:
+`shift+j`/`shift+k` (and a `V` move) with `lines move in sheet order: :sort
+clear first`, and a counted `g p` (or `:package n`) with `a counted g p
+packages in sheet order: :sort clear first`. A plain `g p` still packages
+its line, and `g p` under `V` packages rows that are contiguous in the
+sheet; rows adjacent only on screen refuse with `the selected lines are
+apart in sheet order: :sort clear first`. `o`, `shift+o`, `p` and `shift+p` still insert
+beside the cursor's line in sheet order; the new line paints where it sorts,
+and the cursor follows it there. Find (`/`, `n`, `N`), line numbers and
+selections follow the painted order, and `y y` and `V y` copy and remember
+rows in the order the screen shows them.
+
+Known limitations: the sort icon's arrow is the component's own, and is
+re-read from the tile after every click, but has not been checked on a real
+display; the `/` result header paints no sort icon (it reserves the icon's
+width so labels keep their places); an absolute sort's ` |x|` suffix is not
+counted in the default widths, so a long measure label can ellipsize under
+one until `:autosize`, which measures it.
 
 ### Selection
 

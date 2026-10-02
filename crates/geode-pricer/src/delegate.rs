@@ -20,11 +20,13 @@
 //! are the table's row grounds, which replace a row's own and which
 //! further per-cell fills would obscure.
 
+use crate::core::columns::CellState;
+use crate::core::sort::SortSpec;
 use crate::grid::{CellPass, FillSource, GridCell, GridIndex, GridRowKind};
 use crate::paint::{CellColour, Paints, RowPalette, cell_colour};
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::PricerTile;
-use geode_core::colour::{Anchors, NamedColours, Tokens};
+use geode_core::colour::{Anchors, NamedColours, Sign, Tokens};
 use geode_core::grid::selection::{Resolved, SelectKind};
 use geode_core::view::Colour;
 use geode_shell::colfit::{FitMetrics, FittedWidths};
@@ -34,7 +36,7 @@ use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_fr
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_tile::colour::{ColourCache, Resolved as ColourResolved};
-use geode_tile::grid::{FIRST_WINDOW, WindowCache, WindowRequest};
+use geode_tile::grid::{FIRST_WINDOW, RowCache, WindowCache, WindowRequest};
 use geode_widgets::datefield::{self, DateTimeField, SegmentPaint, SegmentText};
 use gpui::prelude::*;
 use gpui::{
@@ -43,7 +45,7 @@ use gpui::{
     WeakEntity, Window, div, px, relative,
 };
 use gpui_component::input::{Input, InputState};
-use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
+use gpui_component::table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Size, Theme, h_flex};
 use std::ops::Range;
 use std::rc::Rc;
@@ -175,6 +177,15 @@ pub struct ColumnMoved {
 }
 
 impl EventEmitter<ColumnMoved> for TableState<SheetDelegate> {}
+
+/// A header's sort icon clicked: the PLAN column at `0`. Emitted by the
+/// table's `perform_sort` hook; the tile owns the sort and steps it with
+/// `SortOrder::click_cycle` (the component's own three-state proposal is
+/// ignored), so the delegate changes nothing of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SortClicked(pub usize);
+
+impl EventEmitter<SortClicked> for TableState<SheetDelegate> {}
 
 /// Every mouse selection gesture a cell, the tree cell or the line-number
 /// gutter recognises, carried to the tile's `pointer`: the one door a
@@ -313,9 +324,97 @@ fn render_date_field(
         ))
 }
 
+/// What a fuzzy `/` result table paints from: a painter over the all-open
+/// index `/` built, and the measure cells of the rows the find table last
+/// reported ([`FindPaint::show`]), formatted there through [`CellPass`]
+/// over the tile's live sheet. The paint callback only reads it; a row it
+/// does not hold paints blank measure cells.
+pub(crate) struct FindPaint {
+    pub(crate) painter: SheetDelegate,
+    /// The theme the painter's paints were derived under.
+    signature: [Hsla; 28],
+    cells: RowCache<GridCell>,
+    /// The tile's index when `/` opened. The find index's rows name rollup
+    /// nodes and sheet rows as that build saw them; once the tile installs
+    /// another index they may name others, so the measure cells paint
+    /// blank rather than read through a stale index. A price-only refresh
+    /// keeps the tile's index, and so the find's cells read the new prices
+    /// as rows enter view.
+    opened_on: Rc<GridIndex>,
+    /// Cells formatted, ever; each `/` open starts a new `FindPaint`.
+    #[cfg(test)]
+    pub(crate) fills: usize,
+}
+
+impl FindPaint {
+    pub(crate) fn new(painter: SheetDelegate, opened_on: Rc<GridIndex>, theme: &Theme) -> Self {
+        FindPaint {
+            painter,
+            signature: theme_signature(theme),
+            cells: RowCache::default(),
+            opened_on,
+            #[cfg(test)]
+            fills: 0,
+        }
+    }
+
+    /// Hold exactly the reported grid `rows`: keep those already
+    /// formatted, format the rest from `src`, drop the others. When the
+    /// tile's index is no longer the one `/` opened on, hold nothing.
+    pub(crate) fn show(&mut self, rows: &[usize], tile_model: &Rc<GridIndex>, src: FillSource<'_>) {
+        if !Rc::ptr_eq(tile_model, &self.opened_on) {
+            self.cells.clear();
+            return;
+        }
+        let model = Rc::clone(&self.painter.model);
+        let mut pass = CellPass::new(src, &model);
+        #[cfg(test)]
+        let fills = &mut self.fills;
+        self.cells.set_rows(rows, model.columns.len(), |g, c| {
+            #[cfg(test)]
+            {
+                *fills += 1;
+            }
+            pass.cell(g, c)
+        });
+    }
+
+    /// Drop every cell; the next report refills the rows shown.
+    pub(crate) fn clear(&mut self) {
+        self.cells.clear();
+    }
+
+    /// Paint one find cell, re-deriving the paints after a theme change.
+    pub(crate) fn render(
+        &mut self,
+        find_row: &geode_shell::fuzzyfind::FindRow<'_>,
+        col: usize,
+        cx: &App,
+    ) -> gpui::AnyElement {
+        let signature = theme_signature(cx.theme());
+        if self.signature != signature {
+            self.painter.set_paints(Paints::derive(cx.theme()));
+            self.signature = signature;
+        }
+        self.painter
+            .render_find_cell(&self.cells, find_row, col, cx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cells(&self) -> &RowCache<GridCell> {
+        &self.cells
+    }
+}
+
 pub struct SheetDelegate {
     /// The grid index shared with the tile; installs replace it.
     pub(crate) model: Rc<GridIndex>,
+    /// The tile's sort, mirrored by `install_model` through `set_sort`:
+    /// what the header's sort icon says. The tile owns it.
+    pub(crate) sort: Option<SortSpec>,
+    /// The sorted column's header label under an absolute order
+    /// (`npv |x|`), prepared by `set_sort` so `column()` formats nothing.
+    abs_label: Option<SharedString>,
     /// The formatted measure cells on screen, filled outside render;
     /// `render_td` only reads it. A miss paints a blank cell, and an open
     /// editor on it still paints.
@@ -392,6 +491,10 @@ pub struct SheetDelegate {
     colours: Arc<NamedColours>,
     colour_cache: ColourCache,
     theme_inputs: Option<([Hsla; 28], Anchors, Tokens)>,
+    /// The text each painted find measure cell carried, by (grid row,
+    /// table column), as `render_find_cell` put it into the element.
+    #[cfg(test)]
+    pub(crate) find_painted: std::collections::HashMap<(usize, usize), String>,
 }
 
 /// The name column `plan_col` carries a `Colour::Named` of, if it does.
@@ -410,6 +513,8 @@ impl SheetDelegate {
     pub(crate) fn new(theme: &Theme, tile: WeakEntity<PricerTile>) -> Self {
         SheetDelegate {
             model: Rc::new(GridIndex::default()),
+            sort: None,
+            abs_label: None,
             window: WindowCache::default(),
             requested: WindowRequest::with_first(FIRST_WINDOW),
             cursor: None,
@@ -431,6 +536,8 @@ impl SheetDelegate {
             colours: Arc::new(NamedColours::default()),
             colour_cache: ColourCache::new(),
             theme_inputs: None,
+            #[cfg(test)]
+            find_painted: Default::default(),
         }
     }
 
@@ -491,13 +598,26 @@ impl SheetDelegate {
     /// A row the model lacks, and a cell the window lacks, is the own
     /// paint.
     pub(crate) fn text_colour(&mut self, row_ix: usize, plan_col: usize, theme: &Theme) -> Hsla {
+        let cell = self.window.get(row_ix, plan_col).map(|c| (c.state, c.sign));
+        self.colour_of(row_ix, plan_col, cell, theme)
+    }
+
+    /// [`Self::text_colour`] over a cell's `(state, sign)` read from
+    /// wherever it was prepared: the window, or a find table's rows.
+    fn colour_of(
+        &mut self,
+        row_ix: usize,
+        plan_col: usize,
+        cell: Option<(CellState, Option<Sign>)>,
+        theme: &Theme,
+    ) -> Hsla {
         let model = Rc::clone(&self.model);
         if row_ix >= model.len() {
             return self.paints.own;
         }
         // A group row or a leg: the palette floored on its own ground.
         let palette = self.row_palette(row_ix);
-        let Some(&GridCell { state, sign, .. }) = self.window.get(row_ix, plan_col) else {
+        let Some((state, sign)) = cell else {
             return palette.map_or(self.paints.own, |p| p.own);
         };
         let colour = model
@@ -528,9 +648,12 @@ impl SheetDelegate {
     }
 
     /// The search table shares value formatting, colours, and tree depth, without
-    /// edit/expansion handlers belonging to the original table.
+    /// edit/expansion handlers belonging to the original table. Measure
+    /// cells come from `cells`, the rows the find table last reported; a
+    /// row it does not hold paints blank.
     pub(crate) fn render_find_cell(
         &mut self,
+        cells: &RowCache<GridCell>,
         find_row: &geode_shell::fuzzyfind::FindRow<'_>,
         col_ix: usize,
         cx: &App,
@@ -577,25 +700,24 @@ impl SheetDelegate {
                         .child(geode_shell::palette::highlighted_title(
                             row.search,
                             &indices,
-                            cx.theme().foreground,
+                            geode_shell::shell::listrow::row_paint(cx.theme()).accent,
                         )),
                 )
                 .into_any_element();
         }
         let col = col_ix - 1;
+        let cell = cells.get(row_ix, col);
+        let text = cell.map(|c| c.text.clone()).unwrap_or_default();
+        #[cfg(test)]
+        self.find_painted.insert((row_ix, col_ix), text.to_string());
         let colour = if find_row.is_context() {
             cx.theme().muted_foreground
         } else {
-            self.text_colour(row_ix, col, cx.theme())
+            self.colour_of(row_ix, col, cell.map(|c| (c.state, c.sign)), cx.theme())
         };
         el.when(model.columns[col].right, |el| el.justify_end())
             .text_color(colour)
-            .child(
-                self.window
-                    .get(row_ix, col)
-                    .map(|c| c.text.clone())
-                    .unwrap_or_default(),
-            )
+            .child(text)
             .into_any_element()
     }
 
@@ -689,13 +811,6 @@ impl SheetDelegate {
             .set_window(range, model.columns.len(), |g, c| pass.cell(g, c));
     }
 
-    /// The find table's painter: every row of its all-open index, once per `/` open.
-    pub(crate) fn fill_all(&mut self, src: FillSource<'_>) {
-        self.window.clear();
-        let n = self.model.len();
-        self.fill_window(0..n, src);
-    }
-
     /// Fit the tree column and every plan column to its header and the
     /// rows in the window — what the table last showed, as the blotter
     /// measures. The tree column measures exactly what `render_cell`
@@ -730,11 +845,20 @@ impl SheetDelegate {
                     + m.text_px(r.note)
             })),
         );
+        // Every value column's header carries the sort toggle beside its
+        // label: `Icon::size_3` (0.75rem) inside the toggle's `p(px(2.))`.
+        let sort_icon = 0.75 * m.rem_px + 4.0;
         for (col, c) in self.model.columns.iter().enumerate() {
+            // The label as painted: `npv |x|` under an absolute sort.
+            let label = self.header_label(col).unwrap_or(&c.label);
+            let header = m.text_px(label) + sort_icon;
             let cells = rows
                 .clone()
-                .filter_map(|g| self.window.get(g, col).map(|c| c.text.as_ref()));
-            out.insert(c.name.to_string(), m.fit_text(&c.label, cells));
+                .filter_map(|g| self.window.get(g, col).map(|c| m.text_px(&c.text)));
+            out.insert(
+                c.name.to_string(),
+                m.fit(std::iter::once(header).chain(cells)),
+            );
         }
         Some(out)
     }
@@ -763,6 +887,27 @@ impl SheetDelegate {
                 n.map(|n| SharedString::from(n.to_string()))
                     .unwrap_or_default()
             }));
+    }
+
+    /// Mirror the tile's sort against the installed model's columns.
+    /// gpui-component's header arrow only knows a direction, so an
+    /// absolute sort says so in its column's label, as the blotter's
+    /// does: `npv |x|`, prepared here rather than in render.
+    pub(crate) fn set_sort(&mut self, sort: Option<SortSpec>) {
+        self.sort = sort;
+        self.abs_label = sort.filter(|s| s.order.absolute()).and_then(|s| {
+            let c = self.model.columns.iter().find(|c| c.name == s.column)?;
+            Some(format!("{} |x|", c.label).into())
+        });
+    }
+
+    /// The header label `column()` paints for plan column `col`.
+    fn header_label(&self, col: usize) -> Option<&SharedString> {
+        let c = self.model.columns.get(col)?;
+        match (&self.sort, &self.abs_label) {
+            (Some(s), Some(label)) if s.column == c.name => Some(label),
+            _ => Some(&c.label),
+        }
     }
 
     /// The plan column behind table column `col_ix`; `None` is the tree.
@@ -900,15 +1045,24 @@ impl TableDelegate for SheetDelegate {
                 ..Column::default()
             };
         };
+        let own = self.sort.filter(|s| s.column == c.name);
+        let name = match (own, &self.abs_label) {
+            (Some(_), Some(label)) => label.clone(),
+            _ => c.label.clone(),
+        };
         Column {
             key: SharedString::new_static(c.name),
-            name: c.label.clone(),
+            name,
             align: if c.right {
                 TextAlign::Right
             } else {
                 TextAlign::Left
             },
-            sort: None,
+            sort: Some(match own {
+                Some(s) if s.order.descending() => ColumnSort::Descending,
+                Some(_) => ColumnSort::Ascending,
+                None => ColumnSort::Default,
+            }),
             width: px(self.fitted.get(c.name).copied().unwrap_or(c.width)),
             movable: true,
             resizable: true,
@@ -932,6 +1086,20 @@ impl TableDelegate for SheetDelegate {
             return;
         };
         cx.emit(ColumnMoved { from, to });
+    }
+
+    /// A header's sort icon: the tree column has none (`sort: None`), and
+    /// this guard keeps a direct call from sorting by it.
+    fn perform_sort(
+        &mut self,
+        col_ix: usize,
+        _proposed: ColumnSort,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        if let Some(col) = Self::plan_col(col_ix).filter(|&c| c < self.model.columns.len()) {
+            cx.emit(SortClicked(col));
+        }
     }
 
     fn render_th(
@@ -1428,6 +1596,27 @@ mod tests {
         assert_eq!(super::tree_gaps(true, true), 3, "slot, chip, text, note");
     }
 
+    /// The find table's match run takes the list-row accent every other
+    /// fuzzy surface highlights with (the blotter's find, the palette,
+    /// pickers); a plain `foreground` run is invisible on its own text.
+    #[test]
+    fn find_highlights_take_the_list_row_accent() {
+        let text = include_str!("delegate.rs");
+        // Spelled in two parts so the scan does not find itself.
+        let needle = ["highlighted_", "title("].concat();
+        let calls: Vec<&str> = text
+            .match_indices(needle.as_str())
+            .map(|(at, _)| &text[at..(at + 200).min(text.len())])
+            .collect();
+        assert!(!calls.is_empty(), "the scan found no highlight call");
+        for window in calls {
+            assert!(
+                window.contains("row_paint("),
+                "a find highlight bypasses RowPaint::accent:\n{window}"
+            );
+        }
+    }
+
     #[test]
     fn off_numbers_nothing() {
         assert!(
@@ -1493,8 +1682,14 @@ mod width_tests {
         let padding = f32::from(pad.left) + f32::from(pad.right) + CURSOR_BORDER;
         let mut failures = Vec::new();
         for c in &COLUMNS {
-            for text in [c.label.to_string(), worst_case(c)] {
-                let need = text.chars().count() as f32 * advance + padding;
+            // A header also carries the sort toggle: `Icon::size_3`
+            // (0.75rem) inside the toggle's `p(px(2.))`.
+            let toggle = 0.75 * FontSize::Large.rem_px() + 4.0;
+            // Not ` |x|`: an absolute sort is transient, and widening
+            // fifteen measure defaults for it would cost every view; the
+            // label ellipsizes then, and `:autosize` measures the suffix.
+            for (text, extra) in [(c.label.to_string(), toggle), (worst_case(c), 0.0)] {
+                let need = text.chars().count() as f32 * advance + padding + extra;
                 if need > c.default_width {
                     failures.push(format!(
                         "{}: '{text}' needs {need:.1}px in {}px",

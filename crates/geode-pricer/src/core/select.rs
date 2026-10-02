@@ -37,6 +37,9 @@ pub fn top_most(sheet: &Sheet, rows: &[usize]) -> Vec<usize> {
     geode_core::grid::selection::top_most(rows, sheet.len(), |r| sheet.parent(r))
 }
 
+/// `group_plan`'s refusal of a selection with a gap in sheet order.
+pub const NOT_CONTIGUOUS: &str = "can't group: lines are not contiguous";
+
 /// `(first, count)` for `Edit::Group` over top-most `top`: every row a
 /// root line, and together a contiguous run. A gap would sweep an
 /// unselected line into the package, since `Group` takes a run.
@@ -52,7 +55,7 @@ pub fn group_plan(sheet: &Sheet, top: &[usize]) -> Result<(usize, usize), &'stat
     };
     let count = last - first + 1;
     if (first..=last).any(|r| !top.contains(&r)) {
-        return Err("can't group: lines are not contiguous");
+        return Err(NOT_CONTIGUOUS);
     }
     Ok((first, count))
 }

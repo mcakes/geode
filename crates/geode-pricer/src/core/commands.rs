@@ -3,6 +3,7 @@
 //! when no tile holds it. No command changes another tile's sheet.
 
 use crate::core::sheet::Refresh;
+use geode_core::sort::{SortArg, SortOrder};
 use geode_core::source_config::parse_duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,9 +57,17 @@ pub enum Command {
     },
     /// `:unscoped`: toggle whether this tile ignores the frame's scope.
     Unscoped,
+    /// `:sort <column> [asc|desc|abs [asc|desc]]`: the blotter's grammar
+    /// (`geode_core::sort`); the tile resolves the column against its plan.
+    Sort {
+        column: String,
+        order: SortOrder,
+    },
+    /// `:sort clear`: back to sheet order.
+    SortClear,
 }
 
-pub const VERBS: [&str; 15] = [
+pub const VERBS: [&str; 16] = [
     "view",
     "shift",
     "spot",
@@ -74,6 +83,7 @@ pub const VERBS: [&str; 15] = [
     "rm",
     "autosize",
     "unscoped",
+    "sort",
 ];
 
 const SHIFT_USAGE: &str = "usage: shift spot|vol <n>|clear";
@@ -199,6 +209,13 @@ pub fn parse(line: &str) -> Result<Command, String> {
         ["autosize", ..] => Err("usage: autosize [reset]".into()),
         ["unscoped"] => Ok(Command::Unscoped),
         ["unscoped", ..] => Err("usage: unscoped".into()),
+        ["sort", ..] => {
+            let rest = line.trim_start().strip_prefix("sort").unwrap_or_default();
+            Ok(match geode_core::sort::parse_args(rest)? {
+                SortArg::Column { column, order } => Command::Sort { column, order },
+                SortArg::Clear => Command::SortClear,
+            })
+        }
         [other, ..] => Err(format!("unknown command '{other}'")),
     }
 }
@@ -208,7 +225,8 @@ pub fn parse(line: &str) -> Result<Command, String> {
 /// is the known sheet names, for `:e` and `:rm`; `:name` takes a new
 /// name, so it offers none. `groupable` is what `:group` can pin: the
 /// `pricer` dataset's groupable columns and the derived dimensions over
-/// them.
+/// them. `columns` is what `:sort` can name: the planned columns'
+/// vocabulary names.
 pub fn completions(
     line: &str,
     cursor: usize,
@@ -216,6 +234,7 @@ pub fn completions(
     underlyings: &[String],
     sheets: &[String],
     groupable: &[String],
+    columns: &[String],
 ) -> Vec<String> {
     let mut end = cursor.min(line.len());
     while !line.is_char_boundary(end) {
@@ -247,6 +266,7 @@ pub fn completions(
         ["group", "slot"] => (1..=9).map(|n| n.to_string()).collect(),
         ["group", "none", ..] => Vec::new(),
         ["group", ..] => groupable.to_vec(),
+        ["sort", after @ ..] => geode_core::sort::completions(after, columns),
         _ => Vec::new(),
     }
 }
@@ -265,7 +285,7 @@ mod tests {
         );
         assert!(parse("autosize wide").is_err());
         assert_eq!(
-            completions("autosize ", 9, &[], &[], &[], &[]),
+            completions("autosize ", 9, &[], &[], &[], &[], &[]),
             vec!["reset"]
         );
     }
@@ -328,6 +348,23 @@ mod tests {
         assert_eq!(parse("package"), Ok(Command::Package(None)));
         assert_eq!(parse("package 3"), Ok(Command::Package(Some(3))));
         assert_eq!(parse("unpackage"), Ok(Command::Unpackage));
+        assert_eq!(
+            parse("sort npv abs asc"),
+            Ok(Command::Sort {
+                column: "npv".into(),
+                order: SortOrder::AbsAsc
+            })
+        );
+        assert_eq!(
+            parse("sort qty"),
+            Ok(Command::Sort {
+                column: "qty".into(),
+                order: SortOrder::Asc
+            })
+        );
+        assert_eq!(parse("sort clear"), Ok(Command::SortClear));
+        assert!(parse("sort").unwrap_err().contains("column"));
+        assert!(parse("sort npv up").unwrap_err().contains("abs"));
         assert_eq!(
             parse("group underlying_ref, expiry"),
             Ok(Command::Group(vec![
@@ -426,10 +463,10 @@ mod tests {
         );
         let groupable = vec!["expiry".to_string()];
         assert_eq!(
-            completions("group ", 6, &[], &[], &[], &groupable),
+            completions("group ", 6, &[], &[], &[], &groupable, &[]),
             vec!["expiry", "none", "slot"]
         );
-        assert!(completions("group none ", 11, &[], &[], &[], &groupable).is_empty());
+        assert!(completions("group none ", 11, &[], &[], &[], &groupable, &[]).is_empty());
     }
 
     #[test]
@@ -438,8 +475,9 @@ mod tests {
         let unds = vec!["NDX".to_string(), "SPX".to_string()];
         let sheets = vec!["alpha".to_string(), "book".to_string()];
         let groupable = vec!["expiry".to_string(), "underlying_ref".to_string()];
+        let columns = vec!["qty".to_string(), "npv".to_string()];
         let completions = |line: &str, cursor, views: &[String], unds: &[String]| {
-            completions(line, cursor, views, unds, &sheets, &groupable)
+            completions(line, cursor, views, unds, &sheets, &groupable, &columns)
         };
         assert_eq!(
             completions("", 0, &views, &unds),
@@ -481,11 +519,24 @@ mod tests {
         );
         assert!(completions("package ", 8, &views, &unds).is_empty());
         assert!(completions("unpin ", 6, &views, &unds).is_empty());
+        assert_eq!(
+            completions("sort ", 5, &views, &unds),
+            vec!["qty", "npv", "clear"]
+        );
+        assert_eq!(
+            completions("sort npv ", 9, &views, &unds),
+            vec!["abs", "asc", "desc"]
+        );
+        assert_eq!(
+            completions("sort npv abs ", 13, &views, &unds),
+            vec!["asc", "desc"]
+        );
+        assert!(completions("sort clear ", 11, &views, &unds).is_empty());
     }
 
     #[test]
     fn a_cursor_off_a_char_boundary_does_not_panic() {
-        let _ = completions("spot é", 6, &[], &[], &[], &[]);
-        let _ = completions("spot é", 99, &[], &[], &[], &[]);
+        let _ = completions("spot é", 6, &[], &[], &[], &[], &[]);
+        let _ = completions("spot é", 99, &[], &[], &[], &[], &[]);
     }
 }

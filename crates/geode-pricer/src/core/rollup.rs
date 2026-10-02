@@ -444,7 +444,7 @@ impl Builder<'_> {
     }
 }
 
-/// Every shown leg (and bare line) beneath `node`, in display order: a
+/// Every shown leg (and bare line) beneath `node`, in sheet order: a
 /// group's for its sums, unanimity and totals; a package node's legs; a
 /// leaf's own row. An empty package contributes nothing.
 pub fn legs_under(rollup: &Rollup, node: usize) -> Vec<usize> {
@@ -457,6 +457,9 @@ pub fn legs_under(rollup: &Rollup, node: usize) -> Vec<usize> {
         }
         stack.extend(n.children.iter().rev());
     }
+    // Sheet order whatever order a sort ranked the nodes in, so a group's
+    // fold sums its legs in one order and its label reads the same leg.
+    out.sort_unstable();
     out
 }
 

@@ -6,7 +6,7 @@
 
 use crate::core::commands::{AsOfArg, Command, Vocabulary, completions, parse, parse_as_of};
 use crate::core::find::FindState;
-use crate::core::flatten::{SortOrder, SortSpec};
+use crate::core::flatten::SortSpec;
 use crate::core::plan::ColumnKind;
 use crate::core::yank::tsv;
 use crate::delegate::{BlotterDelegate, CellPointer, ChevronClicked};
@@ -18,6 +18,7 @@ use geode_core::query::{AsOf, QueryKey, QueryOutcome};
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::{Scope, parse_expr};
 use geode_core::snapshot::Snapshot;
+use geode_core::sort::SortOrder;
 use geode_core::view::ViewSpec;
 use geode_data::{DataHandle, QueryParams};
 use geode_shell::actions::ActionId;
@@ -1623,6 +1624,9 @@ impl BlotterTile {
                     Vec::new(),
                     |_, _, _| div().into_any_element(),
                     |_, _, _| div().into_any_element(),
+                    // Blotter cells come from its prepared snapshot through
+                    // `update_table`'s painter, not from a row report.
+                    |_, _| {},
                     window,
                     cx,
                 )

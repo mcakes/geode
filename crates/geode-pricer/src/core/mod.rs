@@ -16,6 +16,7 @@ pub mod rollup;
 pub mod select;
 pub mod sheet;
 pub mod shorthand;
+pub mod sort;
 pub mod storage;
 pub mod template;
 pub mod tree;

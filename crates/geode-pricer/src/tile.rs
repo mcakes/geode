@@ -17,6 +17,7 @@ use crate::core::rollup::{self, EffectiveChain, Node, NodeKind, Rollup};
 use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
 use crate::core::shorthand::parse;
 use crate::core::shorthand::render_expiry;
+use crate::core::sort::{self as sorting, SortSpec};
 use crate::core::storage::{PRICER_SHEETS_DATASET, from_rows, rows_from_snapshot, to_rows};
 use crate::core::template::Template;
 use crate::core::tree::Expansion;
@@ -26,7 +27,7 @@ use crate::core::visibility::{Visibility, apply_scope};
 use crate::core::{Place, RowSpec};
 use crate::delegate::{
     CellPointer, ChevronClicked, ColumnMoved, DateFieldPaint, EditorField, EditorPaint,
-    SheetDelegate,
+    SheetDelegate, SortClicked,
 };
 use crate::grid::{CellPass, FillSource, GridIndex, GridRowKind};
 use crate::header::{self, HeaderInputs, HeaderModel};
@@ -43,6 +44,7 @@ use geode_core::grid::selection::{Resolved, SelectKind, Selection};
 use geode_core::pricing::{PriceLine, PriceOutcome, PriceParams};
 use geode_core::query::{QueryKey, QueryOutcome};
 use geode_core::scope::Scope;
+use geode_core::sort::SortOrder;
 use geode_data::{DataHandle, Refusal};
 use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
@@ -80,6 +82,9 @@ use std::time::{Duration, Instant};
 mod select;
 
 pub(crate) const LOADING: &str = "loading…";
+/// The `/` status once the tile has installed another index: the results'
+/// measure cells paint blank, which alone would read as unpriced lines.
+pub(crate) const FIND_OUT_OF_DATE: &str = "Results out of date — reopen /";
 
 /// Initial retry delay after a refused pricing submission. Retries run even when
 /// periodic refresh is disabled.
@@ -292,6 +297,28 @@ pub(crate) const GROUP_ROW: &str = "a grouping row: edit its lines";
 /// (`PricerTile::grouped`).
 pub(crate) const MOVE_GROUPED: &str = "lines move in the flat sheet: clear the grouping first";
 
+/// `shift+j`/`shift+k` move a line among its siblings in sheet order,
+/// which a column sort does not paint: refused while one applies.
+pub(crate) const MOVE_SORTED: &str = "lines move in sheet order: :sort clear first";
+
+/// A counted `g p` takes the next rows in SHEET order, which a column
+/// sort may paint apart: refused while one applies.
+pub(crate) const PACKAGE_SORTED: &str = "a counted g p packages in sheet order: :sort clear first";
+
+/// The footer when a sort change ends a live selection.
+pub(crate) const SORT_CLEARED_SELECTION: &str = "selection cleared: the sort reordered its rows";
+
+/// `g p` over a `V` range that is contiguous on screen but not in the
+/// sheet, while a sort paints them together.
+pub(crate) const GROUP_SORTED: &str =
+    "the selected lines are apart in sheet order: :sort clear first";
+
+/// The header notice when the sorted column leaves the plan (the blotter's
+/// wording).
+pub(crate) fn sort_dropped(column: &str) -> String {
+    format!("sort on '{column}' dropped: the column is no longer in this view")
+}
+
 /// A counted `g p` takes the next rows in SHEET order, which a value
 /// grouping may paint under other groups: refused while one applies.
 pub(crate) const PACKAGE_GROUPED: &str =
@@ -499,8 +526,24 @@ pub struct PricerTile {
     /// than vanishing. Consumed by that rebuild.
     reveal: Vec<LineId>,
     /// The tree the model was last flattened from: `GridIndex::node`
-    /// indexes it, and every window fill reads it (`fill_source`).
+    /// indexes it, and every window fill reads it (`fill_source`). Under
+    /// a sort its sibling sets are in display order (`sorting::rank`); a
+    /// package's legs and the sheet itself never are.
     pub(crate) rollup: Rollup,
+    /// The column sort (`s`/`shift+s`, a header's sort icon, `:sort`):
+    /// display order only. Named by vocabulary column, so a column move
+    /// keeps it; a plan without the column drops it with a notice
+    /// (`resolve_plan`). Tile state alone: never saved, never undone.
+    pub(crate) sort: Option<SortSpec>,
+    /// The painted order a selection started on under a sort
+    /// (`sorting::painted_order`): every rebuild while it lives holds the
+    /// rows there, and the first `sync_cursor` after it ends rebuilds in
+    /// ranked order.
+    pub(crate) held_order: Option<sorting::Held>,
+    /// Tests: the next `apply_edit`/`apply_batch` refuses, as a sheet
+    /// refusal would, without touching the sheet.
+    #[cfg(test)]
+    pub(crate) refuse_next_edit: bool,
     /// `:unscoped`: this tile ignores the frame's scope. Session key
     /// `unscoped`, as the blotter's.
     unscoped: bool,
@@ -610,10 +653,14 @@ pub struct PricerTile {
     stack: Option<StackHandle>,
     pub(crate) clock: Clock,
     /// What `p`/`shift+p` put: the last `y y`, `d d`, or `y`/`d` over a
-    /// `V` selection, in sheet order.
+    /// `V` selection, in painted order (sheet order on a flat, unsorted
+    /// sheet).
     pub(crate) register: Option<Vec<crate::core::RowSpec>>,
     find: Option<FindState>,
     fuzzy_find: Option<gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>>,
+    /// The open `/` result table's cells: a price-only refresh drops them
+    /// so the rows shown refill from the new prices.
+    pub(crate) find_paint: Option<Rc<std::cell::RefCell<crate::delegate::FindPaint>>>,
     /// Latest pricing submission tag. An outcome with any other tag is dropped whole.
     pub(crate) tag: u64,
     /// `id → revision` of the latest batch. Submit when at least one stale line
@@ -867,7 +914,7 @@ impl PricerTile {
                 .loop_selection(false)
                 .col_resizable(true)
                 .col_movable(true)
-                .sortable(false)
+                .sortable(true)
         });
         cx.subscribe_in(&table, window, |this, _, event: &TableEvent, window, cx| {
             this.on_table_event(event, window, cx)
@@ -881,6 +928,10 @@ impl PricerTile {
         .detach();
         cx.subscribe_in(&table, window, |this, _, event: &ColumnMoved, _, cx| {
             this.column_moved(event.from, event.to, cx)
+        })
+        .detach();
+        cx.subscribe_in(&table, window, |this, _, event: &SortClicked, _, cx| {
+            this.sort_clicked(event.0, cx)
         })
         .detach();
         // Shift+click and drag: the delegate's own pointer events, which
@@ -1044,6 +1095,7 @@ impl PricerTile {
             register: None,
             find: None,
             fuzzy_find: None,
+            find_paint: None,
             tag: 0,
             in_flight: HashMap::new(),
             undo: UndoStack::default(),
@@ -1068,6 +1120,10 @@ impl PricerTile {
             selection_extent: None,
             totals: Vec::new(),
             edit_seq: 0,
+            sort: None,
+            held_order: None,
+            #[cfg(test)]
+            refuse_next_edit: false,
         };
         this.adopt_templates();
         this.resolve_plan();
@@ -1336,34 +1392,52 @@ impl PricerTile {
         let search_tree = Arc::new(geode_shell::fuzzyfind::FindTree::from_depths(
             model.trees().filter(|r| r.node.is_some()).map(|r| r.depth),
         ));
+        // The result table formats only the measure cells of the rows it
+        // shows, as it reports them; its paint only reads them.
         let mut painter = SheetDelegate::new(cx.theme(), cx.entity().downgrade());
         painter.model = model;
-        painter.fill_all(self.fill_source());
         painter.set_colours(self.shared.colours.borrow().clone());
-        let painter = std::cell::RefCell::new((
+        let paint = Rc::new(std::cell::RefCell::new(crate::delegate::FindPaint::new(
             painter,
-            geode_shell::shell::colours::theme_signature(cx.theme()),
-        ));
+            Rc::clone(&self.model),
+            cx.theme(),
+        )));
+        self.find_paint = Some(paint.clone());
+        let shown = paint.clone();
+        let tile = cx.entity().downgrade();
         let header_table = self.table.clone();
         let _ = results.update(cx, |results, cx| {
             results.set_table(
                 columns,
                 move |col, window, cx| {
-                    header_table.update(cx, |table, cx| {
+                    let th = header_table.update(cx, |table, cx| {
                         table
                             .delegate_mut()
                             .render_th(col, window, cx)
                             .into_any_element()
-                    })
-                },
-                move |row, col, cx| {
-                    let mut paint = painter.borrow_mut();
-                    let signature = geode_shell::shell::colours::theme_signature(cx.theme());
-                    if paint.1 != signature {
-                        paint.0.set_paints(crate::paint::Paints::derive(cx.theme()));
-                        paint.1 = signature;
+                    });
+                    // The result table sorts nothing, so it paints no sort
+                    // toggle; its width stays reserved so each label sits
+                    // where the tile's header puts it: `Icon::size_3`
+                    // (0.75rem) inside the toggle's `p(px(2.))`.
+                    match SheetDelegate::plan_col(col) {
+                        Some(_) => div()
+                            .size_full()
+                            .pr(window.rem_size() * 0.75 + gpui::px(4.))
+                            .child(th)
+                            .into_any_element(),
+                        None => th,
                     }
-                    paint.0.render_find_cell(row, col, cx)
+                },
+                move |row, col, cx| paint.borrow_mut().render(row, col, cx),
+                // Table layout, after render: the tile is not borrowed.
+                move |rows, cx| {
+                    if let Some(tile) = tile.upgrade() {
+                        let tile = tile.read(cx);
+                        shown
+                            .borrow_mut()
+                            .show(rows, &tile.model, tile.fill_source());
+                    }
                 },
                 window,
                 cx,
@@ -1518,6 +1592,10 @@ impl PricerTile {
         edit: Edit,
         cx: &mut Context<Self>,
     ) -> Result<(), EditError> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.refuse_next_edit) {
+            return Err(EditError::EmptyInsert);
+        }
         let undo = self.sheet.apply(edit)?;
         self.undo.record(undo);
         self.after_edit(cx);
@@ -1556,6 +1634,10 @@ impl PricerTile {
     /// previous row layout, and leaves the partly rolled-back sheet for
     /// the caller's rebuild.
     pub(crate) fn apply_batch(&mut self, edits: Vec<Edit>) -> Result<Option<Undo>, EditError> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.refuse_next_edit) {
+            return Err(EditError::EmptyInsert);
+        }
         let mut undos: Vec<Undo> = Vec::new();
         for e in edits {
             match self.sheet.apply(e) {
@@ -3144,9 +3226,7 @@ impl PricerTile {
                 // package its own row; a grouping row its lines; a split
                 // package only its legs under this node.
                 if let Some(g) = self.cursor_row() {
-                    let mut rows = self.grid_rows_under(g);
-                    rows.sort_unstable();
-                    rows.dedup();
+                    let rows = select::first_seen(self.grid_rows_under(g), self.sheet.len());
                     let top = crate::core::select::top_most(&self.sheet, &rows);
                     let text = top
                         .iter()
@@ -3171,6 +3251,27 @@ impl PricerTile {
                     .collect::<Vec<_>>()
                     .join("\n");
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            }
+            // `s` walks the signed cycle and `shift+s` the absolute one
+            // (`SortOrder::cycle`, which keeps `shift+s` inert on a column
+            // with no magnitude), on the cursor's column.
+            "sort_cycle" | "sort_cycle_abs" => {
+                let Some(c) = self.plan.columns.get(self.cursor.col) else {
+                    return true;
+                };
+                let (name, measure) = (c.def.name, sorting::is_measure(c.def.kind));
+                let current = self.sort.filter(|s| s.column == name).map(|s| s.order);
+                let next = SortOrder::cycle(current, verb == "sort_cycle_abs", measure);
+                if next != current {
+                    self.set_sort(
+                        next.map(|order| SortSpec {
+                            column: name,
+                            order,
+                        }),
+                        cx,
+                    );
+                }
+                return true;
             }
             "find_next" => self.repeat_find(FindDirection::Forward, n, cx),
             "find_prev" => self.repeat_find(FindDirection::Backward, n, cx),
@@ -3946,6 +4047,21 @@ impl PricerTile {
             Command::Autosize { reset } => self
                 .autosize_columns(reset, window, cx)
                 .map_err(str::to_string),
+            Command::Sort { column, order } => {
+                let Some(c) = self.plan.columns.iter().find(|c| c.def.name == column) else {
+                    return Err(format!("no column named '{column}' in this view"));
+                };
+                // A column with no magnitude: `abs` is its signed
+                // direction, in the state as on the screen.
+                let order = order.on_column(sorting::is_measure(c.def.kind));
+                let column = c.def.name;
+                self.set_sort(Some(SortSpec { column, order }), cx);
+                Ok(())
+            }
+            Command::SortClear => {
+                self.set_sort(None, cx);
+                Ok(())
+            }
             Command::Unscoped => {
                 self.unscoped = !self.unscoped;
                 self.follow_frame(cx);
@@ -4495,6 +4611,12 @@ impl PricerTile {
             &unds,
             &self.shared.sheet_names(),
             &rollup::groupable_vocabulary(&self.shared.dims.borrow()),
+            &self
+                .plan
+                .columns
+                .iter()
+                .map(|c| c.def.name.to_string())
+                .collect::<Vec<_>>(),
         )
     }
 
@@ -4551,6 +4673,16 @@ impl PricerTile {
         self.plan = plan;
         self.view_grouping = grouping;
         self.view_notice = notice;
+        // The sorted column left the plan (a view switch, a reload that
+        // hid it): the rows go back to sheet order, and the header says
+        // why, as the blotter's does.
+        if let Some(spec) = self.sort
+            && self.plan.position_of(spec.column).is_none()
+        {
+            self.end_selection_for_sort();
+            self.sort = None;
+            self.notice = Some(sort_dropped(spec.column).into());
+        }
         self.cursor.col = self
             .cursor
             .col
@@ -4598,6 +4730,25 @@ impl PricerTile {
                 self.clock,
             );
         }
+        // Display order: ranked before the comparison below, so a price
+        // that reorders a measure sort rebuilds the index, and one that
+        // leaves the order alone refills only. No sort, no pass.
+        if let Some(spec) = &self.sort {
+            sorting::rank(&mut self.rollup, &self.sheet, spec, &self.plan);
+            // A live selection spans the painted rows between its ends:
+            // re-ranked under it, a line moving into that range would join
+            // it unasked. The order it started on holds until it ends.
+            if self.selection.is_some()
+                && let Some(held) = &self.held_order
+            {
+                sorting::hold(&mut self.rollup, &self.sheet, held);
+            }
+        }
+        // No selection, nothing to hold: this build is the ranked order,
+        // and `sync_cursor` owes no deferred re-rank.
+        if self.selection.is_none() {
+            self.held_order = None;
+        }
         self.group_expansion
             .prune_to(rollup::value_levels(&self.chain));
         for id in std::mem::take(&mut self.reveal) {
@@ -4611,6 +4762,7 @@ impl PricerTile {
         if same {
             // Prices moved, nothing else: the index stands; re-prepare the
             // cells on screen.
+            self.refill_find(cx);
             let src = self.fill_source();
             self.table.update(cx, |t, cx| {
                 t.delegate_mut().refill_window(src);
@@ -4632,9 +4784,39 @@ impl PricerTile {
         ));
         self.recover_hidden_cursor(&model);
         self.model = model;
+        self.find_out_of_date(cx);
         self.install_model(cx);
         self.rebuild_chrome();
         cx.notify();
+    }
+
+    /// The open `/` results, if any.
+    fn open_find(&self, cx: &App) -> Option<Entity<geode_shell::fuzzyfind::FuzzyFind>> {
+        self.fuzzy_find
+            .as_ref()
+            .and_then(|r| r.upgrade())
+            .filter(|r| r.read(cx).is_active())
+    }
+
+    /// A price-only refresh keeps the index `/` opened on: drop its cells and
+    /// have the table re-report, so the rows shown refill from the new
+    /// prices before the next paint rather than mix old and new.
+    fn refill_find(&mut self, cx: &mut Context<Self>) {
+        let Some(results) = self.open_find(cx) else {
+            return;
+        };
+        if let Some(paint) = &self.find_paint {
+            paint.borrow_mut().clear();
+        }
+        results.update(cx, |results, cx| results.refresh_rows(cx));
+    }
+
+    /// A new index leaves `/`'s rows naming the old one's nodes: its
+    /// measure cells paint blank from here, so say why.
+    fn find_out_of_date(&mut self, cx: &mut Context<Self>) {
+        if let Some(results) = self.open_find(cx) {
+            results.update(cx, |results, cx| results.set_notice(FIND_OUT_OF_DATE, cx));
+        }
     }
 
     /// Open every group enclosing line `id` in the current rollup, root
@@ -4851,8 +5033,10 @@ impl PricerTile {
         // planned under them.
         let colours = self.shared.colours.borrow().clone();
         let src = self.fill_source();
+        let sort = self.sort;
         self.table.update(cx, |t, cx| {
             t.delegate_mut().model = model;
+            t.delegate_mut().set_sort(sort);
             t.delegate_mut().loading = loading;
             t.delegate_mut().set_colours(colours);
             // Before `refresh`, which re-reads the tree column's width.
@@ -5242,6 +5426,13 @@ impl PricerTile {
         if self.refresh_selection() {
             self.rebuild_chrome();
         }
+        // The selection that held the order ended (escape, a verb that
+        // consumed it, a click, a lost anchor): the re-rank it deferred
+        // applies now. The rebuild drops the held order before it syncs.
+        if self.held_order.is_some() && self.selection.is_none() {
+            self.rebuild(cx);
+            return;
+        }
         let row = self.cursor_row();
         let col = self.cursor.col;
         let selected = self.resolved.clone();
@@ -5308,6 +5499,47 @@ impl PricerTile {
             self.cursor.col = i;
         }
         self.rebuild(cx);
+    }
+
+    /// A header's sort icon: the next order in `SortOrder::click_cycle`
+    /// for that column (desc first; a measure walks the absolute orders
+    /// too), a click on another column starting its own cycle. The cursor
+    /// stays on its line. The table set its own three-state arrow before
+    /// emitting; the rebuild's `refresh` re-reads `column()`, so the arrow
+    /// shows the tile's order before the next paint.
+    fn sort_clicked(&mut self, col: usize, cx: &mut Context<Self>) {
+        let Some(c) = self.plan.columns.get(col) else {
+            return;
+        };
+        let (name, measure) = (c.def.name, sorting::is_measure(c.def.kind));
+        let current = self.sort.filter(|s| s.column == name).map(|s| s.order);
+        let next = SortOrder::click_cycle(current, measure);
+        self.set_sort(
+            next.map(|order| SortSpec {
+                column: name,
+                order,
+            }),
+            cx,
+        );
+    }
+
+    /// The one door every sort change takes: the rollup re-ranks (or
+    /// returns to sheet order) and the index rebuilds; the cursor and a
+    /// live selection stay on their lines, which may now paint elsewhere.
+    pub(crate) fn set_sort(&mut self, sort: Option<SortSpec>, cx: &mut Context<Self>) {
+        self.end_selection_for_sort();
+        self.sort = sort;
+        self.rebuild(cx);
+    }
+
+    /// Every sort change's first step, a dropped sort's included: a
+    /// selection spans painted rows, and a new order would hand it rows it
+    /// never covered, so it ends and the footer says why.
+    pub(crate) fn end_selection_for_sort(&mut self) {
+        if self.selection.is_some() {
+            self.clear_selection();
+            self.footer = Some(SORT_CLEARED_SELECTION.into());
+        }
     }
 
     /// The `(grid row, plan column)` the open editor sits on.
@@ -5467,10 +5699,19 @@ impl PricerTile {
                 let Some(at) = line else {
                     return;
                 };
+                // A group row has no editable cell: a double-click
+                // anywhere on it is `space`, as on a blotter row.
+                let group = matches!(at, At::Group(_));
                 // Before the tree-column return: this press's `SelectCell`
                 // moved the cursor to the row that slid up.
                 self.cursor.at = Some(at);
                 self.sync_cursor(cx);
+                if group {
+                    self.tree_verb(None, cx);
+                    self.rebuild_chrome();
+                    cx.notify();
+                    return;
+                }
                 let Some(c) = SheetDelegate::plan_col(*col) else {
                     self.rebuild_chrome();
                     cx.notify();
@@ -7863,6 +8104,34 @@ pub(crate) mod tests {
             vec![crate::core::LineId(2)],
             "the session carries the open package"
         );
+    }
+
+    /// A double-click anywhere on a group row is `space` on it, as on a
+    /// blotter row: a group row has no editable cell, so the edit route a
+    /// line's double-click takes would only refuse.
+    #[gpui::test]
+    fn a_double_click_on_a_group_row_toggles_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 4000 P"]);
+        h.command(&mut vcx, "group underlying_ref").unwrap();
+        h.draw(&mut vcx);
+        assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "groups start closed");
+        for sel in ["pricer-cell-1-3", "pricer-cell-1-0"] {
+            click(&mut vcx, sel, 1);
+            click(&mut vcx, sel, 2);
+            assert_eq!(
+                h.tree(&vcx),
+                ["NDX", "SPX", "SPX Z26 5000 C"],
+                "{sel}: a double-click opens the group"
+            );
+            assert!(
+                h.tile.read_with(&vcx, |t, _| t.editor.is_none()),
+                "{sel}: no editor opens on a group row"
+            );
+            assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1), "{sel}");
+            click(&mut vcx, sel, 1);
+            click(&mut vcx, sel, 2);
+            assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "{sel}: and closes it again");
+        }
     }
 
     #[gpui::test]
@@ -10609,6 +10878,9 @@ pub(crate) mod tests {
             "autosize reset",
             // Detaching reads the frame; it never writes it.
             "unscoped",
+            // A sort is this tile's display order alone.
+            "sort qty desc",
+            "sort clear",
         ];
         for word in crate::core::commands::VERBS {
             assert!(
@@ -13949,4 +14221,5 @@ pub(crate) mod tests {
     mod grouping;
     mod scope;
     mod selection;
+    mod sort;
 }

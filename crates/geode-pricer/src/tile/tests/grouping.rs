@@ -179,6 +179,157 @@ fn fzf_native_table_scrolls_and_pointer_picks_without_moving_the_tree(
     );
 }
 
+/// Display positions the `/` result table painted, in order.
+fn find_positions(h: &Harness, vcx: &mut VisualTestContext, rows: usize) -> Vec<usize> {
+    h.draw(vcx);
+    (0..rows)
+        .filter(|i| {
+            let selector: &'static str = Box::leak(format!("find-result-{i}").into_boxed_str());
+            vcx.debug_bounds(selector).is_some()
+        })
+        .collect()
+}
+
+/// The grid rows the find cells hold, ascending.
+fn find_held(paint: &RefCell<crate::delegate::FindPaint>, rows: usize) -> Vec<usize> {
+    let paint = paint.borrow();
+    (0..rows).filter(|&g| paint.cells().contains(g)).collect()
+}
+
+/// Every painted measure cell of `rows` carries the grid formatter's text
+/// for its row of the find's all-open index, and at least one is not blank.
+fn assert_find_paints_the_formatter(
+    h: &Harness,
+    vcx: &VisualTestContext,
+    paint: &RefCell<crate::delegate::FindPaint>,
+    rows: &[usize],
+) {
+    let paint = paint.borrow();
+    let index = Rc::clone(&paint.painter.model);
+    let mut texts = 0;
+    h.tile.read_with(vcx, |t, _| {
+        let mut pass = CellPass::new(t.fill_source(), &index);
+        for &g in rows {
+            for c in 0..index.columns.len() {
+                let fresh = pass.cell(g, c).map(|c| c.text.to_string());
+                texts += fresh.as_ref().is_some_and(|t| !t.is_empty()) as usize;
+                // The tree column sits at table column 0.
+                assert_eq!(
+                    paint.painter.find_painted.get(&(g, c + 1)),
+                    Some(&fresh.unwrap_or_default()),
+                    "find cell ({g}, {c})"
+                );
+            }
+        }
+    });
+    assert!(texts > 0, "some painted cell carries text");
+}
+
+/// `/` formats the measure cells of the rows it paints and no others: the
+/// open, a real wheel scroll and a narrowing to one match each fill
+/// exactly the rows entering view and drop the rest, and every painted
+/// cell is the grid formatter's.
+#[gpui::test]
+fn fzf_formats_only_the_rows_it_paints(cx: &mut gpui::TestAppContext) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    let lines: Vec<_> = (0..300)
+        .map(|i| format!("SPX Z26 {} C", 3000 + i * 5))
+        .collect();
+    let lines: Vec<_> = lines.iter().map(String::as_str).collect();
+    let (h, mut vcx) = open_seeded(cx, &lines);
+    let results = vcx.new(|_| FuzzyFind::default());
+    h.tile.update_in(&mut vcx, |tile, window, cx| {
+        tile.start_fuzzy_find(results.downgrade(), window, cx)
+    });
+    vcx.run_until_parked();
+    let paint = h.tile.read_with(&vcx, |t, _| t.find_paint.clone().unwrap());
+    let cols = paint.borrow().painter.model.columns.len();
+
+    let shown = find_positions(&h, &mut vcx, 300);
+    assert!(
+        shown.len() > 1 && shown.len() < 100,
+        "one screenful: {shown:?}"
+    );
+    assert_eq!(
+        find_held(&paint, 300),
+        shown,
+        "the cells hold the painted rows"
+    );
+    let opened = paint.borrow().fills;
+    assert!(
+        opened <= geode_tile::grid::FIRST_WINDOW * cols,
+        "the open formats at most a first window, not 300 rows: {opened}"
+    );
+    assert_find_paints_the_formatter(&h, &vcx, &paint, &shown);
+
+    let bounds = vcx.debug_bounds("fuzzy-find").expect("the table paints");
+    vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: bounds.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-600.))),
+        modifiers: gpui::Modifiers::default(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    let scrolled = find_positions(&h, &mut vcx, 300);
+    assert!(scrolled.first() > shown.first(), "scrolled: {scrolled:?}");
+    assert_eq!(
+        find_held(&paint, 300),
+        scrolled,
+        "rows scrolled out are dropped"
+    );
+    let entered = scrolled.iter().filter(|r| !shown.contains(r)).count();
+    assert_eq!(
+        paint.borrow().fills - opened,
+        entered * cols,
+        "only the rows scrolling in are formatted"
+    );
+    assert_find_paints_the_formatter(&h, &vcx, &paint, &scrolled);
+
+    // One match far down the sheet: the table never reports a one-row range.
+    results.update(&mut vcx, |results, cx| results.set_query("4205".into(), cx));
+    vcx.run_until_parked();
+    assert_eq!(find_positions(&h, &mut vcx, 300), vec![0]);
+    assert_eq!(
+        find_held(&paint, 300),
+        vec![241],
+        "the lone match is formatted"
+    );
+    assert_find_paints_the_formatter(&h, &vcx, &paint, &[241]);
+}
+
+/// The find index names rollup nodes and sheet rows as `/` opened on
+/// them. Once the tile installs another index (a regroup), a row entering
+/// view paints blank measure cells rather than read through the stale one.
+#[gpui::test]
+fn fzf_paints_blank_cells_once_the_tile_reindexes(cx: &mut gpui::TestAppContext) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    let results = vcx.new(|_| FuzzyFind::default());
+    h.tile.update_in(&mut vcx, |tile, window, cx| {
+        tile.start_fuzzy_find(results.downgrade(), window, cx)
+    });
+    vcx.run_until_parked();
+    let paint = h.tile.read_with(&vcx, |t, _| t.find_paint.clone().unwrap());
+    let shown = find_positions(&h, &mut vcx, 10);
+    assert_find_paints_the_formatter(&h, &vcx, &paint, &shown);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    results.update(&mut vcx, |results, cx| results.set_query("spx".into(), cx));
+    vcx.run_until_parked();
+    // A frame drawn while the query ranked repaints the rows already held.
+    paint.borrow_mut().painter.find_painted.clear();
+    assert!(!find_positions(&h, &mut vcx, 10).is_empty());
+    assert!(
+        find_held(&paint, 10).is_empty(),
+        "nothing is formatted against the stale index"
+    );
+    let paint = paint.borrow();
+    assert!(!paint.painter.find_painted.is_empty());
+    assert!(
+        paint.painter.find_painted.values().all(String::is_empty),
+        "the measure cells now paint blank: {:?}",
+        paint.painter.find_painted
+    );
+}
+
 /// Fill frame slots `(n, chain)`, as a groupings reload does.
 fn slots(h: &Harness, vcx: &mut VisualTestContext, filled: &[(u8, &[&str])]) {
     let mut s = GroupingSlots::default();
@@ -1207,4 +1358,75 @@ fn a_split_rows_cursor_keeps_its_node_across_a_shorter_regroup(cx: &mut gpui::Te
     let splits = split_rows(&h, &vcx);
     assert_eq!(splits.len(), 2, "still split under both dates");
     assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(splits[1]));
+}
+
+/// A price-only delivery keeps the index `/` opened on and refills the rows
+/// it shows from the new prices before the next paint: no row keeps the
+/// price it entered view with beside rows reading the new one.
+#[gpui::test]
+fn fzf_a_price_refresh_repaints_the_shown_rows(cx: &mut gpui::TestAppContext) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    let (h, mut vcx) = open_seeded(cx, &["1 SPX Z26 5000 C", "2 SPX Z26 4000 P"]);
+    let first = h.prices().pop().expect("a batch");
+    h.answer(&mut vcx, &first, 12.5);
+    let results = vcx.new(|_| FuzzyFind::default());
+    h.tile.update_in(&mut vcx, |tile, window, cx| {
+        tile.start_fuzzy_find(results.downgrade(), window, cx)
+    });
+    vcx.run_until_parked();
+    let paint = h.tile.read_with(&vcx, |t, _| t.find_paint.clone().unwrap());
+    let npv = 1 + paint
+        .borrow()
+        .painter
+        .model
+        .columns
+        .iter()
+        .position(|c| c.name == "npv")
+        .expect("an npv column");
+    let shown = find_positions(&h, &mut vcx, 2);
+    assert_eq!(shown, vec![0, 1]);
+    let npv_painted = |g: usize| {
+        paint
+            .borrow()
+            .painter
+            .find_painted
+            .get(&(g, npv))
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert!(npv_painted(0).contains("12"), "{}", npv_painted(0));
+
+    h.dispatch(&mut vcx, "price", None);
+    let batch = h.prices().pop().expect("a reprice");
+    let builds = crate::grid::builds();
+    h.answer(&mut vcx, &batch, 99.25);
+    assert_eq!(crate::grid::builds(), builds, "a price-only refresh");
+    paint.borrow_mut().painter.find_painted.clear();
+    assert_eq!(find_positions(&h, &mut vcx, 2), shown);
+    for g in shown.iter().copied() {
+        assert!(npv_painted(g).contains("99"), "row {g}: {}", npv_painted(g));
+    }
+    assert_find_paints_the_formatter(&h, &vcx, &paint, &shown);
+}
+
+/// Once the tile installs another index the find's measure cells paint
+/// blank; the status line says the results are out of date, so a blank
+/// does not read as an unpriced line.
+#[gpui::test]
+fn fzf_a_reindex_says_the_results_are_out_of_date(cx: &mut gpui::TestAppContext) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    let results = vcx.new(|_| FuzzyFind::default());
+    h.tile.update_in(&mut vcx, |tile, window, cx| {
+        tile.start_fuzzy_find(results.downgrade(), window, cx)
+    });
+    vcx.run_until_parked();
+    h.draw(&mut vcx);
+    let status = |vcx: &VisualTestContext| results.read_with(vcx, |r, _| r.context().1);
+    assert_eq!(status(&vcx), "5 matches");
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    assert_eq!(status(&vcx), FIND_OUT_OF_DATE);
+    results.update(&mut vcx, |results, cx| results.set_query("spx".into(), cx));
+    vcx.run_until_parked();
+    assert_eq!(status(&vcx), FIND_OUT_OF_DATE, "it outlasts a new query");
 }

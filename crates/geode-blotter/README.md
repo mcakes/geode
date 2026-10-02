@@ -137,6 +137,9 @@ cargo bench -p geode-blotter   # the pure core
 - `apply_snapshot` rebuilds the column plan on every delivery and swaps on
   inequality: labels, widths, formats, and colors can change even when
   column names and indices stay the same.
+- `SortOrder`, its key and click cycles, and the `:sort` grammar and
+  completions are `geode_core::sort`, shared with the line pricer; the
+  blotter's `SortSpec` and the sibling ranking over a snapshot stay here.
 - Sorts store column names. `SortSpec.column` is resolved against the fresh
   plan on every rebuild in `apply_snapshot`. The cursor stores a position;
   rebuilds and `move_column` preserve its column by resolving the old column

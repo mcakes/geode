@@ -70,7 +70,7 @@ use gpui::{
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{DataTable, TableDelegate as _, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, h_flex, v_flex};
-use std::cell::Cell as StdCell;
+use std::cell::{Cell as StdCell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -505,6 +505,9 @@ pub struct MarketDataTile {
     /// once per index build.
     #[cfg(test)]
     search_builds: usize,
+    /// The last `/` open's result cells, for tests to read.
+    #[cfg(test)]
+    find_cells: Option<Rc<RefCell<crate::delegate::FindCells>>>,
     /// Policy for new live generations with edits: Hold, Rebase, or Replace. Changing
     /// it does not resolve an already-Behind draft or act on a redelivery. Commands,
     /// menu rows, and actions share the setter; nondefault policy persists in the
@@ -894,6 +897,8 @@ impl MarketDataTile {
             search_text: None,
             #[cfg(test)]
             search_builds: 0,
+            #[cfg(test)]
+            find_cells: None,
             policy,
             cursor: Cursor::Cell { row: 0, col: 0 },
             last_grid_col: 0,
@@ -4004,14 +4009,18 @@ impl MarketDataTile {
             .map(|ix| delegate.column(ix, cx))
             .collect();
         let table = self.table.clone();
-        let model = self.model.clone();
-        // The result table paints arbitrary rows: format every cell once per
-        // `/` open, never in its paint.
-        let mut cells = geode_tile::grid::WindowCache::default();
-        cells.set_window(0..model.len(), model.columns.len(), |r, c| {
-            model.md_cell(&self.draft, r, c)
-        });
-        let cells = Rc::new(cells);
+        // The result table formats only the rows it shows, as it reports
+        // them, against the index and draft `/` opened on; its paint only
+        // reads them.
+        let find = Rc::new(RefCell::new(crate::delegate::FindCells::new(
+            self.model.clone(),
+            self.draft.clone(),
+        )));
+        #[cfg(test)]
+        {
+            self.find_cells = Some(find.clone());
+        }
+        let shown = find.clone();
         let header_table = self.table.clone();
         let _ = results.update(cx, |results, cx| {
             results.set_table(
@@ -4028,9 +4037,10 @@ impl MarketDataTile {
                     table.update(cx, |table, cx| {
                         table
                             .delegate()
-                            .render_find_cell(&model, &cells, row, col, cx)
+                            .render_find_cell(&find.borrow(), row, col, cx)
                     })
                 },
+                move |rows, _| shown.borrow_mut().show(rows),
                 window,
                 cx,
             )
@@ -7846,6 +7856,145 @@ edits = [["2026-11-20", "-1", 9.5]]
             "search never edits the document"
         );
     }
+    /// Display positions the `/` result table painted, in order.
+    fn find_positions(vcx: &mut gpui::VisualTestContext, rows: usize) -> Vec<usize> {
+        draw(vcx);
+        (0..rows)
+            .filter(|i| {
+                let selector: &'static str = Box::leak(format!("find-result-{i}").into_boxed_str());
+                vcx.debug_bounds(selector).is_some()
+            })
+            .collect()
+    }
+
+    /// A 300-row flat schedule, `D000`..`D299`, every amount distinct.
+    fn find_schedule(h: &Harness, vcx: &mut gpui::VisualTestContext) {
+        let ids: Vec<String> = (0..300).map(|i| format!("D{i:03}")).collect();
+        let rows: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), "2026-12-18", i as f64 / 8.0, "declared"))
+            .collect();
+        h.with_flat_document_with(vcx, test_fixtures::schedule_snapshot(&rows));
+    }
+
+    /// Every painted value cell of `rows` carries the grid formatter's
+    /// text for its document row.
+    fn assert_find_paints_the_formatter(
+        h: &Harness,
+        vcx: &gpui::VisualTestContext,
+        find: &RefCell<crate::delegate::FindCells>,
+        rows: &[usize],
+    ) {
+        let find = find.borrow();
+        let painted = find.painted.borrow();
+        h.tile.read_with(vcx, |t, _| {
+            for &row in rows {
+                for c in 0..t.model().columns.len() {
+                    // A shown row label sits at table column 0.
+                    assert_eq!(
+                        painted.get(&(row, c + 1)).map(String::as_str),
+                        Some(t.model().format_cell(t.draft(), row, c).as_ref()),
+                        "find cell ({row}, {c})"
+                    );
+                }
+            }
+        });
+    }
+
+    /// `/` formats the rows it paints and no others: the open, a query
+    /// that brings new rows into view, a real wheel scroll and a
+    /// narrowing to one match each fill exactly the rows entering view
+    /// and drop the rest, and every painted cell is the grid formatter's.
+    #[gpui::test]
+    fn fzf_formats_only_the_rows_it_paints(cx: &mut gpui::TestAppContext) {
+        use geode_shell::fuzzyfind::FuzzyFind;
+        let (h, mut vcx) = open_flat(cx);
+        find_schedule(&h, &mut vcx);
+        let cols = h.tile.read_with(&vcx, |t, _| t.model().columns.len());
+        let results = vcx.new(|_| FuzzyFind::default());
+        assert!(vcx.update(|window, cx| h.content.start_fuzzy_find(
+            results.downgrade(),
+            window,
+            cx
+        )));
+        vcx.run_until_parked();
+        let find = h.tile.read_with(&vcx, |t, _| t.find_cells.clone().unwrap());
+        let held = |find: &RefCell<crate::delegate::FindCells>| {
+            let find = find.borrow();
+            let mut rows: Vec<_> = (0..300).filter(|&r| find.cells().contains(r)).collect();
+            rows.sort();
+            rows
+        };
+
+        // The open: the empty query shows document order.
+        let shown = find_positions(&mut vcx, 300);
+        assert!(
+            shown.len() > 1 && shown.len() < 100,
+            "one screenful: {shown:?}"
+        );
+        assert_eq!(held(&find), shown, "the cache holds the painted rows");
+        let opened = find.borrow().fills;
+        assert!(
+            opened <= geode_tile::grid::FIRST_WINDOW * cols,
+            "the open formats at most a first window, not 300 rows: {opened}"
+        );
+        assert_find_paints_the_formatter(&h, &vcx, &find, &shown);
+
+        // A query that brings rows from far down the document into view.
+        results.update(&mut vcx, |results, cx| results.set_query("D29".into(), cx));
+        vcx.run_until_parked();
+        find.borrow().painted.borrow_mut().clear();
+        let positions = find_positions(&mut vcx, 300);
+        let rows = held(&find);
+        assert_eq!(
+            rows.len(),
+            positions.len(),
+            "rows no longer shown are dropped: {rows:?}"
+        );
+        assert!(rows.contains(&290) && rows.contains(&299), "{rows:?}");
+        let entered = rows.iter().filter(|r| !shown.contains(r)).count();
+        assert_eq!(
+            find.borrow().fills - opened,
+            entered * cols,
+            "exactly the entering rows are formatted"
+        );
+        assert_find_paints_the_formatter(&h, &vcx, &find, &rows);
+
+        // Everything again, then a real wheel scroll down the table.
+        results.update(&mut vcx, |results, cx| results.set_query(String::new(), cx));
+        vcx.run_until_parked();
+        let top = find_positions(&mut vcx, 300);
+        assert_eq!(held(&find), top);
+        let before = find.borrow().fills;
+        let bounds = vcx.debug_bounds("fuzzy-find").expect("the table paints");
+        vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: bounds.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-600.))),
+            modifiers: gpui::Modifiers::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        find.borrow().painted.borrow_mut().clear();
+        let scrolled = find_positions(&mut vcx, 300);
+        assert!(scrolled.first() > top.first(), "scrolled: {scrolled:?}");
+        assert_eq!(held(&find), scrolled, "rows scrolled out are dropped");
+        let scrolled_in = scrolled.iter().filter(|r| !top.contains(r)).count();
+        assert_eq!(
+            find.borrow().fills - before,
+            scrolled_in * cols,
+            "only the rows scrolling in are formatted"
+        );
+        assert_find_paints_the_formatter(&h, &vcx, &find, &scrolled);
+
+        // One match: the table never reports a one-row range.
+        results.update(&mut vcx, |results, cx| results.set_query("D137".into(), cx));
+        vcx.run_until_parked();
+        find.borrow().painted.borrow_mut().clear();
+        assert_eq!(find_positions(&mut vcx, 300), vec![0]);
+        assert_eq!(held(&find), vec![137], "the lone match is formatted");
+        assert_find_paints_the_formatter(&h, &vcx, &find, &[137]);
+    }
+
     // ---- Cell editing ------------------------------------------------
 
     /// Editing seeds the field from the cell, commit parses the column's declared type,

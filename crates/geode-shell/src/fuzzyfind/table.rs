@@ -1,5 +1,16 @@
 //! Native table geometry for the temporary result order. Cell formatting stays
 //! with the tile; this delegate owns neither its model nor its tree cursor.
+//!
+//! The tile formats only the rows shown. This delegate reports them, as
+//! source rows in display order, through the tile's `on_rows` callback: on
+//! each range the table reports (`visible_rows_changed`), and after every
+//! result-set change. The pinned gpui-component 0.6.2 table never reports
+//! an unchanged range or one of length zero or one, so a new ranking under
+//! the same range — or a narrowing to one match — would otherwise paint rows
+//! the tile never prepared. The re-report runs at the next table layout (the
+//! first `render_tr`), never inside the `FuzzyFind` update that changed the
+//! results: that update can run inside the tile's own, and the callback may
+//! read the tile.
 use super::{FindRow, FuzzyFind, Items, Pick, Rows};
 use crate::linenumbers::{UiSettings, gutter_number, gutter_px, window_gutter_px};
 use gpui::{prelude::*, *};
@@ -8,11 +19,36 @@ use gpui_component::{
     table::{Column, TableDelegate, TableState},
 };
 use std::collections::HashMap;
+use std::ops::Range;
 use std::rc::Rc;
 
 type HeaderRenderer = dyn Fn(usize, &mut Window, &mut App) -> AnyElement;
 
 type CellRenderer = dyn Fn(&FindRow<'_>, usize, &mut App) -> AnyElement;
+
+pub(super) type RowsReporter = dyn Fn(&[usize], &mut App);
+
+/// Display rows reported before the table has reported any range, so the
+/// opening frame paints: a result set of one row never gets a report.
+pub(super) const FIRST_WINDOW: usize = 64;
+
+/// The display range to report over `len` result rows: the range the table
+/// last `asked` for (the first `0..FIRST_WINDOW` before any) clamped to
+/// `len`; when nothing of it is left, the last rows of the same height (at
+/// least one), which the table scrolls back onto without reporting. `None`
+/// with no rows. The rule of `geode_tile::grid::WindowRequest::refill_range`,
+/// restated because the shell does not depend on `geode-tile`.
+pub(super) fn report_range(asked: Option<&Range<usize>>, len: usize) -> Option<Range<usize>> {
+    if len == 0 {
+        return None;
+    }
+    let asked = asked.cloned().unwrap_or(0..FIRST_WINDOW);
+    let end = asked.end.min(len);
+    if asked.start < end {
+        return Some(asked.start..end);
+    }
+    Some(len.saturating_sub(asked.len().max(1))..len)
+}
 
 pub(super) struct FindTable {
     columns: Vec<Column>,
@@ -20,7 +56,15 @@ pub(super) struct FindTable {
     render_cell: Rc<CellRenderer>,
     owner: WeakEntity<FuzzyFind>,
     highlights: HashMap<usize, Vec<usize>>,
-    visible: std::ops::Range<usize>,
+    visible: Range<usize>,
+    on_rows: Rc<RowsReporter>,
+    /// The range the table last reported; `None` before its first report.
+    asked: Option<Range<usize>>,
+    /// The results changed since the last report: re-report at the next
+    /// layout, whether or not the table reports a range.
+    stale: bool,
+    /// The last report's source rows, reused as the next report's buffer.
+    reported: Vec<usize>,
     pub items: Items,
     pub ranked: Rows,
     pub message: String,
@@ -29,6 +73,24 @@ pub(super) struct FindTable {
 impl FindTable {
     pub fn clear_highlights(&mut self) {
         self.highlights.clear();
+    }
+
+    /// The results changed: report the shown rows at the next layout.
+    pub fn mark_stale(&mut self) {
+        self.stale = true;
+    }
+
+    /// Tell the tile which source rows show now, in display order.
+    fn report(&mut self, cx: &mut App) {
+        self.stale = false;
+        let Some(range) = report_range(self.asked.as_ref(), self.ranked.len()) else {
+            return;
+        };
+        let mut rows = std::mem::take(&mut self.reported);
+        rows.clear();
+        rows.extend(range.filter_map(|position| self.ranked.get(position)));
+        (self.on_rows)(&rows, cx);
+        self.reported = rows;
     }
 
     pub fn set_presentation(
@@ -45,6 +107,7 @@ impl FindTable {
         columns: Vec<Column>,
         render_header: Rc<HeaderRenderer>,
         render_cell: Rc<CellRenderer>,
+        on_rows: Rc<RowsReporter>,
         owner: WeakEntity<FuzzyFind>,
     ) -> Self {
         Self {
@@ -54,6 +117,10 @@ impl FindTable {
             owner,
             highlights: HashMap::new(),
             visible: 0..0,
+            on_rows,
+            asked: None,
+            stale: true,
+            reported: Vec::new(),
             items: Items::default(),
             ranked: Rows::All(0),
             message: "Searching…".into(),
@@ -70,11 +137,13 @@ impl TableDelegate for FindTable {
     }
     fn visible_rows_changed(
         &mut self,
-        range: std::ops::Range<usize>,
+        range: Range<usize>,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) {
-        self.visible = range;
+        self.visible = range.clone();
+        self.asked = Some(range);
+        self.report(cx);
     }
     fn column(&self, ix: usize, _: &App) -> Column {
         let mut column = self.columns[ix].clone();
@@ -95,8 +164,12 @@ impl TableDelegate for FindTable {
         &mut self,
         row: usize,
         _: &mut Window,
-        _cx: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
+        // Layout time, before this frame's cells: the tile is not borrowed.
+        if self.stale {
+            self.report(cx);
+        }
         let Some(source_row) = self.ranked.get(row) else {
             return div().id(("empty-find-row", row));
         };
@@ -179,5 +252,32 @@ impl TableDelegate for FindTable {
             .p_2()
             .text_color(cx.theme().muted_foreground)
             .child(self.message.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FIRST_WINDOW, report_range};
+
+    /// The re-report clamps the asked range to the rows that remain, and
+    /// when none of it remains reports the tail of the same height — one
+    /// row at least, the lone match the table itself never reports.
+    #[test]
+    fn a_re_report_clamps_the_asked_range_and_falls_back_to_the_tail() {
+        assert_eq!(report_range(None, 0), None, "no rows");
+        assert_eq!(report_range(None, 500), Some(0..FIRST_WINDOW));
+        assert_eq!(report_range(None, 1), Some(0..1), "first window, one row");
+        let asked = 40..60;
+        assert_eq!(report_range(Some(&asked), 100), Some(40..60));
+        assert_eq!(report_range(Some(&asked), 50), Some(40..50), "clamped");
+        assert_eq!(
+            report_range(Some(&asked), 30),
+            Some(10..30),
+            "the tail, asked height"
+        );
+        assert_eq!(report_range(Some(&asked), 40), Some(20..40), "start == len");
+        assert_eq!(report_range(Some(&asked), 1), Some(0..1), "one match");
+        assert_eq!(report_range(Some(&asked), 0), None);
+        assert_eq!(report_range(Some(&(5..5)), 3), Some(2..3), "an empty ask");
     }
 }

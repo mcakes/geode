@@ -18,7 +18,7 @@ use geode_core::grid::selection::{Resolved, SelectKind};
 use geode_shell::colfit::{FitMetrics, FittedWidths};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
-use geode_tile::grid::{FIRST_WINDOW, WindowCache, WindowRequest};
+use geode_tile::grid::{FIRST_WINDOW, RowCache, WindowCache, WindowRequest};
 use gpui::prelude::*;
 use gpui::{
     App, Context, Div, Entity, EventEmitter, FocusHandle, Hsla, MouseButton, MouseDownEvent,
@@ -702,21 +702,85 @@ fn selection_tint(theme: &Theme) -> Div {
     div().absolute().inset_0().bg(theme.selection.opacity(0.35))
 }
 
+/// What a fuzzy `/` result table paints from: the index and draft as `/`
+/// opened them, and the cells of the rows the find table last reported
+/// (`FindCells::show`), formatted there through [`MatrixIndex::md_cell`].
+/// The paint callback only reads it; a row it does not hold paints blank.
+pub(crate) struct FindCells {
+    model: Rc<MatrixIndex>,
+    draft: Draft,
+    cells: RowCache<MdCell>,
+    /// Cells formatted, ever; each `/` open starts a new `FindCells`.
+    #[cfg(test)]
+    pub(crate) fills: usize,
+    /// The text each painted find cell carried, by (document row, table
+    /// column), as `render_find_cell` put it into the element.
+    #[cfg(test)]
+    pub(crate) painted: std::cell::RefCell<std::collections::HashMap<(usize, usize), String>>,
+}
+
+impl FindCells {
+    pub(crate) fn new(model: Rc<MatrixIndex>, draft: Draft) -> Self {
+        FindCells {
+            model,
+            draft,
+            cells: RowCache::default(),
+            #[cfg(test)]
+            fills: 0,
+            #[cfg(test)]
+            painted: Default::default(),
+        }
+    }
+
+    /// Hold exactly the reported document `rows`: keep those already
+    /// formatted, format the rest, drop the others.
+    pub(crate) fn show(&mut self, rows: &[usize]) {
+        let FindCells {
+            model,
+            draft,
+            cells,
+            #[cfg(test)]
+            fills,
+            ..
+        } = self;
+        cells.set_rows(rows, model.columns.len(), |r, c| {
+            #[cfg(test)]
+            {
+                *fills += 1;
+            }
+            model.md_cell(draft, r, c)
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cells(&self) -> &RowCache<MdCell> {
+        &self.cells
+    }
+}
+
 impl MatrixDelegate {
     pub(crate) fn render_find_cell(
         &self,
-        model: &MatrixIndex,
-        cells: &WindowCache<MdCell>,
+        find: &FindCells,
         find_row: &geode_shell::fuzzyfind::FindRow<'_>,
         col: usize,
         cx: &App,
     ) -> gpui::AnyElement {
-        let Some(row) = model.row(find_row.source_row()) else {
+        let Some(row) = find.model.row(find_row.source_row()) else {
             return div().into_any_element();
         };
         let model_col = self.model_col(col);
-        let cell = model_col.and_then(|c| cells.get(row.index, c));
-        let text = cell.map_or_else(|| row.label.clone(), |c| c.text.clone());
+        let cell = model_col.and_then(|c| find.cells.get(row.index, c));
+        // A value cell the last report did not hold paints blank; the label
+        // column paints the row's label.
+        let text = match model_col {
+            Some(_) => cell.map(|c| c.text.clone()).unwrap_or_default(),
+            None => row.label.clone(),
+        };
+        #[cfg(test)]
+        find.painted
+            .borrow_mut()
+            .insert((row.index, col), text.to_string());
         let paint = cell_paint(
             cx.theme(),
             cell.is_some_and(|cell| cell.sent),
@@ -748,7 +812,7 @@ impl MatrixDelegate {
                 .child(geode_shell::palette::highlighted_title(
                     &text,
                     &indices,
-                    cx.theme().foreground,
+                    geode_shell::shell::listrow::row_paint(cx.theme()).accent,
                 ))
                 .into_any_element()
         } else {
@@ -945,6 +1009,27 @@ pub(crate) mod tests {
     use crate::core::test_fixtures::{CVI, DIVIDEND};
     use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio};
     use geode_shell::shell::colours::to_rgb;
+
+    /// The find table's match run takes the list-row accent every other
+    /// fuzzy surface highlights with (the blotter's find, the palette,
+    /// pickers); a plain `foreground` run is invisible on its own text.
+    #[test]
+    fn find_highlights_take_the_list_row_accent() {
+        let text = include_str!("delegate.rs");
+        // Spelled in two parts so the scan does not find itself.
+        let needle = ["highlighted_", "title("].concat();
+        let calls: Vec<&str> = text
+            .match_indices(needle.as_str())
+            .map(|(at, _)| &text[at..(at + 200).min(text.len())])
+            .collect();
+        assert!(!calls.is_empty(), "the scan found no highlight call");
+        for window in calls {
+            assert!(
+                window.contains("row_paint("),
+                "a find highlight bypasses RowPaint::accent:\n{window}"
+            );
+        }
+    }
 
     /// `top` at its own alpha composited over an opaque `under`, in sRGB —
     /// what the GPU paints for a translucent fill over what is beneath it.
