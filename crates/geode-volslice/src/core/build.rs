@@ -613,6 +613,81 @@ mod tests {
         assert!(j < i, "the grid names an earlier job");
     }
 
+    /// With two active expiries each difference evaluates at its own
+    /// expiry's minuend strikes: a grid naming the other expiry's curve
+    /// would pair strikes of one term with vols of another. A hidden
+    /// subtrahend asks no trace of its own but still gets its difference
+    /// job: hiding a kind to read the difference is a use.
+    #[test]
+    fn each_expirys_difference_names_its_own_minuend_and_a_hidden_subtrahend_still_gets_one() {
+        let expiries = [d("2026-10-16"), d("2026-12-18")];
+        let mut st = State {
+            active: Some(expiries.into()),
+            diff: Pair::new(Kind::Draft, Kind::Cvi),
+            ..State::default()
+        };
+        let p = plan(&mut st);
+        let minuend_of = |expiry| {
+            p.roles
+                .iter()
+                .position(|r| {
+                    *r == Role::Curve {
+                        kind: Kind::Draft,
+                        expiry,
+                        trace: true,
+                    }
+                })
+                .unwrap()
+        };
+        let diffs: Vec<(NaiveDate, Grid)> = p
+            .roles
+            .iter()
+            .zip(&p.jobs)
+            .filter_map(|(r, j)| match (r, j) {
+                (Role::DiffCurve { expiry, .. }, VolJob::Slice { request, .. }) => {
+                    Some((*expiry, request.grid.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            diffs,
+            expiries
+                .iter()
+                .map(|e| (*e, Grid::Job(minuend_of(*e))))
+                .collect::<Vec<_>>()
+        );
+
+        st.toggle_kind(Kind::Cvi);
+        let p = plan(&mut st);
+        assert!(
+            !p.roles.iter().any(|r| matches!(
+                r,
+                Role::Curve {
+                    kind: Kind::Cvi,
+                    ..
+                }
+            )),
+            "the hidden subtrahend paints no curve: {:?}",
+            p.roles
+        );
+        let hidden: Vec<NaiveDate> = p
+            .roles
+            .iter()
+            .filter_map(|r| match r {
+                Role::DiffCurve {
+                    kind: Kind::Cvi,
+                    expiry,
+                } => Some(*expiry),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            hidden, expiries,
+            "but each expiry still gets its difference"
+        );
+    }
+
     #[test]
     fn a_hidden_minuend_still_gets_its_dense_job_without_a_trace() {
         let mut st = State {

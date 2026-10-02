@@ -394,3 +394,100 @@ fn a_tile_shown_from_the_shells_draw_paints_its_chrome_at_once(cx: &mut gpui::Te
     );
     assert!(painted(&mut vcx, &format!("volslice-notice-{TILE}")));
 }
+
+/// The done state, headless: a CVI panel stand-in emits a draft into A
+/// and the viewer follows A. The front expiry paints the published curve
+/// solid, its chain as points and the draft dashed; `d` on
+/// `cvi draft - chain` adds the lower pane; two ctrl+clicks add two more
+/// expiries in two more colors; `x x` reaches the reversed delta axis and
+/// `shift+d` puts densities on the right axis. All of it is one painted
+/// model, reached through the keymap, the strip's presses and the shell's
+/// doors.
+#[gpui::test]
+fn the_done_state_in_one_frame(cx: &mut gpui::TestAppContext) {
+    use geode_chart::Axis;
+    use geode_chart::xy::{SlotKind, Style, XFormat};
+
+    let (h, mut vcx) = open_bound(cx, None);
+    h.show(&mut vcx);
+    h.follow_a(&mut vcx);
+    let draft = cvi(&TERMS, Some(("2026-10-16", 0.01)));
+    h.post(&mut vcx, draft_of("SPX.Z", &draft, DraftMark::Editing));
+    let (doc, _) = published();
+    let chains = [
+        chain("2026-10-16"),
+        chain("2026-11-20"),
+        chain("2027-06-18"),
+    ];
+    let reqs = h.answer_documents(&mut vcx, &doc, &chains);
+    let first = vols(&reqs).last().map(|p| (*p).clone()).expect("a batch");
+    assert_eq!(first.documents.len(), 2, "the cvi and the board's draft");
+    h.answer_vol(&mut vcx, &first);
+    let slot = |h: &Harness, vcx: &gpui::VisualTestContext, label: &str| {
+        h.tile.read_with(vcx, |t, _| {
+            t.model()
+                .slots
+                .iter()
+                .find(|s| s.label.as_ref() == label)
+                .cloned()
+                .unwrap_or_else(|| panic!("{label} is painted"))
+        })
+    };
+    assert_eq!(slot(&h, &vcx, "cvi 2026-10-16").style, Style::Solid);
+    assert_eq!(slot(&h, &vcx, "cvi draft 2026-10-16").style, Style::Dashed);
+    assert!(matches!(
+        slot(&h, &vcx, "chain 2026-10-16").kind,
+        SlotKind::Points { .. }
+    ));
+
+    // `d`, then the chooser's fifth row: none, cvi - cvi draft,
+    // cvi - chain, cvi draft - cvi, cvi draft - chain.
+    vcx.simulate_keystrokes("d j j j j enter");
+    assert_eq!(h.state(&vcx).diff, Pair::new(Kind::Draft, Kind::Chain));
+    h.answer_last(&mut vcx).expect("the pair resubmits");
+
+    h.focus(&mut vcx);
+    let ctrl = Modifiers {
+        control: true,
+        ..Modifiers::default()
+    };
+    click(&mut vcx, &row("2026-11-20"), ctrl);
+    click(&mut vcx, &row("2026-12-18"), ctrl);
+    assert_eq!(h.active(&vcx), ["2026-10-16", "2026-11-20", "2026-12-18"]);
+    h.answer_last(&mut vcx).expect("the toggles resubmit");
+
+    vcx.simulate_keystrokes("x x");
+    h.answer_last(&mut vcx).expect("the coordinate resubmits");
+    vcx.simulate_keystrokes("shift-d");
+    h.answer_last(&mut vcx).expect("densities resubmit");
+    h.draw(&mut vcx);
+
+    let model = h.tile.read_with(&vcx, |t, _| t.model().clone());
+    assert!(model.x.reversed && model.x.format == XFormat::Delta);
+    assert_eq!(slot(&h, &vcx, "cvi 2026-10-16").style, Style::Solid);
+    assert_eq!(slot(&h, &vcx, "cvi draft 2026-10-16").style, Style::Dashed);
+    assert!(matches!(
+        slot(&h, &vcx, "chain 2026-10-16").kind,
+        SlotKind::Points { .. }
+    ));
+    let label = Pair::new(Kind::Draft, Kind::Chain).unwrap().label();
+    let lower = slot(&h, &vcx, &format!("{label} 2026-10-16"));
+    assert_eq!(lower.axis, Axis::BottomLeft, "the difference's own pane");
+    assert!(painted(&mut vcx, &format!("volslice-divider-{TILE}")));
+    let colors: Vec<_> = ["2026-10-16", "2026-11-20", "2026-12-18"]
+        .iter()
+        .map(|e| slot(&h, &vcx, &format!("cvi {e}")).color)
+        .collect();
+    assert!(
+        colors[0] != colors[1] && colors[1] != colors[2] && colors[0] != colors[2],
+        "three expiries, three colors: {colors:?}"
+    );
+    assert!(
+        model
+            .slots
+            .iter()
+            .any(|s| s.axis == Axis::Right && s.label.contains("density")),
+        "a right-axis density slot"
+    );
+    assert!(h.notices(&vcx).is_empty(), "{:?}", h.notices(&vcx));
+}
