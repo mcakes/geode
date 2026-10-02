@@ -27037,7 +27037,7 @@ run_mutation "pricer grouping: a split package totals its whole fold per node" \
 run_mutation "pricer grouping: totals count a group row's descendant again" \
   crates/geode-pricer/src/tile/select.rs \
   '            Some(s) if !*s => {' \
-  '            Some(_) => {' \
+  '            Some(s) if true => {' \
   geode-pricer totals_count_a_group_row_and_its_descendant_once
 
 # Line movement: refused under a grouping; past hidden siblings without.
