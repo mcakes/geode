@@ -352,8 +352,9 @@ fn a_sort_mid_drag_refuses_the_drop(cx: &mut gpui::TestAppContext) {
 }
 
 /// A refused drag never ends the selection: a package outside a live `V`
-/// selection, its grip pressed, then partly hidden by the scope before the
-/// drag moves — the drag says why, the selection stays, nothing moves.
+/// selection is grabbed and the drag starts (gpui's threshold crossed),
+/// then the scope partly hides it before the drag's first followed move —
+/// the drag says why, the selection stays, nothing moves.
 #[gpui::test]
 fn a_refused_drag_keeps_the_selection_and_its_footer(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(
@@ -371,6 +372,10 @@ fn a_refused_drag_keeps_the_selection_and_its_footer(cx: &mut gpui::TestAppConte
     // The grip overlaps the package's chevron slot: its press is still
     // the grip's, so the selection survives it.
     assert!(selected(&h, &vcx), "the press keeps the selection");
+    // This move starts gpui's drag; the body follows from the next one.
+    held_move(&mut vcx, gpui::point(at.x, at.y + px(6.)));
+    assert!(vcx.update(|_, cx| cx.has_active_drag()), "the drag started");
+    assert!(selected(&h, &vcx), "not yet followed");
     let scope = geode_core::scope::Scope {
         expression: Some(geode_core::scope::parse_expr("strike != 5200").unwrap()),
         ..Default::default()
@@ -380,7 +385,6 @@ fn a_refused_drag_keeps_the_selection_and_its_footer(cx: &mut gpui::TestAppConte
         cx.notify();
     });
     vcx.run_until_parked();
-    held_move(&mut vcx, gpui::point(at.x, at.y + px(6.)));
     let top = over_row(&mut vcx, 0, false);
     held_move(&mut vcx, top);
     assert!(selected(&h, &vcx), "the selection stays");
