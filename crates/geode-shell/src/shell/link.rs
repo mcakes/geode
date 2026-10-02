@@ -12,15 +12,15 @@ use geode_core::query::QueryKey;
 use super::ShellView;
 use crate::tiling::TileId;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no caller outside tests until the link chooser dispatches these doors"
-    )
-)]
 impl ShellView {
     /// Follow `group`, or the workspace again with `None`.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no caller outside tests until the link chooser dispatches this door"
+        )
+    )]
     pub(super) fn set_follow(
         &mut self,
         tile: TileId,
@@ -90,6 +90,14 @@ impl ShellView {
         let Some(o) = self.occupants.get(&tile) else {
             return;
         };
+        // A membership the session restored for a tile whose module can no
+        // longer emit is cleared through the door, which repaints the tile.
+        // Left in place, its header would show it emitting into a group
+        // that never hears it.
+        if !o.content.emits() {
+            self.set_emit(tile, None, cx);
+            return;
+        }
         let weak = cx.entity().downgrade();
         let changed: Rc<dyn Fn(&mut App)> = Rc::new(move |cx| {
             // The pull reads the tile and updates the frame and the shell,
@@ -145,6 +153,19 @@ impl ShellView {
         }
         self.frame.update(cx, |f, cx| {
             if f.forget_tile(tile) {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Drop the membership of every tile no workspace holds: what the
+    /// session restored for a record whose tile the layout does not have.
+    /// Such a tile never gets an occupant, so nothing would ever unlink it.
+    /// Writes the frame, so it runs after a render, never inside one.
+    pub(super) fn prune_links(&mut self, cx: &mut Context<Self>) {
+        let workspaces = &self.services.workspaces;
+        self.frame.update(cx, |f, cx| {
+            if f.retain_linked(|tile| workspaces.workspace_of(tile).is_some()) {
                 cx.notify();
             }
         });

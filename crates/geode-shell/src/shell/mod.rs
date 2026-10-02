@@ -625,6 +625,11 @@ pub struct ShellView {
     /// the shell pulls. Dropped when the tile leaves its group or closes,
     /// so a tile in no group is never pulled.
     emit_subs: HashMap<TileId, gpui::Subscription>,
+    /// Whether the first occupant reconciliation has dropped the link
+    /// memberships restored for tiles no workspace holds. Set by that pass,
+    /// so no later render looks again: a membership can only outlive its
+    /// tile by arriving from the session.
+    linked_pruned: bool,
     /// The last `(index, len)` `ensure_occupants` delivered to each tile
     /// through `TileContent::set_stack` — a
     /// missing entry means "unsent", so a fresh occupant always hears its
@@ -1271,6 +1276,26 @@ impl ShellView {
                 lane.clear_history();
             });
         }
+        // A restored tile is in its link groups before its occupant exists,
+        // so the first query it sends is already scoped by the group it
+        // follows. Only a record this build has a module for: a placeholder
+        // is in no group, and its record carries the membership to the next
+        // save. Like the lanes above this is where the session starts, not
+        // a change, so it notifies nobody and runs before the flip seed.
+        if services
+            .restored_tiles
+            .values()
+            .any(|record| !record.link.is_empty())
+        {
+            frame.update(cx, |f, _| {
+                for (id, record) in &services.restored_tiles {
+                    if services.roster.factory(&record.kind).is_some() {
+                        f.follow(TileId(*id), record.link.follow);
+                        f.emit(TileId(*id), record.link.emit);
+                    }
+                }
+            });
+        }
         // Seeded from the just-built frame (see the field's own doc
         // comment) so a restored session's scope/slot/as-of is never
         // itself read as "just changed" by the first real
@@ -1357,6 +1382,7 @@ impl ShellView {
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
             emit_subs: HashMap::new(),
+            linked_pruned: false,
             stack_sent: HashMap::new(),
             notice: None,
             stack_list: None,

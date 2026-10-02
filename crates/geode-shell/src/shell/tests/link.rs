@@ -798,3 +798,295 @@ fn filling_a_placeholder_drops_the_membership_its_tile_had(cx: &mut gpui::TestAp
     );
     assert!(frame.read_with(&vcx, |f, _| f.membership(tile).is_empty()));
 }
+
+// --- Membership in the session --------------------------------------
+
+/// `services` as a restart hands them over: workspace 1 holds one leaf,
+/// tile 1, whose session record is `record` (the lines under
+/// `[workspaces.1.tiles.1]`), read back through the session reader.
+fn restored(mut services: ShellServices, record: &str) -> ShellServices {
+    let mut table = crate::session::to_toml(
+        &Workspaces::new(),
+        &crate::session::TileRecords::new(),
+        None,
+        &crate::session::PinnedRecords::new(),
+        &crate::palette_usage::PaletteUsage::new(),
+        &crate::session::PageRecords::new(),
+    );
+    let ws1: toml::Table =
+        format!("focused = 1\n[node]\nkind = \"leaf\"\nid = 1\n[tiles.1]\n{record}\n")
+            .parse()
+            .unwrap();
+    if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+        ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+    }
+    let restored = crate::session::from_toml(&table).unwrap();
+    assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+    services.workspaces = restored.workspaces;
+    services.restored_tiles = restored.tiles;
+    services
+}
+
+fn frame_of(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Entity<Frame> {
+    shell.read_with(vcx, |s, _| s.frame().clone())
+}
+
+/// The next periodic session snapshot's text, if one is due.
+fn session_text(shell: &Entity<ShellView>, vcx: &mut gpui::VisualTestContext) -> Option<String> {
+    shell
+        .update(vcx, |s, cx| s.take_dirty_session_write(cx))
+        .map(|(_, text)| text)
+}
+
+/// A follower's first query is scoped by its group. A membership applied
+/// after the occupant exists would let that first query read the
+/// workspace's scope and answer for the wrong book.
+#[gpui::test]
+fn a_restored_follower_reads_its_group_on_its_first_frame(cx: &mut gpui::TestAppContext) {
+    let rec = RecordingFactory::new("rec");
+    let at_create = rec.followed_at_create.clone();
+    let services = restored(
+        services_with_recorders(vec![rec]),
+        "module = \"rec\"\nfollow = \"a\"",
+    );
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(1))),
+        geode_core::link::Membership {
+            follow: Some(Group::A),
+            emit: None,
+        }
+    );
+    assert_eq!(
+        *at_create.borrow(),
+        vec![(TileId(1), Some(Group::A))],
+        "the occupant read its group from inside `create`"
+    );
+}
+
+/// A restored membership is where the session starts, not a change: it is
+/// applied before the flip baseline is taken, so the first notification of
+/// the frame, whatever it is for, opens no barrier.
+#[gpui::test]
+fn a_restored_follower_and_an_unrelated_frame_notification_open_no_barrier(
+    cx: &mut gpui::TestAppContext,
+) {
+    let services = restored(test_services(), "module = \"rec\"\nfollow = \"a\"");
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    vcx.run_until_parked();
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(1)).follow),
+        Some(Group::A),
+        "fixture: the follower was restored"
+    );
+    let notified = frame_notifications(&frame, &mut vcx);
+
+    frame.update(&mut vcx, |_, cx| cx.notify());
+    vcx.run_until_parked();
+
+    assert_eq!(notified.get(), 1, "fixture: the notification was delivered");
+    assert!(!frame.read_with(&vcx, |f, _| f.barrier_open()));
+    let (seen, now) = shell.read_with(&vcx, |s, cx| {
+        (s.last_flip_groups, s.frame().read(cx).group_scope_gens())
+    });
+    assert_eq!(seen, now);
+}
+
+/// An emitter saved in a group is heard again after a restart without the
+/// trader touching it: the shell subscribes and pulls once the occupant
+/// exists.
+#[gpui::test]
+fn a_restored_emitter_subscribes_and_posts_without_a_key_press(cx: &mut gpui::TestAppContext) {
+    let (services, emitter) = emitting_services(Emission {
+        scope: Some(underlying("SPX.Z")),
+        board: Vec::new(),
+    });
+    let services = restored(services, "module = \"rec\"\nemit = \"a\"");
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    draw(&mut vcx);
+    vcx.run_until_parked();
+
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("SPX.Z"),
+        "the group hears the restored emitter"
+    );
+    assert_eq!(shell.read_with(&vcx, |s, _| s.emit_subs.len()), 1);
+    // The post reached the frame's observers: a group whose scope moved
+    // without a notification would leave its followers on the old scope.
+    let (seen, now) = shell.read_with(&vcx, |s, cx| {
+        (s.last_flip_groups, s.frame().read(cx).group_scope_gens())
+    });
+    assert_eq!(seen, now, "the shell heard the group's scope move");
+
+    emitter.emission.borrow_mut().scope = Some(underlying("NDX"));
+    tile_changed(&shell, &mut vcx, TileId(1));
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("NDX"),
+        "and it is subscribed: a later change is pulled"
+    );
+}
+
+/// A session written by a build whose module could emit, read by one whose
+/// module cannot: the membership is cleared once the occupant exists,
+/// instead of a tile shown as emitting that the shell never listens to.
+#[gpui::test]
+fn a_restored_emit_on_a_tile_that_cannot_emit_is_dropped(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = restored(
+        super::session::test_services_with_session(dir.path().join("session.toml")),
+        "module = \"rec\"\nfollow = \"b\"\nemit = \"a\"",
+    );
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    vcx.run_until_parked();
+
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(1))),
+        geode_core::link::Membership {
+            follow: Some(Group::B),
+            emit: None,
+        },
+        "the emit is dropped and the follow beside it kept"
+    );
+    assert!(shell.read_with(&vcx, |s, _| s.emit_subs.is_empty()));
+    let text = session_text(&shell, &mut vcx).expect("the session is written");
+    assert!(text.contains("follow = \"b\""), "{text}");
+    assert!(!text.contains("emit"), "{text}");
+}
+
+/// A tile whose module this build lacks paints a placeholder, which is in
+/// no group. Its record still carries the membership, so a build that has
+/// the module again restores it.
+#[gpui::test]
+fn a_saved_membership_survives_a_build_without_the_module(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = restored(
+        super::session::test_services_with_session(dir.path().join("session.toml")),
+        "module = \"gone\"\nfollow = \"a\"\nemit = \"b\"",
+    );
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    draw(&mut vcx);
+    vcx.run_until_parked();
+
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
+        Some(crate::module::placeholder::PLACEHOLDER_KIND)
+    );
+    assert!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(1)).is_empty()),
+        "no membership is applied to a placeholder"
+    );
+    let saved = geode_core::link::Membership {
+        follow: Some(Group::A),
+        emit: Some(Group::B),
+    };
+    let tiles = shell.read_with(&vcx, |s, cx| s.current_tiles(cx));
+    assert_eq!(tiles[&1].kind, "gone");
+    assert_eq!(tiles[&1].link, saved);
+    let text = session_text(&shell, &mut vcx).expect("the session is written");
+    assert!(
+        text.contains("follow = \"a\"") && text.contains("emit = \"b\""),
+        "the next save still writes both keys: {text}"
+    );
+}
+
+/// A membership restored for a tile no workspace holds (a record the
+/// layout's healing left behind) would otherwise stay in its group for the
+/// life of the shell, emitting nothing and following nothing. It is
+/// dropped once the first frame has reconciled the tiles, and no later
+/// render touches the frame for it.
+#[gpui::test]
+fn a_restored_membership_for_a_tile_in_no_workspace_is_dropped(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    services.restored_tiles.insert(
+        9,
+        crate::session::TileRecord {
+            kind: "rec".into(),
+            state: toml::Table::new(),
+            link: geode_core::link::Membership {
+                follow: Some(Group::A),
+                emit: Some(Group::B),
+            },
+        },
+    );
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    vcx.run_until_parked();
+
+    assert!(frame.read_with(&vcx, |f, _| f.membership(TileId(9)).is_empty()));
+
+    let generation = frame.read_with(&vcx, |f, _| f.generation());
+    add_tile(&mut vcx);
+    draw(&mut vcx);
+    vcx.run_until_parked();
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.generation()),
+        generation,
+        "an ordinary render writes nothing to the frame"
+    );
+}
+
+/// The other half of `a_group_scope_change_writes_no_session_file`: who
+/// follows and emits is session state, and a change to it is written.
+#[gpui::test]
+fn the_session_text_carries_a_membership_change(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut services, _emitter) = emitting_services(Emission::default());
+    services.session_path = Some(dir.path().join("session.toml"));
+    let (_window, mut vcx, shell, _frame) = two_tiles_in(cx, services);
+    set_follow(&shell, &mut vcx, TileId(1), Some(Group::A));
+    let text = session_text(&shell, &mut vcx).expect("the baseline");
+    assert!(text.contains("follow = \"a\""), "{text}");
+    assert!(!text.contains("emit"), "{text}");
+
+    set_follow(&shell, &mut vcx, TileId(1), Some(Group::B));
+    let text = session_text(&shell, &mut vcx).expect("a follow is session state");
+    assert!(text.contains("follow = \"b\""), "{text}");
+    assert!(!text.contains("follow = \"a\""), "{text}");
+
+    set_emit(&shell, &mut vcx, TileId(2), Some(Group::C));
+    let text = session_text(&shell, &mut vcx).expect("so is an emit");
+    assert!(text.contains("emit = \"c\""), "{text}");
+
+    set_follow(&shell, &mut vcx, TileId(1), None);
+    set_emit(&shell, &mut vcx, TileId(2), None);
+    let text = session_text(&shell, &mut vcx).expect("and leaving");
+    assert!(!text.contains("follow") && !text.contains("emit"), "{text}");
+}
+
+/// A closed tile's membership goes with it: nothing of it is written, so
+/// no later tile inherits a group from the file.
+#[gpui::test]
+fn closing_a_tile_and_reusing_nothing_leaves_no_membership_in_the_session(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = super::session::test_services_with_session(dir.path().join("session.toml"));
+    let (_window, mut vcx, shell, _frame) = two_tiles_in(cx, services);
+    let tile = shell.read_with(&vcx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    set_follow(&shell, &mut vcx, tile, Some(Group::A));
+    let text = session_text(&shell, &mut vcx).expect("the baseline");
+    assert!(text.contains("follow = \"a\""), "{text}");
+
+    vcx.simulate_keystrokes("ctrl-w");
+    draw(&mut vcx);
+    vcx.run_until_parked();
+
+    let text = session_text(&shell, &mut vcx).expect("the close is written");
+    assert!(!text.contains("follow"), "{text}");
+}

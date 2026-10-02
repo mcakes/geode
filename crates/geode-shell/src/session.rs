@@ -32,7 +32,10 @@
 //! shape loads as a single-leaf tree; when both shapes exist, `node` wins with
 //! a warning. Dock fullscreen is unsupported and ignored with a warning.
 //!
-//! `workspaces.N.tiles.<id>` stores a module name and opaque state. `[frame]`
+//! `workspaces.N.tiles.<id>` stores a module name, opaque state, and the link
+//! groups the tile is in: `follow` and `emit`, each a group letter (`"a"` to
+//! `"d"`), written only when set. A value that names no group warns and reads
+//! as unset; the tile is kept. `[frame]`
 //! stores the shared lane's scope, grouping slot, and as-of; `workspaces.N.frame`
 //! stores a pinned workspace's own lane in the same format, and its presence
 //! means workspace N is pinned. `[palette.usage]` stores usage counts and
@@ -60,6 +63,7 @@ use crate::tiling::{
     DOCK_MAX_SIZE, DOCK_MIN_SIZE, Dock, DockSide, Docks, FocusRegion, Node, Orientation, TileId,
     Tree, Workspace, WorkspaceIx, Workspaces,
 };
+use geode_core::link::{Group, Membership};
 use geode_core::query::AsOf;
 use geode_core::scope::{DimensionSelection, Scope, parse_expr};
 
@@ -68,18 +72,23 @@ use geode_core::scope::{DimensionSelection, Scope, parse_expr};
 /// whole session.
 pub const SESSION_CONFIG_VERSION: i64 = 1;
 
-/// A tile's module name and opaque serialized state. Parsing retains the name
-/// without consulting the module roster. The shell passes state only to the
-/// factory registered for that name.
+/// A tile's module name, opaque serialized state, and link groups. Parsing
+/// retains the name without consulting the module roster. The shell passes
+/// state only to the factory registered for that name, and applies the link
+/// groups only to a tile that factory creates.
 ///
 /// An unavailable module displays a placeholder while its original record is
-/// retained in `ShellView::unplaced_records` and included in subsequent saves.
-/// Closing the tile drops that record; filling it with a module replaces it
-/// with the live occupant's record.
+/// retained in `ShellView::unplaced_records` and included in subsequent saves,
+/// link groups included: the placeholder itself is in no group. Closing the
+/// tile drops that record; filling it with a module replaces it with the live
+/// occupant's record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TileRecord {
     pub kind: String,
     pub state: toml::Table,
+    /// The groups the tile follows and emits into, written as `follow` and
+    /// `emit` only when set.
+    pub link: Membership,
 }
 
 /// Tile records keyed by raw `TileId`, ordered deterministically for serialization.
@@ -372,6 +381,20 @@ pub fn to_toml(
                     toml::Value::Table(record.state.clone()),
                 );
             }
+            // Absent means "in no group", so a tile that never linked
+            // writes the record it always wrote.
+            if let Some(g) = record.link.follow {
+                t.insert(
+                    "follow".to_string(),
+                    toml::Value::String(g.as_str().to_string()),
+                );
+            }
+            if let Some(g) = record.link.emit {
+                t.insert(
+                    "emit".to_string(),
+                    toml::Value::String(g.as_str().to_string()),
+                );
+            }
             tiles_table.insert(id.0.to_string(), toml::Value::Table(t));
         }
         if !tiles_table.is_empty() {
@@ -656,11 +679,16 @@ fn parse_workspace(
                             }
                         },
                     };
+                    let link = Membership {
+                        follow: parse_group(ix, id, "follow", t, warnings),
+                        emit: parse_group(ix, id, "emit", t, warnings),
+                    };
                     out_tiles.insert(
                         id,
                         TileRecord {
                             kind: kind.to_string(),
                             state,
+                            link,
                         },
                     );
                 }
@@ -669,6 +697,35 @@ fn parse_workspace(
     }
 
     Ok((ix, workspace))
+}
+
+/// Read one link-group key of a tile record. A value that is not a string,
+/// or names no group, warns and reads as unset. The tile is kept either way:
+/// a bad membership is no reason to lose the tile's module and its state.
+fn parse_group(
+    ix: u8,
+    id: u64,
+    key: &str,
+    tile: &toml::Table,
+    warnings: &mut Vec<String>,
+) -> Option<Group> {
+    match tile.get(key)? {
+        toml::Value::String(s) => {
+            let group = Group::parse(s);
+            if group.is_none() {
+                warnings.push(format!(
+                    "workspace {ix}: tile {id} {key} '{s}' is not a link group; ignored"
+                ));
+            }
+            group
+        }
+        _ => {
+            warnings.push(format!(
+                "workspace {ix}: tile {id} {key} is not a string; ignored"
+            ));
+            None
+        }
+    }
 }
 
 fn region_side_name(side: DockSide) -> &'static str {
@@ -1094,6 +1151,7 @@ mod tests {
             TileRecord {
                 kind: "blotter".into(),
                 state,
+                link: Membership::default(),
             },
         );
         tiles.insert(
@@ -1101,6 +1159,7 @@ mod tests {
             TileRecord {
                 kind: "blotter".into(),
                 state: toml::Table::new(),
+                link: Membership::default(),
             },
         );
 
@@ -1135,6 +1194,7 @@ mod tests {
             TileRecord {
                 kind: "blotter".into(),
                 state: toml::Table::new(),
+                link: Membership::default(),
             },
         );
         let mut table = to_toml(
@@ -1188,6 +1248,128 @@ mod tests {
         let restored = from_toml(&table).unwrap();
         assert!(restored.tiles.is_empty());
         assert_eq!(restored.warnings.len(), 1, "{:?}", restored.warnings);
+    }
+
+    // --- Link membership ------------------------------------------------
+
+    fn linked(follow: Option<Group>, emit: Option<Group>) -> TileRecord {
+        TileRecord {
+            kind: "blotter".into(),
+            state: toml::Table::new(),
+            link: Membership { follow, emit },
+        }
+    }
+
+    fn session_of(ws: &Workspaces, tiles: &TileRecords) -> toml::Table {
+        to_toml(
+            ws,
+            tiles,
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        )
+    }
+
+    /// The session table for two unlinked tiles in workspace 1, and the
+    /// first tile's id: a record to write a hand-edited key into.
+    fn two_unlinked_tiles() -> (toml::Table, u64) {
+        let ws = two_tile_workspaces();
+        let ids = ws.active().tree().tiles();
+        let mut tiles = TileRecords::new();
+        tiles.insert(ids[0].0, linked(None, None));
+        tiles.insert(ids[1].0, linked(None, None));
+        (session_of(&ws, &tiles), ids[0].0)
+    }
+
+    fn set_tile_key(table: &mut toml::Table, id: u64, key: &str, value: toml::Value) {
+        table["workspaces"]["1"]["tiles"][id.to_string().as_str()]
+            .as_table_mut()
+            .unwrap()
+            .insert(key.into(), value);
+    }
+
+    #[test]
+    fn a_tiles_link_round_trips_and_absent_keys_mean_none() {
+        let ws = two_tile_workspaces();
+        let ids = ws.active().tree().tiles();
+        let mut tiles = TileRecords::new();
+        tiles.insert(ids[0].0, linked(Some(Group::A), Some(Group::B)));
+        tiles.insert(ids[1].0, linked(None, None));
+        let table = session_of(&ws, &tiles);
+        let written = |id: TileId| {
+            table["workspaces"]["1"]["tiles"][id.0.to_string().as_str()]
+                .as_table()
+                .unwrap()
+                .clone()
+        };
+        let first = written(ids[0]);
+        assert_eq!(first.get("follow"), Some(&toml::Value::String("a".into())));
+        assert_eq!(first.get("emit"), Some(&toml::Value::String("b".into())));
+        let second = written(ids[1]);
+        assert!(
+            !second.contains_key("follow") && !second.contains_key("emit"),
+            "a tile in no group writes neither key: {second:?}"
+        );
+
+        // Through the file's text as well, which is what a restart reads.
+        let text = toml::to_string_pretty(&table).unwrap();
+        let restored = from_toml(&text.parse().unwrap()).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        assert_eq!(restored.tiles, tiles);
+    }
+
+    #[test]
+    fn a_tile_may_follow_or_emit_alone() {
+        let ws = two_tile_workspaces();
+        let ids = ws.active().tree().tiles();
+        let mut tiles = TileRecords::new();
+        tiles.insert(ids[0].0, linked(Some(Group::D), None));
+        tiles.insert(ids[1].0, linked(None, Some(Group::C)));
+        let restored = from_toml(&session_of(&ws, &tiles)).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        assert_eq!(restored.tiles, tiles);
+    }
+
+    #[test]
+    fn an_unknown_group_is_dropped_with_a_warning_and_the_tile_survives() {
+        let (mut table, id) = two_unlinked_tiles();
+        set_tile_key(&mut table, id, "follow", toml::Value::String("z".into()));
+        set_tile_key(&mut table, id, "emit", toml::Value::String("c".into()));
+
+        let restored = from_toml(&table).unwrap();
+        let record = restored.tiles.get(&id).expect("the tile survives");
+        assert_eq!(record.kind, "blotter");
+        assert_eq!(record.link.follow, None);
+        assert_eq!(
+            record.link.emit,
+            Some(Group::C),
+            "the valid key beside it is still read"
+        );
+        assert_eq!(restored.warnings.len(), 1, "{:?}", restored.warnings);
+        let warning = &restored.warnings[0];
+        assert!(
+            warning.contains(&format!("tile {id}"))
+                && warning.contains("follow")
+                && warning.contains("'z'"),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn a_non_string_group_is_dropped_with_a_warning() {
+        let (mut table, id) = two_unlinked_tiles();
+        set_tile_key(&mut table, id, "emit", toml::Value::Integer(3));
+
+        let restored = from_toml(&table).unwrap();
+        let record = restored.tiles.get(&id).expect("the tile survives");
+        assert_eq!(record.link, Membership::default());
+        assert_eq!(restored.warnings.len(), 1, "{:?}", restored.warnings);
+        let warning = &restored.warnings[0];
+        assert!(
+            warning.contains(&format!("tile {id}")) && warning.contains("emit"),
+            "{warning}"
+        );
     }
 
     #[test]

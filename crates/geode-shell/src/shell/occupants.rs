@@ -25,7 +25,13 @@ impl ShellView {
     /// collision. Placeholder occupants have no state of their own; retaining
     /// unplaced records lets sessions survive builds with fewer modules.
     /// Reconciliation and tile filling remove stale unplaced records.
+    ///
+    /// A live occupant's link groups are the frame's. An unplaced record
+    /// keeps the ones it was read with: its placeholder is in no group, and
+    /// taking the frame's answer would erase a membership the tile gets back
+    /// when its module does.
     pub(super) fn current_tiles(&self, cx: &App) -> session::TileRecords {
+        let frame = self.frame.read(cx);
         let mut tiles: session::TileRecords = self
             .occupants
             .iter()
@@ -36,6 +42,7 @@ impl ShellView {
                     session::TileRecord {
                         kind: o.kind.to_string(),
                         state: o.content.serialize(cx),
+                        link: frame.membership(*id),
                     },
                 )
             })
@@ -195,6 +202,9 @@ impl ShellView {
     /// borrow services.
     /// A fresh `add_tile` occupant that is on screen and focused hears
     /// `TileContent::launched` once, deferred after the render.
+    /// Nothing here writes the frame: every link-group write a pass finds
+    /// due (a closed tile, a restored emitter, the first pass's prune) is
+    /// deferred until the render is over.
     pub(super) fn ensure_occupants(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut all = std::mem::take(&mut self.scratch_all_tiles);
         self.fill_all_tiles(&mut all);
@@ -222,10 +232,19 @@ impl ShellView {
             self.emit_subs.remove(id);
         }
         gone.retain(|id| !self.frame.read(cx).membership(*id).is_empty());
-        if !gone.is_empty() {
+        // The first pass also drops what the session restored for a tile no
+        // workspace holds. Such a tile never has an occupant, so the loop
+        // above never sees it close, and its membership would sit in the
+        // group for the life of the shell. Once, and on the same deferral:
+        // later renders have nothing of the kind to find.
+        let prune = !std::mem::replace(&mut self.linked_pruned, true);
+        if !gone.is_empty() || prune {
             cx.defer_in(window, move |view, _, cx| {
                 for id in gone {
                     view.unlink_tile(id, cx);
+                }
+                if prune {
+                    view.prune_links(cx);
                 }
             });
         }
@@ -292,6 +311,7 @@ impl ShellView {
             // Only an `add_tile` request (no matching restored record) may be
             // told it was launched: a restore must never take focus.
             let from_add = matched.is_none() && pending_factory.is_some();
+            let from_restore = matched.is_some();
             // The tile's own workspace, not the active one: an occupant
             // restored into a hidden workspace reads that workspace's lane.
             // Every tile reaching here is placed in some workspace's tree;
@@ -332,6 +352,16 @@ impl ShellView {
             self.occupants.insert(*id, occupant);
             if from_add {
                 fresh.push(*id);
+            }
+            // A restored tile that emits into a group is listened to from
+            // here on, without the trader touching it. After the render:
+            // the first pull writes the frame, which a render must not, and
+            // GPUI drops a notification sent while the window draws for an
+            // entity the window already tracks, so the group's followers
+            // could miss the post.
+            if from_restore && self.frame.read(cx).membership(*id).emit.is_some() {
+                let id = *id;
+                cx.defer_in(window, move |view, _, cx| view.sync_emitter(id, cx));
             }
             // A fresh occupant under this id must hear its stack position
             // even when a previous occupant under the SAME id already did
