@@ -5208,15 +5208,22 @@ impl PricerTile {
     /// `underlying_ref`. A package across underlyings names none (an empty
     /// context); with no cursor row (an empty sheet) there is no context.
     pub(crate) fn dimension_context(&self) -> Option<geode_core::context::DimensionContext> {
-        let g = self.cursor_row()?;
-        let u = self
-            .model
-            .sheet_row(g)
-            .and_then(|row| self.sheet.sole_underlying(row));
-        Some(match u {
+        self.cursor_row()?;
+        Some(match self.cursor_underlying() {
             Some(u) => geode_core::context::DimensionContext::of(&[("underlying_ref", &u)]),
             None => geode_core::context::DimensionContext::default(),
         })
+    }
+
+    /// The one underlying the cursor row names: a line's or a leg's own, a
+    /// package's when its legs share one. `None` on a package across
+    /// underlyings, on a grouping row, and with no cursor row. This is what
+    /// the tile posts as a link group's scope and what `g m` opens on, so
+    /// the two cannot name different underlyings for one row. Read from
+    /// the sheet on each call: one row, nothing to keep in step.
+    pub(crate) fn cursor_underlying(&self) -> Option<String> {
+        self.cursor_sheet_row()
+            .and_then(|row| self.sheet.sole_underlying(row))
     }
 
     /// The plan's columns for the shell's `Edit column in view…`; the
@@ -6430,6 +6437,95 @@ pub(crate) mod tests {
             .update(|_, cx| h.content.dimension_context(cx))
             .expect("a cursor row has a context");
         assert!(ctx.is_empty(), "{ctx:?}");
+    }
+
+    fn emission_of(h: &Harness, vcx: &mut VisualTestContext) -> geode_core::link::Emission {
+        vcx.update(|_, cx| h.content.emission(cx))
+    }
+
+    /// The scope a pricer posts into a link group is the cursor line's
+    /// underlying, under the column every follower reads, and it follows
+    /// the cursor. A pricer posts no board.
+    #[gpui::test]
+    fn the_emission_is_the_cursor_lines_underlying(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 20000 C"]);
+        assert!(h.content.emits());
+        let on = |u: &str| Some(Scope::one("underlying_ref", u));
+
+        let first = emission_of(&h, &mut vcx);
+        assert_eq!(first.scope, on("SPX"));
+        assert!(first.board.is_empty());
+
+        assert!(h.motion(&mut vcx, "down", None));
+        let second = emission_of(&h, &mut vcx);
+        assert_eq!(second.scope, on("NDX"), "the emission follows the cursor");
+        assert!(second.board.is_empty());
+    }
+
+    /// A package across two underlyings names no single one: no scope,
+    /// which leaves the group's scope as it is rather than clearing it.
+    #[gpui::test]
+    fn a_package_across_two_underlyings_emits_no_scope(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 20000 C"]);
+        assert_eq!(
+            emission_of(&h, &mut vcx).scope,
+            Some(Scope::one("underlying_ref", "SPX")),
+            "a line, before it is packaged"
+        );
+        h.dispatch(&mut vcx, "group", Some(2));
+        h.motion(&mut vcx, "top", None);
+        let top = &h.tree(&vcx)[0];
+        assert!(
+            top.starts_with("CUSTOM SPX/NDX"),
+            "the package, on top: {top}"
+        );
+        assert_eq!(
+            emission_of(&h, &mut vcx),
+            geode_core::link::Emission::default()
+        );
+    }
+
+    /// A pricer can emit before it holds a line (a restored membership is
+    /// dropped for a tile that answers `false`); with no cursor row it
+    /// posts nothing.
+    #[gpui::test]
+    fn an_empty_sheet_emits_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        assert!(h.content.emits(), "capability, not loaded state");
+        assert_eq!(
+            emission_of(&h, &mut vcx),
+            geode_core::link::Emission::default()
+        );
+    }
+
+    /// The shell pulls only when told: a cursor move must reach the
+    /// callback, and a dropped subscription must stop it.
+    #[gpui::test]
+    fn a_cursor_move_tells_the_shell_the_emission_changed(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 20000 C"]);
+        let calls = Rc::new(std::cell::Cell::new(0u32));
+        let subscription = vcx
+            .update(|_, cx| {
+                let calls = calls.clone();
+                h.content
+                    .watch_emission(Rc::new(move |_| calls.set(calls.get() + 1)), cx)
+            })
+            .expect("an emitter hands the shell a subscription");
+        vcx.run_until_parked();
+        let before = calls.get();
+
+        assert!(h.motion(&mut vcx, "down", None));
+        vcx.run_until_parked();
+        assert!(
+            calls.get() > before,
+            "a cursor move through dispatch announces the change"
+        );
+
+        drop(subscription);
+        let after_drop = calls.get();
+        assert!(h.motion(&mut vcx, "up", None));
+        vcx.run_until_parked();
+        assert_eq!(calls.get(), after_drop, "a dropped subscription is silent");
     }
 
     #[gpui::test]

@@ -183,6 +183,35 @@ impl TileContent for BlotterContent {
     fn dimension_context(&self, cx: &App) -> Option<geode_core::context::DimensionContext> {
         self.tile.read(cx).dimension_context(cx)
     }
+    /// A blotter can always emit: the answer is the kind's capability, not
+    /// whether a snapshot has arrived. The shell drops a restored
+    /// membership for a tile that answers `false` right after create,
+    /// before any query can have answered.
+    fn emits(&self) -> bool {
+        true
+    }
+    /// The cursor row's one underlying as a one-value scope; no scope
+    /// where the row names none, which leaves the group's scope as it is.
+    /// A blotter posts no documents.
+    fn emission(&self, cx: &App) -> geode_core::link::Emission {
+        geode_core::link::Emission {
+            scope: self
+                .tile
+                .read(cx)
+                .cursor_underlying(cx)
+                .map(|u| geode_core::scope::Scope::one("underlying_ref", &u)),
+            board: Vec::new(),
+        }
+    }
+    /// Every cursor move, tree change and delivery notifies the tile, so
+    /// observing it covers each way the cursor row's underlying can change.
+    fn watch_emission(
+        &self,
+        changed: Rc<dyn Fn(&mut App)>,
+        cx: &mut App,
+    ) -> Option<gpui::Subscription> {
+        Some(cx.observe(&self.tile, move |_, cx| changed(cx)))
+    }
     fn press_context(&self, cx: &mut App) -> Option<geode_core::context::DimensionContext> {
         self.tile.update(cx, |t, cx| t.press_context(cx))
     }

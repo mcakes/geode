@@ -519,6 +519,22 @@ impl BlotterTile {
         self.table.read(cx).delegate().dimension_context()
     }
 
+    /// The one underlying the cursor row names, for a link group's scope:
+    /// the `underlying_ref` among the row's single-valued columns. `None`
+    /// before the first snapshot, and on a row that names none (a group
+    /// above the underlying level, or one mixed across several). Reads the
+    /// one row and skips the selection walk `dimension_context` does: the
+    /// shell asks on every cursor move while the tile emits, and a
+    /// selection never changes which underlying the cursor is on.
+    pub fn cursor_underlying(&self, cx: &App) -> Option<String> {
+        let d = self.table.read(cx).delegate();
+        let (snapshot, plan) = (d.snapshot.as_ref()?, d.plan.as_ref()?);
+        let row = *d.shown.get(d.cursor.row)? as usize;
+        crate::core::context::values_at(snapshot, plan, row)
+            .into_iter()
+            .find_map(|(column, value)| (column == "underlying_ref").then_some(value))
+    }
+
     /// The row a right press just landed on, for the shell's row menu:
     /// the pressed row's own values (not the cursor's, which a press
     /// inside a `V` selection leaves in place), with the selection riding
@@ -8084,5 +8100,95 @@ mod tests {
             },
         );
         assert_eq!(chip_word(&h, &cx), Some("degraded".into()));
+    }
+
+    /// The tile as the shell holds it: a link group's emission is asked of
+    /// the `TileContent` door, never of the tile.
+    fn content_of(h: &Harness) -> crate::content::BlotterContent {
+        crate::content::BlotterContent::for_tile(h.tile.clone())
+    }
+
+    /// One action through `TileContent::dispatch`, the route a key takes.
+    fn content_act(h: &Harness, cx: &mut gpui::VisualTestContext, id: &str) -> bool {
+        let content = content_of(h);
+        cx.update(|window, cx| content.dispatch(&ActionId(id.into()), None, window, cx))
+    }
+
+    fn emission_of(h: &Harness, cx: &mut gpui::VisualTestContext) -> geode_core::link::Emission {
+        let content = content_of(h);
+        cx.update(|_, cx| content.emission(cx))
+    }
+
+    /// The scope a blotter posts is the cursor row's one underlying, under
+    /// the column every follower reads; a row above the underlying level
+    /// names none, which leaves the group's scope alone. It posts no board.
+    #[gpui::test]
+    fn the_emission_is_the_cursor_rows_underlying(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered_with_a_dimension(cx);
+        assert!(content_of(&h).emits());
+        let on = |u: &str| Some(Scope::one("underlying_ref", u));
+
+        // The cursor opens on the grand total, above every underlying.
+        let total = emission_of(&h, &mut cx);
+        assert_eq!(total.scope, None, "the root names no underlying");
+        assert!(total.board.is_empty());
+
+        assert!(content_act(&h, &mut cx, "motion::down"));
+        let spx = emission_of(&h, &mut cx);
+        assert_eq!(spx.scope, on("SPX"));
+        assert!(spx.board.is_empty());
+
+        assert!(content_act(&h, &mut cx, "motion::down"));
+        let ndx = emission_of(&h, &mut cx);
+        assert_eq!(ndx.scope, on("NDX"), "the emission follows the cursor");
+        assert!(ndx.board.is_empty());
+
+        assert!(content_act(&h, &mut cx, "motion::top"));
+        let back = emission_of(&h, &mut cx);
+        assert_eq!(back.scope, None, "back on the group row: none again");
+        assert!(back.board.is_empty());
+    }
+
+    /// The shell pulls only when told: a cursor move must reach the
+    /// callback, and a dropped subscription must stop it.
+    #[gpui::test]
+    fn a_cursor_move_tells_the_shell_the_emission_changed(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered_with_a_dimension(cx);
+        let content = content_of(&h);
+        let calls = Rc::new(Cell::new(0u32));
+        let subscription = cx
+            .update(|_, cx| {
+                let calls = calls.clone();
+                content.watch_emission(Rc::new(move |_| calls.set(calls.get() + 1)), cx)
+            })
+            .expect("an emitter hands the shell a subscription");
+        cx.run_until_parked();
+        let before = calls.get();
+
+        assert!(content_act(&h, &mut cx, "motion::down"));
+        cx.run_until_parked();
+        assert!(
+            calls.get() > before,
+            "a cursor move through dispatch announces the change"
+        );
+
+        drop(subscription);
+        let after_drop = calls.get();
+        assert!(content_act(&h, &mut cx, "motion::down"));
+        cx.run_until_parked();
+        assert_eq!(calls.get(), after_drop, "a dropped subscription is silent");
+    }
+
+    /// A blotter can emit before it has rows (a restored membership is
+    /// dropped for a tile that answers `false`), and until the first
+    /// snapshot it posts nothing, which leaves the group's scope alone.
+    #[gpui::test]
+    fn before_the_first_snapshot_the_emission_is_empty(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        assert!(content_of(&h).emits(), "capability, not loaded state");
+        assert_eq!(
+            emission_of(&h, &mut cx),
+            geode_core::link::Emission::default()
+        );
     }
 }

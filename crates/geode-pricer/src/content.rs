@@ -433,6 +433,38 @@ impl TileContent for PricerContent {
         self.tile.read(cx).dimension_context()
     }
 
+    /// A pricer can always emit: the answer is the kind's capability, not
+    /// whether a sheet has loaded. The shell drops a restored membership
+    /// for a tile that answers `false` right after create, before any load
+    /// can have answered.
+    fn emits(&self) -> bool {
+        true
+    }
+
+    /// The cursor row's sole underlying as a one-value scope; no scope
+    /// where the row names none, which leaves the group's scope as it is.
+    /// A pricer posts no documents.
+    fn emission(&self, cx: &App) -> geode_core::link::Emission {
+        geode_core::link::Emission {
+            scope: self
+                .tile
+                .read(cx)
+                .cursor_underlying()
+                .map(|u| geode_core::scope::Scope::one("underlying_ref", &u)),
+            board: Vec::new(),
+        }
+    }
+
+    /// Every cursor move, edit and load notifies the tile, so observing it
+    /// covers each way the cursor row's underlying can change.
+    fn watch_emission(
+        &self,
+        changed: Rc<dyn Fn(&mut App)>,
+        cx: &mut App,
+    ) -> Option<gpui::Subscription> {
+        Some(cx.observe(&self.tile, move |_, cx| changed(cx)))
+    }
+
     fn tile_columns(&self, cx: &App) -> Option<geode_core::tile_columns::TileColumns> {
         self.tile.read(cx).tile_columns()
     }
