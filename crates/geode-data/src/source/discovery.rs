@@ -5,7 +5,7 @@
 //! matches nothing has its literal prefix checked once: a missing, non-directory
 //! or unreadable prefix, and an invalid pattern, are `PathProblem`s the scheduler
 //! reports as `Degraded`. A readable empty directory is healthy. Glob traversal
-//! errors below a readable prefix and CSV metadata errors are still skipped;
+//! errors below a readable prefix and CSV metadata errors are skipped;
 //! catalog errors propagate. See `docs/current/data-path.md`.
 
 use crate::source::sentinel::{Sentinel, parse_sentinel};

@@ -201,7 +201,7 @@ often tripped:
   that matches nothing has its literal prefix opened once; a missing,
   non-directory or unreadable prefix, or an invalid pattern, is a `Degraded`
   source. Traversal errors below a readable prefix and CSV metadata errors
-  are still skipped. Adapter queue admission does not acknowledge storage
+  are skipped. Adapter queue admission does not acknowledge storage
   publication. See [source discovery and adapters](../../docs/current/data-path.md#source-discovery-and-adapters).
 - Upload channel admission, transport success, and a stored echo are separate
   events. Service-thread validation precedes each target's bounded FIFO worker

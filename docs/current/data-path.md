@@ -244,15 +244,17 @@ distinct (source, dataset, extra set, missing set) combination emits one
 warning diagnostic per run — `'<file>' loaded into '<dataset>' with extra
 columns [a, b] ignored; optional [c] missing, read as NULL` — and repeats
 emit nothing. At most 256 combinations are remembered; one further warning
-says later ones go unreported.
+names the source and file that reached the cap and says later ones go
+unreported.
 
-**Schema limitation:** `apply_schema` creates missing tables but does not
-migrate existing payload columns. Publication moves rows positionally, so a
-column change against an old database can fail or, for same-typed reorders,
-misfile values silently. Rebuild an affected demo database after changing its
-schema; production migration needs an explicit procedure. See
+`apply_schema` creates missing tables but does not migrate existing payload
+columns, and publication moves rows positionally. Open therefore compares
+every existing payload table with its declaration and refuses a drifted
+dataset rather than misfiling values (see [source conditions](#source-conditions)).
+Rebuild an affected demo database after changing its schema; production
+migration needs an explicit procedure. See
 [`store/mod.rs`](../../crates/geode-data/src/store/mod.rs) and
-[`geode-data README`](../../crates/geode-data/README.md).
+[`drift.rs`](../../crates/geode-data/src/store/drift.rs).
 
 ## Document validation and storage
 
@@ -314,8 +316,11 @@ is not a directory or cannot be opened reports `path '<prefix>' unreadable:
 <error>`; an invalid pattern reports `invalid pattern '<pattern>': <error>`.
 A readable empty directory is healthy, because an empty drop directory is
 normal; a dated directory that does not exist yet is `Degraded`, not
-`Failed`. Glob traversal errors below a readable prefix and CSV metadata
-errors are still skipped, and catalog lookup errors propagate to the
+`Failed`. An escaped glob character (`[[]`, `[*]`) also ends the literal
+text, so the checked prefix is shorter than the directory the pattern names:
+when that shorter prefix exists, a missing directory below it reads as a
+healthy empty one. This is rare and errs toward silence. Glob traversal errors below a readable prefix and CSV metadata
+errors are skipped, and catalog lookup errors propagate to the
 scheduler. See [`discovery.rs`](../../crates/geode-data/src/source/discovery.rs)
 and [`sentinel.rs`](../../crates/geode-data/src/source/sentinel.rs).
 
@@ -831,9 +836,13 @@ to the report time if adding the interval overflows.
 
 ### Source conditions
 
-Conditions that are not one file's or one document's outcome have their own
-slot, so each is reported and cleared independently and never overwrites an
-unrelated one. Every one reaches the status bar, the diagnostics page and a
+Conditions that are not one file's or one document's outcome are reported
+beside those outcomes. The load-lane conditions each have their own key, so
+each is reported and cleared independently and never overwrites an unrelated
+one. A path problem shares the source's discovery slot with its stuck and
+orphaned files; one poll merges them by severity (`worst_health`: the worst
+finding wins and equal ones are listed together), and the next clean poll
+replaces the merged result. Every one reaches the status bar, the diagnostics page and a
 tile's health chip under the source's own name.
 
 | Condition | Lane | Key | Health | Reason | Clears when |
