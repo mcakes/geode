@@ -127,9 +127,9 @@ pub struct BlotterTile {
     /// Configured freshness threshold, shared through the factory so reloads
     /// update open tiles without recreating them.
     pub stale_after: Rc<Cell<Duration>>,
-    /// The one wake-up at which the snapshot's stalest dataset time turns
-    /// stale: armed on each applied snapshot, on show and on a frame flip
-    /// while shown, dropped while hidden (`geode_tile::stale`).
+    /// Wakes the tile as each of the snapshot's dataset times turns stale,
+    /// one deadline at a time: armed on each applied snapshot, on show and on
+    /// a frame flip while shown, dropped while hidden (`geode_tile::stale`).
     stale_timer: geode_tile::stale::StaleTimer,
     table: Entity<TableState<BlotterDelegate>>,
     view_name: String,
