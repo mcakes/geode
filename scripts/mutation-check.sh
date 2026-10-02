@@ -4733,8 +4733,8 @@ run_mutation "palette: the usage bonus is added to the match score" \
 # column painting nothing leaves no `kbd:g` chip for the bound row.
 run_mutation "kbd: the palette's binding column paints its keys" \
   crates/geode-shell/src/palette.rs \
-  '            let binding = crate::shell::kbd::binding(item.binding().unwrap_or_default());' \
-  '            let binding = crate::shell::kbd::binding(&[]);' \
+  '                        view.items[item_ix].binding().unwrap_or_default(),' \
+  '                        &[],' \
   geode-shell pending_keys_which_key_and_palette_bindings_paint_as_kbd
 
 # The status strip's pending keys and the which-key overlay's
@@ -31294,6 +31294,50 @@ run_mutation "chrome rows: browse render never checks the prepared key" \
   '    let theme = cx.theme();' \
   geode-shell \
   render_refuses_browse_rows_a_refresh_missed
+
+# The virtualized palette scrolls the selected row into view; scrolling to
+# the top instead leaves a paged-to row unpainted.
+run_mutation "chrome rows: palette selection scrolls to the top" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '                .scroll_to_item(palette.selected(), ScrollStrategy::Nearest);' \
+  '                .scroll_to_item(0, ScrollStrategy::Nearest);' \
+  geode-shell \
+  paging_the_palette_keeps_the_selected_row_painted
+
+# The prepared title runs are the title's own indices, as the old render
+# loop split them; the whole alignment would glow category hits in the title.
+run_mutation "chrome rows: palette title runs take the category's indices" \
+  crates/geode-shell/src/palette.rs \
+  '                    title_runs: highlight_runs(&self.titles[*i], &indices[..split]),' \
+  '                    title_runs: highlight_runs(&self.titles[*i], indices),' \
+  geode-shell \
+  the_prepared_palette_rows_match_the_old_render_loop
+
+# The list's viewport is capped at VISIBLE_ROWS, so only rows in view paint.
+run_mutation "chrome rows: palette list sized to every row" \
+  crates/geode-shell/src/palette.rs \
+  '        .h(px(row_count.min(VISIBLE_ROWS) as f32 * row_height))' \
+  '        .h(px(row_count as f32 * row_height))' \
+  geode-shell \
+  the_palette_paints_only_the_visible_rows
+
+# A row click carries its filtered-row index, not its item index: a scrolled
+# theme row dispatches itself.
+run_mutation "chrome rows: palette row click passes the item index" \
+  crates/geode-shell/src/palette.rs \
+  '                        click(i, window, cx);' \
+  '                        click(item_ix, window, cx);' \
+  geode-shell \
+  a_click_on_a_scrolled_palette_row_dispatches_that_row
+
+# Each open snapshots the usage a dispatch recorded; a palette built without
+# it leaves the item just chosen where it was.
+run_mutation "chrome rows: palette open ignores recorded usage" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  $'            &self.palette_usage,\n            unix_now(),' \
+  $'            &crate::palette_usage::PaletteUsage::new(),\n            unix_now(),' \
+  geode-shell \
+  a_dispatched_item_leads_the_next_palette_open
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
