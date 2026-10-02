@@ -50,12 +50,13 @@ use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight, Hsla,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Stateful,
-    TextAlign, WeakEntity, Window, div, px, relative,
+    TextAlign, WeakEntity, Window, canvas, div, px, relative,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Icon, Sizable as _, Size, Theme, h_flex};
 use gpui_kit_assets::IconName;
+use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -460,6 +461,10 @@ pub struct SheetDelegate {
     requested: WindowRequest,
     /// `(grid row, plan column)`; `None` with no cursor row.
     pub(crate) cursor: Option<(usize, usize)>,
+    /// The cursor row's painted lower-left in window coordinates, written
+    /// by `render_tr` and cleared when that row leaves the visible range:
+    /// where `g .` hangs the row menu (`PricerTile::dimension_context`).
+    pub(crate) cursor_anchor: Rc<Cell<Option<(f32, f32)>>>,
     /// The tile's resolved selection, mirrored by `sync_cursor`: grid
     /// rows × plan columns. The tree column is never a member; it tints
     /// only as a whole selected row's handle.
@@ -561,6 +566,7 @@ impl SheetDelegate {
             window: WindowCache::default(),
             requested: WindowRequest::with_first(FIRST_WINDOW),
             cursor: None,
+            cursor_anchor: Rc::new(Cell::new(None)),
             selected: None,
             paints: Paints::derive(theme),
             loading: false,
@@ -1055,6 +1061,11 @@ impl TableDelegate for SheetDelegate {
         cx: &mut Context<TableState<Self>>,
     ) {
         self.requested.record(visible_range.clone());
+        // A cursor row outside the window paints no longer, so its last
+        // anchor would point at whatever row sits there now.
+        if !self.cursor.is_some_and(|(r, _)| visible_range.contains(&r)) {
+            self.cursor_anchor.set(None);
+        }
         let end = visible_range.end.min(self.model.len());
         let Some(tile) = self.tile.upgrade() else {
             return;
@@ -1195,8 +1206,30 @@ impl TableDelegate for SheetDelegate {
             self.model.kind(row_ix),
             Some(GridRowKind::Leg { last: false })
         );
+        // The cursor row alone records its painted lower-left (canvas
+        // bounds are window coordinates) for the row menu's anchor.
+        let anchor = self
+            .cursor
+            .is_some_and(|(r, _)| r == row_ix)
+            .then(|| self.cursor_anchor.clone());
         let row = div()
             .id(("row", row_ix))
+            .debug_selector(move || format!("pricer-row-{row_ix}"))
+            .when_some(anchor, |el, anchor| {
+                el.child(
+                    canvas(
+                        move |bounds, _, _| {
+                            anchor.set(Some((
+                                f32::from(bounds.origin.x),
+                                f32::from(bounds.bottom()),
+                            )));
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+            })
             .when(joined, |el| el.border_b_0())
             .when_some(self.row_ground(row_ix), |el, g| el.bg(g));
         if row_ix >= self.model.len() {

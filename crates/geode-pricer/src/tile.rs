@@ -5369,12 +5369,19 @@ impl PricerTile {
     /// The context at the cursor: the cursor row's sole underlying, as
     /// `underlying_ref`. A package across underlyings names none (an empty
     /// context); with no cursor row (an empty sheet) there is no context.
-    pub(crate) fn dimension_context(&self) -> Option<geode_core::context::DimensionContext> {
+    pub(crate) fn dimension_context(
+        &self,
+        cx: &App,
+    ) -> Option<geode_core::context::DimensionContext> {
         let g = self.cursor_row()?;
-        Some(match self.underlying_at(g) {
+        let mut ctx = match self.underlying_at(g) {
             Some(u) => geode_core::context::DimensionContext::of(&[("underlying_ref", &u)]),
             None => geode_core::context::DimensionContext::default(),
-        })
+        };
+        // Where `g .` hangs the row menu: the cursor row's painted
+        // lower-left, or `None` (the tile's top-left) while it is off screen.
+        ctx.anchor = self.table.read(cx).delegate().cursor_anchor.get();
+        Some(ctx)
     }
 
     /// The one underlying the cursor row names, or `None` with no cursor
@@ -6645,6 +6652,35 @@ pub(crate) mod tests {
         assert_eq!(r.sheet.as_deref(), Some("book"));
         assert_eq!(r.view.as_deref(), Some("barrier"));
         assert_eq!(r.cursor, Some(crate::core::LineId(2)));
+    }
+
+    /// `g .` hangs the row menu under the cursor row: the context's anchor
+    /// is that row's painted lower-left, as the blotter's is.
+    #[gpui::test]
+    fn the_cursor_row_records_its_anchor(cx: &mut gpui::TestAppContext) {
+        let (store, mut record) = seeded(&["SPX Z26 5000 C", "NDX Z26 20000 C"]);
+        record.insert("cursor".into(), toml::Value::Integer(2));
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.visible(&mut vcx, true);
+        h.draw(&mut vcx);
+        let row = vcx
+            .update(|_, cx| h.tile.read(cx).cursor_row())
+            .expect("a cursor row");
+        let selector: &'static str = format!("pricer-row-{row}").leak();
+        let bounds = vcx.debug_bounds(selector).expect("the cursor row painted");
+        let ctx = vcx
+            .update(|_, cx| h.content.dimension_context(cx))
+            .expect("a pricer always has a context");
+        let (x, y) = ctx.anchor.expect("an anchor once painted");
+        // Within the row's 1 px bottom border: the canvas fills the content box.
+        assert!(
+            (y - f32::from(bounds.bottom())).abs() <= 1.0,
+            "{y} vs {bounds:?}"
+        );
+        assert!(
+            (x - f32::from(bounds.left())).abs() < 1.0,
+            "{x} vs {bounds:?}"
+        );
     }
 
     /// The cursor line's underlying is the tile's dimension context, as

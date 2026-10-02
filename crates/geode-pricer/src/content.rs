@@ -437,7 +437,7 @@ impl TileContent for PricerContent {
     }
 
     fn dimension_context(&self, cx: &App) -> Option<geode_core::context::DimensionContext> {
-        self.tile.read(cx).dimension_context()
+        self.tile.read(cx).dimension_context(cx)
     }
 
     /// A pricer hides the lines the frame's scope does not select, so
