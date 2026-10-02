@@ -143,8 +143,9 @@ often tripped:
 - The runner's document and series queues have no fixed capacity; a source
   past `BACKLOG_DEPTH` (64) queued feed documents and series reports
   `<source>:backlog` (`Degraded "ingest backlog N"`, re-reported at each
-  further 64, `Ok` once that source's count falls below 64); local writes are
-  not counted.
+  further 64, `Ok` once that source's count falls below 64); `N` is the count
+  at the last crossing (65, 129, …), not a live count, and holds while the
+  queue drains until the clear. Local writes are not counted.
 - `apply_schema` is `CREATE TABLE IF NOT EXISTS` and publish moves rows
   positionally, so open compares every existing payload table with its
   declaration (`store::drift`) and refuses a drifted dataset for the run:

@@ -28882,6 +28882,14 @@ run_mutation "silence: the backlog shares the queue lane" \
   geode-data \
   a_burst_past_the_backlog_depth_degrades_the_source_until_it_drains
 
+# A taken series is uncounted, so a fetch-only source's backlog clears.
+run_mutation "silence: a drained series never uncounts its backlog" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        Work::Series(job) => Some(&job.source),' \
+  '        Work::Series(_job) => None,' \
+  geode-data \
+  documents_and_series_of_one_source_count_toward_its_backlog_and_both_drain_it
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

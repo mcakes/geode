@@ -2292,6 +2292,68 @@ mod tests {
         assert!(q.queued_per_source.is_empty());
     }
 
+    /// A source submitting both documents and series counts both, and
+    /// draining either kind uncounts it: a fetch-only source past the depth
+    /// clears as it drains. A handle without a runner thread, so the test
+    /// drains the queue itself through the runner's own take/uncount path.
+    #[test]
+    fn documents_and_series_of_one_source_count_toward_its_backlog_and_both_drain_it() {
+        let (tx, rx) = channel();
+        let handle = IngestHandle {
+            queue: Arc::new((Mutex::new(Queue::default()), Condvar::new())),
+            sink: Arc::new(move |e| tx.send(e).is_ok()),
+            thread: Mutex::new(None),
+        };
+        let series = |i: usize| SeriesJob {
+            source: "cvi".into(),
+            ..series_job(
+                &format!("S{i}.close"),
+                series_rows("2026-01-05T14:30:00Z", 1, 100.0),
+            )
+        };
+        // Series, one document, then series past the depth: the document
+        // is counted, and the crossing comes on a series submit.
+        for i in 0..30 {
+            handle.submit_series(series(i));
+        }
+        handle.submit_document(job("cvi_params", spx()));
+        for i in 30..64 {
+            handle.submit_series(series(i));
+        }
+        let backlogs: Vec<(String, usize, bool)> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                IngestEvent::Backlog {
+                    source,
+                    queued,
+                    over,
+                } => Some((source, queued, over)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(backlogs, vec![("cvi".to_string(), 65, true)]);
+        // The document drains first (65 → 64); the clear comes on the
+        // first series pop (64 → 63), so an uncounted series never clears.
+        let mut cleared = Vec::new();
+        let mut taken = Vec::new();
+        {
+            let mut q = handle.queue.0.lock().unwrap();
+            while let Some(work) = take_work(&mut q) {
+                taken.push(matches!(work, Work::Series(_)));
+                if let Some(IngestEvent::Backlog { queued, over, .. }) =
+                    backlog_source(&work).and_then(|s| backlog_pop(&mut q, s))
+                {
+                    cleared.push((taken.len(), queued, over));
+                }
+            }
+            assert!(q.queued_per_source.is_empty(), "every job uncounted");
+        }
+        assert_eq!(taken.iter().filter(|s| **s).count(), 64);
+        assert_eq!(cleared, vec![(2, 63, false)]);
+        assert!(taken[1], "the clearing pop is a series");
+        handle.shutdown();
+    }
+
     #[test]
     fn a_submitted_document_publishes_and_reports_its_batch() {
         let (dir, store) = document_store();
