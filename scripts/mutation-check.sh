@@ -3473,6 +3473,9 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
   '            if views_changed {
                 cx.emit(ShellEvent::ConfigReloaded);
             }
+            if app_changed {
+                cx.emit(ShellEvent::AppSettingsReloaded);
+            }
             if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
                 self.frame.update(cx, |f, cx| {
@@ -3482,7 +3485,10 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
                 });
             }
 ' \
-  '            if groupings_changed {
+  '            if app_changed {
+                cx.emit(ShellEvent::AppSettingsReloaded);
+            }
+            if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
                 self.frame.update(cx, |f, cx| {
                     if f.replace_slots(slots) {
@@ -6177,8 +6183,10 @@ run_mutation "bridge: a stale Catalog outcome's tag check is disabled" \
 
 run_mutation "hot_reload: an [log] change on reload is never applied" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '            if changed("app") {' \
-  '            if false && changed("app") {' \
+  '            if app_changed {
+                let (new_levels' \
+  '            if false && app_changed {
+                let (new_levels' \
   geode-shell a_log_table_change_on_reload_applies_it_through_level_control_once
 
 # ---- Diagnostics state and navigation ---------------------------------
