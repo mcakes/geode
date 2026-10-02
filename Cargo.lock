@@ -2512,6 +2512,7 @@ dependencies = [
  "geode-documents",
  "geode-marketdata",
  "geode-nemo",
+ "geode-positions",
  "geode-pricer",
  "geode-pricing",
  "geode-shell",
@@ -2523,6 +2524,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "rand 0.9.5",
+ "serde_json",
  "tempfile",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
@@ -2662,6 +2664,16 @@ dependencies = [
  "geode-shell",
  "gpui-pre",
  "percent-encoding",
+]
+
+[[package]]
+name = "geode-positions"
+version = "0.1.0"
+dependencies = [
+ "geode-core",
+ "geode-data",
+ "geode-shell",
+ "gpui-pre",
 ]
 
 [[package]]

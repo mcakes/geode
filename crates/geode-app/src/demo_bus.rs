@@ -639,6 +639,10 @@ mod tests {
         let mut adapters = AdapterRegistry::default();
         let (bus, _feed) = ChannelAdapter::new("demo_bus");
         adapters.register(bus);
+        // The demo layer's `positions.toml` names it, as `main.rs` registers.
+        adapters.register(Arc::new(crate::demo::DemoPositions::new(
+            src_dir.path().to_path_buf(),
+        )));
         let mut pricers = PricerRegistry::default();
         pricers.register(Arc::new(geode_pricing::MockPricer::new()));
         let mut vol_models = VolModelRegistry::default();

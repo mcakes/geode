@@ -20442,12 +20442,34 @@ run_mutation "bridge: data_setup wires the resolved egress list into DataService
   crates/geode-app/src/bridge.rs \
   '            vol,
             egress,
+            positions,
         },' \
   '            vol,
             egress: Vec::new(),
+            positions,
         },' \
   geode-app \
   the_demo_layer_produces_a_servable_data_setup
+
+# Pass the resolved position service into data_setup. None silently leaves
+# every Move LHU refused "no position service configured".
+run_mutation "bridge: data_setup wires the resolved position service into DataServiceConfig" \
+  crates/geode-app/src/bridge.rs \
+  '            egress,
+            positions,
+        },' \
+  '            egress,
+            positions: None,
+        },' \
+  geode-app \
+  the_demo_layer_produces_a_servable_data_setup
+
+# The bridge says whether a position service survived resolution.
+run_mutation "bridge: positions_configured always false" \
+  crates/geode-app/src/bridge.rs \
+  '    let positions_configured = setup.config.positions.is_some();' \
+  '    let positions_configured = false;' \
+  geode-app the_bridge_says_whether_a_position_service_is_configured
 
 # Changes to egress.toml require a restart because reload does not rebuild
 # egress workers. This mutation preserves change detection but removes the
@@ -28698,6 +28720,145 @@ run_mutation "grid-window: pricer a refill-only delivery refreshes totals" \
   $'            // Totals read the sheet: re-resolve the selection over the new prices.\n            self.sync_cursor(cx);' \
   '            // Totals read the sheet: re-resolve the selection over the new prices.' \
   geode-pricer a_delivery_under_a_selection_updates_its_totals
+
+run_mutation "positions: a move is never answered" \
+  crates/geode-data/src/positions.rs \
+  '        let _ = sink(DataEvent::Command(outcome));' \
+  '        let _ = (&sink, outcome);' \
+  geode-data a_move_is_answered_once
+
+run_mutation "positions: an adapter without a position side is called missing" \
+  crates/geode-data/src/positions.rs \
+  $'            .ok_or_else(|| format!("adapter \'{adapter}\' has no position side")),' \
+  $'            .ok_or_else(|| format!("adapter \'{adapter}\' is not in this build")),' \
+  geode-data an_adapter_without_a_position_side_refuses_every_move
+
+run_mutation "positions: the service's own refusal is never answered" \
+  crates/geode-data/src/service.rs \
+  '            let _ = (self.sink)(DataEvent::Command(CommandOutcome {' \
+  '            let _ = std::convert::identity(DataEvent::Command(CommandOutcome {' \
+  geode-data without_a_position_service_a_move_is_answered_with_the_refusal
+
+run_mutation "move lhu: a handle refusal at yes is silent" \
+  crates/geode-positions/src/lib.rs \
+  '                    Err(refusal) => acx.notice(format!("move to LHU {lhu} refused: {refusal}")),' \
+  '                    Err(_) => {}' \
+  geode-app a_move_the_data_handle_refuses_says_refused
+
+run_mutation "positions: a refusal reads as accepted" \
+  crates/geode-core/src/positions.rs \
+  '        Err(reason) => format!("move to LHU {} refused: {reason}", o.lhu),' \
+  '        Err(_) => format!("moving {} {} to LHU {} \u{b7} accepted", o.count, noun(o.count), o.lhu),' \
+  geode-core a_refusal_names_the_target_and_reason
+
+run_mutation "positions: one position is called positions" \
+  crates/geode-core/src/positions.rs \
+  '    if n == 1 { "position" } else { "positions" }' \
+  $'    let _ = n;\n    "positions"' \
+  geode-core notices_name_one_position_and_many_positions
+
+# An action's value choice applies only the reply to its own request.
+run_mutation "action choose: a stale delivery fills the dialog" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    if outcome.tag != *tag || outcome.column != *column {' \
+  '    if outcome.column != *column {' \
+  geode-shell a_stale_value_delivery_is_dropped
+
+run_mutation "action choose: the excluded value is offered" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                .filter(|value| exclude.as_ref() != Some(value))' \
+  '                .filter(|_| exclude.is_some() || true)' \
+  geode-shell delivered_values_fill_the_dialog_without_the_excluded_one
+
+run_mutation "action choose: a covered choice filters by the cover's query" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            .map(|saved| saved.text.clone())' \
+  '            .map(|_| String::new())' \
+  geode-shell a_covered_choice_filters_by_its_own_query
+
+run_mutation "action choose: an empty reply leaves a covered choice loading" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        view.modals.remove(at);' \
+  '        let _ = at;' \
+  geode-shell an_empty_reply_to_a_covered_choice_removes_it
+
+run_mutation "action choose: the loading footer offers enter" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  $'    } else if loading {\n        ("action-loading-hints", ACTION_LOADING_HINTS)' \
+  $'    } else if false {\n        ("action-loading-hints", ACTION_LOADING_HINTS)' \
+  geode-shell enter_while_loading_does_nothing
+
+run_mutation "action confirm: a refused confirm is silent" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '            self.notice(CONFIRM_REFUSED);' \
+  '            let _ = CONFIRM_REFUSED;' \
+  geode-shell a_confirm_under_a_plain_dialog_is_refused_with_a_notice
+
+run_mutation "action confirm: no runs the action" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '                Some(ConfirmAnswer::No) => no(shell, window, cx),' \
+  '                Some(ConfirmAnswer::No) => yes(shell, window, cx),' \
+  geode-shell no_or_escape_closes_the_confirm_and_runs_nothing
+
+# A position command's answer reaches the status notice through the drain.
+run_mutation "command outcome: the drain drops the answer" \
+  crates/geode-app/src/bridge.rs \
+  '                        shell.update(cx, |s, cx| s.note_command(&outcome, cx));' \
+  '                        let _ = &outcome;' \
+  geode-app a_command_answer_reaches_the_status_notice
+
+# The demo position simulator: all or nothing, and a strictly later sentinel.
+run_mutation "demo positions: an unknown position moves the known ones" \
+  crates/geode-app/src/demo.rs \
+  '        return Err(adapter_error(format!("unknown position {missing}")));' \
+  '        let _ = missing;' \
+  geode-app an_unknown_position_refuses_and_changes_nothing
+
+run_mutation "demo positions: the sentinel is not later" \
+  crates/geode-app/src/demo.rs \
+  '    let as_of = now.max(previous + chrono::Duration::seconds(1));' \
+  '    let as_of = now;' \
+  geode-app the_sentinel_is_strictly_later_even_within_the_same_second
+
+# Move LHU: every selected row names one position, the selection moves, and
+# startup registers the action.
+# Relies on mtime resolution finer than the two writes' gap (APFS: ns); on a
+# coarse-mtime filesystem equal stamps let the swap survive.
+run_mutation "demo positions: the sentinel is written before its CSV" \
+  crates/geode-app/src/demo.rs \
+  $'        replace_file(&r.csv, &r.text)?;\n        replace_file(&r.sentinel, &r.sentinel_json)?;' \
+  $'        replace_file(&r.sentinel, &r.sentinel_json)?;\n        replace_file(&r.csv, &r.text)?;' \
+  geode-app a_move_rewrites_the_lhu_of_those_positions_only
+
+run_mutation "move lhu: a subtotal in the selection is moved anyway" \
+  crates/geode-positions/src/lib.rs \
+  '        let mut positions = ctx.selection_values(POSITION)?;' \
+  '        let mut positions: Vec<String> = ctx.selection.iter().filter_map(|r| r.iter().find(|(c, _)| c == POSITION).map(|(_, v)| v.clone())).collect();' \
+  geode-positions a_selection_with_a_subtotal_disables_move_lhu
+
+run_mutation "move lhu: a position on two selected rows moves twice" \
+  crates/geode-positions/src/lib.rs \
+  '        positions.retain(|p| seen.insert(p.clone()));' \
+  '        positions.retain(|p| seen.insert(p.clone()) || true);' \
+  geode-positions a_position_on_two_selected_rows_moves_once
+
+run_mutation "move lhu: the selection is ignored" \
+  crates/geode-positions/src/lib.rs \
+  '    if !ctx.selection.is_empty() {' \
+  '    if false {' \
+  geode-app move_lhu_sends_the_selected_positions_after_confirm
+
+run_mutation "move lhu: never registered" \
+  crates/geode-app/src/main.rs \
+  '    roster.add_action(Rc::new(geode_positions::MoveLhu::new(' \
+  '    let _ = (Rc::new(geode_positions::MoveLhu::new(' \
+  geode-app move_lhu_sends_the_selected_positions_after_confirm
+
+run_mutation "move lhu: startup enables it without a position service" \
+  crates/geode-app/src/main.rs \
+  '    add_dimension_actions(roster, &bridge.handle, bridge.positions_configured);' \
+  '    add_dimension_actions(roster, &bridge.handle, true);' \
+  geode-app the_production_roster_opens_market_data_on_an_underlying
 
 # ---- Fuzzy find: the result table formats only the rows it shows ----
 

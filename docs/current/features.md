@@ -379,6 +379,40 @@ escape follows the tile's normal narrowing and find-clearing behavior.
 Limitations: a selection is always one contiguous row range or rectangle —
 there is no multi-range selection — and there is no paste; `y` is yank-only.
 
+### Move LHU
+
+A row carrying a single `position_ref` also gets "Move LHU…"
+(`positions::move_lhu`, from `geode-positions`) in that column's
+[row menu](shell.md#row-menu) section, after "Open in Nemo". It moves
+positions to another LHU in the position system named by
+[`positions.toml`](configuration.md#position-service-configuration); without
+one the row is disabled with `no position service configured`.
+
+When the row the menu opened on is inside a `V` row selection, the move takes
+every selected top-most row, in display order; otherwise it takes that row
+alone. A `v` block selection never rides along. Every acting row must name
+exactly one `position_ref`: a selection holding a subtotal over several
+positions disables the row with `{n} selected rows hold several positions`,
+`n` counting the rows that name none.
+
+Picking it opens a choice dialog, "Move to LHU", over the live `lhu` values,
+unscoped, reading `loading…` until they arrive. When every moving position
+already shares one LHU (the row's own `lhu` without a selection, or the
+`lhu` every selected row names), that LHU is left out. No values left closes
+the dialog with `no LHU values to move to`. A pick asks `Move {n}
+position|positions to LHU {x}?`: `y` or `enter` sends one command and `n`
+or `escape` sends nothing.
+
+The move is request-then-wait: nothing on screen changes when it is sent.
+The status bar reads `moving {n} position|positions to LHU {x} · sent`, then
+the position system's answer replaces it: `… · accepted`, or `move to LHU
+{x} refused: {reason}`. A refusal before the command reaches the position
+service reads the same way, with the data service's or the position
+worker's reason (`position service busy`, say). The grid regroups only
+when a later snapshot carries the move; in the demo that is the next poll
+of the rewritten risk files, and a cross-book move keeps the old `Book`
+(see [the demo position system](data-path.md#the-demo-position-system)).
+
 ## Market-data documents
 
 `geode-documents` owns typed wire-format parsers and writers. A parser produces
@@ -2159,7 +2193,9 @@ documents. The [generator guide](../../crates/geode-demo-data/README.md)
 describes risk grains, deliberate ingestion edge cases, document sequences,
 and the demo configuration files. `geode-app --demo` writes risk files under
 a seed-specific temporary directory and streams serialized documents through
-its in-process adapter.
+its in-process adapter. Its position service, `demo_positions`, rewrites
+those risk files to carry a Move LHU, so a move survives a relaunch until
+the directory is deleted.
 Both use the same ingestion, parsing, query, and delivery paths as configured
 sources. Demo configuration remains below desk and user overrides. Cached
 sources and database contents are reused, so schema or generator changes may
@@ -2174,7 +2210,7 @@ ready for the first frame.
 `geode-app` is the composition root. It loads configuration, initializes GPUI
 and logging, builds registries, creates the data service and bridge, registers
 module factories and the row menu's actions (Open in Nemo, from
-`geode-nemo`), installs globals, and opens the window. Cross-layer policy
+`geode-nemo`, then Move LHU, from `geode-positions`), installs globals, and opens the window. Cross-layer policy
 that depends on the assembled binary belongs here; feature behavior does not.
 
 ## Testing and performance
