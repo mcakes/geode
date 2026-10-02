@@ -8,8 +8,8 @@ use super::*;
 use crate::core::cell::READ_ONLY;
 use crate::core::package::{self, package_qty};
 use crate::core::select::{
-    Skip, Skips, group_plan, lines_of, move_plan, risk_totals_visible, set_notice, step_notice,
-    top_most,
+    NOT_CONTIGUOUS, Skip, Skips, group_plan, lines_of, move_plan, risk_totals_visible, set_notice,
+    step_notice, top_most,
 };
 use crate::core::sheet::OwnShifts;
 use geode_core::grid::selection::Lost;
@@ -73,6 +73,12 @@ impl PricerTile {
                     anchor_row: line,
                     anchor_col: col,
                 });
+                // Under a sort the rows hold this painted order while the
+                // selection lives (`PricerTile::held_order`).
+                if self.sort.is_some() {
+                    self.held_order =
+                        Some(crate::core::sort::painted_order(&self.rollup, &self.sheet));
+                }
             }
         }
     }
@@ -557,7 +563,13 @@ impl PricerTile {
     /// become one custom package, opened, with the cursor on it.
     pub(crate) fn group_selection(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         let top = top_most(&self.sheet, &self.selected_sheet_rows());
-        let (first, count) = group_plan(&self.sheet, &top)?;
+        let (first, count) = group_plan(&self.sheet, &top).map_err(|why| {
+            // Adjacent on screen is not adjacent in the sheet under a sort.
+            match self.sort {
+                Some(_) if why == NOT_CONTIGUOUS => GROUP_SORTED,
+                _ => why,
+            }
+        })?;
         // Cleared first: the new package starts closed, so the rebuild
         // after the edit would otherwise report the anchor line as lost.
         let kept = self.selection.take();

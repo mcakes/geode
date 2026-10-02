@@ -502,7 +502,7 @@ fn bench(c: &mut Criterion) {
             b.iter(|| {
                 let chain = effective_chain(&[], &no_levels);
                 let mut tree = rollup::build(&s, &visibility, &chain, &no_levels, Clock::utc());
-                rank(&mut tree, &s, &npv_desc);
+                rank(&mut tree, &s, &npv_desc, &plan);
                 black_box(GridIndex::build(
                     &s,
                     &tree,
@@ -524,7 +524,7 @@ fn bench(c: &mut Criterion) {
             b.iter_batched(
                 || rollup::build(&s, &visibility, &chain, &dims, Clock::utc()),
                 |mut tree| {
-                    rank(&mut tree, &s, &npv_desc);
+                    rank(&mut tree, &s, &npv_desc, &plan);
                     black_box(tree)
                 },
                 BatchSize::SmallInput,
@@ -533,7 +533,7 @@ fn bench(c: &mut Criterion) {
         g.bench_function("rebuild_1000_grouped_sorted", |b| {
             b.iter(|| {
                 let mut tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
-                rank(&mut tree, &s, &npv_desc);
+                rank(&mut tree, &s, &npv_desc, &plan);
                 black_box(GridIndex::build(
                     &s,
                     &tree,

@@ -305,6 +305,14 @@ pub(crate) const MOVE_SORTED: &str = "lines move in sheet order: :sort clear fir
 /// sort may paint apart: refused while one applies.
 pub(crate) const PACKAGE_SORTED: &str = "a counted g p packages in sheet order: :sort clear first";
 
+/// The footer when a sort change ends a live selection.
+pub(crate) const SORT_CLEARED_SELECTION: &str = "selection cleared: the sort reordered its rows";
+
+/// `g p` over a `V` range that is contiguous on screen but not in the
+/// sheet, while a sort paints them together.
+pub(crate) const GROUP_SORTED: &str =
+    "the selected lines are apart in sheet order: :sort clear first";
+
 /// The header notice when the sorted column leaves the plan (the blotter's
 /// wording).
 pub(crate) fn sort_dropped(column: &str) -> String {
@@ -527,6 +535,11 @@ pub struct PricerTile {
     /// keeps it; a plan without the column drops it with a notice
     /// (`resolve_plan`). Tile state alone: never saved, never undone.
     pub(crate) sort: Option<SortSpec>,
+    /// The painted order a selection started on under a sort
+    /// (`sorting::painted_order`): every rebuild while it lives holds the
+    /// rows there, and the first `sync_cursor` after it ends rebuilds in
+    /// ranked order.
+    pub(crate) held_order: Option<std::collections::HashMap<sorting::NodeKey, usize>>,
     /// `:unscoped`: this tile ignores the frame's scope. Session key
     /// `unscoped`, as the blotter's.
     unscoped: bool,
@@ -1104,6 +1117,7 @@ impl PricerTile {
             totals: Vec::new(),
             edit_seq: 0,
             sort: None,
+            held_order: None,
         };
         this.adopt_templates();
         this.resolve_plan();
@@ -4705,7 +4719,20 @@ impl PricerTile {
         // that reorders a measure sort rebuilds the index, and one that
         // leaves the order alone refills only. No sort, no pass.
         if let Some(spec) = &self.sort {
-            sorting::rank(&mut self.rollup, &self.sheet, spec);
+            sorting::rank(&mut self.rollup, &self.sheet, spec, &self.plan);
+            // A live selection spans the painted rows between its ends:
+            // re-ranked under it, a line moving into that range would join
+            // it unasked. The order it started on holds until it ends.
+            if self.selection.is_some()
+                && let Some(held) = &self.held_order
+            {
+                sorting::hold(&mut self.rollup, &self.sheet, held);
+            }
+        }
+        // No selection, nothing to hold: this build is the ranked order,
+        // and `sync_cursor` owes no deferred re-rank.
+        if self.selection.is_none() {
+            self.held_order = None;
         }
         self.group_expansion
             .prune_to(rollup::value_levels(&self.chain));
@@ -4994,7 +5021,7 @@ impl PricerTile {
         let sort = self.sort;
         self.table.update(cx, |t, cx| {
             t.delegate_mut().model = model;
-            t.delegate_mut().sort = sort;
+            t.delegate_mut().set_sort(sort);
             t.delegate_mut().loading = loading;
             t.delegate_mut().set_colours(colours);
             // Before `refresh`, which re-reads the tree column's width.
@@ -5384,6 +5411,13 @@ impl PricerTile {
         if self.refresh_selection() {
             self.rebuild_chrome();
         }
+        // The selection that held the order ended (escape, a verb that
+        // consumed it, a click, a lost anchor): the re-rank it deferred
+        // applies now. The rebuild drops the held order before it syncs.
+        if self.held_order.is_some() && self.selection.is_none() {
+            self.rebuild(cx);
+            return;
+        }
         let row = self.cursor_row();
         let col = self.cursor.col;
         let selected = self.resolved.clone();
@@ -5478,6 +5512,12 @@ impl PricerTile {
     /// returns to sheet order) and the index rebuilds; the cursor and a
     /// live selection stay on their lines, which may now paint elsewhere.
     pub(crate) fn set_sort(&mut self, sort: Option<SortSpec>, cx: &mut Context<Self>) {
+        // A selection spans painted rows: a new order would hand it rows
+        // it never covered, so it ends first and the footer says why.
+        if self.selection.is_some() {
+            self.clear_selection();
+            self.footer = Some(SORT_CLEARED_SELECTION.into());
+        }
         self.sort = sort;
         self.rebuild(cx);
     }

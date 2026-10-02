@@ -409,9 +409,12 @@ impl FindPaint {
 pub struct SheetDelegate {
     /// The grid index shared with the tile; installs replace it.
     pub(crate) model: Rc<GridIndex>,
-    /// The tile's sort, mirrored by `install_model`: what the header's
-    /// sort icon and label say. The tile owns it.
+    /// The tile's sort, mirrored by `install_model` through `set_sort`:
+    /// what the header's sort icon says. The tile owns it.
     pub(crate) sort: Option<SortSpec>,
+    /// The sorted column's header label under an absolute order
+    /// (`npv |x|`), prepared by `set_sort` so `column()` formats nothing.
+    abs_label: Option<SharedString>,
     /// The formatted measure cells on screen, filled outside render;
     /// `render_td` only reads it. A miss paints a blank cell, and an open
     /// editor on it still paints.
@@ -511,6 +514,7 @@ impl SheetDelegate {
         SheetDelegate {
             model: Rc::new(GridIndex::default()),
             sort: None,
+            abs_label: None,
             window: WindowCache::default(),
             requested: WindowRequest::with_first(FIRST_WINDOW),
             cursor: None,
@@ -845,7 +849,9 @@ impl SheetDelegate {
         // label: `Icon::size_3` (0.75rem) inside the toggle's `p(px(2.))`.
         let sort_icon = 0.75 * m.rem_px + 4.0;
         for (col, c) in self.model.columns.iter().enumerate() {
-            let header = m.text_px(&c.label) + sort_icon;
+            // The label as painted: `npv |x|` under an absolute sort.
+            let label = self.header_label(col).unwrap_or(&c.label);
+            let header = m.text_px(label) + sort_icon;
             let cells = rows
                 .clone()
                 .filter_map(|g| self.window.get(g, col).map(|c| m.text_px(&c.text)));
@@ -881,6 +887,27 @@ impl SheetDelegate {
                 n.map(|n| SharedString::from(n.to_string()))
                     .unwrap_or_default()
             }));
+    }
+
+    /// Mirror the tile's sort against the installed model's columns.
+    /// gpui-component's header arrow only knows a direction, so an
+    /// absolute sort says so in its column's label, as the blotter's
+    /// does: `npv |x|`, prepared here rather than in render.
+    pub(crate) fn set_sort(&mut self, sort: Option<SortSpec>) {
+        self.sort = sort;
+        self.abs_label = sort.filter(|s| s.order.absolute()).and_then(|s| {
+            let c = self.model.columns.iter().find(|c| c.name == s.column)?;
+            Some(format!("{} |x|", c.label).into())
+        });
+    }
+
+    /// The header label `column()` paints for plan column `col`.
+    fn header_label(&self, col: usize) -> Option<&SharedString> {
+        let c = self.model.columns.get(col)?;
+        match (&self.sort, &self.abs_label) {
+            (Some(s), Some(label)) if s.column == c.name => Some(label),
+            _ => Some(&c.label),
+        }
     }
 
     /// The plan column behind table column `col_ix`; `None` is the tree.
@@ -1019,11 +1046,8 @@ impl TableDelegate for SheetDelegate {
             };
         };
         let own = self.sort.filter(|s| s.column == c.name);
-        // gpui-component's header arrow only knows a direction, so an
-        // absolute sort says so in the label, as the blotter's does:
-        // `npv |x|`.
-        let name = match own {
-            Some(s) if s.order.absolute() => format!("{} |x|", c.label).into(),
+        let name = match (own, &self.abs_label) {
+            (Some(_), Some(label)) => label.clone(),
             _ => c.label.clone(),
         };
         Column {
@@ -1661,6 +1685,9 @@ mod width_tests {
             // A header also carries the sort toggle: `Icon::size_3`
             // (0.75rem) inside the toggle's `p(px(2.))`.
             let toggle = 0.75 * FontSize::Large.rem_px() + 4.0;
+            // Not ` |x|`: an absolute sort is transient, and widening
+            // fifteen measure defaults for it would cost every view; the
+            // label ellipsizes then, and `:autosize` measures the suffix.
             for (text, extra) in [(c.label.to_string(), toggle), (worst_case(c), 0.0)] {
                 let need = text.chars().count() as f32 * advance + padding + extra;
                 if need > c.default_width {

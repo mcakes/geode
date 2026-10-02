@@ -115,7 +115,16 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   children (`GridIndex::build`, `find_targets`, `/`, `node_rows`) follows the
   ranked order; anything that needs sheet order reads the sheet or
   `legs_under`, which sorts its output. Under a sort a move and a counted
-  `g p` refuse (`MOVE_SORTED`, `PACKAGE_SORTED`), as under a value grouping.
+  `g p` refuse (`MOVE_SORTED`, `PACKAGE_SORTED`), as under a value grouping;
+  `g p` over a `V` range apart in the sheet says `GROUP_SORTED`.
+- A selection spans painted rows, so the order must not move under it:
+  `start_selection` takes `held_order` (`sort::painted_order`) under a sort,
+  every rebuild while the selection lives `sort::hold`s the ranked rollup
+  back to it, and the first `sync_cursor` after the selection ends rebuilds
+  in ranked order (the rebuild drops `held_order`). A sort change ends a
+  live selection first (`SORT_CLEARED_SELECTION`). The header's ` |x|`
+  label is prepared by `SheetDelegate::set_sort`, never in render, and
+  `:autosize` measures it.
 - Yanks keep painted order: `y y` and the `V` rows dedupe in the order
   first met (`select::first_seen`), not by sheet row.
 - A line never vanishes into a closed group: an insert, put, undo or redo

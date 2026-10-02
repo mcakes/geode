@@ -137,7 +137,7 @@ pub(crate) fn groups(
 
 /// The groups of `legs` (some or all of one package's legs, in sheet
 /// order) for `kind`.
-fn groups_over(
+pub(crate) fn groups_over(
     sheet: &Sheet,
     rows: &[usize],
     kind: ColumnKind,

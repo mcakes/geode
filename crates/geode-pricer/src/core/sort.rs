@@ -20,14 +20,18 @@
 //! entities.
 
 use crate::core::columns::{ColumnKind, column};
-use crate::core::package::{aggregates, package_qty};
+use crate::core::package::{aggregates, groups_over, package_qty};
 use crate::core::rollup::{NodeKind, Rollup, legs_under};
-use crate::core::sheet::{LineState, RowKind, Sheet};
+use crate::core::sheet::{LineId, LineState, RowKind, Sheet};
 use crate::core::shorthand::render_barrier_kind;
+use crate::core::views::ColumnPlan;
 use chrono::NaiveDate;
+use geode_core::expansion::Path;
 use geode_core::pricing::{Expiry, Instrument, OptionKind, PriceResult, Strike};
 use geode_core::sort::SortOrder;
+use geode_core::view::ColumnFormat;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 /// The tile's sort: a vocabulary column by name — not by plan position,
 /// which a column move or a hidden column would retarget — and its order.
@@ -58,6 +62,9 @@ enum Part {
     /// length in days, then its text.
     Tenor(u32, String),
     Text(String),
+    /// A package shift cell's `—` part: legs that set no shift beside
+    /// legs that do, after every value at its painted position.
+    Unset,
 }
 
 impl Part {
@@ -68,6 +75,7 @@ impl Part {
             Part::Date(_) => 2,
             Part::Tenor(..) => 3,
             Part::Text(_) => 4,
+            Part::Unset => 5,
         }
     }
 
@@ -161,7 +169,11 @@ fn priced_key(
             (LineState::Failed(_), _) => Key::Mixed,
             (_, None) => Key::Blank,
             (_, Some(r)) if !usd && r.currency.is_mixed() => Key::Mixed,
-            (_, Some(r)) => Key::one(number(r.get(measure, usd))),
+            // A NaN result paints `NaN`: no value, but not a blank either.
+            (_, Some(r)) => match number(r.get(measure, usd)) {
+                Some(p) => Key::Values(vec![p]),
+                None => Key::Mixed,
+            },
         },
         ColumnKind::PricedAt => Key::one(priced_at.map(|t| Part::Num(t.timestamp_millis() as f64))),
         ColumnKind::Status => Key::one(match state {
@@ -257,8 +269,17 @@ fn leaf_key(sheet: &Sheet, row: usize, kind: ColumnKind) -> Key {
     }
 }
 
-/// Package `row`'s cell over `legs`, the legs its node holds.
-fn package_key(sheet: &Sheet, row: usize, legs: &[usize], partial: bool, kind: ColumnKind) -> Key {
+/// Package `row`'s cell over `legs`, the legs its node holds. `format`
+/// is the planned column's: a shift cell groups its legs by their
+/// spelled value, so the key must group them the same way.
+fn package_key(
+    sheet: &Sheet,
+    row: usize,
+    legs: &[usize],
+    partial: bool,
+    kind: ColumnKind,
+    format: &ColumnFormat,
+) -> Key {
     if priced(kind) {
         if partial {
             let f = sheet.fold_legs(legs.iter().copied());
@@ -279,6 +300,27 @@ fn package_key(sheet: &Sheet, row: usize, legs: &[usize], partial: bool, kind: C
         && let Some((q, _)) = package_qty(sheet, row)
     {
         return Key::one(Some(Part::Num(q as f64)));
+    }
+    if matches!(kind, ColumnKind::SpotShift | ColumnKind::VolShift) {
+        // The parts the cell paints: groups by spelled value in leg
+        // order, an unset group `—` where it falls.
+        let groups = groups_over(sheet, legs, kind, format);
+        if groups.iter().all(|g| g.display.is_empty()) {
+            return Key::Blank;
+        }
+        return Key::Values(
+            groups
+                .iter()
+                .map(|g| match g.display.is_empty() {
+                    true => Part::Unset,
+                    false => g
+                        .legs
+                        .first()
+                        .and_then(|&leg| line_part(sheet, leg, kind))
+                        .unwrap_or(Part::Unset),
+                })
+                .collect(),
+        );
     }
     if aggregates(kind) {
         // Distinct values in leg order: the parts the cell joins.
@@ -342,11 +384,17 @@ fn group_key(sheet: &Sheet, legs: &[usize], kind: ColumnKind) -> Key {
 }
 
 /// Rank every sibling set of `rollup` by `spec` (see the module doc). A
-/// column the vocabulary lacks leaves the rollup as built.
-pub fn rank(rollup: &mut Rollup, sheet: &Sheet, spec: &SortSpec) {
+/// column the vocabulary lacks leaves the rollup as built. `plan` gives
+/// the column's painted format (its default when the plan lacks it).
+pub fn rank(rollup: &mut Rollup, sheet: &Sheet, spec: &SortSpec, plan: &ColumnPlan) {
     let Some(def) = column(spec.column) else {
         return;
     };
+    let format = plan
+        .columns
+        .iter()
+        .find(|c| c.def.name == def.name)
+        .map_or(&def.default_format, |c| &c.format);
     let kind = def.kind;
     let desc = spec.order.descending();
     let abs = is_measure(kind) && spec.order.absolute();
@@ -370,7 +418,7 @@ pub fn rank(rollup: &mut Rollup, sheet: &Sheet, spec: &SortSpec) {
             NodeKind::Group { .. } => group_key(sheet, &legs_under(rollup, id), kind),
             NodeKind::Package {
                 row, legs, partial, ..
-            } => package_key(sheet, *row, legs, *partial, kind),
+            } => package_key(sheet, *row, legs, *partial, kind, format),
             NodeKind::Leaf { row } => leaf_key(sheet, *row, kind),
         };
         keys[id] = Some(key);
@@ -384,6 +432,60 @@ pub fn rank(rollup: &mut Rollup, sheet: &Sheet, spec: &SortSpec) {
     for n in 0..rollup.nodes.len() {
         if matches!(rollup.nodes[n].kind, NodeKind::Group { .. }) {
             rollup.nodes[n].children.sort_by(by_key);
+        }
+    }
+}
+
+/// A rollup node by identity: a group by its path, a package or line by
+/// its line id and enclosing path (a split package is held once per
+/// node). Line ids survive edits that shift sheet rows.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NodeKey {
+    Group(Path),
+    Line(LineId, Path),
+}
+
+fn node_key(rollup: &Rollup, sheet: &Sheet, id: usize) -> NodeKey {
+    let n = &rollup.nodes[id];
+    match n.kind {
+        NodeKind::Group { .. } => NodeKey::Group(n.path.clone()),
+        NodeKind::Package { row, .. } | NodeKind::Leaf { row } => {
+            NodeKey::Line(sheet.id(row), n.path.clone())
+        }
+    }
+}
+
+/// Every node's position in `rollup`'s painted order, for [`hold`]: taken
+/// when a selection starts under a sort, so the rows it spans keep their
+/// places while it lives.
+pub fn painted_order(rollup: &Rollup, sheet: &Sheet) -> HashMap<NodeKey, usize> {
+    let mut out = HashMap::with_capacity(rollup.nodes.len());
+    let mut stack: Vec<usize> = rollup.roots.iter().rev().copied().collect();
+    while let Some(id) = stack.pop() {
+        out.insert(node_key(rollup, sheet, id), out.len());
+        stack.extend(rollup.nodes[id].children.iter().rev());
+    }
+    out
+}
+
+/// Re-order `rollup` (already [`rank`]ed) back to the `held` painted order:
+/// each sibling set by its nodes' held positions, stable, a node `held`
+/// lacks (a line added since) after the held ones in ranked order. A
+/// live selection spans painted rows between its ends, so re-ranking
+/// under it would carry lines it never covered into its range.
+pub fn hold(rollup: &mut Rollup, sheet: &Sheet, held: &HashMap<NodeKey, usize>) {
+    let at: Vec<usize> = (0..rollup.nodes.len())
+        .map(|id| {
+            held.get(&node_key(rollup, sheet, id))
+                .copied()
+                .unwrap_or(usize::MAX)
+        })
+        .collect();
+    let by_held = |a: &usize, b: &usize| at[*a].cmp(&at[*b]);
+    rollup.roots.sort_by(by_held);
+    for n in 0..rollup.nodes.len() {
+        if matches!(rollup.nodes[n].kind, NodeKind::Group { .. }) {
+            rollup.nodes[n].children.sort_by(by_held);
         }
     }
 }
@@ -429,6 +531,10 @@ mod tests {
         )
     }
 
+    fn plan() -> ColumnPlan {
+        ColumnPlan::build(crate::core::Views::builtin().get("vanilla").unwrap())
+    }
+
     fn spec(column: &'static str, order: SortOrder) -> SortSpec {
         SortSpec { column, order }
     }
@@ -457,7 +563,7 @@ mod tests {
 
     fn ranked(s: &Sheet, chain: &[&str], spec: SortSpec) -> Vec<String> {
         let mut r = tree(s, chain);
-        rank(&mut r, s, &spec);
+        rank(&mut r, s, &spec, &plan());
         order(s, &r)
     }
 
@@ -663,7 +769,7 @@ mod tests {
         vis = crate::core::visibility::apply_scope(&s, &scope, &dims, Clock::utc()).unwrap_or(vis);
         assert!(vis.is_partial(&s, 0), "precondition: leg 2 hidden");
         let mut r = rollup::build(&s, &vis, &effective_chain(&[], &dims), &dims, Clock::utc());
-        rank(&mut r, &s, &spec("npv", SortOrder::Desc));
+        rank(&mut r, &s, &spec("npv", SortOrder::Desc), &plan());
         assert_eq!(
             order(&s, &r)[0],
             "SPX Z26 4800/5200 CS",
@@ -694,13 +800,89 @@ mod tests {
         let before: Vec<String> = (0..s.len()).map(|r| s.shorthand(r)).collect();
         let built = tree(&s, &[]);
         let mut r = built.clone();
-        rank(&mut r, &s, &spec("nonesuch", SortOrder::Desc));
+        rank(&mut r, &s, &spec("nonesuch", SortOrder::Desc), &plan());
         assert_eq!(r, built);
-        rank(&mut r, &s, &spec("npv", SortOrder::Desc));
+        rank(&mut r, &s, &spec("npv", SortOrder::Desc), &plan());
         assert_ne!(r, built);
         assert_eq!(
             before,
             (0..s.len()).map(|r| s.shorthand(r)).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn a_nan_result_ranks_with_the_gaps_not_the_blanks() {
+        let mut s = sheet(&["SPX Z26 3000 C", "SPX Z26 2000 C", "SPX Z26 1000 C"]);
+        // Row 0 unpriced (blank), row 1 NaN, row 2 a value.
+        price(&mut s, &[(1, f64::NAN), (2, 1.0)]);
+        for order in [SortOrder::Asc, SortOrder::Desc] {
+            assert_eq!(
+                ranked(&s, &[], spec("npv", order)),
+                vec!["SPX Z26 1000 C", "SPX Z26 2000 C", "SPX Z26 3000 C"],
+                "{order:?}: the value, the NaN, then the blank"
+            );
+        }
+    }
+
+    #[test]
+    fn a_package_shift_keys_its_painted_parts_unset_included() {
+        let mut s = sheet(&["SPX Z26 4800/5200 CS", "SPX Z26 4000 C"]);
+        // The package paints `+2.0/—`; the line `+2.0`.
+        let set = |s: &mut Sheet, row: usize| {
+            s.apply(crate::core::Edit::SetShift {
+                row,
+                shift: crate::core::OwnShifts {
+                    spot_pct: Some(2.0),
+                    vol_pts: None,
+                },
+            })
+            .unwrap();
+        };
+        set(&mut s, 1);
+        set(&mut s, 3);
+        assert_eq!(
+            ranked(&s, &[], spec("spot_shift", SortOrder::Asc))[0],
+            "SPX Z26 4000 C",
+            "+2.0 before +2.0/—: the unset part is part of the key"
+        );
+        // Two legs spelling one value are one part, as the cell paints.
+        let mut t = sheet(&["SPX Z26 4800/5200 CS", "SPX Z26 4000 C"]);
+        for (row, v) in [(1, 2.04), (2, 2.0), (3, 2.02)] {
+            t.apply(crate::core::Edit::SetShift {
+                row,
+                shift: crate::core::OwnShifts {
+                    spot_pct: Some(v),
+                    vol_pts: None,
+                },
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            ranked(&t, &[], spec("spot_shift", SortOrder::Desc)),
+            vec![
+                "SPX Z26 4800/5200 CS",
+                "SPX Z26 4800 C",
+                "-1 SPX Z26 5200 C",
+                "SPX Z26 4000 C"
+            ],
+            "the package's `+2.0` (2.04 and 2.0) ties the line's 2.02 \
+             as painted, and the tie keeps sheet order"
+        );
+    }
+
+    #[test]
+    fn hold_keeps_the_painted_order_it_was_taken_from() {
+        let mut s = sheet(&["SPX Z26 1 C", "SPX Z26 2 C", "SPX Z26 3 C"]);
+        price(&mut s, &[(0, 10.0), (1, 30.0), (2, 20.0)]);
+        let desc = spec("npv", SortOrder::Desc);
+        let mut r = tree(&s, &[]);
+        rank(&mut r, &s, &desc, &plan());
+        let held = painted_order(&r, &s);
+        price(&mut s, &[(0, 25.0)]);
+        let mut fresh = tree(&s, &[]);
+        rank(&mut fresh, &s, &desc, &plan());
+        assert_eq!(order(&s, &fresh)[1], "SPX Z26 1 C", "fixture: it re-ranks");
+        hold(&mut fresh, &s, &held);
+        assert_eq!(order(&s, &fresh), order(&s, &r), "held as it was painted");
     }
 }

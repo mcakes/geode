@@ -28756,8 +28756,8 @@ run_mutation "pricer sort: the tree column's hook sorts a column" \
 
 run_mutation "pricer sort: an absolute order's label does not say so" \
   crates/geode-pricer/src/delegate.rs \
-  '            Some(s) if s.order.absolute() => format!("{} |x|", c.label).into(),' \
-  '            Some(s) if false => format!("{} |x|", c.label).into(),' \
+  '        self.abs_label = sort.filter(|s| s.order.absolute()).and_then(|s| {' \
+  '        self.abs_label = sort.filter(|_| false).and_then(|s| {' \
   geode-pricer s_and_shift_s_from_the_keymap_cycle_the_cursor_column
 
 run_mutation "pricer sort: s is unbound in normal mode" \
@@ -28795,6 +28795,59 @@ run_mutation "pricer sort: the / header drops the toggle's width" \
   '                            .pr(window.rem_size() * 0.75 + gpui::px(4.))' \
   '                            .pr(gpui::px(0.))' \
   geode-pricer fzf_keeps_native_header_columns_and_restores_tree
+
+# A live selection spans painted rows: the order holds under it (from
+# its start), the deferred re-rank applies when it ends, and a sort
+# change ends it first. NaN ranks with the gaps; a shift package keys
+# its painted parts; g p over rows apart in the sheet names the sort;
+# autosize measures the `|x|` label.
+run_mutation "pricer sort: a tick re-ranks under a live selection" \
+  crates/geode-pricer/src/tile.rs \
+  $'            if self.selection.is_some()\n                && let Some(held) = &self.held_order' \
+  $'            if false\n                && let Some(held) = &self.held_order' \
+  geode-pricer a_price_tick_under_a_selection_holds_the_order_until_the_selection_ends
+
+run_mutation "pricer sort: a selection takes no held order" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'                if self.sort.is_some() {\n                    self.held_order' \
+  $'                if false {\n                    self.held_order' \
+  geode-pricer a_price_tick_under_a_selection_holds_the_order_until_the_selection_ends
+
+run_mutation "pricer sort: the deferred re-rank never applies" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.held_order.is_some() && self.selection.is_none() {' \
+  '        if false {' \
+  geode-pricer a_price_tick_under_a_selection_holds_the_order_until_the_selection_ends
+
+run_mutation "pricer sort: a sort change keeps the live selection" \
+  crates/geode-pricer/src/tile.rs \
+  $'        if self.selection.is_some() {\n            self.clear_selection();\n            self.footer = Some(SORT_CLEARED_SELECTION.into());' \
+  $'        if false {\n            self.clear_selection();\n            self.footer = Some(SORT_CLEARED_SELECTION.into());' \
+  geode-pricer a_sort_change_clears_a_live_selection_and_says_why
+
+run_mutation "pricer sort: a NaN result ranks as a blank" \
+  crates/geode-pricer/src/core/sort.rs \
+  '                None => Key::Mixed,' \
+  '                None => Key::Blank,' \
+  geode-pricer a_nan_result_ranks_with_the_gaps_not_the_blanks
+
+run_mutation "pricer sort: a shift package keys distinct numbers" \
+  crates/geode-pricer/src/core/sort.rs \
+  '    if matches!(kind, ColumnKind::SpotShift | ColumnKind::VolShift) {' \
+  '    if false {' \
+  geode-pricer a_package_shift_keys_its_painted_parts_unset_included
+
+run_mutation "pricer sort: g p over rows apart says not contiguous" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                Some(_) if why == NOT_CONTIGUOUS => GROUP_SORTED,' \
+  '                Some(_) if false => GROUP_SORTED,' \
+  geode-pricer g_p_over_rows_apart_in_the_sheet_names_the_sort
+
+run_mutation "pricer sort: autosize ignores the |x| label" \
+  crates/geode-pricer/src/delegate.rs \
+  '            let label = self.header_label(col).unwrap_or(&c.label);' \
+  '            let label = &c.label;' \
+  geode-pricer autosize_fits_an_absolute_sorts_label
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

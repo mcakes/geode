@@ -1739,21 +1739,32 @@ are typed, never the formatted text: numbers compare as numbers, an expiry
 as a date (a tenor, which the pricer never resolves, after every date by its
 nominal length), a strike by number (percent strikes after absolute ones),
 text by byte order. A package whose legs disagree compares by its distinct
-values in leg order, the parts its cell joins with `/`. Values come first,
-then cells with no single value (`mixed`, a failed line's `—`, a local
-figure over unlike currencies), then blanks such as an unpriced line, in
-both directions; ties keep sheet order.
+values in leg order, the parts its cell joins with `/`; a shift cell's parts
+are its painted ones, legs that spell alike as one part and an unset group's
+`—` at its place, after any value. Values come first, then cells with no
+single value (`mixed`, a failed line's `—`, a local figure over unlike
+currencies, a `NaN` result), then blanks such as an unpriced line, in both
+directions; ties keep sheet order.
 
 Prices re-rank a measure sort live: a delivery that changes the order moves
-the rows, the cursor and a live selection staying on their lines, and one
-that leaves the order alone refills only the window. With no sort, a price
-delivery does no ranking work.
+the rows, the cursor staying on its line, and one that leaves the order
+alone refills only the window. With no sort, a price delivery does no
+ranking work. While a `V` or `v` selection is live the order freezes
+instead: a selection spans the painted rows between its ends, so a line
+re-ranked into that range would join it unasked (and `d` would delete it).
+Values refill in place, and the order the ticks earned applies when the
+selection ends (`escape`, a verb that consumes it, a click that clears it).
+A sort change (`s`, `shift+s`, a header click, `:sort`) with a live
+selection ends the selection first, with `selection cleared: the sort
+reordered its rows` in the footer.
 
 The verbs that read sheet adjacency refuse while a sort applies:
 `shift+j`/`shift+k` (and a `V` move) with `lines move in sheet order: :sort
 clear first`, and a counted `g p` (or `:package n`) with `a counted g p
-packages in sheet order: :sort clear first`. A plain `g p` and `g p` under
-`V` still package as usual. `o`, `shift+o`, `p` and `shift+p` still insert
+packages in sheet order: :sort clear first`. A plain `g p` still packages
+its line, and `g p` under `V` packages rows that are contiguous in the
+sheet; rows adjacent only on screen refuse with `the selected lines are
+apart in sheet order: :sort clear first`. `o`, `shift+o`, `p` and `shift+p` still insert
 beside the cursor's line in sheet order; the new line paints where it sorts,
 and the cursor follows it there. Find (`/`, `n`, `N`), line numbers and
 selections follow the painted order, and `y y` and `V y` copy and remember
@@ -1762,7 +1773,9 @@ rows in the order the screen shows them.
 Known limitations: the sort icon's arrow is the component's own, and is
 re-read from the tile after every click, but has not been checked on a real
 display; the `/` result header paints no sort icon (it reserves the icon's
-width so labels keep their places).
+width so labels keep their places); an absolute sort's ` |x|` suffix is not
+counted in the default widths, so a long measure label can ellipsize under
+one until `:autosize`, which measures it.
 
 ### Selection
 

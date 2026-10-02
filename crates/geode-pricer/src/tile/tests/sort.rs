@@ -381,11 +381,10 @@ fn a_price_refresh_re_ranks_a_measure_sort_and_the_cursor_stays_on_its_line(
         h.tree(&vcx),
         vec!["SPX Z26 2 C", "SPX Z26 3 C", "SPX Z26 1 C"]
     );
-    // The cursor and a `V` selection on line 3, painted second.
+    // The cursor on line 3, painted second.
     h.motion(&mut vcx, "top", None);
     h.motion(&mut vcx, "down", None);
     assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 3 C"));
-    h.dispatch(&mut vcx, "visual_rows", None);
 
     // The same prices again: the order stands and nothing rebuilds.
     h.dispatch(&mut vcx, "price", None);
@@ -413,13 +412,6 @@ fn a_price_refresh_re_ranks_a_measure_sort_and_the_cursor_stays_on_its_line(
         "the cursor rode its line to the top"
     );
     assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(0));
-    assert_eq!(
-        h.tile
-            .read_with(&vcx, |t, _| t.resolved.as_ref().map(|r| r.rows.clone())),
-        Some(0..1),
-        "the selection stayed on its line"
-    );
-    h.dispatch(&mut vcx, "escape", None);
     assert_eq!(
         h.cell(&vcx, 0, "npv"),
         "50.00",
@@ -492,4 +484,127 @@ fn a_sort_ranks_groups_by_their_folded_value(cx: &mut gpui::TestAppContext) {
             order: SortOrder::Desc
         })
     );
+}
+
+fn selected_rows(h: &Harness, vcx: &VisualTestContext) -> Option<std::ops::Range<usize>> {
+    h.tile
+        .read_with(vcx, |t, _| t.resolved.as_ref().map(|r| r.rows.clone()))
+}
+
+/// The review's probe: lines priced 10/30/20 under `npv desc`, `V` over
+/// the top two rows, then line 1 reprices to 25 — between them. Ranked
+/// live, the range would widen over it and `d` would delete it. The order
+/// holds while the selection lives, and the tick's order applies when it
+/// ends.
+#[gpui::test]
+fn a_price_tick_under_a_selection_holds_the_order_until_the_selection_ends(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 1 C", "SPX Z26 2 C", "SPX Z26 3 C"]);
+    let first = |s: &str| match s {
+        "SPX Z26 1 C" => 10.0,
+        "SPX Z26 2 C" => 30.0,
+        _ => 20.0,
+    };
+    answer_by(&h, &mut vcx, first);
+    h.command(&mut vcx, "sort npv desc").unwrap();
+    let held = vec!["SPX Z26 2 C", "SPX Z26 3 C", "SPX Z26 1 C"];
+    assert_eq!(h.tree(&vcx), held);
+    h.motion(&mut vcx, "top", None);
+    press(&h, &mut vcx, "shift+v");
+    h.motion(&mut vcx, "down", None);
+    assert_eq!(selected_rows(&h, &vcx), Some(0..2));
+
+    h.dispatch(&mut vcx, "price", None);
+    answer_by(&h, &mut vcx, |s| {
+        if s == "SPX Z26 1 C" { 25.0 } else { first(s) }
+    });
+    assert_eq!(h.tree(&vcx), held, "the order holds under the selection");
+    assert_eq!(
+        selected_rows(&h, &vcx),
+        Some(0..2),
+        "the range did not widen"
+    );
+    assert_eq!(h.cell(&vcx, 2, "npv"), "25.00", "values refill in place");
+
+    h.dispatch(&mut vcx, "delete", None);
+    assert_eq!(
+        sheet_order(&h, &vcx),
+        vec!["SPX Z26 1 C"],
+        "d removed exactly the two selected lines"
+    );
+
+    // Again, ended by escape: the deferred order applies then.
+    h.dispatch(&mut vcx, "undo", None);
+    h.dispatch(&mut vcx, "price", None);
+    answer_by(&h, &mut vcx, first);
+    assert_eq!(h.tree(&vcx), held);
+    h.motion(&mut vcx, "top", None);
+    press(&h, &mut vcx, "shift+v");
+    h.motion(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "price", None);
+    answer_by(&h, &mut vcx, |s| {
+        if s == "SPX Z26 1 C" { 25.0 } else { first(s) }
+    });
+    assert_eq!(h.tree(&vcx), held);
+    press(&h, &mut vcx, "escape");
+    assert_eq!(
+        h.tree(&vcx),
+        vec!["SPX Z26 2 C", "SPX Z26 1 C", "SPX Z26 3 C"],
+        "the tick's order applies once the selection ends"
+    );
+}
+
+/// A sort change with a live selection ends it first and says so: a
+/// header click, and `:sort`.
+#[gpui::test]
+fn a_sort_change_clears_a_live_selection_and_says_why(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &LINES);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "down", None);
+    assert!(selected_rows(&h, &vcx).is_some());
+    click_sort_icon(&h, &mut vcx, STRIKE + 1);
+    assert_eq!(sort(&h, &vcx), Some(("strike", SortOrder::Desc)));
+    assert_eq!(selected_rows(&h, &vcx), None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some(SORT_CLEARED_SELECTION));
+
+    press(&h, &mut vcx, "shift+v");
+    h.motion(&mut vcx, "down", None);
+    assert!(selected_rows(&h, &vcx).is_some());
+    h.command(&mut vcx, "sort npv").unwrap();
+    assert_eq!(selected_rows(&h, &vcx), None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some(SORT_CLEARED_SELECTION));
+}
+
+/// `g p` over rows adjacent on screen but apart in the sheet names the
+/// sort, as the other sheet-order refusals do.
+#[gpui::test]
+fn g_p_over_rows_apart_in_the_sheet_names_the_sort(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 3 C", "SPX Z26 1 C", "SPX Z26 2 C"]);
+    h.command(&mut vcx, "sort strike").unwrap();
+    // Painted 1, 2, 3: rows 0..2 are sheet rows 1 and 2 — contiguous.
+    // Rows 1..3 are sheet rows 2 and 0 — apart.
+    h.motion(&mut vcx, "top", None);
+    h.motion(&mut vcx, "down", None);
+    press(&h, &mut vcx, "shift+v");
+    h.motion(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "group", None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some(GROUP_SORTED));
+    assert_eq!(h.sheet_len(&vcx), 3, "nothing packaged");
+}
+
+/// Autosize fits the label as painted: `|x|` under an absolute sort.
+#[gpui::test]
+fn autosize_fits_an_absolute_sorts_label(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &LINES);
+    let width = |h: &Harness, vcx: &mut VisualTestContext| {
+        h.command(vcx, "autosize").unwrap();
+        h.tile.read_with(vcx, |t, cx| {
+            t.table.read(cx).delegate().fitted.get("npv").copied()
+        })
+    };
+    let plain = width(&h, &mut vcx).expect("fitted");
+    h.command(&mut vcx, "sort npv abs").unwrap();
+    let abs = width(&h, &mut vcx).expect("fitted");
+    assert!(abs > plain, "{abs} > {plain}: the suffix is measured");
 }
