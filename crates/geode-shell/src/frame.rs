@@ -384,7 +384,10 @@ impl Frame {
     /// Follow a link group, or the workspace again with `None`. Advances
     /// the generation (the session writer's dirty signal) when it changes
     /// something; the tile's next `versions()` differs in `scope`, which is
-    /// what makes it requery.
+    /// what makes it requery. The one exception is a lane and a group that
+    /// both hold the empty scope at generation zero (neither was ever
+    /// written): equal content under an equal number, so nothing requeries
+    /// and nothing needs to.
     pub fn follow(&mut self, tile: TileId, group: Option<Group>) -> bool {
         let changed = self.links.follow(tile, group);
         if changed {
@@ -447,13 +450,19 @@ impl Frame {
     }
 
     /// Watch one group's board for a dataset, or one document key (or key
-    /// prefix) in it. Registration does not notify. Board reads ignore
-    /// as-of: a draft is now.
+    /// prefix) in it. `key` is the joined key, as
+    /// `geode_core::document::join_key` builds it from the key's parts, or
+    /// a prefix of it ending at a part boundary; [`Self::board_entry`]
+    /// takes the parts themselves. Registration does not notify. Board
+    /// reads ignore as-of: a draft is now.
     pub fn watch_board(&mut self, group: Group, dataset: &str, key: Option<&str>) -> BoardWatch {
         self.links.watch(group, dataset, key)
     }
 
     /// The draft on `group`'s board for this dataset and document key.
+    /// `key` is the key's parts, every one of them: not the joined string
+    /// [`Self::watch_board`] takes (`geode_core::document::join_key`), and
+    /// never a prefix.
     pub fn board_entry(
         &self,
         group: Group,
@@ -724,8 +733,9 @@ impl Frame {
         }
     }
 
-    /// Replace the barrier with these keys, each under its own identity. An
-    /// empty set clears it without bumping flip. No version changes or
+    /// Replace the barrier with these keys, each under its own identity. A
+    /// key listed twice keeps the last identity given for it. An empty set
+    /// clears the barrier without bumping flip. No version changes or
     /// notifications are emitted here.
     pub fn open_flip_each(
         &mut self,
@@ -799,6 +809,15 @@ impl<'a> FrameView<'a> {
     /// The link group this view's tile follows, if any.
     pub fn following(&self) -> Option<Group> {
         self.group.map(|(g, _)| g)
+    }
+
+    /// This view with no group: the workspace lane's own scope and scope
+    /// generation, which is what the scope bar shows.
+    fn lane_view(&self) -> FrameView<'a> {
+        FrameView {
+            group: None,
+            ..*self
+        }
     }
 
     /// A follower's `scope` is its group's generation, so a lane scope
@@ -877,8 +896,9 @@ impl<'a> FrameView<'a> {
     /// The caller supplies cached time inputs; this method reads no global clock.
     ///
     /// The bar shows the workspace, so this is asked of a workspace's view
-    /// only: a follower's view would describe its group's scope under the
-    /// workspace's controls.
+    /// only, and the model is built from the lane whatever the view
+    /// follows: a model built from a follower's view would describe its
+    /// group's scope under the workspace's controls.
     pub fn bar_model(
         &self,
         clock: geode_core::clock::Clock,
@@ -888,11 +908,12 @@ impl<'a> FrameView<'a> {
             self.group.is_none(),
             "the scope bar model was asked of a view that follows a link group"
         );
+        let lane = self.lane_view();
         // `flip` alone never changes what the bar shows — keyed out here
         // (rather than relying on it happening to already match) so a
         // flip costs a refcount bump like any other unrelated notify,
         // not a rebuild.
-        let mut versions = self.versions();
+        let mut versions = lane.versions();
         versions.flip = 0;
         if let Some((cached_versions, cached_clock, cached_today, cached)) =
             self.frame.bar_cache.borrow().as_ref()
@@ -902,7 +923,7 @@ impl<'a> FrameView<'a> {
         {
             return Rc::clone(cached);
         }
-        let built = Rc::new(scopebar::build_model(self, clock, today));
+        let built = Rc::new(scopebar::build_model(&lane, clock, today));
         *self.frame.bar_cache.borrow_mut() = Some((versions, clock, today, Rc::clone(&built)));
         built
     }
@@ -1087,6 +1108,7 @@ impl<'a> FrameViewMut<'a> {
     /// that base, and the base remains the top undo entry, pop it and restore
     /// the captured redo stack. Otherwise leave history as it stands.
     /// Subsequent edits use ordinary history until another session is opened.
+    /// Edits the workspace lane even through a follower's view.
     pub fn end_scope_session(&mut self) {
         let lane = self.lane();
         if let Some(session) = lane.scope_session.take()
@@ -2626,6 +2648,10 @@ mod tests {
         assert!(!f.follow(tile, Some(Group::A)), "already following A");
         assert_eq!(f.generation(), g1);
         assert!(f.emit(tile, Some(Group::B)));
+        assert!(f.generation() > g1, "an emit that changed something");
+        let g2 = f.generation();
+        assert!(!f.emit(tile, Some(Group::B)), "already emitting into B");
+        assert_eq!(f.generation(), g2);
         assert_eq!(
             f.membership(tile),
             geode_core::link::Membership {
@@ -2665,6 +2691,12 @@ mod tests {
             f.view_mut_for(ws(1), tile)
                 .set_scope(Scope::one("underlying_ref", "SPX.Z"))
         );
+        assert_eq!(
+            f.group_scope(Group::A).sole("underlying_ref"),
+            Some("SPX.Z"),
+            "the write landed in the group"
+        );
+        assert!(f.shared().scope().is_empty(), "and not in the lane");
         let generation = f.view_for(ws(1), tile).versions().scope;
         assert!(
             !f.view_mut_for(ws(1), tile)
@@ -2856,7 +2888,14 @@ mod tests {
         );
 
         f.emit(panel, Some(Group::A));
-        f.post_emission(panel, draft("SPX.Z", &rows));
+        assert!(
+            f.post_emission(panel, draft("SPX.Z", &rows)),
+            "what it posted before it left is new to the group again"
+        );
+        assert!(Arc::ptr_eq(
+            &on_board(&f, Group::A, "SPX.Z").unwrap(),
+            &rows
+        ));
         assert!(f.forget_tile(panel), "closing");
         assert!(on_board(&f, Group::A, "SPX.Z").is_none());
         assert!(f.membership(panel).is_empty());
@@ -3015,5 +3054,137 @@ mod tests {
         );
         assert!(!f.post_emission(tile, scoped("NDX")));
         assert_eq!(f.generation(), generation + 1);
+    }
+
+    /// A repeat of an emitter's last answer is skipped whole, scope
+    /// included. Applied again it would pull the group back to a scope
+    /// another emitter has since replaced, on every notify of the first.
+    #[test]
+    fn a_repeated_emission_does_not_restore_a_scope_another_writer_moved() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let (p1, p2) = (TileId(1), TileId(2));
+        let scoped = |u: &str| Emission {
+            scope: Some(Scope::one("underlying_ref", u)),
+            board: vec![],
+        };
+        f.emit(p1, Some(Group::A));
+        f.emit(p2, Some(Group::A));
+        assert!(f.post_emission(p1, scoped("SPX.Z")));
+        assert!(f.post_emission(p2, scoped("NDX")));
+        let generation = f.generation();
+        assert!(!f.post_emission(p1, scoped("SPX.Z")));
+        assert_eq!(f.group_scope(Group::A).sole("underlying_ref"), Some("NDX"));
+        assert_eq!(f.generation(), generation);
+    }
+
+    /// A follower reads the same scope and versions through its writable
+    /// view as through its reading one: a tile that answers the barrier
+    /// inside an update must not answer under its lane's identity.
+    #[test]
+    fn a_followers_writable_view_reads_what_its_reading_view_does() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_scope(book_scope("b1"));
+        let tile = TileId(7);
+        f.follow(tile, Some(Group::A));
+        f.view_mut_for(ws(1), tile)
+            .set_scope(Scope::one("underlying_ref", "SPX.Z"));
+        let reading = f.view_for(ws(1), tile);
+        let (scope, versions) = (reading.scope().clone(), reading.versions());
+        assert_eq!(scope.sole("underlying_ref"), Some("SPX.Z"));
+
+        let writable = f.view_mut_for(ws(1), tile);
+        assert_eq!(writable.scope(), &scope);
+        assert_eq!(writable.versions(), versions);
+        assert_eq!(writable.view().following(), Some(Group::A));
+    }
+
+    /// The scope bar's model is built from the lane even when the view it
+    /// is asked of follows a group: the bar shows the workspace.
+    #[test]
+    fn a_followers_lane_view_reads_the_lane() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_scope(book_scope("b1"));
+        let tile = TileId(7);
+        f.follow(tile, Some(Group::A));
+        f.view_mut_for(ws(1), tile)
+            .set_scope(Scope::one("underlying_ref", "SPX.Z"));
+        let follower = f.view_for(ws(1), tile);
+        assert_eq!(follower.following(), Some(Group::A));
+        let lane = follower.lane_view();
+        assert_eq!(lane.following(), None);
+        assert_eq!(lane.scope(), &book_scope("b1"));
+        assert_eq!(lane.versions(), f.view(ws(1)).versions());
+    }
+
+    /// A closed emitter whose draft another emitter still posts, as the
+    /// same allocation, leaves the board as it was: no board generation,
+    /// no watch revision.
+    #[test]
+    fn retaining_one_of_two_emitters_sharing_a_draft_leaves_the_board_alone() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let (p1, p2) = (TileId(1), TileId(2));
+        let shared = doc("SPX.Z");
+        f.emit(p1, Some(Group::A));
+        f.emit(p2, Some(Group::A));
+        f.post_emission(p1, draft("SPX.Z", &shared));
+        f.post_emission(p2, draft("SPX.Z", &shared));
+        let watch = f.watch_board(Group::A, "cvi_params", Some("SPX.Z"));
+        let (board, revision) = (f.board_gen(Group::A), watch.revision());
+
+        assert!(f.retain_linked(|t| t == p1));
+        assert!(Arc::ptr_eq(
+            &on_board(&f, Group::A, "SPX.Z").unwrap(),
+            &shared
+        ));
+        assert_eq!(f.board_gen(Group::A), board);
+        assert_eq!(watch.revision(), revision);
+    }
+
+    /// Dropping several tiles re-derives each board once, from what is
+    /// left. Dropped one at a time, a board passes through states it does
+    /// not end in: here the newest post leaving would uncover the middle
+    /// one, which is leaving too, and a watch would fire twice for a board
+    /// that ends holding the allocation it began with.
+    #[test]
+    fn retaining_does_not_pass_a_board_through_a_state_it_does_not_end_in() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        // The newest poster has the lowest id, so a one-at-a-time drop in
+        // id order would uncover the middle post first.
+        let (newest, middle, oldest) = (TileId(1), TileId(2), TileId(3));
+        let (kept, passing) = (doc("SPX.Z"), doc("SPX.Z"));
+        for tile in [newest, middle, oldest] {
+            f.emit(tile, Some(Group::A));
+        }
+        f.post_emission(oldest, draft("SPX.Z", &kept));
+        f.post_emission(middle, draft("SPX.Z", &passing));
+        f.post_emission(newest, draft("SPX.Z", &kept));
+        let watch = f.watch_board(Group::A, "cvi_params", Some("SPX.Z"));
+        let (board, revision) = (f.board_gen(Group::A), watch.revision());
+
+        assert!(f.retain_linked(|t| t == oldest));
+        assert!(Arc::ptr_eq(
+            &on_board(&f, Group::A, "SPX.Z").unwrap(),
+            &kept
+        ));
+        assert_eq!(f.board_gen(Group::A), board);
+        assert_eq!(watch.revision(), revision);
+    }
+
+    /// However many emitters closed, a board that changed counts one
+    /// change: a follower compares the number, and two for one change
+    /// would make it rebuild twice.
+    #[test]
+    fn retaining_rebuilds_a_board_once_however_many_emitters_closed() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let (p1, p2) = (TileId(1), TileId(2));
+        f.emit(p1, Some(Group::A));
+        f.emit(p2, Some(Group::A));
+        f.post_emission(p1, draft("SPX.Z", &doc("SPX.Z")));
+        f.post_emission(p2, draft("NDX", &doc("NDX")));
+        let board = f.board_gen(Group::A);
+        assert!(f.retain_linked(|_| false));
+        assert!(on_board(&f, Group::A, "SPX.Z").is_none());
+        assert!(on_board(&f, Group::A, "NDX").is_none());
+        assert_eq!(f.board_gen(Group::A), board + 1);
     }
 }

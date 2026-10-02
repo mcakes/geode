@@ -22,9 +22,11 @@ use gpui::App;
 
 /// The flip barrier as a following query sees it. [`FrameViewMut`]
 /// implements it directly, for pure tests; [`FrameDoor`] implements it over
-/// the frame entity through a tile's [`FrameRef`]. Both read the versions of
-/// one workspace's lane, so a tile in a pinned workspace answers with its own
-/// lane's counters, never the shared lane's.
+/// the frame entity through a tile's [`FrameRef`]. Both read one tile's
+/// versions: grouping and as-of from its workspace's lane, so a tile in a
+/// pinned workspace never answers with the shared lane's counters, and the
+/// scope generation from the link group it follows, or from that lane when
+/// it follows none.
 pub trait Barrier {
     /// This tile's reading of the frame's counters now. An open barrier
     /// holds each awaited key to the identity its own tile reads: the shell
@@ -52,12 +54,12 @@ impl Barrier for FrameViewMut<'_> {
     }
 }
 
-/// A tile's frame handle as a [`Barrier`]: versions are read from the
-/// tile's own lane through [`FrameRef::read`]. An arrival that releases the
-/// barrier notifies the frame, so every other tile's observer sees the
-/// `flip` bump and promotes what it staged in the same pass; without the
-/// notification they would sit on their stages until an unrelated frame
-/// change.
+/// A tile's frame handle as a [`Barrier`]: versions are the tile's own
+/// reading through [`FrameRef::read`], its lane's with the scope generation
+/// of the link group it follows. An arrival that releases the barrier
+/// notifies the frame, so every other tile's observer sees the `flip` bump
+/// and promotes what it staged in the same pass; without the notification
+/// they would sit on their stages until an unrelated frame change.
 pub struct FrameDoor<'a> {
     frame: &'a FrameRef,
     cx: &'a mut App,
@@ -78,7 +80,7 @@ impl Barrier for FrameDoor<'_> {
     }
     fn arrive(&mut self, key: QueryKey, versions: FrameVersions) -> bool {
         self.frame.update(self.cx, |frame, cx| {
-            // The barrier is frame-wide; only the versions are per lane.
+            // The barrier is frame-wide; only the versions are per tile.
             let released = frame.arrived(key, versions);
             if released {
                 cx.notify();

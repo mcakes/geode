@@ -107,6 +107,8 @@ mod tests {
         assert_eq!(Group::D.letter(), "D");
         assert_eq!(Group::parse("e"), None);
         assert_eq!(Group::parse(""), None);
+        assert_eq!(Group::parse("ab"), None, "a letter, not a prefix");
+        assert_eq!(Group::parse(" a"), None, "and not trimmed");
     }
 
     #[test]
@@ -125,6 +127,10 @@ mod tests {
         let mut other = entry(&shared);
         other.dataset = "dividend_schedule".into();
         assert_ne!(entry(&shared), other);
+        // The same rows under another key are another document.
+        let mut rekeyed = entry(&shared);
+        rekeyed.key = vec!["NDX".into()];
+        assert_ne!(entry(&shared), rekeyed);
     }
 
     #[test]

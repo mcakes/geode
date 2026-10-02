@@ -67,8 +67,10 @@ impl Scope {
     }
 
     /// The single value this scope selects for `column`: `None` when the
-    /// column is unconstrained, selects several values, or the scope is
-    /// impossible. Other dimensions and any expression are not consulted.
+    /// column is unconstrained (no selection, or one with no values),
+    /// selects several values, or the scope is impossible. It reads the
+    /// first selection for `column`; other dimensions, the text filter,
+    /// expressions and named references are not consulted.
     pub fn sole(&self, column: &str) -> Option<&str> {
         if self.impossible {
             return None;
@@ -780,6 +782,18 @@ grain = "underlying"
             two.sole("underlying_ref"),
             None,
             "several values name no single one"
+        );
+        let unconstrained = Scope {
+            dimensions: vec![DimensionSelection {
+                column: "underlying_ref".into(),
+                values: Vec::new(),
+            }],
+            ..Scope::default()
+        };
+        assert_eq!(
+            unconstrained.sole("underlying_ref"),
+            None,
+            "an empty selection is no constraint"
         );
         let impossible = Scope {
             impossible: true,

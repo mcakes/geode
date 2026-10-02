@@ -148,19 +148,31 @@ impl Links {
     }
 
     /// Forget every linked tile `live` rejects. `true` when any was dropped.
+    ///
+    /// Every rejected tile's membership and last emission goes first, then
+    /// each group that lost an emitter is re-derived once. Forgetting them
+    /// one at a time would walk a board through states it does not end in
+    /// (a leaving emitter uncovering another that is leaving too), counting
+    /// a board change and firing watches for each.
     pub(crate) fn retain(&mut self, live: impl Fn(TileId) -> bool) -> bool {
-        let gone: Vec<TileId> = self
-            .following
-            .keys()
-            .chain(self.emitting.keys())
-            .copied()
-            .filter(|tile| !live(*tile))
-            .collect();
-        let mut changed = false;
-        for tile in gone {
-            changed |= self.forget(tile);
+        let before = self.following.len() + self.emitting.len();
+        self.following.retain(|tile, _| live(*tile));
+        let mut lost_an_emitter = [false; 4];
+        let last = &mut self.last;
+        self.emitting.retain(|tile, g| {
+            let keep = live(*tile);
+            if !keep {
+                last.remove(tile);
+                lost_an_emitter[g.index()] = true;
+            }
+            keep
+        });
+        for g in Group::ALL {
+            if lost_an_emitter[g.index()] {
+                self.rebuild_board(g);
+            }
         }
-        changed
+        self.following.len() + self.emitting.len() != before
     }
 
     /// Replace a group's scope, drawing its generation from the frame's
@@ -191,10 +203,14 @@ impl Links {
         if self.last.get(&tile).is_some_and(|(_, e)| *e == emission) {
             return false;
         }
-        let mut changed = false;
-        if let Some(scope) = &emission.scope {
-            changed |= self.set_scope(g, scope.clone(), generation);
-        }
+        // Compared before it is cloned: a draft edited at typing speed posts
+        // a changed board under the scope the group already holds.
+        let changed = match &emission.scope {
+            Some(scope) if self.groups[g.index()].scope != *scope => {
+                self.set_scope(g, scope.clone(), generation)
+            }
+            _ => false,
+        };
         self.seq += 1;
         self.last.insert(tile, (self.seq, emission));
         changed | self.rebuild_board(g)
