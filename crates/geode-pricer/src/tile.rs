@@ -14161,4 +14161,5 @@ pub(crate) mod tests {
     mod grouping;
     mod scope;
     mod selection;
+    mod sort;
 }
