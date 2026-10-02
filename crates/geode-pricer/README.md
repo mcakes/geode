@@ -116,7 +116,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   (`move_refusal`: a sort, a read-only or split mover), so a sort turned on
   mid-drag refuses the drop. A drag that would reshape a live selection
   (its row outside a `V` selection, or any `v` block) ends it at the drag's
-  first move (`ROW_MOVED_SELECTION`). The line shows only at a gap that
+  first move (`ROW_MOVED_SELECTION`) — only when its plan can move rows:
+  a refused drag keeps the selection and its refusal footer (a refusal at
+  re-preparation sets that footer). The line shows only at a gap that
   moves something (`DropPlan::target`). The gap comes from the table's scroll geometry (uniform row
   height), never from render. The grip's click stops propagation, so the
   table's `SelectCell`/`DoubleClickedCell` never see it.

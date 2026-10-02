@@ -27266,6 +27266,18 @@ run_mutation "pricer reorder: a grip click leaves its drag state" \
   '                if false {' \
   geode-pricer a_grip_click_leaves_no_drag
 
+run_mutation "pricer reorder: a refused drag ends the selection" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        let moves = d.plan.is_ok();' \
+  '        let moves = true;' \
+  geode-pricer a_refused_drag_keeps_the_selection_and_its_footer
+
+run_mutation "pricer reorder: a grip press on a package row is a chevron press" \
+  crates/geode-pricer/src/delegate.rs \
+  '                                if d.inner_press != Some(InnerPress::Grip) {' \
+  '                                if true {' \
+  geode-pricer a_refused_drag_keeps_the_selection_and_its_footer
+
 # Session: the pin and the open grouping rows round-trip, held mid-load,
 # NULL apart from the empty string.
 run_mutation "pricer grouping: a restored pin is dropped" \

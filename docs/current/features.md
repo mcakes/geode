@@ -1339,7 +1339,7 @@ with the keys' footer. A drag of any other row while a selection is live
 selection as the drag starts, with `selection cleared: a row moved`: the
 selection spans painted rows, so a row moved into or out of them would
 widen or shift it onto lines nobody picked (a following `d` would delete
-the dragged line). A grip click with no drag keeps it. While the button is held a 2 px line in the theme's
+the dragged line). A grip click with no drag keeps it, and so does a refused drag (the press refused, or a rebuild mid-drag made the move one the keys refuse): it keeps its refusal in the footer and moves nothing. On a package row the grip overlaps the chevron's slot; a press there is the grip's, never a chevron press. While the button is held a 2 px line in the theme's
 drag-border color (the header's column-drop line) marks the nearest legal
 gap: between rows of the same sibling set (the roots, or the package's legs)
 and, under a value grouping, of the same group. Over a package's open legs

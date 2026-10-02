@@ -237,6 +237,12 @@ impl PricerTile {
             self.move_refusal(&m)
                 .map_or_else(|| self.drop_plan(&m), Err)
         });
+        // A drag the rebuild refused says why, as a refused press does.
+        if let Err(why) = plan {
+            self.footer = Some(why.into());
+            self.rebuild_chrome();
+            cx.notify();
+        }
         if let Some(d) = self.row_drag.as_mut() {
             d.plan = plan;
         }
@@ -259,8 +265,11 @@ impl PricerTile {
         };
         d.pointer = Some(at);
         // The first move is the drag's start: a selection the drag would
-        // reshape ends here, not at the press (a grip click keeps it).
-        if std::mem::take(&mut d.ends_selection) && self.selection.is_some() {
+        // reshape ends here, not at the press (a grip click keeps it) —
+        // and only when the drag can move rows: a refused one keeps the
+        // selection and its refusal footer.
+        let moves = d.plan.is_ok();
+        if std::mem::take(&mut d.ends_selection) && moves && self.selection.is_some() {
             self.clear_selection();
             self.footer = Some(ROW_MOVED_SELECTION.into());
             self.sync_cursor(cx);

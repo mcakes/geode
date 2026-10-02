@@ -1399,7 +1399,13 @@ impl SheetDelegate {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, _| {
-                                this.delegate_mut().inner_press = Some(InnerPress::Chevron);
+                                // The grip overlaps the slot's left edge
+                                // and is painted over it: its press,
+                                // recorded first, is the grip's.
+                                let d = this.delegate_mut();
+                                if d.inner_press != Some(InnerPress::Grip) {
+                                    d.inner_press = Some(InnerPress::Chevron);
+                                }
                             }),
                         )
                         .on_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {

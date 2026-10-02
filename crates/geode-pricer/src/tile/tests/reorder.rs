@@ -351,6 +351,48 @@ fn a_sort_mid_drag_refuses_the_drop(cx: &mut gpui::TestAppContext) {
     assert_eq!(roots, FOUR, "sheet order unchanged");
 }
 
+/// A refused drag never ends the selection: a package outside a live `V`
+/// selection, its grip pressed, then partly hidden by the scope before the
+/// drag moves — the drag says why, the selection stays, nothing moves.
+#[gpui::test]
+fn a_refused_drag_keeps_the_selection_and_its_footer(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(
+        cx,
+        &[
+            "SPX Z26 1000 P",
+            "SPX Z26 2000 P",
+            "-5 SPX Z26 4800/5200 CS",
+        ],
+    );
+    h.dispatch(&mut vcx, "expand_all", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    let at = grip(&mut vcx, 2);
+    down(&mut vcx, at, 1);
+    // The grip overlaps the package's chevron slot: its press is still
+    // the grip's, so the selection survives it.
+    assert!(selected(&h, &vcx), "the press keeps the selection");
+    let scope = geode_core::scope::Scope {
+        expression: Some(geode_core::scope::parse_expr("strike != 5200").unwrap()),
+        ..Default::default()
+    };
+    h.frame.update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(scope);
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    held_move(&mut vcx, gpui::point(at.x, at.y + px(6.)));
+    let top = over_row(&mut vcx, 0, false);
+    held_move(&mut vcx, top);
+    assert!(selected(&h, &vcx), "the selection stays");
+    assert_eq!(
+        h.footer(&vcx).as_deref(),
+        Some("package partly hidden by the scope: edit its legs")
+    );
+    assert_eq!(drop_gap(&h, &vcx), None);
+    up(&mut vcx, top, 1);
+    assert_eq!(h.tree(&vcx)[0], "SPX Z26 1000 P", "nothing moved");
+}
+
 /// A grip click with no drag leaves no drag state behind.
 #[gpui::test]
 fn a_grip_click_leaves_no_drag(cx: &mut gpui::TestAppContext) {
