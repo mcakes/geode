@@ -31397,6 +31397,15 @@ run_mutation "blotter find: the row report formats nothing" \
   geode-blotter \
   fzf_formats_only_the_rows_it_paints
 
+# `/`'s headers read the live plan; without the refresh a column move leaves
+# them over cells formatted against the plan `/` was installed with.
+run_mutation "blotter find: a column move leaves / on the old plan" \
+  crates/geode-blotter/src/tile.rs \
+  $'            TableEvent::MoveColumn(..) => {\n                let complete = this.find_complete(cx);\n                this.refresh_fuzzy_find(complete, cx);\n            }' \
+  $'            TableEvent::MoveColumn(..) => {\n                let _ = this.find_complete(cx);\n            }' \
+  geode-blotter \
+  fzf_follows_a_column_move
+
 run_mutation "blotter footer: a fold leaves the rows label" \
   crates/geode-blotter/src/delegate.rs \
   '    if label.0 != n {' \
