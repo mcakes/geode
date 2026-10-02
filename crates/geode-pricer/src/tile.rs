@@ -26,8 +26,8 @@ use crate::core::views::ColumnPlan;
 use crate::core::visibility::{Visibility, apply_scope};
 use crate::core::{Place, RowSpec};
 use crate::delegate::{
-    CellPointer, ChevronClicked, ColumnMoved, DateFieldPaint, EditorField, EditorPaint,
-    SheetDelegate, SortClicked,
+    CellPointer, ChevronClicked, ColumnMoved, DateFieldPaint, EditorField, EditorPaint, RowDrag,
+    RowGripPressed, SheetDelegate, SortClicked,
 };
 use crate::grid::{CellPass, FillSource, GridIndex, GridRowKind};
 use crate::header::{self, HeaderInputs, HeaderModel};
@@ -68,8 +68,8 @@ use geode_tile::notice::Notice;
 use geode_widgets::datefield::{DateTimeField, FieldKey, Precision, Segment, route};
 use gpui::prelude::*;
 use gpui::{
-    AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, SharedString,
-    Task, Window, div,
+    AnyWindowHandle, App, Context, DragMoveEvent, Entity, FocusHandle, Focusable as _,
+    KeyDownEvent, MouseButton, SharedString, Task, Window, div,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{DataTable, TableDelegate as _, TableEvent, TableState};
@@ -715,6 +715,9 @@ pub struct PricerTile {
     /// press's own `DoubleClickedCell` (every press emits `SelectCell`
     /// first, which overwrites it).
     pressed: Option<Option<At>>,
+    /// A grip drag from its press to its drop, cancel or release
+    /// elsewhere (`tile::reorder`).
+    pub(crate) row_drag: Option<reorder::RowDragState>,
     /// The entry bar's underlyings as last read from the factory's
     /// source, and the source revision they were read at (`None`: never
     /// read). Re-read only when the revision moves.
@@ -941,6 +944,10 @@ impl PricerTile {
             |this, _, event: &CellPointer, window, cx| this.pointer(*event, window, cx),
         )
         .detach();
+        cx.subscribe(&table, |this, _, event: &RowGripPressed, cx| {
+            this.grip_pressed(event.0, cx)
+        })
+        .detach();
         // Pricing does not follow frame queries, so there is no result to wait for.
         // The frame's scope applies here, synchronously (a bounded pass over
         // the sheet and one model build), and the tile then arrives at once
@@ -1111,6 +1118,7 @@ impl PricerTile {
             last_press_on_name: false,
             click_anchor: None,
             pressed: None,
+            row_drag: None,
             underlyings: Rc::from([]),
             underlyings_rev: None,
             selection: None,
@@ -3173,6 +3181,11 @@ impl PricerTile {
             return false;
         };
         let n = count.unwrap_or(1).max(1) as usize;
+        // Any verb ends a live grip drag first (its plan would outlive the
+        // edit); `escape` does nothing else.
+        if self.cancel_row_drag(window, cx) && verb == "escape" {
+            return true;
+        }
         self.footer = None;
         // A verb arriving under an armed `:rm` (a palette dispatch; a key
         // never gets here, the prompt consumes it) answers "no" first.
@@ -5036,8 +5049,10 @@ impl PricerTile {
         let colours = self.shared.colours.borrow().clone();
         let src = self.fill_source();
         let sort = self.sort;
+        let grips = self.grip_rows();
         self.table.update(cx, |t, cx| {
             t.delegate_mut().model = model;
+            t.delegate_mut().grips = grips;
             t.delegate_mut().set_sort(sort);
             t.delegate_mut().loading = loading;
             t.delegate_mut().set_colours(colours);
@@ -5051,6 +5066,7 @@ impl PricerTile {
         self.follow_editor(cx);
         self.sync_cursor(cx);
         self.sync_editor(cx);
+        self.refresh_row_drag(cx);
     }
 
     /// Keep an open editor attached to its LineId and ColumnKind across rebuilds.
@@ -5642,6 +5658,17 @@ impl PricerTile {
     }
 
     fn on_table_event(&mut self, event: &TableEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A grip's click and double-click are the grip's: no cursor move,
+        // no selection change, no editor. A drag released back on its own
+        // cell lands here instead of a drop, and so ends.
+        if matches!(
+            event,
+            TableEvent::SelectCell(..) | TableEvent::DoubleClickedCell(..)
+        ) && self.table.read(cx).delegate().grip_pressed
+        {
+            self.row_drag_released_outside(cx);
+            return;
+        }
         match event {
             TableEvent::SelectCell(row, col) => {
                 // A click anywhere cancels an open entry or editor, never
@@ -5832,14 +5859,32 @@ impl gpui::Render for PricerTile {
             .as_ref()
             .and_then(|r| r.upgrade())
             .filter(|r| r.read(cx).is_active());
-        let body = div().flex_1().min_h_0().w_full().child(match &search {
-            Some(results) => results.clone().into_any_element(),
-            None => DataTable::new(&self.table)
-                .with_size(crate::delegate::TABLE_SIZE)
-                .bordered(false)
-                .stripe(false)
-                .into_any_element(),
-        });
+        // The body follows a grip drag (`tile::reorder`): every move of
+        // it re-reads the drop gap, a drop lands it, and a release off the
+        // body ends it with nothing moved.
+        let body = div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .on_drag_move(cx.listener(|this, e: &DragMoveEvent<RowDrag>, _, cx| {
+                let drag = *e.drag(cx);
+                this.row_drag_moved(&drag, e.event.position, cx);
+            }))
+            .on_drop(cx.listener(|this, drag: &RowDrag, window, cx| {
+                this.row_dropped(drag, window, cx);
+            }))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.row_drag_released_outside(cx)),
+            )
+            .child(match &search {
+                Some(results) => results.clone().into_any_element(),
+                None => DataTable::new(&self.table)
+                    .with_size(crate::delegate::TABLE_SIZE)
+                    .bordered(false)
+                    .stripe(false)
+                    .into_any_element(),
+            });
         let bar = self.entry.as_ref().map(|e| {
             header::render_entry_bar(
                 &e.input,
@@ -14221,6 +14266,7 @@ pub(crate) mod tests {
     }
 
     mod grouping;
+    mod reorder;
     mod scope;
     mod selection;
     mod sort;

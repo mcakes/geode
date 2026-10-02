@@ -28,6 +28,8 @@ gpui_kit_assets::icon_assets!(
         // (`SquareDashedMousePointer`, `geode_tile::header`).
         Pencil,
         SquareDashedMousePointer,
+        // A movable pricer row's drag grip (`geode_pricer::delegate`).
+        GripVertical,
     ]
 );
 
