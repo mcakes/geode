@@ -187,12 +187,18 @@ impl Sender {
         } else {
             pending.order.push_back(key.clone());
         }
-        if let DataEvent::Diagnostics(diags) = &mut event {
-            // Match the shell's diagnostic history bound and oldest-first order.
-            let excess = diags
-                .len()
-                .saturating_sub(geode_shell::diagnostics::DATA_DIAGNOSTICS_CAP);
-            diags.drain(..excess);
+        if let DataEvent::Diagnostics(diags) = &mut event
+            && diags.len() > geode_shell::diagnostics::DATA_DIAGNOSTICS_CAP
+        {
+            // The shell's bound and eviction rule: an error queued before a
+            // flood of warnings must reach the ring, not die here.
+            let mut queued: std::collections::VecDeque<_> = std::mem::take(diags).into();
+            geode_shell::diagnostics::trim_keeping_errors(
+                &mut queued,
+                geode_shell::diagnostics::DATA_DIAGNOSTICS_CAP,
+                |d| d.severity == geode_core::config::Severity::Error,
+            );
+            *diags = queued.into();
         }
         let replaced = pending.events.insert(key, event);
         // A full channel already promises a wakeup. The pending state is
@@ -274,6 +280,43 @@ mod tests {
         assert_eq!(diags.len(), geode_shell::diagnostics::DATA_DIAGNOSTICS_CAP);
         assert_eq!(diags.first().unwrap().message, "error 44");
         assert_eq!(diags.last().unwrap().message, "error 299");
+    }
+
+    /// An error queued before more warnings than the bound survives the
+    /// mailbox trim; the warnings lose their oldest, order kept.
+    #[gpui::test]
+    async fn an_error_queued_before_a_flood_of_warnings_survives_the_mailbox() {
+        let diag = |severity, message: String| geode_core::config::Diagnostic {
+            severity,
+            layer: None,
+            file: None,
+            message,
+            path: None,
+        };
+        let (tx, rx) = channel();
+        tx.try_send(DataEvent::Diagnostics(vec![diag(
+            geode_core::config::Severity::Error,
+            "schema drift in 'risk'".into(),
+        )]))
+        .unwrap();
+        for n in 0..300 {
+            tx.try_send(DataEvent::Diagnostics(vec![diag(
+                geode_core::config::Severity::Warning,
+                format!("warning {n}"),
+            )]))
+            .unwrap();
+        }
+        let DataEvent::Diagnostics(diags) = rx.recv().await.unwrap() else {
+            panic!("diagnostics expected")
+        };
+        assert_eq!(diags.len(), geode_shell::diagnostics::DATA_DIAGNOSTICS_CAP);
+        assert_eq!(
+            diags.first().unwrap().message,
+            "schema drift in 'risk'",
+            "the error survives the trim, first in order"
+        );
+        assert_eq!(diags[1].message, "warning 45");
+        assert_eq!(diags.last().unwrap().message, "warning 299");
     }
 
     #[gpui::test]

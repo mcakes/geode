@@ -234,6 +234,38 @@ pub const CONFIG_HISTORY_CAP: usize = 16;
 /// oldest non-error is evicted before any error.
 pub const DATA_DIAGNOSTICS_CAP: usize = 256;
 
+/// Trim `entries` to `cap`, oldest first, so a flood of benign warnings
+/// cannot evict an error (schema drift, a worker failure): the oldest
+/// non-errors go first, and errors go oldest-first only once nothing else is
+/// left. Survivors keep their order. Shared by the data-diagnostics ring and
+/// the app bridge's event mailbox, so an error survives both bounds.
+pub fn trim_keeping_errors<T>(
+    entries: &mut VecDeque<T>,
+    cap: usize,
+    is_error: impl Fn(&T) -> bool,
+) {
+    let excess = entries.len().saturating_sub(cap);
+    if excess == 0 {
+        return;
+    }
+    let others = entries.iter().filter(|e| !is_error(e)).count();
+    let mut drop_others = excess.min(others);
+    let mut drop_errors = excess - drop_others;
+    entries.retain(|e| {
+        let budget = if is_error(e) {
+            &mut drop_errors
+        } else {
+            &mut drop_others
+        };
+        if *budget > 0 {
+            *budget -= 1;
+            false
+        } else {
+            true
+        }
+    });
+}
+
 /// Section-specific change counters alongside [`Diagnostics::version`], which
 /// invalidates the shared status summary. A tile compares only the counter for
 /// its selected section:
@@ -567,18 +599,11 @@ impl Diagnostics {
             self.data_diagnostics.push_back((at, d));
             changed = true;
         }
-        while self.data_diagnostics.len() > DATA_DIAGNOSTICS_CAP {
-            // A flood of benign warnings must not evict an error (schema
-            // drift, a worker failure) from the page: the oldest non-error
-            // goes first, and errors go oldest-first only once nothing else
-            // is left.
-            let evict = self
-                .data_diagnostics
-                .iter()
-                .position(|(_, d)| d.severity != Severity::Error)
-                .unwrap_or(0);
-            self.data_diagnostics.remove(evict);
-        }
+        trim_keeping_errors(
+            &mut self.data_diagnostics,
+            DATA_DIAGNOSTICS_CAP,
+            |(_, d)| d.severity == Severity::Error,
+        );
         if changed {
             self.version += 1;
             // `config`, not `data` — despite this field's name, it is

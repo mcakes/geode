@@ -29449,8 +29449,8 @@ run_mutation "silence: a blotter flip never re-arms the stale timer" \
 # The data-diagnostics ring evicts a warning before an error.
 run_mutation "silence: the diagnostics ring evicts its oldest error first" \
   crates/geode-shell/src/diagnostics.rs \
-  '                .position(|(_, d)| d.severity != Severity::Error)' \
-  '                .position(|_| true)' \
+  '    let mut drop_others = excess.min(others);' \
+  '    let mut drop_others = 0;' \
   geode-shell \
   a_flood_of_warnings_never_evicts_an_older_error
 
@@ -29724,6 +29724,14 @@ run_mutation "pricer sort: a refused selection verb restores no hold" \
   $'        self.held_order = held;\n        self.rebuild(cx);' \
   $'        let _ = held;\n        self.refresh_selection();' \
   geode-pricer a_refused_selection_verb_keeps_the_held_order
+
+# The bridge mailbox trims by the ring's rule, so an error reaches the ring.
+run_mutation "silence: the event mailbox trims an error before warnings" \
+  crates/geode-app/src/events.rs \
+  '                |d| d.severity == geode_core::config::Severity::Error,' \
+  '                |_| false,' \
+  geode-app \
+  an_error_queued_before_a_flood_of_warnings_survives_the_mailbox
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
