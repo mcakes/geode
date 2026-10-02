@@ -400,14 +400,12 @@ pub fn model(
                 }
                 // Each coordinate pairs with its quote by position: a
                 // length mismatch would paint quotes at other strikes' x.
+                // One chain job per expiry, so the notice is already unique.
                 if xs.len() != c.mid.len() {
-                    let notice = failure(
+                    notices.push(failure(
                         role,
                         &format!("{} coordinates for {} quotes", xs.len(), c.mid.len()),
-                    );
-                    if !notices.contains(&notice) {
-                        notices.push(notice);
-                    }
+                    ));
                     continue;
                 }
                 // One-sided quotes carry a NaN bid or ask: the chart paints
