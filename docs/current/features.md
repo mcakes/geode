@@ -1139,7 +1139,9 @@ closing cancels by key, the vol batch included.
 **Failures.** The footer shows the first notice and a count of the rest. A
 failed job is one notice (`no cvi curve at <date>: <why>`) and the rest of
 the batch paints; one cause behind every job is said once, in the outcome's
-words. A refused read or batch is worded `document request refused: …` or
+words, and a difference failing only because its source curve failed adds
+none. A pair naming a kind that is not loaded is the notice `diff <pair>:
+<kind> is not loaded` rather than an empty lower pane. A refused read or batch is worded `document request refused: …` or
 `vol request refused: …` and the last good picture stays; the next change
 retries. A refused chain read fails the fetch, which still answers the
 barrier.

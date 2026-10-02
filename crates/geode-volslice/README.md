@@ -124,10 +124,16 @@ The footer shows the first notice and how many more stand behind it:
   error for a snapshot it cannot read (`option_chain rows for <date> are
   not contiguous`); the other kind still paints.
 - `no <kind> curve at <date>: <why>` and `no chain coordinates at <date>:
-  <why>` for a failed job, once each; the rest of the batch paints. One
-  cause behind every job is said once, in the outcome's words (`vol model
-  "demo" is not built into this binary`, `the vol queue is full;
-  resubmit`).
+  <why>` for a failed job, once each; the rest of the batch paints. A
+  difference that fails only because the curve it reads its strikes from
+  failed adds no notice of its own. A chain whose coordinates do not count
+  one per quote is skipped with `no chain coordinates at <date>: <n>
+  coordinates for <m> quotes`. One cause behind every job is said once, in
+  the outcome's words (`vol model "demo" is not built into this binary`,
+  `the vol queue is full; resubmit`).
+- `diff <pair>: <kind> is not loaded` when a restored or kept pair names a
+  kind with nothing loaded (a draft that left with its group): no
+  difference is asked, and the pair stays set for when the kind returns.
 - `vol request refused: …`: the painted model stays and the next change
   retries.
 - `following A — set the underlying there` for `u` while following.

@@ -652,6 +652,30 @@ fn a_restored_tile_requeries_once_and_paints_its_saved_expiries(cx: &mut gpui::T
     assert_eq!((view.lo, view.hi), (0.95, 1.05), "the saved view stands");
 }
 
+/// A restored pair naming the draft, with no draft on any board, asks no
+/// difference and says why in the footer rather than painting nothing.
+#[gpui::test]
+fn a_restored_pair_naming_an_unloaded_kind_is_a_notice(cx: &mut gpui::TestAppContext) {
+    let mut t = launched_on("SPX.Z");
+    t.insert(
+        "diff".into(),
+        toml::Value::Array(vec![
+            toml::Value::String("cvi draft".into()),
+            toml::Value::String("cvi".into()),
+        ]),
+    );
+    let (h, mut vcx) = open_on(cx, t);
+    h.show(&mut vcx);
+    let (doc, chains) = published();
+    let reqs = h.answer_documents(&mut vcx, &doc, &chains);
+    let params = vols(&reqs)[0].clone();
+    h.answer_vol(&mut vcx, &params);
+    assert_eq!(
+        h.notices(&vcx),
+        vec!["diff cvi draft \u{2212} cvi: cvi draft is not loaded".to_string()]
+    );
+}
+
 /// Hiding keeps the documents' query in flight; closing cancels by the
 /// tile's key once.
 #[gpui::test]

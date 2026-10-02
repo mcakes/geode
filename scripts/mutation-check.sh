@@ -31421,6 +31421,35 @@ run_mutation "volslice: one cause behind every job is said once" \
   '    if let Some(Err(first)) = results.first().filter(|_| false)' \
   geode-volslice one_message_for_every_job_is_said_once
 
+# A difference failing only because its strike source failed adds no
+# notice: the source's own notice says why.
+run_mutation "volslice: a difference whose strikes failed adds no notice" \
+  crates/geode-volslice/src/core/build.rs \
+  '                && results.get(of).is_some_and(Result::is_err)' \
+  '                && false' \
+  geode-volslice a_difference_whose_strikes_failed_adds_no_notice
+
+# A chain whose coordinates miscount its quotes is skipped with a notice,
+# not painted at other strikes' x.
+run_mutation "volslice: a chain miscounting its quotes is skipped" \
+  crates/geode-volslice/src/core/build.rs \
+  '                if xs.len() != c.mid.len() {' \
+  '                if false {' \
+  geode-volslice a_chain_whose_coordinates_miscount_its_quotes_is_skipped
+
+# A pair naming an unloaded kind is a notice, not a silent empty pane.
+run_mutation "volslice: a pair naming an unloaded kind says so" \
+  crates/geode-volslice/src/core/build.rs \
+  '            .find(|k| !loaded.has(*k))' \
+  '            .find(|_| false)' \
+  geode-volslice a_pair_naming_an_unloaded_kind_says_so
+
+run_mutation "volslice: a restored pair naming an unloaded kind is a notice" \
+  crates/geode-volslice/src/core/build.rs \
+  '        notices.push(format!("diff {}: {} is not loaded", pair.label(), k.label()));' \
+  '        let _ = (pair, k);' \
+  geode-volslice a_restored_pair_naming_an_unloaded_kind_is_a_notice
+
 run_mutation "volslice: the draft curve is dashed" \
   crates/geode-volslice/src/core/build.rs \
   '                let style = if kind == Kind::Draft {' \

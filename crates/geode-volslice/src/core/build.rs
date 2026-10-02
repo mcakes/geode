@@ -332,6 +332,15 @@ pub fn model(
             | Role::DiffCurve { expiry, .. } => *expiry,
         };
         if let Err(e) = &results[i] {
+            // A difference whose strikes come from a failed job fails
+            // because that job did, and that job's own notice says why:
+            // a second notice would name job indices a trader never sees.
+            if let VolJob::Slice { request, .. } = &plan.jobs[i]
+                && let Grid::Job(of) = request.grid
+                && results.get(of).is_some_and(Result::is_err)
+            {
+                continue;
+            }
             let notice = failure(role, e);
             if !notices.contains(&notice) {
                 notices.push(notice);
@@ -387,6 +396,18 @@ pub fn model(
                     continue;
                 };
                 if !trace {
+                    continue;
+                }
+                // Each coordinate pairs with its quote by position: a
+                // length mismatch would paint quotes at other strikes' x.
+                if xs.len() != c.mid.len() {
+                    let notice = failure(
+                        role,
+                        &format!("{} coordinates for {} quotes", xs.len(), c.mid.len()),
+                    );
+                    if !notices.contains(&notice) {
+                        notices.push(notice);
+                    }
                     continue;
                 }
                 // One-sided quotes carry a NaN bid or ask: the chart paints
@@ -479,6 +500,20 @@ pub fn model(
         && results.iter().all(|r| r.as_ref().err() == Some(first))
     {
         notices = vec![first.clone()];
+    }
+    // A pair naming a kind with nothing loaded (restored, or kept while a
+    // draft left) asks no difference job: without this it paints nothing,
+    // silently. Worded as `:diff` refuses such a pair.
+    if let Some(pair) = plan.diff
+        && let Some(k) = [pair.minuend, pair.subtrahend]
+            .into_iter()
+            .find(|k| !loaded.has(*k))
+    {
+        notices.push(format!(
+            "diff {}: {} is not loaded",
+            pair.label(),
+            k.label()
+        ));
     }
 
     let model = XyModel::new(version, x_axis(plan.coordinate), Y_FORMAT, split, slots);
@@ -956,6 +991,82 @@ mod tests {
                 .any(|s| s.label.as_ref() == "chain 2027-06-18"),
             "the chain still paints"
         );
+    }
+
+    /// Past the last term both dense curves refuse, and the difference
+    /// reading the minuend's strikes fails because its source did: the two
+    /// curves' notices say why, and the difference adds none.
+    #[test]
+    fn a_difference_whose_strikes_failed_adds_no_notice() {
+        let mut st = State {
+            active: Some([d("2027-06-18")].into()),
+            diff: Pair::new(Kind::Draft, Kind::Cvi),
+            ..State::default()
+        };
+        let b = built(&mut st);
+        assert_eq!(b.notices.len(), 2, "{:?}", b.notices);
+        assert!(
+            b.notices.iter().all(|n| !n.contains("job")),
+            "{:?}",
+            b.notices
+        );
+    }
+
+    /// A chain whose coordinates do not match its quotes one for one is
+    /// skipped with a notice rather than painted at other strikes' x.
+    #[test]
+    fn a_chain_whose_coordinates_miscount_its_quotes_is_skipped() {
+        let l = fixture();
+        let s = strip(&l, d(TODAY));
+        let mut st = State {
+            active: Some([d("2026-11-20")].into()),
+            ..State::default()
+        };
+        st.reconcile(&s);
+        let p = batch(&st, &l, &s);
+        let mut o = answer(&p);
+        let at = p
+            .roles
+            .iter()
+            .position(|r| matches!(r, Role::Chain { .. }))
+            .unwrap();
+        let Ok(VolResult::Map(xs)) = &mut o.results[at] else {
+            panic!("the chain's coordinates")
+        };
+        xs.pop();
+        let b = model(&p, &o, &l, &palette(), st.split, 1).unwrap();
+        assert!(
+            !b.model.slots.iter().any(|s| s.label.starts_with("chain")),
+            "no chain slot"
+        );
+        assert_eq!(
+            b.notices,
+            vec!["no chain coordinates at 2026-11-20: 6 coordinates for 7 quotes".to_string()]
+        );
+    }
+
+    /// A pair naming a kind with nothing loaded says so: it asks no
+    /// difference job, so otherwise nothing would paint and nothing say why.
+    #[test]
+    fn a_pair_naming_an_unloaded_kind_says_so() {
+        let mut l = fixture();
+        l.draft = None;
+        let s = strip(&l, d(TODAY));
+        let mut st = State {
+            diff: Pair::new(Kind::Draft, Kind::Cvi),
+            ..State::default()
+        };
+        st.reconcile(&s);
+        let p = batch(&st, &l, &s);
+        let b = model(&p, &answer(&p), &l, &palette(), st.split, 1).unwrap();
+        assert_eq!(
+            b.notices,
+            vec!["diff cvi draft \u{2212} cvi: cvi draft is not loaded".to_string()]
+        );
+        st.diff = Pair::new(Kind::Cvi, Kind::Chain);
+        let p = batch(&st, &fixture(), &s);
+        let b = model(&p, &answer(&p), &fixture(), &palette(), st.split, 1).unwrap();
+        assert!(b.notices.is_empty(), "both loaded: {:?}", b.notices);
     }
 
     #[test]
