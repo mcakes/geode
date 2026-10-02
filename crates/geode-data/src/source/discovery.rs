@@ -627,4 +627,30 @@ mod tests {
         assert_eq!(found.candidates.len(), 1);
         assert!(found.problems.is_empty());
     }
+    /// A pattern with no glob character matches through `fs::metadata`
+    /// alone, so its file is found under a directory the process may search
+    /// but not list (mode 0o311) — the one prefix a check would call
+    /// unreadable. Matching wins: the check runs only when nothing matched.
+    #[cfg(unix)]
+    #[test]
+    fn a_match_under_an_unlistable_prefix_is_not_a_path_problem() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let locked = d.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let csv = write(&locked, "risk_2026-08-30_BK000.csv", "Book\nBK000\n");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o311)).unwrap();
+        // A privileged runner lists anything; there is nothing to prove there.
+        let privileged = std::fs::read_dir(&locked).is_ok();
+        let s = one_pattern(csv.display().to_string());
+        let (_sd, st) = store();
+        let cat = crate::store::Catalog::new(st.writer());
+        let found = discover_all(&s, &cat, SystemTime::now()).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if privileged {
+            return;
+        }
+        assert_eq!(found.candidates.len(), 1, "fixture: the file matched");
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+    }
 }

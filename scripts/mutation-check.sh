@@ -29104,6 +29104,14 @@ run_mutation "silence: stalest compares offset text" \
   geode-core \
   the_stalest_input_compares_instants_not_offset_text
 
+# The prefix check runs only for a pattern that matched nothing.
+run_mutation "silence: a matching pattern is checked for its prefix" \
+  crates/geode-data/src/source/discovery.rs \
+  '        if !matched && let Some(reason) = prefix_problem(pattern) {' \
+  '        if let Some(reason) = prefix_problem(pattern) {' \
+  geode-data \
+  a_match_under_an_unlistable_prefix_is_not_a_path_problem
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
