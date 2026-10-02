@@ -3,13 +3,20 @@
 //! module never evaluates a vol; it names documents, expiries and
 //! strikes and reads the results back by position.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::NaiveDate;
+use geode_chart::Axis;
+use geode_chart::core::palette::Palette;
+use geode_chart::xy::{SlotKind, Style, XAxis, XFormat, XyModel, XySlot, YFormat};
 use geode_core::document::DocumentRows;
 use geode_core::query::QueryKey;
-use geode_core::vol::{Coordinate, Grid, MapRequest, SliceRequest, VolJob, VolSliceParams};
+use geode_core::vol::{
+    Coordinate, Grid, MapRequest, SliceRequest, VolJob, VolResult, VolSliceOutcome, VolSliceParams,
+};
+use gpui::Hsla;
 
 use crate::core::model::{Kind, Loaded, Pair, State, StripRow};
 
@@ -157,11 +164,338 @@ pub fn batch(state: &State, loaded: &Loaded, strip: &[StripRow]) -> Plan {
     }
 }
 
+/// A density line's opacity against its curve's expiry color, so the pdf
+/// reads as a companion of the smile rather than a second smile.
+pub const DENSITY_ALPHA: f32 = 0.55;
+
+/// The y formats in `Axis::ALL` order: vols on the left of either pane,
+/// densities on the right.
+const Y_FORMAT: [YFormat; 4] = [
+    YFormat::Percent,
+    YFormat::Plain,
+    YFormat::Percent,
+    YFormat::Plain,
+];
+
+/// A painted batch: the model, the notices of its failed jobs, and the
+/// x extent of its visible slots.
+pub struct Built {
+    pub model: Arc<XyModel>,
+    pub notices: Vec<String>,
+    pub full: (f64, f64),
+}
+
+pub fn x_axis(coordinate: Coordinate) -> XAxis {
+    match coordinate {
+        Coordinate::Strike => XAxis {
+            format: XFormat::Price,
+            reversed: false,
+        },
+        Coordinate::Moneyness => XAxis {
+            format: XFormat::Percent,
+            reversed: false,
+        },
+        Coordinate::LogMoneyness => XAxis {
+            format: XFormat::Fixed(2),
+            reversed: false,
+        },
+        // Call delta falls as strike rises: reversed, puts stay on the left.
+        Coordinate::Delta => XAxis {
+            format: XFormat::Delta,
+            reversed: true,
+        },
+    }
+}
+
+/// The narrowest x span a view may show in a coordinate. A strike view
+/// keeps at least one chain strike gap, so a zoom cannot leave a single
+/// quote alone between the axis ends.
+pub fn min_span(coordinate: Coordinate, loaded: &Loaded) -> f64 {
+    match coordinate {
+        Coordinate::Strike => {
+            let mut gap = f64::INFINITY;
+            for c in &loaded.chain {
+                let mut strikes: Vec<f64> = c
+                    .strikes
+                    .iter()
+                    .copied()
+                    .filter(|k| k.is_finite())
+                    .collect();
+                strikes.sort_by(f64::total_cmp);
+                for w in strikes.windows(2) {
+                    let g = w[1] - w[0];
+                    if g > 0.0 && g < gap {
+                        gap = g;
+                    }
+                }
+            }
+            if gap.is_finite() { gap } else { 1.0 }
+        }
+        Coordinate::Moneyness | Coordinate::LogMoneyness => 0.01,
+        Coordinate::Delta => 0.02,
+    }
+}
+
+/// Widen a range narrower than `min` to `min` about its centre: a one-x
+/// extent (a single strike) is otherwise a zero-width axis.
+pub fn padded(full: (f64, f64), min: f64) -> (f64, f64) {
+    let (lo, hi) = full;
+    if hi - lo >= min {
+        return full;
+    }
+    let centre = (lo + hi) / 2.0;
+    (centre - min / 2.0, centre + min / 2.0)
+}
+
+/// The same slots at another split, under a new version: the element's
+/// caches tell models apart by version alone.
+pub fn with_split(model: &XyModel, split: f32, version: u64) -> Arc<XyModel> {
+    XyModel::new(version, model.x, model.y_format, split, model.slots.clone())
+}
+
+fn failure(role: &Role, e: &str) -> String {
+    match role {
+        Role::Curve { kind, expiry, .. } | Role::DiffCurve { kind, expiry } => {
+            format!("no {} curve at {expiry}: {e}", kind.label())
+        }
+        Role::Chain { expiry, .. } => format!("no chain coordinates at {expiry}: {e}"),
+    }
+}
+
+/// Read a batch's answers by position into the slots they paint. An
+/// outcome shorter than its plan (a cancelled batch) answers `None`:
+/// indexing it would pair results with the wrong roles, and a newer
+/// batch supersedes it anyway.
+pub fn model(
+    plan: &Plan,
+    outcome: &VolSliceOutcome,
+    loaded: &Loaded,
+    palette: &Palette,
+    split: f32,
+    version: u64,
+) -> Option<Built> {
+    let n = plan.jobs.len();
+    if outcome.results.len() < n || plan.roles.len() < n {
+        return None;
+    }
+    let results = &outcome.results[..n];
+    let slice = |i: usize| match &results[i] {
+        Ok(VolResult::Slice(s)) => Some(s),
+        _ => None,
+    };
+    let map = |i: usize| match &results[i] {
+        Ok(VolResult::Map(xs)) => Some(xs),
+        _ => None,
+    };
+
+    let mut notices: Vec<String> = Vec::new();
+    let mut slots: Vec<XySlot> = Vec::new();
+    // Slot numbers count from one in push order.
+    fn push(
+        slots: &mut Vec<XySlot>,
+        label: String,
+        color: Hsla,
+        axis: Axis,
+        style: Style,
+        kind: SlotKind,
+    ) {
+        slots.push(XySlot {
+            number: (slots.len() + 1) as u16,
+            label: label.into(),
+            color,
+            axis,
+            visible: true,
+            style,
+            kind,
+        });
+    }
+    // A difference reads its expiry's dense curve and chain jobs by
+    // lookup, not by adjacency, so it cannot pair with another expiry's.
+    let mut curve_at: HashMap<(Kind, NaiveDate), usize> = HashMap::new();
+    let mut chain_of: HashMap<NaiveDate, usize> = HashMap::new();
+    for (i, role) in plan.roles[..n].iter().enumerate() {
+        match *role {
+            Role::Curve { kind, expiry, .. } => {
+                curve_at.insert((kind, expiry), i);
+            }
+            Role::Chain { expiry, .. } => {
+                chain_of.insert(expiry, i);
+            }
+            Role::DiffCurve { .. } => {}
+        }
+    }
+
+    for (i, role) in plan.roles[..n].iter().enumerate() {
+        let expiry = match role {
+            Role::Curve { expiry, .. }
+            | Role::Chain { expiry, .. }
+            | Role::DiffCurve { expiry, .. } => *expiry,
+        };
+        if let Err(e) = &results[i] {
+            let notice = failure(role, e);
+            if !notices.contains(&notice) {
+                notices.push(notice);
+            }
+            continue;
+        }
+        let color = plan
+            .active
+            .iter()
+            .find(|(_, e)| *e == expiry)
+            .map_or_else(|| palette.colour(0), |(pos, _)| palette.colour(*pos));
+        match *role {
+            Role::Curve { kind, trace, .. } => {
+                let Some(s) = slice(i) else { continue };
+                if !trace {
+                    continue;
+                }
+                let style = if kind == Kind::Draft {
+                    Style::Dashed
+                } else {
+                    Style::Solid
+                };
+                push(
+                    &mut slots,
+                    format!("{} {expiry}", kind.label()),
+                    color,
+                    Axis::Left,
+                    style,
+                    SlotKind::Line {
+                        xs: s.points.iter().map(|p| p.x).collect(),
+                        ys: s.points.iter().map(|p| p.vol).collect(),
+                    },
+                );
+                if let Some(density) = &s.density {
+                    push(
+                        &mut slots,
+                        format!("{} density {expiry}", kind.label()),
+                        Hsla {
+                            a: DENSITY_ALPHA,
+                            ..color
+                        },
+                        Axis::Right,
+                        style,
+                        SlotKind::Line {
+                            xs: density.iter().map(|(x, _)| *x).collect(),
+                            ys: density.iter().map(|(_, pdf)| *pdf).collect(),
+                        },
+                    );
+                }
+            }
+            Role::Chain { trace, .. } => {
+                let (Some(xs), Some(c)) = (map(i), loaded.chain_at(expiry)) else {
+                    continue;
+                };
+                if !trace {
+                    continue;
+                }
+                // One-sided quotes carry a NaN bid or ask: the chart paints
+                // the half bar the quote has.
+                push(
+                    &mut slots,
+                    format!("chain {expiry}"),
+                    color,
+                    Axis::Left,
+                    Style::Solid,
+                    SlotKind::Points {
+                        xs: xs.clone(),
+                        mid: c.mid.clone(),
+                        lo: c.bid.clone(),
+                        hi: c.ask.clone(),
+                    },
+                );
+            }
+            Role::DiffCurve { kind, .. } => {
+                let (Some(pair), Some(other)) = (plan.diff, slice(i)) else {
+                    continue;
+                };
+                let label = format!("{} {expiry}", pair.label());
+                if pair.subtrahend.is_curve() && pair.minuend.is_curve() {
+                    // Equal strikes: the subtrahend was evaluated at the
+                    // minuend's, so the points pair by position.
+                    let minuend = curve_at.get(&(pair.minuend, expiry)).copied();
+                    let Some(minuend) = minuend.and_then(slice) else {
+                        continue;
+                    };
+                    if minuend.points.len() != other.points.len() {
+                        continue;
+                    }
+                    push(
+                        &mut slots,
+                        label,
+                        color,
+                        Axis::BottomLeft,
+                        Style::Solid,
+                        SlotKind::Line {
+                            xs: minuend.points.iter().map(|p| p.x).collect(),
+                            ys: minuend
+                                .points
+                                .iter()
+                                .zip(&other.points)
+                                .map(|(a, b)| a.vol - b.vol)
+                                .collect(),
+                        },
+                    );
+                } else {
+                    // The curve was evaluated at the chain strikes and
+                    // sits at the chain's x.
+                    let (Some(xs), Some(c)) = (
+                        chain_of.get(&expiry).copied().and_then(map),
+                        loaded.chain_at(expiry),
+                    ) else {
+                        continue;
+                    };
+                    if xs.len() != other.points.len() || c.mid.len() != other.points.len() {
+                        continue;
+                    }
+                    let sign = if pair.minuend == kind { 1.0 } else { -1.0 };
+                    let diff: Vec<f64> = other
+                        .points
+                        .iter()
+                        .zip(&c.mid)
+                        .map(|(p, mid)| sign * (p.vol - mid))
+                        .collect();
+                    push(
+                        &mut slots,
+                        label,
+                        color,
+                        Axis::BottomLeft,
+                        Style::Solid,
+                        SlotKind::Points {
+                            xs: xs.clone(),
+                            mid: diff.clone(),
+                            lo: diff.clone(),
+                            hi: diff,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    // One cause behind every job (no model, a full queue) is said once,
+    // as the outcome words it, not once per expiry and kind.
+    if let Some(Err(first)) = results.first()
+        && results.iter().all(|r| r.as_ref().err() == Some(first))
+    {
+        notices = vec![first.clone()];
+    }
+
+    let model = XyModel::new(version, x_axis(plan.coordinate), Y_FORMAT, split, slots);
+    let full = model.full();
+    Some(Built {
+        model,
+        notices,
+        full,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::model::tests::{TODAY, d, fixture};
     use crate::core::model::{Kind, Pair, State, strip};
+    use geode_data::vol::{VolConfig, evaluate};
 
     fn plan(state: &mut State) -> Plan {
         let l = fixture();
@@ -338,6 +672,238 @@ mod tests {
         assert_eq!(
             (params.key, params.tag, params.jobs.len()),
             (QueryKey(9), 4, 2)
+        );
+    }
+
+    fn palette() -> Palette {
+        let c = |l| gpui::hsla(0.0, 0.0, l, 1.0);
+        Palette::from_theme([c(0.1), c(0.2), c(0.3), c(0.4), c(0.5)], c(1.0), c(0.0))
+    }
+
+    fn answer(plan: &Plan) -> VolSliceOutcome {
+        let config = VolConfig::with(Arc::new(geode_pricing::DemoVolModel));
+        let params = plan.params(QueryKey(1), 1, Instant::now());
+        VolSliceOutcome {
+            key: params.key,
+            tag: 1,
+            submitted: params.submitted,
+            results: evaluate(&config, &params),
+        }
+    }
+
+    fn built(state: &mut State) -> Built {
+        let l = fixture();
+        let s = strip(&l, d(TODAY));
+        state.reconcile(&s);
+        let p = batch(state, &l, &s);
+        model(&p, &answer(&p), &l, &palette(), state.split, 7).unwrap()
+    }
+
+    #[test]
+    fn curves_and_chains_become_slots_by_kind_style_and_expiry_color() {
+        let mut st = State {
+            active: Some([d("2026-10-16"), d("2026-11-20")].into()),
+            ..State::default()
+        };
+        let b = built(&mut st);
+        let labels: Vec<_> = b.model.slots.iter().map(|s| s.label.to_string()).collect();
+        assert_eq!(
+            labels,
+            [
+                "cvi 2026-10-16",
+                "cvi draft 2026-10-16",
+                "cvi 2026-11-20",
+                "cvi draft 2026-11-20",
+                "chain 2026-11-20"
+            ]
+        );
+        assert_eq!(b.model.slots[1].style, Style::Dashed);
+        assert_eq!(b.model.slots[0].color, palette().colour(0));
+        assert_eq!(
+            b.model.slots[2].color,
+            palette().colour(1),
+            "the strip position, not the active index"
+        );
+        let SlotKind::Points { lo, hi, .. } = &b.model.slots[4].kind else {
+            panic!()
+        };
+        assert_eq!((lo[0], hi[0]), (0.19, 0.21));
+        assert_eq!(b.model.version, 7);
+        assert!(b.notices.is_empty());
+    }
+
+    #[test]
+    fn densities_paint_on_the_right_axis() {
+        let mut st = State {
+            density: true,
+            ..State::default()
+        };
+        let b = built(&mut st);
+        assert!(
+            b.model
+                .slots
+                .iter()
+                .any(|s| s.axis == Axis::Right && s.label.contains("density"))
+        );
+    }
+
+    #[test]
+    fn a_draft_atm_edit_is_the_difference_at_equal_strikes() {
+        // The draft lifts atm by 0.01 at 2026-12-18 alone: at that term the
+        // diff is 0.01 at every strike (the stand-in's atm lifts every point).
+        let mut st = State {
+            active: Some([d("2026-12-18")].into()),
+            diff: Pair::new(Kind::Draft, Kind::Cvi),
+            ..State::default()
+        };
+        let b = built(&mut st);
+        let diff = b
+            .model
+            .slots
+            .iter()
+            .find(|s| s.axis == Axis::BottomLeft)
+            .unwrap();
+        let SlotKind::Line { ys, .. } = &diff.kind else {
+            panic!("curve-curve is a line")
+        };
+        assert_eq!(ys.len(), GRID_N);
+        assert!(ys.iter().all(|y| (y - 0.01).abs() < 1e-9), "{:?}", &ys[..3]);
+    }
+
+    #[test]
+    fn a_curve_minus_chain_difference_sits_at_the_chain_x() {
+        let mut st = State {
+            active: Some([d("2026-11-20")].into()),
+            diff: Pair::new(Kind::Chain, Kind::Cvi),
+            ..State::default()
+        };
+        let b = built(&mut st);
+        let chain = b
+            .model
+            .slots
+            .iter()
+            .find(|s| s.label.starts_with("chain"))
+            .unwrap();
+        let diff = b
+            .model
+            .slots
+            .iter()
+            .find(|s| s.axis == Axis::BottomLeft)
+            .unwrap();
+        assert_eq!(diff.xs(), chain.xs());
+        let SlotKind::Points { mid, lo, hi, .. } = &diff.kind else {
+            panic!()
+        };
+        assert_eq!((mid, mid), (lo, hi), "a difference has no spread");
+    }
+
+    #[test]
+    fn swapping_a_curve_chain_pair_negates_the_difference() {
+        let at = |pair| {
+            let mut st = State {
+                active: Some([d("2026-11-20")].into()),
+                diff: pair,
+                ..State::default()
+            };
+            let b = built(&mut st);
+            let diff = b.model.slots.iter().find(|s| s.axis == Axis::BottomLeft);
+            let SlotKind::Points { mid, .. } = &diff.unwrap().kind else {
+                panic!()
+            };
+            mid.clone()
+        };
+        let curve_first = at(Pair::new(Kind::Cvi, Kind::Chain));
+        let chain_first = at(Pair::new(Kind::Chain, Kind::Cvi));
+        assert!(
+            curve_first.iter().any(|y| y.abs() > 1e-6),
+            "{curve_first:?}"
+        );
+        let negated: Vec<f64> = chain_first.iter().map(|y| -y).collect();
+        assert_eq!(curve_first, negated);
+    }
+
+    #[test]
+    fn failed_jobs_become_deduplicated_notices() {
+        // 2027-06-18 is past the last term: both curves refuse there.
+        let mut st = State {
+            active: Some([d("2026-10-16"), d("2027-06-18")].into()),
+            ..State::default()
+        };
+        let b = built(&mut st);
+        assert_eq!(b.notices.len(), 2, "one per kind: {:?}", b.notices);
+        assert!(
+            b.notices[0].starts_with("no cvi curve at 2027-06-18: expiry 2027-06-18 is outside"),
+            "{:?}",
+            b.notices
+        );
+        assert!(
+            b.model
+                .slots
+                .iter()
+                .any(|s| s.label.as_ref() == "chain 2027-06-18"),
+            "the chain still paints"
+        );
+    }
+
+    #[test]
+    fn one_message_for_every_job_is_said_once() {
+        let l = fixture();
+        let s = strip(&l, d(TODAY));
+        let mut st = State::default();
+        st.reconcile(&s);
+        let p = batch(&st, &l, &s);
+        let params = p.params(QueryKey(1), 1, Instant::now());
+        let o = VolSliceOutcome {
+            key: params.key,
+            tag: 1,
+            submitted: params.submitted,
+            results: evaluate(&VolConfig::missing("demo"), &params),
+        };
+        let b = model(&p, &o, &l, &palette(), 0.7, 1).unwrap();
+        assert_eq!(
+            b.notices,
+            vec!["vol model \"demo\" is not built into this binary".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_short_outcome_is_superseded_not_indexed() {
+        let l = fixture();
+        let s = strip(&l, d(TODAY));
+        let mut st = State::default();
+        st.reconcile(&s);
+        let p = batch(&st, &l, &s);
+        let mut o = answer(&p);
+        o.results.pop();
+        assert!(model(&p, &o, &l, &palette(), 0.7, 1).is_none());
+    }
+
+    #[test]
+    fn the_view_is_rebuilt_with_the_coordinates_min_span() {
+        let l = fixture();
+        assert_eq!(
+            min_span(Coordinate::Strike, &l),
+            5.0,
+            "the chain's strike gap"
+        );
+        assert_eq!(min_span(Coordinate::Delta, &l), 0.02);
+        let (lo, hi) = padded((1.0, 1.0), 0.02);
+        assert!(
+            (lo - 0.99).abs() < 1e-12 && (hi - 1.01).abs() < 1e-12,
+            "a one-x range is padded: {lo} {hi}"
+        );
+        assert_eq!(padded((0.8, 1.2), 0.02), (0.8, 1.2));
+        let a = x_axis(Coordinate::Delta);
+        assert!(a.reversed && a.format == XFormat::Delta);
+    }
+
+    #[test]
+    fn a_split_change_is_a_new_version_with_the_same_slots() {
+        let b = built(&mut State::default());
+        let m = with_split(&b.model, 0.5, 8);
+        assert_eq!(
+            (m.version, m.split, m.slots.len()),
+            (8, 0.5, b.model.slots.len())
         );
     }
 }
