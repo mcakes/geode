@@ -322,6 +322,10 @@ fn opens_dialog_matches_what_dispatch_pushes(cx: &mut gpui::TestAppContext) {
         // No focused tile answers `tile_columns` here: a status notice, no list.
         "config::view_column",
         "config::schema_column",
+        // No tile is focused here: a status notice, no chooser. That it
+        // pushes over a dialog with a tile focused is asserted by
+        // `the_chooser_is_refused_over_a_page_and_listed_as_a_dialog_opener`.
+        "tile::link_group",
     ];
     let (window, mut vcx) = open_shell(cx, super::picker::services_with_pickable());
     let shell = shell_of(&window, &mut vcx);

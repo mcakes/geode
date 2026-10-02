@@ -1,5 +1,5 @@
 //! A filter-only choice modal for grouping slots, saved scopes, tile kinds,
-//! columns, and log levels.
+//! columns, log levels, and a tile's link groups.
 //! [`ChoiceList`] owns ranking, highlight, Tab completion, and navigation.
 //! Enter or a row click commits the selected option.
 //!
@@ -28,6 +28,13 @@
 //! `config::view_column` / `config::schema_column` list the focused tile's
 //! presented columns (Schema without derived ones), the cursor's column
 //! highlighted; a pick opens that dialog on the column's Column stage.
+//!
+//! `tile::link_group` lists what the focused tile may follow (the
+//! workspace or a group) and, for a tile whose module emits, what it may
+//! emit into (none or a group), opening on the row for what it follows
+//! now. The title names the groups it is in. A pick changes one of the two
+//! through the shell's link doors. With no tile focused, or a placeholder,
+//! nothing opens and the status bar says so.
 
 use std::rc::Rc;
 
@@ -37,6 +44,7 @@ use gpui_component::{ActiveTheme as _, v_flex};
 
 use geode_core::context::DimensionContext;
 use geode_core::groupings::GroupingSlots;
+use geode_core::link::{Group, Membership};
 use geode_core::log::{Level, LogLevels, TARGETS};
 use geode_core::scope::Scope;
 use geode_core::scopes::SavedScopes;
@@ -46,6 +54,7 @@ use crate::choice::{self, ChoiceKey, ChoiceList};
 use crate::defaults::{AddPlacement, capitalize};
 use crate::keymap::{Keystroke, Modifiers};
 use crate::module::placeholder::PLACEHOLDER_KIND;
+use crate::tiling::TileId;
 
 use super::ShellView;
 use super::dialog;
@@ -97,6 +106,51 @@ pub enum Target {
         targets: Vec<String>,
         chosen: Option<String>,
     },
+    /// `tile::link_group`: the link groups `tile` may follow and, when its
+    /// module `emits`, emit into. `tile` and its membership (`current`) are
+    /// captured at open, so a pick lands on the tile the chooser was opened
+    /// for even if focus has moved since. `changes[i]` is what declared
+    /// option `i` does: a row stands for its change by position, never by
+    /// its text.
+    LinkGroup {
+        tile: TileId,
+        emits: bool,
+        current: Membership,
+        changes: Vec<LinkChange>,
+    },
+}
+
+/// What one link-chooser row changes about its tile: the group it follows
+/// (`None` is the workspace) or the group it emits into (`None` is none).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkChange {
+    Follow(Option<Group>),
+    Emit(Option<Group>),
+}
+
+/// The follow rows: the workspace, then each group in `Group::ALL` order.
+const FOLLOW_ROWS: [&str; 5] = [
+    "follow \u{00b7} workspace",
+    "follow \u{00b7} A",
+    "follow \u{00b7} B",
+    "follow \u{00b7} C",
+    "follow \u{00b7} D",
+];
+
+/// The emit rows, offered only to a tile whose module emits: none, then
+/// each group in `Group::ALL` order.
+const EMIT_ROWS: [&str; 5] = [
+    "emit \u{00b7} none",
+    "emit \u{00b7} A",
+    "emit \u{00b7} B",
+    "emit \u{00b7} C",
+    "emit \u{00b7} D",
+];
+
+/// The group a link row at `ix` of its five names: row 0 is "no group",
+/// rows 1 to 4 are `Group::ALL`.
+fn link_row_group(ix: usize) -> Option<Group> {
+    ix.checked_sub(1).map(|g| Group::ALL[g])
 }
 
 /// The level rows, in severity order, as `[log]` spells them.
@@ -245,10 +299,57 @@ impl ChoiceDialogState {
         }
     }
 
+    /// The link rows for `tile`: the five follow rows, then the five emit
+    /// rows when its module `emits`. The highlight opens on the row for
+    /// what the tile follows now (`current`), so `enter` on an untouched
+    /// chooser changes nothing.
+    pub fn link_group(tile: TileId, emits: bool, current: Membership) -> Self {
+        let mut options: Vec<String> = Vec::with_capacity(10);
+        let mut changes = Vec::with_capacity(10);
+        for (ix, text) in FOLLOW_ROWS.iter().enumerate() {
+            options.push((*text).to_string());
+            changes.push(LinkChange::Follow(link_row_group(ix)));
+        }
+        if emits {
+            for (ix, text) in EMIT_ROWS.iter().enumerate() {
+                options.push((*text).to_string());
+                changes.push(LinkChange::Emit(link_row_group(ix)));
+            }
+        }
+        let mut list = ChoiceList::new(options, choice::DEFAULT_CAP);
+        list.place(Some(
+            FOLLOW_ROWS[current.follow.map_or(0, |g| g.index() + 1)],
+        ));
+        Self {
+            list,
+            target: Target::LinkGroup {
+                tile,
+                emits,
+                current,
+                changes,
+            },
+        }
+    }
+
     /// The modal's title: the chrome's fixed words, or `Open {subject}…`
-    /// for a context launch with a subject.
+    /// for a context launch with a subject. Built once, when the dialog
+    /// opens.
     pub fn title(&self) -> SharedString {
         match &self.target {
+            Target::LinkGroup { current, .. } => {
+                let base = chrome(&self.target).0;
+                match (current.follow, current.emit) {
+                    (None, None) => base.into(),
+                    (Some(f), None) => format!("{base} \u{00b7} following {}", f.letter()).into(),
+                    (None, Some(e)) => format!("{base} \u{00b7} emitting {}", e.letter()).into(),
+                    (Some(f), Some(e)) => format!(
+                        "{base} \u{00b7} following {} \u{00b7} emitting {}",
+                        f.letter(),
+                        e.letter()
+                    )
+                    .into(),
+                }
+            }
             Target::TileKindWith { subject, .. } => match subject {
                 Some(u) => format!("Open {u} in\u{2026}").into(),
                 None => chrome(&self.target).0.into(),
@@ -331,6 +432,10 @@ impl ChoiceDialogState {
                 None => Pick::LogTarget(targets[declared].clone()),
                 Some(target) => Pick::LogLevel(target.clone(), LEVEL_WORDS[declared].1),
             },
+            Target::LinkGroup { tile, changes, .. } => Pick::Link {
+                tile: *tile,
+                change: changes[declared],
+            },
         }
     }
 
@@ -357,7 +462,8 @@ impl ChoiceDialogState {
             | Pick::Column { .. }
             | Pick::Scope(_)
             | Pick::LogTarget(_)
-            | Pick::LogLevel(..) => None,
+            | Pick::LogLevel(..)
+            | Pick::Link { .. } => None,
         }
     }
 }
@@ -385,6 +491,8 @@ pub enum Pick {
     LogTarget(String),
     /// Step 2: `Diagnostics::request_level`.
     LogLevel(String, Level),
+    /// `ShellView::set_follow` or `ShellView::set_emit` on `tile`.
+    Link { tile: TileId, change: LinkChange },
 }
 
 /// The grouping option texts and their slots, in row order: the view
@@ -483,6 +591,19 @@ const LOG_HINTS: &[Hint] = &[
     Hint::Text("back / close"),
 ];
 
+/// The link chooser's footer. Enter here changes a membership, it adds
+/// nothing, so the tile picker's verb would misstate it.
+const LINK_HINTS: &[Hint] = &[
+    Hint::Text("type to filter \u{00b7}"),
+    Hint::Key("up"),
+    Hint::Key("down"),
+    Hint::Text("move \u{00b7}"),
+    Hint::Key("enter"),
+    Hint::Text("choose \u{00b7}"),
+    Hint::Key("escape"),
+    Hint::Text("close"),
+];
+
 /// The per-target chrome: the modal's title, the selector prefix
 /// (`{prefix}-choice-list`, `{prefix}-choice-{text}`, `{prefix}-hints`)
 /// and the footer.
@@ -499,6 +620,8 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
         Target::Column { .. } => ("Edit column", "column", "column-hints", COLUMN_HINTS),
         Target::Scope { .. } => ("Scope", "scope", "scope-hints", SCOPE_HINTS),
         Target::LogLevel { .. } => ("Log level", "loglevel", "loglevel-hints", LOG_HINTS),
+        // `title()` appends the groups the tile is in.
+        Target::LinkGroup { .. } => ("Link group", "link", "link-hints", LINK_HINTS),
     }
 }
 
@@ -602,6 +725,33 @@ pub fn open_columns(
     open(view, state, window, cx);
 }
 
+/// Status notice: `tile::link_group` with no focused tile, or with a
+/// placeholder focused. A placeholder is in no group, and a membership set
+/// on it would be dropped when a module fills it.
+pub(crate) const NO_TILE_TO_LINK: &str = "no tile to link";
+
+/// Open the link chooser on the focused tile (`tile::link_group`). The
+/// tile, whether its module emits, and its membership are read now and kept
+/// by the dialog.
+pub fn open_link_group(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let focused = view
+        .services
+        .workspaces
+        .active()
+        .focused_tile()
+        .and_then(|tile| view.occupants.get(&tile).map(|o| (tile, o)))
+        .filter(|(_, o)| o.kind != PLACEHOLDER_KIND)
+        .map(|(tile, o)| (tile, o.content.emits()));
+    let Some((tile, emits)) = focused else {
+        view.notice = Some(NO_TILE_TO_LINK.into());
+        cx.notify();
+        return;
+    };
+    let current = view.frame.read(cx).membership(tile);
+    let state = ChoiceDialogState::link_group(tile, emits, current);
+    open(view, state, window, cx);
+}
+
 /// Open `Set log level…` on the target step (`log::level`, palette-only).
 pub fn open_log_level(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let state = ChoiceDialogState::log_targets(&view.diagnostics.read(cx).levels);
@@ -678,12 +828,17 @@ pub(super) const SLOT_GONE: &str = "that grouping slot is no longer configured";
 /// Notice for a saved scope removed after the dialog captured its rows.
 pub(super) const SCOPE_GONE: &str = "that saved scope no longer exists";
 
+/// Notice for a link pick whose tile closed after the chooser captured it.
+pub(super) const TILE_GONE: &str = "that tile is no longer open";
+
 /// Commit through the target's operation. Grouping revalidates the slot
 /// against the frame; a scope loads through `load_saved_scope`, the
 /// `scope::<name>` actions' own path, and a name gone since the open
 /// posts [`SCOPE_GONE`]. Tile kind closes the modal before calling `add_tile`,
 /// so modal focus return precedes occupant creation. A log target replaces
-/// the rows without closing; a log level requests the change and closes.
+/// the rows without closing; a log level requests the change and closes. A
+/// link row closes the modal and goes through the shell's link doors; a
+/// tile closed since the open posts [`TILE_GONE`] and links nothing.
 fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Context<ShellView>) {
     match pick {
         Pick::Slot(slot) => {
@@ -749,6 +904,30 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
                 cx.notify();
             });
             shell.close_modal(window, cx);
+        }
+        Pick::Link { tile, change } => {
+            // Closed first, like a tile-kind pick: the chooser is gone
+            // before the doors notify the frame and the tile. The doors
+            // are the shell's own, never the frame's: `set_emit` reads the
+            // tile and writes the frame, which is sound here because a
+            // commit runs in the shell's key or click handler, inside no
+            // update of the tile or of the frame.
+            shell.close_modal(window, cx);
+            // The palette can close the tile under the open chooser. A
+            // follow written for it then would stay in the frame for a
+            // tile nothing ever unlinks.
+            if shell
+                .occupant_kind(tile)
+                .is_none_or(|kind| kind == PLACEHOLDER_KIND)
+            {
+                shell.notice = Some(TILE_GONE.into());
+                cx.notify();
+                return;
+            }
+            match change {
+                LinkChange::Follow(group) => shell.set_follow(tile, group, cx),
+                LinkChange::Emit(group) => shell.set_emit(tile, group, cx),
+            }
         }
     }
 }
@@ -1243,5 +1422,125 @@ mod tests {
             panic!("a scope target")
         };
         assert_eq!(names.as_slice(), state.list.options());
+    }
+
+    // --- Link group ----------------------------------------------------
+
+    const TILE: TileId = TileId(7);
+
+    fn link(emits: bool, follow: Option<Group>, emit: Option<Group>) -> ChoiceDialogState {
+        ChoiceDialogState::link_group(TILE, emits, Membership { follow, emit })
+    }
+
+    fn link_pick(change: LinkChange) -> Option<Pick> {
+        Some(Pick::Link { tile: TILE, change })
+    }
+
+    const FOLLOW: [&str; 5] = [
+        "follow \u{00b7} workspace",
+        "follow \u{00b7} A",
+        "follow \u{00b7} B",
+        "follow \u{00b7} C",
+        "follow \u{00b7} D",
+    ];
+    const EMIT: [&str; 5] = [
+        "emit \u{00b7} none",
+        "emit \u{00b7} A",
+        "emit \u{00b7} B",
+        "emit \u{00b7} C",
+        "emit \u{00b7} D",
+    ];
+
+    /// A tile that cannot emit is offered no emit row: picking one would
+    /// set nothing, and the row would promise what the tile cannot do.
+    #[test]
+    fn the_link_rows_offer_emitting_only_to_a_tile_that_emits() {
+        assert_eq!(link(false, None, None).list.options(), FOLLOW);
+        let emitter = link(true, None, None);
+        assert_eq!(emitter.list.options().len(), 10);
+        assert_eq!(emitter.list.options()[..5], FOLLOW, "follow rows first");
+        assert_eq!(emitter.list.options()[5..], EMIT);
+    }
+
+    /// The chooser opens on the row that says what the tile follows now,
+    /// so `enter` on an untouched chooser changes nothing.
+    #[test]
+    fn the_highlight_opens_on_the_current_follow_row() {
+        let state = link(true, Some(Group::C), Some(Group::A));
+        assert_eq!(state.list.highlighted_text(), Some("follow \u{00b7} C"));
+        assert_eq!(
+            state.highlighted_pick(),
+            link_pick(LinkChange::Follow(Some(Group::C)))
+        );
+        let state = link(true, None, Some(Group::A));
+        assert_eq!(
+            state.list.highlighted_text(),
+            Some("follow \u{00b7} workspace")
+        );
+        assert_eq!(
+            state.highlighted_pick(),
+            link_pick(LinkChange::Follow(None))
+        );
+    }
+
+    /// A row stands for its change by position, never by its text, and a
+    /// filtered row still resolves to its own.
+    #[test]
+    fn each_row_picks_its_change() {
+        let state = link(true, None, None);
+        let picks: Vec<Option<Pick>> = (0..10).map(|row| state.pick_at_ranked(row)).collect();
+        let mut expected = vec![link_pick(LinkChange::Follow(None))];
+        expected.extend(Group::ALL.map(|g| link_pick(LinkChange::Follow(Some(g)))));
+        expected.push(link_pick(LinkChange::Emit(None)));
+        expected.extend(Group::ALL.map(|g| link_pick(LinkChange::Emit(Some(g)))));
+        assert_eq!(picks, expected);
+        assert_eq!(state.pick_at_ranked(10), None);
+
+        let viewer = link(false, None, None);
+        assert_eq!(
+            viewer.pick_at_ranked(4),
+            link_pick(LinkChange::Follow(Some(Group::D)))
+        );
+        assert_eq!(viewer.pick_at_ranked(5), None, "no emit row to pick");
+
+        for query in ["emit b", "b emit"] {
+            let mut state = link(true, None, None);
+            state.list.set_query(query);
+            let first = state.list.ranked().first().map(|r| r.row);
+            assert_eq!(
+                first.map(|row| state.list.options()[row].as_str()),
+                Some("emit \u{00b7} B"),
+                "{query}"
+            );
+            assert_eq!(
+                state.pick_at_ranked(0),
+                link_pick(LinkChange::Emit(Some(Group::B))),
+                "{query}"
+            );
+            assert_eq!(
+                state.highlighted_pick(),
+                link_pick(LinkChange::Emit(Some(Group::B))),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_title_names_the_current_groups() {
+        let title = |follow, emit| link(true, follow, emit).title().to_string();
+        assert_eq!(title(None, None), "Link group");
+        assert_eq!(
+            title(Some(Group::A), None),
+            "Link group \u{00b7} following A"
+        );
+        assert_eq!(
+            title(None, Some(Group::B)),
+            "Link group \u{00b7} emitting B"
+        );
+        assert_eq!(
+            title(Some(Group::A), Some(Group::B)),
+            "Link group \u{00b7} following A \u{00b7} emitting B"
+        );
+        assert_eq!(link(true, None, None).jump("1"), None, "digits type here");
     }
 }

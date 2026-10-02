@@ -7,6 +7,7 @@
 use super::*;
 use crate::frame::Frame;
 use crate::module::recording::{Recorded, RecordingFactory};
+use crate::shell::choicedialog::{NO_TILE_TO_LINK, TILE_GONE, Target};
 use crate::tiling::WorkspaceIx;
 use geode_core::document::DocumentRows;
 use geode_core::link::{BoardEntry, Emission, Group};
@@ -1089,4 +1090,314 @@ fn closing_a_tile_and_reusing_nothing_leaves_no_membership_in_the_session(
 
     let text = session_text(&shell, &mut vcx).expect("the close is written");
     assert!(!text.contains("follow"), "{text}");
+}
+
+// --- The chooser ----------------------------------------------------
+
+/// A shell over `services` with one recorder tile, focused.
+fn one_tile_in(
+    cx: &mut gpui::TestAppContext,
+    services: ShellServices,
+) -> (
+    gpui::WindowHandle<Root>,
+    gpui::VisualTestContext,
+    Entity<ShellView>,
+    TileId,
+) {
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    add_tile(&mut vcx);
+    let tile = shell.read_with(&vcx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupant_kind(tile)),
+        Some("rec")
+    );
+    (window, vcx, shell, tile)
+}
+
+/// Press the chord and paint what it opened.
+fn press_mod_u(vcx: &mut gpui::VisualTestContext) {
+    vcx.simulate_keystrokes("alt-u");
+    draw(vcx);
+    vcx.run_until_parked();
+    draw(vcx);
+}
+
+/// The tile the open chooser is for, when the open choice dialog is one.
+fn chooser_tile(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Option<TileId> {
+    shell.read_with(vcx, |s, _| {
+        match s.choice_dialog.as_ref().map(|d| &d.target) {
+            Some(Target::LinkGroup { tile, .. }) => Some(*tile),
+            _ => None,
+        }
+    })
+}
+
+fn notice(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Option<String> {
+    shell.read_with(vcx, |s, _| s.notice.as_ref().map(|n| n.to_string()))
+}
+
+/// The keyboard route end to end: the chord opens the chooser on the
+/// focused tile with the filter focused, typed words narrow the rows, and
+/// Enter follows the group the lit row names.
+#[gpui::test]
+fn mod_u_opens_the_chooser_for_the_focused_tile_and_enter_follows(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, test_services());
+    let frame = frame_of(&shell, &vcx);
+    press_mod_u(&mut vcx);
+
+    assert_eq!(chooser_tile(&shell, &vcx), Some(tile));
+    assert!(vcx.debug_bounds("link-choice-list").is_some());
+    assert!(vcx.debug_bounds("link-hints").is_some());
+    assert!(
+        dialog_filter_is_focused(&shell, &mut vcx),
+        "typing reaches the filter"
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.modals.last().map(|m| m.title.to_string())),
+        Some("Link group".to_string())
+    );
+
+    vcx.simulate_input("follow b");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(tile).follow),
+        Some(Group::B)
+    );
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+
+    // Opened again it says where the tile is: the title names the group
+    // and the lit row is the one Enter would leave unchanged.
+    press_mod_u(&mut vcx);
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.modals.last().map(|m| m.title.to_string())),
+        Some("Link group \u{00b7} following B".to_string())
+    );
+    assert_eq!(
+        shell
+            .read_with(&vcx, |s, _| {
+                let list = &s.choice_dialog.as_ref().unwrap().list;
+                list.highlighted_text().map(str::to_owned)
+            })
+            .as_deref(),
+        Some("follow \u{00b7} B")
+    );
+}
+
+/// A tile that cannot emit (a viewer) is offered the follow rows alone.
+#[gpui::test]
+fn a_viewer_like_tile_sees_no_emit_rows(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, test_services());
+    press_mod_u(&mut vcx);
+    assert_eq!(chooser_tile(&shell, &vcx), Some(tile));
+    assert!(vcx.debug_bounds("link-choice-follow \u{00b7} A").is_some());
+    assert!(
+        vcx.debug_bounds("link-choice-follow \u{00b7} workspace")
+            .is_some()
+    );
+    assert!(vcx.debug_bounds("link-choice-emit \u{00b7} A").is_none());
+    assert!(vcx.debug_bounds("link-choice-emit \u{00b7} none").is_none());
+}
+
+/// Picking an emit row goes through the shell's door: the tile is
+/// subscribed and its emission reaches the group at once.
+#[gpui::test]
+fn picking_an_emit_row_subscribes_and_posts(cx: &mut gpui::TestAppContext) {
+    let (services, emitter) = emitting_services(Emission {
+        scope: Some(underlying("SPX.Z")),
+        board: Vec::new(),
+    });
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, services);
+    let frame = frame_of(&shell, &vcx);
+    press_mod_u(&mut vcx);
+    assert!(
+        vcx.debug_bounds("link-choice-emit \u{00b7} A").is_some(),
+        "an emitting tile is offered the emit rows"
+    );
+
+    vcx.simulate_input("emit a");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(tile)),
+        geode_core::link::Membership {
+            follow: None,
+            emit: Some(Group::A),
+        }
+    );
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("SPX.Z")
+    );
+    assert_eq!(shell.read_with(&vcx, |s, _| s.emit_subs.len()), 1);
+    emitter.emission.borrow_mut().scope = Some(underlying("NDX"));
+    tile_changed(&shell, &mut vcx, tile);
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("NDX")
+    );
+
+    // `emit · none` leaves the group again.
+    press_mod_u(&mut vcx);
+    vcx.simulate_input("emit none");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(frame.read_with(&vcx, |f, _| f.membership(tile).emit), None);
+    assert!(shell.read_with(&vcx, |s, _| s.emit_subs.is_empty()));
+}
+
+/// With nothing to link there is no chooser to open: the status bar says
+/// why instead of a dialog whose every row would do nothing.
+#[gpui::test]
+fn the_chooser_refuses_without_a_tile(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    press_mod_u(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()));
+    assert_eq!(notice(&shell, &vcx).as_deref(), Some("no tile to link"));
+}
+
+/// A placeholder is in no group and cannot be put in one: its membership
+/// would be dropped the moment a module filled it.
+#[gpui::test]
+fn the_chooser_refuses_on_a_placeholder(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    shell.update(&mut vcx, |s, cx| {
+        s.services
+            .workspaces
+            .split_active(crate::tiling::Orientation::Horizontal);
+        cx.notify();
+    });
+    draw(&mut vcx);
+    let tile = shell.read_with(&vcx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupant_kind(tile)),
+        Some(crate::module::placeholder::PLACEHOLDER_KIND)
+    );
+
+    press_mod_u(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+    assert_eq!(notice(&shell, &vcx).as_deref(), Some(NO_TILE_TO_LINK));
+}
+
+/// The chooser acts on a tile, so it is refused while a page covers the
+/// tiles. It opens a dialog, so its chord reaches the shell over another
+/// dialog and stacks; over a choice dialog already open it changes nothing.
+#[gpui::test]
+fn the_chooser_is_refused_over_a_page_and_listed_as_a_dialog_opener(cx: &mut gpui::TestAppContext) {
+    let page = crate::module::recording::RecordingPageFactory::new("diagnostics");
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, services_with_page(page));
+
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.page_open()));
+    dispatch_action(&shell, "tile::link_group", &mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+    assert_eq!(
+        notice(&shell, &vcx).as_deref(),
+        Some(crate::shell::input::CLOSE_PAGE_FIRST)
+    );
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| !s.page_open()));
+    draw(&mut vcx);
+
+    assert!(crate::shell::dialog::opens_dialog(&ActionId(
+        "tile::link_group".into()
+    )));
+    let kinds = |shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext| {
+        shell.read_with(vcx, |s, _| {
+            s.modals.iter().map(|m| m.kind).collect::<Vec<_>>()
+        })
+    };
+    use crate::shell::dialog::DialogKind;
+
+    // Over another dialog the chord still reaches the shell, and stacks.
+    dispatch_action(&shell, "settings::open", &mut vcx);
+    draw(&mut vcx);
+    press_mod_u(&mut vcx);
+    assert_eq!(
+        kinds(&shell, &vcx),
+        vec![DialogKind::Settings, DialogKind::Choice]
+    );
+    assert_eq!(chooser_tile(&shell, &vcx), Some(tile));
+    shell.update_in(&mut vcx, |s, window, cx| {
+        while s.modal_open() {
+            s.close_modal(window, cx);
+        }
+    });
+    draw(&mut vcx);
+
+    // Over the tile picker, itself a choice dialog, it replaces nothing.
+    vcx.simulate_keystrokes("alt-n");
+    draw(&mut vcx);
+    press_mod_u(&mut vcx);
+    assert_eq!(kinds(&shell, &vcx), vec![DialogKind::Choice]);
+    assert!(
+        shell.read_with(&vcx, |s, _| matches!(
+            s.choice_dialog.as_ref().map(|d| &d.target),
+            Some(Target::TileKind { .. })
+        )),
+        "the tile picker is still the open choice dialog"
+    );
+}
+
+/// The pointer route: a click on a row commits that row.
+#[gpui::test]
+fn a_click_on_a_row_commits_it(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, test_services());
+    let frame = frame_of(&shell, &vcx);
+    press_mod_u(&mut vcx);
+    let row = vcx
+        .debug_bounds("link-choice-follow \u{00b7} A")
+        .expect("the row is painted");
+    vcx.simulate_click(row.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(tile).follow),
+        Some(Group::A)
+    );
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+}
+
+/// The palette still reaches `Close tile` over an open dialog. A pick for a
+/// tile closed under the chooser links nothing: a follow written for it
+/// would sit in the frame for a tile nothing ever unlinks.
+#[gpui::test]
+fn a_pick_for_a_tile_closed_under_the_chooser_links_nothing(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, test_services());
+    let frame = frame_of(&shell, &vcx);
+    press_mod_u(&mut vcx);
+    assert_eq!(chooser_tile(&shell, &vcx), Some(tile));
+
+    dispatch_action(&shell, "workspace::close_tile", &mut vcx);
+    draw(&mut vcx);
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupant_kind(tile)),
+        None,
+        "fixture: the tile closed under the chooser"
+    );
+    assert_eq!(
+        chooser_tile(&shell, &vcx),
+        Some(tile),
+        "fixture: the chooser is still open on it"
+    );
+
+    vcx.simulate_input("follow b");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+
+    assert!(frame.read_with(&vcx, |f, _| f.membership(tile).is_empty()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+    assert_eq!(notice(&shell, &vcx).as_deref(), Some(TILE_GONE));
 }

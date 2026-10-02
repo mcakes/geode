@@ -97,6 +97,7 @@ context = "workspace"
 "mod+x" = "frame::add_expression"
 "mod+t" = "frame::as_of"
 "mod+g" = "frame::grouping"
+"mod+u" = "tile::link_group"
 "mod+o" = "frame::scope"
 "mod+n" = "tile::add"
 
@@ -417,6 +418,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // Fits the focused tile's table columns to their content
     // (`TileContent::autosize_columns`). Palette-only: no default key.
     action(reg, "tile::autosize_columns", "Autosize columns", "Tile");
+    // The link chooser on the focused tile: the group it follows and, for
+    // a tile whose module emits, the group it emits into.
+    action(reg, "tile::link_group", "Link group\u{2026}", "Tile");
     // Control-1 through Control-9 activate grouping slots; empty slots are
     // ignored. Control-0 restores each following tile's view-default grouping.
     for i in 1..=9 {

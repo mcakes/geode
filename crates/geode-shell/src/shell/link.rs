@@ -14,13 +14,6 @@ use crate::tiling::TileId;
 
 impl ShellView {
     /// Follow `group`, or the workspace again with `None`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no caller outside tests until the link chooser dispatches this door"
-        )
-    )]
     pub(super) fn set_follow(
         &mut self,
         tile: TileId,

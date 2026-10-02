@@ -58,7 +58,8 @@ pub(crate) const NO_MODULE_OPENS: &str = "no module opens on the context at the 
 
 /// The action ids refused with [`CLOSE_PAGE_FIRST`] while a page is open:
 /// the transient tile chrome (the `:` line, find, the stack list, the row
-/// menu) and every layout edit — add, open-with, autosize, and the whole
+/// menu, the link chooser) and every layout edit — add, open-with,
+/// autosize, and the whole
 /// `workspace::`, `dock::`, and `stack::` families, which close,
 /// fullscreen, move, resize, refocus, dock, or restack tiles nobody can see
 /// (`Close tile` would destroy an unseen tile with no undo).
@@ -78,6 +79,7 @@ fn refused_over_a_page(id: &str) -> bool {
                 | "tile::open_with"
                 | "tile::context_menu"
                 | "tile::autosize_columns"
+                | "tile::link_group"
         )
         || crate::defaults::parse_add_action(id).is_some()
 }
@@ -495,6 +497,9 @@ impl ShellView {
         } else if action.0 == "frame::grouping" {
             // Open the same grouping picker as the toolbar readout.
             choicedialog::open_grouping(self, window, cx);
+        } else if action.0 == "tile::link_group" {
+            // Open the link chooser on the focused tile.
+            choicedialog::open_link_group(self, window, cx);
         } else if action.0 == "tile::add" {
             // Open the same tile-kind picker as a placeholder double-click.
             choicedialog::open_tile_kinds(self, window, cx);

@@ -231,6 +231,7 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
             | "frame::scope"
             | "tile::add"
             | "tile::open_with"
+            | "tile::link_group"
             | "log::level"
     ) || action.0.starts_with("frame::pick_")
 }
