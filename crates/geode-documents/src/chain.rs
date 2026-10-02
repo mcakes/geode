@@ -3,8 +3,12 @@
 //! `optionChain` carries the forward, spot reference and quote time, and one
 //! `quote` per strike with bid, ask and mid vols and bid and ask prices.
 //!
-//! Vols arrive computed upstream: a quote missing any of the three vols is
-//! refused, so nothing downstream averages bid and ask. Quotes are sorted
+//! Vols arrive computed upstream: a quote missing its mid vol is refused,
+//! so nothing downstream averages bid and ask. A side is its vol and its
+//! price together: a quote may lack one whole side (a one-sided market,
+//! carried as NaN in both of that side's columns, since the family has no
+//! NULL, and written back with that side's children absent), but half a
+//! side or both sides missing is refused naming the strike. Quotes are sorted
 //! by strike at parse and a repeated strike is refused. A negative vol or
 //! price and a non-positive spot reference are refused; crossed or locked
 //! quotes are accepted as market states. Wire tag names
@@ -353,20 +357,39 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                         quote.fields[i] = Some(non_negative(tag, number(tag, trimmed)?)?);
                     }
                     Shape::Quote => {
-                        // Every child is required. A quote without a strike
-                        // is named by its 1-based position; one with a
-                        // strike is named by it.
+                        // A quote without a strike is named by its 1-based
+                        // position; one with a strike is named by it.
                         let n = quotes_seen + 1;
                         let strike = quote
                             .strike
                             .ok_or_else(|| parse_err(format!("quote {n} is missing strike")))?;
-                        let mut values = [0.0; 5];
-                        for (i, (tag, _)) in TAGS.iter().enumerate() {
-                            values[i] = quote.fields[i].ok_or_else(|| {
-                                parse_err(format!("quote at strike {strike} is missing {tag}"))
-                            })?;
+                        let [bid_vol, ask_vol, mid_vol, bid, ask] = quote.fields;
+                        let missing = |tag: &str| {
+                            parse_err(format!("quote at strike {strike} is missing {tag}"))
+                        };
+                        let mid = mid_vol.ok_or_else(|| missing("midVol"))?;
+                        // A side is its vol and its price together: half a
+                        // side is a malformed quote, an absent side a
+                        // one-sided market (NaN in both its columns; the
+                        // family has no NULL).
+                        let side = |vol: Option<f64>, price: Option<f64>, vt: &str, pt: &str| match (
+                            vol, price,
+                        ) {
+                            (Some(v), Some(p)) => Ok(Some((v, p))),
+                            (None, None) => Ok(None),
+                            (Some(_), None) => Err(missing(pt)),
+                            (None, Some(_)) => Err(missing(vt)),
+                        };
+                        let b = side(bid_vol, bid, "bidVol", "bid")?;
+                        let a = side(ask_vol, ask, "askVol", "ask")?;
+                        if b.is_none() && a.is_none() {
+                            return Err(parse_err(format!(
+                                "quote at strike {strike} has neither a bid nor an ask"
+                            )));
                         }
-                        rows.push((strike, values));
+                        let (bv, bp) = b.unwrap_or((f64::NAN, f64::NAN));
+                        let (av, ap) = a.unwrap_or((f64::NAN, f64::NAN));
+                        rows.push((strike, [bv, av, mid, bp, ap]));
                         quotes_seen += 1;
                     }
                     // A container closing, and — with the stack empty, a
@@ -574,6 +597,32 @@ fn write(rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
     if *spot_ref <= 0.0 || spot_ref.is_nan() {
         return Err(write_err(format!("spot_ref {spot_ref} is not positive")));
     }
+    // The parser yields a side's vol and price absent together (both NaN),
+    // never both sides absent, and always a mid.
+    for (i, k) in strikes.iter().enumerate() {
+        for (vol, price, vn, pn) in [
+            (values[0], values[3], "bid_vol", "bid"),
+            (values[1], values[4], "ask_vol", "ask"),
+        ] {
+            if vol[i].is_nan() != price[i].is_nan() {
+                let (has, lacks) = if vol[i].is_nan() { (pn, vn) } else { (vn, pn) };
+                return Err(write_err(format!(
+                    "quote at strike {k} has {has} without {lacks}"
+                )));
+            }
+        }
+        if !values[2][i].is_finite() {
+            return Err(write_err(format!(
+                "mid_vol {} at strike {k} is not finite",
+                values[2][i]
+            )));
+        }
+        if values[0][i].is_nan() && values[1][i].is_nan() {
+            return Err(write_err(format!(
+                "quote at strike {k} has neither a bid nor an ask"
+            )));
+        }
+    }
     for (name, column) in VALUES.iter().zip(values) {
         if let Some(v) = column.iter().find(|v| **v < 0.0) {
             return Err(write_err(format!("{name} {v} is negative")));
@@ -613,6 +662,10 @@ fn write(rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
         num_into(&mut buf, "strike", strikes[i])?;
         leaf(&mut w, "strike", &buf)?;
         for ((tag, _), column) in TAGS.iter().zip(values) {
+            // An absent side (checked whole above) has no children.
+            if column[i].is_nan() {
+                continue;
+            }
             num_into(&mut buf, tag, column[i])?;
             leaf(&mut w, tag, &buf)?;
         }
@@ -840,6 +893,116 @@ role = "attribute"
                 "{tag}"
             );
         }
+    }
+
+    /// Column-by-column equality where two NaNs are equal: a one-sided
+    /// quote carries NaN in its absent side, which `==` never matches.
+    fn same_rows(a: &DocumentRows, b: &DocumentRows) -> bool {
+        let same_f64 = |x: &[f64], y: &[f64]| {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y)
+                    .all(|(p, q)| p == q || (p.is_nan() && q.is_nan()))
+        };
+        let same_cols = |x: &[(String, Column)], y: &[(String, Column)]| {
+            x.len() == y.len()
+                && x.iter().zip(y).all(|((n, c), (m, d))| {
+                    n == m
+                        && match (c, d) {
+                            (Column::F64(c), Column::F64(d)) => same_f64(c, d),
+                            (c, d) => c == d,
+                        }
+                })
+        };
+        a.key == b.key
+            && a.attributes == b.attributes
+            && same_cols(&a.axes, &b.axes)
+            && same_cols(&a.values, &b.values)
+    }
+
+    #[test]
+    fn a_quote_may_lack_one_whole_side() {
+        // Strike 7500's bid side removed: both children.
+        let doc = DOC
+            .replacen("<bidVol>0.2</bidVol>", "", 1)
+            .replacen("<bid>95.5</bid>", "", 1);
+        let parsed = OptionChainKind.parse(doc.as_bytes()).unwrap();
+        let rows = &parsed.rows;
+        let col = |name: &str| match &rows.values.iter().find(|(n, _)| n == name).unwrap().1 {
+            Column::F64(v) => v.clone(),
+            _ => unreachable!(),
+        };
+        let i = 0; // the first quote in DOC is the one edited
+        assert!(col("bid_vol")[i].is_nan() && col("bid")[i].is_nan());
+        assert!(col("ask_vol")[i].is_finite() && col("mid_vol")[i].is_finite());
+    }
+
+    #[test]
+    fn half_a_side_or_no_side_is_refused_naming_the_strike() {
+        let no_bid_price = DOC.replacen("<bid>95.5</bid>", "", 1);
+        assert_eq!(err(&no_bid_price), "quote at strike 7500 is missing bid");
+        let no_sides = DOC
+            .replacen("<bidVol>0.2</bidVol>", "", 1)
+            .replacen("<bid>95.5</bid>", "", 1)
+            .replacen("<askVol>0.21</askVol>", "", 1)
+            .replacen("<ask>99</ask>", "", 1);
+        assert_eq!(
+            err(&no_sides),
+            "quote at strike 7500 has neither a bid nor an ask"
+        );
+        let no_mid = DOC.replacen("<midVol>0.205</midVol>", "", 1);
+        assert_eq!(err(&no_mid), "quote at strike 7500 is missing midVol");
+    }
+
+    #[test]
+    fn a_one_sided_quote_round_trips_with_its_side_absent() {
+        let mut rows = expected();
+        for name in ["bid_vol", "bid"] {
+            let Column::F64(v) = &mut rows.values.iter_mut().find(|(n, _)| n == name).unwrap().1
+            else {
+                unreachable!()
+            };
+            v[0] = f64::NAN;
+        }
+        let bytes = OptionChainKind.write(&rows).unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert_eq!(text.matches("<bidVol>").count(), rows.rows() - 1);
+        let back = OptionChainKind.parse(&bytes).unwrap().rows;
+        assert!(same_rows(&rows, &back), "NaN-aware equality");
+    }
+
+    #[test]
+    fn write_refuses_half_a_side_and_a_missing_mid() {
+        let mut half = expected();
+        let Column::F64(v) = &mut half.values[3].1 else {
+            unreachable!()
+        }; // bid
+        v[0] = f64::NAN;
+        assert_eq!(
+            OptionChainKind.write(&half).unwrap_err().message,
+            "quote at strike 7500 has bid_vol without bid"
+        );
+        let mut half = expected();
+        let Column::F64(v) = &mut half.values[1].1 else {
+            unreachable!()
+        }; // ask_vol
+        v[0] = f64::NAN;
+        assert_eq!(
+            OptionChainKind.write(&half).unwrap_err().message,
+            "quote at strike 7500 has ask without ask_vol"
+        );
+        let mut no_mid = expected();
+        let Column::F64(v) = &mut no_mid.values[2].1 else {
+            unreachable!()
+        }; // mid_vol
+        v[0] = f64::NAN;
+        assert!(
+            OptionChainKind
+                .write(&no_mid)
+                .unwrap_err()
+                .message
+                .contains("mid_vol")
+        );
     }
 
     #[test]
@@ -1087,7 +1250,7 @@ role = "attribute"
             }
             let n = strikes.len();
             let mut col = |scale: f64| Column::F64((0..n).map(|_| draw() * scale).collect());
-            let rows = DocumentRows {
+            let mut rows = DocumentRows {
                 key: vec!["SPX".into(), "2027-03-19".into()],
                 attributes: vec![
                     ("forward".into(), Value::F64(7000.25)),
@@ -1103,10 +1266,23 @@ role = "attribute"
                     ("ask".into(), col(500.0)),
                 ],
             };
+            // About one quote in eight lacks its bid side, one in eight
+            // its ask side; never both.
+            for i in 0..n {
+                let side = match draw() {
+                    d if d < 0.125 => [0, 3],
+                    d if d < 0.25 => [1, 4],
+                    _ => continue,
+                };
+                for c in side {
+                    let Column::F64(v) = &mut rows.values[c].1 else { unreachable!() };
+                    v[i] = f64::NAN;
+                }
+            }
             let bytes = OptionChainKind.write(&rows).unwrap();
             let parsed = OptionChainKind.parse(&bytes).unwrap();
             proptest::prop_assert!(parsed.unknown_paths.is_empty());
-            proptest::prop_assert_eq!(parsed.rows, rows);
+            proptest::prop_assert!(same_rows(&parsed.rows, &rows));
         }
     }
 }
