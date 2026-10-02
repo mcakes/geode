@@ -148,7 +148,7 @@ often tripped:
   queue drains until the clear. Local writes are not counted.
 - Load notes (`LoadNotes`: extra source columns, absent optional ones) ride
   `IngestEvent::Published`; the service warns once per distinct combination,
-  up to 256.
+  up to 256, then once more naming the source and file that reached the cap.
 - `apply_schema` is `CREATE TABLE IF NOT EXISTS` and publish moves rows
   positionally, so open compares every existing payload table with its
   declaration (`store::drift`) and refuses a drifted dataset for the run:

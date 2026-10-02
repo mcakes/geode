@@ -385,7 +385,8 @@ struct LoadNoteLog {
 impl LoadNoteLog {
     /// The warning one load's notes earn: one for a combination not seen
     /// this run (column order aside), none for a repeat. At the cap, one
-    /// last warning says further combinations go unreported.
+    /// last warning names the source and file whose new combination hit the
+    /// cap and says further combinations go unreported.
     fn note(
         &mut self,
         source: &str,
@@ -408,7 +409,9 @@ impl LoadNoteLog {
             }
             self.capped = true;
             return Some(load_note_warning(format!(
-                "{LOAD_NOTE_CAP} distinct load-note combinations reported; further ones are not"
+                "source '{source}' reached {LOAD_NOTE_CAP} distinct load-note combinations \
+                 ('{}' into '{dataset}'); further ones are not reported",
+                notes.file
             )));
         }
         self.seen.insert(key);
@@ -7113,9 +7116,14 @@ source_name = "NPV"
             );
         }
         let last = log
-            .note("s", "d", &notes("f.csv", &["one more"], &[]))
+            .note("t", "d", &notes("g.csv", &["one more"], &[]))
             .expect("the cap is announced once");
         assert!(last.message.contains("further"), "{}", last.message);
+        assert!(
+            last.message.contains("source 't'") && last.message.contains("'g.csv'"),
+            "the cap warning names the source and file that hit it: {}",
+            last.message
+        );
         assert!(
             log.note("s", "d", &notes("f.csv", &["and another"], &[]))
                 .is_none()

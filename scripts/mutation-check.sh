@@ -29068,6 +29068,14 @@ run_mutation "silence: the diagnostics ring evicts its oldest error first" \
   geode-shell \
   a_flood_of_warnings_never_evicts_an_older_error
 
+# The cap warning names the source that reached it.
+run_mutation "silence: the load-note cap warning omits its source" \
+  crates/geode-data/src/service.rs \
+  '                "source '"'"'{source}'"'"' reached {LOAD_NOTE_CAP} distinct' \
+  '                "reached {LOAD_NOTE_CAP} distinct' \
+  geode-data \
+  load_notes_stop_growing_at_the_cap_with_one_last_warning
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
