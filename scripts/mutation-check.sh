@@ -6278,7 +6278,7 @@ run_mutation "diagnostics: MAJ-5 — note_config appends instead of replacing" \
         self.config_history.push_front((at, diags));' \
   geode-shell note_config_is_a_no_op_for_an_identical_batch
 
-run_mutation "diagnostics: MAJ-1 — summary() rebuilds the Rc<str> on a cache hit" \
+run_mutation "diagnostics: MAJ-1 — summary() rebuilds the SharedString on a cache hit" \
   crates/geode-shell/src/diagnostics.rs \
   '        {
             let cache = self.summary_cache.borrow();
