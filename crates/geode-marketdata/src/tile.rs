@@ -38,8 +38,10 @@ use crate::popup::{ChoicePopup, PickerRows, PickerState, Popup, render_picker};
 use geode_core::colour::{Rgb, contrast_ratio, readable_on};
 use geode_core::document::{DocumentRows, Value, split_key};
 use geode_core::grid::selection::{Resolved, SelectKind, Selection};
+use geode_core::link::{BoardEntry, Emission};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::schema::ColumnType;
+use geode_core::scope::Scope;
 use geode_core::snapshot::Snapshot;
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
@@ -461,6 +463,36 @@ enum Yank {
     Col,
 }
 
+/// The draft document as last assembled for a link group's board, and what
+/// it was assembled from. The shell pulls [`MarketDataTile::emission`] on
+/// every notification while the panel emits, and assembling walks the whole
+/// document: rebuilt per pull, a one-cell commit budgeted at one cell refill
+/// would cost a document walk and hand the frame a new allocation it must
+/// treat as a changed draft.
+struct Emitted {
+    /// The underlying the rows are for, so one underlying's rows are never
+    /// handed out as another's even over an equal draft and base.
+    key: Vec<String>,
+    draft: Draft,
+    /// The painted base the rows were read from, held so its allocation is
+    /// the identity: a republish at the same source time is the same
+    /// `DocumentBase` under an unchanged draft, and only the snapshot
+    /// itself says the untouched rows moved.
+    snapshot: Arc<Snapshot>,
+    /// `None` when the builder refused this draft: remembered, so a draft
+    /// that cannot be assembled is not re-walked on every pull either.
+    rows: Option<Arc<DocumentRows>>,
+}
+
+impl Emitted {
+    /// Whether these rows are still what the builder would assemble: the
+    /// same underlying, the same base allocation and an equal draft. The
+    /// index is not compared: it is replaced only when one of those moves.
+    fn is_for(&self, key: &[String], snapshot: &Arc<Snapshot>, draft: &Draft) -> bool {
+        self.key == key && Arc::ptr_eq(&self.snapshot, snapshot) && self.draft == *draft
+    }
+}
+
 pub struct MarketDataTile {
     id: TileId,
     spec: Arc<PanelSpec>,
@@ -626,6 +658,14 @@ pub struct MarketDataTile {
     /// `rebuild_chrome` compares against, so no edit door has to
     /// remember to clear it.
     upload_error: Option<(SharedString, Draft)>,
+    /// The draft document last assembled for a link group's board (see
+    /// [`Emitted`]). Interior because `emission` reads the tile: it is
+    /// borrowed only inside [`Self::draft_rows`], which calls nothing that
+    /// reaches back into the tile, and the shell pulls an emission only
+    /// after the update that announced it has finished, so no borrow is
+    /// ever open across a tile update. No edit route touches it: an edit
+    /// costs nothing here until the shell pulls.
+    emitted: RefCell<Option<Emitted>>,
 }
 
 impl MarketDataTile {
@@ -951,6 +991,7 @@ impl MarketDataTile {
             in_flight: None,
             upload_tag: 0,
             upload_error: None,
+            emitted: RefCell::new(None),
         };
         this.rebuild_chrome();
         // Install the tile's initial model into the delegate through the same path as
@@ -1724,6 +1765,62 @@ impl MarketDataTile {
     /// is retained, else the newest delivered.
     fn painted_snapshot(&self) -> Option<Arc<Snapshot>> {
         self.base_snapshot.clone().or_else(|| self.snapshot.clone())
+    }
+
+    /// What the panel posts into the link group it emits into: where it is
+    /// (its underlying, as a one-value scope) and, while it holds unsent
+    /// work the upload builder can assemble, that whole document. The same
+    /// answer whether or not the panel is emitting. With no underlying it
+    /// posts nothing, which leaves the group's scope as it is.
+    pub(crate) fn emission(&self) -> Emission {
+        let Some(key) = self.key.as_deref() else {
+            return Emission::default();
+        };
+        let board = self
+            .draft_rows(key)
+            .map(|rows| BoardEntry {
+                dataset: self.spec.dataset.clone(),
+                key: key.to_vec(),
+                rows,
+            })
+            .into_iter()
+            .collect();
+        Emission {
+            scope: key.first().map(|u| Scope::one("underlying_ref", u)),
+            board,
+        }
+    }
+
+    /// The draft document for the board: the rows `:upload` would assemble
+    /// from the painted base, the installed index and the draft, in the
+    /// same allocation until the underlying, the base or the draft moves
+    /// (the frame reads a new allocation as a changed draft). `None` with
+    /// nothing unsent, with no document, and for a draft the builder
+    /// refuses.
+    fn draft_rows(&self, key: &[String]) -> Option<Arc<DocumentRows>> {
+        let mut emitted = self.emitted.borrow_mut();
+        let unsent = self.draft.state != DraftState::Clean;
+        let Some(snapshot) = self.painted_snapshot().filter(|_| unsent) else {
+            // Nothing to post: let go of the rows and the snapshot they pin.
+            *emitted = None;
+            return None;
+        };
+        let current = emitted
+            .as_ref()
+            .is_some_and(|e| e.is_for(key, &snapshot, &self.draft));
+        if !current {
+            let rows =
+                crate::core::upload::assemble(&snapshot, &self.spec, &self.model, &self.draft)
+                    .ok()
+                    .map(Arc::new);
+            *emitted = Some(Emitted {
+                key: key.to_vec(),
+                draft: self.draft.clone(),
+                snapshot,
+                rows,
+            });
+        }
+        emitted.as_ref().and_then(|e| e.rows.clone())
     }
 
     /// Capture same-day group sizes only if the painted snapshot is the draft's own
@@ -16172,6 +16269,336 @@ edits = [["2026-11-20", "-1", 9.5]]
             matches!(cursor(&vcx), Cursor::Cell { row: 1, .. }),
             "G leaves the strip"
         );
+    }
+
+    // ---- Link-group emission -------------------------------------------
+
+    /// What the shell would pull: asked of the `TileContent` door.
+    fn emission_of(h: &Harness, vcx: &mut gpui::VisualTestContext) -> Emission {
+        vcx.update(|_, cx| h.content.emission(cx))
+    }
+
+    /// Commit `text` into the cursor cell through the editor's own verbs.
+    fn commit_cell(h: &Harness, vcx: &mut gpui::VisualTestContext, text: &str) {
+        h.dispatch(vcx, "edit", None);
+        h.set_editor(vcx, text);
+        h.dispatch(vcx, "commit", None);
+    }
+
+    /// The document `:upload` would send from the panel's state right now.
+    fn assembled(h: &Harness, vcx: &gpui::VisualTestContext) -> Result<DocumentRows, String> {
+        h.tile.read_with(vcx, |t, _| {
+            crate::core::upload::assemble(
+                &t.painted_snapshot().expect("a painted document"),
+                &t.spec,
+                t.model(),
+                t.draft(),
+            )
+        })
+    }
+
+    /// The shell's subscription, counting each announced change.
+    fn watch_emission(
+        h: &Harness,
+        vcx: &mut gpui::VisualTestContext,
+    ) -> (Rc<StdCell<u32>>, gpui::Subscription) {
+        let calls = Rc::new(StdCell::new(0u32));
+        let subscription = vcx
+            .update(|_, cx| {
+                let calls = calls.clone();
+                h.content
+                    .watch_emission(Rc::new(move |_| calls.set(calls.get() + 1)), cx)
+            })
+            .expect("an emitter hands the shell a subscription");
+        vcx.run_until_parked();
+        (calls, subscription)
+    }
+
+    fn on(underlying: &str) -> Option<Scope> {
+        Some(Scope::one("underlying_ref", underlying))
+    }
+
+    /// A panel with nothing unsent posts where it is and no document: a
+    /// follower reads the delivered document itself.
+    #[gpui::test]
+    fn a_clean_panel_emits_its_underlying_and_no_board(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        assert!(h.content.emits());
+        assert!(assembled(&h, &vcx).is_ok(), "sanity: there is a document");
+        let emission = emission_of(&h, &mut vcx);
+        assert_eq!(emission.scope, on("SPX.Z"));
+        assert!(
+            emission.board.is_empty(),
+            "a clean draft is not a document on the board"
+        );
+    }
+
+    /// The board carries the whole draft document, exactly the rows an
+    /// upload of the same state would send.
+    #[gpui::test]
+    fn an_edited_panel_posts_the_rows_the_upload_builder_assembles(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        let clean = assembled(&h, &vcx).unwrap();
+        h.motion(&mut vcx, "right", None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.model().columns[1].to_string()),
+            "atm",
+            "sanity: the cursor is on the first term's atm"
+        );
+        commit_cell(&h, &mut vcx, "0.25");
+
+        let emission = emission_of(&h, &mut vcx);
+        assert_eq!(emission.scope, on("SPX.Z"));
+        assert_eq!(emission.board.len(), 1, "one document: this panel's");
+        let entry = &emission.board[0];
+        assert_eq!(entry.dataset, "cvi_params");
+        assert_eq!(entry.key, vec!["SPX.Z".to_string()]);
+        let expected = assembled(&h, &vcx).unwrap();
+        assert_ne!(expected, clean, "sanity: the edit is in the document");
+        assert_eq!(*entry.rows, expected, "assemble's own rows, whole");
+    }
+
+    /// The frame compares drafts by allocation: a repeated pull must hand
+    /// back the same rows (no board write, no document walk), and a
+    /// changed draft a new allocation.
+    #[gpui::test]
+    fn an_unchanged_draft_hands_out_the_same_allocation(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.motion(&mut vcx, "right", None);
+        commit_cell(&h, &mut vcx, "0.25");
+
+        let first = emission_of(&h, &mut vcx);
+        let second = emission_of(&h, &mut vcx);
+        assert!(
+            Arc::ptr_eq(&first.board[0].rows, &second.board[0].rows),
+            "no edit between the pulls: the same allocation"
+        );
+        assert_eq!(first, second, "which the frame reads as no change");
+
+        commit_cell(&h, &mut vcx, "0.26");
+        let third = emission_of(&h, &mut vcx);
+        assert!(
+            !Arc::ptr_eq(&first.board[0].rows, &third.board[0].rows),
+            "one more edit: a new allocation"
+        );
+        assert_eq!(*third.board[0].rows, assembled(&h, &vcx).unwrap());
+    }
+
+    /// A republish at the same source time reaches the panel as the same
+    /// document base under an unchanged draft: only the snapshot itself
+    /// says the rows moved, and the board must not keep the old ones.
+    #[gpui::test]
+    fn a_redelivered_document_under_an_unchanged_draft_is_reassembled(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        let tag = h.with_document_tagged(&mut vcx);
+        h.motion(&mut vcx, "right", None);
+        commit_cell(&h, &mut vcx, "0.25");
+        let before = emission_of(&h, &mut vcx);
+        let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+
+        h.deliver(&mut vcx, tag, Arc::new(cvi_with_forward(BASE, 4600.0)));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().clone()),
+            draft,
+            "sanity: the same base, so the draft did not move"
+        );
+        let after = emission_of(&h, &mut vcx);
+        assert!(
+            !Arc::ptr_eq(&before.board[0].rows, &after.board[0].rows),
+            "another snapshot is another document"
+        );
+        let expected = assembled(&h, &vcx).unwrap();
+        assert_ne!(*before.board[0].rows, expected, "sanity: the forward moved");
+        assert_eq!(*after.board[0].rows, expected);
+    }
+
+    /// Reverting takes the document off the board; the panel still says
+    /// where it is.
+    #[gpui::test]
+    fn a_reverted_draft_empties_the_board(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.motion(&mut vcx, "right", None);
+        commit_cell(&h, &mut vcx, "0.25");
+        assert_eq!(emission_of(&h, &mut vcx).board.len(), 1);
+
+        h.command(&mut vcx, "revert").unwrap();
+        let emission = emission_of(&h, &mut vcx);
+        assert_eq!(emission.scope, on("SPX.Z"));
+        assert!(emission.board.is_empty());
+    }
+
+    /// A draft the upload builder refuses (an inserted row with no amount)
+    /// is not a document: nothing is posted, and the pull does not panic.
+    #[gpui::test]
+    fn a_draft_the_builder_refuses_posts_nothing(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = []
+[draft.rows.new-1]
+after = "D1"
+cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "text", value = "declared" }} }}
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::SCHEDULE, Some(restored));
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::schedule_snapshot(&[
+                ("D1", "2026-12-18", 1.25, "declared"),
+                ("D2", "2027-03-19", 0.5, "estimated"),
+            ])),
+        );
+        assert_ne!(
+            h.tile.read_with(&vcx, |t, _| t.draft().state.clone()),
+            DraftState::Clean,
+            "sanity: there is unsent work"
+        );
+        assert!(
+            assembled(&h, &vcx).is_err(),
+            "sanity: the builder refuses the incomplete row"
+        );
+
+        let emission = emission_of(&h, &mut vcx);
+        assert_eq!(emission.scope, on("SPX.Z"));
+        assert!(emission.board.is_empty());
+        // And the refusal is remembered rather than rebuilt per pull.
+        assert_eq!(emission_of(&h, &mut vcx), emission);
+    }
+
+    /// A panel can emit before it is given an underlying (a restored
+    /// membership is dropped for a tile that answers `false`); until then
+    /// it posts nothing, which leaves the group's scope alone.
+    #[gpui::test]
+    fn a_panel_with_no_underlying_emits_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        assert!(h.content.emits(), "capability, not loaded state");
+        assert_eq!(emission_of(&h, &mut vcx), Emission::default());
+    }
+
+    /// The shell pulls only when told. The one-cell commit refills its
+    /// window cell through the table entity, so this pins that the tile
+    /// entity is notified as well, and that a dropped subscription is silent.
+    #[gpui::test]
+    fn an_edit_tells_the_shell_the_emission_changed(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.motion(&mut vcx, "right", None);
+        let (calls, subscription) = watch_emission(&h, &mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.25");
+        vcx.run_until_parked();
+        let before = calls.get();
+
+        h.dispatch(&mut vcx, "commit", None);
+        vcx.run_until_parked();
+        assert!(
+            calls.get() > before,
+            "the commit itself announces the change"
+        );
+        assert_eq!(emission_of(&h, &mut vcx).board.len(), 1);
+
+        drop(subscription);
+        let after_drop = calls.get();
+        commit_cell(&h, &mut vcx, "0.26");
+        vcx.run_until_parked();
+        assert_eq!(calls.get(), after_drop, "a dropped subscription is silent");
+    }
+
+    /// A refused `:upload` still cancels an open selection editor, which
+    /// takes its live steps back out of the draft, and returns its refusal
+    /// before the verb's own notify. The `:` line's popup close is what
+    /// notifies the tile on that route: without it a follower would keep
+    /// painting steps the panel no longer holds.
+    #[gpui::test]
+    fn a_refused_upload_that_takes_live_steps_back_tells_the_shell(cx: &mut gpui::TestAppContext) {
+        // No egress target: `:upload` is refused after it closes the editor.
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.motion(&mut vcx, "right", Some(SLICE as u32));
+        h.dispatch(&mut vcx, "visual_block", None);
+        h.motion(&mut vcx, "right", None);
+        h.dispatch(&mut vcx, "edit", None);
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert!(
+            !h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+            "sanity: the live steps are in the draft"
+        );
+        assert_eq!(emission_of(&h, &mut vcx).board.len(), 1);
+        let (calls, _subscription) = watch_emission(&h, &mut vcx);
+        let before = calls.get();
+
+        assert!(h.command(&mut vcx, "upload").is_err());
+        vcx.run_until_parked();
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+            "sanity: the cancel took the steps back"
+        );
+        assert!(calls.get() > before, "the shell is told the draft moved");
+        assert!(emission_of(&h, &mut vcx).board.is_empty());
+    }
+
+    /// The rows assembled for one underlying are never handed out for
+    /// another. The harness delivers ONE snapshot allocation for both
+    /// underlyings and makes the same edit on each, so the two drafts and
+    /// their base are indistinguishable: the underlying alone tells the
+    /// two documents apart.
+    #[gpui::test]
+    fn a_new_underlying_drops_the_cached_rows(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let document = Arc::new(cvi(BASE));
+        h.command(&mut vcx, "underlying SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::clone(&document));
+        h.motion(&mut vcx, "right", None);
+        commit_cell(&h, &mut vcx, "0.25");
+        let spx = emission_of(&h, &mut vcx);
+        assert_eq!(spx.scope, on("SPX.Z"));
+        assert_eq!(spx.board[0].key, vec!["SPX.Z".to_string()]);
+        let spx_draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+
+        h.command(&mut vcx, "underlying NDX").unwrap();
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::clone(&document));
+        h.motion(&mut vcx, "right", None);
+        commit_cell(&h, &mut vcx, "0.25");
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().clone()),
+            spx_draft,
+            "sanity: the same edit over the same base"
+        );
+
+        let ndx = emission_of(&h, &mut vcx);
+        assert_eq!(ndx.scope, on("NDX"));
+        assert_eq!(ndx.board.len(), 1);
+        assert_eq!(ndx.board[0].key, vec!["NDX".to_string()]);
+        assert!(
+            !Arc::ptr_eq(&spx.board[0].rows, &ndx.board[0].rows),
+            "SPX.Z's rows are not NDX's document"
+        );
+
+        // A third underlying with nothing unsent: where the panel is, and
+        // no document of any other underlying.
+        h.command(&mut vcx, "underlying NKY.Z").unwrap();
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::clone(&document));
+        let nky = emission_of(&h, &mut vcx);
+        assert_eq!(nky.scope, on("NKY.Z"));
+        assert!(nky.board.is_empty());
     }
 
     mod selection;

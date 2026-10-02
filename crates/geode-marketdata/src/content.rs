@@ -249,6 +249,28 @@ impl TileContent for MarketDataContent {
     fn launched(&self, window: &mut Window, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.launched(window, cx))
     }
+    /// A panel can always emit: the answer is the kind's capability, not
+    /// whether an underlying is named or a document has arrived. The shell
+    /// drops a restored membership for a tile that answers `false` right
+    /// after create, before either can have happened.
+    fn emits(&self) -> bool {
+        true
+    }
+    /// The panel's underlying as a one-value scope and, while it holds
+    /// unsent work the upload builder can assemble, that draft document.
+    fn emission(&self, cx: &App) -> geode_core::link::Emission {
+        self.tile.read(cx).emission()
+    }
+    /// Every route that moves the underlying, the draft or the painted
+    /// document notifies the tile, so observing it covers each way the
+    /// emission can change.
+    fn watch_emission(
+        &self,
+        changed: Rc<dyn Fn(&mut App)>,
+        cx: &mut App,
+    ) -> Option<gpui::Subscription> {
+        Some(cx.observe(&self.tile, move |_, cx| changed(cx)))
+    }
 }
 
 /// Builds one panel's tiles. One factory per accepted [`PanelSpec`] — the
