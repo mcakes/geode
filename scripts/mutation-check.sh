@@ -27170,11 +27170,11 @@ run_mutation "pricer reorder: a grip in a V selection drags its row alone" \
   '            .is_some_and(|_| false);' \
   geode-pricer a_grip_drag_moves_a_v_block_as_one_undo
 
-run_mutation "pricer reorder: a grouped drag drops in another group" \
+run_mutation "pricer reorder: a split sibling spans its other group's rows" \
   crates/geode-pricer/src/tile/reorder.rs \
   '            Some(path) => self.exact_row(id, path)?,' \
   '            Some(_) => self.model.grid_row_of(id)?,' \
-  geode-pricer a_grouped_grip_drag_stays_in_its_group
+  geode-pricer a_grouped_drag_lands_beside_a_split_packages_own_half
 
 run_mutation "pricer reorder: escape leaves a grip drag live" \
   crates/geode-pricer/src/tile.rs \
@@ -27186,7 +27186,7 @@ run_mutation "pricer reorder: a grip click reaches the table" \
   crates/geode-pricer/src/tile.rs \
   '        ) && self.table.read(cx).delegate().grip_pressed' \
   '        ) && false && self.table.read(cx).delegate().grip_pressed' \
-  geode-pricer a_grip_press_never_selects_moves_the_cursor_or_edits
+  geode-pricer a_drag_released_on_its_own_cell_does_not_click
 
 run_mutation "pricer reorder: a grip press is a cell press" \
   crates/geode-pricer/src/delegate.rs \

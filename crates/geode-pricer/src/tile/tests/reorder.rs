@@ -261,6 +261,55 @@ fn escape_cancels_a_grip_drag(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.tree(&vcx), FOUR);
 }
 
+/// A split package is a sibling in each group it paints under: dragging a
+/// line above the calendar's row in the later expiry group lands it there,
+/// beside that group's own half, and leaves the earlier group's order.
+#[gpui::test]
+fn a_grouped_drag_lands_beside_a_split_packages_own_half(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(
+        cx,
+        &["SPX Z26 4000 P", "SPX Z26/H27 5000 CAL", "SPX H27 4000 P"],
+    );
+    h.command(&mut vcx, "group expiry").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    let splits: Vec<usize> = h.tile.read_with(&vcx, |t, _| {
+        (0..t.model.len())
+            .filter(|&g| {
+                matches!(
+                    t.model.kind(g),
+                    Some(GridRowKind::Package { split: true, .. })
+                )
+            })
+            .collect()
+    });
+    let line = row_of(&h, &vcx, "SPX H27 4000 P");
+    assert!(splits[1] < line, "{:?}", h.tree(&vcx));
+    let to = over_row(&mut vcx, splits[1], false);
+    drag_to(&mut vcx, line, to);
+    let roots: Vec<String> = h.tile.read_with(&vcx, |t, _| {
+        t.sheet.roots().map(|r| t.sheet.shorthand(r)).collect()
+    });
+    assert_eq!(roots[1], "SPX H27 4000 P", "{roots:?}");
+    assert_eq!(roots[0], "SPX Z26 4000 P");
+}
+
+/// A drag carried back and released on its own grip's cell is no click:
+/// the cursor stays and nothing moves.
+#[gpui::test]
+fn a_drag_released_on_its_own_cell_does_not_click(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &FOUR);
+    let cursor = h.cursor(&vcx);
+    let at = grip(&mut vcx, 2);
+    down(&mut vcx, at, 1);
+    held_move(&mut vcx, gpui::point(at.x, at.y + px(6.)));
+    let away = over_row(&mut vcx, 3, true);
+    held_move(&mut vcx, away);
+    held_move(&mut vcx, at);
+    up(&mut vcx, at, 1);
+    assert_eq!(h.tree(&vcx), FOUR);
+    assert_eq!(h.cursor(&vcx), cursor, "the cursor stays");
+}
+
 /// A grip's press, click and double-click are the grip's alone: no
 /// cursor move, no selection started or cleared, no editor.
 #[gpui::test]

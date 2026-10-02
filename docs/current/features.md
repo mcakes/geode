@@ -1241,7 +1241,7 @@ Normal-mode keys:
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
 | `y y` / `y c` | Copy the shorthand of what the row shows (and remember it for `p`): a line or package its own, a grouping row its lines, a split package row its legs under that group / the column's cells |
 | `p` / `shift+p` | Put the remembered rows below / above as one undo entry, the cursor on the first landed row; when any of them is a package the whole run lands at a root boundary. On a grouping row both put at the end of the sheet and say so |
-| `shift+j` / `shift+k` | Move the row within its parent (refused under a value grouping or a sort) |
+| `shift+j` / `shift+k` | Move the row within its parent, and under a value grouping within its group (refused under a sort); a row's grip drags it (see [Moving rows by pointer](#moving-rows-by-pointer)) |
 | `s` / `shift+s` | Sort by the cursor column: asc → desc → off / abs desc → abs asc → off (see [Sorting](#sorting)) |
 | `g p` / `g u` | Package the cursor row and the next `count − 1` roots into a custom package / unpackage it (`:package [n]` / `:unpackage`; a counted one refused under a value grouping or a sort) |
 | `g m` | Open a panel on the cursor row's underlying |
@@ -1319,6 +1319,43 @@ press that closes the bar hands off the same way, so the cursor stays on the
 package it toggled.
 Commands and search close open fields and menus. A text editor remains open
 after a click outside the grid; a typeahead closes on an outside click.
+
+#### Moving rows by pointer
+
+A row `shift+j`/`shift+k` could move shows a grip (⋮⋮) at the left edge of
+its tree cell while the pointer is on the row. It is painted over the
+column's padding and the cell's edge, so nothing reflows, and sits clear of
+a package's chevron. Hover and pressed take the chevron's control paint, and
+the cursor is the grab hand. No grip paints on a grouping row, under a sort,
+on a package the grouping splits or the scope partly hides, or on a leg of a
+split package: each would refuse the keys, so a grip there would only
+promise a refusal.
+
+Dragging the grip moves its row; a grip on a row inside a live `V`
+selection moves the whole selection, under `move_plan`'s rule (one parent,
+one group), and a selection that would refuse the keys refuses at the press
+with the keys' footer. While the button is held a 2 px line in the theme's
+drag-border color (the header's column-drop line) marks the nearest legal
+gap: between rows of the same sibling set (the roots, or the package's legs)
+and, under a value grouping, of the same group. Over a package's open legs
+the line snaps to the package's edge; over another group's rows, another
+package, or off the table, no line shows and a release there moves nothing.
+Held within a row of the body's top or bottom edge, the table scrolls on
+its own and the line follows the rows passing under the still pointer.
+`escape` (any verb, in fact) ends the drag with nothing moved.
+
+The release lands the rows as one undo entry: one `Edit::Move` for a single
+row, one per selected row for a block. Rows of other groups, and lines the
+scope hides, keep their order. The cursor lands on the dragged row, unless a
+selection is live, whose cursor is its moving end and stays. An open editor
+or entry bar closes as for any grid click. The grip's own press, click and
+double-click never start, extend or clear a selection, move the cursor or
+open an editor; every other press and drag selects exactly as before.
+
+Known limitations: the drag paints no ghost of the dragged rows, only the
+drop line; the gap is read from the table's uniform row height and scroll
+offset, not from painted row bounds; and the line is a row child painted
+under the row's cells, so a selection or cursor tint lies over it.
 
 An open action menu recomputes availability and views when tile chrome
 rebuilds, retaining its highlighted action or view when still present. Both
@@ -1690,12 +1727,22 @@ the end of the sheet` in the footer. `g m` on a group row opens the plain
 tile picker.
 
 **Moving and packaging under a grouping.** Under a chain with a value level
-the painted order is not sheet order, so `shift+j`/`shift+k` refuse with
-`lines move in the flat sheet: clear the grouping first`, and a counted
-`g p` (or `:package n`) with `a counted g p packages in the flat sheet:
-clear the grouping first`: it takes the next rows in sheet order, which may
-be painted under other groups. A plain `g p` still packages its one line,
-and `g p` under `V` still packages a contiguous selection. A chain of
+the painted order is sheet order only inside each group, so
+`shift+j`/`shift+k` (counted, and a `V` block) move a row among the siblings
+painted in its own group: a step hops the sheet lines of other groups and
+hidden lines between them and lands beside the next sibling of the same
+group, so the group's painted order changes as the key says and no other
+group's does. A root at its group's end refuses with `cannot move past the
+end of the group`; a leg moves among its package's legs and stops at the
+package's end (`cannot move past the end`). A split package and a leg of
+one refuse with the split reason, since their siblings paint under several
+groups. Undo restores a move in one step; the cursor and a selection
+follow the moved lines. A grip drag holds to the same group (see
+[Moving rows by pointer](#moving-rows-by-pointer)). A counted `g p` (or
+`:package n`) refuses with `a counted g p packages in the flat sheet: clear
+the grouping first`: it takes the next rows in sheet order, which may be
+painted under other groups. A plain `g p` still packages its one line, and
+`g p` under `V` still packages a contiguous selection. A chain of
 structural levels alone moves and packages as the flat sheet does.
 
 Known limitations: the `.` menu keeps `ungroup` enabled on a split package
@@ -1823,9 +1870,11 @@ selection and says why in the footer; a success notice goes to the header.
   leg selected without its package is deleted as a leg.
 - `shift+j`/`shift+k` under `V` slide the selected rows one sibling step as a
   unit — one move of the neighbouring row across the block — and keep the
-  selection on the moved lines. Rows under different parents refuse (`can't
-  move: selection spans packages`), as does the end of the parent (`cannot
-  move past the end`).
+  selection on the moved lines. Under a value grouping the step is within
+  the block's group, as for one row. Rows under different parents refuse
+  (`can't move: selection spans packages`), as does the end of the parent
+  (`cannot move past the end`) or of the group (`cannot move past the end of
+  the group`).
 - `g p` under `V` packages the selected root lines into one custom package,
   opens it and puts the cursor on it, ending the selection. It refuses a
   selection that includes a package, lines inside a package, or lines that
