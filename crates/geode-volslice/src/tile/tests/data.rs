@@ -596,12 +596,21 @@ fn leaving_a_group_drops_the_draft_and_returns_to_the_own_underlying(
     let _ = h.requests();
     h.answer_doc(&mut vcx, tag, chain_snapshot(&chains));
     let reqs = h.requests();
+    let painted = vols(&reqs).last().map(|p| (*p).clone()).unwrap();
     assert_eq!(
-        vols(&reqs).last().unwrap().documents.len(),
+        painted.documents.len(),
         2,
         "the group's draft rides the batch"
     );
     assert_eq!(h.draft_label(&vcx), Some("cvi draft".to_string()));
+    h.answer_vol(&mut vcx, &painted);
+    let has_draft = |labels: Vec<String>| labels.iter().any(|l| l.starts_with("cvi draft"));
+    assert!(has_draft(h.labels(&vcx)), "{:?}", h.labels(&vcx));
+    // A board bump leaves a draft batch in flight across the leave.
+    h.post(&mut vcx, draft_of("SPX.Z", &draft, DraftMark::Behind));
+    let reqs = h.requests();
+    let in_flight = vols(&reqs).last().map(|p| (*p).clone()).unwrap();
+    assert_eq!(in_flight.documents.len(), 2);
 
     h.link(&mut vcx, TileId(TILE), Membership::default());
     let reqs = h.requests();
@@ -610,12 +619,49 @@ fn leaving_a_group_drops_the_draft_and_returns_to_the_own_underlying(
     assert_eq!(asked[0].document_key, vec!["NDX.Z".to_string()]);
     assert!(vols(&reqs).is_empty(), "{reqs:?}");
     assert_eq!(h.draft_label(&vcx), None, "the draft left with the group");
+    assert!(
+        !has_draft(h.labels(&vcx)),
+        "no draft trace under no draft chip: {:?}",
+        h.labels(&vcx)
+    );
+    h.answer_vol(&mut vcx, &in_flight);
+    assert!(
+        !has_draft(h.labels(&vcx)),
+        "the pre-leave batch cannot land: {:?}",
+        h.labels(&vcx)
+    );
     let again = cvi(&TERMS, Some(("2026-10-16", 0.02)));
     h.post(&mut vcx, draft_of("SPX.Z", &again, DraftMark::Editing));
     assert!(
         h.requests().is_empty(),
         "the board watch left with the group"
     );
+}
+
+/// Following a group whose scope was never written and leaving it moves no
+/// frame version: the change of group alone sends the tile back to its own
+/// underlying, which it asks for at once.
+#[gpui::test]
+fn leaving_a_never_written_group_asks_for_the_own_underlying(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_bound(cx, Some(launched_on("NDX.Z")));
+    h.show(&mut vcx);
+    let (doc, chains) = published();
+    h.answer_documents(&mut vcx, &doc, &chains);
+    h.link(
+        &mut vcx,
+        TileId(TILE),
+        Membership {
+            follow: Some(Group::A),
+            emit: None,
+        },
+    );
+    assert_eq!(h.notices(&vcx), vec!["no underlying in A".to_string()]);
+    assert!(docs(&h.requests()).is_empty(), "A names nothing to ask");
+    h.link(&mut vcx, TileId(TILE), Membership::default());
+    let reqs = h.requests();
+    let asked = docs(&reqs);
+    assert_eq!(asked.len(), 1, "{reqs:?}");
+    assert_eq!(asked[0].document_key, vec!["NDX.Z".to_string()]);
 }
 
 /// A restored tile asks once on its first show (a reshow with nothing

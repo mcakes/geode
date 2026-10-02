@@ -31691,6 +31691,26 @@ run_mutation "volslice: a change of followed group is noticed" \
   '        if true {' \
   geode-volslice leaving_a_group_drops_the_draft_and_returns_to_the_own_underlying
 
+# A follow change clears the model and moves the vol tag: the old group's
+# draft trace goes, and a batch out for it cannot land after the leave.
+run_mutation "volslice: a follow change clears the painted draft" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        self.loaded.draft = None;
+        self.clear_model();' \
+  '        self.loaded.draft = None;' \
+  geode-volslice leaving_a_group_drops_the_draft_and_returns_to_the_own_underlying
+
+# Leaving a never-written group moves no version: the follow change itself
+# asks for the own underlying.
+run_mutation "volslice: leaving a never-written group requeries" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        if self.sync_following(cx) {
+            if self.visible {
+                self.requery(cx);' \
+  '        if self.sync_following(cx) {
+            if self.visible {' \
+  geode-volslice leaving_a_never_written_group_asks_for_the_own_underlying
+
 # A board draft joins the batch only beside its own underlying's documents.
 run_mutation "volslice: a draft joins only its own underlying's documents" \
   crates/geode-volslice/src/tile/data.rs \

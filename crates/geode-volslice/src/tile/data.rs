@@ -481,7 +481,10 @@ impl VolsliceTile {
 
     /// Notice a change of followed group, which moves no version when
     /// neither scope was ever written. The old group's draft and board
-    /// watch go, and the old question is forgotten. `true` when it changed.
+    /// watch go, and the old question is forgotten. The model goes too: it
+    /// may paint the old group's draft, and a batch still out for it would
+    /// land after the leave, a dashed trace under no draft chip that stays
+    /// while the requery fails. `true` when it changed.
     fn sync_following(&mut self, cx: &mut Context<Self>) -> bool {
         let following = self.frame.read(cx).following();
         if following == self.last_following {
@@ -491,6 +494,7 @@ impl VolsliceTile {
         self.board = None;
         self.board_draft = None;
         self.loaded.draft = None;
+        self.clear_model();
         self.fetch = Fetch::Idle;
         self.following.reset();
         cx.notify();
