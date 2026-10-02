@@ -28577,6 +28577,12 @@ run_mutation "move lhu: never registered" \
   '    let _ = (Rc::new(geode_positions::MoveLhu::new(' \
   geode-app move_lhu_sends_the_selected_positions_after_confirm
 
+run_mutation "move lhu: startup enables it without a position service" \
+  crates/geode-app/src/main.rs \
+  '    add_dimension_actions(roster, &bridge.handle, bridge.positions_configured);' \
+  '    add_dimension_actions(roster, &bridge.handle, true);' \
+  geode-app the_production_roster_opens_market_data_on_an_underlying
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

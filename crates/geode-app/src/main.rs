@@ -1226,6 +1226,21 @@ label = "skew"
                 "positions::move_lhu"
             ]
         );
+        // No `positions.toml` here, so startup resolved no position
+        // service and registered Move LHU disabled.
+        assert!(!bridge.positions_configured);
+        let move_lhu = roster
+            .actions()
+            .iter()
+            .find(|a| a.id() == "positions::move_lhu")
+            .expect("Move LHU is registered");
+        assert_eq!(
+            move_lhu
+                .available(&DimensionContext::of(&[("position_ref", "P7")]))
+                .map_err(|e| e.to_string()),
+            Err("no position service configured".to_string()),
+            "startup passes positions_configured through to Move LHU"
+        );
         for kind in ["cvi", "dividend"] {
             let f = roster.factory(kind).unwrap();
             assert_eq!(f.accepts(), &["underlying_ref"], "{kind}");
