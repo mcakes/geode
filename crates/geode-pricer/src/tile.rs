@@ -539,7 +539,11 @@ pub struct PricerTile {
     /// (`sorting::painted_order`): every rebuild while it lives holds the
     /// rows there, and the first `sync_cursor` after it ends rebuilds in
     /// ranked order.
-    pub(crate) held_order: Option<std::collections::HashMap<sorting::NodeKey, usize>>,
+    pub(crate) held_order: Option<sorting::Held>,
+    /// Tests: the next `apply_edit`/`apply_batch` refuses, as a sheet
+    /// refusal would, without touching the sheet.
+    #[cfg(test)]
+    pub(crate) refuse_next_edit: bool,
     /// `:unscoped`: this tile ignores the frame's scope. Session key
     /// `unscoped`, as the blotter's.
     unscoped: bool,
@@ -1118,6 +1122,8 @@ impl PricerTile {
             edit_seq: 0,
             sort: None,
             held_order: None,
+            #[cfg(test)]
+            refuse_next_edit: false,
         };
         this.adopt_templates();
         this.resolve_plan();
@@ -1586,6 +1592,10 @@ impl PricerTile {
         edit: Edit,
         cx: &mut Context<Self>,
     ) -> Result<(), EditError> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.refuse_next_edit) {
+            return Err(EditError::EmptyInsert);
+        }
         let undo = self.sheet.apply(edit)?;
         self.undo.record(undo);
         self.after_edit(cx);
@@ -1624,6 +1634,10 @@ impl PricerTile {
     /// previous row layout, and leaves the partly rolled-back sheet for
     /// the caller's rebuild.
     pub(crate) fn apply_batch(&mut self, edits: Vec<Edit>) -> Result<Option<Undo>, EditError> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.refuse_next_edit) {
+            return Err(EditError::EmptyInsert);
+        }
         let mut undos: Vec<Undo> = Vec::new();
         for e in edits {
             match self.sheet.apply(e) {
@@ -4665,6 +4679,7 @@ impl PricerTile {
         if let Some(spec) = self.sort
             && self.plan.position_of(spec.column).is_none()
         {
+            self.end_selection_for_sort();
             self.sort = None;
             self.notice = Some(sort_dropped(spec.column).into());
         }
@@ -5512,14 +5527,19 @@ impl PricerTile {
     /// returns to sheet order) and the index rebuilds; the cursor and a
     /// live selection stay on their lines, which may now paint elsewhere.
     pub(crate) fn set_sort(&mut self, sort: Option<SortSpec>, cx: &mut Context<Self>) {
-        // A selection spans painted rows: a new order would hand it rows
-        // it never covered, so it ends first and the footer says why.
+        self.end_selection_for_sort();
+        self.sort = sort;
+        self.rebuild(cx);
+    }
+
+    /// Every sort change's first step, a dropped sort's included: a
+    /// selection spans painted rows, and a new order would hand it rows it
+    /// never covered, so it ends and the footer says why.
+    pub(crate) fn end_selection_for_sort(&mut self) {
         if self.selection.is_some() {
             self.clear_selection();
             self.footer = Some(SORT_CLEARED_SELECTION.into());
         }
-        self.sort = sort;
-        self.rebuild(cx);
     }
 
     /// The `(grid row, plan column)` the open editor sits on.

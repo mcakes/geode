@@ -121,8 +121,12 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `start_selection` takes `held_order` (`sort::painted_order`) under a sort,
   every rebuild while the selection lives `sort::hold`s the ranked rollup
   back to it, and the first `sync_cursor` after the selection ends rebuilds
-  in ranked order (the rebuild drops `held_order`). A sort change ends a
-  live selection first (`SORT_CLEARED_SELECTION`). The header's ` |x|`
+  in ranked order (the rebuild drops `held_order`). Every sort change,
+  `resolve_plan`'s drop included, ends a live selection first through
+  `end_selection_for_sort` (`SORT_CLEARED_SELECTION`). A verb that takes the
+  selection before its edit uses `take_selection`/`restore_selection`, which
+  carry `held_order` with it and rebuild on refusal, since the refused
+  edit's rebuild ran selection-less in ranked order. The header's ` |x|`
   label is prepared by `SheetDelegate::set_sort`, never in render, and
   `:autosize` measures it.
 - Yanks keep painted order: `y y` and the `V` rows dedupe in the order

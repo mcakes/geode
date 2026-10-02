@@ -1754,9 +1754,11 @@ instead: a selection spans the painted rows between its ends, so a line
 re-ranked into that range would join it unasked (and `d` would delete it).
 Values refill in place, and the order the ticks earned applies when the
 selection ends (`escape`, a verb that consumes it, a click that clears it).
-A sort change (`s`, `shift+s`, a header click, `:sort`) with a live
-selection ends the selection first, with `selection cleared: the sort
-reordered its rows` in the footer.
+A sort change (`s`, `shift+s`, a header click, `:sort`, or a view switch or
+reload that drops the sort) with a live selection ends the selection first,
+with `selection cleared: the sort reordered its rows` in the footer. A
+selection verb that refuses (`d`, `g p`, `g u` over a selection) puts the
+selection back with the order it held.
 
 The verbs that read sheet adjacency refuse while a sort applies:
 `shift+j`/`shift+k` (and a `V` move) with `lines move in sheet order: :sort

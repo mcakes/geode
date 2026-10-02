@@ -5,6 +5,12 @@
 //! with a notice rather than guessing a neighbour.
 
 use super::*;
+
+/// A selection a verb took before its edit, and the order it held.
+pub(crate) type TakenSelection = (
+    Option<Selection<At, &'static str>>,
+    Option<crate::core::sort::Held>,
+);
 use crate::core::cell::READ_ONLY;
 use crate::core::package::{self, package_qty};
 use crate::core::select::{
@@ -84,6 +90,26 @@ impl PricerTile {
     }
 
     /// Drop the selection and everything prepared from it.
+    /// End the selection before a verb's edit, keeping it — with the
+    /// painted order it holds under a sort — for [`Self::restore_selection`]
+    /// should the edit refuse. The edit's rebuild runs selection-less and
+    /// drops the held order, so it must travel with the selection.
+    pub(crate) fn take_selection(&mut self) -> TakenSelection {
+        let kept = (self.selection.take(), self.held_order.clone());
+        self.clear_selection();
+        kept
+    }
+
+    /// Put back a selection [`Self::take_selection`] took, and its held
+    /// order, then rebuild: the refused edit's rebuild ran in ranked order,
+    /// and the selection must resolve over the order it was made on.
+    pub(crate) fn restore_selection(&mut self, kept: TakenSelection, cx: &mut Context<Self>) {
+        let (selection, held) = kept;
+        self.selection = selection;
+        self.held_order = held;
+        self.rebuild(cx);
+    }
+
     pub(crate) fn clear_selection(&mut self) {
         self.selection = None;
         self.resolved = None;
@@ -528,15 +554,12 @@ impl PricerTile {
         let edits = at.into_iter().map(|at| Edit::Remove { at }).collect();
         // Cleared first: the rebuild after the edit would otherwise find the
         // anchor gone and report a lost selection over a deliberate delete.
-        let kept = self.selection.take();
-        self.clear_selection();
+        let kept = self.take_selection();
         if let Err(e) = self.apply_edits(edits, cx) {
             // A refused batch leaves the sheet as it was, so the selection
             // still names what the user picked — re-resolved, or the footer
             // would show no extent or totals over a live selection.
-            self.selection = kept;
-            self.refresh_selection();
-            self.rebuild_chrome();
+            self.restore_selection(kept, cx);
             return Err(e.to_string());
         }
         let n = specs.len();
@@ -572,8 +595,7 @@ impl PricerTile {
         })?;
         // Cleared first: the new package starts closed, so the rebuild
         // after the edit would otherwise report the anchor line as lost.
-        let kept = self.selection.take();
-        self.clear_selection();
+        let kept = self.take_selection();
         let edit = Edit::Group {
             first,
             count,
@@ -583,9 +605,7 @@ impl PricerTile {
         if let Err(e) = self.apply_edit(edit, cx) {
             // Re-resolved as well as restored: a bare restore leaves the
             // footer's extent and totals empty over a live selection.
-            self.selection = kept;
-            self.refresh_selection();
-            self.rebuild_chrome();
+            self.restore_selection(kept, cx);
             return Err(e.to_string());
         }
         let id = self.sheet.id(first);
@@ -613,14 +633,11 @@ impl PricerTile {
             .collect();
         // Cleared first: an anchor on a package row vanishes with it, and
         // that is the verb's intent, not a lost selection.
-        let kept = self.selection.take();
-        self.clear_selection();
+        let kept = self.take_selection();
         if let Err(e) = self.apply_edits(edits, cx) {
             // A refused batch leaves the sheet as it was; the kept
             // selection is re-resolved so its footer strip comes back.
-            self.selection = kept;
-            self.refresh_selection();
-            self.rebuild_chrome();
+            self.restore_selection(kept, cx);
             return Err(e.to_string());
         }
         Ok(())

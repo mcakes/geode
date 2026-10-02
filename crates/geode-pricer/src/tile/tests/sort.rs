@@ -608,3 +608,111 @@ fn autosize_fits_an_absolute_sorts_label(cx: &mut gpui::TestAppContext) {
     let abs = width(&h, &mut vcx).expect("fitted");
     assert!(abs > plain, "{abs} > {plain}: the suffix is measured");
 }
+
+/// Barrier lines in sheet order 6000, 5500, 5900: `:sort barrier desc`
+/// paints 6000, 5900, 5500.
+const BARRIERS: [&str; 3] = [
+    "SPX Z26 5000 C UO 6000",
+    "SPX Z26 5000 C UO 5500",
+    "SPX Z26 5000 C UO 5900",
+];
+
+fn select_top_two_under_barrier_sort(h: &Harness, vcx: &mut VisualTestContext) {
+    h.command(vcx, "view barrier").unwrap();
+    h.command(vcx, "sort barrier desc").unwrap();
+    assert_eq!(h.tree(vcx)[1], "SPX Z26 5000 C UO 5900", "fixture: sorted");
+    h.motion(vcx, "top", None);
+    press(h, vcx, "shift+v");
+    h.motion(vcx, "down", None);
+    assert_eq!(selected_rows(h, vcx), Some(0..2));
+}
+
+/// The review's probe: a view switch that drops the sort ends a live
+/// selection, as any sort change does — else the rows return to sheet
+/// order under it and its range covers 5500, which `d` would delete.
+#[gpui::test]
+fn a_view_switch_dropping_the_sort_ends_a_live_selection(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BARRIERS);
+    select_top_two_under_barrier_sort(&h, &mut vcx);
+    h.command(&mut vcx, "view vanilla").unwrap();
+    assert_eq!(sort(&h, &vcx), None);
+    assert_eq!(selected_rows(&h, &vcx), None, "the selection ended");
+    assert_eq!(h.footer(&vcx).as_deref(), Some(SORT_CLEARED_SELECTION));
+    assert_eq!(
+        h.notice(&vcx).as_deref(),
+        Some("sort on 'barrier' dropped: the column is no longer in this view")
+    );
+    h.dispatch(&mut vcx, "delete", None);
+    assert_eq!(h.sheet_len(&vcx), 2, "d d took the cursor line alone");
+}
+
+/// The same drop through a views reload that loses the column.
+#[gpui::test]
+fn a_views_reload_dropping_the_sort_ends_a_live_selection(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BARRIERS);
+    select_top_two_under_barrier_sort(&h, &mut vcx);
+    let doc = geode_core::config::merge_docs(
+        "views",
+        &[geode_core::config::LayerDoc::builtin(
+            "views",
+            "[barrier]\ndataset = \"pricer\"\n[[barrier.columns]]\nname = \"qty\"\nkind = \"dimension\"\n[[barrier.columns]]\nname = \"npv\"\n",
+        )
+        .unwrap()],
+    );
+    let (views, diags) = Views::from_specs(&geode_core::view::ViewSpec::from_doc(&doc).0);
+    assert!(diags.is_empty(), "{diags:?}");
+    vcx.update(|_, cx| {
+        h.factory.reload(
+            views,
+            TemplateSet::builtin(),
+            NamedColours::default(),
+            None,
+            std::time::Duration::from_secs(60),
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    assert_eq!(sort(&h, &vcx), None);
+    assert_eq!(selected_rows(&h, &vcx), None, "the selection ended");
+    assert_eq!(h.footer(&vcx).as_deref(), Some(SORT_CLEARED_SELECTION));
+}
+
+/// A verb that takes the selection and then refuses puts it back with
+/// the order it held: a later tick must not re-rank under it.
+#[gpui::test]
+fn a_refused_selection_verb_keeps_the_held_order(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 1 C", "SPX Z26 2 C", "SPX Z26 3 C"]);
+    let first = |s: &str| match s {
+        "SPX Z26 1 C" => 10.0,
+        "SPX Z26 2 C" => 30.0,
+        _ => 20.0,
+    };
+    answer_by(&h, &mut vcx, first);
+    h.command(&mut vcx, "sort npv desc").unwrap();
+    let held = vec!["SPX Z26 2 C", "SPX Z26 3 C", "SPX Z26 1 C"];
+    h.motion(&mut vcx, "top", None);
+    press(&h, &mut vcx, "shift+v");
+    h.motion(&mut vcx, "down", None);
+    // A tick ranks line 1 between the selected two, held.
+    h.dispatch(&mut vcx, "price", None);
+    answer_by(&h, &mut vcx, |s| {
+        if s == "SPX Z26 1 C" { 25.0 } else { first(s) }
+    });
+    assert_eq!(h.tree(&vcx), held);
+    h.tile.update(&mut vcx, |t, _| t.refuse_next_edit = true);
+    h.dispatch(&mut vcx, "delete", None);
+    assert!(h.footer(&vcx).is_some(), "the delete refused");
+    assert_eq!(h.sheet_len(&vcx), 3);
+    assert_eq!(h.tree(&vcx), held, "the restored selection's order holds");
+    assert_eq!(
+        selected_rows(&h, &vcx),
+        Some(0..2),
+        "the range did not widen"
+    );
+    h.dispatch(&mut vcx, "price", None);
+    answer_by(&h, &mut vcx, |s| {
+        if s == "SPX Z26 1 C" { 26.0 } else { first(s) }
+    });
+    assert_eq!(h.tree(&vcx), held, "a later tick still holds");
+    assert_eq!(selected_rows(&h, &vcx), Some(0..2));
+}

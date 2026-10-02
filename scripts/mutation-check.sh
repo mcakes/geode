@@ -28849,6 +28849,20 @@ run_mutation "pricer sort: autosize ignores the |x| label" \
   '            let label = &c.label;' \
   geode-pricer autosize_fits_an_absolute_sorts_label
 
+# A dropped sort ends a live selection as any sort change does; a
+# selection verb that refuses puts back the order the selection held.
+run_mutation "pricer sort: a dropped sort keeps the live selection" \
+  crates/geode-pricer/src/tile.rs \
+  $'            self.end_selection_for_sort();\n            self.sort = None;' \
+  '            self.sort = None;' \
+  geode-pricer a_view_switch_dropping_the_sort_ends_a_live_selection
+
+run_mutation "pricer sort: a refused selection verb restores no hold" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        self.held_order = held;\n        self.rebuild(cx);' \
+  $'        let _ = held;\n        self.refresh_selection();' \
+  geode-pricer a_refused_selection_verb_keeps_the_held_order
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

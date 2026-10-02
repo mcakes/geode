@@ -455,10 +455,13 @@ fn node_key(rollup: &Rollup, sheet: &Sheet, id: usize) -> NodeKey {
     }
 }
 
+/// A painted order held for a live selection.
+pub type Held = HashMap<NodeKey, usize>;
+
 /// Every node's position in `rollup`'s painted order, for [`hold`]: taken
 /// when a selection starts under a sort, so the rows it spans keep their
 /// places while it lives.
-pub fn painted_order(rollup: &Rollup, sheet: &Sheet) -> HashMap<NodeKey, usize> {
+pub fn painted_order(rollup: &Rollup, sheet: &Sheet) -> Held {
     let mut out = HashMap::with_capacity(rollup.nodes.len());
     let mut stack: Vec<usize> = rollup.roots.iter().rev().copied().collect();
     while let Some(id) = stack.pop() {
@@ -473,7 +476,7 @@ pub fn painted_order(rollup: &Rollup, sheet: &Sheet) -> HashMap<NodeKey, usize> 
 /// lacks (a line added since) after the held ones in ranked order. A
 /// live selection spans painted rows between its ends, so re-ranking
 /// under it would carry lines it never covered into its range.
-pub fn hold(rollup: &mut Rollup, sheet: &Sheet, held: &HashMap<NodeKey, usize>) {
+pub fn hold(rollup: &mut Rollup, sheet: &Sheet, held: &Held) {
     let at: Vec<usize> = (0..rollup.nodes.len())
         .map(|id| {
             held.get(&node_key(rollup, sheet, id))
