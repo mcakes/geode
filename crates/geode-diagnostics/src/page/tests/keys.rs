@@ -252,22 +252,16 @@ fn ctrl_l_clears_the_log(cx: &mut gpui::TestAppContext) {
 }
 
 /// The Levels popover's buttons take no keyboard focus; `shift+l` opens
-/// the shell's log-level chooser instead, and Escape over an open popover
-/// dismisses it without closing the page.
+/// the shell's log-level chooser instead, closing the popover first.
+/// (Escape over the popover is delivered as a real key through the shell
+/// in `geode-app`'s `escape_over_the_levels_popover_closes_it_and_keeps_the_page`.)
 #[gpui::test]
-fn shift_l_opens_the_level_chooser_and_escape_closes_the_popover(cx: &mut gpui::TestAppContext) {
+fn shift_l_opens_the_level_chooser(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     open_log_section(&h, &mut vcx);
     focus_page(&h, &mut vcx);
     click(&mut vcx, "diagnostics-levels-open");
     assert!(h.page.read_with(&vcx, |p, _| p.levels.open));
-    assert!(key(&h, &mut vcx, "escape"), "the page keeps the close");
-    assert!(!h.page.read_with(&vcx, |p, _| p.levels.open));
-    assert!(
-        !key(&h, &mut vcx, "escape"),
-        "with nothing of its own open, Escape closes the page"
-    );
-    click(&mut vcx, "diagnostics-levels-open");
     assert!(key(&h, &mut vcx, "shift+l"));
     assert!(!h.page.read_with(&vcx, |p, _| p.levels.open));
     assert_eq!(*h.actions.borrow(), vec!["log::level".to_string()]);

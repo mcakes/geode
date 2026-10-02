@@ -1905,6 +1905,17 @@ impl ShellView {
         self.open_page_kind()
     }
 
+    /// The open page's own focus handle — cross-crate test reach, the same
+    /// door as `picker()`: `geode-app`'s tests check that a key the page
+    /// handled left keyboard focus on the page.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn page_focus_handle_for_test(&self, cx: &gpui::App) -> Option<gpui::FocusHandle> {
+        self.page
+            .as_ref()
+            .filter(|p| p.open)
+            .map(|p| p.occupant.content.focus_handle(cx))
+    }
+
     /// The status notice's text (painted under `shell-notice`), or `None`
     /// without one — cross-crate test reach, the same door as `picker()`:
     /// `geode-app`'s tests read what a row menu action reported.

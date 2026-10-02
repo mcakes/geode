@@ -127,8 +127,8 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
   it is closed, and `set_visible(true)` rebuilds once with everything that
   arrived meanwhile. A clock change waits for the show the same way.
 - Fragment keys spell modifiers with `+` and shift explicitly (`alt+backspace`,
-  `z shift+r`): the parser lowercases and splits on `+`, so `alt-backspace`
-  or `z R` compile to keys no keyboard sends; a fragment test rejects them.
+  `z shift+r`); the keystroke parser refuses `alt-backspace` and `z R`, and
+  `geode-app`'s production keymap test fails on any refusal.
 - Every bare-key table in the fragment carries `mode == normal`. The
   page's context carries `mode == insert` while the filter holds focus,
   and the shell's insert route resolves bare keys against every context

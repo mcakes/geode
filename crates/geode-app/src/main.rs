@@ -1191,6 +1191,8 @@ label = "skew"
     /// Build the complete builtin/demo keymap with the production registry and
     /// module factories. This checks keystroke syntax as well as declared contexts
     /// and registered action IDs; fragment validation alone does not parse keys.
+    /// The parser refuses a key no keyboard sends (`alt-backspace`, `z R`), so
+    /// every builtin and module fragment's keys are checked here.
     #[gpui::test]
     fn the_whole_production_keymap_builds_with_no_diagnostics(cx: &mut gpui::TestAppContext) {
         let (_keymap, keymap_diags, _registry, _mod_alias, _dir) = production_keymap(cx);

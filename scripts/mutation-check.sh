@@ -32172,7 +32172,7 @@ run_mutation "diagnostics keys: shift+l opens no chooser" \
   crates/geode-diagnostics/src/page.rs \
   '                (self.actions)(&ActionId("log::level".into()), window, cx);' \
   '                let _ = &self.actions;' \
-  geode-diagnostics shift_l_opens_the_level_chooser_and_escape_closes_the_popover
+  geode-diagnostics shift_l_opens_the_level_chooser
 
 run_mutation "diagnostics keys: escape over the popover closes the page" \
   crates/geode-diagnostics/src/page.rs \
@@ -32183,7 +32183,38 @@ run_mutation "diagnostics keys: escape over the popover closes the page" \
   '            if false {
                 return true;
             }' \
-  geode-diagnostics shift_l_opens_the_level_chooser_and_escape_closes_the_popover
+  geode-app escape_over_the_levels_popover_closes_it_and_keeps_the_page
+
+
+run_mutation "keystroke parser: an uppercase letter parses as the lowercase key" \
+  crates/geode-shell/src/keymap/keystroke.rs \
+  '        if c.is_uppercase() {' \
+  '        if false {' \
+  geode-shell keys_a_keyboard_never_sends_are_refused_with_the_spelling_that_works
+
+run_mutation "keystroke parser: any text is a key name" \
+  crates/geode-shell/src/keymap/keystroke.rs \
+  '    Err(format!("'\''{spec}'\'': '\''{part}'\'' is not a key name"))' \
+  '    Ok(lower)' \
+  geode-shell keys_a_keyboard_never_sends_are_refused_with_the_spelling_that_works
+
+run_mutation "keystroke parser: a dashed spelling gets no + hint" \
+  crates/geode-shell/src/keymap/keystroke.rs \
+  '    if dashed.len() > 1' \
+  '    if dashed.len() > 99' \
+  geode-shell keys_a_keyboard_never_sends_are_refused_with_the_spelling_that_works
+
+run_mutation "keystroke parser: a user key no keyboard sends still binds" \
+  crates/geode-shell/src/keymap/keystroke.rs \
+  '                key = Some(key_name(part, s)?);' \
+  '                key = Some(key_name(part, s).unwrap_or(lower));' \
+  geode-shell a_user_key_no_keyboard_sends_is_an_error_naming_the_fix
+
+run_mutation "keystroke parser: named keys lose a gpui name" \
+  crates/geode-shell/src/keymap/keystroke.rs \
+  '    "pagedown",' \
+  '    "page_down",' \
+  geode-shell every_gpui_named_key_and_single_characters_parse
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

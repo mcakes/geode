@@ -447,6 +447,35 @@ mod tests {
         assert_eq!(diags[0].severity, Severity::Error);
     }
 
+    /// A user key no keyboard sends is an error naming the spelling that
+    /// works, and only that binding is skipped: it is never bound to a key
+    /// that cannot fire.
+    #[test]
+    fn a_user_key_no_keyboard_sends_is_an_error_naming_the_fix() {
+        let d = doc(
+            Layer::User,
+            "[[bindings]]\n[bindings.keys]\n\"alt-h\" = \"workspace::focus_left\"\n\"z L\" = \"workspace::focus_left\"\n\"mod+l\" = \"workspace::focus_right\"\n",
+        );
+        let (keymap, diags) = build_keymap(&[d], Modifiers::ALT, &registry());
+        assert_eq!(keymap.bindings().len(), 1, "only mod+l binds");
+        assert_eq!(keymap.bindings()[0].key_source, "mod+l");
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.severity == Severity::Error && d.layer == Some(Layer::User)),
+            "{diags:?}"
+        );
+        assert!(
+            diags.iter().any(|d| d.message.contains("alt+h")),
+            "{diags:?}"
+        );
+        assert!(
+            diags.iter().any(|d| d.message.contains("shift+l")),
+            "{diags:?}"
+        );
+    }
+
     fn focus_left() -> ActionId {
         ActionId("workspace::focus_left".to_string())
     }
