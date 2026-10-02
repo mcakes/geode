@@ -118,6 +118,20 @@ pub fn chip_paint_on(theme: &Theme, tone: Tone, surface: Hsla) -> ChipPaint {
     paint
 }
 
+/// A neutral chip whose text carries `color`: an identity the trader
+/// assigned (a link group), not a state. The fill is the neutral chip's;
+/// the text is `color` floored to the small-text ratio against that fill on
+/// `surface`. A generated hue arrives floored only for a graphic against
+/// the background, which is short of what chip text on a fill needs.
+pub fn colored(theme: &Theme, color: Hsla, surface: Hsla) -> ChipPaint {
+    let neutral = chip_paint_on(theme, Tone::Neutral, surface);
+    let surface = to_hsla(over(surface, to_rgb(theme.background)));
+    ChipPaint {
+        fill: neutral.fill,
+        text: text_on(color, neutral.fill, surface),
+    }
+}
+
 /// Text for an application-owned chip or bare label on an opaque surface.
 /// Keep the original token (including its alpha) when it already clears.
 pub(crate) fn text_on(text: Hsla, fill: Option<Hsla>, surface: Hsla) -> Hsla {
@@ -286,6 +300,48 @@ mod tests {
             failing_themes >= 20,
             "warning_foreground over the tint failed on only {failing_themes} themes — \
              the sweep has lost its teeth or the pinned tokens changed"
+        );
+    }
+
+    /// A group's color is the text of its header chip. The generated hue
+    /// is floored for a graphic (3:1) against the background, not for small
+    /// text on the chip's fill, so `colored` must bring it to the text
+    /// floor on every bundled theme.
+    #[gpui::test]
+    fn a_colored_chip_is_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
+        use geode_core::link::Group;
+        cx.update(gpui_component::init);
+        let (service, _) = crate::theme::load_bundled();
+        let mut failures = Vec::new();
+        let mut checked = 0;
+        for name in service.names() {
+            let entry = service.resolve(&name).unwrap().clone();
+            cx.update(|cx| {
+                Theme::global_mut(cx).apply_config(&entry);
+                let theme = cx.theme();
+                for group in Group::ALL {
+                    checked += 1;
+                    let color = crate::link::group_color(theme, group);
+                    let paint = colored(theme, color, theme.background);
+                    assert_eq!(
+                        paint.fill,
+                        chip_paint(theme, Tone::Neutral).fill,
+                        "{name}: the neutral chip's fill"
+                    );
+                    if !is_readable(theme, &paint) {
+                        failures.push(format!("{name}: group {}", group.letter()));
+                    }
+                }
+            });
+        }
+        assert!(
+            checked >= 4 * 40,
+            "the sweep saw {checked} checks: bundled themes missing?"
+        );
+        assert!(
+            failures.is_empty(),
+            "unreadable group chips:\n{}",
+            failures.join("\n")
         );
     }
 

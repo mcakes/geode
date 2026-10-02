@@ -2165,6 +2165,7 @@ impl gpui::Render for BlotterTile {
                 stale: self.is_stale(t.as_of.as_deref(), now),
             })
             .collect();
+        cluster.links = geode_tile::header::link_chips(&self.frame, cx);
         cluster.health = self.health.chip();
         let header = geode_tile::header::frame(
             self.stack.as_ref().and_then(|s| s.marker(theme, self.tile)),
@@ -2556,6 +2557,26 @@ mod tests {
         restored: Option<&toml::Table>,
         options: gpui::WindowOptions,
     ) -> (Harness, gpui::VisualTestContext) {
+        open_framed(cx, restored, options, |frame| {
+            FrameRef::new(frame, WorkspaceIx::FIRST)
+        })
+    }
+
+    /// [`open`] with the frame handle the shell hands an occupant: bound
+    /// to the tile's own id, so the tile reads its link-group membership.
+    fn open_bound(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+        open_framed(cx, None, gpui::WindowOptions::default(), |frame| {
+            FrameRef::for_tile(frame, WorkspaceIx::FIRST, TileId(7))
+        })
+    }
+
+    /// [`open_in`] with the tile's frame handle built by `bind`.
+    fn open_framed(
+        cx: &mut gpui::TestAppContext,
+        restored: Option<&toml::Table>,
+        options: gpui::WindowOptions,
+        bind: fn(Entity<Frame>) -> FrameRef,
+    ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
         cx.update(crate::init);
         let (data, requests) = DataHandle::for_tests();
@@ -2572,7 +2593,7 @@ mod tests {
                         let tile = cx.new(|cx| {
                             BlotterTile::new(
                                 TileId(7),
-                                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
+                                bind(frame.clone()),
                                 diagnostics.clone(),
                                 data.clone(),
                                 Rc::new(RefCell::new(views())),
@@ -6016,6 +6037,48 @@ mod tests {
         assert!(
             vcx.debug_bounds("stack-marker-7").is_none(),
             "a stack of one paints no marker"
+        );
+    }
+
+    /// The header shows the link group the tile follows, read from the
+    /// frame at each paint: following shows the chip inside the header and
+    /// leaving removes it. The tile keeps no group of its own that could
+    /// outlive a change made through the shell.
+    #[gpui::test]
+    fn the_header_shows_the_link_group_the_tile_follows(cx: &mut gpui::TestAppContext) {
+        use geode_core::link::Group;
+        let (h, mut vcx) = open_bound(cx);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let follow = |vcx: &mut gpui::VisualTestContext, group: Option<Group>| {
+            h.frame.update(vcx, |f, cx| {
+                f.follow(TileId(7), group);
+                cx.notify();
+            });
+            // The shell's follow door repaints the tile; here the test does.
+            h.tile.update(vcx, |_, cx| cx.notify());
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        assert!(vcx.debug_bounds("tile-link-7-A-follow").is_none());
+
+        follow(&mut vcx, Some(Group::A));
+        let chip = vcx
+            .debug_bounds("tile-link-7-A-follow")
+            .expect("the chip is painted");
+        let header = vcx.debug_bounds("blotter-header-7").unwrap();
+        assert!(
+            chip.left() >= header.left()
+                && chip.right() <= header.right()
+                && chip.top() >= header.top()
+                && chip.bottom() <= header.bottom(),
+            "the chip {chip:?} is outside the header {header:?}"
+        );
+
+        follow(&mut vcx, None);
+        assert!(
+            vcx.debug_bounds("tile-link-7-A-follow").is_none(),
+            "following the workspace again removes the chip"
         );
     }
 

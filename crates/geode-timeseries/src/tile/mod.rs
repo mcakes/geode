@@ -1198,6 +1198,7 @@ impl Render for TimeseriesTile {
                 self.menu_selector.clone(),
                 self.health.chip(),
                 geode_tile::header::Mode::from_key_mode(self.mode()),
+                geode_tile::header::link_chips(&self.frame, cx),
             ))
             .when_some(popup, |el, popup_el| {
                 el.child(

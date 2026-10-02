@@ -4920,6 +4920,7 @@ impl gpui::Render for MarketDataTile {
             self.stack.as_ref(),
             self.health.chip(),
             geode_tile::header::Mode::from_key_mode(self.mode()),
+            geode_tile::header::link_chips(&self.frame, cx),
         );
         // Anchor the popup at the header's right edge using a positioned sibling and
         // the wrapper's relative coordinate system.
@@ -5358,6 +5359,28 @@ mod tests {
         restored: Option<toml::Table>,
         egress: Vec<(String, Vec<String>)>,
     ) -> (Harness, gpui::VisualTestContext) {
+        open_framed(cx, spec, restored, egress, |frame| {
+            FrameRef::new(frame, WorkspaceIx::FIRST)
+        })
+    }
+
+    /// [`open`] with the frame handle the shell hands an occupant: bound
+    /// to the tile's own id, so the tile reads its link-group membership.
+    fn open_bound(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+        open_framed(cx, &CVI, None, Vec::new(), |frame| {
+            FrameRef::for_tile(frame, WorkspaceIx::FIRST, TileId(TILE))
+        })
+    }
+
+    /// [`open_spec_with_egress`] with the tile's frame handle built by
+    /// `bind`.
+    fn open_framed(
+        cx: &mut gpui::TestAppContext,
+        spec: &Arc<PanelSpec>,
+        restored: Option<toml::Table>,
+        egress: Vec<(String, Vec<String>)>,
+        bind: fn(Entity<Frame>) -> FrameRef,
+    ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
         // The shell's own reclaims ride along, exactly as `main.rs`
         // installs them after the component's init: the panel's editor is
@@ -5390,7 +5413,7 @@ mod tests {
                     let occupant = factory.create(
                         TileId(TILE),
                         restored.as_ref(),
-                        FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
+                        bind(frame.clone()),
                         diagnostics.clone(),
                         window,
                         cx,
@@ -6381,6 +6404,47 @@ label = "skew"
             "first in the strip"
         );
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.title()).as_ref(), "CVI");
+    }
+
+    /// The header shows the link group the tile follows, read from the
+    /// frame at each paint: following shows the chip inside the header and
+    /// leaving removes it. The tile keeps no group of its own that could
+    /// outlive a change made through the shell.
+    #[gpui::test]
+    fn the_header_shows_the_link_group_the_tile_follows(cx: &mut gpui::TestAppContext) {
+        use geode_core::link::Group;
+        let (h, mut vcx) = open_bound(cx);
+        let follow = |vcx: &mut gpui::VisualTestContext, group: Option<Group>| {
+            h.frame.update(vcx, |f, cx| {
+                f.follow(TileId(TILE), group);
+                cx.notify();
+            });
+            // The shell's follow door repaints the tile; here the test does.
+            h.tile.update(vcx, |_, cx| cx.notify());
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        assert!(vcx.debug_bounds("tile-link-3-A-follow").is_none());
+
+        follow(&mut vcx, Some(Group::A));
+        let chip = vcx
+            .debug_bounds("tile-link-3-A-follow")
+            .expect("the chip is painted");
+        let header = vcx.debug_bounds("marketdata-header-3").unwrap();
+        assert!(
+            chip.left() >= header.left()
+                && chip.right() <= header.right()
+                && chip.top() >= header.top()
+                && chip.bottom() <= header.bottom(),
+            "the chip {chip:?} is outside the header {header:?}"
+        );
+
+        follow(&mut vcx, None);
+        assert!(
+            vcx.debug_bounds("tile-link-3-A-follow").is_none(),
+            "following the workspace again removes the chip"
+        );
     }
 
     /// The cached title follows key changes, including from an initially unset key.

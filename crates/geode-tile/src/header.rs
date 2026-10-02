@@ -8,6 +8,10 @@
 //! string arrives prepared, and a time run's stale flag is the only thing a
 //! tile decides per frame.
 //!
+//! A tile in a link group shows it in the fixed tail, after the times: a
+//! chip per group it follows or emits into ([`link_chips`], read from the
+//! tile's frame handle at paint). The chips never shrink and take no press.
+//!
 //! [`HealthWatch`] is the health half each tile keeps: the last
 //! `DiagVersions::sources` it read from the shared [`Diagnostics`] and the
 //! chip prepared from its answer, so a tile re-asks only when source health
@@ -17,7 +21,10 @@
 
 use std::rc::Rc;
 
+use geode_core::link::Group;
 use geode_shell::diagnostics::{Diagnostics, Health, TileHealth};
+use geode_shell::frame::FrameRef;
+use geode_shell::link::group_color;
 use geode_shell::shell::chip::{self, chip_paint};
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
@@ -50,6 +57,73 @@ const NOTICE_TIP: &str = "tip-tile-notice";
 /// The page's own action, named in the chip's tooltip: its binding is the
 /// chip's keyboard route. The chip has no key of its own.
 const DIAGNOSTICS_ACTION: &str = "page::toggle_diagnostics";
+
+/// The link group chooser's action, named in a link chip's tooltip: its
+/// binding is how the membership the chip shows is changed. The chip takes
+/// no press of its own.
+const LINK_ACTION: &str = "tile::link_group";
+
+/// The link chips' shared tooltip selector: only one tooltip shows at once.
+const LINK_TIP: &str = "tip-tile-link";
+
+/// What a tile does with the group a link chip names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkRole {
+    /// The tile's scope comes from the group.
+    Follow,
+    /// The tile's selection goes to the group.
+    Emit,
+    /// Both, with one group.
+    Both,
+}
+
+/// One link chip: a group and what the tile does with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkChip {
+    pub group: Group,
+    pub role: LinkRole,
+}
+
+/// The link chips of the tile `frame` is bound to, read from the frame at
+/// paint: one [`LinkRole::Both`] chip when it follows and emits into the
+/// same group, otherwise its follow chip then its emit chip, filled from
+/// the front. A handle bound to no tile has none. A module passes the
+/// answer to [`Cluster::links`] and stores nothing: membership is the
+/// frame's, and a copy kept in a tile would outlive a change made through
+/// the shell.
+pub fn link_chips(frame: &FrameRef, cx: &App) -> [Option<LinkChip>; 2] {
+    let Some(tile) = frame.tile() else {
+        return [None, None];
+    };
+    let membership = frame.entity().read(cx).membership(tile);
+    let chip = |group, role| LinkChip { group, role };
+    match (membership.follow, membership.emit) {
+        (Some(follow), Some(emit)) if follow == emit => [Some(chip(follow, LinkRole::Both)), None],
+        (Some(follow), emit) => [
+            Some(chip(follow, LinkRole::Follow)),
+            emit.map(|group| chip(group, LinkRole::Emit)),
+        ],
+        (None, emit) => [emit.map(|group| chip(group, LinkRole::Emit)), None],
+    }
+}
+
+/// A link chip's tooltip title: its letter and arrows in words.
+pub fn link_title(chip: LinkChip) -> &'static str {
+    match (chip.role, chip.group) {
+        (LinkRole::Follow, Group::A) => "Following group A",
+        (LinkRole::Follow, Group::B) => "Following group B",
+        (LinkRole::Follow, Group::C) => "Following group C",
+        (LinkRole::Follow, Group::D) => "Following group D",
+        (LinkRole::Emit, Group::A) => "Emitting into group A",
+        (LinkRole::Emit, Group::B) => "Emitting into group B",
+        (LinkRole::Emit, Group::C) => "Emitting into group C",
+        (LinkRole::Emit, Group::D) => "Emitting into group D",
+        (LinkRole::Both, Group::A) => "Following and emitting into group A",
+        (LinkRole::Both, Group::B) => "Following and emitting into group B",
+        (LinkRole::Both, Group::C) => "Following and emitting into group C",
+        (LinkRole::Both, Group::D) => "Following and emitting into group D",
+    }
+}
 
 /// What the tile's keys are doing, as its header shows it: an icon at the
 /// head of the cluster while a field holds the keys ([`Mode::Edit`]) or a
@@ -212,6 +286,9 @@ pub struct Cluster<'a> {
     /// Painted in order through the notice door.
     pub notices: Vec<Notice>,
     pub times: Vec<TimeRun>,
+    /// The tile's link groups, from [`link_chips`]; painted in the fixed
+    /// tail after the times.
+    pub links: [Option<LinkChip>; 2],
     pub health: Option<&'a HealthChip>,
     /// `None` for a tile without an action menu (the blotter).
     pub menu: Option<MenuTrigger>,
@@ -225,6 +302,7 @@ impl Cluster<'_> {
             status: Vec::new(),
             notices: Vec::new(),
             times: Vec::new(),
+            links: [None, None],
             health: None,
             menu: None,
         }
@@ -307,9 +385,55 @@ fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> (Option<Stateful<Div>>, Div) 
             .debug_selector(move || format!("tile-time-{tile}-{i}"))
             .child(t.text().clone())
     }));
+    row = row.children(
+        c.links
+            .into_iter()
+            .flatten()
+            .map(|chip| link_chip(chip, tile, theme)),
+    );
     row = row.children(c.health.map(|h| health_chip(h, theme)));
     row = row.children(c.menu.map(|m| menu_button(m, theme)));
     (text, row)
+}
+
+/// A link chip: the group's letter and its role's arrows (down for what
+/// the tile takes from the group, up for what it sends) on the neutral
+/// chip's fill, in the group's color floored to text contrast on that
+/// fill. The letter and the arrows carry the meaning; the color only
+/// repeats the group. It takes no press, so a click on it focuses the tile
+/// like the rest of the header; the tooltip names the chooser's key. Ids
+/// derive from the tile and the role, which two chips never share.
+fn link_chip(chip: LinkChip, tile: u64, theme: &Theme) -> Stateful<Div> {
+    let paint = chip::colored(theme, group_color(theme, chip.group), theme.background);
+    let (name, role, follows, emits) = match chip.role {
+        LinkRole::Follow => ("tile-link-follow", "follow", true, false),
+        LinkRole::Emit => ("tile-link-emit", "emit", false, true),
+        LinkRole::Both => ("tile-link-both", "both", true, true),
+    };
+    let letter = chip.group.letter();
+    let arrow = |icon: IconName| Icon::new(icon).xsmall().text_color(paint.text);
+    h_flex()
+        .id(ElementId::NamedInteger(
+            SharedString::new_static(name),
+            tile,
+        ))
+        .flex_none()
+        .items_center()
+        .gap_0p5()
+        .px_1()
+        .rounded(theme.radius_tokens().sm)
+        .text_color(paint.text)
+        .when_some(paint.fill, |el, fill| el.bg(fill))
+        .debug_selector(move || format!("tile-link-{tile}-{letter}-{role}"))
+        .child(letter)
+        .when(follows, |el| el.child(arrow(IconName::ArrowDown)))
+        .when(emits, |el| el.child(arrow(IconName::ArrowUp)))
+        .tooltip(tips::tip_with(
+            SharedString::new_static(LINK_TIP),
+            SharedString::new_static(link_title(chip)),
+            Some(LINK_ACTION),
+            None,
+        ))
 }
 
 /// The mode icon: a bare glyph in its mode's color, no fill, at the
@@ -486,8 +610,12 @@ impl HealthWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geode_core::groupings::GroupingSlots;
     use geode_core::log::LogLevels;
+    use geode_core::scopes::SavedScopes;
     use geode_shell::diagnostics::SourceSummary;
+    use geode_shell::frame::Frame;
+    use geode_shell::tiling::WorkspaceIx;
     use gpui::{Context, Render, TestAppContext, VisualTestContext};
     use gpui_component::ActiveTheme as _;
     use std::cell::Cell;
@@ -635,6 +763,9 @@ mod tests {
         left_runs: usize,
         notice: Notice,
         mode: Mode,
+        /// The tile's own handle on a frame: what its link chips are read
+        /// from, each paint, as a module reads them.
+        frame: FrameRef,
     }
 
     fn plain_time() -> TimeRun {
@@ -660,6 +791,7 @@ mod tests {
             cluster.notices.push(self.notice.clone());
             cluster.times = self.times.clone();
             cluster.health = self.watch.chip();
+            cluster.links = link_chips(&self.frame, cx);
             cluster.menu = Some(MenuTrigger {
                 id: ElementId::Name("strip-menu".into()),
                 selector: "strip-menu".into(),
@@ -698,6 +830,7 @@ mod tests {
         cx.update(gpui_component::init);
         let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
         let presses = Rc::new(Cell::new(0));
+        let frame = fresh_frame(cx);
         let (view, vcx) = cx.add_window_view({
             let diagnostics = diagnostics.clone();
             let presses = presses.clone();
@@ -709,9 +842,220 @@ mod tests {
                 left_runs: 0,
                 notice: Notice::warning("not saved"),
                 mode: Mode::Normal,
+                frame: FrameRef::for_tile(frame, WorkspaceIx::FIRST, TILE),
             }
         });
         (view, diagnostics, presses, vcx)
+    }
+
+    fn fresh_frame(cx: &mut TestAppContext) -> Entity<Frame> {
+        cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None))
+    }
+
+    /// Set the strip's tile's membership on its frame and repaint the
+    /// strip, as the shell's doors do for a real tile.
+    fn link(
+        view: &Entity<Strip>,
+        vcx: &mut VisualTestContext,
+        follow: Option<Group>,
+        emit: Option<Group>,
+    ) {
+        let frame = view.read_with(vcx, |s, _| s.frame.entity().clone());
+        frame.update(vcx, |f, cx| {
+            f.follow(TILE, follow);
+            f.emit(TILE, emit);
+            cx.notify();
+        });
+        view.update(vcx, |_, cx| cx.notify());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    fn chip(group: Group, role: LinkRole) -> Option<LinkChip> {
+        Some(LinkChip { group, role })
+    }
+
+    /// Another tile's membership is not this tile's.
+    #[gpui::test]
+    fn a_tile_in_no_group_has_no_link_chip(cx: &mut TestAppContext) {
+        let frame = fresh_frame(cx);
+        frame.update(cx, |f, _| {
+            f.follow(TileId(9), Some(Group::A));
+            f.emit(TileId(9), Some(Group::B));
+        });
+        let tile = FrameRef::for_tile(frame, WorkspaceIx::FIRST, TILE);
+        assert_eq!(cx.read(|cx| link_chips(&tile, cx)), [None, None]);
+    }
+
+    /// A handle bound to no tile (a page, a shell door) names no tile to
+    /// look up, whatever the frame holds; the same frame through the
+    /// tile's own handle shows the chip.
+    #[gpui::test]
+    fn an_unbound_frame_ref_has_none(cx: &mut TestAppContext) {
+        let frame = fresh_frame(cx);
+        frame.update(cx, |f, _| {
+            f.follow(TILE, Some(Group::A));
+        });
+        let unbound = FrameRef::new(frame.clone(), WorkspaceIx::FIRST);
+        assert_eq!(cx.read(|cx| link_chips(&unbound, cx)), [None, None]);
+        let bound = FrameRef::for_tile(frame, WorkspaceIx::FIRST, TILE);
+        assert_eq!(
+            cx.read(|cx| link_chips(&bound, cx)),
+            [chip(Group::A, LinkRole::Follow), None]
+        );
+    }
+
+    #[gpui::test]
+    fn following_and_emitting_one_group_is_one_chip_and_two_groups_are_two(
+        cx: &mut TestAppContext,
+    ) {
+        let frame = fresh_frame(cx);
+        let tile = FrameRef::for_tile(frame.clone(), WorkspaceIx::FIRST, TILE);
+        let mut chips = |follow: Option<Group>, emit: Option<Group>| {
+            frame.update(cx, |f, _| {
+                f.follow(TILE, follow);
+                f.emit(TILE, emit);
+            });
+            cx.read(|cx| link_chips(&tile, cx))
+        };
+        assert_eq!(
+            chips(Some(Group::A), Some(Group::A)),
+            [chip(Group::A, LinkRole::Both), None]
+        );
+        assert_eq!(
+            chips(Some(Group::A), Some(Group::B)),
+            [
+                chip(Group::A, LinkRole::Follow),
+                chip(Group::B, LinkRole::Emit)
+            ]
+        );
+        assert_eq!(
+            chips(None, Some(Group::C)),
+            [chip(Group::C, LinkRole::Emit), None],
+            "an emitter alone takes the first slot: no gap is laid out"
+        );
+        assert_eq!(
+            chips(Some(Group::D), None),
+            [chip(Group::D, LinkRole::Follow), None]
+        );
+    }
+
+    /// The chip is part of the tail that never shrinks: a left side wider
+    /// than the tile clips, and the chip stays inside the header, after the
+    /// left side and the time and before the health chip and the menu.
+    /// Leaving the group removes it.
+    #[gpui::test]
+    fn the_link_chip_paints_in_the_fixed_tail(cx: &mut TestAppContext) {
+        let (view, diagnostics, _, vcx) = open_strip(cx);
+        view.update(vcx, |s, cx| {
+            s.left_runs = 40;
+            cx.notify();
+        });
+        vcx.simulate_resize(gpui::size(gpui::px(480.0), gpui::px(300.0)));
+        show_failure(&view, &diagnostics, vcx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        for s in [
+            "tile-link-3-A-follow",
+            "tile-link-3-A-emit",
+            "tile-link-3-A-both",
+        ] {
+            assert!(vcx.debug_bounds(s).is_none(), "no group: no {s}");
+        }
+
+        link(&view, vcx, Some(Group::A), None);
+        let strip = vcx.debug_bounds("strip").expect("the strip is painted");
+        let chip = vcx
+            .debug_bounds("tile-link-3-A-follow")
+            .expect("the chip is painted");
+        assert!(
+            chip.left() >= strip.left()
+                && chip.right() <= strip.right()
+                && chip.top() >= strip.top()
+                && chip.bottom() <= strip.bottom(),
+            "the chip {chip:?} escapes the header {strip:?}"
+        );
+        let left = vcx.debug_bounds("tile-header-left-3").unwrap();
+        let time = vcx.debug_bounds("tile-time-3-0").unwrap();
+        let health = vcx.debug_bounds("tile-health-3").unwrap();
+        let menu = vcx.debug_bounds("strip-menu").unwrap();
+        assert!(left.right() <= chip.left(), "{left:?} vs {chip:?}");
+        assert!(time.right() <= chip.left(), "{time:?} vs {chip:?}");
+        assert!(chip.right() <= health.left(), "{chip:?} vs {health:?}");
+        assert!(health.right() <= menu.left(), "{health:?} vs {menu:?}");
+
+        // Two groups: the follow chip, then the emit chip.
+        link(&view, vcx, Some(Group::A), Some(Group::B));
+        let follow = vcx.debug_bounds("tile-link-3-A-follow").unwrap();
+        let emit = vcx.debug_bounds("tile-link-3-B-emit").unwrap();
+        let health = vcx.debug_bounds("tile-health-3").unwrap();
+        assert!(follow.right() <= emit.left(), "{follow:?} vs {emit:?}");
+        assert!(emit.right() <= health.left(), "{emit:?} vs {health:?}");
+
+        // One group both ways is one chip under its own selector.
+        link(&view, vcx, Some(Group::B), Some(Group::B));
+        assert!(vcx.debug_bounds("tile-link-3-B-both").is_some());
+        assert!(vcx.debug_bounds("tile-link-3-B-follow").is_none());
+        assert!(vcx.debug_bounds("tile-link-3-B-emit").is_none());
+
+        link(&view, vcx, None, None);
+        for s in [
+            "tile-link-3-A-follow",
+            "tile-link-3-B-emit",
+            "tile-link-3-B-both",
+        ] {
+            assert!(vcx.debug_bounds(s).is_none(), "left the group: no {s}");
+        }
+    }
+
+    /// The tooltip says what the chip's letter and arrow mean, in words,
+    /// for every role and group.
+    #[test]
+    fn the_link_chip_tooltip_names_the_role_and_the_group() {
+        let title = |group, role| link_title(LinkChip { group, role });
+        assert_eq!(title(Group::A, LinkRole::Follow), "Following group A");
+        assert_eq!(title(Group::B, LinkRole::Emit), "Emitting into group B");
+        assert_eq!(
+            title(Group::D, LinkRole::Both),
+            "Following and emitting into group D"
+        );
+        for group in Group::ALL {
+            for role in [LinkRole::Follow, LinkRole::Emit, LinkRole::Both] {
+                assert!(
+                    title(group, role).ends_with(group.letter()),
+                    "{group:?} {role:?}"
+                );
+            }
+        }
+    }
+
+    /// Hovering the chip shows that title: the chip takes no press, so the
+    /// tooltip is where the chooser's key is named.
+    #[gpui::test]
+    fn hovering_the_link_chip_names_the_group(cx: &mut TestAppContext) {
+        let (view, _, _, vcx) = open_strip(cx);
+        link(&view, vcx, Some(Group::C), None);
+        let at = centre(vcx, "tile-link-3-C-follow");
+        vcx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("tip-tile-link-title").is_some());
+        assert_eq!(LINK_ACTION, "tile::link_group");
+    }
+
+    /// A press on the chip is not the chip's: it reaches the tile's own
+    /// listeners, so clicking it focuses the tile like any other part of
+    /// the header.
+    #[gpui::test]
+    fn a_press_on_the_link_chip_reaches_the_tile(cx: &mut TestAppContext) {
+        let (view, _, _, vcx) = open_strip(cx);
+        link(&view, vcx, Some(Group::A), None);
+        let at = centre(vcx, "tile-link-3-A-follow");
+        click(vcx, at);
+        assert_eq!(parent_presses(&view, vcx), 1);
     }
 
     fn parent_presses(view: &Entity<Strip>, vcx: &mut VisualTestContext) -> u32 {

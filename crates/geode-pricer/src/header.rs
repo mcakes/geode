@@ -23,7 +23,7 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_tile::confirm::{self, Confirm};
-use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TimeRun};
+use geode_tile::header::{Cluster, HealthChip, LinkChip, MenuTrigger, Mode, TimeRun};
 use geode_tile::notice::Notice;
 use gpui::prelude::*;
 use gpui::{
@@ -253,6 +253,8 @@ pub(crate) struct HeaderChrome<'a> {
     /// The tile's mode, read from the key context's own decision
     /// (`PricerTile::mode`), painted as the cluster's mode icon.
     pub mode: Mode,
+    /// The tile's link groups, read from its frame handle at paint.
+    pub links: [Option<LinkChip>; 2],
     /// The sheet name's tooltip selector, built once with the tile.
     pub name_tip: SharedString,
     /// The open rename field, painted in the sheet name's place.
@@ -495,6 +497,7 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
         stale_label: h.time_stale.clone(),
         stale: c.stale,
     }));
+    cluster.links = c.links;
     cluster.health = c.health;
     // Same dispatch route as the menu key: cancel and blur any open field
     // before opening the menu on the current cursor row.

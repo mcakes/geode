@@ -8,17 +8,47 @@
 //! emitter stops listing it, leaves the group or closes. Board changes move
 //! their own revisions ([`BoardWatch`]) and never the frame's publish
 //! counter: a draft is not a publish.
+//!
+//! [`group_color`] is each group's color under a theme: the one place the
+//! four hues live, read by every surface that marks a group.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
+use geode_core::colour::{Definition, Tone, resolve};
 use geode_core::document::{DocumentRows, is_key_prefix, join_key};
 use geode_core::link::{Emission, Group, Membership};
 use geode_core::scope::Scope;
+use gpui::Hsla;
+use gpui_component::Theme;
 
+use crate::shell::colours::{anchors_from_theme, to_hsla, tokens_from_theme};
 use crate::tiling::TileId;
+
+/// Each group's hue in degrees on the theme's own wheel, in `Group::ALL`
+/// order. Themes name no group colors, so these are generated: spread
+/// around the wheel so that, after the readability floor has moved their
+/// lightness, the four still read apart. Guarded on every bundled theme by
+/// `every_bundled_theme_keeps_the_group_colors_readable_and_distinct`; a
+/// hue changed here without that sweep can merge two groups on a theme
+/// nobody looked at. These four are the best the sweep found near an even
+/// spread: a few degrees either way brings two groups together on a
+/// low-chroma or light theme.
+const HUES: [f32; 4] = [215.0, 25.0, 285.0, 130.0];
+
+/// A group's color under `theme`: its hue between the theme's anchors,
+/// floored to the generated-color contrast against the theme's background.
+/// Resolved per call from the live theme, so a theme change shows on the
+/// next paint; a caller painting many marks per frame resolves once.
+pub fn group_color(theme: &Theme, group: Group) -> Hsla {
+    to_hsla(resolve(
+        &Definition::hue(HUES[group.index()], Tone::Normal),
+        &anchors_from_theme(theme),
+        &tokens_from_theme(theme),
+    ))
+}
 
 /// A board's key: the dataset and the document key within it.
 type BoardKey = (String, Vec<String>);
@@ -405,5 +435,68 @@ mod tests {
         assert!(links.entry(Group::A, "vol_slices", &key[..1]).is_none());
         assert!(links.entry(Group::A, "cvi_params", &key).is_none());
         assert_eq!(generation, 0, "a board post draws no scope generation");
+    }
+
+    /// How far apart two group colors must stay in OKLab. Lower than the
+    /// chart palette's 0.07 because a group's mark always carries its
+    /// letter: the letter is the identity and the color a second cue,
+    /// where a chart series has its color alone. 0.07 is also out of
+    /// reach: no four hues floored for readability hold it on every
+    /// bundled theme, and the best tuple on a 5-degree grid reaches about
+    /// 0.054.
+    const GROUP_SEPARATION: f32 = 0.05;
+
+    /// On every bundled theme each group color must clear the
+    /// generated-color floor against the background and stand apart from
+    /// the other three, or two groups read as one at a glance. The
+    /// separation is measured after the floor, which moves lightness and
+    /// can bring two hues together.
+    #[gpui::test]
+    fn every_bundled_theme_keeps_the_group_colors_readable_and_distinct(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::shell::colours::to_rgb;
+        use geode_core::colour::oklab::srgb_to_oklab;
+        use geode_core::colour::{READABLE_RATIO, contrast_ratio};
+        use gpui_component::ActiveTheme as _;
+
+        cx.update(gpui_component::init);
+        let (service, _) = crate::theme::load_bundled();
+        let mut failures = Vec::new();
+        let mut themes = 0;
+        for name in service.names() {
+            let entry = service.resolve(&name).unwrap().clone();
+            cx.update(|cx| {
+                Theme::global_mut(cx).apply_config(&entry);
+                let theme = cx.theme();
+                themes += 1;
+                let colors = Group::ALL.map(|g| to_rgb(group_color(theme, g)));
+                for (i, g) in Group::ALL.into_iter().enumerate() {
+                    let ratio = contrast_ratio(colors[i], to_rgb(theme.background));
+                    if ratio < READABLE_RATIO {
+                        failures.push(format!("{name}: group {} at {ratio:.2}:1", g.letter()));
+                    }
+                    let a = srgb_to_oklab(colors[i]);
+                    for (j, other) in Group::ALL.into_iter().enumerate().skip(i + 1) {
+                        let b = srgb_to_oklab(colors[j]);
+                        let distance =
+                            ((a.l - b.l).powi(2) + (a.a - b.a).powi(2) + (a.b - b.b).powi(2))
+                                .sqrt();
+                        if distance < GROUP_SEPARATION {
+                            failures.push(format!(
+                                "{name}: groups {} and {} only {distance:.3} apart",
+                                g.letter(),
+                                other.letter()
+                            ));
+                        }
+                    }
+                }
+            });
+        }
+        assert!(
+            themes >= 40,
+            "the sweep saw {themes} themes: bundled themes missing?"
+        );
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 }

@@ -317,6 +317,27 @@ fn open_full(
     default_source: Option<&str>,
     sources: Vec<FetchSource>,
 ) -> (Harness, gpui::VisualTestContext) {
+    open_framed(cx, restored, default_source, sources, |frame| {
+        FrameRef::new(frame, WorkspaceIx::FIRST)
+    })
+}
+
+/// [`open`] with the frame handle the shell hands an occupant: bound to
+/// the tile's own id, so the tile reads its link-group membership.
+fn open_bound(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+    open_framed(cx, None, Some("demo_kdb"), demo_sources(), |frame| {
+        FrameRef::for_tile(frame, WorkspaceIx::FIRST, TileId(TILE))
+    })
+}
+
+/// [`open_full`] with the tile's frame handle built by `bind`.
+fn open_framed(
+    cx: &mut gpui::TestAppContext,
+    restored: Option<toml::Table>,
+    default_source: Option<&str>,
+    sources: Vec<FetchSource>,
+    bind: fn(Entity<Frame>) -> FrameRef,
+) -> (Harness, gpui::VisualTestContext) {
     cx.update(gpui_component::init);
     // The module's own key reclaim, exactly as `main.rs` will call
     // it: without it `Root`'s window-wide `tab` binding eats the
@@ -349,7 +370,7 @@ fn open_full(
                 let occupant = factory.create(
                     TileId(TILE),
                     restored.as_ref(),
-                    FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
+                    bind(frame.clone()),
                     diagnostics.clone(),
                     window,
                     cx,
@@ -3960,6 +3981,47 @@ fn the_header_is_the_shared_height(cx: &mut gpui::TestAppContext) {
     let header = vcx.debug_bounds("timeseries-header-7").expect("painted");
     let want = scale::design_px(geode_tile::header::HEADER_HEIGHT, rem);
     assert!((f32::from(header.size.height) - want).abs() < 0.5);
+}
+
+/// The header shows the link group the tile follows, read from the frame
+/// at each paint: following shows the chip inside the header and leaving
+/// removes it. The tile keeps no group of its own that could outlive a
+/// change made through the shell.
+#[gpui::test]
+fn the_header_shows_the_link_group_the_tile_follows(cx: &mut gpui::TestAppContext) {
+    use geode_core::link::Group;
+    let (h, mut vcx) = open_bound(cx);
+    let follow = |vcx: &mut gpui::VisualTestContext, group: Option<Group>| {
+        h.frame.update(vcx, |f, cx| {
+            f.follow(TileId(TILE), group);
+            cx.notify();
+        });
+        // The shell's follow door repaints the tile; here the test does.
+        h.tile.update(vcx, |_, cx| cx.notify());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    };
+    assert!(vcx.debug_bounds("tile-link-7-A-follow").is_none());
+
+    follow(&mut vcx, Some(Group::A));
+    let chip = vcx
+        .debug_bounds("tile-link-7-A-follow")
+        .expect("the chip is painted");
+    let header = vcx.debug_bounds("timeseries-header-7").unwrap();
+    assert!(
+        chip.left() >= header.left()
+            && chip.right() <= header.right()
+            && chip.top() >= header.top()
+            && chip.bottom() <= header.bottom(),
+        "the chip {chip:?} is outside the header {header:?}"
+    );
+
+    follow(&mut vcx, None);
+    assert!(
+        vcx.debug_bounds("tile-link-7-A-follow").is_none(),
+        "following the workspace again removes the chip"
+    );
 }
 
 /// A slot chip (its swatch target included) fits inside the 22 px strip:
