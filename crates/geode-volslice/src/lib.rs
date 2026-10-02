@@ -6,6 +6,7 @@
 //! and density painted comes out of the data tier's vol door: this crate
 //! computes none of them.
 
+pub mod commands;
 pub mod content;
 pub mod core;
 pub mod tile;
