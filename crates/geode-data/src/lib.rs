@@ -9,6 +9,7 @@ pub mod egress;
 pub mod handle;
 pub mod health;
 pub mod ingest;
+pub mod positions;
 pub mod pricing;
 pub mod query;
 pub mod service;

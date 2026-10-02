@@ -416,7 +416,7 @@ impl Sheet {
     }
 
     /// The flat block a row occupies: itself plus its legs.
-    fn block(&self, row: usize) -> std::ops::Range<usize> {
+    pub(crate) fn block(&self, row: usize) -> std::ops::Range<usize> {
         row..self.children(row).end
     }
 

@@ -47,6 +47,7 @@ use geode_core::context::DimensionContext;
 use geode_core::groupings::GroupingSlots;
 use geode_core::link::{Group, Membership};
 use geode_core::log::{Level, LogLevels, TARGETS};
+use geode_core::query::DistinctOutcome;
 use geode_core::scope::Scope;
 use geode_core::scopes::SavedScopes;
 use geode_core::tile_columns::{TileColumn, TileColumns};
@@ -119,6 +120,24 @@ pub enum Target {
         emits: bool,
         current: Membership,
         changes: Vec<LinkChange>,
+    },
+    /// `ActionCx::choose_value`: `column`'s distinct live values, minus
+    /// `exclude`, for the roster action at `action`, which ran on
+    /// `context`. `values: None` is loading, waiting on the `ACTION_KEY`
+    /// request tagged `tag`; `Some` holds the rows, in delivered order.
+    /// `title` is the modal's; `empty` is the notice when no row is left;
+    /// `window` is where a reply that closes the dialog closes it (a
+    /// delivery arrives without one).
+    ActionValue {
+        action: usize,
+        context: DimensionContext,
+        column: String,
+        exclude: Option<String>,
+        tag: u64,
+        values: Option<Vec<String>>,
+        title: SharedString,
+        empty: &'static str,
+        window: gpui::AnyWindowHandle,
     },
 }
 
@@ -386,6 +405,7 @@ impl ChoiceDialogState {
                 Domain::Schema => format!("Edit column in schema \u{b7} {view}").into(),
                 _ => format!("Edit column in view \u{b7} {view}").into(),
             },
+            Target::ActionValue { title, .. } => title.clone(),
             Target::Grouping { .. }
             | Target::TileKind { .. }
             | Target::Scope { .. }
@@ -458,7 +478,8 @@ impl ChoiceDialogState {
             | Target::TileKindWith { .. }
             | Target::Column { .. }
             | Target::Scope { .. }
-            | Target::LogLevel { .. } => self.list.set_query(query),
+            | Target::LogLevel { .. }
+            | Target::ActionValue { .. } => self.list.set_query(query),
         }
     }
 
@@ -499,6 +520,13 @@ impl ChoiceDialogState {
                 tile: *tile,
                 change: changes[declared],
             },
+            Target::ActionValue {
+                action, context, ..
+            } => Pick::ActionValue {
+                action: *action,
+                context: context.clone(),
+                value: self.list.options()[declared].clone(),
+            },
         }
     }
 
@@ -526,7 +554,8 @@ impl ChoiceDialogState {
             | Pick::Scope(_)
             | Pick::LogTarget(_)
             | Pick::LogLevel(..)
-            | Pick::Link { .. } => None,
+            | Pick::Link { .. }
+            | Pick::ActionValue { .. } => None,
         }
     }
 }
@@ -556,6 +585,13 @@ pub enum Pick {
     LogLevel(String, Level),
     /// `ShellView::set_follow` or `ShellView::set_emit` on `tile`.
     Link { tile: TileId, change: LinkChange },
+    /// The roster action at `action`'s `DimensionAction::chosen` with
+    /// `value`, on `context`.
+    ActionValue {
+        action: usize,
+        context: DimensionContext,
+        value: String,
+    },
 }
 
 /// The grouping option texts and their slots, in row order: the view
@@ -643,6 +679,21 @@ const SCOPE_HINTS: &[Hint] = &[
 /// nothing for Enter to load, so only the way out is offered.
 const SCOPE_EMPTY_HINTS: &[Hint] = &[Hint::Key("escape"), Hint::Text("close")];
 
+/// An action's value choice while its values load: no row to move over and
+/// nothing for Enter to choose, so only the way out is offered.
+const ACTION_LOADING_HINTS: &[Hint] = &[Hint::Key("escape"), Hint::Text("close")];
+
+const ACTION_HINTS: &[Hint] = &[
+    Hint::Text("type to filter ·"),
+    Hint::Key("up"),
+    Hint::Key("down"),
+    Hint::Text("move ·"),
+    Hint::Key("enter"),
+    Hint::Text("choose ·"),
+    Hint::Key("escape"),
+    Hint::Text("close"),
+];
+
 const LOG_HINTS: &[Hint] = &[
     Hint::Text("type to filter ·"),
     Hint::Key("up"),
@@ -685,6 +736,8 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
         Target::LogLevel { .. } => ("Log level", "loglevel", "loglevel-hints", LOG_HINTS),
         // `title()` appends the groups the tile is in.
         Target::LinkGroup { .. } => ("Link group", "link", "link-hints", LINK_HINTS),
+        // Fallback only: `title()` is the action's own.
+        Target::ActionValue { .. } => ("Choose a value", "action", "action-hints", ACTION_HINTS),
     }
 }
 
@@ -830,6 +883,149 @@ pub fn open_link_group(view: &mut ShellView, window: &mut Window, cx: &mut Conte
 pub fn open_log_level(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let state = ChoiceDialogState::log_targets(&view.diagnostics.read(cx).levels);
     open(view, state, window, cx);
+}
+
+/// Open the loading value choice for `ActionCx::choose_value`: `column`'s
+/// values for the roster action at `action`, minus `exclude`, titled
+/// `title`, waiting on the `ACTION_KEY` request tagged `tag`. False when the
+/// stack refused it (a choice list already open), so the caller asks for
+/// nothing.
+#[allow(clippy::too_many_arguments)]
+// Every argument is a field of the target the dialog waits on.
+pub(crate) fn open_action_values(
+    view: &mut ShellView,
+    action: usize,
+    context: DimensionContext,
+    column: String,
+    title: SharedString,
+    exclude: Option<String>,
+    empty: &'static str,
+    tag: u64,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
+    if !dialog::can_open(view, dialog::DialogKind::Choice) {
+        return false;
+    }
+    let state = ChoiceDialogState {
+        list: ChoiceList::new(Vec::new(), choice::DEFAULT_CAP),
+        target: Target::ActionValue {
+            action,
+            context,
+            column,
+            exclude,
+            tag,
+            values: None,
+            title,
+            empty,
+            window: window.window_handle(),
+        },
+    };
+    open(view, state, window, cx);
+    true
+}
+
+/// Status notice: an action's value fetch failed.
+pub(crate) fn action_values_failed(column: &str, reason: &str) -> String {
+    format!("could not load {column} values: {reason}")
+}
+
+/// An `ACTION_KEY` reply. Applied only while the open choice dialog waits
+/// on this tag; anything else is dropped. The values minus the excluded
+/// one, in delivered order, replace the loading row, filtered by the query
+/// typed while loading: the shared field's text on top, the stack entry's
+/// saved text when another dialog covers the choice. None left, or a failed
+/// fetch, sets the target's notice and removes the dialog: on top, the
+/// close is deferred to the target's window (a delivery arrives without
+/// one); covered, its entry is dropped from the stack at once, since focus
+/// belongs to the cover.
+pub(crate) fn deliver_action_values(
+    view: &mut ShellView,
+    outcome: DistinctOutcome,
+    cx: &mut Context<ShellView>,
+) {
+    // The choice's stack entry when another dialog covers it.
+    let covered_at = view
+        .modals
+        .iter()
+        .position(|m| m.kind == dialog::DialogKind::Choice)
+        .filter(|&at| at + 1 < view.modals.len());
+    let live = match covered_at {
+        Some(at) => view.modals[at]
+            .saved_input
+            .as_ref()
+            .map(|saved| saved.text.clone())
+            .unwrap_or_default(),
+        None => view.dialog_input.read(cx).value().to_string(),
+    };
+    let Some(state) = view.choice_dialog.as_mut() else {
+        return;
+    };
+    let Target::ActionValue {
+        column,
+        exclude,
+        tag,
+        values,
+        empty,
+        window,
+        ..
+    } = &mut state.target
+    else {
+        return;
+    };
+    if outcome.tag != *tag || outcome.column != *column {
+        return;
+    }
+    let notice = match outcome.values {
+        Ok(rows) => {
+            let kept: Vec<String> = rows
+                .into_iter()
+                .map(|(value, _)| value)
+                .filter(|value| exclude.as_ref() != Some(value))
+                .collect();
+            if kept.is_empty() {
+                (*empty).to_string()
+            } else {
+                state.list = ChoiceList::new(kept.clone(), choice::DEFAULT_CAP);
+                // A query typed while loading filters the rows it waited for.
+                state.list.set_query(&live);
+                *values = Some(kept);
+                view.choice_dialog_scroll
+                    .scroll_to_item(state.list.ranked_highlighted());
+                cx.notify();
+                return;
+            }
+        }
+        Err(reason) => action_values_failed(column, &reason),
+    };
+    let (window, tag) = (*window, *tag);
+    view.notice = Some(notice.into());
+    if let Some(at) = covered_at {
+        // Covered: focus belongs to the cover, so no window is needed. The
+        // entries beneath keep their saved input.
+        view.modals.remove(at);
+        view.choice_dialog = None;
+        cx.notify();
+        return;
+    }
+    let entity = cx.entity();
+    cx.defer(move |cx| {
+        let _ = window.update(cx, |_, window, cx| {
+            entity.update(cx, |shell, cx| {
+                // Still this dialog, on top: nothing closed or covered it
+                // since the reply.
+                let waiting = shell.top_kind() == Some(dialog::DialogKind::Choice)
+                    && matches!(
+                        shell.choice_dialog.as_ref().map(|s| &s.target),
+                        Some(Target::ActionValue { tag: t, .. }) if *t == tag
+                    );
+                if waiting {
+                    shell.close_modal(window, cx);
+                }
+            })
+        });
+    });
+    cx.notify();
 }
 
 fn open(
@@ -1003,6 +1199,16 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
                 LinkChange::Emit(group) => shell.set_emit(tile, group, cx),
             }
         }
+        Pick::ActionValue {
+            action,
+            context,
+            value,
+        } => {
+            // Close first: what `chosen` opens (a confirm) lands on the
+            // stack the list was opened over, not on the list.
+            shell.close_modal(window, cx);
+            shell.run_action_chosen(action, &context, &value, window, cx);
+        }
     }
 }
 
@@ -1111,8 +1317,11 @@ fn build(
     };
     let (_, prefix, hints_selector, hints) = chrome(&state.target);
     let no_scopes = matches!(state.target, Target::Scope { .. }) && state.list.options().is_empty();
+    let loading = matches!(state.target, Target::ActionValue { values: None, .. });
     let (hints_selector, hints) = if no_scopes {
         ("scope-empty-hints", SCOPE_EMPTY_HINTS)
+    } else if loading {
+        ("action-loading-hints", ACTION_LOADING_HINTS)
     } else {
         (hints_selector, hints)
     };
@@ -1139,6 +1348,14 @@ fn build(
     // No saved scope at all: in place of an empty list, say how to make one.
     let body = if no_scopes {
         no_scopes_hint(muted, cx)
+    } else if loading {
+        div()
+            .px_3()
+            .text_sm()
+            .text_color(muted)
+            .debug_selector(|| "action-loading".to_string())
+            .child("loading\u{2026}")
+            .into_any_element()
     } else {
         rows
     };

@@ -1218,6 +1218,55 @@ fn an_egress_change_asks_for_a_restart(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// The position service is resolved at startup. A changed `positions.toml`
+/// requires restart while it differs from the engine's startup baseline, and
+/// reverting it clears the message.
+#[gpui::test]
+fn positions_toml_is_restart_required(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
+            sink.borrow_mut().push(event.clone())
+        })
+        .detach();
+    });
+
+    let mut with_positions = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("positions", "[service]\nadapter = \"demo_positions\"\n").unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut with_positions), cx)
+    });
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, ShellEvent::RestartRequired(m) if m.contains("positions"))),
+        "{:?}",
+        events.borrow()
+    );
+
+    let mut reverted = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut reverted), cx)
+    });
+    assert!(
+        shell.read_with(&cx, |s, _| s.restart_required.is_none()),
+        "reverting positions.toml back to the baseline clears the message"
+    );
+}
+
 /// The pricing adapter is selected at startup. Changing it requires restart; reverting
 /// to the startup baseline clears that message.
 #[gpui::test]

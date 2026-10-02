@@ -38,6 +38,11 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::visual_block", "Select cells"),
     ("pricer::find_next", "Find next"),
     ("pricer::find_prev", "Find previous"),
+    ("pricer::sort_cycle", "Sort by cursor column"),
+    (
+        "pricer::sort_cycle_abs",
+        "Sort by cursor column's magnitude",
+    ),
     ("pricer::escape", "Clear selection, else find and notice"),
     ("pricer::add_below", "Add lines below…"),
     ("pricer::add_above", "Add lines above…"),
@@ -167,6 +172,8 @@ context = "pricer && mode == normal"
 "y c" = "pricer::yank_col"
 "n" = "pricer::find_next"
 "shift+n" = "pricer::find_prev"
+"s" = "pricer::sort_cycle"
+"shift+s" = "pricer::sort_cycle_abs"
 "escape" = "pricer::escape"
 "o" = "pricer::add_below"
 "shift+o" = "pricer::add_above"

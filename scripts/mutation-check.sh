@@ -3675,16 +3675,16 @@ run_mutation "yank: numbers are raw and unscaled" \
   tsv_has_a_header_indented_tree_text_raw_numbers_and_blanks
 
 run_mutation "commands: sort desc is parsed" \
-  crates/geode-blotter/src/core/commands.rs \
-  '                (Some("desc"), None, _) => SortOrder::Desc,' \
-  '                (Some("desc"), None, _) => SortOrder::Asc,' \
+  crates/geode-core/src/sort.rs \
+  '        (Some("desc"), None, _) => SortOrder::Desc,' \
+  '        (Some("desc"), None, _) => SortOrder::Asc,' \
   geode-blotter \
   every_command_parses
 
 run_mutation "commands: a bare sort abs is abs desc" \
-  crates/geode-blotter/src/core/commands.rs \
-  '                (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsDesc,' \
-  '                (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsAsc,' \
+  crates/geode-core/src/sort.rs \
+  '        (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsDesc,' \
+  '        (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsAsc,' \
   geode-blotter \
   every_command_parses
 
@@ -3763,38 +3763,38 @@ run_mutation "flatten: NaN is a NULL to the comparator, not Equal-to-everything"
   nan_sorts_last_like_null_and_never_panics_the_sort
 
 run_mutation "sort cycle: S is inert on a column with no magnitude" \
-  crates/geode-blotter/src/core/flatten.rs \
+  crates/geode-core/src/sort.rs \
   '        if absolute && !measure {' \
   '        if false {' \
-  geode-blotter \
+  geode-core \
   shift_s_is_inert_on_a_column_with_no_magnitude_where_s_is_not
 
 run_mutation "sort cycle: S steps abs desc on to abs asc before clearing" \
-  crates/geode-blotter/src/core/flatten.rs \
+  crates/geode-core/src/sort.rs \
   '                Some(SortOrder::AbsDesc) => Some(SortOrder::AbsAsc),' \
   '                Some(SortOrder::AbsDesc) => None,' \
-  geode-blotter \
+  geode-core \
   the_key_cycles_walk_their_own_orders_and_restart_from_the_others
 
 run_mutation "sort cycle: s from an absolute order restarts at asc, not desc" \
-  crates/geode-blotter/src/core/flatten.rs \
+  crates/geode-core/src/sort.rs \
   '                _ => Some(SortOrder::Asc),' \
   '                _ => Some(SortOrder::Desc),' \
-  geode-blotter \
+  geode-core \
   the_key_cycles_walk_their_own_orders_and_restart_from_the_others
 
 run_mutation "click cycle: a measure's click goes on from asc to abs desc, not to cleared" \
-  crates/geode-blotter/src/core/flatten.rs \
+  crates/geode-core/src/sort.rs \
   '            Some(SortOrder::Asc) if measure => Some(SortOrder::AbsDesc),' \
   '            Some(SortOrder::Asc) if measure => None,' \
-  geode-blotter \
+  geode-core \
   a_header_click_walks_every_order_a_measure_can_show_desc_first
 
 run_mutation "click cycle: a text column's click clears after asc instead of entering the absolute pair" \
-  crates/geode-blotter/src/core/flatten.rs \
+  crates/geode-core/src/sort.rs \
   '            Some(SortOrder::Asc) if measure => Some(SortOrder::AbsDesc),' \
   '            Some(SortOrder::Asc) => Some(SortOrder::AbsDesc),' \
-  geode-blotter \
+  geode-core \
   a_header_click_on_a_text_column_skips_the_absolute_pair
 
 run_mutation "delegate: a header-click resort moves the component's highlight with the cursor" \
@@ -3812,10 +3812,10 @@ run_mutation "delegate: a header click steps the blotter's own cycle, not the co
   a_header_click_cycles_through_the_absolute_orders_too
 
 run_mutation "sort order: abs asked of a text column is its signed direction" \
-  crates/geode-blotter/src/core/flatten.rs \
+  crates/geode-core/src/sort.rs \
   '            (SortOrder::AbsDesc, false) => SortOrder::Desc,' \
   '            (SortOrder::AbsDesc, false) => SortOrder::AbsDesc,' \
-  geode-blotter \
+  geode-core \
   an_absolute_order_asked_of_a_text_column_becomes_its_signed_direction
 
 run_mutation "tile: the key cycle reaches the delegate through SortOrder::cycle, not a stale copy" \
@@ -20441,12 +20441,34 @@ run_mutation "bridge: data_setup wires the resolved egress list into DataService
   crates/geode-app/src/bridge.rs \
   '            vol,
             egress,
+            positions,
         },' \
   '            vol,
             egress: Vec::new(),
+            positions,
         },' \
   geode-app \
   the_demo_layer_produces_a_servable_data_setup
+
+# Pass the resolved position service into data_setup. None silently leaves
+# every Move LHU refused "no position service configured".
+run_mutation "bridge: data_setup wires the resolved position service into DataServiceConfig" \
+  crates/geode-app/src/bridge.rs \
+  '            egress,
+            positions,
+        },' \
+  '            egress,
+            positions: None,
+        },' \
+  geode-app \
+  the_demo_layer_produces_a_servable_data_setup
+
+# The bridge says whether a position service survived resolution.
+run_mutation "bridge: positions_configured always false" \
+  crates/geode-app/src/bridge.rs \
+  '    let positions_configured = setup.config.positions.is_some();' \
+  '    let positions_configured = false;' \
+  geode-app the_bridge_says_whether_a_position_service_is_configured
 
 # Changes to egress.toml require a restart because reload does not rebuild
 # egress workers. This mutation preserves change detection but removes the
@@ -21116,8 +21138,8 @@ run_mutation "pricer entry bar: a tree-column double-click keeps the slid-up row
   crates/geode-pricer/src/tile.rs \
   '                self.cursor.at = Some(at);
                 self.sync_cursor(cx);
-                let Some(c) = SheetDelegate::plan_col(*col) else {' \
-  '                let Some(c) = SheetDelegate::plan_col(*col) else {' \
+                if group {' \
+  '                if group {' \
   geode-pricer a_tree_column_double_click_while_the_bar_is_open_keeps_that_row
 
 # A chevron stops propagation, so no SelectCell hands off for it: without
@@ -24770,8 +24792,8 @@ run_mutation "pricer select: lines_of keeps a leg twice" \
 # carries its legs, so totalling both would double them.
 run_mutation "pricer select: totals count a selected package's legs again" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        rows.dedup();\n        top_most(&self.sheet, &rows)' \
-  $'        rows.dedup();\n        rows' \
+  $'            self.sheet.len(),\n        );\n        top_most(&self.sheet, &rows)' \
+  $'            self.sheet.len(),\n        );\n        rows' \
   geode-pricer the_footer_totals_count_an_open_packages_legs_once
 
 # A line's total is a position total: its qty times the unit value.
@@ -26773,8 +26795,8 @@ run_mutation "pricer grid: a partial package's key reads every leg" \
 # the one door refuses them all.
 run_mutation "pricer scope: structural verbs ignore a partly hidden package" \
   crates/geode-pricer/src/tile/select.rs \
-  '        first_refusal(targets.into_iter().map(|r| self.read_only(r)))' \
-  '        first_refusal(targets.into_iter().map(|_| None))' \
+  '            self.read_only(r)' \
+  '            None::<&'"'"'static str>' \
   geode-pricer row_verbs_on_a_partly_hidden_package_are_refused
 
 # A selection refuses whole when any of its rows is a partly hidden package.
@@ -27035,28 +27057,247 @@ run_mutation "pricer grouping: a split package totals its whole fold per node" \
 
 run_mutation "pricer grouping: totals count a group row's descendant again" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        rows.sort_unstable();\n        rows.dedup();\n        top_most(&self.sheet, &rows)' \
-  $'        rows.sort_unstable();\n        top_most(&self.sheet, &rows)' \
+  '            Some(s) if !*s => {' \
+  '            Some(s) if true => {' \
   geode-pricer totals_count_a_group_row_and_its_descendant_once
 
-# Line movement: refused under a grouping; past hidden siblings without.
-run_mutation "pricer grouping: shift+j moves under a grouping" \
-  crates/geode-pricer/src/tile/select.rs \
-  '        if matches!(verb, "move_down" | "move_up") && self.grouped() {' \
-  '        if matches!(verb, "move_down" | "move_up") && false {' \
-  geode-pricer line_moves_refuse_under_a_grouping
-
+# Line movement: within the mover's own group under a grouping; past
+# hidden siblings always.
 run_mutation "pricer grouping: a move swaps with a hidden sibling" \
   crates/geode-pricer/src/tile.rs \
-  '        let steps = shown_steps(&siblings, at, delta, |r| self.visibility.is_shown(r))' \
-  '        let steps = shown_steps(&siblings, at, delta, |_| true)' \
+  '            shown_steps(&siblings, at, delta, lands).ok_or(edge)?' \
+  '            shown_steps(&siblings, at, delta, |_| true).ok_or(edge)?' \
   geode-pricer a_move_steps_past_a_sibling_the_scope_hides
 
 run_mutation "pricer grouping: a selection move swaps with a hidden sibling" \
   crates/geode-pricer/src/tile/select.rs \
-  '        let edit = move_plan(&self.sheet, &top, down, |r| self.visibility.is_shown(r))?;' \
-  '        let edit = move_plan(&self.sheet, &top, down, |_| true)?;' \
+  '            move_plan(&self.sheet, &top, down, lands, edge)?' \
+  '            move_plan(&self.sheet, &top, down, |_| true, edge)?' \
   geode-pricer a_move_steps_past_a_sibling_the_scope_hides
+
+run_mutation "pricer grouping: move_lands steps onto a hidden sibling" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        let shown = |r: usize| self.visibility.is_shown(r);' \
+  '        let shown = |_: usize| true;' \
+  geode-pricer a_move_steps_past_a_sibling_the_scope_hides
+
+run_mutation "pricer grouping: a grouped move lands in another group" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        Ok((Box::new(move |r| shown(r) && same(r)), edge))' \
+  '        Ok((Box::new(move |r| shown(r) && (same(r) || true)), edge))' \
+  geode-pricer a_grouped_move_steps_within_its_group
+
+run_mutation "pricer grouping: a grouped block move lands in another group" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        Ok((Box::new(move |r| shown(r) && same(r)), edge))' \
+  '        Ok((Box::new(move |r| shown(r) && (same(r) || true)), edge))' \
+  geode-pricer a_grouped_block_move_stays_in_its_group
+
+run_mutation "pricer grouping: a root at its group's end says only the end" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        let edge = if roots { OFF_GROUP_END } else { OFF_END };' \
+  '        let edge = if roots { OFF_END } else { OFF_END };' \
+  geode-pricer a_grouped_move_steps_within_its_group
+
+run_mutation "pricer grouping: a leg at its package's end names the group" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        let edge = if roots { OFF_GROUP_END } else { OFF_END };' \
+  '        let edge = if roots { OFF_GROUP_END } else { OFF_GROUP_END };' \
+  geode-pricer grouped_leg_moves_stay_in_the_package_and_split_ones_refuse
+
+run_mutation "pricer grouping: a split package's leg moves" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        (moving && self.sheet.parent(row).is_some_and(|p| self.split(p))).then_some(SPLIT)' \
+  '        (moving && false && self.sheet.parent(row).is_some_and(|p| self.split(p))).then_some(SPLIT)' \
+  geode-pricer grouped_leg_moves_stay_in_the_package_and_split_ones_refuse
+
+# The same-node rule and the drop plan (core::reorder).
+run_mutation "pricer reorder: movers in two groups share a node" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '        if groups.any(|g| g != Some(path)) {' \
+  '        if groups.any(|g| g.is_none()) {' \
+  geode-pricer same_node_refuses_movers_in_two_groups_and_a_split_package
+
+run_mutation "pricer reorder: a split package has one group" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '            Some([one]) => Some(*one),' \
+  '            Some([one, ..]) => Some(*one),' \
+  geode-pricer same_node_refuses_movers_in_two_groups_and_a_split_package
+
+run_mutation "pricer reorder: a drop in place is an empty edit" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '        if in_place {' \
+  '        if false && in_place {' \
+  geode-pricer a_single_row_drop_is_one_move_and_its_own_gaps_are_no_ops
+
+run_mutation "pricer reorder: a mover after its anchor lands one short" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '                    if j < a { a } else { a + 1 }' \
+  '                    if j < a { a - 1 } else { a + 1 }' \
+  geode-pricer a_single_row_drop_is_one_move_and_its_own_gaps_are_no_ops
+
+run_mutation "pricer reorder: a block drop moves only one mover" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '            anchor = Anchor::After(m);' \
+  '            anchor = anchor;' \
+  geode-pricer a_block_drop_keeps_its_order_and_lands_whole
+
+run_mutation "pricer reorder: a package counts as one flat row" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '        let size = |r: usize| sheet.block(r).len();' \
+  '        let size = |_: usize| 1;' \
+  geode-pricer a_package_drop_counts_its_legs_and_a_leg_moves_among_legs
+
+run_mutation "pricer reorder: a pointer outside the stops still snaps" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '        if !region.contains(&row) {' \
+  '        if false && !region.contains(&row) {' \
+  geode-pricer a_grouped_drop_hops_other_groups_and_leaves_their_order
+
+run_mutation "pricer reorder: a gap inside a package's legs is legal" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '            .filter(|&g| self.legal(g))' \
+  '            .filter(|&g| g == g)' \
+  geode-pricer a_package_drop_counts_its_legs_and_a_leg_moves_among_legs
+
+# The grip drag (tile::reorder, delegate).
+run_mutation "pricer reorder: the drop gap ignores the pointer's half" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        plan.target(&self.sheet, row, rel - rel.floor() >= 0.5)' \
+  '        plan.target(&self.sheet, row, false)' \
+  geode-pricer a_grip_drag_moves_a_row_down_and_up
+
+run_mutation "pricer reorder: the drop line never paints" \
+  crates/geode-pricer/src/delegate.rs \
+  '            .filter(|_| cx.has_active_drag())' \
+  '            .filter(|_| false)' \
+  geode-pricer a_grip_drag_moves_a_row_down_and_up
+
+run_mutation "pricer reorder: a drop leaves the cursor behind" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '                self.cursor.at = Some(d.grabbed);' \
+  '                let _ = &d.grabbed;' \
+  geode-pricer a_grip_drag_moves_a_row_down_and_up
+
+run_mutation "pricer reorder: a drop reshapes a live selection" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '            Ok(()) if self.selection.is_none() => {' \
+  '            Ok(()) if true => {' \
+  geode-pricer a_grip_drag_moves_a_v_block_as_one_undo
+
+run_mutation "pricer reorder: a grip in a V selection drags its row alone" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '            .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(g));' \
+  '            .is_some_and(|_| false);' \
+  geode-pricer a_grip_drag_moves_a_v_block_as_one_undo
+
+run_mutation "pricer reorder: a split sibling spans its other group's rows" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '            Some(path) => self.exact_row(id, path)?,' \
+  '            Some(_) => self.model.grid_row_of(id)?,' \
+  geode-pricer a_grouped_drag_lands_beside_a_split_packages_own_half
+
+run_mutation "pricer reorder: escape leaves a grip drag live" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.cancel_row_drag(window, cx) && verb == "escape" {' \
+  '        if verb == "escape" && false && self.cancel_row_drag(window, cx) {' \
+  geode-pricer escape_cancels_a_grip_drag
+
+run_mutation "pricer reorder: a grip click reaches the table" \
+  crates/geode-pricer/src/delegate.rs \
+  '            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.stop_propagation()))' \
+  '            .on_click(cx.listener(|_, _: &ClickEvent, _, _| {}))' \
+  geode-pricer a_grip_press_never_selects_moves_the_cursor_or_edits
+
+run_mutation "pricer reorder: a grip press is a cell press" \
+  crates/geode-pricer/src/delegate.rs \
+  '                if d.inner_press == Some(InnerPress::Grip) {' \
+  '                if false && d.inner_press == Some(InnerPress::Grip) {' \
+  geode-pricer a_grip_press_never_selects_moves_the_cursor_or_edits
+
+run_mutation "pricer reorder: grips paint under a sort" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        if self.sort.is_some() || self.loading {' \
+  '        if self.loading {' \
+  geode-pricer no_grip_under_a_sort_or_on_a_group_row
+
+run_mutation "pricer reorder: a split package paints a grip" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '                !split.contains(&package) && !partial' \
+  '                !partial' \
+  geode-pricer no_grip_on_split_or_partly_hidden_packages
+
+run_mutation "pricer reorder: a partly hidden package paints a grip" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '                !split.contains(&package) && !partial' \
+  '                !split.contains(&package)' \
+  geode-pricer no_grip_on_split_or_partly_hidden_packages
+
+run_mutation "pricer reorder: the bottom edge never scrolls" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        if self.scroll_step(cx) == 0. {' \
+  '        if true {' \
+  geode-pricer a_grip_drag_at_the_bottom_edge_scrolls
+
+run_mutation "pricer reorder: a drag outside a V selection keeps it" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        let ends_selection = self.selection.is_some() && !selected;' \
+  '        let ends_selection = false;' \
+  geode-pricer dragging_a_row_outside_a_v_selection_ends_it
+
+run_mutation "pricer reorder: a drag under a v block keeps it" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        let ends_selection = self.selection.is_some() && !selected;' \
+  '        let ends_selection = false;' \
+  geode-pricer dragging_a_row_under_a_v_block_ends_it
+
+run_mutation "pricer reorder: a sort mid-drag lets the drop land" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '            return Some(MOVE_SORTED);' \
+  '            return None;' \
+  geode-pricer a_sort_mid_drag_refuses_the_drop
+
+run_mutation "pricer reorder: a re-prepared drag skips the refusal" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '                .map_or_else(|| self.drop_plan(&m), Err)' \
+  '                .map_or_else(|| self.drop_plan(&m), |_| self.drop_plan(&m))' \
+  geode-pricer a_sort_mid_drag_refuses_the_drop
+
+run_mutation "pricer reorder: below the last row drops nowhere" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '            return plan.target(&self.sheet, len.checked_sub(1)?, true);' \
+  '            return None;' \
+  geode-pricer no_line_at_a_no_op_gap_and_below_the_last_row_is_the_end
+
+run_mutation "pricer reorder: a no-op gap is a target" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '            .filter(|&gap| self.edits(sheet, gap).is_some())' \
+  '            .filter(|&gap| gap == gap)' \
+  geode-pricer a_target_is_a_legal_gap_that_moves_something
+
+run_mutation "pricer reorder: the line paints at the dragged row's own edge" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '            .filter(|&gap| self.edits(sheet, gap).is_some())' \
+  '            .filter(|&gap| gap == gap)' \
+  geode-pricer no_line_at_a_no_op_gap_and_below_the_last_row_is_the_end
+
+run_mutation "pricer reorder: a grip click leaves its drag state" \
+  crates/geode-pricer/src/tile.rs \
+  '                if !cx.has_active_drag() {' \
+  '                if false {' \
+  geode-pricer a_grip_click_leaves_no_drag
+
+run_mutation "pricer reorder: a refused drag ends the selection" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        let moves = d.plan.is_ok();' \
+  '        let moves = true;' \
+  geode-pricer a_refused_drag_keeps_the_selection_and_its_footer
+
+run_mutation "pricer reorder: a grip press on a package row is a chevron press" \
+  crates/geode-pricer/src/delegate.rs \
+  '                                if d.inner_press != Some(InnerPress::Grip) {' \
+  '                                if true {' \
+  geode-pricer a_refused_drag_keeps_the_selection_and_its_footer
 
 # Session: the pin and the open grouping rows round-trip, held mid-load,
 # NULL apart from the empty string.
@@ -27273,8 +27514,8 @@ run_mutation "blotter grouping: a flat view titles with a dangling separator" \
 # `y y` / `V y` on a split package row yank that node's legs.
 run_mutation "pricer grouping: y y on a split row yanks the whole package" \
   crates/geode-pricer/src/tile.rs \
-  '                    let mut rows = self.grid_rows_under(g);' \
-  $'                    let mut rows = match self.model.sheet_row(g) {\n                        Some(r) => vec![r],\n                        None => self.grid_rows_under(g),\n                    };' \
+  '                    let rows = select::first_seen(self.grid_rows_under(g), self.sheet.len());' \
+  $'                    let rows = match self.model.sheet_row(g) {\n                        Some(r) => vec![r],\n                        None => self.grid_rows_under(g),\n                    };' \
   geode-pricer a_yank_on_a_split_package_row_yanks_its_nodes_legs
 
 run_mutation "pricer grouping: V y on a split row yanks the whole package" \
@@ -28478,6 +28719,145 @@ run_mutation "grid-window: pricer a refill-only delivery refreshes totals" \
   $'            // Totals read the sheet: re-resolve the selection over the new prices.\n            self.sync_cursor(cx);' \
   '            // Totals read the sheet: re-resolve the selection over the new prices.' \
   geode-pricer a_delivery_under_a_selection_updates_its_totals
+
+run_mutation "positions: a move is never answered" \
+  crates/geode-data/src/positions.rs \
+  '        let _ = sink(DataEvent::Command(outcome));' \
+  '        let _ = (&sink, outcome);' \
+  geode-data a_move_is_answered_once
+
+run_mutation "positions: an adapter without a position side is called missing" \
+  crates/geode-data/src/positions.rs \
+  $'            .ok_or_else(|| format!("adapter \'{adapter}\' has no position side")),' \
+  $'            .ok_or_else(|| format!("adapter \'{adapter}\' is not in this build")),' \
+  geode-data an_adapter_without_a_position_side_refuses_every_move
+
+run_mutation "positions: the service's own refusal is never answered" \
+  crates/geode-data/src/service.rs \
+  '            let _ = (self.sink)(DataEvent::Command(CommandOutcome {' \
+  '            let _ = std::convert::identity(DataEvent::Command(CommandOutcome {' \
+  geode-data without_a_position_service_a_move_is_answered_with_the_refusal
+
+run_mutation "move lhu: a handle refusal at yes is silent" \
+  crates/geode-positions/src/lib.rs \
+  '                    Err(refusal) => acx.notice(format!("move to LHU {lhu} refused: {refusal}")),' \
+  '                    Err(_) => {}' \
+  geode-app a_move_the_data_handle_refuses_says_refused
+
+run_mutation "positions: a refusal reads as accepted" \
+  crates/geode-core/src/positions.rs \
+  '        Err(reason) => format!("move to LHU {} refused: {reason}", o.lhu),' \
+  '        Err(_) => format!("moving {} {} to LHU {} \u{b7} accepted", o.count, noun(o.count), o.lhu),' \
+  geode-core a_refusal_names_the_target_and_reason
+
+run_mutation "positions: one position is called positions" \
+  crates/geode-core/src/positions.rs \
+  '    if n == 1 { "position" } else { "positions" }' \
+  $'    let _ = n;\n    "positions"' \
+  geode-core notices_name_one_position_and_many_positions
+
+# An action's value choice applies only the reply to its own request.
+run_mutation "action choose: a stale delivery fills the dialog" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    if outcome.tag != *tag || outcome.column != *column {' \
+  '    if outcome.column != *column {' \
+  geode-shell a_stale_value_delivery_is_dropped
+
+run_mutation "action choose: the excluded value is offered" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                .filter(|value| exclude.as_ref() != Some(value))' \
+  '                .filter(|_| exclude.is_some() || true)' \
+  geode-shell delivered_values_fill_the_dialog_without_the_excluded_one
+
+run_mutation "action choose: a covered choice filters by the cover's query" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            .map(|saved| saved.text.clone())' \
+  '            .map(|_| String::new())' \
+  geode-shell a_covered_choice_filters_by_its_own_query
+
+run_mutation "action choose: an empty reply leaves a covered choice loading" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        view.modals.remove(at);' \
+  '        let _ = at;' \
+  geode-shell an_empty_reply_to_a_covered_choice_removes_it
+
+run_mutation "action choose: the loading footer offers enter" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  $'    } else if loading {\n        ("action-loading-hints", ACTION_LOADING_HINTS)' \
+  $'    } else if false {\n        ("action-loading-hints", ACTION_LOADING_HINTS)' \
+  geode-shell enter_while_loading_does_nothing
+
+run_mutation "action confirm: a refused confirm is silent" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '            self.notice(CONFIRM_REFUSED);' \
+  '            let _ = CONFIRM_REFUSED;' \
+  geode-shell a_confirm_under_a_plain_dialog_is_refused_with_a_notice
+
+run_mutation "action confirm: no runs the action" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '                Some(ConfirmAnswer::No) => no(shell, window, cx),' \
+  '                Some(ConfirmAnswer::No) => yes(shell, window, cx),' \
+  geode-shell no_or_escape_closes_the_confirm_and_runs_nothing
+
+# A position command's answer reaches the status notice through the drain.
+run_mutation "command outcome: the drain drops the answer" \
+  crates/geode-app/src/bridge.rs \
+  '                        shell.update(cx, |s, cx| s.note_command(&outcome, cx));' \
+  '                        let _ = &outcome;' \
+  geode-app a_command_answer_reaches_the_status_notice
+
+# The demo position simulator: all or nothing, and a strictly later sentinel.
+run_mutation "demo positions: an unknown position moves the known ones" \
+  crates/geode-app/src/demo.rs \
+  '        return Err(adapter_error(format!("unknown position {missing}")));' \
+  '        let _ = missing;' \
+  geode-app an_unknown_position_refuses_and_changes_nothing
+
+run_mutation "demo positions: the sentinel is not later" \
+  crates/geode-app/src/demo.rs \
+  '    let as_of = now.max(previous + chrono::Duration::seconds(1));' \
+  '    let as_of = now;' \
+  geode-app the_sentinel_is_strictly_later_even_within_the_same_second
+
+# Move LHU: every selected row names one position, the selection moves, and
+# startup registers the action.
+# Relies on mtime resolution finer than the two writes' gap (APFS: ns); on a
+# coarse-mtime filesystem equal stamps let the swap survive.
+run_mutation "demo positions: the sentinel is written before its CSV" \
+  crates/geode-app/src/demo.rs \
+  $'        replace_file(&r.csv, &r.text)?;\n        replace_file(&r.sentinel, &r.sentinel_json)?;' \
+  $'        replace_file(&r.sentinel, &r.sentinel_json)?;\n        replace_file(&r.csv, &r.text)?;' \
+  geode-app a_move_rewrites_the_lhu_of_those_positions_only
+
+run_mutation "move lhu: a subtotal in the selection is moved anyway" \
+  crates/geode-positions/src/lib.rs \
+  '        let mut positions = ctx.selection_values(POSITION)?;' \
+  '        let mut positions: Vec<String> = ctx.selection.iter().filter_map(|r| r.iter().find(|(c, _)| c == POSITION).map(|(_, v)| v.clone())).collect();' \
+  geode-positions a_selection_with_a_subtotal_disables_move_lhu
+
+run_mutation "move lhu: a position on two selected rows moves twice" \
+  crates/geode-positions/src/lib.rs \
+  '        positions.retain(|p| seen.insert(p.clone()));' \
+  '        positions.retain(|p| seen.insert(p.clone()) || true);' \
+  geode-positions a_position_on_two_selected_rows_moves_once
+
+run_mutation "move lhu: the selection is ignored" \
+  crates/geode-positions/src/lib.rs \
+  '    if !ctx.selection.is_empty() {' \
+  '    if false {' \
+  geode-app move_lhu_sends_the_selected_positions_after_confirm
+
+run_mutation "move lhu: never registered" \
+  crates/geode-app/src/main.rs \
+  '    roster.add_action(Rc::new(geode_positions::MoveLhu::new(' \
+  '    let _ = (Rc::new(geode_positions::MoveLhu::new(' \
+  geode-app move_lhu_sends_the_selected_positions_after_confirm
+
+run_mutation "move lhu: startup enables it without a position service" \
+  crates/geode-app/src/main.rs \
+  '    add_dimension_actions(roster, &bridge.handle, bridge.positions_configured);' \
+  '    add_dimension_actions(roster, &bridge.handle, true);' \
+  geode-app the_production_roster_opens_market_data_on_an_underlying
 
 # ---- Fuzzy find: the result table formats only the rows it shows ----
 
@@ -30063,6 +30443,231 @@ run_mutation "link: a Behind draft posts its painted base" \
   '        self.base_snapshot.clone().or_else(|| self.snapshot.clone())' \
   '        self.snapshot.clone()' \
   geode-marketdata a_behind_draft_posts_its_retained_base_with_the_edit
+
+# A double-click on a group row toggles it; the edit route it would
+# otherwise take only refuses on a row with no editable cell.
+run_mutation "pricer tile: a double-click on a group row toggles it" \
+  crates/geode-pricer/src/tile.rs \
+  '                let group = matches!(at, At::Group(_));' \
+  '                let group = false;' \
+  geode-pricer a_double_click_on_a_group_row_toggles_it
+
+# The pricer's and market data's find tables highlight the match run in the
+# list-row accent, as every other fuzzy surface does.
+run_mutation "find-window: pricer match run takes the list-row accent" \
+  crates/geode-pricer/src/delegate.rs \
+  '                            geode_shell::shell::listrow::row_paint(cx.theme()).accent,' \
+  '                            cx.theme().foreground,' \
+  geode-pricer find_highlights_take_the_list_row_accent
+
+run_mutation "find-window: market data match run takes the list-row accent" \
+  crates/geode-marketdata/src/delegate.rs \
+  '                    geode_shell::shell::listrow::row_paint(cx.theme()).accent,' \
+  '                    cx.theme().foreground,' \
+  geode-marketdata find_highlights_take_the_list_row_accent
+
+# ---- pricer column sort
+
+# The ranking: blanks and gaps after values in both directions, a group
+# by its own fold, magnitudes under an absolute order, an expiry as a
+# date, a partly hidden package by the legs it paints, a failure and an
+# unlike-currency local sum as gaps, a group dimension's unanimity.
+run_mutation "pricer sort: descending puts blanks first" \
+  crates/geode-pricer/src/core/sort.rs \
+  '        (a, b) => a.rank().cmp(&b.rank()),' \
+  $'        (a, b) if desc => b.rank().cmp(&a.rank()),\n        (a, b) => a.rank().cmp(&b.rank()),' \
+  geode-pricer unpriced_and_failed_rows_sort_after_values_in_both_directions
+
+run_mutation "pricer sort: a group row ranks by nothing" \
+  crates/geode-pricer/src/core/sort.rs \
+  '            NodeKind::Group { .. } => group_key(sheet, &legs_under(rollup, id), kind),' \
+  '            NodeKind::Group { .. } => Key::Blank,' \
+  geode-pricer group_rows_rank_by_their_folded_value_at_every_level
+
+run_mutation "pricer sort: an absolute order compares signed values" \
+  crates/geode-pricer/src/core/sort.rs \
+  '        let mag = |v: f64| if abs { v.abs() } else { v };' \
+  '        let mag = |v: f64| v;' \
+  geode-pricer a_measure_sort_ranks_lines_and_packages_and_legs_ride_with_their_package
+
+run_mutation "pricer sort: an expiry compares as its code" \
+  crates/geode-pricer/src/core/sort.rs \
+  '            Expiry::Date(d) => Part::Date(*d),' \
+  '            Expiry::Date(d) => Part::Text(crate::core::shorthand::render_expiry(&Expiry::Date(*d))),' \
+  geode-pricer an_expiry_sorts_as_a_date_not_as_its_code
+
+run_mutation "pricer sort: a partly hidden package ranks by every leg" \
+  crates/geode-pricer/src/core/sort.rs \
+  $'        if partial {\n            let f = sheet.fold_legs(legs.iter().copied());' \
+  $'        if false {\n            let f = sheet.fold_legs(legs.iter().copied());' \
+  geode-pricer a_partly_hidden_package_ranks_by_the_legs_it_paints
+
+run_mutation "pricer sort: a failed line ranks as a blank" \
+  crates/geode-pricer/src/core/sort.rs \
+  '            (LineState::Failed(_), _) => Key::Mixed,' \
+  '            (LineState::Failed(_), _) => Key::Blank,' \
+  geode-pricer unpriced_and_failed_rows_sort_after_values_in_both_directions
+
+run_mutation "pricer sort: an unlike-currency local sum ranks as a value" \
+  crates/geode-pricer/src/core/sort.rs \
+  '            (_, Some(r)) if !usd && r.currency.is_mixed() => Key::Mixed,' \
+  '            (_, Some(r)) if false && r.currency.is_mixed() => Key::Mixed,' \
+  geode-pricer a_mixed_currency_local_sum_is_a_gap_and_its_usd_twin_a_value
+
+run_mutation "pricer sort: legs that differ rank as unanimous" \
+  crates/geode-pricer/src/core/sort.rs \
+  '                Some(_) if blanks || differ => Key::Mixed,' \
+  '                Some(_) if blanks => Key::Mixed,' \
+  geode-pricer a_group_dimension_ranks_unanimous_values_then_mixed_then_blank
+
+run_mutation "pricer sort: every column has a magnitude" \
+  crates/geode-pricer/src/core/sort.rs \
+  '    matches!(kind, ColumnKind::Measure { .. })' \
+  '    let _ = kind; true' \
+  geode-pricer s_and_shift_s_from_the_keymap_cycle_the_cursor_column
+
+# The tile: a price-only refresh re-ranks; the drop clears and says so;
+# the header steps the click cycle and the tree never sorts; the keys
+# are bound; `:sort` folds `abs` on a text column; the sheet-order verbs
+# refuse; yanks keep painted order; `/`'s header reserves the toggle.
+run_mutation "pricer sort: a price refresh keeps the old order" \
+  crates/geode-pricer/src/tile.rs \
+  '        if let Some(spec) = &self.sort {' \
+  '        if let Some(spec) = self.sort.as_ref().filter(|_| change == Change::Structure) {' \
+  geode-pricer a_price_refresh_re_ranks_a_measure_sort_and_the_cursor_stays_on_its_line
+
+run_mutation "pricer sort: a dropped sort says nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.notice = Some(sort_dropped(spec.column).into());' \
+  '            let _ = sort_dropped(spec.column);' \
+  geode-pricer a_view_without_the_sorted_column_drops_the_sort_and_says_which
+
+run_mutation "pricer sort: a plan without the column keeps the sort" \
+  crates/geode-pricer/src/tile.rs \
+  $'            self.sort = None;\n            self.notice = Some(sort_dropped(spec.column).into());' \
+  '            self.notice = Some(sort_dropped(spec.column).into());' \
+  geode-pricer a_view_without_the_sorted_column_drops_the_sort_and_says_which
+
+run_mutation "pricer sort: a header click steps the key cycle" \
+  crates/geode-pricer/src/tile.rs \
+  '        let next = SortOrder::click_cycle(current, measure);' \
+  '        let next = SortOrder::cycle(current, false, measure);' \
+  geode-pricer a_header_click_walks_the_click_cycle_and_the_tree_column_never_sorts
+
+run_mutation "pricer sort: the tree column's hook sorts a column" \
+  crates/geode-pricer/src/delegate.rs \
+  '        if let Some(col) = Self::plan_col(col_ix).filter(|&c| c < self.model.columns.len()) {' \
+  '        if let Some(col) = Self::plan_col(col_ix).or(Some(0)) {' \
+  geode-pricer a_header_click_walks_the_click_cycle_and_the_tree_column_never_sorts
+
+run_mutation "pricer sort: an absolute order's label does not say so" \
+  crates/geode-pricer/src/delegate.rs \
+  '        self.abs_label = sort.filter(|s| s.order.absolute()).and_then(|s| {' \
+  '        self.abs_label = sort.filter(|_| false).and_then(|s| {' \
+  geode-pricer s_and_shift_s_from_the_keymap_cycle_the_cursor_column
+
+run_mutation "pricer sort: s is unbound in normal mode" \
+  crates/geode-pricer/src/content.rs \
+  '"s" = "pricer::sort_cycle"' \
+  '"ctrl+alt+s" = "pricer::sort_cycle"' \
+  geode-pricer s_and_shift_s_from_the_keymap_cycle_the_cursor_column
+
+run_mutation "pricer sort: :sort keeps abs on a text column" \
+  crates/geode-pricer/src/tile.rs \
+  '                let order = order.on_column(sorting::is_measure(c.def.kind));' \
+  '                let order = order;' \
+  geode-pricer sort_commands_resolve_against_the_plan_and_complete
+
+run_mutation "pricer sort: a move runs under a sort" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        if matches!(verb, "move_down" | "move_up") && self.sort.is_some() {' \
+  '        if matches!(verb, "move_down" | "move_up") && false {' \
+  geode-pricer sheet_order_verbs_refuse_under_a_sort_naming_sort_clear
+
+run_mutation "pricer sort: a counted g p runs under a sort" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        if verb == "group" && !selected && count > 1 && self.sort.is_some() {' \
+  '        if verb == "group" && !selected && count > 1 && false {' \
+  geode-pricer sheet_order_verbs_refuse_under_a_sort_naming_sort_clear
+
+run_mutation "pricer sort: a V yank goes back to sheet order" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'            self.sheet.len(),\n        );\n        top_most(&self.sheet, &rows)' \
+  $'            self.sheet.len(),\n        );\n        let mut rows = rows;\n        rows.sort_unstable();\n        top_most(&self.sheet, &rows)' \
+  geode-pricer find_and_yank_walk_the_painted_order
+
+run_mutation "pricer sort: the / header drops the toggle's width" \
+  crates/geode-pricer/src/tile.rs \
+  '                            .pr(window.rem_size() * 0.75 + gpui::px(4.))' \
+  '                            .pr(gpui::px(0.))' \
+  geode-pricer fzf_keeps_native_header_columns_and_restores_tree
+
+# A live selection spans painted rows: the order holds under it (from
+# its start), the deferred re-rank applies when it ends, and a sort
+# change ends it first. NaN ranks with the gaps; a shift package keys
+# its painted parts; g p over rows apart in the sheet names the sort;
+# autosize measures the `|x|` label.
+run_mutation "pricer sort: a tick re-ranks under a live selection" \
+  crates/geode-pricer/src/tile.rs \
+  $'            if self.selection.is_some()\n                && let Some(held) = &self.held_order' \
+  $'            if false\n                && let Some(held) = &self.held_order' \
+  geode-pricer a_price_tick_under_a_selection_holds_the_order_until_the_selection_ends
+
+run_mutation "pricer sort: a selection takes no held order" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'                if self.sort.is_some() {\n                    self.held_order' \
+  $'                if false {\n                    self.held_order' \
+  geode-pricer a_price_tick_under_a_selection_holds_the_order_until_the_selection_ends
+
+run_mutation "pricer sort: the deferred re-rank never applies" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.held_order.is_some() && self.selection.is_none() {' \
+  '        if false {' \
+  geode-pricer a_price_tick_under_a_selection_holds_the_order_until_the_selection_ends
+
+run_mutation "pricer sort: a sort change keeps the live selection" \
+  crates/geode-pricer/src/tile.rs \
+  $'        if self.selection.is_some() {\n            self.clear_selection();\n            self.footer = Some(SORT_CLEARED_SELECTION.into());' \
+  $'        if false {\n            self.clear_selection();\n            self.footer = Some(SORT_CLEARED_SELECTION.into());' \
+  geode-pricer a_sort_change_clears_a_live_selection_and_says_why
+
+run_mutation "pricer sort: a NaN result ranks as a blank" \
+  crates/geode-pricer/src/core/sort.rs \
+  '                None => Key::Mixed,' \
+  '                None => Key::Blank,' \
+  geode-pricer a_nan_result_ranks_with_the_gaps_not_the_blanks
+
+run_mutation "pricer sort: a shift package keys distinct numbers" \
+  crates/geode-pricer/src/core/sort.rs \
+  '    if matches!(kind, ColumnKind::SpotShift | ColumnKind::VolShift) {' \
+  '    if false {' \
+  geode-pricer a_package_shift_keys_its_painted_parts_unset_included
+
+run_mutation "pricer sort: g p over rows apart says not contiguous" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                Some(_) if why == NOT_CONTIGUOUS => GROUP_SORTED,' \
+  '                Some(_) if false => GROUP_SORTED,' \
+  geode-pricer g_p_over_rows_apart_in_the_sheet_names_the_sort
+
+run_mutation "pricer sort: autosize ignores the |x| label" \
+  crates/geode-pricer/src/delegate.rs \
+  '            let label = self.header_label(col).unwrap_or(&c.label);' \
+  '            let label = &c.label;' \
+  geode-pricer autosize_fits_an_absolute_sorts_label
+
+# A dropped sort ends a live selection as any sort change does; a
+# selection verb that refuses puts back the order the selection held.
+run_mutation "pricer sort: a dropped sort keeps the live selection" \
+  crates/geode-pricer/src/tile.rs \
+  $'            self.end_selection_for_sort();\n            self.sort = None;' \
+  '            self.sort = None;' \
+  geode-pricer a_view_switch_dropping_the_sort_ends_a_live_selection
+
+run_mutation "pricer sort: a refused selection verb restores no hold" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        self.held_order = held;\n        self.rebuild(cx);' \
+  $'        let _ = held;\n        self.refresh_selection();' \
+  geode-pricer a_refused_selection_verb_keeps_the_held_order
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

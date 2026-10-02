@@ -68,6 +68,9 @@ fn key(event: &DataEvent, seq: u64) -> Key {
         | DataEvent::LocalPublishFailed { .. }
         | DataEvent::Forgotten { .. }
         | DataEvent::ForgetFailed { .. } => Key::Local(seq),
+        // Every position command is answered once and each answer is its
+        // own notice, so none may coalesce away.
+        DataEvent::Command(_) => Key::Local(seq),
         DataEvent::SeriesFetched {
             source,
             identity,

@@ -306,7 +306,8 @@ The market-data panel's fragment binds its verbs and its `mode == menu`
 pick and close keys (`enter`, `escape`, `.`); the menu's steps are the shared
 ones under `tilelist`. `k` on row 0 still enters the attribute strip around
 the shared result.
-The line pricer's fragment binds its verbs (`g p`, `g u` and `g m` among
+The line pricer's fragment binds its verbs (`s`/`shift+s` sort as the
+blotter's do; `g p`, `g u` and `g m` among
 them, beside the shell's `g g`: a first `g` waits for the second key), its
 `mode == insert` field keys and its `mode == menu` pick and close keys.
 The timeseries fragment binds its popups' `enter`, `escape` and `.`; their

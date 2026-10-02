@@ -2509,3 +2509,43 @@ scroll then formats only the rows entering view. The pricer's open drops its
 all-open `fill_all` the same way; it has no bench of its own (its `GridIndex`
 build for `/`, tree labels only, is unchanged and `pricer_core/grid_build_1000`
 covers it).
+
+## Pricer column sort: sorted rebuilds — 2026-10-01
+
+Apple M5 Pro, 18 cores, rustc 1.96.0 (ac68faa20 2026-05-25), bench profile.
+`pricer_core/rebuild_1000_flat_sorted` and `rebuild_1000_grouped_sorted` run
+the tile's structural rebuild under an `npv` descending sort: the rollup,
+`core::sort::rank` over every sibling set (a group keyed by its legs' fold, a
+package by its own folded result, a line by its result), then
+`GridIndex::build`, before any window fill. The flat shape is
+`texts(1_000)` (1,200 sheet rows, every package open); the grouped one
+`grouped_texts(1_000)` under `[underlying_ref, expiry, position_ref]`, every
+group and package open. Prices vary per line (`(row × 7919) mod 1000 − 500`)
+so the ranks are not all ties. `rank_1000_grouped` is the ranking alone on a
+fresh grouped rollup. The same commit also sorts `rollup::legs_under`'s
+output into sheet order, which every unsorted grouped build now pays too.
+
+The machine was heavily loaded by other sessions' builds: one-minute load
+49.14 at the first run's start, 21.49 at the second's, 10.61 at its end. The
+unsorted reference rows ran in the same invocations; compare within a round,
+not against the reference table's idle figures (`grid_build_1000` read
+473 µs and 425 µs here against its 271 µs reference).
+
+| Bench | Round 1 | Round 2 |
+|---|---:|---:|
+| `grid_build_1000` | 473 µs | 425 µs |
+| `rebuild_1000_flat` | 517 µs | 469 µs |
+| `rebuild_1000_flat_sorted` | 561 µs | 549 µs |
+| `rebuild_1000_grouped` | 1.32 ms | 834 µs |
+| `rebuild_1000_grouped_sorted` | 1.04 ms | 923 µs |
+| `rank_1000_grouped` | 108 µs | 102 µs |
+
+Round 1's unsorted grouped figure (1.32 ms, a 1.15–1.54 ms interval) is load
+noise: its sorted twin ran faster. In round 2 the sort adds about 80 µs flat
+and 90 µs grouped, about 1% of the 8 ms pure-UI budget; the
+ranking is bounded by the grouped fold (each group folds its legs once per
+level). Headless model work only: no table layout or paint. A price-only
+delivery under a sort runs the same rank before its structural comparison;
+when the order is unchanged it still refills only (the tile test
+`a_price_refresh_re_ranks_a_measure_sort_and_the_cursor_stays_on_its_line`
+asserts no index build), and with no sort no rank runs.

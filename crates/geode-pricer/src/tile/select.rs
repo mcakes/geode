@@ -8,13 +8,19 @@ use super::*;
 use crate::core::cell::READ_ONLY;
 use crate::core::package::{self, package_qty};
 use crate::core::select::{
-    Skip, Skips, group_plan, lines_of, move_plan, risk_totals_visible, set_notice, step_notice,
-    top_most,
+    NOT_CONTIGUOUS, Skip, Skips, group_plan, lines_of, move_plan, risk_totals_visible, set_notice,
+    step_notice, top_most,
 };
 use crate::core::sheet::OwnShifts;
 use geode_core::grid::selection::Lost;
 use geode_core::pricing::{Instrument, Measure};
 use std::collections::BTreeMap;
+
+/// A selection a verb took before its edit, and the order it held.
+pub(crate) type TakenSelection = (
+    Option<Selection<At, &'static str>>,
+    Option<crate::core::sort::Held>,
+);
 
 /// The strongest of several targets' read-only reasons: [`SPLIT`] over
 /// [`PARTLY_HIDDEN`], so a selection holding both names the grouping.
@@ -73,8 +79,34 @@ impl PricerTile {
                     anchor_row: line,
                     anchor_col: col,
                 });
+                // Under a sort the rows hold this painted order while the
+                // selection lives (`PricerTile::held_order`).
+                if self.sort.is_some() {
+                    self.held_order =
+                        Some(crate::core::sort::painted_order(&self.rollup, &self.sheet));
+                }
             }
         }
+    }
+
+    /// End the selection before a verb's edit, keeping it — with the
+    /// painted order it holds under a sort — for [`Self::restore_selection`]
+    /// should the edit refuse. The edit's rebuild runs selection-less and
+    /// drops the held order, so it must travel with the selection.
+    pub(crate) fn take_selection(&mut self) -> TakenSelection {
+        let kept = (self.selection.take(), self.held_order.clone());
+        self.clear_selection();
+        kept
+    }
+
+    /// Put back a selection [`Self::take_selection`] took, and its held
+    /// order, then rebuild: the refused edit's rebuild ran in ranked order,
+    /// and the selection must resolve over the order it was made on.
+    pub(crate) fn restore_selection(&mut self, kept: TakenSelection, cx: &mut Context<Self>) {
+        let (selection, held) = kept;
+        self.selection = selection;
+        self.held_order = held;
+        self.rebuild(cx);
     }
 
     /// Drop the selection and everything prepared from it.
@@ -206,20 +238,18 @@ impl PricerTile {
 
     /// The rows a total or a `V` yank reaches: each selected grid row's
     /// sheet rows (a grouping row its contents, a split package its legs
-    /// under that node; `grid_rows_under`), each once, top-most — a
-    /// grouping row selected with its own descendants, or a package with
-    /// its legs, counts every leg once.
+    /// under that node; `grid_rows_under`), each once in painted order
+    /// (a yank keeps what the screen shows, under a sort or a grouping),
+    /// top-most — a grouping row selected with its own descendants, or a
+    /// package with its legs, counts every leg once.
     pub(crate) fn selection_total_rows(&self) -> Vec<usize> {
         let Some(r) = &self.resolved else {
             return Vec::new();
         };
-        let mut rows: Vec<usize> = r
-            .rows
-            .clone()
-            .flat_map(|g| self.grid_rows_under(g))
-            .collect();
-        rows.sort_unstable();
-        rows.dedup();
+        let rows = first_seen(
+            r.rows.clone().flat_map(|g| self.grid_rows_under(g)),
+            self.sheet.len(),
+        );
         top_most(&self.sheet, &rows)
     }
 
@@ -387,11 +417,14 @@ impl PricerTile {
     /// The one door every structural verb passes before it mutates: `d`,
     /// `shift+j`/`shift+k`, `g p` and `g u` (keys, the `.` menu, and
     /// `:package`/`:unpackage`) refuse when their target could reach
-    /// lines its row does not paint. In order: a move while any grouping
-    /// applies ([`MOVE_GROUPED`]: sheet order is not the painted order); a
-    /// target that is a grouping row ([`GROUP_ROW`]: no line behind it); a
-    /// target package split across nodes ([`SPLIT`]) or partly hidden by
-    /// the scope ([`PARTLY_HIDDEN`]). `selected`: the verb acts on the
+    /// lines its row does not paint. In order: a counted `g p` under a
+    /// value grouping ([`PACKAGE_GROUPED`]), a move or counted `g p` under
+    /// a sort ([`MOVE_SORTED`], [`PACKAGE_SORTED`]) — sheet order is not
+    /// the painted order there (a move under a value grouping is instead
+    /// held to its own group by [`Self::move_lands`]); a target that is a grouping row
+    /// ([`GROUP_ROW`]: no line behind it); a target package split across
+    /// nodes ([`SPLIT`]) — for a move, a leg of one too — or partly hidden
+    /// by the scope ([`PARTLY_HIDDEN`]). `selected`: the verb acts on the
     /// live selection, which then refuses as a whole — no part of it is
     /// acted on. Otherwise the target is the cursor row; for `g u` its
     /// package (a leg's parent). A counted `g p` takes the `count` sheet
@@ -413,11 +446,14 @@ impl PricerTile {
         ) {
             return None;
         }
-        if matches!(verb, "move_down" | "move_up") && self.grouped() {
-            return Some(MOVE_GROUPED);
-        }
         if verb == "group" && !selected && count > 1 && self.grouped() {
             return Some(PACKAGE_GROUPED);
+        }
+        if matches!(verb, "move_down" | "move_up") && self.sort.is_some() {
+            return Some(MOVE_SORTED);
+        }
+        if verb == "group" && !selected && count > 1 && self.sort.is_some() {
+            return Some(PACKAGE_SORTED);
         }
         let targets: Vec<usize> = if selected {
             if self.selection_holds_group() {
@@ -441,7 +477,18 @@ impl PricerTile {
                 _ => vec![row],
             }
         };
-        first_refusal(targets.into_iter().map(|r| self.read_only(r)))
+        let moving = matches!(verb, "move_down" | "move_up");
+        first_refusal(targets.into_iter().map(|r| {
+            self.read_only(r)
+                .or_else(|| self.split_leg_refusal(r, moving))
+        }))
+    }
+
+    /// A move of a leg whose package the grouping splits: its sibling
+    /// legs paint under other groups' package rows, so its sibling order
+    /// is not one painted order ([`SPLIT`]).
+    pub(crate) fn split_leg_refusal(&self, row: usize, moving: bool) -> Option<&'static str> {
+        (moving && self.sheet.parent(row).is_some_and(|p| self.split(p))).then_some(SPLIT)
     }
 
     /// `y` over a selection, which it ends. Under `V` the clipboard gets
@@ -498,7 +545,7 @@ impl PricerTile {
     }
 
     /// `d` over a `V` selection: the top-most rows go as ONE undo entry
-    /// and land in the register in sheet order. The specs are read before
+    /// and land in the register in painted order. The specs are read before
     /// any remove, since each remove shifts the indices after it; the
     /// removes run bottom-up so the earlier indices stay valid.
     pub(crate) fn delete_selection(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
@@ -518,15 +565,12 @@ impl PricerTile {
         let edits = at.into_iter().map(|at| Edit::Remove { at }).collect();
         // Cleared first: the rebuild after the edit would otherwise find the
         // anchor gone and report a lost selection over a deliberate delete.
-        let kept = self.selection.take();
-        self.clear_selection();
+        let kept = self.take_selection();
         if let Err(e) = self.apply_edits(edits, cx) {
             // A refused batch leaves the sheet as it was, so the selection
             // still names what the user picked — re-resolved, or the footer
             // would show no extent or totals over a live selection.
-            self.selection = kept;
-            self.refresh_selection();
-            self.rebuild_chrome();
+            self.restore_selection(kept, cx);
             return Err(e.to_string());
         }
         let n = specs.len();
@@ -536,16 +580,20 @@ impl PricerTile {
     }
 
     /// `shift+j`/`shift+k` over a `V` selection: the block slides one
-    /// sibling step as a unit, as ONE move of the neighbour across it.
-    /// The selection stays: it is anchored by line id, so the rebuild
-    /// re-resolves it onto the moved lines.
+    /// sibling step as a unit, as ONE move of the neighbour across it —
+    /// under a value grouping, the next neighbour in the block's own group
+    /// ([`Self::move_lands`]). The selection stays: it is anchored by line
+    /// id, so the rebuild re-resolves it onto the moved lines.
     pub(crate) fn move_selection(
         &mut self,
         down: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let top = top_most(&self.sheet, &self.selected_sheet_rows());
-        let edit = move_plan(&self.sheet, &top, down, |r| self.visibility.is_shown(r))?;
+        let edit = {
+            let (lands, edge) = self.move_lands(&top)?;
+            move_plan(&self.sheet, &top, down, lands, edge)?
+        };
         self.apply_edit(edit, cx).map_err(|e| e.to_string())
     }
 
@@ -553,11 +601,16 @@ impl PricerTile {
     /// become one custom package, opened, with the cursor on it.
     pub(crate) fn group_selection(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         let top = top_most(&self.sheet, &self.selected_sheet_rows());
-        let (first, count) = group_plan(&self.sheet, &top)?;
+        let (first, count) = group_plan(&self.sheet, &top).map_err(|why| {
+            // Adjacent on screen is not adjacent in the sheet under a sort.
+            match self.sort {
+                Some(_) if why == NOT_CONTIGUOUS => GROUP_SORTED,
+                _ => why,
+            }
+        })?;
         // Cleared first: the new package starts closed, so the rebuild
         // after the edit would otherwise report the anchor line as lost.
-        let kept = self.selection.take();
-        self.clear_selection();
+        let kept = self.take_selection();
         let edit = Edit::Group {
             first,
             count,
@@ -567,9 +620,7 @@ impl PricerTile {
         if let Err(e) = self.apply_edit(edit, cx) {
             // Re-resolved as well as restored: a bare restore leaves the
             // footer's extent and totals empty over a live selection.
-            self.selection = kept;
-            self.refresh_selection();
-            self.rebuild_chrome();
+            self.restore_selection(kept, cx);
             return Err(e.to_string());
         }
         let id = self.sheet.id(first);
@@ -597,14 +648,11 @@ impl PricerTile {
             .collect();
         // Cleared first: an anchor on a package row vanishes with it, and
         // that is the verb's intent, not a lost selection.
-        let kept = self.selection.take();
-        self.clear_selection();
+        let kept = self.take_selection();
         if let Err(e) = self.apply_edits(edits, cx) {
             // A refused batch leaves the sheet as it was; the kept
             // selection is re-resolved so its footer strip comes back.
-            self.selection = kept;
-            self.refresh_selection();
-            self.rebuild_chrome();
+            self.restore_selection(kept, cx);
             return Err(e.to_string());
         }
         Ok(())
@@ -979,4 +1027,20 @@ impl PricerTile {
     pub(crate) fn resolved(&self) -> Option<&Resolved> {
         self.resolved.as_ref()
     }
+}
+
+/// `rows` once each, in the order first met: the painted order a yank
+/// keeps, which a sort or a grouping makes differ from sheet order. A
+/// split package's legs reach here once per node that paints them.
+pub(crate) fn first_seen(rows: impl IntoIterator<Item = usize>, universe: usize) -> Vec<usize> {
+    let mut seen = vec![false; universe];
+    rows.into_iter()
+        .filter(|&r| match seen.get_mut(r) {
+            Some(s) if !*s => {
+                *s = true;
+                true
+            }
+            _ => false,
+        })
+        .collect()
 }
