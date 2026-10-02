@@ -2436,6 +2436,25 @@ mod tests {
         }
     }
 
+    /// [`until`] with an overall deadline: `None` when no picked event lands
+    /// within `limit`. A source that polls every interval keeps the channel
+    /// busy, so `until`'s per-event timeout never fires on a missing event;
+    /// a test whose broken path still emits must fail on its assertion here.
+    fn until_within<T>(
+        rx: &std::sync::mpsc::Receiver<DataEvent>,
+        limit: Duration,
+        mut pick: impl FnMut(DataEvent) -> Option<T>,
+    ) -> Option<T> {
+        let deadline = Instant::now() + limit;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let e = rx.recv_timeout(remaining).ok()?;
+            if let Some(t) = pick(e) {
+                return Some(t);
+            }
+        }
+    }
+
     #[test]
     fn a_local_publish_lands_a_generation_the_document_request_reads_back() {
         let (_d, service, rx) = local_service();
@@ -6421,7 +6440,7 @@ source_name = "NPV"
         let root = tempfile::tempdir().unwrap();
         let drops = root.path().join("drops");
         let (_db, svc, rx) = directory_service(format!("{}/*.csv", drops.display()));
-        let reason = until(&rx, |e| match e {
+        let reason = until_within(&rx, Duration::from_secs(10), |e| match e {
             DataEvent::Health {
                 source,
                 worst: Health::Degraded { reason },
@@ -6432,9 +6451,13 @@ source_name = "NPV"
             }
             _ => None,
         });
-        assert_eq!(reason, format!("path '{}' not found", drops.display()));
+        assert_eq!(
+            reason,
+            Some(format!("path '{}' not found", drops.display())),
+            "a missing drop directory must degrade its source"
+        );
         std::fs::create_dir(&drops).unwrap();
-        until(&rx, |e| match e {
+        let cleared = until_within(&rx, Duration::from_secs(10), |e| match e {
             DataEvent::Health {
                 source,
                 worst: Health::Ok,
@@ -6442,6 +6465,7 @@ source_name = "NPV"
             } if source == "eod_risk" => Some(()),
             _ => None,
         });
+        assert_eq!(cleared, Some(()), "the directory appearing must clear it");
         svc.shutdown();
     }
 
@@ -6450,7 +6474,7 @@ source_name = "NPV"
         let root = tempfile::tempdir().unwrap();
         let pattern = format!("{}/[.csv", root.path().display());
         let (_db, svc, rx) = directory_service(pattern.clone());
-        let reason = until(&rx, |e| match e {
+        let reason = until_within(&rx, Duration::from_secs(10), |e| match e {
             DataEvent::Health {
                 source,
                 worst: Health::Degraded { reason },
@@ -6459,8 +6483,10 @@ source_name = "NPV"
             _ => None,
         });
         assert!(
-            reason.starts_with(&format!("invalid pattern '{pattern}': ")),
-            "{reason}"
+            reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with(&format!("invalid pattern '{pattern}': "))),
+            "{reason:?}"
         );
         svc.shutdown();
     }
