@@ -24,7 +24,7 @@ use geode_shell::shell::aggregates::{AggregateCell, CellPaint};
 use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_tile::colour::{ColourCache, Resolved as ColourResolved};
-use geode_tile::grid::{WindowCache, WindowRequest};
+use geode_tile::grid::{RowCache, WindowCache, WindowRequest};
 use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, MouseButton, MouseDownEvent,
@@ -46,6 +46,15 @@ use std::sync::Arc;
 /// gpui-component's own closed enum, so the blotter emits its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChevronClicked(pub usize);
+
+/// Re-format `label` for `n` shown rows, only when the count changed. A free
+/// function so `reflatten_keeping` can call it while it holds the snapshot
+/// and plan borrowed.
+fn note_shown(label: &mut (usize, SharedString), n: usize) {
+    if label.0 != n {
+        *label = (n, format!("{n} rows").into());
+    }
+}
 
 impl EventEmitter<ChevronClicked> for TableState<BlotterDelegate> {}
 
@@ -146,6 +155,12 @@ pub struct BlotterDelegate {
     /// Whether any painted cell carried the dagger, for the footer.
     pub any_determined: bool,
     pub semi_joined: Vec<String>,
+    /// `"{n} rows"` for `shown`, re-formatted only when the count changes.
+    pub rows_label: (usize, SharedString),
+    /// The semi-join legend, prepared when a snapshot applies.
+    pub semi_join_label: Option<SharedString>,
+    /// `"{n} rows unplaced"`, prepared when a snapshot applies.
+    pub unplaced_label: Option<SharedString>,
     /// Last window requested by the table, retained even when fewer rows
     /// remain. Invalidation refills this range because an unchanged numeric
     /// range may produce no table callback; see `invalidate_cells`. No first
@@ -230,6 +245,103 @@ fn named_colour_of(plan: Option<&ColumnPlan>, col_ix: usize) -> Option<&str> {
     {
         Some(Colour::Named(name)) => Some(name.as_str()),
         _ => None,
+    }
+}
+
+/// The `/` result table's cells: formatted by the grid's own formatter for the
+/// rows the table reports, against the prepared display `/` installed, and held
+/// for those rows only. Paint reads; it never formats.
+pub(crate) struct FindCells {
+    prepared: Option<Arc<crate::search::Prepared>>,
+    cols: usize,
+    cells: RowCache<CachedCell>,
+    /// Cells formatted since the session opened.
+    #[cfg(test)]
+    pub(crate) fills: usize,
+    /// The text each painted cell carried, by (source row, column).
+    #[cfg(test)]
+    pub(crate) painted: std::cell::RefCell<std::collections::HashMap<(usize, usize), String>>,
+}
+
+impl FindCells {
+    pub(crate) fn new() -> Self {
+        FindCells {
+            prepared: None,
+            cols: 0,
+            cells: RowCache::default(),
+            #[cfg(test)]
+            fills: 0,
+            #[cfg(test)]
+            painted: Default::default(),
+        }
+    }
+
+    /// Point at a new prepared display. A display over the same snapshot,
+    /// plan and rows (the search index arriving for the display `/` opened
+    /// on) keeps its cells; any other drops every held cell, so none of the
+    /// old display paints under the new rows.
+    pub(crate) fn install(&mut self, prepared: Arc<crate::search::Prepared>, cols: usize) {
+        let same = self.cols == cols
+            && self.prepared.as_ref().is_some_and(|old| {
+                Arc::ptr_eq(&old.snapshot, &prepared.snapshot)
+                    && Arc::ptr_eq(&old.rows, &prepared.rows)
+                    && old.plan == prepared.plan
+            });
+        self.prepared = Some(prepared);
+        self.cols = cols;
+        if !same {
+            self.cells.clear();
+        }
+    }
+
+    /// Hold exactly `rows` (source rows: indices into the prepared display),
+    /// formatting only the rows entering.
+    pub(crate) fn show(&mut self, rows: &[usize]) {
+        let FindCells {
+            prepared,
+            cols,
+            cells,
+            #[cfg(test)]
+            fills,
+            ..
+        } = self;
+        let Some(p) = prepared.as_ref() else {
+            return;
+        };
+        cells.set_rows(rows, *cols, |r, c| {
+            #[cfg(test)]
+            {
+                *fills += 1;
+            }
+            let row = *p.rows.get(r)? as usize;
+            cell(&p.snapshot, &p.plan, row, c)
+        });
+    }
+
+    pub(crate) fn cell(&self, row: usize, col: usize) -> Option<&CachedCell> {
+        self.cells.get(row, col)
+    }
+
+    /// The tree depth of source row `row`, for the tree column's indent.
+    pub(crate) fn depth(&self, row: usize) -> usize {
+        self.prepared
+            .as_ref()
+            .and_then(|p| {
+                p.rows
+                    .get(row)
+                    .map(|&r| p.snapshot.tree().depth(r as usize))
+            })
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepared(&self) -> Option<&Arc<crate::search::Prepared>> {
+        self.prepared.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cells(&self) -> &RowCache<CachedCell> {
+        &self.cells
     }
 }
 
@@ -345,6 +457,9 @@ impl BlotterDelegate {
             unplaced: 0,
             any_determined: false,
             semi_joined: Vec::new(),
+            rows_label: (0, SharedString::new_static("0 rows")),
+            semi_join_label: None,
+            unplaced_label: None,
             requested: WindowRequest::default(),
             glyphs: Vec::new(),
             line_numbers: LineNumbers::Off,
@@ -802,6 +917,15 @@ impl BlotterDelegate {
                 v
             })
             .unwrap_or_default();
+        self.unplaced_label =
+            (self.unplaced > 0).then(|| format!("{} rows unplaced", self.unplaced).into());
+        self.semi_join_label = (!self.semi_joined.is_empty()).then(|| {
+            format!(
+                "⋈ scoped by membership on {}: whole entities that qualify, not their share",
+                self.semi_joined.join(", ")
+            )
+            .into()
+        });
         self.snapshot = Some(snapshot);
         self.narrowed = None;
         self.reflatten_keeping(keep);
@@ -817,6 +941,7 @@ impl BlotterDelegate {
         let (Some(snapshot), Some(plan)) = (&self.snapshot, &self.plan) else {
             self.visible.clear();
             self.shown.clear();
+            self.note_shown();
             self.refresh_selection();
             return;
         };
@@ -840,6 +965,7 @@ impl BlotterDelegate {
                     .filter_map(|&i| self.visible.get(i).copied()),
             ),
         }
+        note_shown(&mut self.rows_label, self.shown.len());
         if let Some(path) = keep {
             self.cursor.row = restore_by_path(&self.shown, snapshot, plan, &path, self.cursor.row);
         }
@@ -888,9 +1014,15 @@ impl BlotterDelegate {
         }
     }
 
+    /// Re-prepare the rows label after `shown` changed.
+    fn note_shown(&mut self) {
+        note_shown(&mut self.rows_label, self.shown.len());
+    }
+
     pub fn set_narrowed(&mut self, rows: Option<Vec<usize>>) {
         self.narrowed = rows;
         self.rebuild_shown();
+        self.note_shown();
         let cols = self.plan.as_ref().map_or(0, |p| p.columns.len());
         self.cursor.clamp(self.shown.len(), cols);
         self.invalidate_cells();

@@ -489,6 +489,11 @@ impl FuzzyFind {
         self.active
     }
 
+    /// How many result rows the table shows now.
+    pub fn result_count(&self) -> usize {
+        self.ranked.len()
+    }
+
     /// The tile's results changed under the same rows (a price refresh):
     /// re-report the rows shown at the next layout.
     pub fn refresh_rows(&mut self, cx: &mut Context<Self>) {

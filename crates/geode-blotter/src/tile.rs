@@ -199,6 +199,8 @@ pub struct BlotterTile {
     restored_view_refusal: Option<String>,
     find: Option<FindState>,
     fuzzy_find: Option<gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>>,
+    /// The open `/` session's cells, filled by its row report.
+    find_cells: Option<Rc<RefCell<crate::delegate::FindCells>>>,
     find_cache: Option<Arc<crate::search::Prepared>>,
     find_task: Option<gpui::Task<()>>,
     find_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -505,6 +507,7 @@ impl BlotterTile {
             restored_view_refusal: restored_view_computed,
             find: None,
             fuzzy_find: None,
+            find_cells: None,
             find_cache: None,
             find_task: None,
             find_cancel: None,
@@ -1650,14 +1653,14 @@ impl BlotterTile {
                 }
             })
             .detach();
+            let cells = Rc::new(RefCell::new(crate::delegate::FindCells::new()));
+            self.find_cells = Some(cells.clone());
             results.update(cx, |results, cx| {
                 results.set_table(
                     Vec::new(),
                     |_, _, _| div().into_any_element(),
                     |_, _, _| div().into_any_element(),
-                    // Blotter cells come from its prepared snapshot through
-                    // `update_table`'s painter, not from a row report.
-                    |_, _| {},
+                    move |rows, _| cells.borrow_mut().show(rows),
                     window,
                     cx,
                 )
@@ -1775,14 +1778,19 @@ impl BlotterTile {
         expanding: bool,
         cx: &mut Context<Self>,
     ) {
+        let Some(cells) = self.find_cells.clone() else {
+            return;
+        };
         let delegate = self.table.read(cx).delegate();
-        let columns = (0..delegate.columns_count(cx))
-            .map(|ix| delegate.column(ix, cx))
-            .collect();
-        let paint = prepared.clone();
+        let cols = delegate.columns_count(cx);
+        let columns = (0..cols).map(|ix| delegate.column(ix, cx)).collect();
+        // Every held cell belonged to the previous display; `update_table`
+        // marks the table stale, so the rows shown re-report at the next
+        // layout and are formatted against this one.
+        cells.borrow_mut().install(prepared.clone(), cols);
+        let paint = cells;
         let table = self.table.clone();
         let header_table = self.table.clone();
-        let cells = RefCell::new(std::collections::HashMap::new());
         let tile = cx.entity().downgrade();
         results.update(cx, |results, cx| {
             results.update_table(
@@ -1797,23 +1805,18 @@ impl BlotterTile {
                 },
                 move |find_row, col, cx| {
                     let row = find_row.source_row();
-                    let mut cells = cells.borrow_mut();
-                    let cell = cells.entry((row, col)).or_insert_with(|| {
-                        crate::core::cache::cell(
-                            &paint.snapshot,
-                            &paint.plan,
-                            paint.rows[row] as usize,
-                            col,
-                        )
-                    });
+                    let cells = paint.borrow();
+                    let cell = cells.cell(row, col);
+                    #[cfg(test)]
+                    cells.painted.borrow_mut().insert(
+                        (row, col),
+                        cell.map(|c| c.text.to_string()).unwrap_or_default(),
+                    );
+                    let depth = cells.depth(row);
                     table.update(cx, |table, cx| {
-                        table.delegate_mut().render_find_cell(
-                            cell.as_ref(),
-                            col,
-                            paint.snapshot.tree().depth(paint.rows[row] as usize),
-                            find_row,
-                            cx,
-                        )
+                        table
+                            .delegate_mut()
+                            .render_find_cell(cell, col, depth, find_row, cx)
                     })
                 },
                 cx,
@@ -1937,27 +1940,14 @@ impl BlotterTile {
     /// Arm a wake-up at each dataset time's deadline, while shown; a hidden
     /// tile holds none. Each painted run turns stale at its own deadline, not
     /// only the stalest one. Idempotent for unchanged (times, threshold).
-    /// Unparsable times are skipped, as render skips them.
+    /// It arms on the header model's parsed times, the values render compares,
+    /// so an unparsable time is skipped by both.
     fn arm_stale(&mut self, cx: &mut Context<Self>) {
         if !self.visible {
             self.stale_timer.disarm();
             return;
         }
-        let times = self
-            .table
-            .read(cx)
-            .delegate()
-            .snapshot
-            .as_ref()
-            .map(|s| {
-                s.provenance()
-                    .datasets
-                    .iter()
-                    .filter_map(|f| chrono::DateTime::parse_from_rfc3339(f.as_of.as_deref()?).ok())
-                    .map(|t| t.with_timezone(&chrono::Utc))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let times = self.header.times.iter().filter_map(|t| t.at).collect();
         self.stale_timer.arm_each(
             times,
             self.stale_after.get(),
@@ -1967,22 +1957,19 @@ impl BlotterTile {
         );
     }
 
-    /// Whether a parseable freshness timestamp is older than `stale_after`,
-    /// by the clock or by the stale timer having fired for a time at least
-    /// as fresh. Missing or malformed timestamps are not marked stale; future
-    /// timestamps have zero age.
-    pub(crate) fn is_stale(&self, as_of: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
-        as_of
-            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-            .is_some_and(|t| {
-                now.signed_duration_since(t.with_timezone(&chrono::Utc))
-                    .to_std()
-                    .unwrap_or_default()
-                    > self.stale_after.get()
-                    || self
-                        .stale_timer
-                        .fired_for(t.with_timezone(&chrono::Utc), self.stale_after.get())
-            })
+    /// Whether a source time is older than `stale_after`, by the clock or by
+    /// the stale timer having fired for a time at least as fresh. A time that
+    /// was missing or did not parse (`None`) is never stale; a future time has
+    /// zero age.
+    pub(crate) fn is_stale(
+        &self,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        at.is_some_and(|t| {
+            now.signed_duration_since(t).to_std().unwrap_or_default() > self.stale_after.get()
+                || self.stale_timer.fired_for(t, self.stale_after.get())
+        })
     }
 
     /// The tile's current notice or error text, as the header shows it.
@@ -2235,7 +2222,7 @@ impl gpui::Render for BlotterTile {
             .map(|t| TimeRun {
                 label: t.label.clone(),
                 stale_label: None,
-                stale: self.is_stale(t.as_of.as_deref(), now),
+                stale: self.is_stale(t.at, now),
             })
             .collect();
         cluster.links = geode_tile::header::link_chips(&self.frame, cx);
@@ -2249,7 +2236,13 @@ impl gpui::Render for BlotterTile {
         .font_family(fonts::MONO)
         .debug_selector(|| format!("blotter-header-{}", self.tile.0));
 
-        // Footer: counts and legends.
+        // Footer: counts and legends, prepared when `shown`, the semi-join
+        // or the placement changes.
+        debug_assert_eq!(
+            delegate.rows_label.0,
+            delegate.shown.len(),
+            "the footer rows label is stale"
+        );
         let mut footer = h_flex()
             .w_full()
             .h(scale::design(FOOTER_HEIGHT))
@@ -2260,7 +2253,7 @@ impl gpui::Render for BlotterTile {
             .text_color(theme.muted_foreground)
             .border_t_1()
             .border_color(theme.border)
-            .child(div().child(format!("{} rows", delegate.shown.len())))
+            .child(div().child(delegate.rows_label.1.clone()))
             .when(delegate.selection_extent.is_some(), |f| {
                 f.child(aggregates::strip(
                     delegate.selection_extent.as_ref(),
@@ -2279,18 +2272,11 @@ impl gpui::Render for BlotterTile {
         if delegate.summary_unsummable {
             footer = footer.child(div().child(UNSUMMABLE_LEGEND));
         }
-        if !delegate.semi_joined.is_empty() {
-            footer = footer.child(div().child(format!(
-                "⋈ scoped by membership on {}: whole entities that qualify, not their share",
-                delegate.semi_joined.join(", ")
-            )));
+        if let Some(label) = &delegate.semi_join_label {
+            footer = footer.child(div().child(label.clone()));
         }
-        if delegate.unplaced > 0 {
-            footer = footer.child(
-                div()
-                    .text_color(warn_text)
-                    .child(format!("{} rows unplaced", delegate.unplaced)),
-            );
+        if let Some(label) = &delegate.unplaced_label {
+            footer = footer.child(div().text_color(warn_text).child(label.clone()));
         }
 
         let search = self
@@ -5250,6 +5236,264 @@ mod tests {
                 .is_err(),
             "a stale result cannot reveal a different row"
         );
+    }
+
+    /// A grouped snapshot whose `count` contracts each carry a distinct delta, so
+    /// every painted value cell names its row.
+    fn fzf_valued_snapshot(count: usize, base: f64) -> Arc<Snapshot> {
+        let meta = |name: &str| ColumnMeta {
+            name: name.into(),
+            attribution_by_depth: vec![Attribution::Additive; 3],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: false,
+            mixed_flag: None,
+        };
+        Arc::new(Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu"),
+                    TestColumn::Dict(
+                        std::iter::once(None)
+                            .chain((0..=count).map(|_| Some("L1".into())))
+                            .collect(),
+                    ),
+                ),
+                (
+                    meta("underlying_ref"),
+                    TestColumn::Dict(
+                        vec![None, None]
+                            .into_iter()
+                            .chain((0..count).map(|i| Some(format!("Contract{i:06}"))))
+                            .collect(),
+                    ),
+                ),
+                (
+                    meta("row_depth"),
+                    TestColumn::I32(
+                        vec![0, 1]
+                            .into_iter()
+                            .chain(std::iter::repeat_n(2, count))
+                            .collect(),
+                    ),
+                ),
+                (
+                    meta("delta01"),
+                    TestColumn::F64((0..count + 2).map(|i| Some(base + i as f64)).collect()),
+                ),
+            ],
+            2,
+        ))
+    }
+
+    /// Display positions the `/` result table painted, in order.
+    fn find_positions(cx: &mut gpui::VisualTestContext, rows: usize) -> Vec<usize> {
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (0..rows)
+            .filter(|i| {
+                let selector: &'static str = Box::leak(format!("find-result-{i}").into_boxed_str());
+                cx.debug_bounds(selector).is_some()
+            })
+            .collect()
+    }
+
+    /// Every held row painted, and each of its painted cells carries the grid
+    /// formatter's text. The list also lays out its first item off screen to
+    /// measure the row height (gpui's `uniform_list`); that render is never
+    /// shown, so a cell of a row the report did not hold is not checked —
+    /// the callers pin the held rows to the painted positions.
+    fn assert_find_paints_the_formatter(tile: &Entity<BlotterTile>, cx: &gpui::VisualTestContext) {
+        tile.read_with(cx, |tile, _| {
+            let cells = tile.find_cells.as_ref().expect("a / session").borrow();
+            let prepared = cells.prepared().expect("installed");
+            let painted = cells.painted.borrow();
+            assert!(!cells.cells().is_empty(), "the / table holds rows");
+            for row in 0..prepared.rows.len() {
+                if cells.cells().contains(row) {
+                    assert!(
+                        painted.keys().any(|&(r, _)| r == row),
+                        "held row {row} painted"
+                    );
+                }
+            }
+            for (&(row, col), text) in painted.iter() {
+                if !cells.cells().contains(row) {
+                    continue;
+                }
+                let expected = crate::core::cache::cell(
+                    &prepared.snapshot,
+                    &prepared.plan,
+                    prepared.rows[row] as usize,
+                    col,
+                )
+                .map(|c| c.text.to_string())
+                .unwrap_or_default();
+                assert_eq!(text, &expected, "find cell ({row}, {col})");
+            }
+        });
+    }
+
+    /// `/` formats the rows it paints and no others: the open, a scroll to
+    /// the bottom, a query bringing far rows into view, and a one-match
+    /// narrowing each fill exactly the rows entering view, and every painted
+    /// cell — group rows included — is the grid formatter's.
+    #[gpui::test]
+    fn fzf_formats_only_the_rows_it_paints(cx: &mut gpui::TestAppContext) {
+        use geode_shell::fuzzyfind::FuzzyFind;
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |tile, cx| {
+            tile.apply(
+                fzf_valued_snapshot(300, 0.0),
+                vec!["lhu".into(), "underlying_ref".into()],
+                cx,
+            )
+        });
+        let results = cx.new(|_| FuzzyFind::default());
+        h.tile.update_in(&mut cx, |tile, window, cx| {
+            tile.start_fuzzy_find(results.downgrade(), window, cx)
+        });
+        cx.run_until_parked();
+        let cells = h.tile.read_with(&cx, |t, _| t.find_cells.clone().unwrap());
+        let cols = h
+            .tile
+            .read_with(&cx, |t, cx| t.table.read(cx).delegate().columns_count(cx));
+        let total = results.read_with(&cx, |r, _| r.result_count());
+        assert_eq!(total, 302, "root, L1 and every contract");
+        let held = |cells: &RefCell<crate::delegate::FindCells>| {
+            let cells = cells.borrow();
+            (0..total)
+                .filter(|&r| cells.cells().contains(r))
+                .collect::<Vec<_>>()
+        };
+
+        let shown = find_positions(&mut cx, total);
+        assert!(
+            shown.len() > 1 && shown.len() < 100,
+            "one screenful: {shown:?}"
+        );
+        assert!(shown.contains(&0) && shown.contains(&1), "group rows paint");
+        let opened = cells.borrow().fills;
+        assert!(
+            opened <= geode_tile::grid::FIRST_WINDOW * cols,
+            "the open formats a first window at most: {opened}"
+        );
+        assert_eq!(held(&cells), shown, "the cache holds the painted rows");
+        assert_find_paints_the_formatter(&h.tile, &cx);
+
+        results.update(&mut cx, |r, cx| {
+            r.navigate(geode_shell::vimnav::NavCommand::Bottom, cx)
+        });
+        cx.run_until_parked();
+        cells.borrow().painted.borrow_mut().clear();
+        let scrolled = find_positions(&mut cx, total);
+        assert!(scrolled.contains(&(total - 1)), "scrolled: {scrolled:?}");
+        assert_eq!(held(&cells), scrolled, "a scroll holds the rows in view");
+        assert_find_paints_the_formatter(&h.tile, &cx);
+
+        results.update(&mut cx, |r, cx| r.set_query("Contract00029".into(), cx));
+        cx.run_until_parked();
+        cells.borrow().painted.borrow_mut().clear();
+        let narrowed = find_positions(&mut cx, total);
+        assert_eq!(
+            held(&cells).len(),
+            narrowed.len(),
+            "rows no longer shown are dropped"
+        );
+        assert_find_paints_the_formatter(&h.tile, &cx);
+
+        results.update(&mut cx, |r, cx| r.set_query("Contract000137".into(), cx));
+        cx.run_until_parked();
+        cells.borrow().painted.borrow_mut().clear();
+        // A lone match shows under its ancestors: root, L1, the contract.
+        assert_eq!(find_positions(&mut cx, total), vec![0, 1, 2], "one match");
+        assert_eq!(held(&cells), vec![0, 1, 139], "the lone match is formatted");
+        assert_find_paints_the_formatter(&h.tile, &cx);
+    }
+
+    /// A snapshot that lands while `/` is open repaints the shown rows from the
+    /// new values: no cell of the old snapshot survives the re-index.
+    #[gpui::test]
+    fn fzf_repaints_a_replaced_snapshot_from_the_new_values(cx: &mut gpui::TestAppContext) {
+        use geode_shell::fuzzyfind::FuzzyFind;
+        let (h, mut cx) = open(cx);
+        let grouping = vec!["lhu".to_string(), "underlying_ref".to_string()];
+        h.tile.update(&mut cx, |tile, cx| {
+            tile.apply(fzf_valued_snapshot(50, 0.0), grouping.clone(), cx)
+        });
+        let results = cx.new(|_| FuzzyFind::default());
+        h.tile.update_in(&mut cx, |tile, window, cx| {
+            tile.start_fuzzy_find(results.downgrade(), window, cx)
+        });
+        cx.run_until_parked();
+        let total = results.read_with(&cx, |r, _| r.result_count());
+        let _ = find_positions(&mut cx, total);
+        assert_find_paints_the_formatter(&h.tile, &cx);
+        let replacement = fzf_valued_snapshot(50, 1000.0);
+        h.tile.update(&mut cx, |tile, cx| {
+            tile.apply(replacement.clone(), grouping.clone(), cx)
+        });
+        cx.run_until_parked();
+        let cells = h.tile.read_with(&cx, |t, _| t.find_cells.clone().unwrap());
+        cells.borrow().painted.borrow_mut().clear();
+        let _ = find_positions(&mut cx, total);
+        assert!(Arc::ptr_eq(
+            &cells.borrow().prepared().unwrap().snapshot,
+            &replacement
+        ));
+        assert_find_paints_the_formatter(&h.tile, &cx);
+    }
+
+    #[gpui::test]
+    fn the_footer_rows_label_follows_a_fold_and_is_shared_across_renders(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut cx) = delivered(cx);
+        let label = |h: &Harness, cx: &gpui::VisualTestContext| {
+            h.tile
+                .read_with(cx, |t, cx| t.table.read(cx).delegate().rows_label.clone())
+        };
+        let first = label(&h, &cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let again = label(&h, &cx);
+        assert_eq!(first, again, "a render leaves the prepared label");
+        let delivered = h
+            .tile
+            .read_with(&cx, |t, cx| t.table.read(cx).delegate().shown.len());
+        assert_eq!(first.0, delivered);
+        assert_eq!(first.1.as_ref(), format!("{delivered} rows"));
+        let before = h
+            .tile
+            .read_with(&cx, |t, cx| t.table.read(cx).delegate().shown.len());
+        h.tile.update(&mut cx, |t, cx| {
+            t.dispatch(&ActionId("motion::down".into()), None, cx);
+            t.dispatch(&ActionId("blotter::expand".into()), None, cx);
+        });
+        let (n, after) = label(&h, &cx);
+        let shown = h
+            .tile
+            .read_with(&cx, |t, cx| t.table.read(cx).delegate().shown.len());
+        assert_ne!(shown, before, "the fixture's cursor row expands");
+        assert_eq!(n, shown);
+        assert_eq!(after.as_ref(), format!("{shown} rows"));
+    }
+
+    /// Text that does not parse never turns stale, however old the clock says
+    /// "now" is — decided once, when the header model is prepared.
+    #[gpui::test]
+    fn an_unparsable_dataset_time_never_turns_stale(cx: &mut gpui::TestAppContext) {
+        let (h, cx) = delivered(cx);
+        let far_future = chrono::Utc::now() + chrono::Duration::days(3650);
+        h.tile.read_with(&cx, |t, _| {
+            assert!(!t.is_stale(None, far_future));
+            assert!(t.is_stale(
+                Some(chrono::Utc::now() - chrono::Duration::days(1)),
+                far_future
+            ));
+        });
+        cx.run_until_parked();
     }
 
     #[gpui::test]

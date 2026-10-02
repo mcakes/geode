@@ -708,8 +708,8 @@ mod tests {
         // The same reading — 5 seconds old — is stale under the 1s
         // factory's tile and not under the default (15m) factory's.
         let now = chrono::Utc::now();
-        let as_of = (now - chrono::Duration::seconds(5)).to_rfc3339();
-        assert!(short_tile.read_with(&short_cx, |t, _| t.is_stale(Some(&as_of), now)));
-        assert!(!default_tile.read_with(&default_cx, |t, _| t.is_stale(Some(&as_of), now)));
+        let at = now - chrono::Duration::seconds(5);
+        assert!(short_tile.read_with(&short_cx, |t, _| t.is_stale(Some(at), now)));
+        assert!(!default_tile.read_with(&default_cx, |t, _| t.is_stale(Some(at), now)));
     }
 }

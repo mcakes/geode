@@ -119,6 +119,13 @@ measure already reads. Re-measure on an idle machine before quoting them.
   shown and dropping the rest, so it holds about a screenful. Before the
   table's first report it reports the first 64 rows. The paint callback only
   reads; a miss paints blank.
+- The blotter's `/` table formats only the rows it reports
+  (`delegate::FindCells`, a `RowCache` by source row) with the grid's own
+  formatter. A new snapshot re-indexes and clears every held cell before the
+  re-report; the search index arriving for the display `/` opened on keeps
+  them. Its footer strings are prepared when `shown`, the semi-join or the
+  placement changes, and each dataset time is parsed once when the header
+  model is prepared; render and the stale timer compare the parsed times.
 - A market-data delivery, structural edit or bulk step builds a `MatrixIndex`
   (labels and row facts, no cell text) and refills only the window the table
   last reported; a one-cell commit refills one window cell. The session tick
@@ -220,9 +227,6 @@ measure already reads. Re-measure on an idle machine before quoting them.
   pipeline. Concurrent staging is on hold until the real path and a network
   share are measured.
 - CI compiles benchmarks but has no stable regression baseline.
-- The blotter's fuzzy `/` table does not use the row report: it formats a
-  cell in its paint callback the first time the cell paints and keeps every
-  cell it formatted until `/` closes.
 - The pricer's `/` cells read the live sheet through the index `/` built. A
   price-only delivery (the refill-only path) drops them and has the table
   re-report, so the rows shown refill from the new prices before the next
@@ -233,7 +237,7 @@ measure already reads. Re-measure on an idle machine before quoting them.
   out of date — reopen /" so a blank does not read as an unpriced line.
 - The pinned table never reports a visible range of one row; a tile scrolled
   to show a single row keeps the window it last had, so that row can paint
-  blank, as the blotter's always could.
+  blank, as every `/` table can.
 
 ## Recording a measurement
 

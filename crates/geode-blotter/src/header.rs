@@ -10,11 +10,14 @@ use gpui::{App, SharedString};
 use crate::tile::short_time;
 
 /// One dataset's freshness run: its label (`risk 14:00`, or `risk —`) and
-/// the raw source time render compares against `stale_after`.
+/// the source time, parsed once here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DatasetTime {
     pub label: SharedString,
-    pub as_of: Option<String>,
+    /// The parsed source time render compares against `stale_after` and the
+    /// stale timer arms on; `None` for a missing or unparsable time, which is
+    /// never stale.
+    pub at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -38,7 +41,11 @@ impl HeaderModel {
                     Some(t) => format!("{} {}", f.dataset, short_time(t, clock)).into(),
                     None => format!("{} —", f.dataset).into(),
                 },
-                as_of: f.as_of.clone(),
+                at: f
+                    .as_of
+                    .as_deref()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| t.with_timezone(&chrono::Utc)),
             })
             .collect();
         let frame_as_of = p.as_of_request.as_ref().map(|req| {
@@ -98,5 +105,44 @@ mod tests {
         assert_eq!(labels, vec!["risk —", "risk 14:00", "pnl 15:00"]);
         assert_eq!(h.datasets, vec!["pnl".to_string(), "risk".to_string()]);
         assert_eq!(h.frame_as_of.as_deref(), Some("AS OF 2026-09-11 09:30"));
+    }
+
+    #[test]
+    fn prepare_parses_each_time_once_and_leaves_garbage_unparsed() {
+        let p = Provenance {
+            datasets: vec![
+                Freshness {
+                    dataset: "risk".into(),
+                    as_of: Some("2026-09-12T14:00:00Z".into()),
+                    generation: None,
+                },
+                Freshness {
+                    dataset: "pnl".into(),
+                    as_of: Some("not a time".into()),
+                    generation: None,
+                },
+                Freshness {
+                    dataset: "fx".into(),
+                    as_of: None,
+                    generation: None,
+                },
+            ],
+            as_of_request: None,
+        };
+        let h = HeaderModel::prepare(&p, Clock::utc());
+        let at: Vec<_> = h
+            .times
+            .iter()
+            .map(|t| (t.label.to_string(), t.at))
+            .collect();
+        assert!(at.contains(&(
+            "risk 14:00".to_string(),
+            Some("2026-09-12T14:00:00Z".parse().unwrap())
+        )));
+        assert!(
+            at.iter()
+                .any(|(label, at)| label.starts_with("pnl") && at.is_none())
+        );
+        assert!(at.iter().any(|(label, at)| label == "fx —" && at.is_none()));
     }
 }
