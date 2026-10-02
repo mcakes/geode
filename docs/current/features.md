@@ -385,6 +385,40 @@ escape follows the tile's normal narrowing and find-clearing behavior.
 Limitations: a selection is always one contiguous row range or rectangle —
 there is no multi-range selection — and there is no paste; `y` is yank-only.
 
+### Move LHU
+
+A row carrying a single `position_ref` also gets "Move LHU…"
+(`positions::move_lhu`, from `geode-positions`) in that column's
+[row menu](shell.md#row-menu) section, after "Open in Nemo". It moves
+positions to another LHU in the position system named by
+[`positions.toml`](configuration.md#position-service-configuration); without
+one the row is disabled with `no position service configured`.
+
+When the row the menu opened on is inside a `V` row selection, the move takes
+every selected top-most row, in display order; otherwise it takes that row
+alone. A `v` block selection never rides along. Every acting row must name
+exactly one `position_ref`: a selection holding a subtotal over several
+positions disables the row with `{n} selected rows hold several positions`,
+`n` counting the rows that name none.
+
+Picking it opens a choice dialog, "Move to LHU", over the live `lhu` values,
+unscoped, reading `loading…` until they arrive. When every moving position
+already shares one LHU (the row's own `lhu` without a selection, or the
+`lhu` every selected row names), that LHU is left out. No values left closes
+the dialog with `no LHU values to move to`. A pick asks `Move {n}
+position|positions to LHU {x}?`: `y` or `enter` sends one command and `n`
+or `escape` sends nothing.
+
+The move is request-then-wait: nothing on screen changes when it is sent.
+The status bar reads `moving {n} position|positions to LHU {x} · sent`, then
+the position system's answer replaces it: `… · accepted`, or `move to LHU
+{x} refused: {reason}`. A refusal before the command reaches the position
+service reads the same way, with the data service's or the position
+worker's reason (`position service busy`, say). The grid regroups only
+when a later snapshot carries the move; in the demo that is the next poll
+of the rewritten risk files, and a cross-book move keeps the old `Book`
+(see [the demo position system](data-path.md#the-demo-position-system)).
+
 ## Market-data documents
 
 `geode-documents` owns typed wire-format parsers and writers. A parser produces
@@ -1099,7 +1133,8 @@ takes no motion. A motion dispatched from the palette while the entry bar, the
 cell editor or the action menu is open closes it first, then moves.
 
 Column headers are words carrying their unit (`spot %`, `vol pt`, `barrier
-type`, `priced at`), and default widths are checked against labels and representative large
+type`, `priced at`), and default widths are checked against labels (beside the
+header's sort icon) and representative large
 values (`-1,234,567.8900` for a greek, `-1,234,567.89` for npv) at the
 largest supported font size. These examples do not bound every possible
 value. A view's `label` and `width` override the defaults. Columns are
@@ -1248,8 +1283,9 @@ Normal-mode keys:
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
 | `y y` / `y c` | Copy the shorthand of what the row shows (and remember it for `p`): a line or package its own, a grouping row its lines, a split package row its legs under that group / the column's cells |
 | `p` / `shift+p` | Put the remembered rows below / above as one undo entry, the cursor on the first landed row; when any of them is a package the whole run lands at a root boundary. On a grouping row both put at the end of the sheet and say so |
-| `shift+j` / `shift+k` | Move the row within its parent (refused under a value grouping) |
-| `g p` / `g u` | Package the cursor row and the next `count − 1` roots into a custom package / unpackage it (`:package [n]` / `:unpackage`) |
+| `shift+j` / `shift+k` | Move the row within its parent, and under a value grouping within its group (refused under a sort); a row's grip drags it (see [Moving rows by pointer](#moving-rows-by-pointer)) |
+| `s` / `shift+s` | Sort by the cursor column: asc → desc → off / abs desc → abs asc → off (see [Sorting](#sorting)) |
+| `g p` / `g u` | Package the cursor row and the next `count − 1` roots into a custom package / unpackage it (`:package [n]` / `:unpackage`; a counted one refused under a value grouping or a sort) |
 | `g m` | Open a panel on the cursor row's underlying |
 | `g .` | Open the row menu on the cursor row |
 | `.` | Open the action menu |
@@ -1325,6 +1361,53 @@ press that closes the bar hands off the same way, so the cursor stays on the
 package it toggled.
 Commands and search close open fields and menus. A text editor remains open
 after a click outside the grid; a typeahead closes on an outside click.
+
+#### Moving rows by pointer
+
+A row `shift+j`/`shift+k` could move shows a grip (⋮⋮) at the left edge of
+its tree cell while the pointer is on the row. It is painted over the
+column's padding and the cell's edge, so nothing reflows, and sits clear of
+a package's chevron. Hover and pressed take the chevron's control paint, and
+the cursor is the grab hand. No grip paints on a grouping row, under a sort,
+on a package the grouping splits or the scope partly hides, or on a leg of a
+split package: each would refuse the keys, so a grip there would only
+promise a refusal.
+
+Dragging the grip moves its row; a grip on a row inside a live `V`
+selection moves the whole selection, under `move_plan`'s rule (one parent,
+one group), and a selection that would refuse the keys refuses at the press
+with the keys' footer. A drag of any other row while a selection is live
+(a row outside the `V` selection, or any row under a `v` block) ends the
+selection as the drag starts, with `selection cleared: a row moved`: the
+selection spans painted rows, so a row moved into or out of them would
+widen or shift it onto lines nobody picked (a following `d` would delete
+the dragged line). A grip click with no drag keeps it, and so does a refused drag (the press refused, or a rebuild mid-drag made the move one the keys refuse): it keeps its refusal in the footer and moves nothing. On a package row the grip overlaps the chevron's slot; a press there is the grip's, never a chevron press. While the button is held a 2 px line in the theme's
+drag-border color (the header's column-drop line) marks the nearest legal
+gap: between rows of the same sibling set (the roots, or the package's legs)
+and, under a value grouping, of the same group. Over a package's open legs
+the line snaps to the package's edge, and the empty body below the last
+row is the gap after it. No line shows at a gap that would change nothing
+(the dragged rows' own edges), over another group's rows or another
+package, or off the table, and a release there moves nothing. A rebuild
+mid-drag re-prepares the drop against the new rows; one that makes the
+move one the keys refuse (a sort turned on, the package split or partly
+hidden) refuses the drop, so the line goes and the release moves nothing.
+Held within a row of the body's top or bottom edge, the table scrolls on
+its own and the line follows the rows passing under the still pointer.
+`escape` (any verb, in fact) ends the drag with nothing moved.
+
+The release lands the rows as one undo entry: one `Edit::Move` for a single
+row, one per selected row for a block. Rows of other groups, and lines the
+scope hides, keep their order. The cursor lands on the dragged row, unless a
+selection is live, whose cursor is its moving end and stays. An open editor
+or entry bar closes as for any grid click. The grip's own press, click and
+double-click never start, extend or clear a selection, move the cursor or
+open an editor; every other press and drag selects exactly as before.
+
+Known limitations: the drag paints no ghost of the dragged rows, only the
+drop line; the gap is read from the table's uniform row height and scroll
+offset, not from painted row bounds; and the line is a row child painted
+under the row's cells, so a selection or cursor tint lies over it.
 
 An open action menu recomputes availability and views when tile chrome
 rebuilds, retaining its highlighted action or view when still present. Both
@@ -1696,12 +1779,22 @@ the end of the sheet` in the footer. `g m` on a group row opens the plain
 tile picker.
 
 **Moving and packaging under a grouping.** Under a chain with a value level
-the painted order is not sheet order, so `shift+j`/`shift+k` refuse with
-`lines move in the flat sheet: clear the grouping first`, and a counted
-`g p` (or `:package n`) with `a counted g p packages in the flat sheet:
-clear the grouping first`: it takes the next rows in sheet order, which may
-be painted under other groups. A plain `g p` still packages its one line,
-and `g p` under `V` still packages a contiguous selection. A chain of
+the painted order is sheet order only inside each group, so
+`shift+j`/`shift+k` (counted, and a `V` block) move a row among the siblings
+painted in its own group: a step hops the sheet lines of other groups and
+hidden lines between them and lands beside the next sibling of the same
+group, so the group's painted order changes as the key says and no other
+group's does. A root at its group's end refuses with `cannot move past the
+end of the group`; a leg moves among its package's legs and stops at the
+package's end (`cannot move past the end`). A split package and a leg of
+one refuse with the split reason, since their siblings paint under several
+groups. Undo restores a move in one step; the cursor and a selection
+follow the moved lines. A grip drag holds to the same group (see
+[Moving rows by pointer](#moving-rows-by-pointer)). A counted `g p` (or
+`:package n`) refuses with `a counted g p packages in the flat sheet: clear
+the grouping first`: it takes the next rows in sheet order, which may be
+painted under other groups. A plain `g p` still packages its one line, and
+`g p` under `V` still packages a contiguous selection. A chain of
 structural levels alone moves and packages as the flat sheet does.
 
 Known limitations: the `.` menu keeps `ungroup` enabled on a split package
@@ -1712,6 +1805,78 @@ absolute and a percent strike of the same number) label by the first; a
 cursor on a group row is not saved (a restored tile starts on row 0).
 Blotter group rows have no ground of their own, so the two tiles' group
 rows look different.
+
+### Sorting
+
+The pricer sorts as the blotter does, on the same surface: `s` walks the
+cursor column through asc → desc → off and `shift+s` through abs desc → abs
+asc → off (either key, pressed while the other's order shows, starts its own
+cycle); a header's sort icon walks desc → asc → abs desc → abs asc → off, a
+column with no magnitude skipping the absolute pair; `:sort <column> [asc |
+desc | abs [asc | desc]]` and `:sort clear` complete the planned columns and
+the order words. Only the result measures (`npv`, the greeks and their `_usd`
+twins) have a magnitude: `shift+s` on any other column does nothing, and
+`:sort <column> abs` on one is its signed direction. The tree column never
+sorts and has no icon. The sorted column's header shows the direction's
+arrow, and an absolute order adds `|x|` to its label (`npv |x|`).
+
+A sort is display order alone. The sheet's own order, the order lines were
+entered and moved into, never changes, and `:sort clear` restores it exactly.
+The sort is not saved with the session or the sheet and is not an undoable
+edit. It names its column, so a column move keeps it; a view switch or
+reload whose plan lacks the column drops it, the rows go back to sheet order,
+and the header warns `sort on '<column>' dropped: the column is no longer in
+this view`.
+
+Every sibling set ranks on its own, at every level of the tree: grouping rows
+among their siblings by their own value in the sorted column (a measure's
+fold, a dimension's unanimous value or `mixed`), packages and lines among
+theirs by their row's value. A package moves with its legs, which keep sheet
+order beneath it. A package split by the grouping or partly hidden by the
+scope ranks by the value its row paints, over the legs its node holds. Keys
+are typed, never the formatted text: numbers compare as numbers, an expiry
+as a date (a tenor, which the pricer never resolves, after every date by its
+nominal length), a strike by number (percent strikes after absolute ones),
+text by byte order. A package whose legs disagree compares by its distinct
+values in leg order, the parts its cell joins with `/`; a shift cell's parts
+are its painted ones, legs that spell alike as one part and an unset group's
+`—` at its place, after any value. Values come first, then cells with no
+single value (`mixed`, a failed line's `—`, a local figure over unlike
+currencies, a `NaN` result), then blanks such as an unpriced line, in both
+directions; ties keep sheet order.
+
+Prices re-rank a measure sort live: a delivery that changes the order moves
+the rows, the cursor staying on its line, and one that leaves the order
+alone refills only the window. With no sort, a price delivery does no
+ranking work. While a `V` or `v` selection is live the order freezes
+instead: a selection spans the painted rows between its ends, so a line
+re-ranked into that range would join it unasked (and `d` would delete it).
+Values refill in place, and the order the ticks earned applies when the
+selection ends (`escape`, a verb that consumes it, a click that clears it).
+A sort change (`s`, `shift+s`, a header click, `:sort`, or a view switch or
+reload that drops the sort) with a live selection ends the selection first,
+with `selection cleared: the sort reordered its rows` in the footer. A
+selection verb that refuses (`d`, `g p`, `g u` over a selection) puts the
+selection back with the order it held.
+
+The verbs that read sheet adjacency refuse while a sort applies:
+`shift+j`/`shift+k` (and a `V` move) with `lines move in sheet order: :sort
+clear first`, and a counted `g p` (or `:package n`) with `a counted g p
+packages in sheet order: :sort clear first`. A plain `g p` still packages
+its line, and `g p` under `V` packages rows that are contiguous in the
+sheet; rows adjacent only on screen refuse with `the selected lines are
+apart in sheet order: :sort clear first`. `o`, `shift+o`, `p` and `shift+p` still insert
+beside the cursor's line in sheet order; the new line paints where it sorts,
+and the cursor follows it there. Find (`/`, `n`, `N`), line numbers and
+selections follow the painted order, and `y y` and `V y` copy and remember
+rows in the order the screen shows them.
+
+Known limitations: the sort icon's arrow is the component's own, and is
+re-read from the tile after every click, but has not been checked on a real
+display; the `/` result header paints no sort icon (it reserves the icon's
+width so labels keep their places); an absolute sort's ` |x|` suffix is not
+counted in the default widths, so a long measure label can ellipsize under
+one until `:autosize`, which measures it.
 
 ### Selection
 
@@ -1757,9 +1922,11 @@ selection and says why in the footer; a success notice goes to the header.
   leg selected without its package is deleted as a leg.
 - `shift+j`/`shift+k` under `V` slide the selected rows one sibling step as a
   unit — one move of the neighbouring row across the block — and keep the
-  selection on the moved lines. Rows under different parents refuse (`can't
-  move: selection spans packages`), as does the end of the parent (`cannot
-  move past the end`).
+  selection on the moved lines. Under a value grouping the step is within
+  the block's group, as for one row. Rows under different parents refuse
+  (`can't move: selection spans packages`), as does the end of the parent
+  (`cannot move past the end`) or of the group (`cannot move past the end of
+  the group`).
 - `g p` under `V` packages the selected root lines into one custom package,
   opens it and puts the cursor on it, ending the selection. It refuses a
   selection that includes a package, lines inside a package, or lines that
@@ -2034,7 +2201,9 @@ documents. The [generator guide](../../crates/geode-demo-data/README.md)
 describes risk grains, deliberate ingestion edge cases, document sequences,
 and the demo configuration files. `geode-app --demo` writes risk files under
 a seed-specific temporary directory and streams serialized documents through
-its in-process adapter.
+its in-process adapter. Its position service, `demo_positions`, rewrites
+those risk files to carry a Move LHU, so a move survives a relaunch until
+the directory is deleted.
 Both use the same ingestion, parsing, query, and delivery paths as configured
 sources. Demo configuration remains below desk and user overrides. Cached
 sources and database contents are reused, so schema or generator changes may
@@ -2049,7 +2218,7 @@ ready for the first frame.
 `geode-app` is the composition root. It loads configuration, initializes GPUI
 and logging, builds registries, creates the data service and bridge, registers
 module factories and the row menu's actions (Open in Nemo, from
-`geode-nemo`), installs globals, and opens the window. Cross-layer policy
+`geode-nemo`, then Move LHU, from `geode-positions`), installs globals, and opens the window. Cross-layer policy
 that depends on the assembled binary belongs here; feature behavior does not.
 
 ## Testing and performance

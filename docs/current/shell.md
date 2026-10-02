@@ -155,7 +155,8 @@ add-a-filter menu, and takes the shell root's focus.
 
 A crate adds a row by implementing `dimension::DimensionAction`: `id`,
 `title`, the `column` whose section it sits in, `available` (enabled, or
-disabled with the reason its row shows; enabled by default) and `run`.
+disabled with the reason its row shows; enabled by default), `run`, and
+`chosen` (a value picked from `choose_value`; does nothing by default).
 `geode-app` registers it with `ModuleRoster::add_action` in
 `add_bridge_modules` (through `add_dimension_actions`), before the roster's
 `context_columns` are published, so each row carries the action's column.
@@ -167,13 +168,49 @@ and `notice(text)` sets the status notice. The notice takes any text, so an
 action can report what it did, not only a fixed refusal. Nothing reports
 whether a handler took a URL, so a notice says only what Geode did.
 
-Two actions are registered, both from `geode-nemo` and both titled "Open in
-Nemo": `nemo::open_position` on `position_ref`, opening
+`choose_value(context, column, title, exclude, empty)` opens the
+shared choice dialog, titled `title`, over `column`'s distinct live values,
+unscoped, minus `exclude`. It asks for them with a `Request::Distinct`
+under the reserved `ACTION_KEY` and a fresh tag, and reads `loading…` until
+they arrive, its footer offering only `escape`; `enter` does nothing while
+loading, and a query typed meanwhile filters the rows when they do.
+`ShellView::deliver_distinct` routes `ACTION_KEY` replies to the open
+dialog, which drops one whose tag or column is not its own. No values left
+after the exclusion closes the dialog with the notice `empty`; a failed
+fetch closes it with `could not load {column} values: {reason}`. Nothing is
+asked when a choice dialog is already open. A pick closes the dialog first,
+then calls the action that asked (the running one) with
+`chosen(context, value)`, so a dialog that
+`chosen` opens lands on the stack the list was opened over.
+
+`confirm(question, on_yes)` opens a plain y/n dialog asking `question`. `y`,
+`enter`, or the Yes button closes it and then runs `on_yes` with a fresh
+`ActionCx`; `n`, `escape` (with any modifiers: shift or ctrl with escape
+is consumed as No too), or Cancel closes it. Any other bare key is
+consumed; a chord or a shift-modified key passes to the matcher. A confirm
+asked while a plain dialog is already on top is refused with the notice
+`another dialog is already open`.
+
+`ShellView::note_command` shows a position-system command's answer as the
+status notice, worded by `geode_core::positions::outcome_notice`, which
+shares its wording with the action's `sent_notice`. The app's bridge calls
+it for every `DataEvent::Command`. It replaces the current status notice,
+as any notice does, and checks no tag: the latest answer wins.
+
+Three actions are registered, in this order. Two are from `geode-nemo` and
+both titled "Open in Nemo": `nemo::open_position` on `position_ref`, opening
 `nemo://position/<id>`, and `nemo::open_instrument` on `instrument_ref`,
 opening `nemo://instrument/<id>`. The id is percent-encoded as one path
 segment (RFC 3986 unreserved characters pass). Each opens the target row's
 value only, ignoring any selection riding in the context, and sets the
-notice `opened <url>`.
+notice `opened <url>`. The third, from `geode-positions`, is "Move LHU…"
+(`positions::move_lhu`) on `position_ref`. It acts on the selection riding
+in the context when there is one, chooses the target LHU with
+`choose_value`, asks with `confirm`, and sends one command through the data
+handle; see [Move LHU](features.md#move-lhu). `add_dimension_actions` takes
+whether startup resolved a position service (`positions.toml`, which is
+restart-required) and passes it to the action, which is disabled without
+one.
 
 ## Actions and keyboard routing
 

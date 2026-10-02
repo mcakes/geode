@@ -158,6 +158,20 @@ pub trait Egress: Send {
     fn upload(&mut self, target: &str, bytes: Vec<u8>) -> Result<(), AdapterError>;
 }
 
+/// Optional command capability for the position system, independent of the
+/// other capabilities. One worker owns it and runs one command at a time.
+/// `Ok` means the position system accepted the command; the grid learns of
+/// the move only from a later snapshot. A refusal's message is shown to the
+/// user as the reason. The worker sets no deadline: an implementation must
+/// bound its own calls, or a hung call holds every later command.
+pub trait PositionCommands: Send {
+    /// Move every one of `positions` to LHU `lhu`. All or nothing with
+    /// respect to validation: a refusal found before writing changes
+    /// nothing. A write that fails part-way can leave earlier writes in
+    /// place; the `Err` then says so only as far as its message does.
+    fn move_lhu(&mut self, positions: &[String], lhu: &str) -> Result<(), AdapterError>;
+}
+
 /// History request for one adapter-defined identity over the half-open span
 /// `from <= ts < to`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,6 +273,14 @@ pub trait Adapter: Send + Sync {
     /// On-demand history capability. The default returns None for adapters that
     /// provide no fetch implementation.
     fn fetch(&self) -> Option<Box<dyn Fetch>> {
+        None
+    }
+
+    /// The position-command side, or `None` (the default) if this adapter
+    /// has none. Each call returns a FRESH handle, like `egress`:
+    /// `positions::resolve` probes one and discards it, then
+    /// `PositionWorker::spawn` takes another for its worker thread.
+    fn positions(&self) -> Option<Box<dyn PositionCommands>> {
         None
     }
 }

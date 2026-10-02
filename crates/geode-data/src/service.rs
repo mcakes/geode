@@ -12,6 +12,7 @@ use crate::ingest::subscribe::{LoadReportSink, SubscriptionWorker};
 use crate::ingest::{
     DocumentJob, ForgetJob, IngestEvent, IngestHandle, IngestRunner, IngestSink, SeriesJob,
 };
+use crate::positions::PositionWorker;
 use crate::pricing::{PriceSink, PricerConfig, PricingWorker};
 use crate::query::as_of::AsOf;
 use crate::query::catalog::build_catalog;
@@ -29,6 +30,7 @@ use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::check_kind_against;
 use geode_core::egress_config::EgressSpec;
+use geode_core::positions::{CommandOutcome, MoveLhuParams};
 use geode_core::pricing::{LOCAL_SOURCE, LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
     CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
@@ -77,6 +79,10 @@ pub struct DataServiceConfig {
     /// its own worker thread at open; empty means every upload answers
     /// "unknown target".
     pub egress: Vec<EgressSpec>,
+    /// The position service, already passed through `positions::resolve`.
+    /// `None` means every position command is refused
+    /// `no position service configured`.
+    pub positions: Option<geode_core::positions::PositionsSpec>,
     /// The display clock at open. Formats the times inside health reasons
     /// (`N messages dropped since HH:MM:SS`); a later `[time]` reload re-zones
     /// them on restart.
@@ -143,6 +149,11 @@ pub enum DataEvent {
     /// Upload result, addressed by the requesting tile's key. Every
     /// admitted upload request answers exactly one.
     Upload(UploadOutcome),
+    /// A position-system command's answer, addressed by the requester's tag.
+    /// Every command `DataHandle::move_lhu` admits normally answers exactly
+    /// one, including a refusal decided before it reached the position
+    /// service; worker and event-delivery failures can prevent that.
+    Command(geode_core::positions::CommandOutcome),
     /// A local publish (`DataHandle::publish`) was stored as generation
     /// `gen_id` of document `batch`. Sent beside, not instead of, that
     /// publish's `Published`: this one answers the writer (addressed by
@@ -823,6 +834,9 @@ pub struct DataService {
     /// One worker per upload target. They only answer the sink, so they
     /// stop first and depend on nothing below.
     egress: EgressWorkers,
+    /// The position-command worker. Like the upload workers it only answers
+    /// the sink, so it stops early and depends on nothing below.
+    positions: PositionWorker,
     /// Workers precede their consumers in field drop order. Fetchers and
     /// subscriptions can submit to ingest; they must stop before the writer.
     /// Explicit shutdown follows the same producer-before-consumer order.
@@ -1619,6 +1633,11 @@ impl DataService {
             validate_views(&config.views, &config.schema, &config.dimensions);
         let egress =
             EgressWorkers::spawn(&config.egress, &config.adapters, Arc::clone(&stored_sink));
+        let positions = PositionWorker::spawn(
+            &config.positions,
+            &config.adapters,
+            Arc::clone(&stored_sink),
+        );
         Ok(DataService {
             read_config: Arc::new(ReadConfig {
                 schema: Arc::new(config.schema.clone()),
@@ -1631,6 +1650,7 @@ impl DataService {
             refused_views,
             drifted,
             egress,
+            positions,
             subscriptions: std::sync::Mutex::new(subscriptions),
             fetchers: std::sync::Mutex::new(fetchers),
             identities,
@@ -1846,6 +1866,21 @@ impl DataService {
     /// including a refusal decided here, arrives as one `DataEvent::Upload`.
     pub fn upload(&self, params: UploadParams) {
         self.egress.upload(params, &self.config.documents);
+    }
+
+    /// Queue a position command on the position worker. Every outcome,
+    /// including a refusal decided here, arrives as one `DataEvent::Command`.
+    pub fn move_lhu(&self, params: MoveLhuParams) {
+        let (tag, count, lhu) = (params.tag, params.positions.len(), params.lhu.clone());
+        if let Err(reason) = self.positions.submit(params) {
+            tracing::info!(target: "geode::ingest", "move to LHU {lhu} refused: {reason}");
+            let _ = (self.sink)(DataEvent::Command(CommandOutcome {
+                tag,
+                count,
+                lhu,
+                result: Err(reason),
+            }));
+        }
     }
 
     /// Queue a document query through the shared pool, with the same per-key
@@ -2299,6 +2334,8 @@ impl DataService {
         // Upload workers first: they answer only the sink, and an upload
         // echoing onto a bus should not arrive after its subscriptions stop.
         self.egress.shutdown();
+        // The position worker for the same reason: it answers only the sink.
+        self.positions.shutdown();
         // Fetch workers before the subscriptions, for the same reason
         // the subscriptions come before the runner: a worker's outcome
         // sink submits series jobs into the ingest runner, so it must
@@ -2394,6 +2431,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
         (db, src, service, rx)
@@ -2437,6 +2475,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
         (db, src, service, rx)
@@ -2536,6 +2575,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
         (dir, service, rx)
@@ -2596,6 +2636,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
         (dir, service, rx)
@@ -2639,6 +2680,7 @@ mod tests {
                 asked: Default::default(),
                 delay,
             })),
+            positions: None,
         })
         .unwrap();
         (dir, service, rx)
@@ -3309,6 +3351,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
         let expected = "schema drift in 'cvi_params': 'cvi_params_document_live' column";
@@ -3704,6 +3747,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
         (dir, calls, service, rx)
@@ -3765,6 +3809,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
         let message = until(&rx, |e| match e {
@@ -3835,6 +3880,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
         service.ingest.submit(crate::ingest::WorkPlan {
@@ -4149,6 +4195,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                positions: None,
             },
             sink,
         );
@@ -4384,6 +4431,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
         let health = loop {
@@ -5011,6 +5059,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                positions: None,
             },
             sink,
         )
@@ -5047,6 +5096,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .expect("a broken view must not stop the service opening")
         .0
@@ -5087,6 +5137,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .expect("a broken view must not stop the service opening");
 
@@ -5145,6 +5196,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .expect("a broken view must not stop the service opening");
         assert!(
@@ -5420,6 +5472,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
 
@@ -5491,6 +5544,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
 
@@ -5592,6 +5646,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
 
@@ -5671,6 +5726,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
 
@@ -5794,6 +5850,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
 
@@ -5879,6 +5936,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
 
@@ -5981,6 +6039,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         }
     }
 
@@ -6778,6 +6837,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
 
@@ -6879,6 +6939,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
 
@@ -6975,6 +7036,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
 
@@ -7331,6 +7393,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
 
@@ -7406,6 +7469,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
 
@@ -7465,6 +7529,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            positions: None,
         })
         .unwrap();
 
@@ -7621,6 +7686,7 @@ source_name = "NPV"
                 clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                positions: None,
             },
             sink,
         );

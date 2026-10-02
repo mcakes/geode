@@ -2,7 +2,7 @@
 //! `Command` for the tile to apply; the shell ranks the candidates for the
 //! word at the cursor. Frame-wide commands return actionable refusals.
 
-use crate::core::flatten::SortOrder;
+use geode_core::sort::{SortArg, SortOrder};
 
 /// A tile-local `:asof` override, or a return to the frame's as-of state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,38 +137,10 @@ pub fn parse(line: &str) -> Result<Command, String> {
                 Ok(Command::View(rest.to_string()))
             }
         }
-        "sort" => {
-            let mut words = rest.split_whitespace();
-            let column = match words.next() {
-                None => return Err("sort needs a column, or `clear`".into()),
-                Some("clear") => {
-                    return if words.next().is_none() {
-                        Ok(Command::SortClear)
-                    } else {
-                        Err("sort clear takes nothing after it".into())
-                    };
-                }
-                Some(c) => c,
-            };
-            // A bare `abs` is `abs desc`: the biggest exposures first.
-            let order = match (words.next(), words.next(), words.next()) {
-                (None, _, _) => SortOrder::Asc,
-                (Some("asc"), None, _) => SortOrder::Asc,
-                (Some("desc"), None, _) => SortOrder::Desc,
-                (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsDesc,
-                (Some("abs"), Some("asc"), None) => SortOrder::AbsAsc,
-                _ => {
-                    return Err(
-                        "sort takes a column and optionally `asc`, `desc`, `abs`, `abs asc` or `abs desc`"
-                            .into(),
-                    );
-                }
-            };
-            Ok(Command::Sort {
-                column: column.into(),
-                order,
-            })
-        }
+        "sort" => Ok(match geode_core::sort::parse_args(rest)? {
+            SortArg::Column { column, order } => Command::Sort { column, order },
+            SortArg::Clear => Command::SortClear,
+        }),
         other => Err(format!("unknown command '{other}'")),
     }
 }
@@ -208,14 +180,7 @@ pub fn completions(line: &str, cursor: usize, vocab: &Vocabulary) -> Vec<String>
     let done: Vec<&str> = done.iter().copied().filter(|w| !w.is_empty()).collect();
     let mut out: Vec<String> = match done.as_slice() {
         [] => COMMANDS.iter().map(|s| s.to_string()).collect(),
-        ["sort"] => {
-            let mut v = vocab.columns.clone();
-            v.push("clear".into());
-            v
-        }
-        ["sort", "clear"] => Vec::new(),
-        ["sort", _] => vec!["abs".into(), "asc".into(), "desc".into()],
-        ["sort", _, "abs"] => vec!["asc".into(), "desc".into()],
+        ["sort", after @ ..] => geode_core::sort::completions(after, &vocab.columns),
         ["group"] => {
             let mut v = vocab.dimensions.clone();
             v.push("slot".into());

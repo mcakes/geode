@@ -158,6 +158,15 @@ pub fn data_setup(
     diagnostics.extend(d);
     let (egress, d) = geode_data::egress::resolve(egress_specs, &adapters);
     diagnostics.extend(d);
+    // Resolve the one position service the same way: an unknown adapter, or
+    // one without a position side, configures none, with a diagnostic.
+    let (positions_spec, d) = config
+        .doc("positions")
+        .map(geode_core::positions::from_doc)
+        .unwrap_or_default();
+    diagnostics.extend(d);
+    let (positions, d) = geode_data::positions::resolve(positions_spec, &adapters);
+    diagnostics.extend(d);
     let (colours, colour_diags) = config
         .doc(geode_core::config::COLORS_DOC)
         .map(NamedColours::from_doc)
@@ -257,6 +266,7 @@ pub fn data_setup(
             pricer,
             vol,
             egress,
+            positions,
         },
         views,
         dimensions,
@@ -591,6 +601,10 @@ pub struct Bridge {
     /// skipped from the first one. `None` when the factory's config is
     /// unknown: the first reload then always applies.
     pub pricer_key: Option<PricerConfigKey>,
+    /// Whether the service started with a position service: `positions.toml`
+    /// named one and its adapter resolved. Fixed for the run, since
+    /// `positions.toml` is restart-required. Gates the Move LHU row action.
+    pub positions_configured: bool,
 }
 
 /// One factory per accepted panel. Only the first ships the shared
@@ -664,6 +678,7 @@ pub fn start(
             })
             .collect(),
     );
+    let positions_configured = setup.config.positions.is_some();
     let handle = DataService::spawn(setup.config, sink);
     // Both factories receive the same startup colors and later reload updates.
     let timeseries = Rc::new(geode_timeseries::content::TimeseriesFactory::new(
@@ -718,6 +733,7 @@ pub fn start(
         sources,
         local_datasets,
         pricer_key: Some(pricer_key),
+        positions_configured,
     }
 }
 
@@ -1372,6 +1388,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::VolSlices(outcome), window, cx)
                         });
                     }
+                    // A position command's answer becomes the status notice;
+                    // `geode_data::positions` already logs it under
+                    // `geode::ingest`.
+                    DataEvent::Command(outcome) => {
+                        shell.update(cx, |s, cx| s.note_command(&outcome, cx));
+                    }
                     // A data thread died despite containment, or the request
                     // loop never opened. Its segment and the diagnostics row
                     // stay until restart. Logging is not repeated here: the
@@ -1760,6 +1782,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings,
         }
     }
@@ -3319,6 +3342,12 @@ role = "key"
         vcx: gpui::VisualTestContext,
         tile: Entity<geode_blotter::tile::BlotterTile>,
         shell: Entity<ShellView>,
+        window: WindowHandle<Root>,
+        /// The handle the tile and the roster hook were given.
+        handle: DataHandle,
+        /// What the tile and the shell's actions asked the data service
+        /// for after the first query.
+        requests: std::sync::mpsc::Receiver<geode_data::Request>,
     }
 
     /// A [`ShellBlotter`] snapshot column's metadata: additive at both
@@ -3338,7 +3367,7 @@ role = "key"
         cx: &mut gpui::TestAppContext,
         views_toml: &str,
         view: &str,
-        roster_hook: impl FnOnce(&mut ModuleRoster),
+        roster_hook: impl FnOnce(&mut ModuleRoster, &DataHandle),
         columns: Vec<(
             geode_core::snapshot::ColumnMeta,
             geode_core::snapshot::TestColumn,
@@ -3355,7 +3384,7 @@ role = "key"
         let mut roster = ModuleRoster::new();
         roster.add(Box::new(KeepingBlotter {
             factory: BlotterFactory::new(
-                handle,
+                handle.clone(),
                 views,
                 NamedColours::default(),
                 SchemaSpec::default(),
@@ -3365,7 +3394,7 @@ role = "key"
             ),
             tiles: tiles.clone(),
         }));
-        roster_hook(&mut roster);
+        roster_hook(&mut roster, &handle);
         roster.register_actions(&mut services.registry);
         let (fragments, diags) = roster.keymap_fragments();
         assert!(diags.is_empty(), "{diags:?}");
@@ -3444,7 +3473,14 @@ role = "key"
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        ShellBlotter { vcx, tile, shell }
+        ShellBlotter {
+            vcx,
+            tile,
+            shell,
+            window,
+            handle,
+            requests: rx,
+        }
     }
 
     impl ShellBlotter {
@@ -3691,7 +3727,7 @@ role = "key"
             cx,
             FLAT_VIEW,
             "flat",
-            |roster| roster.add(Box::new(rec)),
+            |roster, _| roster.add(Box::new(rec)),
             vec![
                 (shell_blotter_meta("lhu"), dict("L1", "L2")),
                 (shell_blotter_meta("underlying_ref"), dict("SPX", "NDX")),
@@ -3741,7 +3777,8 @@ role = "key"
                              [[flat.columns]]\nname = \"delta01\"\n";
 
     /// A [`ShellBlotter`] with the row actions startup registers
-    /// (`add_dimension_actions`: Open in Nemo), a recording
+    /// (`add_dimension_actions`: Open in Nemo, then Move LHU with a
+    /// position service configured), a recording
     /// [`geode_shell::dimension::UrlOpener`] (the returned list), and one
     /// delivered snapshot grouped by `lhu`: root; L1 over P7 and P8; L2 over
     /// P9; L3 over P6. `position_ref` is a HIDDEN unanimity column (the view
@@ -3766,7 +3803,7 @@ role = "key"
             FLAT_VIEW,
             "flat",
             // The same call `add_bridge_modules` makes.
-            crate::add_dimension_actions,
+            |roster, data| crate::add_dimension_actions(roster, data, true),
             vec![
                 (
                     meta("lhu"),
@@ -3799,7 +3836,7 @@ role = "key"
     }
 
     /// Right press on L2's `delta01` (a measure, so no leading column):
-    /// the menu's one row is Open in Nemo under `position_ref · P9`, read
+    /// the menu's first row is Open in Nemo under `position_ref · P9`, read
     /// from a column the view never shows. `enter` opens the URL through
     /// the production `ActionCx::open_url` and the shell paints the
     /// action's own notice.
@@ -3862,6 +3899,117 @@ role = "key"
         f.close();
     }
 
+    /// The next request on `f`'s handle that `pick` takes, skipping the
+    /// rest (refreshes, catalog reads).
+    fn next_request<T>(
+        f: &ShellBlotter,
+        mut pick: impl FnMut(geode_data::Request) -> Option<T>,
+    ) -> T {
+        loop {
+            let r = f
+                .requests
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the request arrives");
+            if let Some(t) = pick(r) {
+                return t;
+            }
+        }
+    }
+
+    /// [`nemo_blotter`] with the bridge attached (so the shell's distinct
+    /// requests reach the handle, as at startup), `V` over L2 (P9) and L3
+    /// (P6), a right press on L3 inside the selection, `j enter` on
+    /// "Move LHU…", and the `lhu` values `L4`, `L5` answered through the
+    /// shell's `deliver_distinct` as the drain does, then `enter` on L4.
+    /// Returns the fixture with the confirm open, and the bridge.
+    fn move_lhu_to_the_confirm(cx: &mut gpui::TestAppContext) -> (ShellBlotter, Bridge) {
+        let (mut f, _) = nemo_blotter(cx);
+        let bridge = test_bridge(f.handle.clone());
+        let window = f.window;
+        // Outside the window's update: `attach` reads the window's root.
+        gpui::TestAppContext::update(&f.vcx, |cx| attach(&bridge, window, cx));
+        f.type_keys("j j j shift-v k");
+        f.right_press("blotter-cell-3-2");
+        f.type_keys("j enter");
+        let (key, tag) = next_request(&f, |r| match r {
+            geode_data::Request::Distinct(p) if p.column == "lhu" => Some((p.key, p.tag)),
+            _ => None,
+        });
+        f.shell.update(&mut f.vcx, |s, cx| {
+            s.deliver_distinct(
+                DistinctOutcome {
+                    key,
+                    tag,
+                    column: "lhu".into(),
+                    values: Ok(vec![("L4".into(), 1), ("L5".into(), 2)]),
+                },
+                cx,
+            )
+        });
+        f.type_keys("enter");
+        assert!(
+            f.vcx
+                .debug_bounds("action-question-Move 2 positions to LHU L4?")
+                .is_some(),
+            "the confirm names both positions and the picked LHU"
+        );
+        (f, bridge)
+    }
+
+    /// Move LHU end to end through the production registration: the two
+    /// selected positions, in selection order, go out as one command to the
+    /// picked LHU after `y`, and the notice says sent, not done.
+    #[gpui::test]
+    fn move_lhu_sends_the_selected_positions_after_confirm(cx: &mut gpui::TestAppContext) {
+        let (mut f, _bridge) = move_lhu_to_the_confirm(cx);
+        f.type_keys("y");
+        let params = next_request(&f, |r| match r {
+            geode_data::Request::MoveLhu(p) => Some(p),
+            _ => None,
+        });
+        assert_eq!(params.positions, vec!["P9".to_string(), "P6".to_string()]);
+        assert_eq!(params.lhu, "L4");
+        assert_eq!(
+            f.shell
+                .read_with(&f.vcx, |s, _| s.notice_for_test())
+                .as_deref(),
+            Some("moving 2 positions to LHU L4 \u{b7} sent")
+        );
+        f.close();
+    }
+
+    /// A yes the data handle cannot admit (here: shut down between the
+    /// confirm opening and `y`) says so at once, with the handle's refusal;
+    /// nothing else will answer it.
+    #[gpui::test]
+    fn a_move_the_data_handle_refuses_says_refused(cx: &mut gpui::TestAppContext) {
+        let (mut f, _bridge) = move_lhu_to_the_confirm(cx);
+        f.handle.shutdown();
+        f.type_keys("y");
+        assert_eq!(
+            f.shell
+                .read_with(&f.vcx, |s, _| s.notice_for_test())
+                .as_deref(),
+            Some("move to LHU L4 refused: the data service has stopped")
+        );
+        f.close();
+    }
+
+    /// `n` at the confirm sends no command and says nothing.
+    #[gpui::test]
+    fn no_to_the_confirm_sends_nothing(cx: &mut gpui::TestAppContext) {
+        let (mut f, _bridge) = move_lhu_to_the_confirm(cx);
+        f.type_keys("n");
+        let sent: Vec<_> = f
+            .requests
+            .try_iter()
+            .filter(|r| matches!(r, geode_data::Request::MoveLhu(_)))
+            .collect();
+        assert!(sent.is_empty(), "{sent:?}");
+        assert_eq!(f.shell.read_with(&f.vcx, |s, _| s.notice_for_test()), None);
+        f.close();
+    }
+
     /// [`test_bridge`] with `pricer` as its pricer factory, and the sender
     /// of its mailbox so a test can post data events to the real drain.
     fn test_bridge_with_pricer(
@@ -3873,6 +4021,37 @@ role = "key"
         bridge.pricer = pricer;
         bridge.events = rx;
         (bridge, tx)
+    }
+
+    /// A position-service answer posted to the real drain becomes the
+    /// shell's status notice, in the shared wording.
+    #[gpui::test]
+    fn a_command_answer_reaches_the_status_notice(cx: &mut gpui::TestAppContext) {
+        let (handle, _rx) = DataHandle::for_tests();
+        let window = open_test_window(cx, test_shell_services());
+        let (tx, rx) = crate::events::channel();
+        let mut bridge = test_bridge(handle);
+        bridge.events = rx;
+        cx.update(|cx| attach(&bridge, window, cx));
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let outcome = geode_core::positions::CommandOutcome {
+            tag: 4,
+            count: 3,
+            lhu: "BK003_LHU2".into(),
+            result: Ok(()),
+        };
+        let expected = geode_core::positions::outcome_notice(&outcome);
+        tx.try_send(DataEvent::Command(outcome)).unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            shell
+                .read_with(&vcx, |s, _| s.notice_for_test())
+                .map(|n| n.to_string()),
+            Some(expected)
+        );
     }
 
     /// `o`, a line, `enter` typed through the shell into its focused tile
@@ -4558,6 +4737,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Rc::new(["pricer_sheets".to_string()].into_iter().collect()),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -4663,6 +4843,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -4760,6 +4941,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
 
@@ -4876,6 +5058,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -4934,6 +5117,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -4992,6 +5176,7 @@ role = "key"
             )),
             pricer: test_pricer(&handle),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
             handle,
             factory,
@@ -5055,6 +5240,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
 
@@ -5145,6 +5331,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5214,6 +5401,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5360,6 +5548,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5457,6 +5646,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5550,6 +5740,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5610,6 +5801,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5755,6 +5947,7 @@ role = "key"
             )],
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5817,6 +6010,7 @@ role = "key"
             )],
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6518,6 +6712,7 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            positions_configured: false,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));

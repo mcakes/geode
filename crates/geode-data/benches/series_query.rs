@@ -98,6 +98,7 @@ fn service() -> (
         clock: geode_core::clock::Clock::utc(),
         pricer: PricerConfig::default(),
         vol: geode_data::VolConfig::default(),
+        positions: None,
     })
     .unwrap();
     (dir, service, rx, start)

@@ -93,6 +93,8 @@ the measurement log for fixture and hardware details.
 | Line-pricer flat rebuild | 1,000 entries / 1,200 sheet rows, every package open: the empty-chain rollup plus the index, as the tile runs it, before its window fill | 343 µs |
 | Line-pricer grouped rebuild | 1,000 entries over four underlyings × three expiries under `[underlying_ref, expiry, position_ref]`, every group and package open: rollup plus index, before its window fill (a cold grouped 40-row fill adds 206 µs) | 610 µs |
 | Line-pricer refill-only delivery | 1,000 entries / 1,200 sheet rows, structure unchanged | 241 µs |
+| Line-pricer sorted rebuild | the flat rebuild above under an `npv` descending sort over varied prices: rollup, `sort::rank`, index (heavily loaded machine; the unsorted rebuild measured 469 µs in the same run) | 549 µs |
+| Line-pricer sorted grouped rebuild | the grouped rebuild above under the same sort (the unsorted one measured 834 µs in the same run; the rank alone 102 µs) | 923 µs |
 | In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
 

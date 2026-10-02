@@ -26,6 +26,8 @@ geode-data = { path = "../geode-data" }
 geode-widgets.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
+# The grip glyph on a movable row (`delegate`).
+gpui-kit-assets.workspace = true
 chrono = "0.4.42"
 toml = "1.1.4"
 tracing.workspace = true

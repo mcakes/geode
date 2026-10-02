@@ -185,7 +185,7 @@ pub static COLUMNS: [ColumnDef; 44] = [
         false,
         EveryRow,
         TEXT,
-        72.0,
+        84.0,
     ),
     def(
         "instrument_ref",
@@ -194,7 +194,7 @@ pub static COLUMNS: [ColumnDef; 44] = [
         false,
         EveryRow,
         TEXT,
-        88.0,
+        100.0,
     ),
     def(
         "template",
@@ -203,7 +203,7 @@ pub static COLUMNS: [ColumnDef; 44] = [
         false,
         EveryRow,
         TEXT,
-        72.0,
+        84.0,
     ),
     def("qty", "qty", ColumnKind::Qty, true, EveryLine, TEXT, 56.0),
     def(
@@ -213,7 +213,7 @@ pub static COLUMNS: [ColumnDef; 44] = [
         true,
         EveryLine,
         TEXT,
-        88.0,
+        100.0,
     ),
     def(
         "expiry",
@@ -240,7 +240,7 @@ pub static COLUMNS: [ColumnDef; 44] = [
         true,
         EveryLine,
         TEXT,
-        48.0,
+        56.0,
     ),
     def(
         "currency",
@@ -249,7 +249,7 @@ pub static COLUMNS: [ColumnDef; 44] = [
         false,
         EveryRow,
         TEXT,
-        72.0,
+        84.0,
     ),
     def(
         "barrier",
@@ -267,7 +267,7 @@ pub static COLUMNS: [ColumnDef; 44] = [
         true,
         BarrierLines,
         TEXT,
-        104.0,
+        116.0,
     ),
     def(
         "spot_shift",
@@ -576,7 +576,7 @@ pub static COLUMNS: [ColumnDef; 44] = [
         false,
         EveryRow,
         GREEK,
-        128.0,
+        144.0,
     ),
     def(
         Measure::RhoOis010.name(),
@@ -600,7 +600,7 @@ pub static COLUMNS: [ColumnDef; 44] = [
         false,
         EveryRow,
         GREEK,
-        128.0,
+        144.0,
     ),
     def(
         Measure::CleanThetaBusinessDay.name(),
@@ -633,7 +633,7 @@ pub static COLUMNS: [ColumnDef; 44] = [
         false,
         EveryRow,
         TEXT,
-        80.0,
+        92.0,
     ),
     def(
         "status",

@@ -41,12 +41,13 @@ thread. Admission, cancellation, and completion have distinct guarantees; see
 The request loop contains each request's arm and the view-replacement step:
 a panicking request is answered once, with `<kind> request panicked:
 <payload>`, through the route that answers its success, and the loop serves
-on. Read, pricing, ingest, and egress paths contain panics at their operation
-boundaries; an ingest load panic reports that operation as `Failed`, and egress
-contains encoding and transport separately on the target's worker. Identity
-listings, the stale check, the local sweep, discovery, and result-event
-building report their panics as error diagnostics, health, or the key's
-error. Containment does not interrupt blocked adapter or filesystem calls.
+on. Read, pricing, ingest, egress, and position-command paths contain panics
+at their operation boundaries; an ingest load panic reports that operation as
+`Failed`, egress contains encoding and transport separately on the target's
+worker, and the position worker answers a panicking command and goes on.
+Identity listings, the stale check, the local sweep, discovery, and
+result-event building report their panics as error diagnostics, health, or
+the key's error. Containment does not interrupt blocked adapter or filesystem calls.
 
 Every long-lived thread is spawned through `supervise::spawn_supervised`,
 which declares an unwinding body once as `DataEvent::ThreadStopped { thread,
@@ -70,9 +71,9 @@ for capacity, coalescing, and worker shutdown behavior.
 |---|---|
 | `supervise` | `spawn_supervised`, the one door for long-lived data threads, and `REQUEST_LOOP` (`geode-data`), the request loop's thread name. |
 | `service` | `DataService`, `DataServiceConfig`, `DataEvent`, and the `HealthTracker` (two lanes per source, `discovery` and `load`; the worse by `Health::severity` wins). |
-| `handle` | `DataHandle`, `Refusal`, and `Request`: queries, distinct values, the catalog, a document by key, a series fetch, identities, an upload, a local publish, and a local forget. |
+| `handle` | `DataHandle`, `Refusal`, and `Request`: queries, distinct values, the catalog, a document by key, a series fetch, identities, an upload, a Move LHU command, a local publish, and a local forget. |
 | `source` | Directory discovery, sentinel parsing, and readiness classification. Configuration types are shared with `geode-core`; stable-mtime readiness is accepted by configuration but unsupported at runtime. |
-| `adapter` | Subscription, upload, and fetch capabilities; a registry, bounded message sink, and topic matching. Includes the in-process `ChannelAdapter`; the app can register additional implementations such as its demo series adapter. |
+| `adapter` | Subscription, upload, fetch, and position-command (`PositionCommands`, through `Adapter::positions`, `None` by default) capabilities; a registry, bounded message sink, and topic matching. Includes the in-process `ChannelAdapter`; the app can register additional implementations such as its demo series adapter. |
 | `ingest` | The discovery scheduler, the cold-start priority ladder, the per-file load pipeline, the grain split and conflict detector, the ingest runner (one thread, one writer connection, three queues), the subscribed-source receiver, the `Coalescer`, and the fetch worker. |
 | `store` | The DuckDB store: DDL generated from the schema, the per-file publish transaction and backfill guard, document publish, the series family's bitemporal append (`append_series`, the one door series rows enter by), retention, the freshness catalog in source time, and the payload-table drift check made at open. |
 | `query` | Scope lowering, grain-aware view compilation, distinct values, document and series queries, catalog reads, and the read pool. View/document planning, provenance, and execution share a worker transaction; superseded results are dropped. |
@@ -80,6 +81,7 @@ for capacity, coalescing, and worker shutdown behavior.
 | `vol` | App-supplied vol model registry and a bounded worker queue shaped like `pricing`'s: batches coalesce by key, cancellation stops a running batch at the next job boundary, a panicking job fails alone. |
 | `documents` | The `DocumentKind` registry the app fills. |
 | `egress` | Startup target resolution and per-target workers that encode and send, with eight waiting jobs. Refusals answer from the service thread; encoding and transport results, including contained panics, answer from the worker as keyed/tagged upload outcomes. |
+| `positions` | Startup resolution of the one position service and its `PositionWorker`: one supervised thread (`geode-positions`), one command at a time, eight waiting. Refusals (`no position service configured`, `position service unavailable: …`, `position service busy`, `position service stopped`) are decided synchronously and answered from the service thread; the worker answers each command once, a contained transport panic as `position service panicked`. Every admitted command answers one `DataEvent::Command`. See [position commands](../../docs/current/data-path.md#position-commands). |
 | `health` | Re-export of `geode_core::health::Health`. |
 
 ## Features

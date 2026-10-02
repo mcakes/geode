@@ -19,8 +19,17 @@
 //! the tree column carries a package's structure, and hover and selection
 //! are the table's row grounds, which replace a row's own and which
 //! further per-cell fills would obscure.
+//!
+//! A row the tile marks movable (`grips`) carries a grip at its tree
+//! cell's left edge, over the cell's own padding, shown only while the
+//! pointer is on the row: an overlay, so nothing reflows. Pressing it
+//! reports `RowGripPressed` and never a selection gesture; dragging it is
+//! a gpui drag of [`RowDrag`] the tile's body follows and drops. While a
+//! drag is live the row at the tile's mirrored `drop_gap` paints the drop
+//! line on its edge.
 
 use crate::core::columns::CellState;
+use crate::core::sort::SortSpec;
 use crate::grid::{CellPass, FillSource, GridCell, GridIndex, GridRowKind};
 use crate::paint::{CellColour, Paints, RowPalette, cell_colour};
 use crate::popup::{ChoicePaint, render_choice};
@@ -40,12 +49,13 @@ use geode_widgets::datefield::{self, DateTimeField, SegmentPaint, SegmentText};
 use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight, Hsla,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, SharedString, Stateful, TextAlign,
-    WeakEntity, Window, div, px, relative,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Stateful,
+    TextAlign, WeakEntity, Window, div, px, relative,
 };
 use gpui_component::input::{Input, InputState};
-use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
-use gpui_component::{ActiveTheme as _, Size, Theme, h_flex};
+use gpui_component::table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState};
+use gpui_component::{ActiveTheme as _, Icon, Sizable as _, Size, Theme, h_flex};
+use gpui_kit_assets::IconName;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -177,6 +187,15 @@ pub struct ColumnMoved {
 
 impl EventEmitter<ColumnMoved> for TableState<SheetDelegate> {}
 
+/// A header's sort icon clicked: the PLAN column at `0`. Emitted by the
+/// table's `perform_sort` hook; the tile owns the sort and steps it with
+/// `SortOrder::click_cycle` (the component's own three-state proposal is
+/// ignored), so the delegate changes nothing of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SortClicked(pub usize);
+
+impl EventEmitter<SortClicked> for TableState<SheetDelegate> {}
+
 /// Every mouse selection gesture a cell, the tree cell or the line-number
 /// gutter recognises, carried to the tile's `pointer`: the one door a
 /// shift+click and a drag go through to `start_selection` and
@@ -201,6 +220,31 @@ pub enum CellPointer {
 
 impl EventEmitter<CellPointer> for TableState<SheetDelegate> {}
 
+/// A row's grip pressed at grid row `0`: the tile prepares where a drag
+/// of it may drop. Never a selection gesture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowGripPressed(pub usize);
+
+impl EventEmitter<RowGripPressed> for TableState<SheetDelegate> {}
+
+/// The value a grip drag carries: the table it started in (another
+/// tile's body ignores it; the tile holds what moves). Renders as
+/// nothing: the drop line is the drag's whole feedback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowDrag {
+    pub table: gpui::EntityId,
+}
+
+impl Render for RowDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// The hover group every model row registers, so its grip shows while
+/// the pointer is anywhere on the row.
+const ROW_GROUP: &str = "pricer-row";
+
 /// A press an element inside a cell owns, recorded on the way up so the
 /// cell and the row it bubbles through next do not report it as their
 /// own.
@@ -210,6 +254,8 @@ enum InnerPress {
     Editor,
     /// A package chevron: a toggle, never a selection gesture.
     Chevron,
+    /// A row's grip: a drag handle, never a selection gesture.
+    Grip,
 }
 
 /// A paint-time copy of the tile's open editor (`PricerTile::sync_editor`):
@@ -399,6 +445,12 @@ impl FindPaint {
 pub struct SheetDelegate {
     /// The grid index shared with the tile; installs replace it.
     pub(crate) model: Rc<GridIndex>,
+    /// The tile's sort, mirrored by `install_model` through `set_sort`:
+    /// what the header's sort icon says. The tile owns it.
+    pub(crate) sort: Option<SortSpec>,
+    /// The sorted column's header label under an absolute order
+    /// (`npv |x|`), prepared by `set_sort` so `column()` formats nothing.
+    abs_label: Option<SharedString>,
     /// The formatted measure cells on screen, filled outside render;
     /// `render_td` only reads it. A miss paints a blank cell, and an open
     /// editor on it still paints.
@@ -467,6 +519,13 @@ pub struct SheetDelegate {
     /// editor, its own cell — and so cancel the edit the press was aimed
     /// into.
     inner_press: Option<InnerPress>,
+    /// Per grid row, whether it paints a grip: a line, a package or a
+    /// leg the tile can move (`PricerTile::grip_rows`), prepared on every
+    /// install. Empty under a sort.
+    pub(crate) grips: Vec<bool>,
+    /// The tile's live drag's drop gap, mirrored: the drop line paints
+    /// above grid row `gap` (below the last row when `gap` is the length).
+    pub(crate) drop_gap: Option<usize>,
     /// The `colors.toml` definitions the tile last handed down
     /// (`set_colours`), the named-colour resolutions cached against them,
     /// and the theme inputs those resolutions were made under: the
@@ -497,6 +556,8 @@ impl SheetDelegate {
     pub(crate) fn new(theme: &Theme, tile: WeakEntity<PricerTile>) -> Self {
         SheetDelegate {
             model: Rc::new(GridIndex::default()),
+            sort: None,
+            abs_label: None,
             window: WindowCache::default(),
             requested: WindowRequest::with_first(FIRST_WINDOW),
             cursor: None,
@@ -515,6 +576,8 @@ impl SheetDelegate {
             drag_last: None,
             drag_origin: None,
             inner_press: None,
+            grips: Vec::new(),
+            drop_gap: None,
             colours: Arc::new(NamedColours::default()),
             colour_cache: ColourCache::new(),
             theme_inputs: None,
@@ -682,7 +745,7 @@ impl SheetDelegate {
                         .child(geode_shell::palette::highlighted_title(
                             row.search,
                             &indices,
-                            cx.theme().foreground,
+                            geode_shell::shell::listrow::row_paint(cx.theme()).accent,
                         )),
                 )
                 .into_any_element();
@@ -827,11 +890,20 @@ impl SheetDelegate {
                     + m.text_px(r.note)
             })),
         );
+        // Every value column's header carries the sort toggle beside its
+        // label: `Icon::size_3` (0.75rem) inside the toggle's `p(px(2.))`.
+        let sort_icon = 0.75 * m.rem_px + 4.0;
         for (col, c) in self.model.columns.iter().enumerate() {
+            // The label as painted: `npv |x|` under an absolute sort.
+            let label = self.header_label(col).unwrap_or(&c.label);
+            let header = m.text_px(label) + sort_icon;
             let cells = rows
                 .clone()
-                .filter_map(|g| self.window.get(g, col).map(|c| c.text.as_ref()));
-            out.insert(c.name.to_string(), m.fit_text(&c.label, cells));
+                .filter_map(|g| self.window.get(g, col).map(|c| m.text_px(&c.text)));
+            out.insert(
+                c.name.to_string(),
+                m.fit(std::iter::once(header).chain(cells)),
+            );
         }
         Some(out)
     }
@@ -860,6 +932,27 @@ impl SheetDelegate {
                 n.map(|n| SharedString::from(n.to_string()))
                     .unwrap_or_default()
             }));
+    }
+
+    /// Mirror the tile's sort against the installed model's columns.
+    /// gpui-component's header arrow only knows a direction, so an
+    /// absolute sort says so in its column's label, as the blotter's
+    /// does: `npv |x|`, prepared here rather than in render.
+    pub(crate) fn set_sort(&mut self, sort: Option<SortSpec>) {
+        self.sort = sort;
+        self.abs_label = sort.filter(|s| s.order.absolute()).and_then(|s| {
+            let c = self.model.columns.iter().find(|c| c.name == s.column)?;
+            Some(format!("{} |x|", c.label).into())
+        });
+    }
+
+    /// The header label `column()` paints for plan column `col`.
+    fn header_label(&self, col: usize) -> Option<&SharedString> {
+        let c = self.model.columns.get(col)?;
+        match (&self.sort, &self.abs_label) {
+            (Some(s), Some(label)) if s.column == c.name => Some(label),
+            _ => Some(&c.label),
+        }
     }
 
     /// The plan column behind table column `col_ix`; `None` is the tree.
@@ -997,15 +1090,24 @@ impl TableDelegate for SheetDelegate {
                 ..Column::default()
             };
         };
+        let own = self.sort.filter(|s| s.column == c.name);
+        let name = match (own, &self.abs_label) {
+            (Some(_), Some(label)) => label.clone(),
+            _ => c.label.clone(),
+        };
         Column {
             key: SharedString::new_static(c.name),
-            name: c.label.clone(),
+            name,
             align: if c.right {
                 TextAlign::Right
             } else {
                 TextAlign::Left
             },
-            sort: None,
+            sort: Some(match own {
+                Some(s) if s.order.descending() => ColumnSort::Descending,
+                Some(_) => ColumnSort::Ascending,
+                None => ColumnSort::Default,
+            }),
             width: px(self.fitted.get(c.name).copied().unwrap_or(c.width)),
             movable: true,
             resizable: true,
@@ -1029,6 +1131,20 @@ impl TableDelegate for SheetDelegate {
             return;
         };
         cx.emit(ColumnMoved { from, to });
+    }
+
+    /// A header's sort icon: the tree column has none (`sort: None`), and
+    /// this guard keeps a direct call from sorting by it.
+    fn perform_sort(
+        &mut self,
+        col_ix: usize,
+        _proposed: ColumnSort,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        if let Some(col) = Self::plan_col(col_ix).filter(|&c| c < self.model.columns.len()) {
+            cx.emit(SortClicked(col));
+        }
     }
 
     fn render_th(
@@ -1086,25 +1202,55 @@ impl TableDelegate for SheetDelegate {
         if row_ix >= self.model.len() {
             return row;
         }
-        row.on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                let d = this.delegate_mut();
-                // Taken on every row press, so it never outlives the
-                // press that set it.
-                if d.inner_press.take().is_some() || d.drag_origin.is_some() {
-                    return;
+        // The drop line: on this row's top edge for the gap above it, on
+        // the last row's bottom edge for the gap after everything. Only
+        // while a drag is live, so a drag released elsewhere leaves none.
+        let len = self.model.len();
+        let line = self
+            .drop_gap
+            .filter(|_| cx.has_active_drag())
+            .and_then(|gap| {
+                if gap == row_ix {
+                    Some(false)
+                } else if gap == len && row_ix + 1 == len {
+                    Some(true)
+                } else {
+                    None
                 }
-                let Some((_, col)) = d.cursor else {
-                    return;
-                };
-                cx.emit(CellPointer::Press {
-                    row: row_ix,
-                    col: Some(col),
-                    shift: e.modifiers.shift,
-                });
-            }),
-        )
+            });
+        // The column-drop indicator's weight and token (the header's
+        // own), so both drags read alike.
+        let drop_line = line.map(|bottom| {
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .h(px(2.))
+                .map(|el| if bottom { el.bottom_0() } else { el.top_0() })
+                .bg(cx.theme().drag_border)
+                .debug_selector(|| "pricer-drop-line".into())
+        });
+        row.group(ROW_GROUP)
+            .when_some(drop_line, |el, line| el.relative().child(line))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    let d = this.delegate_mut();
+                    // Taken on every row press, so it never outlives the
+                    // press that set it.
+                    if d.inner_press.take().is_some() || d.drag_origin.is_some() {
+                        return;
+                    }
+                    let Some((_, col)) = d.cursor else {
+                        return;
+                    };
+                    cx.emit(CellPointer::Press {
+                        row: row_ix,
+                        col: Some(col),
+                        shift: e.modifiers.shift,
+                    });
+                }),
+            )
     }
 
     /// Paint loading or entry guidance in full-opacity muted text contrast-adjusted
@@ -1253,7 +1399,13 @@ impl SheetDelegate {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _: &MouseDownEvent, _, _| {
-                                this.delegate_mut().inner_press = Some(InnerPress::Chevron);
+                                // The grip overlaps the slot's left edge
+                                // and is painted over it: its press,
+                                // recorded first, is the grip's.
+                                let d = this.delegate_mut();
+                                if d.inner_press != Some(InnerPress::Grip) {
+                                    d.inner_press = Some(InnerPress::Chevron);
+                                }
                             }),
                         )
                         .on_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {
@@ -1294,7 +1446,13 @@ impl SheetDelegate {
                     .debug_selector(|| format!("pricer-note-{row_ix}"))
                     .child(row.note.clone())
             });
-            return Self::wire_pointer(el, cx, row_ix, None)
+            let grip = self
+                .grips
+                .get(row_ix)
+                .copied()
+                .unwrap_or(false)
+                .then(|| self.render_grip(row_ix, cx));
+            let tree = Self::wire_pointer(el, cx, row_ix, None)
                 .child(slot)
                 .children(chip)
                 .child(
@@ -1313,8 +1471,18 @@ impl SheetDelegate {
                         })
                         .child(row.text.clone()),
                 )
-                .children(note)
-                .into_any_element();
+                .children(note);
+            // The grip sits beside the cell, not in it: the cell clips its
+            // overflow, and the grip reaches left into the column padding.
+            return match grip {
+                None => tree.into_any_element(),
+                Some(grip) => div()
+                    .relative()
+                    .size_full()
+                    .child(tree)
+                    .child(grip)
+                    .into_any_element(),
+            };
         };
         let at_cursor = self.cursor == Some((row_ix, plan_col));
         let right = model.columns.get(plan_col).is_some_and(|c| c.right);
@@ -1396,6 +1564,61 @@ impl SheetDelegate {
 }
 
 impl SheetDelegate {
+    /// Grid row `row_ix`'s grip: the drag handle of a movable row, at the
+    /// tree cell's left edge. It straddles that edge, half over the
+    /// column's own left padding and half over the cell, so it clears a
+    /// package's chevron (centred in the slot after it) and paints over
+    /// nothing a row needs; absolute, so the tree text never shifts.
+    /// Hidden until the pointer is on its row (the row's hover group),
+    /// and gpui paints no listener on a hidden element, so a press there
+    /// before it shows is the cell's. Hover and pressed follow the
+    /// chevron's control paint.
+    ///
+    /// Its press records [`InnerPress::Grip`] (the cell and the row it
+    /// bubbles through report nothing), then reports [`RowGripPressed`];
+    /// its click stops there, so the table's `SelectCell` and
+    /// `DoubleClickedCell` never see it (no cursor move, no selection
+    /// change, no editor). Dragging past gpui's threshold starts a
+    /// [`RowDrag`]; the tile's body tracks and drops it.
+    fn render_grip(&mut self, row_ix: usize, cx: &Context<TableState<Self>>) -> Stateful<Div> {
+        let states = self.chevron_states(cx.theme(), false);
+        let radius = cx.theme().radius_tokens().sm;
+        let pad = TABLE_SIZE.table_cell_padding().left;
+        let table = cx.entity_id();
+        div()
+            .id(("pricer-grip", row_ix))
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(-pad)
+            .w(pad * 2.)
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(radius)
+            .text_color(self.paints.muted)
+            .invisible()
+            .group_hover(ROW_GROUP, |s| s.visible())
+            .cursor_grab()
+            .pointer_states(states)
+            .debug_selector(move || format!("pricer-grip-{row_ix}"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    let d = this.delegate_mut();
+                    d.inner_press = Some(InnerPress::Grip);
+                    cx.emit(RowGripPressed(row_ix));
+                }),
+            )
+            // A click is the cell's no more than a press is.
+            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.stop_propagation()))
+            .on_drag(RowDrag { table }, |drag, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| *drag)
+            })
+            .child(Icon::new(IconName::GripVertical).xsmall())
+    }
+
     /// Wire a cell's, the tree cell's or the gutter's selection gestures
     /// onto `el`: a press (plain or shift) and, only while the button has
     /// stayed down since a press this table caught, a drag. `col` is the
@@ -1426,6 +1649,11 @@ impl SheetDelegate {
             MouseButton::Left,
             cx.listener(move |this, e: &MouseDownEvent, _, cx| {
                 let d = this.delegate_mut();
+                // The grip's own press: no selection gesture, no drag of
+                // ours (gpui's drag takes it from here).
+                if d.inner_press == Some(InnerPress::Grip) {
+                    return;
+                }
                 if d.inner_press == Some(InnerPress::Chevron) {
                     cx.emit(CellPointer::Press {
                         row: row_ix,
@@ -1525,6 +1753,27 @@ mod tests {
         assert_eq!(super::tree_gaps(true, true), 3, "slot, chip, text, note");
     }
 
+    /// The find table's match run takes the list-row accent every other
+    /// fuzzy surface highlights with (the blotter's find, the palette,
+    /// pickers); a plain `foreground` run is invisible on its own text.
+    #[test]
+    fn find_highlights_take_the_list_row_accent() {
+        let text = include_str!("delegate.rs");
+        // Spelled in two parts so the scan does not find itself.
+        let needle = ["highlighted_", "title("].concat();
+        let calls: Vec<&str> = text
+            .match_indices(needle.as_str())
+            .map(|(at, _)| &text[at..(at + 200).min(text.len())])
+            .collect();
+        assert!(!calls.is_empty(), "the scan found no highlight call");
+        for window in calls {
+            assert!(
+                window.contains("row_paint("),
+                "a find highlight bypasses RowPaint::accent:\n{window}"
+            );
+        }
+    }
+
     #[test]
     fn off_numbers_nothing() {
         assert!(
@@ -1590,8 +1839,14 @@ mod width_tests {
         let padding = f32::from(pad.left) + f32::from(pad.right) + CURSOR_BORDER;
         let mut failures = Vec::new();
         for c in &COLUMNS {
-            for text in [c.label.to_string(), worst_case(c)] {
-                let need = text.chars().count() as f32 * advance + padding;
+            // A header also carries the sort toggle: `Icon::size_3`
+            // (0.75rem) inside the toggle's `p(px(2.))`.
+            let toggle = 0.75 * FontSize::Large.rem_px() + 4.0;
+            // Not ` |x|`: an absolute sort is transient, and widening
+            // fifteen measure defaults for it would cost every view; the
+            // label ellipsizes then, and `:autosize` measures the suffix.
+            for (text, extra) in [(c.label.to_string(), toggle), (worst_case(c), 0.0)] {
+                let need = text.chars().count() as f32 * advance + padding + extra;
                 if need > c.default_width {
                     failures.push(format!(
                         "{}: '{text}' needs {need:.1}px in {}px",
