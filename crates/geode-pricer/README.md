@@ -537,6 +537,17 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   in the open editor's own cell, or on a chevron, sets `inner_press` so the
   row's bubbling handler does not report it; the editor's press reports
   nothing and the chevron's reports a plain press.
+- A right press on a cell, the tree cell or the row beside its cells emits
+  `CellPointer::Context` (not in the open editor's own cell, whose press is
+  the editor's; `is_editor_cell` is the one check for both buttons). The
+  table stops a cell's right press after the cell's own listener, so the row
+  hears only presses beside the cells; the shell captures its own. The tile
+  records the row in `context_pressed`; inside a live `V` selection holding
+  it the cursor and selection stay, otherwise it is a plain press's move
+  (selection cleared, editor and entry bar closed, the cursor's column
+  kept). `press_context` takes that row once and answers its context
+  (`context_at`, which `dimension_context` shares), with no anchor: the
+  shell hangs the menu at the pointer.
 
 ## Known limitations
 

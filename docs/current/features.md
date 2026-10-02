@@ -1520,10 +1520,16 @@ Normal-mode keys:
 `g m` opens a panel on the cursor row's underlying, as the `underlying_ref`
 context column the market-data panels accept: a line's or leg's own, a
 package's when its legs share one; otherwise the plain tile picker. `g .`
-opens the shell's [row menu](shell.md#row-menu) on the same context, at the
-tile's top-left (the pricer records no row anchor); a line with no single
-underlying shows `no actions for this row`. A right-click opens no row
-menu in the pricer.
+opens the shell's [row menu](shell.md#row-menu) on the same context, hung
+just under the cursor row (at the tile's top-left while that row is scrolled
+out of view); a row with no single underlying shows `no actions for this
+row`. A right-click on a row's cell, its tree cell, or the row beside its
+cells opens the same menu at the pointer, on the clicked row's underlying.
+A right-click inside a `V` row selection keeps the cursor and the
+selection; anywhere else it clears any selection, closes an open editor or
+entry bar, and moves the cursor to the clicked row, keeping its column. A
+right-click inside the open editor's own cell is the editor's and opens no
+row menu; blank space below the lines opens nothing.
 
 Emitting into a [link group](#link-groups), the pricer posts the same
 underlying `g m` opens on, as the group's scope, so the two never name
