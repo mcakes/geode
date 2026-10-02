@@ -3675,16 +3675,16 @@ run_mutation "yank: numbers are raw and unscaled" \
   tsv_has_a_header_indented_tree_text_raw_numbers_and_blanks
 
 run_mutation "commands: sort desc is parsed" \
-  crates/geode-blotter/src/core/commands.rs \
-  '                (Some("desc"), None, _) => SortOrder::Desc,' \
-  '                (Some("desc"), None, _) => SortOrder::Asc,' \
+  crates/geode-core/src/sort.rs \
+  '        (Some("desc"), None, _) => SortOrder::Desc,' \
+  '        (Some("desc"), None, _) => SortOrder::Asc,' \
   geode-blotter \
   every_command_parses
 
 run_mutation "commands: a bare sort abs is abs desc" \
-  crates/geode-blotter/src/core/commands.rs \
-  '                (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsDesc,' \
-  '                (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsAsc,' \
+  crates/geode-core/src/sort.rs \
+  '        (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsDesc,' \
+  '        (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsAsc,' \
   geode-blotter \
   every_command_parses
 
@@ -3763,38 +3763,38 @@ run_mutation "flatten: NaN is a NULL to the comparator, not Equal-to-everything"
   nan_sorts_last_like_null_and_never_panics_the_sort
 
 run_mutation "sort cycle: S is inert on a column with no magnitude" \
-  crates/geode-blotter/src/core/flatten.rs \
+  crates/geode-core/src/sort.rs \
   '        if absolute && !measure {' \
   '        if false {' \
-  geode-blotter \
+  geode-core \
   shift_s_is_inert_on_a_column_with_no_magnitude_where_s_is_not
 
 run_mutation "sort cycle: S steps abs desc on to abs asc before clearing" \
-  crates/geode-blotter/src/core/flatten.rs \
+  crates/geode-core/src/sort.rs \
   '                Some(SortOrder::AbsDesc) => Some(SortOrder::AbsAsc),' \
   '                Some(SortOrder::AbsDesc) => None,' \
-  geode-blotter \
+  geode-core \
   the_key_cycles_walk_their_own_orders_and_restart_from_the_others
 
 run_mutation "sort cycle: s from an absolute order restarts at asc, not desc" \
-  crates/geode-blotter/src/core/flatten.rs \
+  crates/geode-core/src/sort.rs \
   '                _ => Some(SortOrder::Asc),' \
   '                _ => Some(SortOrder::Desc),' \
-  geode-blotter \
+  geode-core \
   the_key_cycles_walk_their_own_orders_and_restart_from_the_others
 
 run_mutation "click cycle: a measure's click goes on from asc to abs desc, not to cleared" \
-  crates/geode-blotter/src/core/flatten.rs \
+  crates/geode-core/src/sort.rs \
   '            Some(SortOrder::Asc) if measure => Some(SortOrder::AbsDesc),' \
   '            Some(SortOrder::Asc) if measure => None,' \
-  geode-blotter \
+  geode-core \
   a_header_click_walks_every_order_a_measure_can_show_desc_first
 
 run_mutation "click cycle: a text column's click clears after asc instead of entering the absolute pair" \
-  crates/geode-blotter/src/core/flatten.rs \
+  crates/geode-core/src/sort.rs \
   '            Some(SortOrder::Asc) if measure => Some(SortOrder::AbsDesc),' \
   '            Some(SortOrder::Asc) => Some(SortOrder::AbsDesc),' \
-  geode-blotter \
+  geode-core \
   a_header_click_on_a_text_column_skips_the_absolute_pair
 
 run_mutation "delegate: a header-click resort moves the component's highlight with the cursor" \
@@ -3812,10 +3812,10 @@ run_mutation "delegate: a header click steps the blotter's own cycle, not the co
   a_header_click_cycles_through_the_absolute_orders_too
 
 run_mutation "sort order: abs asked of a text column is its signed direction" \
-  crates/geode-blotter/src/core/flatten.rs \
+  crates/geode-core/src/sort.rs \
   '            (SortOrder::AbsDesc, false) => SortOrder::Desc,' \
   '            (SortOrder::AbsDesc, false) => SortOrder::AbsDesc,' \
-  geode-blotter \
+  geode-core \
   an_absolute_order_asked_of_a_text_column_becomes_its_signed_direction
 
 run_mutation "tile: the key cycle reaches the delegate through SortOrder::cycle, not a stale copy" \
@@ -24771,8 +24771,8 @@ run_mutation "pricer select: lines_of keeps a leg twice" \
 # carries its legs, so totalling both would double them.
 run_mutation "pricer select: totals count a selected package's legs again" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        rows.dedup();\n        top_most(&self.sheet, &rows)' \
-  $'        rows.dedup();\n        rows' \
+  $'            self.sheet.len(),\n        );\n        top_most(&self.sheet, &rows)' \
+  $'            self.sheet.len(),\n        );\n        rows' \
   geode-pricer the_footer_totals_count_an_open_packages_legs_once
 
 # A line's total is a position total: its qty times the unit value.
@@ -27036,8 +27036,8 @@ run_mutation "pricer grouping: a split package totals its whole fold per node" \
 
 run_mutation "pricer grouping: totals count a group row's descendant again" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        rows.sort_unstable();\n        rows.dedup();\n        top_most(&self.sheet, &rows)' \
-  $'        rows.sort_unstable();\n        top_most(&self.sheet, &rows)' \
+  '            Some(s) if !*s => {' \
+  '            Some(_) => {' \
   geode-pricer totals_count_a_group_row_and_its_descendant_once
 
 # Line movement: refused under a grouping; past hidden siblings without.
@@ -27274,8 +27274,8 @@ run_mutation "blotter grouping: a flat view titles with a dangling separator" \
 # `y y` / `V y` on a split package row yank that node's legs.
 run_mutation "pricer grouping: y y on a split row yanks the whole package" \
   crates/geode-pricer/src/tile.rs \
-  '                    let mut rows = self.grid_rows_under(g);' \
-  $'                    let mut rows = match self.model.sheet_row(g) {\n                        Some(r) => vec![r],\n                        None => self.grid_rows_under(g),\n                    };' \
+  '                    let rows = select::first_seen(self.grid_rows_under(g), self.sheet.len());' \
+  $'                    let rows = match self.model.sheet_row(g) {\n                        Some(r) => vec![r],\n                        None => self.grid_rows_under(g),\n                    };' \
   geode-pricer a_yank_on_a_split_package_row_yanks_its_nodes_legs
 
 run_mutation "pricer grouping: V y on a split row yanks the whole package" \
@@ -28659,6 +28659,142 @@ run_mutation "find-window: market data match run takes the list-row accent" \
   '                    geode_shell::shell::listrow::row_paint(cx.theme()).accent,' \
   '                    cx.theme().foreground,' \
   geode-marketdata find_highlights_take_the_list_row_accent
+
+# ---- pricer column sort
+
+# The ranking: blanks and gaps after values in both directions, a group
+# by its own fold, magnitudes under an absolute order, an expiry as a
+# date, a partly hidden package by the legs it paints, a failure and an
+# unlike-currency local sum as gaps, a group dimension's unanimity.
+run_mutation "pricer sort: descending puts blanks first" \
+  crates/geode-pricer/src/core/sort.rs \
+  '        (a, b) => a.rank().cmp(&b.rank()),' \
+  $'        (a, b) if desc => b.rank().cmp(&a.rank()),\n        (a, b) => a.rank().cmp(&b.rank()),' \
+  geode-pricer unpriced_and_failed_rows_sort_after_values_in_both_directions
+
+run_mutation "pricer sort: a group row ranks by nothing" \
+  crates/geode-pricer/src/core/sort.rs \
+  '            NodeKind::Group { .. } => group_key(sheet, &legs_under(rollup, id), kind),' \
+  '            NodeKind::Group { .. } => Key::Blank,' \
+  geode-pricer group_rows_rank_by_their_folded_value_at_every_level
+
+run_mutation "pricer sort: an absolute order compares signed values" \
+  crates/geode-pricer/src/core/sort.rs \
+  '        let mag = |v: f64| if abs { v.abs() } else { v };' \
+  '        let mag = |v: f64| v;' \
+  geode-pricer a_measure_sort_ranks_lines_and_packages_and_legs_ride_with_their_package
+
+run_mutation "pricer sort: an expiry compares as its code" \
+  crates/geode-pricer/src/core/sort.rs \
+  '            Expiry::Date(d) => Part::Date(*d),' \
+  '            Expiry::Date(d) => Part::Text(crate::core::shorthand::render_expiry(&Expiry::Date(*d))),' \
+  geode-pricer an_expiry_sorts_as_a_date_not_as_its_code
+
+run_mutation "pricer sort: a partly hidden package ranks by every leg" \
+  crates/geode-pricer/src/core/sort.rs \
+  $'        if partial {\n            let f = sheet.fold_legs(legs.iter().copied());' \
+  $'        if false {\n            let f = sheet.fold_legs(legs.iter().copied());' \
+  geode-pricer a_partly_hidden_package_ranks_by_the_legs_it_paints
+
+run_mutation "pricer sort: a failed line ranks as a blank" \
+  crates/geode-pricer/src/core/sort.rs \
+  '            (LineState::Failed(_), _) => Key::Mixed,' \
+  '            (LineState::Failed(_), _) => Key::Blank,' \
+  geode-pricer unpriced_and_failed_rows_sort_after_values_in_both_directions
+
+run_mutation "pricer sort: an unlike-currency local sum ranks as a value" \
+  crates/geode-pricer/src/core/sort.rs \
+  '            (_, Some(r)) if !usd && r.currency.is_mixed() => Key::Mixed,' \
+  '            (_, Some(r)) if false && r.currency.is_mixed() => Key::Mixed,' \
+  geode-pricer a_mixed_currency_local_sum_is_a_gap_and_its_usd_twin_a_value
+
+run_mutation "pricer sort: legs that differ rank as unanimous" \
+  crates/geode-pricer/src/core/sort.rs \
+  '                Some(_) if blanks || differ => Key::Mixed,' \
+  '                Some(_) if blanks => Key::Mixed,' \
+  geode-pricer a_group_dimension_ranks_unanimous_values_then_mixed_then_blank
+
+run_mutation "pricer sort: every column has a magnitude" \
+  crates/geode-pricer/src/core/sort.rs \
+  '    matches!(kind, ColumnKind::Measure { .. })' \
+  '    let _ = kind; true' \
+  geode-pricer s_and_shift_s_from_the_keymap_cycle_the_cursor_column
+
+# The tile: a price-only refresh re-ranks; the drop clears and says so;
+# the header steps the click cycle and the tree never sorts; the keys
+# are bound; `:sort` folds `abs` on a text column; the sheet-order verbs
+# refuse; yanks keep painted order; `/`'s header reserves the toggle.
+run_mutation "pricer sort: a price refresh keeps the old order" \
+  crates/geode-pricer/src/tile.rs \
+  '        if let Some(spec) = &self.sort {' \
+  '        if let Some(spec) = self.sort.as_ref().filter(|_| change == Change::Structure) {' \
+  geode-pricer a_price_refresh_re_ranks_a_measure_sort_and_the_cursor_stays_on_its_line
+
+run_mutation "pricer sort: a dropped sort says nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.notice = Some(sort_dropped(spec.column).into());' \
+  '            let _ = sort_dropped(spec.column);' \
+  geode-pricer a_view_without_the_sorted_column_drops_the_sort_and_says_which
+
+run_mutation "pricer sort: a plan without the column keeps the sort" \
+  crates/geode-pricer/src/tile.rs \
+  $'            self.sort = None;\n            self.notice = Some(sort_dropped(spec.column).into());' \
+  '            self.notice = Some(sort_dropped(spec.column).into());' \
+  geode-pricer a_view_without_the_sorted_column_drops_the_sort_and_says_which
+
+run_mutation "pricer sort: a header click steps the key cycle" \
+  crates/geode-pricer/src/tile.rs \
+  '        let next = SortOrder::click_cycle(current, measure);' \
+  '        let next = SortOrder::cycle(current, false, measure);' \
+  geode-pricer a_header_click_walks_the_click_cycle_and_the_tree_column_never_sorts
+
+run_mutation "pricer sort: the tree column's hook sorts a column" \
+  crates/geode-pricer/src/delegate.rs \
+  '        if let Some(col) = Self::plan_col(col_ix).filter(|&c| c < self.model.columns.len()) {' \
+  '        if let Some(col) = Self::plan_col(col_ix).or(Some(0)) {' \
+  geode-pricer a_header_click_walks_the_click_cycle_and_the_tree_column_never_sorts
+
+run_mutation "pricer sort: an absolute order's label does not say so" \
+  crates/geode-pricer/src/delegate.rs \
+  '            Some(s) if s.order.absolute() => format!("{} |x|", c.label).into(),' \
+  '            Some(s) if false => format!("{} |x|", c.label).into(),' \
+  geode-pricer s_and_shift_s_from_the_keymap_cycle_the_cursor_column
+
+run_mutation "pricer sort: s is unbound in normal mode" \
+  crates/geode-pricer/src/content.rs \
+  '"s" = "pricer::sort_cycle"' \
+  '"ctrl+alt+s" = "pricer::sort_cycle"' \
+  geode-pricer s_and_shift_s_from_the_keymap_cycle_the_cursor_column
+
+run_mutation "pricer sort: :sort keeps abs on a text column" \
+  crates/geode-pricer/src/tile.rs \
+  '                let order = order.on_column(sorting::is_measure(c.def.kind));' \
+  '                let order = order;' \
+  geode-pricer sort_commands_resolve_against_the_plan_and_complete
+
+run_mutation "pricer sort: a move runs under a sort" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        if matches!(verb, "move_down" | "move_up") && self.sort.is_some() {' \
+  '        if matches!(verb, "move_down" | "move_up") && false {' \
+  geode-pricer sheet_order_verbs_refuse_under_a_sort_naming_sort_clear
+
+run_mutation "pricer sort: a counted g p runs under a sort" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        if verb == "group" && !selected && count > 1 && self.sort.is_some() {' \
+  '        if verb == "group" && !selected && count > 1 && false {' \
+  geode-pricer sheet_order_verbs_refuse_under_a_sort_naming_sort_clear
+
+run_mutation "pricer sort: a V yank goes back to sheet order" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'            self.sheet.len(),\n        );\n        top_most(&self.sheet, &rows)' \
+  $'            self.sheet.len(),\n        );\n        let mut rows = rows;\n        rows.sort_unstable();\n        top_most(&self.sheet, &rows)' \
+  geode-pricer find_and_yank_walk_the_painted_order
+
+run_mutation "pricer sort: the / header drops the toggle's width" \
+  crates/geode-pricer/src/tile.rs \
+  '                            .pr(window.rem_size() * 0.75 + gpui::px(4.))' \
+  '                            .pr(gpui::px(0.))' \
+  geode-pricer fzf_keeps_native_header_columns_and_restores_tree
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

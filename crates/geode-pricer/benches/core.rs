@@ -2,6 +2,8 @@
 //! evaluation, the rollup tree, the grid index and window fills for 1,000 shorthand entries. Every
 //! tenth entry is a two-leg package, so the sheet contains 1,200 rows. These benchmarks
 //! measure local model work, excluding pricing execution, database I/O, and painting.
+//! The `_sorted` rebuilds rank every sibling set by `npv` descending over
+//! varied prices, as the tile does under a measure sort.
 //! Budgets and reference measurements are in `docs/current/performance.md`.
 
 use chrono::Utc;
@@ -11,7 +13,9 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::expansion::Expansion as GroupExpansion;
 use geode_core::pricing::{Currency, Measure, PriceResult};
 use geode_core::scope::{Scope, parse_expr};
+use geode_core::sort::SortOrder;
 use geode_pricer::core::rollup::{self, EffectiveChain, effective_chain};
+use geode_pricer::core::sort::{SortSpec, rank};
 use geode_pricer::core::{
     ColumnPlan, Edit, Expansion, LineId, OwnShifts, Place, RowSpec, Sheet, TemplateSet, Views,
     Visibility, apply_scope, from_rows, parse, to_rows,
@@ -467,6 +471,78 @@ fn bench(c: &mut Criterion) {
                 },
                 BatchSize::SmallInput,
             )
+        });
+    }
+
+    // The tile's rebuild under a measure sort: the rollup, every sibling
+    // set ranked by `npv` descending (a group by its fold, a package by
+    // its own), then the index. Prices vary per line so the ranks move.
+    let npv_desc = SortSpec {
+        column: "npv",
+        order: SortOrder::Desc,
+    };
+    let varied = |s: &mut Sheet| {
+        let answers: Vec<(LineId, u64, Result<PriceResult, String>)> = (0..s.len())
+            .filter(|r| s.is_line(*r))
+            .map(|r| {
+                let mut p = PriceResult::zero(Currency::USD);
+                p.set(Measure::Npv, false, ((r * 7919) % 1000) as f64 - 500.0);
+                (s.id(r), s.revision(r), Ok(p))
+            })
+            .collect();
+        s.deliver_all(answers, Utc::now());
+    };
+    {
+        let mut s = sheet(1_000);
+        varied(&mut s);
+        let mut expansion = Expansion::default();
+        expansion.open_all(&s);
+        let visibility = Visibility::all(&s);
+        g.bench_function("rebuild_1000_flat_sorted", |b| {
+            b.iter(|| {
+                let chain = effective_chain(&[], &no_levels);
+                let mut tree = rollup::build(&s, &visibility, &chain, &no_levels, Clock::utc());
+                rank(&mut tree, &s, &npv_desc);
+                black_box(GridIndex::build(
+                    &s,
+                    &tree,
+                    &no_groups,
+                    &expansion,
+                    &plan,
+                    Clock::utc(),
+                ))
+            })
+        });
+    }
+    {
+        let mut s = sheet_of(&grouped_texts(1_000));
+        varied(&mut s);
+        let mut expansion = Expansion::default();
+        expansion.open_all(&s);
+        let visibility = Visibility::all(&s);
+        g.bench_function("rank_1000_grouped", |b| {
+            b.iter_batched(
+                || rollup::build(&s, &visibility, &chain, &dims, Clock::utc()),
+                |mut tree| {
+                    rank(&mut tree, &s, &npv_desc);
+                    black_box(tree)
+                },
+                BatchSize::SmallInput,
+            )
+        });
+        g.bench_function("rebuild_1000_grouped_sorted", |b| {
+            b.iter(|| {
+                let mut tree = rollup::build(&s, &visibility, &chain, &dims, Clock::utc());
+                rank(&mut tree, &s, &npv_desc);
+                black_box(GridIndex::build(
+                    &s,
+                    &tree,
+                    &groups,
+                    &expansion,
+                    &plan,
+                    Clock::utc(),
+                ))
+            })
         });
     }
 
