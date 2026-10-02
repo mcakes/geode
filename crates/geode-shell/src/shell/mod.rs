@@ -610,9 +610,11 @@ pub struct ShellView {
     last_flip_versions: FrameVersions,
     /// Each link group's scope generation as of the last `on_frame_changed`,
     /// in `Group::ALL` order: the other half of the flip baseline. A group
-    /// whose number moved flips its visible followers. Seeded and re-seeded
-    /// beside `last_flip_versions`, so a restored group scope or a workspace
-    /// switch is not read as a change either.
+    /// whose number moved flips its visible followers. Seeded beside
+    /// `last_flip_versions` in `new`, so a restored group scope is not read
+    /// as a change. Not re-seeded on a workspace switch: the numbers are
+    /// frame-wide, so a switch changes none of them, and re-seeding there
+    /// would swallow a group change whose notification is still pending.
     last_flip_groups: [u64; 4],
     /// Who lives in each tile. Created lazily in `ensure_occupants` and
     /// dropped when the tile is gone from every workspace.
@@ -1567,11 +1569,18 @@ impl ShellView {
                         concerned.then(|| (*key, f.view_for(ws, tile).versions()))
                     })
                     .collect();
-                // A group with no visible follower opens nothing: opening
-                // over an empty set would clear a lane barrier that still
-                // waits on the visible tiles.
-                if lane_moved || !awaited.is_empty() {
+                if lane_moved {
+                    // A new flip for everyone: whatever was awaited before
+                    // answered an older frame.
                     f.open_flip_each(awaited, Instant::now());
+                } else {
+                    // A group's change alone joins the flip in progress.
+                    // Replacing it would drop the other tiles while their
+                    // queries are in flight: they would paint on arrival,
+                    // beside tiles still holding what they staged. A group
+                    // with no visible follower adds nothing, and so leaves
+                    // an open barrier waiting.
+                    f.extend_flip(awaited, Instant::now());
                 }
             });
             self.scratch_visible_keys = keys;

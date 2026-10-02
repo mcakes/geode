@@ -225,9 +225,11 @@ impl ShellView {
         // closing follower answers the flip barrier under its group's
         // identity, which it reads only while still a member. The frame is
         // written only for a tile that was in a group, so an ordinary render
-        // writes nothing, and that write waits until this render is over:
-        // GPUI drops a notification sent while the window draws, and the
-        // tiles reading the group's board would not hear a draft leave.
+        // writes nothing, and that write waits until this render is over.
+        // While a window draws, GPUI drops a notification for any entity
+        // that window read in its last draw. The frame is one, because the
+        // shell's render reads it, so notified here the tiles reading the
+        // group's board would not hear a draft leave.
         for id in &gone {
             self.emit_subs.remove(id);
         }

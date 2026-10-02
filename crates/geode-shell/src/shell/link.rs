@@ -14,6 +14,9 @@ use crate::tiling::TileId;
 
 impl ShellView {
     /// Follow `group`, or the workspace again with `None`.
+    ///
+    /// Writes the frame: call this from the shell's own handlers, never
+    /// from inside an update of the frame.
     pub(super) fn set_follow(
         &mut self,
         tile: TileId,

@@ -182,6 +182,105 @@ fn a_group_scope_change_opens_a_barrier_over_its_visible_followers_only(
             "the tile that does not follow the group is not awaited"
         );
     }
+
+    // The change is flipped once. A baseline that kept the group's old
+    // number would read every later notification as the same change again:
+    // the release notifies, the barrier reopens, the follower answers at
+    // once, and the frame never comes to rest.
+    settle(&frame, &mut vcx);
+    frame.update(&mut vcx, |f, cx| {
+        f.note_config_reloaded();
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert!(
+        !frame.read_with(&vcx, |f, _| f.barrier_open()),
+        "an unrelated notification after the flip opens nothing"
+    );
+}
+
+/// A group's scope change while a lane flip is still in progress joins it.
+/// Replacing the barrier would drop the tiles that do not follow the group
+/// while their queries are in flight: they would then paint on arrival,
+/// beside tiles still holding what they staged.
+#[gpui::test]
+fn a_group_scope_change_under_an_open_lane_barrier_keeps_the_other_tiles_awaited(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_window, mut vcx, _shell, frame) = two_tiles(cx);
+    follow(&frame, &mut vcx, TileId(1), Some(Group::A));
+    frame.update(&mut vcx, |f, cx| {
+        assert!(f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now())));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let lane = frame.read_with(&vcx, |f, _| f.view(WS1).versions());
+    let enrolled = frame.read_with(&vcx, |f, _| f.view_for(WS1, TileId(1)).versions());
+    assert!(frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(1), enrolled)));
+    assert!(frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(2), lane)));
+
+    frame.update(&mut vcx, |f, cx| {
+        assert!(
+            f.view_mut_for(WS1, TileId(1))
+                .set_scope(underlying("SPX.Z"))
+        );
+        cx.notify();
+    });
+    vcx.run_until_parked();
+
+    let follower = frame.read_with(&vcx, |f, _| f.view_for(WS1, TileId(1)).versions());
+    assert_ne!(follower.scope, enrolled.scope, "sanity: its identity moved");
+    assert!(
+        frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(2), lane)),
+        "the tile that does not follow the group is still awaited"
+    );
+    assert!(
+        frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(1), follower)),
+        "the follower is awaited under its new identity"
+    );
+    assert!(!frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(1), enrolled)));
+}
+
+/// Group generations are frame-wide, not per workspace, so a workspace
+/// switch has nothing of theirs to re-seed. Re-seeded there, a group change
+/// whose notification is still pending when the switch happens would be
+/// taken for already seen, and the followers now on screen never flipped.
+#[gpui::test]
+fn a_group_change_pending_across_a_workspace_switch_still_flips(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, frame) = two_tiles(cx);
+    super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
+    add_tile(&mut vcx);
+    let hidden = shell.read_with(&vcx, |s, _| {
+        s.services.workspaces.active().tree().tiles()[0]
+    });
+    let ws2 = shell.read_with(&vcx, |s, _| s.active_ix());
+    super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_1");
+    follow(&frame, &mut vcx, hidden, Some(Group::B));
+    assert!(!frame.read_with(&vcx, |f, _| f.barrier_open()));
+
+    // One update: the group's scope moves, then the workspace switches
+    // before the frame's notification is delivered.
+    vcx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.frame().clone().update(cx, |f, cx| {
+                assert!(f.view_mut_for(ws2, hidden).set_scope(underlying("SPX.Z")));
+                cx.notify();
+            });
+            s.dispatch(
+                &ActionId("workspace::switch_2".to_string()),
+                None,
+                window,
+                cx,
+            );
+        });
+    });
+    vcx.run_until_parked();
+
+    let follower = frame.read_with(&vcx, |f, _| f.view_for(ws2, hidden).versions());
+    assert!(
+        frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(hidden.0), follower)),
+        "the follower now on screen is flipped for the group's change"
+    );
 }
 
 /// A group whose followers are all off screen has nobody to flip. Opening
@@ -232,7 +331,8 @@ fn a_group_nobody_visible_follows_opens_no_barrier(cx: &mut gpui::TestAppContext
 }
 
 /// Following changes one tile's scope; that tile requeries by itself and
-/// nothing else has to wait for it.
+/// nothing else has to wait for it. A guard: no flip code has to exist for
+/// it to pass, and it fails only if a follow starts opening a barrier.
 #[gpui::test]
 fn a_follow_alone_opens_no_barrier(cx: &mut gpui::TestAppContext) {
     let (_window, mut vcx, _shell, frame) = two_tiles(cx);
@@ -271,9 +371,8 @@ fn a_group_scope_change_writes_no_session_file(cx: &mut gpui::TestAppContext) {
             .is_none(),
         "a group's scope is not session state"
     );
-    // A membership change is session state and must be written. That half
-    // is asserted by `the_session_text_carries_a_membership_change`, once
-    // the session file carries `follow` and `emit`.
+    // A membership change is session state and must be written:
+    // `the_session_text_carries_a_membership_change` asserts that half.
 }
 
 // --- The emission pull ----------------------------------------------
@@ -441,10 +540,12 @@ fn a_change_with_the_same_emission_writes_nothing(cx: &mut gpui::TestAppContext)
     assert_eq!(notified.get(), 0, "and notifies nobody");
 }
 
-/// A draft edited while its tile emits is one board write per edit. It is
-/// not a publish, so the frame's data counter (which requeries every tile
-/// watching a dataset) stays put, and it is not session state, so nothing
-/// is written to disk at typing speed.
+/// An emitting tile whose cursor and draft both move is one board write
+/// per move. It is not a publish, so the frame's data counter (which
+/// requeries every tile watching a dataset) stays put. The group's scope
+/// does advance the frame generation, the session writer's dirty signal,
+/// but neither it nor the draft is session state: the snapshot's text is
+/// the one already written, and nothing goes to disk at cursor speed.
 #[gpui::test]
 fn a_changed_draft_is_one_board_write_and_no_session_write(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -462,11 +563,20 @@ fn a_changed_draft_is_one_board_write_and_no_session_write(cx: &mut gpui::TestAp
         frame.read_with(vcx, |f, _| (f.board_gen(Group::A), f.data_version()))
     };
     let (board, data) = counters(&vcx);
+    let generation = frame.read_with(&vcx, |f, _| f.generation());
 
-    // The same key under a new allocation: the draft was edited.
-    *emitter.emission.borrow_mut() = emission_for("SPX.Z", &draft());
+    // The cursor moved to another underlying, with a draft for it.
+    *emitter.emission.borrow_mut() = emission_for("NDX", &draft());
     tile_changed(&shell, &mut vcx, TileId(1));
     assert_eq!(counters(&vcx), (board + 1, data));
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("NDX")
+    );
+    assert!(
+        frame.read_with(&vcx, |f, _| f.generation()) > generation,
+        "sanity: the scope change made the session writer look"
+    );
     tile_changed(&shell, &mut vcx, TileId(1));
     assert_eq!(
         counters(&vcx),
@@ -477,7 +587,7 @@ fn a_changed_draft_is_one_board_write_and_no_session_write(cx: &mut gpui::TestAp
         shell
             .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
             .is_none(),
-        "a draft on a board is not session state"
+        "neither a group's scope nor a draft on its board is session state"
     );
 }
 
@@ -526,7 +636,22 @@ fn switching_group_moves_the_drafts_and_leaves_the_old_scope(cx: &mut gpui::Test
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
     set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
 
-    set_emit(&shell, &mut vcx, TileId(1), Some(Group::B));
+    // Read inside the update that switched, before any notification is
+    // delivered: the join into B posts by itself. The tile's repaint would
+    // post a moment later, but only for a module that watches the entity
+    // the shell repaints.
+    let (left_a, joined_b) = shell.update(&mut vcx, |s, cx| {
+        s.set_emit(TileId(1), Some(Group::B), cx);
+        let f = s.frame().read(cx);
+        let key = ["SPX.Z".to_string()];
+        (
+            f.board_entry(Group::A, DRAFTS, &key).is_none(),
+            f.board_entry(Group::B, DRAFTS, &key).is_some(),
+        )
+    });
+    assert!(left_a, "the draft leaves the old board with the tile");
+    assert!(joined_b, "and is on the new board as the tile joins");
+    vcx.run_until_parked();
     assert!(!on_board(&frame, &vcx, Group::A, "SPX.Z"));
     assert!(on_board(&frame, &vcx, Group::B, "SPX.Z"));
     assert_eq!(

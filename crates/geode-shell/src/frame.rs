@@ -749,6 +749,28 @@ impl Frame {
         });
     }
 
+    /// Add these keys to the flip in progress, each under its own identity.
+    /// The keys already awaited stay, a key listed again takes the identity
+    /// given here, and the barrier keeps the instant it opened, so its
+    /// deadline does not move. With nothing open this opens a barrier at
+    /// `now`. An empty set changes nothing: it never clears an open barrier.
+    /// No version changes or notifications are emitted here.
+    ///
+    /// For a change that concerns only some visible tiles (a link group's
+    /// scope). Replacing the barrier there would drop the other tiles while
+    /// their queries are in flight; they would apply on arrival, beside
+    /// tiles still holding what they staged.
+    pub fn extend_flip(
+        &mut self,
+        keys: impl IntoIterator<Item = (QueryKey, FrameVersions)>,
+        now: Instant,
+    ) {
+        match self.barrier.as_mut() {
+            Some(barrier) => barrier.awaiting.extend(keys),
+            None => self.open_flip_each(keys, now),
+        }
+    }
+
     /// `key`'s tile now answers under `versions`: it started or stopped
     /// following a link group, which changes its scope generation. When an
     /// open barrier awaits `key`, hold it to that identity from here on;
@@ -2382,6 +2404,62 @@ mod tests {
         assert!(!f.barrier_wants(QueryKey(2), other));
         assert!(f.barrier_wants(QueryKey(1), v));
         assert_eq!(f.shared().versions().flip, v.flip, "and releases nothing");
+    }
+
+    /// Extending joins the flip in progress. Replacing it instead would
+    /// drop the tiles still in flight, which then apply on arrival while
+    /// the staged ones wait: the tear the barrier exists to prevent.
+    #[test]
+    fn extending_a_barrier_keeps_its_keys_and_its_deadline() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let lane = f.shared().versions();
+        let other = FrameVersions {
+            scope: lane.scope + 100,
+            ..lane
+        };
+        let (k1, k2, k3) = (QueryKey(1), QueryKey(2), QueryKey(3));
+        let opened = Instant::now();
+        f.open_flip_each([(k1, lane), (k2, lane)], opened);
+
+        let later = opened + std::time::Duration::from_millis(100);
+        f.extend_flip([(k2, other), (k3, other)], later);
+        assert!(
+            f.barrier_wants(k1, lane),
+            "an earlier key stays, under its identity"
+        );
+        assert!(
+            f.barrier_wants(k2, other),
+            "a key listed again is re-identified"
+        );
+        assert!(!f.barrier_wants(k2, lane));
+        assert!(f.barrier_wants(k3, other), "a new key joins");
+
+        assert!(
+            !f.sweep(later),
+            "sanity: the deadline has not passed at the extension"
+        );
+        assert!(
+            f.sweep(opened + FLIP_DEADLINE),
+            "the deadline is still the one the barrier opened with"
+        );
+    }
+
+    #[test]
+    fn extending_with_nothing_open_opens_and_an_empty_extension_changes_nothing() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let v = f.shared().versions();
+        f.extend_flip(std::iter::empty(), Instant::now());
+        assert!(!f.barrier_open(), "nothing to await opens nothing");
+
+        f.extend_flip([(QueryKey(1), v)], Instant::now());
+        assert!(f.barrier_wants(QueryKey(1), v), "with none open it opens");
+
+        f.extend_flip(std::iter::empty(), Instant::now());
+        assert!(
+            f.barrier_wants(QueryKey(1), v),
+            "an empty extension never clears an open barrier"
+        );
+        assert_eq!(f.shared().versions().flip, v.flip);
     }
 
     #[test]

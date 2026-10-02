@@ -44,8 +44,12 @@ impl ShellView {
             let f = self.frame.read(cx);
             f.is_pinned(prev) || f.is_pinned(active)
         };
+        // Only the lane half of the baseline: the lane read depends on the
+        // workspace, a link group's scope generation does not. Re-seeding
+        // the groups here would take a group change whose notification is
+        // still pending for already seen, and its followers on the workspace
+        // now shown would never flip.
         self.last_flip_versions = self.active_frame().read(cx).versions();
-        self.last_flip_groups = self.frame.read(cx).group_scope_gens();
         if lane_changed {
             self.frame
                 .update(cx, |f, _| f.view_mut(prev).end_scope_session());
