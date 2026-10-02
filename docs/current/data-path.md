@@ -297,10 +297,18 @@ even if its bytes changed. Discovery and the runner's pre-load check share
 this rule. A committed degraded generation counts as loaded; a rolled-back
 load has no new catalog entry.
 
-Invalid glob syntax, glob traversal errors, and CSV metadata errors are
-currently skipped. Catalog lookup errors propagate to the scheduler. An
-empty discovery result therefore cannot establish that every path was
-accessible. See [`discovery.rs`](../../crates/geode-data/src/source/discovery.rs)
+A pattern that matches no file has its literal prefix checked once: the text
+before its first `*`, `?` or `[`, cut back to the last separator (a pattern
+with no glob character names a file, so its directory is checked; a relative
+pattern resolves against the working directory; `~` is not expanded). A
+missing prefix reports `Degraded` with `path '<prefix>' not found`; one that
+is not a directory or cannot be opened reports `path '<prefix>' unreadable:
+<error>`; an invalid pattern reports `invalid pattern '<pattern>': <error>`.
+A readable empty directory is healthy, because an empty drop directory is
+normal; a dated directory that does not exist yet is `Degraded`, not
+`Failed`. Glob traversal errors below a readable prefix and CSV metadata
+errors are still skipped, and catalog lookup errors propagate to the
+scheduler. See [`discovery.rs`](../../crates/geode-data/src/source/discovery.rs)
 and [`sentinel.rs`](../../crates/geode-data/src/source/sentinel.rs).
 
 Adapters expose independent subscription, upload, and fetch capabilities.
@@ -812,6 +820,17 @@ operation or queue drain. Local document writes omit the start event, so
 autosave does not activate progress. A poll's `ready` count is the plan size
 before runner deduplication; its next-poll time is an estimate, falling back
 to the report time if adding the interval overflows.
+
+### Source conditions
+
+Conditions that are not one file's or one document's outcome have their own
+slot, so each is reported and cleared independently and never overwrites an
+unrelated one. Every one reaches the status bar, the diagnostics page and a
+tile's health chip under the source's own name.
+
+| Condition | Lane | Key | Health | Reason | Clears when |
+|---|---|---|---|---|---|
+| Source path missing, unreadable, or an invalid pattern | discovery | the source | `Degraded` | `path '<prefix>' not found`, `path '<prefix>' unreadable: <error>`, `invalid pattern '<pattern>': <error>` | the prefix exists and is readable |
 
 ## Limits and verification
 

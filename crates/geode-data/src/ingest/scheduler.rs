@@ -8,7 +8,7 @@
 use crate::health::{Health, severity_rank};
 use crate::ingest::IngestHandle;
 use crate::ingest::plan::build_plan;
-use crate::source::{CandidateState, SourceSpec, discover};
+use crate::source::{CandidateState, PathProblem, SourceSpec, discover_all};
 use crate::store::Catalog;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -161,8 +161,8 @@ fn run(
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || -> Result<Refused, crate::store::StoreError> {
                 geode_core::panic::contained(|| {
-                    let candidates = discover(spec, &Catalog::new(&conn), SystemTime::now())?;
-                    let health = worst_health(&candidates);
+                    let found = discover_all(spec, &Catalog::new(&conn), SystemTime::now())?;
+                    let health = worst_health(&found.candidates, &found.problems);
                     // Report every poll, including clean state. The service's shared tracker
                     // combines discovery with load health and deduplicates transitions.
                     let health_delivered = match health {
@@ -177,7 +177,7 @@ fn run(
                             detail: String::new(),
                         }),
                     };
-                    let plan = build_plan(&[(spec.clone(), candidates)]);
+                    let plan = build_plan(&[(spec.clone(), found.candidates)]);
                     let ready = plan.items.len();
                     if ready > 0 {
                         ingest.submit(plan);
@@ -244,20 +244,32 @@ fn log_refused_discovery(latched: &AtomicBool, what: &str, source: &str) {
     );
 }
 
-/// Select by severity rank and include every file at the worst rank. Equal
-/// severity must not compare reason strings alphabetically. The returned
-/// Health carries the first candidate's reason; detail includes individual
-/// reasons when they differ and a shared label when they agree.
-fn worst_health(candidates: &[crate::source::Candidate]) -> Option<(Health, String)> {
+/// Select by severity rank and include every finding at the worst rank. Equal
+/// severity must not compare reason strings alphabetically. A pattern the poll
+/// could not search ranks as `Degraded`, named by the pattern, beside the files
+/// it did find. The returned Health carries the first finding's reason; detail
+/// includes individual reasons when they differ and a shared label when they agree.
+fn worst_health(
+    candidates: &[crate::source::Candidate],
+    problems: &[PathProblem],
+) -> Option<(Health, String)> {
     let mut worst: Vec<(Health, String)> = Vec::new();
-    for c in candidates {
+    let unsearched = problems.iter().map(|p| {
+        (
+            Health::Degraded {
+                reason: p.reason.clone(),
+            },
+            p.pattern.clone(),
+        )
+    });
+    let found = candidates.iter().filter_map(|c| {
         let h = match &c.state {
             CandidateState::PendingTooLong => Health::PendingTooLong,
             CandidateState::Orphaned { reason } => Health::Degraded {
                 reason: reason.clone(),
             },
             CandidateState::Ready(_) | CandidateState::Pending | CandidateState::Unchanged => {
-                continue;
+                return None;
             }
         };
         let name = c
@@ -265,6 +277,9 @@ fn worst_health(candidates: &[crate::source::Candidate]) -> Option<(Health, Stri
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
+        Some((h, name))
+    });
+    for (h, name) in unsearched.chain(found) {
         let incumbent_rank = worst.first().map(|(w, _)| severity_rank(w));
         match incumbent_rank {
             Some(r) if r == severity_rank(&h) => worst.push((h, name)),
@@ -460,7 +475,8 @@ mod tests {
                 },
             ),
         ];
-        let (health, detail) = worst_health(&candidates).expect("both candidates are unhealthy");
+        let (health, detail) =
+            worst_health(&candidates, &[]).expect("both candidates are unhealthy");
         assert_eq!(
             health,
             Health::Degraded {
@@ -490,7 +506,7 @@ mod tests {
             ),
         ];
         let (health, detail) =
-            worst_health(&candidates).expect("all three candidates are unhealthy");
+            worst_health(&candidates, &[]).expect("all three candidates are unhealthy");
         assert_eq!(
             health,
             Health::Degraded {
@@ -501,6 +517,23 @@ mod tests {
             detail, "degraded: c.csv",
             "the two lower-rank names must be replaced, not kept alongside the winner"
         );
+    }
+
+    #[test]
+    fn an_unsearched_pattern_outranks_a_file_pending_too_long() {
+        let candidates = vec![candidate("stuck.csv", CandidateState::PendingTooLong)];
+        let problems = vec![PathProblem {
+            pattern: "/mnt/risk/*.csv".into(),
+            reason: "path '/mnt/risk' not found".into(),
+        }];
+        let (worst, detail) = worst_health(&candidates, &problems).unwrap();
+        assert_eq!(
+            worst,
+            Health::Degraded {
+                reason: "path '/mnt/risk' not found".into()
+            }
+        );
+        assert!(detail.contains("/mnt/risk/*.csv"), "{detail}");
     }
 
     #[test]

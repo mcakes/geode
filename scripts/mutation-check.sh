@@ -28638,6 +28638,46 @@ run_mutation "find-window: shell a notice takes the status line" \
             notice.clone()' \
   geode-pricer fzf_a_reindex_says_the_results_are_out_of_date
 
+# A drop directory that does not exist must not read as a healthy, empty source.
+run_mutation "silence: a missing source directory reads healthy" \
+  crates/geode-data/src/source/discovery.rs \
+  '    match std::fs::read_dir(&prefix) {' \
+  '    match std::fs::read_dir(".") {' \
+  geode-data \
+  a_missing_source_directory_is_degraded_and_clears_when_it_appears
+
+# An existing empty drop directory is normal, never a problem.
+run_mutation "silence: an empty drop directory reads as a problem" \
+  crates/geode-data/src/source/discovery.rs \
+  '        Ok(_) => None,' \
+  '        Ok(_) => Some(String::from("spurious")),' \
+  geode-data \
+  an_existing_empty_directory_is_healthy
+
+# An invalid glob is reported, not skipped.
+run_mutation "silence: an invalid source pattern is skipped" \
+  crates/geode-data/src/source/discovery.rs \
+  '                problems.push(invalid_pattern(pattern, &e));' \
+  '                let _ = &e;' \
+  geode-data \
+  an_invalid_source_pattern_is_degraded_not_skipped
+
+# The prefix is cut back to the LAST separator before the first glob character.
+run_mutation "silence: the literal prefix cuts at the first separator" \
+  crates/geode-data/src/source/discovery.rs \
+  '    match head.rfind(std::path::is_separator) {' \
+  '    match head.find(std::path::is_separator) {' \
+  geode-data \
+  literal_prefix_cuts_at_the_first_glob_character_and_back_to_a_separator
+
+# Path problems reach the scheduler's health report.
+run_mutation "silence: path problems never reach the scheduler" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '    for (h, name) in unsearched.chain(found) {' \
+  '    for (h, name) in unsearched.take(0).chain(found) {' \
+  geode-data \
+  a_missing_source_directory_is_degraded_and_clears_when_it_appears
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -1,10 +1,12 @@
 //! Poll directory globs, classify readiness, and compare files with the catalog.
 //! Polling avoids dependence on filesystem watches on network shares.
 //!
-//! Discovery reads metadata and sentinels, not CSV content. Glob traversal and
-//! CSV metadata errors are skipped; catalog errors propagate. An empty result
-//! therefore does not prove every configured path was accessible. See
-//! `docs/current/data-path.md` for readiness and change-detection limits.
+//! Discovery reads metadata and sentinels, not CSV content. A pattern that
+//! matches nothing has its literal prefix checked once: a missing, non-directory
+//! or unreadable prefix, and an invalid pattern, are `PathProblem`s the scheduler
+//! reports as `Degraded`. A readable empty directory is healthy. Glob traversal
+//! errors below a readable prefix and CSV metadata errors are still skipped;
+//! catalog errors propagate. See `docs/current/data-path.md`.
 
 use crate::source::sentinel::{Sentinel, parse_sentinel};
 use crate::store::Catalog;
@@ -43,17 +45,49 @@ pub struct Candidate {
     pub state: CandidateState,
 }
 
+/// A configured pattern this poll could not search: an invalid glob, or one
+/// that matched nothing because its literal prefix is missing, not a
+/// directory, or unreadable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathProblem {
+    pub pattern: String,
+    pub reason: String,
+}
+
+/// One poll's findings: the matched files, and the patterns it could not search.
+#[derive(Debug, Default)]
+pub struct Discovered {
+    pub candidates: Vec<Candidate>,
+    pub problems: Vec<PathProblem>,
+}
+
+/// The matched files only. Callers that report health use [`discover_all`].
 pub fn discover(
     spec: &SourceSpec,
     catalog: &Catalog,
     now: SystemTime,
 ) -> Result<Vec<Candidate>, StoreError> {
+    discover_all(spec, catalog, now).map(|d| d.candidates)
+}
+
+pub fn discover_all(
+    spec: &SourceSpec,
+    catalog: &Catalog,
+    now: SystemTime,
+) -> Result<Discovered, StoreError> {
     let mut out = Vec::new();
+    let mut problems = Vec::new();
     for pattern in &spec.paths {
-        let Ok(paths) = glob::glob(pattern) else {
-            continue;
+        let paths = match glob::glob(pattern) {
+            Ok(paths) => paths,
+            Err(e) => {
+                problems.push(invalid_pattern(pattern, &e));
+                continue;
+            }
         };
+        let mut matched = false;
         for csv_path in paths.flatten() {
+            matched = true;
             let Ok(meta) = std::fs::metadata(&csv_path) else {
                 continue;
             };
@@ -71,9 +105,59 @@ pub fn discover(
                 state,
             });
         }
+        if !matched && let Some(reason) = prefix_problem(pattern) {
+            problems.push(PathProblem {
+                pattern: pattern.clone(),
+                reason,
+            });
+        }
     }
     out.sort_by(|a, b| a.csv_path.cmp(&b.csv_path));
-    Ok(out)
+    Ok(Discovered {
+        candidates: out,
+        problems,
+    })
+}
+
+fn invalid_pattern(pattern: &str, e: &glob::PatternError) -> PathProblem {
+    PathProblem {
+        pattern: pattern.to_string(),
+        reason: format!("invalid pattern '{pattern}': {e}"),
+    }
+}
+
+/// The directory a pattern's matches must live under: the text before its
+/// first glob character (`*`, `?`, `[`), cut back to the last separator. A
+/// pattern with no glob character names one file, so its prefix is that
+/// file's directory. No separator means the working directory, as glob
+/// resolves a relative pattern; a cut at the root keeps the root. `~` is
+/// not expanded.
+pub(crate) fn literal_prefix(pattern: &str) -> PathBuf {
+    let head = match pattern.find(['*', '?', '[']) {
+        Some(i) => &pattern[..i],
+        None => pattern,
+    };
+    match head.rfind(std::path::is_separator) {
+        Some(0) => PathBuf::from(&head[..1]),
+        Some(i) => PathBuf::from(&head[..i]),
+        None => PathBuf::from("."),
+    }
+}
+
+/// Why a pattern that matched nothing could never have matched: its literal
+/// prefix is missing, not a directory, or unreadable. `None` for a readable
+/// directory, because an empty drop directory is normal. Opens the directory
+/// without listing it; `fs::metadata` alone succeeds on one the process
+/// cannot read.
+fn prefix_problem(pattern: &str) -> Option<String> {
+    let prefix = literal_prefix(pattern);
+    match std::fs::read_dir(&prefix) {
+        Ok(_) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Some(format!("path '{}' not found", prefix.display()))
+        }
+        Err(e) => Some(format!("path '{}' unreadable: {e}", prefix.display())),
+    }
 }
 
 fn sentinel_path_for(csv: &Path) -> PathBuf {
@@ -423,5 +507,124 @@ mod tests {
             !is_unchanged(&prev, 10, ts("2026-08-30T08:00:00Z")),
             "a different source time is a change"
         );
+    }
+
+    #[test]
+    fn literal_prefix_cuts_at_the_first_glob_character_and_back_to_a_separator() {
+        use std::path::PathBuf;
+        assert_eq!(
+            literal_prefix("/mnt/risk/*.csv"),
+            PathBuf::from("/mnt/risk")
+        );
+        assert_eq!(
+            literal_prefix("/mnt/risk/2026-*/x.csv"),
+            PathBuf::from("/mnt/risk")
+        );
+        assert_eq!(literal_prefix("/mnt/ri?k/x.csv"), PathBuf::from("/mnt"));
+        assert_eq!(literal_prefix("/mnt/[ab]/x.csv"), PathBuf::from("/mnt"));
+        assert_eq!(
+            literal_prefix("//share/risk/**/*.csv"),
+            PathBuf::from("//share/risk")
+        );
+        // No glob character: the pattern names one file, so its directory decides.
+        assert_eq!(
+            literal_prefix("/mnt/risk/eod.csv"),
+            PathBuf::from("/mnt/risk")
+        );
+        // Relative patterns resolve against the working directory, as glob does.
+        assert_eq!(literal_prefix("drops/*.csv"), PathBuf::from("drops"));
+        assert_eq!(literal_prefix("*.csv"), PathBuf::from("."));
+        assert_eq!(literal_prefix("/*.csv"), PathBuf::from("/"));
+        // glob does not expand `~`; the prefix keeps it so the reason names it.
+        assert_eq!(literal_prefix("~/risk/*.csv"), PathBuf::from("~/risk"));
+    }
+
+    fn one_pattern(pattern: String) -> SourceSpec {
+        SourceSpec::directory("risk_files", "risk_snapshot", vec![pattern])
+    }
+
+    #[test]
+    fn a_pattern_under_a_missing_directory_is_a_path_problem() {
+        let d = tempfile::tempdir().unwrap();
+        let gone = d.path().join("not-mounted");
+        let s = one_pattern(format!("{}/*.csv", gone.display()));
+        let (_sd, st) = store();
+        let cat = crate::store::Catalog::new(st.writer());
+        let found = discover_all(&s, &cat, SystemTime::now()).unwrap();
+        assert!(found.candidates.is_empty());
+        assert_eq!(
+            found.problems,
+            vec![PathProblem {
+                pattern: s.paths[0].clone(),
+                reason: format!("path '{}' not found", gone.display()),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_existing_empty_directory_is_healthy() {
+        let d = tempfile::tempdir().unwrap();
+        let s = one_pattern(format!("{}/*.csv", d.path().display()));
+        let (_sd, st) = store();
+        let cat = crate::store::Catalog::new(st.writer());
+        let found = discover_all(&s, &cat, SystemTime::now()).unwrap();
+        assert!(found.candidates.is_empty());
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+    }
+
+    #[test]
+    fn an_invalid_pattern_is_a_path_problem() {
+        let d = tempfile::tempdir().unwrap();
+        let s = one_pattern(format!("{}/[.csv", d.path().display()));
+        let (_sd, st) = store();
+        let cat = crate::store::Catalog::new(st.writer());
+        let found = discover_all(&s, &cat, SystemTime::now()).unwrap();
+        assert_eq!(found.problems.len(), 1);
+        assert!(
+            found.problems[0]
+                .reason
+                .starts_with(&format!("invalid pattern '{}': ", s.paths[0])),
+            "{:?}",
+            found.problems
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_directory_is_a_path_problem() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let locked = d.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A privileged runner reads anything; there is nothing to prove there.
+        let privileged = std::fs::read_dir(&locked).is_ok();
+        let s = one_pattern(format!("{}/*.csv", locked.display()));
+        let (_sd, st) = store();
+        let cat = crate::store::Catalog::new(st.writer());
+        let found = discover_all(&s, &cat, SystemTime::now()).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if privileged {
+            return;
+        }
+        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
+        assert!(
+            found.problems[0]
+                .reason
+                .starts_with(&format!("path '{}' unreadable: ", locked.display())),
+            "{:?}",
+            found.problems
+        );
+    }
+
+    #[test]
+    fn a_pattern_that_matches_is_not_checked_for_its_prefix() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "risk_2026-08-30_BK000.csv", "Book\nBK000\n");
+        let (_sd, st) = store();
+        let cat = crate::store::Catalog::new(st.writer());
+        let found = discover_all(&spec(d.path()), &cat, SystemTime::now()).unwrap();
+        assert_eq!(found.candidates.len(), 1);
+        assert!(found.problems.is_empty());
     }
 }

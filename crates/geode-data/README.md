@@ -182,10 +182,12 @@ often tripped:
   forgets) in order before the runner stops, each answering as usual, and
   drops every other queued job. A caller that stops waiting for the join can
   still exit with a write running.
-- Discovery compares path, size, and source time, not CSV contents. Glob and
-  CSV metadata errors are currently skipped, so an empty poll does not prove
-  path accessibility. Adapter queue admission likewise does not acknowledge
-  storage publication. See [source discovery and adapters](../../docs/current/data-path.md#source-discovery-and-adapters).
+- Discovery compares path, size, and source time, not CSV contents. A pattern
+  that matches nothing has its literal prefix opened once; a missing,
+  non-directory or unreadable prefix, or an invalid pattern, is a `Degraded`
+  source. Traversal errors below a readable prefix and CSV metadata errors
+  are still skipped. Adapter queue admission does not acknowledge storage
+  publication. See [source discovery and adapters](../../docs/current/data-path.md#source-discovery-and-adapters).
 - Upload channel admission, transport success, and a stored echo are separate
   events. Service-thread validation precedes each target's bounded FIFO worker
   queue; the worker encodes (`kind.write`) and sends. Write errors therefore

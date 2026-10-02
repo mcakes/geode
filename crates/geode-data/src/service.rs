@@ -6380,6 +6380,91 @@ source_name = "NPV"
         svc.shutdown();
     }
 
+    /// A service with one directory source, `eod_risk` over `risk_snapshot`,
+    /// polling `pattern` every 50 ms.
+    fn directory_service(
+        pattern: String,
+    ) -> (
+        tempfile::TempDir,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        let db = tempfile::tempdir().unwrap();
+        let ds = crate::ingest::load::tests_support::fixture().3;
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let (svc, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                poll_interval: Duration::from_millis(50),
+                batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+                ..crate::source::SourceSpec::directory("eod_risk", "risk_snapshot", vec![pattern])
+            }],
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+        })
+        .unwrap();
+        (db, svc, rx)
+    }
+
+    /// A drop directory that is not there is a degraded source, named by its
+    /// path, not a green one with no rows; it clears once the directory exists.
+    #[test]
+    fn a_missing_source_directory_is_degraded_and_clears_when_it_appears() {
+        let root = tempfile::tempdir().unwrap();
+        let drops = root.path().join("drops");
+        let (_db, svc, rx) = directory_service(format!("{}/*.csv", drops.display()));
+        let reason = until(&rx, |e| match e {
+            DataEvent::Health {
+                source,
+                worst: Health::Degraded { reason },
+                ..
+            } => {
+                assert_eq!(source, "eod_risk");
+                Some(reason)
+            }
+            _ => None,
+        });
+        assert_eq!(reason, format!("path '{}' not found", drops.display()));
+        std::fs::create_dir(&drops).unwrap();
+        until(&rx, |e| match e {
+            DataEvent::Health {
+                source,
+                worst: Health::Ok,
+                ..
+            } if source == "eod_risk" => Some(()),
+            _ => None,
+        });
+        svc.shutdown();
+    }
+
+    #[test]
+    fn an_invalid_source_pattern_is_degraded_not_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let pattern = format!("{}/[.csv", root.path().display());
+        let (_db, svc, rx) = directory_service(pattern.clone());
+        let reason = until(&rx, |e| match e {
+            DataEvent::Health {
+                source,
+                worst: Health::Degraded { reason },
+                ..
+            } if source == "eod_risk" => Some(reason),
+            _ => None,
+        });
+        assert!(
+            reason.starts_with(&format!("invalid pattern '{pattern}': ")),
+            "{reason}"
+        );
+        svc.shutdown();
+    }
+
     /// Clean polls and a clean publication for one source must combine into one
     /// Ok transition at the service boundary.
     #[test]
