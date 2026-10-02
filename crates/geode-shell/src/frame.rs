@@ -350,9 +350,11 @@ impl Frame {
 
     /// One tile's writable view: `set_scope` and `clear_scope` write the
     /// link group it follows, when it follows one; every other write is
-    /// its workspace lane's. Crate-private: a tile reaches it through its
-    /// own `FrameRef::update`, and no module can build one for another
-    /// tile.
+    /// its workspace lane's. Crate-private: a tile reaches it through
+    /// `FrameRef::update` on the handle it was created with. A handle can
+    /// be built for any tile (`FrameRef::for_tile` is public), so writing
+    /// only through one's own is a rule modules keep, not one the types
+    /// enforce; membership and emission have no such door at all.
     pub(crate) fn view_mut_for(&mut self, ws: WorkspaceIx, tile: TileId) -> FrameViewMut<'_> {
         FrameViewMut {
             frame: self,

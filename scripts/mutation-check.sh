@@ -29773,8 +29773,8 @@ run_mutation "link: a moved highlight is kept until the query changes" \
 # change.
 run_mutation "link: other dialogs keep the highlight by text" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '            | Target::LogLevel { .. } => self.list.set_query(query),' \
-  '            | Target::LogLevel { .. } => self.list.set_query_placing(query, None),' \
+  '            | Target::ActionValue { .. } => self.list.set_query(query),' \
+  '            | Target::ActionValue { .. } => self.list.set_query_placing(query, None),' \
   geode-shell other_targets_keep_the_highlight_by_text
 
 run_mutation "link: the title names the current groups" \
