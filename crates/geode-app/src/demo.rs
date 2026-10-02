@@ -977,7 +977,27 @@ mod demo_positions_tests {
         }
         assert!(rewritten >= 2);
         assert_eq!(after.ends_with('\n'), before.ends_with('\n'));
+        // One rewritten line keeps its ending byte for byte.
+        let ending = |line: &str| line[line.trim_end_matches(['\r', '\n']).len()..].to_string();
+        let (old_line, new_line) = before
+            .split_inclusive('\n')
+            .zip(after.split_inclusive('\n'))
+            .find(|(o, n)| o != n)
+            .expect("a rewritten line");
+        assert!(!ending(old_line).is_empty(), "{old_line:?}");
+        assert_eq!(ending(new_line).as_bytes(), ending(old_line).as_bytes());
         assert!(as_of(dir.path(), &sentinel) > as_of_before);
+        // CSV before sentinel: discovery holds a CSV newer than its sentinel
+        // as pending, so the sentinel is written last.
+        let mtime = |n: &str| {
+            std::fs::metadata(dir.path().join(n))
+                .and_then(|m| m.modified())
+                .unwrap()
+        };
+        assert!(
+            mtime(&sentinel) >= mtime(&name),
+            "the sentinel is written after its CSV"
+        );
     }
 
     #[test]

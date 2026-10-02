@@ -28601,6 +28601,14 @@ run_mutation "demo positions: the sentinel is not later" \
 
 # Move LHU: every selected row names one position, the selection moves, and
 # startup registers the action.
+# Relies on mtime resolution finer than the two writes' gap (APFS: ns); on a
+# coarse-mtime filesystem equal stamps let the swap survive.
+run_mutation "demo positions: the sentinel is written before its CSV" \
+  crates/geode-app/src/demo.rs \
+  $'        replace_file(&r.csv, &r.text)?;\n        replace_file(&r.sentinel, &r.sentinel_json)?;' \
+  $'        replace_file(&r.sentinel, &r.sentinel_json)?;\n        replace_file(&r.csv, &r.text)?;' \
+  geode-app a_move_rewrites_the_lhu_of_those_positions_only
+
 run_mutation "move lhu: a subtotal in the selection is moved anyway" \
   crates/geode-positions/src/lib.rs \
   '        let mut positions = ctx.selection_values(POSITION)?;' \
