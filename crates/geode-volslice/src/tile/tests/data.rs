@@ -395,22 +395,24 @@ fn a_refused_chain_submission_fails_the_fetch_with_the_refusal_worded(
 }
 
 /// Two batches in flight: the first's late answer is dropped, and the
-/// model's version moves once, for the answer applied.
+/// model's version moves once, for the answer applied. The two batches ask
+/// the same jobs, so only the tag can tell the older answer apart.
 #[gpui::test]
 fn an_older_vol_tag_is_dropped(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_bound(cx, None);
     h.show(&mut vcx);
     h.follow_a(&mut vcx);
-    h.post(&mut vcx, scope_of("SPX.Z"));
-    let (doc, chains) = published();
-    let reqs = h.answer_documents(&mut vcx, &doc, &chains);
-    let first = vols(&reqs)[0].clone();
-    // A board bump: a second batch, carrying the draft.
     let draft = cvi(&TERMS, Some(("2026-10-16", 0.01)));
     h.post(&mut vcx, draft_of("SPX.Z", &draft, DraftMark::Editing));
+    let (doc, chains) = published();
+    let reqs = h.answer_documents(&mut vcx, &doc, &chains);
+    let first = vols(&reqs).last().map(|p| (*p).clone()).expect("a batch");
+    // A board bump: the same draft falling behind, a second batch.
+    h.post(&mut vcx, draft_of("SPX.Z", &draft, DraftMark::Behind));
     let reqs = h.requests();
     let second = vols(&reqs)[0].clone();
     assert_ne!(first.tag, second.tag);
+    assert_eq!(first.jobs, second.jobs, "the same question twice");
     let before = h.version(&vcx);
     h.answer_vol(&mut vcx, &first);
     assert_eq!(h.version(&vcx), before, "the older answer is dropped");
@@ -585,7 +587,15 @@ fn leaving_a_group_drops_the_draft_and_returns_to_the_own_underlying(
             emit: None,
         },
     );
-    let reqs = h.answer_documents(&mut vcx, &doc, &chains);
+    // SPX.Z's draft is on the board while NDX.Z's documents are still the
+    // ones loaded: it waits for its own underlying's.
+    let reqs = h.requests();
+    assert!(vols(&reqs).is_empty(), "no draft over NDX.Z: {reqs:?}");
+    let tag = docs(&reqs)[0].tag;
+    h.answer_doc(&mut vcx, tag, cvi_snapshot(&doc));
+    let _ = h.requests();
+    h.answer_doc(&mut vcx, tag, chain_snapshot(&chains));
+    let reqs = h.requests();
     assert_eq!(
         vols(&reqs).last().unwrap().documents.len(),
         2,

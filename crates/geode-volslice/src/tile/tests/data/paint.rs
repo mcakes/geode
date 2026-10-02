@@ -294,8 +294,29 @@ fn x_resets_the_view_to_the_new_extent(cx: &mut gpui::TestAppContext) {
     let narrowest = min_span(Coordinate::LogMoneyness, &loaded);
     assert_eq!(view.min_span, narrowest);
     let full = h.tile.read_with(&vcx, |t, _| t.model().full());
-    let padded = padded(full, narrowest);
-    assert_eq!((view.lo, view.hi), padded, "not {zoomed:?}");
+    assert_eq!(
+        (view.lo, view.hi),
+        padded(full, narrowest),
+        "not {zoomed:?}"
+    );
+    // A zoom about log-moneyness zero overlaps the delta extent: kept, it
+    // would stand. The coordinate change itself resets it.
+    vcx.simulate_keystrokes("= =");
+    let zoomed = h.view(&vcx);
+    vcx.simulate_keystrokes("x");
+    h.answer_last(&mut vcx).unwrap();
+    let view = h.view(&vcx);
+    let full = h.tile.read_with(&vcx, |t, _| t.model().full());
+    assert!(
+        zoomed.hi > full.0 && zoomed.lo < full.1,
+        "the zoom overlaps the new extent: {zoomed:?} {full:?}"
+    );
+    let narrowest = min_span(Coordinate::Delta, &loaded);
+    assert_eq!(
+        (view.lo, view.hi),
+        padded(full, narrowest),
+        "not {zoomed:?}"
+    );
 }
 
 #[gpui::test]
