@@ -28500,7 +28500,7 @@ run_mutation "grid-window: pricer a refill-only delivery refreshes totals" \
   '            // Totals read the sheet: re-resolve the selection over the new prices.' \
   geode-pricer a_delivery_under_a_selection_updates_its_totals
 
-run_mutation "positions: a move is answered twice or never" \
+run_mutation "positions: a move is never answered" \
   crates/geode-data/src/positions.rs \
   '        let _ = sink(DataEvent::Command(outcome));' \
   '        let _ = (&sink, outcome);' \
@@ -28511,6 +28511,18 @@ run_mutation "positions: an adapter without a position side is called missing" \
   $'            .ok_or_else(|| format!("adapter \'{adapter}\' has no position side")),' \
   $'            .ok_or_else(|| format!("adapter \'{adapter}\' is not in this build")),' \
   geode-data an_adapter_without_a_position_side_refuses_every_move
+
+run_mutation "positions: the service's own refusal is never answered" \
+  crates/geode-data/src/service.rs \
+  '            let _ = (self.sink)(DataEvent::Command(CommandOutcome {' \
+  '            let _ = std::convert::identity(DataEvent::Command(CommandOutcome {' \
+  geode-data without_a_position_service_a_move_is_answered_with_the_refusal
+
+run_mutation "move lhu: a handle refusal at yes is silent" \
+  crates/geode-positions/src/lib.rs \
+  '                    Err(refusal) => acx.notice(format!("move to LHU {lhu} refused: {refusal}")),' \
+  '                    Err(_) => {}' \
+  geode-app a_move_the_data_handle_refuses_says_refused
 
 run_mutation "positions: a refusal reads as accepted" \
   crates/geode-core/src/positions.rs \

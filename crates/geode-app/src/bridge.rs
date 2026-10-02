@@ -3972,6 +3972,23 @@ role = "key"
         f.close();
     }
 
+    /// A yes the data handle cannot admit (here: shut down between the
+    /// confirm opening and `y`) says so at once, with the handle's refusal;
+    /// nothing else will answer it.
+    #[gpui::test]
+    fn a_move_the_data_handle_refuses_says_refused(cx: &mut gpui::TestAppContext) {
+        let (mut f, _bridge) = move_lhu_to_the_confirm(cx);
+        f.handle.shutdown();
+        f.type_keys("y");
+        assert_eq!(
+            f.shell
+                .read_with(&f.vcx, |s, _| s.notice_for_test())
+                .as_deref(),
+            Some("move to LHU L4 refused: the data service has stopped")
+        );
+        f.close();
+    }
+
     /// `n` at the confirm sends no command and says nothing.
     #[gpui::test]
     fn no_to_the_confirm_sends_nothing(cx: &mut gpui::TestAppContext) {
