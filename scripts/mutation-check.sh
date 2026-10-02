@@ -28984,6 +28984,14 @@ run_mutation "link: a group nobody visible follows clears no barrier" \
   '                    f.open_flip_each(awaited, Instant::now());' \
   geode-shell a_group_nobody_visible_follows_opens_no_barrier
 
+# A group's change concerns that group's followers alone: a visible
+# follower of another group requeries nothing and must not be awaited.
+run_mutation "link: a group's change awaits only that group's followers" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                                .is_some_and(|g| groups_now[g.index()] != last_groups[g.index()]);' \
+  '                                .is_some_and(|_| true);' \
+  geode-shell a_group_nobody_visible_follows_opens_no_barrier
+
 # A lane change is a new flip for everyone on screen: the barrier is
 # replaced. Joined instead, keys of tiles now hidden would hold it to its
 # deadline.
