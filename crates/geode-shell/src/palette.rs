@@ -1856,11 +1856,17 @@ mod tests {
         usage.record(&items[3].usage_key(), 1_000);
         let fresh = || PaletteState::new(items.clone());
         let used = || PaletteState::with_usage(items.clone(), &usage, 1_000);
+        let mut category_hits = 0;
         for make in [&fresh as &dyn Fn() -> PaletteState, &used] {
-            for query in ["", "fo", "th gr", "pal wk", "scope", "zzz"] {
+            for query in ["", "fo", "th gr", "pal wk", "scope", "workspace", "zzz"] {
                 let mut state = make();
                 state.set_query(query);
                 let view = state.view();
+                category_hits += view
+                    .rows
+                    .iter()
+                    .filter(|r| !r.category_runs.is_empty())
+                    .count();
                 let old: Vec<PaletteRow> = state
                     .rows()
                     .map(|(ix, item, indices, title_len)| {
@@ -1885,6 +1891,7 @@ mod tests {
                 }
             }
         }
+        assert!(category_hits > 0, "the query set reaches a category match");
         // The usage snapshot reorders the prepared rows, not only the cache.
         let state = used();
         assert_eq!(state.view().rows[0].item, 3);

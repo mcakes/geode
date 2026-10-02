@@ -31304,12 +31304,14 @@ run_mutation "chrome rows: palette selection scrolls to the top" \
   geode-shell \
   paging_the_palette_keeps_the_selected_row_painted
 
-# The prepared title runs are the title's own indices, as the old render
-# loop split them; the whole alignment would glow category hits in the title.
-run_mutation "chrome rows: palette title runs take the category's indices" \
+# The prepared category runs are rebased past the title and its separating
+# space, as the old render loop split them; unrebased, a category hit glows
+# on the wrong characters. (Handing the title every index is no mutation:
+# `highlight_runs` drops indices past the title's end.)
+run_mutation "chrome rows: palette category runs skip the rebase" \
   crates/geode-shell/src/palette.rs \
-  '                    title_runs: highlight_runs(&self.titles[*i], &indices[..split]),' \
-  '                    title_runs: highlight_runs(&self.titles[*i], indices),' \
+  '                    category_runs: highlight_runs(&self.categories[*i], &category),' \
+  '                    category_runs: highlight_runs(&self.categories[*i], &indices[split..]),' \
   geode-shell \
   the_prepared_palette_rows_match_the_old_render_loop
 
