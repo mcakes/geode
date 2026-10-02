@@ -65,6 +65,16 @@ reads `fullscreen · N hidden` (just
 dispatches that action and restores the layout. Dock trees cannot be
 fullscreen, so a dock never shows the segment.
 
+The same section opens with a `following A` segment while the focused tile
+follows a link group, with the group's underlying after it (`following A ·
+SPX.Z`) when the group's scope names exactly one. A tile that only emits
+shows none, and a page hides it. The label is cached on the focused tile,
+its group and the group's scope generation, and refreshed while a render is
+prepared, so a repaint formats nothing. Its tooltip names the
+`tile::link_group` key and a click dispatches that action. Each tile's own
+header carries the matching chip (`geode_tile::header::link_chips`): the
+group's letter with a down arrow for follow and an up arrow for emit.
+
 Tile occupants are created through the app-supplied `ModuleRoster`. A new
 occupant begins hidden and receives an explicit visibility value during the
 next reconciliation. Hidden occupants may release live subscriptions and

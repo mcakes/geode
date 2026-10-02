@@ -1526,3 +1526,262 @@ fn a_pick_for_a_tile_closed_under_the_chooser_links_nothing(cx: &mut gpui::TestA
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert_eq!(notice(&shell, &vcx).as_deref(), Some(TILE_GONE));
 }
+
+// --- The status segment ---------------------------------------------
+//
+// These tests never force a draw after the change they make. The test
+// window repaints only when something marked it dirty, so a segment that
+// would go stale in the app (the shell not told to repaint) fails here.
+
+/// The label the status bar last painted from, when it painted one. Tests
+/// cannot read painted text; this cached string is what the segment shows.
+fn following(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Option<String> {
+    shell.read_with(vcx, |s, _| {
+        s.link_label.as_ref().map(|(_, label)| label.to_string())
+    })
+}
+
+/// The focused tile of a two-tile shell, and the tile beside it.
+fn focused_and_other(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> (TileId, TileId) {
+    let focused = shell.read_with(vcx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    let other = if focused == TileId(1) {
+        TileId(2)
+    } else {
+        TileId(1)
+    };
+    (focused, other)
+}
+
+/// The segment is about the focused tile: it shows while that tile follows
+/// a group, in the bar's right-hand section, and moving focus to a tile
+/// that follows nothing removes it. Focus moves by its keys.
+#[gpui::test]
+fn the_status_bar_names_the_group_the_focused_tile_follows(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, _frame) = two_tiles(cx);
+    let (focused, other) = focused_and_other(&shell, &vcx);
+    assert_eq!((focused, other), (TileId(2), TileId(1)), "fixture");
+    assert!(
+        vcx.debug_bounds("status-following").is_none(),
+        "nothing followed: no segment"
+    );
+    assert_eq!(following(&shell, &vcx), None);
+
+    set_follow(&shell, &mut vcx, focused, Some(Group::A));
+    let seg = vcx
+        .debug_bounds("status-following")
+        .expect("the focused tile follows A: the segment shows");
+    let bar = vcx
+        .debug_bounds("shell-status-bar")
+        .expect("status bar painted");
+    assert!(
+        seg.left() > bar.center().x,
+        "the segment sits in the bar's right-hand section"
+    );
+    assert_eq!(following(&shell, &vcx).as_deref(), Some("following A"));
+
+    vcx.simulate_keystrokes("alt-h");
+    vcx.run_until_parked();
+    assert_eq!(focused_and_other(&shell, &vcx).0, other, "focus moved");
+    assert!(
+        vcx.debug_bounds("status-following").is_none(),
+        "the focused tile follows nothing: no segment"
+    );
+    assert_eq!(following(&shell, &vcx), None);
+
+    vcx.simulate_keystrokes("alt-l");
+    vcx.run_until_parked();
+    assert_eq!(focused_and_other(&shell, &vcx).0, focused, "focus is back");
+    assert!(vcx.debug_bounds("status-following").is_some());
+    assert_eq!(following(&shell, &vcx).as_deref(), Some("following A"));
+
+    set_follow(&shell, &mut vcx, focused, None);
+    assert!(
+        vcx.debug_bounds("status-following").is_none(),
+        "following the workspace again removes it"
+    );
+}
+
+/// The segment names what the tile follows. A tile that only emits takes
+/// nothing from its group, so the bar says nothing about it.
+#[gpui::test]
+fn emitting_alone_shows_no_following_segment(cx: &mut gpui::TestAppContext) {
+    let (services, _emitter) = emitting_services(Emission::default());
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    let (focused, _) = focused_and_other(&shell, &vcx);
+
+    set_emit(&shell, &mut vcx, focused, Some(Group::B));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(focused).emit),
+        Some(Group::B),
+        "fixture: the focused tile emits"
+    );
+    assert!(vcx.debug_bounds("status-following").is_none());
+    assert_eq!(following(&shell, &vcx), None);
+}
+
+/// The label carries the single underlying the group's scope names, and
+/// follows it. The second change reaches the frame from the emitting tile
+/// with no shell handler in between: the frame's notification alone has to
+/// repaint the bar.
+#[gpui::test]
+fn the_following_segment_tracks_the_groups_scope(cx: &mut gpui::TestAppContext) {
+    let (services, emitter) = emitting_services(Emission {
+        scope: Some(underlying("SPX.Z")),
+        board: Vec::new(),
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    let (focused, other) = focused_and_other(&shell, &vcx);
+    set_follow(&shell, &mut vcx, focused, Some(Group::A));
+    assert_eq!(
+        following(&shell, &vcx).as_deref(),
+        Some("following A"),
+        "an unwritten group names no underlying"
+    );
+
+    set_emit(&shell, &mut vcx, other, Some(Group::A));
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("SPX.Z"),
+        "fixture: the emitter moved the group"
+    );
+    assert_eq!(
+        following(&shell, &vcx).as_deref(),
+        Some("following A \u{00b7} SPX.Z")
+    );
+
+    emitter.emission.borrow_mut().scope = Some(underlying("NDX"));
+    tile_changed(&shell, &mut vcx, other);
+    assert_eq!(
+        following(&shell, &vcx).as_deref(),
+        Some("following A \u{00b7} NDX")
+    );
+
+    // Another group's scope is not this tile's.
+    set_emit(&shell, &mut vcx, other, Some(Group::B));
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::B).as_deref(),
+        Some("NDX"),
+        "fixture: the emitter now moves B"
+    );
+    emitter.emission.borrow_mut().scope = Some(underlying("RTY"));
+    tile_changed(&shell, &mut vcx, other);
+    assert_eq!(
+        following(&shell, &vcx).as_deref(),
+        Some("following A \u{00b7} NDX"),
+        "A keeps its scope as last written"
+    );
+}
+
+/// The label is formatted when its tile, group or the group's scope
+/// changes, never per paint: repaints, and a frame change that moves none
+/// of the three, keep the very string. The test holds the first string, so
+/// a rebuilt one could not land at the same address. The underlying is long
+/// on purpose: a `SharedString` of 23 bytes or fewer lives inline, and its
+/// address would say nothing about a rebuild.
+#[gpui::test]
+fn an_unchanged_frame_rebuilds_no_label(cx: &mut gpui::TestAppContext) {
+    let (services, _emitter) = emitting_services(Emission {
+        scope: Some(underlying("STOXX50E.EUREX")),
+        board: Vec::new(),
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    let (focused, other) = focused_and_other(&shell, &vcx);
+    set_follow(&shell, &mut vcx, focused, Some(Group::A));
+    set_emit(&shell, &mut vcx, other, Some(Group::A));
+    let label = |vcx: &gpui::VisualTestContext| {
+        shell.read_with(vcx, |s, _| {
+            s.link_label
+                .as_ref()
+                .map(|(_, label)| label.clone())
+                .unwrap()
+        })
+    };
+    let first = label(&vcx);
+    assert_eq!(first.as_ref(), "following A \u{00b7} STOXX50E.EUREX");
+    assert!(first.len() > 23, "fixture: the label is heap-backed");
+
+    draw(&mut vcx);
+    draw(&mut vcx);
+    assert_eq!(
+        label(&vcx).as_ptr(),
+        first.as_ptr(),
+        "a repaint formats nothing"
+    );
+
+    frame.update(&mut vcx, |f, cx| {
+        assert!(f.shared_mut().set_text(Some("ndx".into())));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(
+        label(&vcx).as_ptr(),
+        first.as_ptr(),
+        "the workspace's own scope is not the group's"
+    );
+}
+
+/// The segment is the pointer route to the chooser, on the tile it names.
+#[gpui::test]
+fn a_click_on_the_segment_opens_the_chooser(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, test_services());
+    set_follow(&shell, &mut vcx, tile, Some(Group::C));
+    let seg = vcx
+        .debug_bounds("status-following")
+        .expect("the segment shows");
+    assert_eq!(chooser_tile(&shell, &vcx), None);
+
+    vcx.simulate_click(seg.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert_eq!(chooser_tile(&shell, &vcx), Some(tile));
+}
+
+/// The tooltip names the chooser's key, so the segment teaches the
+/// keyboard route it stands in for.
+#[gpui::test]
+fn hovering_the_segment_shows_the_chord(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, test_services());
+    set_follow(&shell, &mut vcx, tile, Some(Group::A));
+    let seg = vcx
+        .debug_bounds("status-following")
+        .expect("the segment shows");
+
+    vcx.simulate_mouse_move(
+        seg.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("tip-status-following-chord-alt+u")
+            .is_some(),
+        "the tooltip names the link group key"
+    );
+    assert!(vcx.debug_bounds("tip-status-following-title").is_some());
+}
+
+/// A page covers the tiles and the chooser is refused over one, so the
+/// segment (whose click opens the chooser) is not offered there.
+#[gpui::test]
+fn a_page_hides_the_following_segment(cx: &mut gpui::TestAppContext) {
+    let page = crate::module::recording::RecordingPageFactory::new("diagnostics");
+    let (_window, mut vcx, shell, tile) = one_tile_in(cx, services_with_page(page));
+    set_follow(&shell, &mut vcx, tile, Some(Group::A));
+    assert!(vcx.debug_bounds("status-following").is_some());
+
+    // `mod+d`, the page's own key.
+    vcx.simulate_keystrokes("alt-d");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.page_open()), "fixture");
+    assert!(vcx.debug_bounds("status-following").is_none());
+    assert_eq!(following(&shell, &vcx), None);
+
+    vcx.simulate_keystrokes("alt-d");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| !s.page_open()), "fixture");
+    assert!(vcx.debug_bounds("status-following").is_some());
+}

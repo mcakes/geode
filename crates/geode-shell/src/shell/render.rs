@@ -280,6 +280,10 @@ impl Render for ShellView {
             self.drop_row_menu(window, cx);
         }
 
+        // The status bar's `following` label, rebuilt only when the focused
+        // tile, its group or the group's scope moved. A field write, ahead
+        // of the borrows the bar's other arguments take.
+        self.refresh_link_label(cx);
         let active_index = self.services.workspaces.active_index();
         let non_empty = self.services.workspaces.non_empty_indices();
         let reload_message = self.last_reload.status_message();
@@ -333,6 +337,20 @@ impl Render for ShellView {
                 cx.notify();
             });
         };
+        // Clicking the following segment opens the link group chooser
+        // through the same action `mod+u` dispatches.
+        let following_click_entity = cx.entity();
+        let on_following_click = move |window: &mut Window, cx: &mut App| {
+            following_click_entity.update(cx, |view, cx| {
+                view.dispatch(
+                    &crate::actions::ActionId("tile::link_group".into()),
+                    None,
+                    window,
+                    cx,
+                );
+                cx.notify();
+            });
+        };
         let status_bar = status::status_bar(
             self.matcher.pending(),
             self.matcher.count(),
@@ -344,6 +362,8 @@ impl Render for ShellView {
             (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_ref()),
             on_diagnostics_click,
             ingest,
+            self.link_label.as_ref().map(|(_, label)| label),
+            on_following_click,
             fullscreen_hidden,
             on_fullscreen_click,
             bar_model.as_of.as_deref(),

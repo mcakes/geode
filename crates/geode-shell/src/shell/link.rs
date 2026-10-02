@@ -1,6 +1,7 @@
 //! The shell's doors onto link groups: who follows and emits, and the pull
 //! that carries an emitting tile's emission into the frame. Modules never
-//! write the frame; they answer `emission()` and say when it changed.
+//! write the frame; they answer `emission()` and say when it changed. The
+//! status bar's `following` label for the focused tile is cached here.
 
 use std::rc::Rc;
 
@@ -9,10 +10,48 @@ use gpui::{App, Context};
 use geode_core::link::Group;
 use geode_core::query::QueryKey;
 
-use super::ShellView;
+use super::{ShellView, status};
 use crate::tiling::TileId;
 
+/// What the status bar's `following` label was built from: the focused
+/// tile, the group it follows and that group's scope generation.
+pub(super) type LinkLabelKey = (TileId, Group, u64);
+
+/// The column whose single value a group's scope is named by.
+const UNDERLYING: &str = "underlying_ref";
+
 impl ShellView {
+    /// Bring the status bar's `following` label up to date with the focused
+    /// tile. The label is rebuilt only when the tile, its
+    /// followed group or that group's scope generation changed, so a
+    /// repaint with none of them moved formats nothing. Under a page there
+    /// is no label: the page covers the tiles and the chooser the segment
+    /// opens is refused there.
+    ///
+    /// Called while preparing a render. It writes this one field and
+    /// notifies nobody: a notification sent while the window draws is
+    /// dropped, and none is needed, since the label is read in the same
+    /// pass.
+    pub(super) fn refresh_link_label(&mut self, cx: &App) {
+        let frame = self.frame.read(cx);
+        let focused = if self.page_open() {
+            None
+        } else {
+            self.services.workspaces.active().focused_tile()
+        };
+        let key: Option<LinkLabelKey> = focused.and_then(|tile| {
+            let group = frame.membership(tile).follow?;
+            Some((tile, group, frame.group_scope_gens()[group.index()]))
+        });
+        if self.link_label.as_ref().map(|(held, _)| *held) == key {
+            return;
+        }
+        self.link_label = key.map(|key| {
+            let underlying = frame.group_scope(key.1).sole(UNDERLYING);
+            (key, status::following_label(key.1, underlying))
+        });
+    }
+
     /// Follow `group`, or the workspace again with `None`.
     ///
     /// Writes the frame: call this from the shell's own handlers, never

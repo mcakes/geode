@@ -1,10 +1,12 @@
 //! Bottom status bar prepared from arguments and the active theme, with no retained
 //! state or I/O. Stopped data threads, count, pending keys, configuration messages, diagnostics, ingestion,
 //! and historical-time indicators occupy the left region. The right region is the
-//! view-state section: the fullscreen indicator, then the active theme name.
+//! view-state section: the link group the focused tile follows, the fullscreen
+//! indicator, then the active theme name.
 //! Workspace indicators belong to the sidebar. StatusBar supplies
 //! the status_bar and status_bar_border theme tokens.
 
+use geode_core::link::Group;
 use gpui::prelude::*;
 use gpui::{App, IntoElement, MouseButton, SharedString, Window, div, px};
 use gpui_component::status_bar::StatusBar;
@@ -57,10 +59,30 @@ pub fn fullscreen_label(hidden: usize) -> SharedString {
     }
 }
 
+/// The following segment's text: the link group the focused tile follows
+/// and, when the group's scope names exactly one underlying, that
+/// underlying. The bare form is a literal; the other is formatted here,
+/// once per change, by the caller that caches it (`ShellView::link_label`),
+/// never per paint.
+pub fn following_label(group: Group, underlying: Option<&str>) -> SharedString {
+    match underlying {
+        None => SharedString::new_static(match group {
+            Group::A => "following A",
+            Group::B => "following B",
+            Group::C => "following C",
+            Group::D => "following D",
+        }),
+        Some(underlying) => format!("following {} \u{00b7} {underlying}", group.letter()).into(),
+    }
+}
+
 /// Render optional status segments in order: stopped data threads, count, nonempty
 /// pending keys, reload failure, write failure, restart requirement, shell notice,
 /// diagnostics summary, ingestion activity, and historical time on the left;
-/// fullscreen, then the theme name, on the right. The fullscreen segment shows while
+/// following, fullscreen, then the theme name, on the right. The following segment
+/// shows while the focused tile follows a link group, naming the group and its
+/// single underlying; clicking it opens the link group chooser through the supplied
+/// callback. The fullscreen segment shows while
 /// a main-tree tile is maximised, carrying the number of tiles it hides; clicking it
 /// restores the layout through the supplied callback. Stopped threads and
 /// configuration errors use danger, restart and diagnostics use warning, and ordinary
@@ -86,6 +108,10 @@ pub fn status_bar(
     // Current ingestion activity, shown as a loading label and a two-pixel strip along
     // the bar's top edge. None hides both.
     ingest: Option<&IngestActivity>,
+    // The prepared `following_label` for the focused tile; None while it
+    // follows no link group.
+    following: Option<&SharedString>,
+    on_following_click: impl Fn(&mut Window, &mut App) + 'static,
     // Other tiles hidden by a fullscreen main-tree tile; None while nothing is
     // fullscreen.
     fullscreen_hidden: Option<usize>,
@@ -248,6 +274,36 @@ pub fn status_bar(
         );
     }
 
+    if let Some(label) = following {
+        // First in the view-state section: whose scope the focused tile is
+        // showing. Muted like the fullscreen segment beside it: following a
+        // group is a choice, not a fault. The click and the tooltip's key
+        // both open the chooser that changes it.
+        bar = bar.right(
+            div()
+                .id("status-following")
+                .px_1()
+                .rounded(theme.radius_tokens().sm)
+                .text_color(theme.muted_foreground)
+                .pointer_states(control::paint(
+                    theme,
+                    control::Rest::Bare,
+                    theme.status_bar,
+                    theme.muted_foreground,
+                ))
+                .debug_selector(|| "status-following".to_string())
+                .child(label.clone())
+                .tooltip(crate::tips::tip(
+                    "tip-status-following",
+                    "Link group",
+                    Some("tile::link_group"),
+                    Some(SharedString::new_static("click to change")),
+                ))
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                    on_following_click(window, cx);
+                }),
+        );
+    }
     if let Some(hidden) = fullscreen_hidden {
         // The right region is the view-state section: how the window is
         // being shown, beside the theme it is painted in. Muted, like the
@@ -315,4 +371,32 @@ pub fn status_bar(
                     ),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The label names the group, and the underlying only when the
+    /// group's scope names exactly one: a group with no scope, or one
+    /// spanning several underlyings, reads as the group alone.
+    #[test]
+    fn the_following_label_names_the_group_and_its_single_underlying() {
+        assert_eq!(following_label(Group::A, None).as_ref(), "following A");
+        assert_eq!(following_label(Group::D, None).as_ref(), "following D");
+        assert_eq!(
+            following_label(Group::A, Some("SPX.Z")).as_ref(),
+            "following A \u{00b7} SPX.Z"
+        );
+        assert_eq!(
+            following_label(Group::C, Some("NDX")).as_ref(),
+            "following C \u{00b7} NDX"
+        );
+        for group in Group::ALL {
+            assert!(
+                following_label(group, None).ends_with(group.letter()),
+                "{group:?}"
+            );
+        }
+    }
 }

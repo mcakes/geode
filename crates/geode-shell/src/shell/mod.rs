@@ -627,6 +627,12 @@ pub struct ShellView {
     /// the shell pulls. Dropped when the tile leaves its group or closes,
     /// so a tile in no group is never pulled.
     emit_subs: HashMap<TileId, gpui::Subscription>,
+    /// The status bar's `following` label and what it was built from: the
+    /// focused tile, the group it follows and that group's scope
+    /// generation. Refreshed in render preparation (`refresh_link_label`)
+    /// and rebuilt only when that key changes, so a repaint formats
+    /// nothing. `None` while the focused tile follows no group.
+    link_label: Option<(link::LinkLabelKey, gpui::SharedString)>,
     /// Whether the first occupant reconciliation has dropped the link
     /// memberships restored for tiles no workspace holds. Set by that pass,
     /// so no later render looks again: a membership can only outlive its
@@ -1384,6 +1390,7 @@ impl ShellView {
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
             emit_subs: HashMap::new(),
+            link_label: None,
             linked_pruned: false,
             stack_sent: HashMap::new(),
             notice: None,
