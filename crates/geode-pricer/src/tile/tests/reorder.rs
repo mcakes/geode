@@ -181,6 +181,11 @@ fn a_grip_drag_moves_a_v_block_as_one_undo(cx: &mut gpui::TestAppContext) {
         ]
     );
     assert!(selected(&h, &vcx), "the selection rides along");
+    assert_eq!(
+        cursor_text(&h, &vcx).as_deref(),
+        Some("SPX Z26 3000 P"),
+        "the cursor keeps the selection's end"
+    );
     assert_eq!(h.footer(&vcx), None);
     h.dispatch(&mut vcx, "escape", None);
     h.dispatch(&mut vcx, "undo", None);

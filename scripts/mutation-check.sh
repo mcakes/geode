@@ -26774,8 +26774,8 @@ run_mutation "pricer grid: a partial package's key reads every leg" \
 # the one door refuses them all.
 run_mutation "pricer scope: structural verbs ignore a partly hidden package" \
   crates/geode-pricer/src/tile/select.rs \
-  '        first_refusal(targets.into_iter().map(|r| self.read_only(r)))' \
-  '        first_refusal(targets.into_iter().map(|_| None))' \
+  '            self.read_only(r)' \
+  '            None::<&'"'"'static str>' \
   geode-pricer row_verbs_on_a_partly_hidden_package_are_refused
 
 # A selection refuses whole when any of its rows is a partly hidden package.
@@ -27040,24 +27040,183 @@ run_mutation "pricer grouping: totals count a group row's descendant again" \
   '            Some(s) if true => {' \
   geode-pricer totals_count_a_group_row_and_its_descendant_once
 
-# Line movement: refused under a grouping; past hidden siblings without.
-run_mutation "pricer grouping: shift+j moves under a grouping" \
-  crates/geode-pricer/src/tile/select.rs \
-  '        if matches!(verb, "move_down" | "move_up") && self.grouped() {' \
-  '        if matches!(verb, "move_down" | "move_up") && false {' \
-  geode-pricer line_moves_refuse_under_a_grouping
-
+# Line movement: within the mover's own group under a grouping; past
+# hidden siblings always.
 run_mutation "pricer grouping: a move swaps with a hidden sibling" \
   crates/geode-pricer/src/tile.rs \
-  '        let steps = shown_steps(&siblings, at, delta, |r| self.visibility.is_shown(r))' \
-  '        let steps = shown_steps(&siblings, at, delta, |_| true)' \
+  '            shown_steps(&siblings, at, delta, lands).ok_or(edge)?' \
+  '            shown_steps(&siblings, at, delta, |_| true).ok_or(edge)?' \
   geode-pricer a_move_steps_past_a_sibling_the_scope_hides
 
 run_mutation "pricer grouping: a selection move swaps with a hidden sibling" \
   crates/geode-pricer/src/tile/select.rs \
-  '        let edit = move_plan(&self.sheet, &top, down, |r| self.visibility.is_shown(r))?;' \
-  '        let edit = move_plan(&self.sheet, &top, down, |_| true)?;' \
+  '            move_plan(&self.sheet, &top, down, lands, edge)?' \
+  '            move_plan(&self.sheet, &top, down, |_| true, edge)?' \
   geode-pricer a_move_steps_past_a_sibling_the_scope_hides
+
+run_mutation "pricer grouping: move_lands steps onto a hidden sibling" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        let shown = |r: usize| self.visibility.is_shown(r);' \
+  '        let shown = |_: usize| true;' \
+  geode-pricer a_move_steps_past_a_sibling_the_scope_hides
+
+run_mutation "pricer grouping: a grouped move lands in another group" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        Ok((Box::new(move |r| shown(r) && same(r)), edge))' \
+  '        Ok((Box::new(move |r| shown(r) && (same(r) || true)), edge))' \
+  geode-pricer a_grouped_move_steps_within_its_group
+
+run_mutation "pricer grouping: a grouped block move lands in another group" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        Ok((Box::new(move |r| shown(r) && same(r)), edge))' \
+  '        Ok((Box::new(move |r| shown(r) && (same(r) || true)), edge))' \
+  geode-pricer a_grouped_block_move_stays_in_its_group
+
+run_mutation "pricer grouping: a root at its group's end says only the end" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        let edge = if roots { OFF_GROUP_END } else { OFF_END };' \
+  '        let edge = if roots { OFF_END } else { OFF_END };' \
+  geode-pricer a_grouped_move_steps_within_its_group
+
+run_mutation "pricer grouping: a leg at its package's end names the group" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        let edge = if roots { OFF_GROUP_END } else { OFF_END };' \
+  '        let edge = if roots { OFF_GROUP_END } else { OFF_GROUP_END };' \
+  geode-pricer grouped_leg_moves_stay_in_the_package_and_split_ones_refuse
+
+run_mutation "pricer grouping: a split package's leg moves" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        (moving && self.sheet.parent(row).is_some_and(|p| self.split(p))).then_some(SPLIT)' \
+  '        (moving && false && self.sheet.parent(row).is_some_and(|p| self.split(p))).then_some(SPLIT)' \
+  geode-pricer grouped_leg_moves_stay_in_the_package_and_split_ones_refuse
+
+# The same-node rule and the drop plan (core::reorder).
+run_mutation "pricer reorder: movers in two groups share a node" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '        if groups.any(|g| g != Some(path)) {' \
+  '        if groups.any(|g| g.is_none()) {' \
+  geode-pricer same_node_refuses_movers_in_two_groups_and_a_split_package
+
+run_mutation "pricer reorder: a split package has one group" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '            Some([one]) => Some(*one),' \
+  '            Some([one, ..]) => Some(*one),' \
+  geode-pricer same_node_refuses_movers_in_two_groups_and_a_split_package
+
+run_mutation "pricer reorder: a drop in place is an empty edit" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '        if in_place {' \
+  '        if false && in_place {' \
+  geode-pricer a_single_row_drop_is_one_move_and_its_own_gaps_are_no_ops
+
+run_mutation "pricer reorder: a mover after its anchor lands one short" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '                    if j < a { a } else { a + 1 }' \
+  '                    if j < a { a - 1 } else { a + 1 }' \
+  geode-pricer a_single_row_drop_is_one_move_and_its_own_gaps_are_no_ops
+
+run_mutation "pricer reorder: a block drop moves only one mover" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '            anchor = Anchor::After(m);' \
+  '            anchor = anchor;' \
+  geode-pricer a_block_drop_keeps_its_order_and_lands_whole
+
+run_mutation "pricer reorder: a package counts as one flat row" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '        let size = |r: usize| sheet.block(r).len();' \
+  '        let size = |_: usize| 1;' \
+  geode-pricer a_package_drop_counts_its_legs_and_a_leg_moves_among_legs
+
+run_mutation "pricer reorder: a pointer outside the stops still snaps" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '        if !region.contains(&row) {' \
+  '        if false && !region.contains(&row) {' \
+  geode-pricer a_grouped_drop_hops_other_groups_and_leaves_their_order
+
+run_mutation "pricer reorder: a gap inside a package's legs is legal" \
+  crates/geode-pricer/src/core/reorder.rs \
+  '            .filter(|&g| self.legal(g))' \
+  '            .filter(|&g| g == g)' \
+  geode-pricer a_package_drop_counts_its_legs_and_a_leg_moves_among_legs
+
+# The grip drag (tile::reorder, delegate).
+run_mutation "pricer reorder: the drop gap ignores the pointer's half" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        plan.snap(row, rel - rel.floor() >= 0.5)' \
+  '        plan.snap(row, false)' \
+  geode-pricer a_grip_drag_moves_a_row_down_and_up
+
+run_mutation "pricer reorder: the drop line never paints" \
+  crates/geode-pricer/src/delegate.rs \
+  '            .filter(|_| cx.has_active_drag())' \
+  '            .filter(|_| false)' \
+  geode-pricer a_grip_drag_moves_a_row_down_and_up
+
+run_mutation "pricer reorder: a drop leaves the cursor behind" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '                self.cursor.at = Some(d.grabbed);' \
+  '                let _ = &d.grabbed;' \
+  geode-pricer a_grip_drag_moves_a_row_down_and_up
+
+run_mutation "pricer reorder: a drop reshapes a live selection" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '            Ok(()) if self.selection.is_none() => {' \
+  '            Ok(()) if true => {' \
+  geode-pricer a_grip_drag_moves_a_v_block_as_one_undo
+
+run_mutation "pricer reorder: a grip in a V selection drags its row alone" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '            .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(g));' \
+  '            .is_some_and(|_| false);' \
+  geode-pricer a_grip_drag_moves_a_v_block_as_one_undo
+
+run_mutation "pricer reorder: a grouped drag drops in another group" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '            Some(path) => self.exact_row(id, path)?,' \
+  '            Some(_) => self.model.grid_row_of(id)?,' \
+  geode-pricer a_grouped_grip_drag_stays_in_its_group
+
+run_mutation "pricer reorder: escape leaves a grip drag live" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.cancel_row_drag(window, cx) && verb == "escape" {' \
+  '        if verb == "escape" && false && self.cancel_row_drag(window, cx) {' \
+  geode-pricer escape_cancels_a_grip_drag
+
+run_mutation "pricer reorder: a grip click reaches the table" \
+  crates/geode-pricer/src/tile.rs \
+  '        ) && self.table.read(cx).delegate().grip_pressed' \
+  '        ) && false && self.table.read(cx).delegate().grip_pressed' \
+  geode-pricer a_grip_press_never_selects_moves_the_cursor_or_edits
+
+run_mutation "pricer reorder: a grip press is a cell press" \
+  crates/geode-pricer/src/delegate.rs \
+  '                if d.inner_press == Some(InnerPress::Grip) {' \
+  '                if false && d.inner_press == Some(InnerPress::Grip) {' \
+  geode-pricer a_grip_press_never_selects_moves_the_cursor_or_edits
+
+run_mutation "pricer reorder: grips paint under a sort" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        if self.sort.is_some() || self.loading {' \
+  '        if self.loading {' \
+  geode-pricer no_grip_under_a_sort_or_on_a_group_row
+
+run_mutation "pricer reorder: a split package paints a grip" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '                !split.contains(&package) && !partial' \
+  '                !partial' \
+  geode-pricer no_grip_on_split_or_partly_hidden_packages
+
+run_mutation "pricer reorder: a partly hidden package paints a grip" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '                !split.contains(&package) && !partial' \
+  '                !split.contains(&package)' \
+  geode-pricer no_grip_on_split_or_partly_hidden_packages
+
+run_mutation "pricer reorder: the bottom edge never scrolls" \
+  crates/geode-pricer/src/tile/reorder.rs \
+  '        if self.scroll_step(cx) == 0. {' \
+  '        if true {' \
+  geode-pricer a_grip_drag_at_the_bottom_edge_scrolls
 
 # Session: the pin and the open grouping rows round-trip, held mid-load,
 # NULL apart from the empty string.
