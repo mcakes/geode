@@ -28557,6 +28557,26 @@ run_mutation "demo positions: the sentinel is not later" \
   '    let as_of = now;' \
   geode-app the_sentinel_is_strictly_later_even_within_the_same_second
 
+# Move LHU: every selected row names one position, the selection moves, and
+# startup registers the action.
+run_mutation "move lhu: a subtotal in the selection is moved anyway" \
+  crates/geode-positions/src/lib.rs \
+  '        return ctx.selection_values(POSITION);' \
+  '        return Ok(ctx.selection.iter().filter_map(|r| r.iter().find(|(c, _)| c == POSITION).map(|(_, v)| v.clone())).collect());' \
+  geode-positions a_selection_with_a_subtotal_disables_move_lhu
+
+run_mutation "move lhu: the selection is ignored" \
+  crates/geode-positions/src/lib.rs \
+  '    if !ctx.selection.is_empty() {' \
+  '    if false {' \
+  geode-app move_lhu_sends_the_selected_positions_after_confirm
+
+run_mutation "move lhu: never registered" \
+  crates/geode-app/src/main.rs \
+  '    roster.add_action(Rc::new(geode_positions::MoveLhu::new(' \
+  '    let _ = (Rc::new(geode_positions::MoveLhu::new(' \
+  geode-app move_lhu_sends_the_selected_positions_after_confirm
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
