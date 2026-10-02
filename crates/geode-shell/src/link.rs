@@ -180,34 +180,6 @@ impl Links {
         followed | emitted
     }
 
-    /// Forget every linked tile `live` rejects. `true` when any was dropped.
-    ///
-    /// Every rejected tile's membership and last emission goes first, then
-    /// each group that lost an emitter is re-derived once. Forgetting them
-    /// one at a time would walk a board through states it does not end in
-    /// (a leaving emitter uncovering another that is leaving too), counting
-    /// a board change and firing watches for each.
-    pub(crate) fn retain(&mut self, live: impl Fn(TileId) -> bool) -> bool {
-        let before = self.following.len() + self.emitting.len();
-        self.following.retain(|tile, _| live(*tile));
-        let mut lost_an_emitter = [false; 4];
-        let last = &mut self.last;
-        self.emitting.retain(|tile, g| {
-            let keep = live(*tile);
-            if !keep {
-                last.remove(tile);
-                lost_an_emitter[g.index()] = true;
-            }
-            keep
-        });
-        for g in Group::ALL {
-            if lost_an_emitter[g.index()] {
-                self.rebuild_board(g);
-            }
-        }
-        self.following.len() + self.emitting.len() != before
-    }
-
     /// Replace a group's scope, drawing its generation from the frame's
     /// counter. An equal scope is not a write.
     pub(crate) fn set_scope(&mut self, g: Group, scope: Scope, generation: &mut u64) -> bool {

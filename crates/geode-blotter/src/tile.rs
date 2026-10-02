@@ -6072,7 +6072,13 @@ mod tests {
         h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
         let follow = |vcx: &mut gpui::VisualTestContext, group: Option<Group>| {
             h.frame.update(vcx, |f, cx| {
-                f.follow(TileId(7), group);
+                f.link_for_test(
+                    TileId(7),
+                    geode_core::link::Membership {
+                        follow: group,
+                        emit: None,
+                    },
+                );
                 cx.notify();
             });
             // The shell's follow door repaints the tile; here the test does.

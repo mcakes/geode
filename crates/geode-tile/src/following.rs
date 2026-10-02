@@ -405,7 +405,7 @@ pub fn arrive_immediately(barrier: &mut impl Barrier, key: QueryKey) -> bool {
 mod tests {
     use super::*;
     use geode_core::groupings::GroupingSlots;
-    use geode_core::link::Group;
+    use geode_core::link::{Group, Membership};
     use geode_core::scope::Scope;
     use geode_core::scopes::SavedScopes;
     use geode_shell::frame::{FLIP_DEADLINE, Frame};
@@ -887,7 +887,15 @@ mod tests {
         let frame = cx.update(|cx| cx.new(|_| fresh_frame()));
         let ws = WorkspaceIx::FIRST;
         let id = TileId(7);
-        frame.update(cx, |f, _| assert!(f.follow(id, Some(Group::A))));
+        frame.update(cx, |f, _| {
+            f.link_for_test(
+                id,
+                Membership {
+                    follow: Some(Group::A),
+                    emit: None,
+                },
+            )
+        });
         let tile = FrameRef::for_tile(frame.clone(), ws, id);
         let workspace = FrameRef::new(frame.clone(), ws);
         assert_eq!(tile.tile(), Some(id));

@@ -616,6 +616,7 @@ impl HealthWatch {
 mod tests {
     use super::*;
     use geode_core::groupings::GroupingSlots;
+    use geode_core::link::Membership;
     use geode_core::log::LogLevels;
     use geode_core::scopes::SavedScopes;
     use geode_shell::diagnostics::SourceSummary;
@@ -867,8 +868,7 @@ mod tests {
     ) {
         let frame = view.read_with(vcx, |s, _| s.frame.entity().clone());
         frame.update(vcx, |f, cx| {
-            f.follow(TILE, follow);
-            f.emit(TILE, emit);
+            f.link_for_test(TILE, Membership { follow, emit });
             cx.notify();
         });
         view.update(vcx, |_, cx| cx.notify());
@@ -886,8 +886,13 @@ mod tests {
     fn a_tile_in_no_group_has_no_link_chip(cx: &mut TestAppContext) {
         let frame = fresh_frame(cx);
         frame.update(cx, |f, _| {
-            f.follow(TileId(9), Some(Group::A));
-            f.emit(TileId(9), Some(Group::B));
+            f.link_for_test(
+                TileId(9),
+                Membership {
+                    follow: Some(Group::A),
+                    emit: Some(Group::B),
+                },
+            );
         });
         let tile = FrameRef::for_tile(frame, WorkspaceIx::FIRST, TILE);
         assert_eq!(cx.read(|cx| link_chips(&tile, cx)), [None, None]);
@@ -900,7 +905,13 @@ mod tests {
     fn an_unbound_frame_ref_has_none(cx: &mut TestAppContext) {
         let frame = fresh_frame(cx);
         frame.update(cx, |f, _| {
-            f.follow(TILE, Some(Group::A));
+            f.link_for_test(
+                TILE,
+                Membership {
+                    follow: Some(Group::A),
+                    emit: None,
+                },
+            );
         });
         let unbound = FrameRef::new(frame.clone(), WorkspaceIx::FIRST);
         assert_eq!(cx.read(|cx| link_chips(&unbound, cx)), [None, None]);
@@ -919,8 +930,7 @@ mod tests {
         let tile = FrameRef::for_tile(frame.clone(), WorkspaceIx::FIRST, TILE);
         let mut chips = |follow: Option<Group>, emit: Option<Group>| {
             frame.update(cx, |f, _| {
-                f.follow(TILE, follow);
-                f.emit(TILE, emit);
+                f.link_for_test(TILE, Membership { follow, emit })
             });
             cx.read(|cx| link_chips(&tile, cx))
         };

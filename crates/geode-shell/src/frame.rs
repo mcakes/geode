@@ -350,8 +350,10 @@ impl Frame {
 
     /// One tile's writable view: `set_scope` and `clear_scope` write the
     /// link group it follows, when it follows one; every other write is
-    /// its workspace lane's.
-    pub fn view_mut_for(&mut self, ws: WorkspaceIx, tile: TileId) -> FrameViewMut<'_> {
+    /// its workspace lane's. Crate-private: a tile reaches it through its
+    /// own `FrameRef::update`, and no module can build one for another
+    /// tile.
+    pub(crate) fn view_mut_for(&mut self, ws: WorkspaceIx, tile: TileId) -> FrameViewMut<'_> {
         FrameViewMut {
             frame: self,
             ws: Some(ws),
@@ -388,7 +390,12 @@ impl Frame {
     /// both hold the empty scope at generation zero (neither was ever
     /// written): equal content under an equal number, so nothing requeries
     /// and nothing needs to.
-    pub fn follow(&mut self, tile: TileId, group: Option<Group>) -> bool {
+    ///
+    /// Crate-private, like every write of a tile's membership or emission:
+    /// the shell's doors (`ShellView::set_follow`, `set_emit` and the
+    /// emission pull) are the only callers, so a module, which reaches
+    /// `Frame` through its handle's `DerefMut`, has no door to a group.
+    pub(crate) fn follow(&mut self, tile: TileId, group: Option<Group>) -> bool {
         let changed = self.links.follow(tile, group);
         if changed {
             fresh(&mut self.generation);
@@ -400,7 +407,7 @@ impl Frame {
     /// it changes something. A tile that leaves or switches group takes
     /// what it posted off the old group's board at once; that group's scope
     /// stays as last written.
-    pub fn emit(&mut self, tile: TileId, group: Option<Group>) -> bool {
+    pub(crate) fn emit(&mut self, tile: TileId, group: Option<Group>) -> bool {
         let changed = self.links.emit(tile, group);
         if changed {
             fresh(&mut self.generation);
@@ -422,7 +429,7 @@ impl Frame {
     /// or board changed and observers should be notified. A tile that emits
     /// into no group, or repeats its last answer, writes nothing; a board
     /// change never moves `data`.
-    pub fn post_emission(&mut self, tile: TileId, emission: Emission) -> bool {
+    pub(crate) fn post_emission(&mut self, tile: TileId, emission: Emission) -> bool {
         let Frame {
             links, generation, ..
         } = self;
@@ -431,7 +438,7 @@ impl Frame {
 
     /// Drop a closed tile's membership and what it posted. `true`, and the
     /// generation advances, when it was in a group.
-    pub fn forget_tile(&mut self, tile: TileId) -> bool {
+    pub(crate) fn forget_tile(&mut self, tile: TileId) -> bool {
         let changed = self.links.forget(tile);
         if changed {
             fresh(&mut self.generation);
@@ -439,14 +446,22 @@ impl Frame {
         changed
     }
 
-    /// Drop every linked tile `live` rejects. `true`, and the generation
-    /// advances, when any was dropped.
-    pub fn retain_linked(&mut self, live: impl Fn(TileId) -> bool) -> bool {
-        let changed = self.links.retain(live);
-        if changed {
-            fresh(&mut self.generation);
-        }
-        changed
+    /// Test-only: put `tile` in these groups, as the shell's doors would.
+    /// A test outside this crate has no shell to go through; production
+    /// code links a tile through `ShellView::set_follow` and `set_emit`
+    /// only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn link_for_test(&mut self, tile: TileId, membership: Membership) {
+        self.follow(tile, membership.follow);
+        self.emit(tile, membership.emit);
+    }
+
+    /// Test-only: record `emission` as `tile`'s, as the shell's pull would.
+    /// `true` when its group's scope or board changed. Production code
+    /// posts only what the shell pulled from `TileContent::emission`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn post_for_test(&mut self, tile: TileId, emission: Emission) -> bool {
+        self.post_emission(tile, emission)
     }
 
     /// Watch one group's board for a dataset, or one document key (or key
@@ -737,7 +752,7 @@ impl Frame {
     /// key listed twice keeps the last identity given for it. An empty set
     /// clears the barrier without bumping flip. No version changes or
     /// notifications are emitted here.
-    pub fn open_flip_each(
+    pub(crate) fn open_flip_each(
         &mut self,
         keys: impl IntoIterator<Item = (QueryKey, FrameVersions)>,
         now: Instant,
@@ -760,7 +775,7 @@ impl Frame {
     /// scope). Replacing the barrier there would drop the other tiles while
     /// their queries are in flight; they would apply on arrival, beside
     /// tiles still holding what they staged.
-    pub fn extend_flip(
+    pub(crate) fn extend_flip(
         &mut self,
         keys: impl IntoIterator<Item = (QueryKey, FrameVersions)>,
         now: Instant,
@@ -777,7 +792,7 @@ impl Frame {
     /// left under the old one the tile's next arrival would not match and
     /// the flip would wait out its deadline. A key nothing awaits is left
     /// out: this never opens, releases or notifies.
-    pub fn reidentify(&mut self, key: QueryKey, versions: FrameVersions) {
+    pub(crate) fn reidentify(&mut self, key: QueryKey, versions: FrameVersions) {
         if let Some(awaited) = self.barrier.as_mut().and_then(|b| b.awaiting.get_mut(&key)) {
             *awaited = versions;
         }
@@ -917,19 +932,15 @@ impl<'a> FrameView<'a> {
     /// even without a frame mutation, covering zone reloads and midnight.
     /// The caller supplies cached time inputs; this method reads no global clock.
     ///
-    /// The bar shows the workspace, so this is asked of a workspace's view
-    /// only, and the model is built from the lane whatever the view
-    /// follows: a model built from a follower's view would describe its
-    /// group's scope under the workspace's controls.
+    /// The bar shows the workspace, so the model is built from the lane
+    /// whatever the view follows: a model built from a follower's view
+    /// would describe its group's scope under the workspace's controls. A
+    /// module asking through its own handle gets the workspace's model.
     pub fn bar_model(
         &self,
         clock: geode_core::clock::Clock,
         today: chrono::NaiveDate,
     ) -> Rc<ScopeBarModel> {
-        debug_assert!(
-            self.group.is_none(),
-            "the scope bar model was asked of a view that follows a link group"
-        );
         let lane = self.lane_view();
         // `flip` alone never changes what the bar shows — keyed out here
         // (rather than relying on it happening to already match) so a
@@ -3048,39 +3059,26 @@ mod tests {
         assert!(!spx.is_for(Group::A, "cvi_params", None));
     }
 
+    /// Forgetting a tile advances the generation exactly when the tile was
+    /// in a group: it is the session writer's dirty signal, so a membership
+    /// that left without it would stay in the session file, and a tile in
+    /// no group closing must not make the session dirty.
     #[test]
-    fn retaining_live_tiles_drops_the_rest_and_their_entries() {
+    fn forgetting_a_tile_advances_the_generation_only_when_it_was_linked() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        let (keep, gone) = (TileId(1), TileId(2));
-        f.follow(keep, Some(Group::A));
-        f.emit(gone, Some(Group::A));
-        f.post_emission(gone, draft("SPX.Z", &doc("SPX.Z")));
-        assert!(f.retain_linked(|t| t == keep));
-        assert_eq!(f.membership(keep).follow, Some(Group::A));
-        assert!(f.membership(gone).is_empty());
-        assert!(on_board(&f, Group::A, "SPX.Z").is_none());
-        assert!(!f.retain_linked(|t| t == keep), "nothing left to drop");
-    }
-
-    /// A closed tile that only followed is dropped as well, and dropping
-    /// advances the generation: it is the session writer's dirty signal, so
-    /// a membership that left without it would stay in the session file.
-    #[test]
-    fn retaining_live_tiles_drops_a_closed_follower_and_marks_the_session_dirty() {
-        let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        let (keep, gone) = (TileId(1), TileId(2));
-        f.emit(keep, Some(Group::A));
-        f.follow(gone, Some(Group::B));
+        let (emitter, follower, unlinked) = (TileId(1), TileId(2), TileId(3));
+        f.emit(emitter, Some(Group::A));
+        f.follow(follower, Some(Group::B));
         let before = f.generation();
-        assert!(f.retain_linked(|t| t == keep));
-        assert!(f.membership(gone).is_empty());
-        assert_eq!(f.membership(keep).emit, Some(Group::A));
+        assert!(f.forget_tile(follower), "a tile that only followed");
+        assert!(f.membership(follower).is_empty());
+        assert_eq!(f.membership(emitter).emit, Some(Group::A));
         assert!(f.generation() > before);
         let settled = f.generation();
-        assert!(!f.retain_linked(|t| t == keep));
-        assert!(!f.forget_tile(gone), "already gone");
+        assert!(!f.forget_tile(follower), "already gone");
+        assert!(!f.forget_tile(unlinked));
         assert_eq!(f.generation(), settled, "nothing dropped, nothing to save");
-        assert!(f.forget_tile(keep));
+        assert!(f.forget_tile(emitter));
         assert!(f.generation() > settled);
     }
 
@@ -3194,75 +3192,31 @@ mod tests {
         assert_eq!(lane.versions(), f.view(ws(1)).versions());
     }
 
-    /// A closed emitter whose draft another emitter still posts, as the
-    /// same allocation, leaves the board as it was: no board generation,
-    /// no watch revision.
+    /// A module can ask for the bar's model through its own handle, whose
+    /// view follows a group. It gets the workspace's model, the one the
+    /// shell's bar paints: built from the group it would describe a scope
+    /// the bar's controls do not edit.
     #[test]
-    fn retaining_one_of_two_emitters_sharing_a_draft_leaves_the_board_alone() {
+    fn the_bar_model_asked_of_a_followers_view_describes_the_lane() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        let (p1, p2) = (TileId(1), TileId(2));
-        let shared = doc("SPX.Z");
-        f.emit(p1, Some(Group::A));
-        f.emit(p2, Some(Group::A));
-        f.post_emission(p1, draft("SPX.Z", &shared));
-        f.post_emission(p2, draft("SPX.Z", &shared));
-        let watch = f.watch_board(Group::A, "cvi_params", Some("SPX.Z"));
-        let (board, revision) = (f.board_gen(Group::A), watch.revision());
+        f.shared_mut().set_scope(book_scope("b1"));
+        let tile = TileId(7);
+        f.follow(tile, Some(Group::A));
+        f.view_mut_for(ws(1), tile)
+            .set_scope(Scope::one("underlying_ref", "SPX.Z"));
+        let clock = Clock::utc();
+        let today = clock.today(chrono::Utc::now());
 
-        assert!(f.retain_linked(|t| t == p1));
-        assert!(Arc::ptr_eq(
-            &on_board(&f, Group::A, "SPX.Z").unwrap(),
-            &shared
+        let model = f.view_for(ws(1), tile).bar_model(clock, today);
+        assert_eq!(model.chips.len(), 1);
+        assert_eq!(model.chips[0].summary, "book \u{2208} b1");
+        assert!(
+            Rc::ptr_eq(&model, &f.view(ws(1)).bar_model(clock, today)),
+            "one cached model serves the workspace's view and a follower's"
+        );
+        assert!(Rc::ptr_eq(
+            &model,
+            &f.view_mut_for(ws(1), tile).bar_model(clock, today)
         ));
-        assert_eq!(f.board_gen(Group::A), board);
-        assert_eq!(watch.revision(), revision);
-    }
-
-    /// Dropping several tiles re-derives each board once, from what is
-    /// left. Dropped one at a time, a board passes through states it does
-    /// not end in: here the newest post leaving would uncover the middle
-    /// one, which is leaving too, and a watch would fire twice for a board
-    /// that ends holding the allocation it began with.
-    #[test]
-    fn retaining_does_not_pass_a_board_through_a_state_it_does_not_end_in() {
-        let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        // The newest poster has the lowest id, so a one-at-a-time drop in
-        // id order would uncover the middle post first.
-        let (newest, middle, oldest) = (TileId(1), TileId(2), TileId(3));
-        let (kept, passing) = (doc("SPX.Z"), doc("SPX.Z"));
-        for tile in [newest, middle, oldest] {
-            f.emit(tile, Some(Group::A));
-        }
-        f.post_emission(oldest, draft("SPX.Z", &kept));
-        f.post_emission(middle, draft("SPX.Z", &passing));
-        f.post_emission(newest, draft("SPX.Z", &kept));
-        let watch = f.watch_board(Group::A, "cvi_params", Some("SPX.Z"));
-        let (board, revision) = (f.board_gen(Group::A), watch.revision());
-
-        assert!(f.retain_linked(|t| t == oldest));
-        assert!(Arc::ptr_eq(
-            &on_board(&f, Group::A, "SPX.Z").unwrap(),
-            &kept
-        ));
-        assert_eq!(f.board_gen(Group::A), board);
-        assert_eq!(watch.revision(), revision);
-    }
-
-    /// However many emitters closed, a board that changed counts one
-    /// change: a follower compares the number, and two for one change
-    /// would make it rebuild twice.
-    #[test]
-    fn retaining_rebuilds_a_board_once_however_many_emitters_closed() {
-        let mut f = Frame::new(slots(), SavedScopes::new(), None);
-        let (p1, p2) = (TileId(1), TileId(2));
-        f.emit(p1, Some(Group::A));
-        f.emit(p2, Some(Group::A));
-        f.post_emission(p1, draft("SPX.Z", &doc("SPX.Z")));
-        f.post_emission(p2, draft("NDX", &doc("NDX")));
-        let board = f.board_gen(Group::A);
-        assert!(f.retain_linked(|_| false));
-        assert!(on_board(&f, Group::A, "SPX.Z").is_none());
-        assert!(on_board(&f, Group::A, "NDX").is_none());
-        assert_eq!(f.board_gen(Group::A), board + 1);
     }
 }

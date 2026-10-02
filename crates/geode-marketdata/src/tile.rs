@@ -6543,7 +6543,13 @@ label = "skew"
         let (h, mut vcx) = open_bound(cx);
         let follow = |vcx: &mut gpui::VisualTestContext, group: Option<Group>| {
             h.frame.update(vcx, |f, cx| {
-                f.follow(TileId(TILE), group);
+                f.link_for_test(
+                    TileId(TILE),
+                    geode_core::link::Membership {
+                        follow: group,
+                        emit: None,
+                    },
+                );
                 cx.notify();
             });
             // The shell's follow door repaints the tile; here the test does.
