@@ -2,16 +2,25 @@
 //! its data handle and the catalog it picks underlyings from, answers the
 //! shell's door (`crate::content::VolsliceContent`) and paints the tile.
 //! The data flow (documents under the flip barrier, the followed group's
-//! board, the vol batch and the model swap) is [`data`]'s.
+//! board, the vol batch and the model swap) is [`data`]'s; the choosers
+//! are [`picker`]'s and the chart's pointer gestures [`pointer`]'s.
+//!
+//! What paint reads beside the model is prepared in [`Chrome`] whenever the
+//! tile is notified and an input it was built from changed, never in
+//! render: the header's text, the strip's rows, the footer's notice.
 
 mod data;
 mod picker;
+mod pointer;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
+
+use chrono::NaiveDate;
 
 use geode_chart::core::palette::Palette;
 use geode_chart::core::view::View;
-use geode_chart::xy::XyModel;
+use geode_chart::xy::{XyElement, XyModel};
 use geode_core::document::DocumentRows;
 use geode_core::link::{DraftMark, Group};
 use geode_data::DataHandle;
@@ -21,20 +30,29 @@ use geode_shell::frame::{FrameRef, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::link::BoardWatch;
 use geode_shell::module::StackHandle;
+use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_tile::following::FollowingQuery;
+use geode_tile::header::{HEADER_HEIGHT, HealthWatch, Mode, link_chips};
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, Focusable as _, Hsla, SharedString, Window, div};
-use gpui_component::{ActiveTheme as _, Theme, v_flex};
+use gpui::{
+    App, Context, ElementId, Entity, Focusable as _, Hsla, MouseButton, MouseDownEvent,
+    MouseMoveEvent, ScrollWheelEvent, SharedString, Window, canvas, div, px,
+};
+use gpui_component::{ActiveTheme as _, Theme, h_flex, v_flex};
 
 use crate::commands::{self, Command};
 use crate::content::ACTIONS;
 use crate::core::build::{Plan, with_split};
-use crate::core::model::{Kind, Loaded, State, StripRow};
+use crate::core::docs::{CHAIN, CVI};
+use crate::core::model::{Kind, Loaded, Pair, State, StripRow};
 use crate::core::session;
+use crate::header::{self, FooterHint, HeaderModel};
+use crate::strip::{self, StripPaint};
 
 use data::{Fetch, Fetched};
 use picker::Popup;
+use pointer::{ChartBounds, Drag};
 
 pub use picker::PICKER_CONTEXT;
 
@@ -106,10 +124,50 @@ pub struct VolsliceTile {
     /// drop expiries before today.
     #[cfg(test)]
     pub(crate) today_pin: Option<chrono::NaiveDate>,
+    /// Whether the shell last told this tile it is the focused tile. A
+    /// strip press acts only when it was; the cursor row is lit only then.
+    focused: bool,
+    /// The chart surface's last painted bounds (`pointer`).
+    chart_bounds: ChartBounds,
+    /// The pointer gesture in progress (`pointer`).
+    drag: Option<Drag>,
+    /// The header's health half: the two datasets' sources.
+    health: HealthWatch,
+    chrome: Chrome,
     /// Every action id the dispatch door received, so a test proves a key
     /// reached the tile through the real keymap rather than calling a verb.
     #[cfg(test)]
     pub(crate) dispatch_log: Vec<ActionId>,
+}
+
+/// What the header names, as of the last header build.
+#[derive(Clone, Debug, PartialEq)]
+struct HeaderKey {
+    underlying: Option<String>,
+    coordinate: geode_core::vol::Coordinate,
+    kinds: Vec<Kind>,
+    mark: Option<DraftMark>,
+    hidden: BTreeSet<Kind>,
+    diff: Option<Pair>,
+}
+
+/// What the strip's rows were built from: the rows, the active set and
+/// the palette's theme colors.
+type StripKey = (Vec<StripRow>, Option<BTreeSet<NaiveDate>>, [Hsla; 7]);
+
+/// Prepared paint input, each part with the inputs it was built from.
+#[derive(Default)]
+struct Chrome {
+    header: Option<HeaderModel>,
+    header_key: Option<HeaderKey>,
+    strip: Vec<StripPaint>,
+    strip_key: Option<StripKey>,
+    notice: Option<SharedString>,
+    notice_key: Option<(Vec<String>, Vec<String>)>,
+    hints: Vec<FooterHint>,
+    /// How many parts were rebuilt, for the test that paint formats nothing.
+    #[cfg(test)]
+    builds: usize,
 }
 
 fn palette_key(theme: &Theme) -> [Hsla; 7] {
@@ -149,9 +207,22 @@ impl VolsliceTile {
         // An open picker follows the catalog as it lands; anything else the
         // diagnostics entity announces leaves it alone.
         cx.observe(&diagnostics, |this, _, cx| {
-            if this.refresh_picker(cx) {
+            let health = this
+                .health
+                .refresh(cx, |d| d.health_for_datasets(&[CVI, CHAIN]));
+            if this.refresh_picker(cx) || health {
                 cx.notify();
             }
+        })
+        .detach();
+        // The chrome follows every change the tile announces, and only the
+        // parts whose inputs moved are rebuilt.
+        cx.observe_self(|this, cx| this.refresh_chrome(cx)).detach();
+        // The footer names live chords: re-resolved on a keymap reload,
+        // never per frame.
+        cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
+            this.chrome.hints = header::footer_hints(cx);
+            cx.notify();
         })
         .detach();
         // Expiry colors come from the theme: derived once per theme change,
@@ -163,12 +234,21 @@ impl VolsliceTile {
                 this.palette = palette_of(&key);
                 if this.plan.is_some() {
                     this.submit_batch(cx);
+                } else {
+                    // The strip's dots take the new colors.
+                    cx.notify();
                 }
             }
         })
         .detach();
         let key = palette_key(cx.theme());
-        VolsliceTile {
+        let mut health = HealthWatch::new(diagnostics.clone(), id);
+        health.reask(cx, |d| d.health_for_datasets(&[CVI, CHAIN]));
+        let chrome = Chrome {
+            hints: header::footer_hints(cx),
+            ..Chrome::default()
+        };
+        let mut tile = VolsliceTile {
             id,
             frame,
             data,
@@ -198,10 +278,84 @@ impl VolsliceTile {
             palette_key: key,
             notices,
             model_notices: Vec::new(),
+            focused: false,
+            chart_bounds: ChartBounds::default(),
+            drag: None,
+            health,
+            chrome,
             #[cfg(test)]
             today_pin: None,
             #[cfg(test)]
             dispatch_log: Vec::new(),
+        };
+        tile.refresh_chrome(cx);
+        tile
+    }
+
+    /// Rebuild each prepared part whose inputs changed since it was built.
+    fn refresh_chrome(&mut self, cx: &App) {
+        let key = HeaderKey {
+            underlying: self.underlying(cx),
+            coordinate: self.state.coordinate,
+            kinds: self.loaded.kinds(),
+            mark: self.loaded.draft.as_ref().map(|(_, m)| *m),
+            hidden: self.state.hidden.clone(),
+            diff: self.state.diff,
+        };
+        if self.chrome.header_key.as_ref() != Some(&key) {
+            self.chrome.header = Some(HeaderModel::prepare(
+                key.underlying.as_deref(),
+                &self.state,
+                &self.loaded,
+            ));
+            self.chrome.header_key = Some(key);
+            #[cfg(test)]
+            {
+                self.chrome.builds += 1;
+            }
+        }
+        let strip_stale = self
+            .chrome
+            .strip_key
+            .as_ref()
+            .is_none_or(|(rows, active, palette)| {
+                *rows != self.strip || *active != self.state.active || *palette != self.palette_key
+            });
+        if strip_stale {
+            self.chrome.strip = strip::prepare(&self.strip, &self.state, &self.palette);
+            self.chrome.strip_key = Some((
+                self.strip.clone(),
+                self.state.active.clone(),
+                self.palette_key,
+            ));
+            #[cfg(test)]
+            {
+                self.chrome.builds += 1;
+            }
+        }
+        let notice_stale = self
+            .chrome
+            .notice_key
+            .as_ref()
+            .is_none_or(|(data, model)| *data != self.notices || *model != self.model_notices);
+        if notice_stale {
+            self.chrome.notice =
+                header::footer_notice(self.notices.iter().chain(&self.model_notices));
+            self.chrome.notice_key = Some((self.notices.clone(), self.model_notices.clone()));
+            #[cfg(test)]
+            {
+                self.chrome.builds += 1;
+            }
+        }
+    }
+
+    /// The shell's word on whether this is the focused tile. Called from
+    /// the shell's render, before this tile's own, so the flag is painted
+    /// this frame.
+    pub fn set_focused(&mut self, focused: bool, cx: &mut Context<Self>) {
+        if self.focused != focused {
+            self.focused = focused;
+            cx.notify();
         }
     }
 
@@ -496,11 +650,17 @@ impl VolsliceTile {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn draft_label(&self) -> Option<String> {
         let (_, mark) = self.loaded.draft.as_ref()?;
-        let kind = crate::core::model::Kind::Draft.label();
-        Some(match mark.label() {
-            Some(word) => format!("{kind} \u{00b7} {word}"),
-            None => kind.to_string(),
-        })
+        Some(header::draft_label(*mark))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn footer_notice(&self) -> Option<SharedString> {
+        self.chrome.notice.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn chrome_builds(&self) -> usize {
+        self.chrome.builds
     }
 
     #[cfg(test)]
@@ -519,28 +679,181 @@ fn following_refusal(g: Group) -> String {
     format!("following {} \u{2014} set the underlying there", g.letter())
 }
 
+impl VolsliceTile {
+    /// The chart and its pointer surface: the element, a canvas recording
+    /// the bounds the gestures hit-test against, the divider's resize
+    /// cursor, and while a drag is armed an occluding catcher that takes
+    /// its moves and releases.
+    fn render_chart(&self, tile: &Entity<Self>, tile_id: u64, window: &Window) -> impl IntoElement {
+        let rem_px = window.rem_size().as_f32();
+        let bounds_cell = self.chart_bounds.clone();
+        let divider = self.divider_rect(rem_px);
+        let drag = self.drag;
+        let view = self
+            .view
+            .unwrap_or_else(|| View::with_min_span(self.model.full(), 0.0));
+        div()
+            .id(ElementId::NamedInteger(
+                SharedString::new_static("volslice-chart-surface"),
+                tile_id,
+            ))
+            .debug_selector(move || format!("volslice-chart-{tile_id}"))
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(XyElement::new(
+                self.model.clone(),
+                view,
+                rem_px,
+                // Unique per tile: the element's path caches hang off it.
+                ElementId::NamedInteger(SharedString::new_static("volslice-chart"), tile_id),
+            ))
+            .child(
+                canvas(
+                    move |bounds, _window, _cx| bounds_cell.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .on_scroll_wheel({
+                let tile = tile.clone();
+                move |event: &ScrollWheelEvent, window, cx| {
+                    tile.update(cx, |t, cx| t.wheel(event, window, cx));
+                }
+            })
+            .on_mouse_down(MouseButton::Left, {
+                let tile = tile.clone();
+                move |event: &MouseDownEvent, window, cx| {
+                    tile.update(cx, |t, cx| t.chart_pressed(event, window, cx));
+                }
+            })
+            .when_some(divider, |el, band| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left(px(band.x))
+                        .top(px(band.y))
+                        .w(px(band.w))
+                        .h(px(band.h))
+                        .cursor_row_resize()
+                        .debug_selector(move || format!("volslice-divider-{tile_id}")),
+                )
+            })
+            .when_some(drag, |el, drag| {
+                el.child(
+                    div()
+                        .id(ElementId::NamedInteger(
+                            SharedString::new_static("volslice-drag-catcher"),
+                            tile_id,
+                        ))
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .map(|el| match drag {
+                            Drag::Pan { .. } => el.cursor_grabbing(),
+                            Drag::Split => el.cursor_row_resize(),
+                        })
+                        .on_mouse_move({
+                            let tile = tile.clone();
+                            move |event: &MouseMoveEvent, window, cx| {
+                                tile.update(cx, |t, cx| t.drag_moved(event, window, cx));
+                            }
+                        })
+                        .on_mouse_up(MouseButton::Left, {
+                            let tile = tile.clone();
+                            move |_, _window, cx| tile.update(cx, |t, cx| t.drag_finished(cx))
+                        })
+                        .on_mouse_up_out(MouseButton::Left, {
+                            let tile = tile.clone();
+                            move |_, _window, cx| tile.update(cx, |t, cx| t.drag_finished(cx))
+                        }),
+                )
+            })
+    }
+}
+
 impl Render for VolsliceTile {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id.0;
         let tile = cx.entity();
+        let theme = cx.theme();
         let popup = self
             .popup
             .as_ref()
             .map(|p| picker::render_popup(p, &tile, id, cx));
+        let header = self.chrome.header.as_ref().map(|h| {
+            header::render_header(
+                h,
+                theme,
+                &tile,
+                id,
+                self.stack.as_ref(),
+                self.health.chip(),
+                Mode::from_key_mode(self.mode()),
+                link_chips(&self.frame, cx),
+            )
+        });
+        let reads_one = self
+            .chrome
+            .header_key
+            .as_ref()
+            .is_some_and(|k| k.underlying.is_some());
+        let body = if reads_one || !self.model.slots.is_empty() {
+            h_flex()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .child(self.render_chart(&tile, id, window))
+                .child(strip::render_strip(
+                    &self.chrome.strip,
+                    self.state.cursor,
+                    self.focused,
+                    theme,
+                    &tile,
+                    id,
+                ))
+                .into_any_element()
+        } else {
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .items_center()
+                .justify_center()
+                .text_color(theme.muted_foreground)
+                .child(
+                    div()
+                        .debug_selector(move || format!("volslice-empty-{id}"))
+                        .child(EMPTY),
+                )
+                .into_any_element()
+        };
         v_flex()
-            .relative()
             .size_full()
-            .items_center()
-            .justify_center()
-            .text_color(cx.theme().muted_foreground)
+            .bg(theme.background)
             .child(
                 div()
-                    .debug_selector(move || format!("volslice-empty-{id}"))
-                    .child(EMPTY),
+                    .relative()
+                    .w_full()
+                    .children(header)
+                    .when_some(popup, |el, p| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .right_0()
+                                .top(scale::design(HEADER_HEIGHT))
+                                .child(p),
+                        )
+                    }),
             )
-            .when_some(popup, |el, p| {
-                el.child(div().absolute().top_0().right_0().child(p))
-            })
+            .child(body)
+            .child(header::render_footer(
+                self.chrome.notice.as_ref(),
+                &self.chrome.hints,
+                theme,
+                id,
+            ))
     }
 }
 

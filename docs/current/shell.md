@@ -123,6 +123,17 @@ render. A module that is useless without further state, such as a panel
 added with no state — from the palette, the tile picker, or
 `tile::open_with` falling back to the picker — asks for it here.
 
+`TileContent::set_focused` tells an occupant whether it is the focused tile
+of the active workspace's focused region. The shell diffs the focused tile
+during its render, before the tiles render, and tells the tile that lost
+focus and the one that gained it; a fresh occupant under the focused id is
+told again. The call runs inside the draw, so a module keeps the flag and
+reads it when it paints, and must not notify the frame from it. A module
+uses it to paint a focus-only state or to let a press that merely focused
+the tile do nothing else (the shell's own tile handler runs after the
+module's, so the flag still says whether the tile was focused before the
+press).
+
 ### Row menu
 
 The row menu lists what a row's single-valued columns let the user do. The

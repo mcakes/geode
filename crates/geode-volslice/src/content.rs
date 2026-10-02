@@ -196,6 +196,12 @@ impl TileContent for VolsliceContent {
         self.tile.read(cx).holds_focus(window, cx)
     }
 
+    /// Kept for the strip: a press acts only on a focused tile, and the
+    /// cursor row is lit only on one.
+    fn set_focused(&self, focused: bool, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.set_focused(focused, cx))
+    }
+
     /// A tile added with no underlying is useless: it asks for one at once.
     fn launched(&self, window: &mut Window, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.launched(window, cx))

@@ -25,35 +25,40 @@ fn loaded(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
 impl Harness {
     /// The one batch the last keys submitted, answered; `None` when none
     /// went out.
-    fn answer_last(&self, vcx: &mut gpui::VisualTestContext) -> Option<VolSliceParams> {
+    pub(super) fn answer_last(&self, vcx: &mut gpui::VisualTestContext) -> Option<VolSliceParams> {
         let reqs = self.requests();
         let last = vols(&reqs).last().map(|p| (*p).clone())?;
         self.answer_vol(vcx, &last);
         Some(last)
     }
-    fn command(&self, vcx: &mut gpui::VisualTestContext, line: &str) -> Result<(), String> {
+    pub(super) fn command(
+        &self,
+        vcx: &mut gpui::VisualTestContext,
+        line: &str,
+    ) -> Result<(), String> {
         let r = vcx.update(|window, cx| self.content.command(line, window, cx));
         vcx.run_until_parked();
         r
     }
-    fn state(&self, vcx: &gpui::VisualTestContext) -> State {
+    pub(super) fn state(&self, vcx: &gpui::VisualTestContext) -> State {
         self.tile.read_with(vcx, |t, _| t.state().clone())
     }
-    fn mode(&self, vcx: &gpui::VisualTestContext) -> String {
+    pub(super) fn mode(&self, vcx: &gpui::VisualTestContext) -> String {
         self.tile.read_with(vcx, |t, _| {
             t.key_context().get("mode").unwrap_or_default().to_string()
         })
     }
-    fn tilelist(&self, vcx: &gpui::VisualTestContext) -> bool {
+    pub(super) fn tilelist(&self, vcx: &gpui::VisualTestContext) -> bool {
         self.tile
             .read_with(vcx, |t, _| t.key_context().has_flag("tilelist"))
     }
     /// The open chooser's rows and its highlighted row, or `None`.
-    fn chooser(&self, vcx: &gpui::VisualTestContext) -> Option<(Vec<String>, usize)> {
+    pub(super) fn chooser(&self, vcx: &gpui::VisualTestContext) -> Option<(Vec<String>, usize)> {
         self.tile.read_with(vcx, |t, _| t.chooser_rows())
     }
-    fn draw(&self, vcx: &mut gpui::VisualTestContext) {
+    pub(super) fn draw(&self, vcx: &mut gpui::VisualTestContext) {
         vcx.update(|window, cx| {
+            window.refresh();
             let _ = window.draw(cx);
         });
         vcx.run_until_parked();

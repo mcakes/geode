@@ -9,6 +9,8 @@
 pub mod commands;
 pub mod content;
 pub mod core;
+mod header;
+mod strip;
 pub mod tile;
 
 pub use content::VolsliceFactory;

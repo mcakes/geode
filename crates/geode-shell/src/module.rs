@@ -315,6 +315,14 @@ pub trait TileContent {
     /// focused tile on that render. A module that is useless without some
     /// state asks for it here; the default does nothing.
     fn launched(&self, _window: &mut Window, _cx: &mut App) {}
+    /// Whether this tile is now the focused tile of the active workspace's
+    /// focused region. Called from the shell's render whenever that changes
+    /// (and once for a fresh occupant that is focused), before the tile's
+    /// own render in the same frame, so a module keeps the flag and reads
+    /// it when it paints; it must not notify the frame from here. A module
+    /// that paints a focus-dependent state, or acts on a press only when the
+    /// press did not merely focus it, keeps it; the default ignores it.
+    fn set_focused(&self, _focused: bool, _cx: &mut App) {}
     /// Fit every column of this tile's table to its content, or with
     /// `reset` drop the fitted widths and return to the configured ones.
     /// The shell's `tile::autosize_columns` action calls this on the
@@ -977,6 +985,8 @@ pub mod recording {
         SeriesFetched(TileId, String),
         Stack(TileId, Option<(usize, usize)>),
         Launched(TileId),
+        /// `set_focused` reached this tile.
+        Focused(TileId, bool),
         /// `autosize_columns(reset)` reached this tile.
         Autosize(TileId, bool),
         /// The `/` result table reported these source rows as shown
@@ -1516,6 +1526,11 @@ pub mod recording {
                 .borrow_mut()
                 .push(Recorded::Autosize(self.tile, reset));
             Ok(())
+        }
+        fn set_focused(&self, focused: bool, _: &mut App) {
+            self.log
+                .borrow_mut()
+                .push(Recorded::Focused(self.tile, focused));
         }
         fn launched(&self, window: &mut Window, cx: &mut App) {
             self.log.borrow_mut().push(Recorded::Launched(self.tile));

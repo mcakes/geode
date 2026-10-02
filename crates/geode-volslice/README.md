@@ -22,7 +22,14 @@ data tier's vol door; the crate computes none of them.
   and the model swap. `tile/picker.rs` holds the two choosers: the
   underlying picker (a field over the diagnostics catalog's `cvi_params` and
   `option_chain` underlyings) and the diff chooser (`none` and every ordered
-  pair of loaded kinds).
+  pair of loaded kinds). `tile/pointer.rs` holds the chart's wheel, drag
+  and divider gestures and the strip's presses.
+- `header.rs`: the header (underlying, coordinate, a chip per loaded kind
+  with its digit, the diff chip, link chips, the two datasets' health) and
+  the footer (the first notice with a count of the rest, the key hints).
+- `strip.rs`: the expiry strip beside the chart: a dot in the expiry's
+  palette color (filled when active), the date and a digit per kind that
+  has the expiry.
 
 ## Invariants
 
@@ -49,3 +56,14 @@ data tier's vol door; the crate computes none of them.
   row moves off it.
 - While following, the underlying is the group's: `u` and `:underlying` are
   refused, and a launched follower is not prompted.
+- Paint formats nothing. The header text, the strip rows and the footer
+  notice are rebuilt when the tile is notified and an input they were
+  built from changed; the hints when the chords change.
+- Every pointer action has its key: a strip press is `enter` (ctrl: `space`),
+  a kind chip its digit, the diff chip `d`, the wheel `=`/`-` and `h`/`l`, a
+  drag `h`/`l`, the divider `[`/`]`. A strip press acts only on a tile the
+  shell had already told it is focused (`TileContent::set_focused`), so the
+  press that focuses a tile changes nothing else.
+- Pans and zooms go through the x axis's scale (`pan_sign`, `about`), so a
+  reversed delta axis moves the way it reads. Keyboard zoom anchors at the
+  view's centre, wheel zoom at the pointer.

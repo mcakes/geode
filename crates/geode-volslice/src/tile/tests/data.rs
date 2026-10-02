@@ -672,3 +672,5 @@ fn the_viewer_emits_nothing(cx: &mut gpui::TestAppContext) {
 }
 
 mod keys;
+
+mod paint;

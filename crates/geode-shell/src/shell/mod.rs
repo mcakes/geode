@@ -659,6 +659,9 @@ pub struct ShellView {
     /// at the end of every `ensure_occupants`, the same lifecycle
     /// `pending_tiles`/`unplaced_records` follow.
     stack_sent: HashMap<TileId, Option<(usize, usize)>>,
+    /// The tile last told it is focused (`TileContent::set_focused`), so
+    /// focus is diffed rather than sent to every occupant every frame.
+    focused_sent: Option<TileId>,
     /// Status notice, such as a refused stack action's `"not in a stack"`
     /// or a row menu action's report (`opened <url>`).
     /// Cleared at the start of the next dispatch.
@@ -1439,6 +1442,7 @@ impl ShellView {
             emit_subs: HashMap::new(),
             link_label: None,
             stack_sent: HashMap::new(),
+            focused_sent: None,
             notice: None,
             stack_list: None,
             add_filter_menu: None,

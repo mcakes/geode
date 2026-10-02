@@ -386,6 +386,11 @@ impl ShellView {
             // holding the old occupant's last-sent value and skips the
             // new one as already told.
             self.stack_sent.remove(id);
+            // Likewise for focus: a fresh occupant under the focused id
+            // has not been told.
+            if self.focused_sent == Some(*id) {
+                self.focused_sent = None;
+            }
         }
         // A request whose tile closed before this render is dropped, not
         // re-aimed.
@@ -416,6 +421,25 @@ impl ShellView {
             if let Some(o) = self.occupants.get(id) {
                 o.content.set_visible(true, cx);
             }
+        }
+
+        // Tell the focused tile it is, and the one before it that it no
+        // longer is. In render, before the tiles' own renders, so the flag
+        // is read in this same frame and nothing needs notifying.
+        let focused_now = self
+            .services
+            .workspaces
+            .active()
+            .focused_tile()
+            .filter(|id| active.contains(id));
+        if focused_now != self.focused_sent {
+            if let Some(o) = self.focused_sent.and_then(|id| self.occupants.get(&id)) {
+                o.content.set_focused(false, cx);
+            }
+            if let Some(o) = focused_now.and_then(|id| self.occupants.get(&id)) {
+                o.content.set_focused(true, cx);
+            }
+            self.focused_sent = focused_now;
         }
 
         // Tell a fresh `add_tile` occupant it was launched, once, if it is
