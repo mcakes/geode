@@ -166,7 +166,10 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
 - Emitting into a link group (`TileContent::emission`), a panel posts its
   underlying (the first part of its document key) as a one-value
   `underlying_ref` scope; with no underlying it posts nothing, which leaves
-  the group's scope as it was. Its board entry is the draft the upload
+  the group's scope as it was. The column name is a literal: every built-in
+  document dataset keys first on `underlying_ref`, as `accepts()` and the
+  launch path also assume, and a panel over a dataset keyed first on another
+  column would post under the wrong column. Its board entry is the draft the upload
   builder assembles (`core::upload::assemble` over the painted base, the
   installed index and the draft): the panel's dataset, its document key and
   the whole document's rows. The entry is posted while the draft is not
@@ -178,9 +181,12 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   base snapshot's allocation and the draft. An unchanged pull returns the
   same `Arc`, which the frame compares by allocation and reads as no change;
   a republish at the same source time is another snapshot and is
-  reassembled; a refusal is cached like a result. The cache is touched only
-  inside `draft_rows`, never by an edit route, and is dropped when there is
-  nothing unsent, which also lets go of the snapshot it pins.
+  reassembled; a refusal is cached like a result, so a draft the builder
+  refuses is walked once, not once per pull. The cache is touched only
+  inside `draft_rows`, never by an edit route. It keeps one snapshot, one
+  rows allocation and one draft clone alive until the next pull replaces
+  them, or clears them because nothing is unsent: bounded at one document
+  per panel.
 - `emits` is true before an underlying is named or a document has arrived:
   the shell drops a restored membership for a tile that answers false right
   after create. `watch_emission` observes the tile entity, so every route

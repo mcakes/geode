@@ -5208,21 +5208,28 @@ impl PricerTile {
     /// `underlying_ref`. A package across underlyings names none (an empty
     /// context); with no cursor row (an empty sheet) there is no context.
     pub(crate) fn dimension_context(&self) -> Option<geode_core::context::DimensionContext> {
-        self.cursor_row()?;
-        Some(match self.cursor_underlying() {
+        let g = self.cursor_row()?;
+        Some(match self.underlying_at(g) {
             Some(u) => geode_core::context::DimensionContext::of(&[("underlying_ref", &u)]),
             None => geode_core::context::DimensionContext::default(),
         })
     }
 
-    /// The one underlying the cursor row names: a line's or a leg's own, a
-    /// package's when its legs share one. `None` on a package across
-    /// underlyings, on a grouping row, and with no cursor row. This is what
-    /// the tile posts as a link group's scope and what `g m` opens on, so
-    /// the two cannot name different underlyings for one row. Read from
+    /// The one underlying the cursor row names, or `None` with no cursor
+    /// row. This is what the tile posts as a link group's scope. Read from
     /// the sheet on each call: one row, nothing to keep in step.
     pub(crate) fn cursor_underlying(&self) -> Option<String> {
-        self.cursor_sheet_row()
+        self.underlying_at(self.cursor_row()?)
+    }
+
+    /// The one underlying grid row `g` names: a line's or a leg's own, a
+    /// package's when its legs share one. `None` on a package across
+    /// underlyings and on a grouping row. `g m` and the link emission both
+    /// read the cursor row through this, so the two cannot name different
+    /// underlyings for one row.
+    fn underlying_at(&self, g: usize) -> Option<String> {
+        self.model
+            .sheet_row(g)
             .and_then(|row| self.sheet.sole_underlying(row))
     }
 

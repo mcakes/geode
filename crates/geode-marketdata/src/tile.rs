@@ -469,6 +469,11 @@ enum Yank {
 /// document: rebuilt per pull, a one-cell commit budgeted at one cell refill
 /// would cost a document walk and hand the frame a new allocation it must
 /// treat as a changed draft.
+///
+/// It keeps one snapshot, one rows allocation and one clone of the draft
+/// alive until the next pull replaces or clears them: bounded at one
+/// document per panel, and held past the draft's own life only until the
+/// shell next asks.
 struct Emitted {
     /// The underlying the rows are for, so one underlying's rows are never
     /// handed out as another's even over an equal draft and base.
@@ -666,6 +671,10 @@ pub struct MarketDataTile {
     /// ever open across a tile update. No edit route touches it: an edit
     /// costs nothing here until the shell pulls.
     emitted: RefCell<Option<Emitted>>,
+    /// How many times the board's document was assembled, for tests that
+    /// pin it to once per changed draft, a refused draft included.
+    #[cfg(test)]
+    assembles: StdCell<usize>,
 }
 
 impl MarketDataTile {
@@ -992,6 +1001,8 @@ impl MarketDataTile {
             upload_tag: 0,
             upload_error: None,
             emitted: RefCell::new(None),
+            #[cfg(test)]
+            assembles: StdCell::new(0),
         };
         this.rebuild_chrome();
         // Install the tile's initial model into the delegate through the same path as
@@ -1786,6 +1797,11 @@ impl MarketDataTile {
             .into_iter()
             .collect();
         Emission {
+            // The column is a literal, not read from the dataset: every
+            // built-in document dataset keys first on `underlying_ref`, and
+            // the panel's `accepts()` and launch path assume the same. A
+            // panel over a dataset keyed first on another column would post
+            // that key's value under the wrong column.
             scope: key.first().map(|u| Scope::one("underlying_ref", u)),
             board,
         }
@@ -1819,6 +1835,8 @@ impl MarketDataTile {
                 snapshot,
                 rows,
             });
+            #[cfg(test)]
+            self.assembles.set(self.assembles.get() + 1);
         }
         emitted.as_ref().and_then(|e| e.rows.clone())
     }
@@ -5269,6 +5287,18 @@ mod tests {
         provenance: Provenance,
         forward: f64,
     ) -> Snapshot {
+        document_spot(terms, nodes, provenance, forward, 5000.0)
+    }
+
+    /// [`document_forward`] with the document-level `spot_ref` attribute at
+    /// `spot`.
+    fn document_spot(
+        terms: &[&str],
+        nodes: &[f64],
+        provenance: Provenance,
+        forward: f64,
+        spot: f64,
+    ) -> Snapshot {
         let mut cells: Vec<(String, f64, f64)> = Vec::new();
         let mut slices: Vec<(f64, f64, f64)> = Vec::new();
         for (t, term) in terms.iter().enumerate() {
@@ -5319,7 +5349,7 @@ mod tests {
                 ),
                 (
                     meta("spot_ref", Attribution::Additive),
-                    TestColumn::F64(vec![Some(5000.0); n]),
+                    TestColumn::F64(vec![Some(spot); n]),
                 ),
             ],
             0,
@@ -16436,6 +16466,8 @@ edits = [["2026-11-20", "-1", 9.5]]
 
     /// A draft the upload builder refuses (an inserted row with no amount)
     /// is not a document: nothing is posted, and the pull does not panic.
+    /// The refusal is remembered: the document is walked once, not once
+    /// per pull.
     #[gpui::test]
     fn a_draft_the_builder_refuses_posts_nothing(cx: &mut gpui::TestAppContext) {
         let restored: toml::Table = format!(
@@ -16472,11 +16504,54 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
             "sanity: the builder refuses the incomplete row"
         );
 
+        let assembles =
+            |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.assembles.get());
+        let before = assembles(&vcx);
         let emission = emission_of(&h, &mut vcx);
         assert_eq!(emission.scope, on("SPX.Z"));
         assert!(emission.board.is_empty());
-        // And the refusal is remembered rather than rebuilt per pull.
+        assert_eq!(assembles(&vcx), before + 1, "the builder was asked once");
+
         assert_eq!(emission_of(&h, &mut vcx), emission);
+        assert_eq!(
+            assembles(&vcx),
+            before + 1,
+            "a second pull of the same refused draft walks nothing"
+        );
+    }
+
+    /// A draft held `Behind` paints its own base, not the newer document
+    /// delivered over it, and the board mirrors what the panel paints: the
+    /// retained base with the edit applied, the rows `:upload` would
+    /// assemble from the painted snapshot. The newer document differs in a
+    /// header attribute, which the builder reads from the snapshot it is
+    /// handed.
+    #[gpui::test]
+    fn a_behind_draft_posts_its_retained_base_with_the_edit(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let tag = h.with_document_tagged(&mut vcx);
+        h.motion(&mut vcx, "right", None);
+        commit_cell(&h, &mut vcx, "0.25");
+        let newer = document_spot(&TERMS, &NODES, provenance(NEWER), 4500.0, 5100.0);
+        h.deliver(&mut vcx, tag, Arc::new(newer));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_behind()),
+            "sanity: held behind the newer document"
+        );
+        let over_newest = h.tile.read_with(&vcx, |t, _| {
+            let newest = t.snapshot.clone().expect("the newer document");
+            assert!(
+                !Arc::ptr_eq(&newest, &t.painted_snapshot().unwrap()),
+                "sanity: the base is retained and painted"
+            );
+            crate::core::upload::assemble(&newest, &t.spec, t.model(), t.draft()).unwrap()
+        });
+        let expected = assembled(&h, &vcx).unwrap();
+        assert_ne!(expected, over_newest, "sanity: the two documents differ");
+
+        let emission = emission_of(&h, &mut vcx);
+        assert_eq!(emission.board.len(), 1);
+        assert_eq!(*emission.board[0].rows, expected);
     }
 
     /// A panel can emit before it is given an underlying (a restored
