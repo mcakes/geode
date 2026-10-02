@@ -3337,6 +3337,8 @@ role = "key"
         tile: Entity<geode_blotter::tile::BlotterTile>,
         shell: Entity<ShellView>,
         window: WindowHandle<Root>,
+        /// The handle the tile and the roster hook were given.
+        handle: DataHandle,
         /// What the tile and the shell's actions asked the data service
         /// for after the first query.
         requests: std::sync::mpsc::Receiver<geode_data::Request>,
@@ -3470,6 +3472,7 @@ role = "key"
             tile,
             shell,
             window,
+            handle,
             requests: rx,
         }
     }
@@ -3886,6 +3889,100 @@ role = "key"
         );
         f.type_keys("enter");
         assert_eq!(*opened.borrow(), vec!["nemo://position/P6".to_string()]);
+        f.close();
+    }
+
+    /// The next request on `f`'s handle that `pick` takes, skipping the
+    /// rest (refreshes, catalog reads).
+    fn next_request<T>(
+        f: &ShellBlotter,
+        mut pick: impl FnMut(geode_data::Request) -> Option<T>,
+    ) -> T {
+        loop {
+            let r = f
+                .requests
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the request arrives");
+            if let Some(t) = pick(r) {
+                return t;
+            }
+        }
+    }
+
+    /// [`nemo_blotter`] with the bridge attached (so the shell's distinct
+    /// requests reach the handle, as at startup), `V` over L2 (P9) and L3
+    /// (P6), a right press on L3 inside the selection, `j enter` on
+    /// "Move LHU…", and the `lhu` values `L4`, `L5` answered through the
+    /// shell's `deliver_distinct` as the drain does, then `enter` on L4.
+    /// Returns the fixture with the confirm open, and the bridge.
+    fn move_lhu_to_the_confirm(cx: &mut gpui::TestAppContext) -> (ShellBlotter, Bridge) {
+        let (mut f, _) = nemo_blotter(cx);
+        let bridge = test_bridge(f.handle.clone());
+        let window = f.window;
+        // Outside the window's update: `attach` reads the window's root.
+        gpui::TestAppContext::update(&mut f.vcx, |cx| attach(&bridge, window, cx));
+        f.type_keys("j j j shift-v k");
+        f.right_press("blotter-cell-3-2");
+        f.type_keys("j enter");
+        let (key, tag) = next_request(&f, |r| match r {
+            geode_data::Request::Distinct(p) if p.column == "lhu" => Some((p.key, p.tag)),
+            _ => None,
+        });
+        f.shell.update(&mut f.vcx, |s, cx| {
+            s.deliver_distinct(
+                DistinctOutcome {
+                    key,
+                    tag,
+                    column: "lhu".into(),
+                    values: Ok(vec![("L4".into(), 1), ("L5".into(), 2)]),
+                },
+                cx,
+            )
+        });
+        f.type_keys("enter");
+        assert!(
+            f.vcx
+                .debug_bounds("action-question-Move 2 positions to LHU L4?")
+                .is_some(),
+            "the confirm names both positions and the picked LHU"
+        );
+        (f, bridge)
+    }
+
+    /// Move LHU end to end through the production registration: the two
+    /// selected positions, in selection order, go out as one command to the
+    /// picked LHU after `y`, and the notice says sent, not done.
+    #[gpui::test]
+    fn move_lhu_sends_the_selected_positions_after_confirm(cx: &mut gpui::TestAppContext) {
+        let (mut f, _bridge) = move_lhu_to_the_confirm(cx);
+        f.type_keys("y");
+        let params = next_request(&f, |r| match r {
+            geode_data::Request::MoveLhu(p) => Some(p),
+            _ => None,
+        });
+        assert_eq!(params.positions, vec!["P9".to_string(), "P6".to_string()]);
+        assert_eq!(params.lhu, "L4");
+        assert_eq!(
+            f.shell
+                .read_with(&f.vcx, |s, _| s.notice_for_test())
+                .as_deref(),
+            Some("moving 2 positions to LHU L4 \u{b7} sent")
+        );
+        f.close();
+    }
+
+    /// `n` at the confirm sends no command and says nothing.
+    #[gpui::test]
+    fn no_to_the_confirm_sends_nothing(cx: &mut gpui::TestAppContext) {
+        let (mut f, _bridge) = move_lhu_to_the_confirm(cx);
+        f.type_keys("n");
+        let sent: Vec<_> = f
+            .requests
+            .try_iter()
+            .filter(|r| matches!(r, geode_data::Request::MoveLhu(_)))
+            .collect();
+        assert!(sent.is_empty(), "{sent:?}");
+        assert_eq!(f.shell.read_with(&f.vcx, |s, _| s.notice_for_test()), None);
         f.close();
     }
 
