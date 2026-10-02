@@ -29261,17 +29261,22 @@ run_mutation "link: the chooser opens on the current follow row" \
 # and Enter would follow nothing.
 run_mutation "link: a typed query lights the top-ranked row" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '            Target::LinkGroup {
-                follows, current, ..
-            } => self
-                .list
-                .set_query_placing(query, Some(link_opening_row(*follows, *current))),' \
+  '            Target::LinkGroup { current, .. } => {
+                let current = *current;
+                self.list.set_query_placing_with(query, |top| {
+                    Some(if EMIT_ROWS.contains(&top) {
+                        current_emit_row(current)
+                    } else {
+                        current_follow_row(current)
+                    })
+                })
+            }' \
   '            Target::LinkGroup { .. } => self.list.set_query(query),' \
   geode-shell a_typed_query_lights_its_top_ranked_row
 
 # The current follow row stays lit when nothing outranks it: a query every
 # follow row shares ranks them level, and lit on the first of them Enter
-# after a shared prefix would unfollow.
+# after a shared prefix would unfollow. (The emit rows' entries are below.)
 run_mutation "link: a tie keeps the current row" \
   crates/geode-shell/src/listfilter.rs \
   '        (Some((a, _)), Some((b, _))) => a == b,' \
@@ -29306,21 +29311,23 @@ run_mutation "link: a typed space then enter keeps the followed group" \
 
 run_mutation "link: a placed row yields to a row ranked above it" \
   crates/geode-shell/src/choice.rs \
-  '                .is_some_and(|top| listfilter::level(&self.query, top, value))' \
-  '                .is_some_and(|_| true)' \
+  '            && listfilter::level(&self.query, top, value)' \
+  '            && !value.is_empty()' \
   geode-shell a_typed_query_lights_its_top_ranked_row
 
 run_mutation "link: a placed row is kept on a tie" \
   crates/geode-shell/src/choice.rs \
-  '                .is_some_and(|top| listfilter::level(&self.query, top, value))' \
-  '                .is_some_and(|_| self.query.trim().is_empty())' \
+  '            && listfilter::level(&self.query, top, value)' \
+  '            && self.query.trim().is_empty()' \
   geode-shell set_query_placing_keeps_a_named_row_that_ties_for_the_top_rank
 
 run_mutation "link: a moved highlight is kept until the query changes" \
   crates/geode-shell/src/choice.rs \
-  '    pub fn set_query_placing(&mut self, query: &str, value: Option<&str>) -> bool {
+  '        value: impl FnOnce(&str) -> Option<&'\''a str>,
+    ) -> bool {
         if query == self.query {' \
-  '    pub fn set_query_placing(&mut self, query: &str, value: Option<&str>) -> bool {
+  '        value: impl FnOnce(&str) -> Option<&'\''a str>,
+    ) -> bool {
         if false {' \
   geode-shell a_moved_highlight_is_kept_until_the_query_changes
 
@@ -29361,7 +29368,7 @@ run_mutation "link: the label names the underlying" \
 
 run_mutation "link: the segment reads the group's underlying" \
   crates/geode-shell/src/shell/link.rs \
-  '            let underlying = frame.group_scope(key.1).sole(UNDERLYING);' \
+  '            let underlying = geode_core::link::underlying_of(frame.group_scope(key.1));' \
   '            let underlying = None;' \
   geode-shell the_following_segment_tracks_the_groups_scope
 
@@ -29492,7 +29499,7 @@ run_mutation "link: the timeseries header shows the chip" \
 run_mutation "link: the blotter emits the cursor's underlying" \
   crates/geode-blotter/src/content.rs \
   '                .cursor_underlying(cx)
-                .map(|u| geode_core::scope::Scope::one("underlying_ref", &u)),' \
+                .map(|u| geode_core::link::underlying_scope(&u)),' \
   '                .cursor_underlying(cx)
                 .and_then(|_| None),' \
   geode-blotter the_emission_is_the_cursor_rows_underlying
@@ -29537,7 +29544,7 @@ run_mutation "link: a promoted snapshot tells the shell the emission changed" \
 run_mutation "link: the pricer emits the cursor line's underlying" \
   crates/geode-pricer/src/content.rs \
   '                .cursor_underlying()
-                .map(|u| geode_core::scope::Scope::one("underlying_ref", &u)),' \
+                .map(|u| geode_core::link::underlying_scope(&u)),' \
   '                .cursor_underlying()
                 .and_then(|_| None),' \
   geode-pricer the_emission_is_the_cursor_lines_underlying
@@ -29574,7 +29581,7 @@ run_mutation "link: a package across underlyings emits no scope" \
 # pull hands back the same allocation, which the frame reads as no change.
 run_mutation "link: a panel posts its underlying as the scope" \
   crates/geode-marketdata/src/tile.rs \
-  '            scope: key.first().map(|u| Scope::one("underlying_ref", u)),' \
+  '            scope: key.first().map(|u| underlying_scope(u)),' \
   '            scope: None,' \
   geode-marketdata a_clean_panel_emits_its_underlying_and_no_board
 
@@ -29674,7 +29681,7 @@ run_mutation "link: the production roster emits" \
 run_mutation "link: the production pricer emits its cursor line" \
   crates/geode-pricer/src/content.rs \
   '                .cursor_underlying()
-                .map(|u| geode_core::scope::Scope::one("underlying_ref", &u)),' \
+                .map(|u| geode_core::link::underlying_scope(&u)),' \
   '                .cursor_underlying()
                 .and_then(|_| None),' \
   geode-app the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows
@@ -29791,6 +29798,34 @@ run_mutation "link: a restored group scope is not a flip" \
   '        let last_flip_groups = frame.read(cx).group_scope_gens();' \
   '        let last_flip_groups = [0; 4];' \
   geode-shell a_restored_group_scope_opens_no_barrier_on_the_first_frame_notification
+
+# The tie rule covers the emit rows: a query every emit row shares keeps the
+# row for what the tile emits into now. Lit on the first of them, `emit` then
+# Enter would stop the tile emitting.
+run_mutation "link: a tie keeps the current emit row" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                    Some(if EMIT_ROWS.contains(&top) {' \
+  '                    Some(if false {' \
+  geode-shell a_tie_for_the_top_rank_keeps_the_current_emit_row
+
+run_mutation "link: a shared emit prefix then enter keeps the tile emitting" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                    Some(if EMIT_ROWS.contains(&top) {' \
+  '                    Some(if false {' \
+  geode-shell a_shared_emit_prefix_then_enter_keeps_the_group_the_tile_emits_into
+
+run_mutation "link: the kept row is asked of the top-ranked row" \
+  crates/geode-shell/src/choice.rs \
+  '            && let Some(value) = value(top)' \
+  '            && let Some(value) = value("")' \
+  geode-shell set_query_placing_with_keeps_the_row_of_the_section_the_query_lands_in
+
+# One name for the column an emitter posts and a reader names a group by.
+run_mutation "link: the emitted column is underlying_ref" \
+  crates/geode-core/src/link.rs \
+  'pub const UNDERLYING: &str = "underlying_ref";' \
+  'pub const UNDERLYING: &str = "underlying";' \
+  geode-core an_underlying_scope_names_its_underlying_and_nothing_else_does
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
