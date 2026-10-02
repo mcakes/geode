@@ -28506,6 +28506,12 @@ run_mutation "positions: a move is answered twice or never" \
   '        let _ = (&sink, outcome);' \
   geode-data a_move_is_answered_once
 
+run_mutation "positions: an adapter without a position side is called missing" \
+  crates/geode-data/src/positions.rs \
+  $'            .ok_or_else(|| format!("adapter \'{adapter}\' has no position side")),' \
+  $'            .ok_or_else(|| format!("adapter \'{adapter}\' is not in this build")),' \
+  geode-data an_adapter_without_a_position_side_refuses_every_move
+
 run_mutation "positions: a refusal reads as accepted" \
   crates/geode-core/src/positions.rs \
   '        Err(reason) => format!("move to LHU {} refused: {reason}", o.lhu),' \

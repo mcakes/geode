@@ -44,12 +44,9 @@ pub fn resolve(
     let Some(spec) = spec else {
         return (None, Vec::new());
     };
-    let problem = match adapters.get(&spec.adapter) {
-        None => format!("adapter '{}' is not in this build", spec.adapter),
-        Some(adapter) if adapter.positions().is_none() => {
-            format!("adapter '{}' has no position side", spec.adapter)
-        }
-        Some(_) => return (Some(spec), Vec::new()),
+    let problem = match position_side(&spec.adapter, adapters) {
+        Ok(_) => return (Some(spec), Vec::new()),
+        Err(problem) => problem,
     };
     (
         None,
@@ -61,6 +58,21 @@ pub fn resolve(
             path: Some("positions.service.adapter".into()),
         }],
     )
+}
+
+/// A fresh position side of the adapter named `adapter`, or why there is
+/// none: the one wording `resolve`'s diagnostic and `PositionWorker::spawn`'s
+/// refusal share.
+fn position_side(
+    adapter: &str,
+    adapters: &AdapterRegistry,
+) -> Result<Box<dyn PositionCommands>, String> {
+    match adapters.get(adapter) {
+        None => Err(format!("adapter '{adapter}' is not in this build")),
+        Some(found) => found
+            .positions()
+            .ok_or_else(|| format!("adapter '{adapter}' has no position side")),
+    }
 }
 
 /// The one position-command worker `DataService` owns.
@@ -138,13 +150,7 @@ impl PositionWorker {
         let Some(spec) = spec else {
             return stopped(NOT_CONFIGURED.into());
         };
-        let commands = match adapters.get(&spec.adapter) {
-            None => Err(format!("adapter '{}' is not in this build", spec.adapter)),
-            Some(adapter) => adapter
-                .positions()
-                .ok_or_else(|| format!("adapter '{}' has no position side", spec.adapter)),
-        };
-        let commands = match commands {
+        let commands = match position_side(&spec.adapter, adapters) {
             Ok(commands) => commands,
             Err(why) => {
                 tracing::warn!(target: "geode::ingest", "positions: {why}");
@@ -422,6 +428,26 @@ pub(crate) mod tests {
 
         assert_silent(&rx);
         assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_adapter_without_a_position_side_refuses_every_move() {
+        let (bus, _feed) = crate::adapter::ChannelAdapter::new("demo_bus");
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(bus);
+        let (sink, rx) = event_sink();
+        let worker = PositionWorker::spawn(
+            &Some(PositionsSpec {
+                adapter: "demo_bus".into(),
+            }),
+            &adapters,
+            sink,
+        );
+        assert_eq!(
+            worker.submit(params(1, &["P1"], "L7")),
+            Err("position service unavailable: adapter 'demo_bus' has no position side".into())
+        );
+        assert_silent(&rx);
     }
 
     #[test]
