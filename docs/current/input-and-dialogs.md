@@ -147,9 +147,11 @@ Settings updates its shell preference when a value is chosen or stepped, then
 submits the user-layer write. Propagation to modules follows each setting's
 global or reload path; the row updating is not proof that every open module
 has adopted the change. Keybinding edits instead become effective through the config
-watcher's reload; the editor's rows are prepared from the registry and keymap
-and re-derived by each applied reload; render and every key and click read that
-one list.
+watcher's reload. The editor's rows are prepared from the registry and keymap,
+re-derived by each applied reload and re-ranked by each query change; render
+and every key and click read that one prepared list. Settings rows are not
+prepared: render and each handler derive them, at a measured 2 to 3.5
+microseconds (see [performance](performance.md#cache-and-allocation-contracts)).
 Neither surface's background write acknowledgement is proof that the write
 completed. See [configuration writes](configuration.md#runtime-edits) and
 [keybinding editing](keymaps.md#editing-unbinding-and-reset) for failure and

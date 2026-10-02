@@ -121,7 +121,8 @@ change most often hits:
   (`crate::prepared`); refresh them through `ShellView::refresh_dialog_rows`
   at any new seam that changes a key input. A parked object dialog is
   re-keyed when `close_modal` reveals it. Render asserts, never refreshes.
-  Object edit-stage rows still derive in render.
+  Settings rows and object edit-stage rows derive in render and each
+  handler; they measure 2 to 13 µs, too little to repay a prepared list.
 - A multi-screen dialog registers its back step with `dialog::set_back`.
   The title row paints the Back button only while the step is available, and
   the step uses Escape's parent-stage transition. One Back click also discards

@@ -20,9 +20,11 @@ typed name); render and every browse key and click read it. A covered object
 dialog is re-keyed when it is revealed, so a reload while it was parked shows
 on the first paint. Landing the cursor after a removal still ranks the
 pending-aware configuration, because the painted list catches up only when the
-batch applies. The Edit, Column and Values rows are the draft's and still
-derive at each render and handler call; their measured cost is 2 to 13
-microseconds.
+batch applies. The Edit, Column and Values rows are the draft's and are not
+prepared: they derive at each render and handler call, because one derivation
+and rank of the largest demo draft costs 2 to 13 microseconds, too little to
+repay a cache key and its refresh seams (see
+[performance](performance.md#cache-and-allocation-contracts)).
 
 | Stage | Content and return path |
 |---|---|
