@@ -391,6 +391,20 @@ fn log_health_event(source: &str, worst: &Health, detail: &str) {
     }
 }
 
+/// The load-lane slot an ingest backlog report fills: `<source>:backlog`,
+/// `Degraded "ingest backlog N"` while over, `Ok` once below.
+fn backlog_health(source: &str, queued: usize, over: bool) -> (String, Health, String) {
+    let key = crate::health::condition_key(source, crate::health::BACKLOG);
+    let reason = format!("ingest backlog {queued}");
+    let detail = format!("{key}: {reason}");
+    let health = if over {
+        Health::Degraded { reason }
+    } else {
+        Health::Ok
+    };
+    (key, health, detail)
+}
+
 /// Report adapter content outcomes through the shared load lane. Batch keys
 /// are the parsed document key (or raw topic for parse failure) for subscribed
 /// sources, and `identity@source` for fetches. Failures receive one operation
@@ -1146,6 +1160,28 @@ impl DataService {
                 // stale check that could not read the catalog, a local sweep
                 // that panicked.
                 IngestEvent::Diagnostic(d) => sink(DataEvent::Diagnostics(vec![d])),
+                // One source's queue crossed the backlog depth, or fell back
+                // below it: its own `<source>:backlog` load slot.
+                IngestEvent::Backlog {
+                    source,
+                    queued,
+                    over,
+                } => {
+                    let (key, health, detail) = backlog_health(&source, queued, over);
+                    health_tracker.report_load_and_emit(&source, &key, health, detail, |reported| {
+                        match reported {
+                            Some((worst, detail)) => {
+                                log_health_event(&source, &worst, &detail);
+                                sink(DataEvent::Health {
+                                    source: source.clone(),
+                                    worst,
+                                    detail,
+                                })
+                            }
+                            None => true,
+                        }
+                    })
+                }
                 // A drained runner also ends progress. The runner does not retry refused
                 // events; the app mailbox coalesces progress state.
                 IngestEvent::PlanComplete => sink(DataEvent::LoadEnded),
@@ -3005,6 +3041,22 @@ mod tests {
         DataService,
         std::sync::mpsc::Receiver<DataEvent>,
     ) {
+        let (dir, feed, config) = subscribed_config(kind, adapter, document);
+        let (service, rx) = DataService::open_channel(config).unwrap();
+        (dir, feed, service, rx)
+    }
+
+    /// [`subscribed_service_for`]'s configuration, for a test that opens
+    /// the service on its own sink.
+    fn subscribed_config(
+        kind: Arc<dyn geode_core::document::DocumentKind>,
+        adapter: &str,
+        document: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::adapter::ChannelFeed,
+        DataServiceConfig,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (bus, feed) = crate::adapter::ChannelAdapter::new("demo_bus");
         let mut adapters = AdapterRegistry::default();
@@ -3024,7 +3076,7 @@ mod tests {
             coalesce: Duration::ZERO,
             ..crate::source::SourceSpec::directory("cvi", "cvi_params", Vec::new())
         };
-        let (service, rx) = DataService::open_channel(DataServiceConfig {
+        let config = DataServiceConfig {
             db_path: dir.path().join("geode.duckdb"),
             schema,
             views: Vec::new(),
@@ -3037,9 +3089,89 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
-        })
-        .unwrap();
-        (dir, feed, service, rx)
+        };
+        (dir, feed, config)
+    }
+
+    /// The writer is held on the first document's `Loading` (the sink runs
+    /// on the runner thread, outside the queue lock), so the burst queues
+    /// behind it whatever the machine's speed: the depth is crossed by
+    /// count, not by submissions outrunning publishes.
+    #[test]
+    fn a_burst_past_the_backlog_depth_degrades_the_source_until_it_drains() {
+        let (_dir, _feed, config) = subscribed_config(
+            Arc::new(crate::store::ddl::tests_support::FakeKind::new()),
+            "demo_bus",
+            "fake_cvi",
+        );
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let held_tx = Mutex::new(held_tx);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sink_gate = Arc::clone(&gate);
+        let sink: EventSink = Arc::new(move |e| {
+            if matches!(e, DataEvent::Loading { .. }) {
+                let _ = held_tx.lock().unwrap().send(());
+                let (lock, opened) = &*sink_gate;
+                let mut open = lock.lock().unwrap();
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !*open {
+                    let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                        break;
+                    };
+                    open = opened.wait_timeout(open, left).unwrap().0;
+                }
+            }
+            tx.send(e).is_ok()
+        });
+        let svc = DataService::open(config, sink).unwrap();
+        let doc = |i: usize| DocumentJob {
+            source: "cvi".into(),
+            dataset: "cvi_params".into(),
+            rows: cvi_doc(&format!("K{i}.Z"), [1., 2., 3., 4., 5., 6.]),
+            source_time: Utc::now(),
+            received_at: Utc::now(),
+            bytes: 0,
+        };
+        svc.ingest.submit_document(doc(0));
+        held_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the writer holds on the first document");
+        for i in 1..=65 {
+            svc.ingest.submit_document(doc(i));
+        }
+        let (worst, detail) = until(&rx, |e| match e {
+            DataEvent::Health {
+                source,
+                worst: worst @ Health::Degraded { .. },
+                detail,
+            } => {
+                assert_eq!(source, "cvi");
+                Some((worst, detail))
+            }
+            _ => None,
+        });
+        assert_eq!(
+            worst,
+            Health::Degraded {
+                reason: "ingest backlog 65".into()
+            }
+        );
+        assert_eq!(detail, "cvi:backlog: ingest backlog 65");
+        {
+            let (lock, opened) = &*gate;
+            *lock.lock().unwrap() = true;
+            opened.notify_all();
+        }
+        until(&rx, |e| match e {
+            DataEvent::Health {
+                source,
+                worst: Health::Ok,
+                ..
+            } if source == "cvi" => Some(()),
+            _ => None,
+        });
+        svc.shutdown();
     }
 
     /// A real database file whose `cvi_params` live table gained a column

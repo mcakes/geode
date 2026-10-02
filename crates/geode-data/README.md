@@ -140,6 +140,11 @@ often tripped:
 - Source-wide conditions use their own load-lane keys from
   `health::condition_key` (`<source>:queue`, `<source>:backlog`) so each is
   reported and cleared alone; health events still carry the source name.
+- The runner's document and series queues have no fixed capacity; a source
+  past `BACKLOG_DEPTH` (64) queued feed documents and series reports
+  `<source>:backlog` (`Degraded "ingest backlog N"`, re-reported at each
+  further 64, `Ok` once that source's count falls below 64); local writes are
+  not counted.
 - `apply_schema` is `CREATE TABLE IF NOT EXISTS` and publish moves rows
   positionally, so open compares every existing payload table with its
   declaration (`store::drift`) and refuses a drifted dataset for the run:

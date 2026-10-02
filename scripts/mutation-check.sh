@@ -28850,6 +28850,38 @@ run_mutation "silence: a later episode's growing count ignores its base" \
   geode-data \
   a_drop_after_a_clear_opens_a_new_episode_counted_from_zero
 
+# A source past the depth is reported.
+run_mutation "silence: a backlog is never reported" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if n > BACKLOG_DEPTH && (n - 1).is_multiple_of(BACKLOG_DEPTH) {' \
+  '    if false {' \
+  geode-data \
+  a_source_queued_past_the_backlog_depth_is_reported_and_draining_clears_it
+
+# A drained backlog clears.
+run_mutation "silence: a drained backlog never clears" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if n < BACKLOG_DEPTH && q.backlogged.remove(source) {' \
+  '    if false && q.backlogged.remove(source) {' \
+  geode-data \
+  a_source_queued_past_the_backlog_depth_is_reported_and_draining_clears_it
+
+# Each source has its own count.
+run_mutation "silence: one backlog count for every source" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    let n = q.queued_per_source.entry(source.to_string()).or_default();' \
+  '    let n = q.queued_per_source.entry(String::new()).or_default();' \
+  geode-data \
+  a_source_queued_past_the_backlog_depth_is_reported_and_draining_clears_it
+
+# The backlog has its own lane key.
+run_mutation "silence: the backlog shares the queue lane" \
+  crates/geode-data/src/service.rs \
+  '    let key = crate::health::condition_key(source, crate::health::BACKLOG);' \
+  '    let key = crate::health::condition_key(source, crate::health::QUEUE);' \
+  geode-data \
+  a_burst_past_the_backlog_depth_degrades_the_source_until_it_drains
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
