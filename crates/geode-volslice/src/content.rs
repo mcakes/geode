@@ -49,6 +49,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     // them and the palette lists them.
     ("volslice::commit", "Commit"),
     ("volslice::cancel", "Cancel"),
+    // The underlying picker's row steps. Its field types every bare key,
+    // so the shared `j`/`k` list steps cannot reach it; the arrows can.
+    ("volslice::list_down", "Next row"),
+    ("volslice::list_up", "Previous row"),
 ];
 
 /// Bindings scoped to the factory's `volslice` context. Fragment validation
@@ -99,8 +103,21 @@ context = "volslice && mode == normal"
 "[" = "volslice::split_shrink"
 "]" = "volslice::split_grow"
 
+# The underlying picker: a field, so only these keys are claimed and
+# every other bare key types.
 [[bindings]]
 context = "volslice && mode == insert"
+[bindings.keys]
+"enter" = "volslice::commit"
+"escape" = "volslice::cancel"
+"down" = "volslice::list_down"
+"up" = "volslice::list_up"
+
+# The diff chooser: a fieldless list. The tile publishes `tilelist` while
+# it is up, so the shell's shared `j`/`k` and arrows step its rows; the
+# strip's own `j`/`k` are normal-mode bindings and stay out.
+[[bindings]]
+context = "volslice && mode == menu"
 [bindings.keys]
 "enter" = "volslice::commit"
 "escape" = "volslice::cancel"
@@ -177,6 +194,11 @@ impl TileContent for VolsliceContent {
 
     fn holds_focus(&self, window: &Window, cx: &App) -> bool {
         self.tile.read(cx).holds_focus(window, cx)
+    }
+
+    /// A tile added with no underlying is useless: it asks for one at once.
+    fn launched(&self, window: &mut Window, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.launched(window, cx))
     }
 
     /// A slice viewer reads its underlying from the group it follows, so
@@ -275,7 +297,7 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
         let ids: Vec<&str> = ACTIONS.iter().map(|(id, _)| *id).collect();
         let bindings = doc.table["bindings"].as_array().unwrap();
-        assert_eq!(bindings.len(), 2, "normal and insert");
+        assert_eq!(bindings.len(), 3, "normal, insert and menu");
         let mut bound = 0;
         for b in bindings {
             for (key, action) in b["keys"].as_table().unwrap() {
@@ -284,7 +306,7 @@ mod tests {
                 bound += 1;
             }
         }
-        assert_eq!(bound, 28);
+        assert_eq!(bound, 32);
         // And the registry the app builds accepts every binding.
         let (data, _rx) = DataHandle::for_tests();
         let mut registry = ActionRegistry::default();

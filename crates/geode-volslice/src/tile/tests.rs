@@ -54,8 +54,10 @@ impl gpui::Render for ShellStandIn {
                 else {
                     return;
                 };
+                // `menu` is a fieldless list popup: the shell routes it as
+                // normal mode, over the whole stack.
                 let stack = match context.get("mode") {
-                    Some("normal") => vec![
+                    Some("normal") | Some("menu") => vec![
                         KeyContext::new("workspace"),
                         KeyContext::new("tile"),
                         context,
@@ -101,6 +103,7 @@ struct Built {
     content: Box<dyn TileContent>,
     tile: Entity<VolsliceTile>,
     frame: Entity<Frame>,
+    diagnostics: Entity<Diagnostics>,
     shell_focus: gpui::FocusHandle,
 }
 
@@ -115,6 +118,8 @@ struct Harness {
     frame: Entity<Frame>,
     /// The factory's data handle, for the refusal knob.
     data: DataHandle,
+    /// The diagnostics entity the tile reads its catalog and health from.
+    diagnostics: Entity<Diagnostics>,
     /// Every `Request` the tile submitted, in order. Held for the harness's
     /// whole life: dropping the receiver closes the channel and
     /// `DataHandle::send` starts refusing.
@@ -150,7 +155,7 @@ fn open_framed(
                     TileId(TILE),
                     restored.as_ref(),
                     bind(frame.clone()),
-                    diagnostics,
+                    diagnostics.clone(),
                     window,
                     cx,
                 );
@@ -161,6 +166,7 @@ fn open_framed(
                     content: occupant.content,
                     tile: tile.clone(),
                     frame: frame.clone(),
+                    diagnostics,
                     shell_focus: shell_focus.clone(),
                 });
                 // Wrapped in `Root`, as `main.rs` wraps the shell: a tile
@@ -189,6 +195,7 @@ fn open_framed(
             factory,
             frame: built.frame,
             data,
+            diagnostics: built.diagnostics,
             rx: RefCell::new(Some(rx)),
         },
         vcx,

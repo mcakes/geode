@@ -217,15 +217,21 @@ impl State {
         changed
     }
 
-    /// Add or remove one row's expiry. Removing the last leaves the set
-    /// empty; the next strip change fronts the first expiry again, so the
-    /// plot is never left blank for good.
+    /// Add or remove one row's expiry. The last active expiry is refused
+    /// (`false`, nothing changed): an emptied set would paint a blank plot
+    /// until the next strip change fronted the first row, a jump the trader
+    /// did not ask for. Solo another row first to move off it.
     pub fn toggle(&mut self, strip: &[StripRow], row: usize) -> bool {
         let Some(r) = strip.get(row) else {
             return false;
         };
         let set = self.active.get_or_insert_with(BTreeSet::new);
-        if !set.remove(&r.expiry) {
+        if set.contains(&r.expiry) {
+            if set.len() == 1 {
+                return false;
+            }
+            set.remove(&r.expiry);
+        } else {
             set.insert(r.expiry);
         }
         true
@@ -421,6 +427,19 @@ pub(crate) mod tests {
         assert!(st.solo(&s, 4));
         assert_eq!(st.active_in(&s), vec![(4, d("2027-06-18"))]);
         assert!(!st.solo(&s, 9), "a row past the strip does nothing");
+    }
+
+    #[test]
+    fn toggling_the_last_active_expiry_is_refused() {
+        let s = strip(&fixture(), d(TODAY));
+        let mut st = State::default();
+        st.reconcile(&s);
+        let before = st.active.clone();
+        assert!(!st.toggle(&s, 0), "the only active row stays");
+        assert_eq!(st.active, before);
+        assert!(st.toggle(&s, 1));
+        assert!(st.toggle(&s, 0), "with another active, it may go");
+        assert_eq!(st.active_in(&s), vec![(1, d("2026-11-20"))]);
     }
 
     #[test]

@@ -16,7 +16,15 @@ pub use content::VolsliceFactory;
 /// The tile kind, its keymap context and its session table name.
 pub const KIND: &str = "volslice";
 
-/// Startup hook beside the other modules' `init`. The tile reserves no key
-/// beyond its fragment yet; the hook exists so the app's startup sequence
-/// names every module once.
-pub fn init(_cx: &mut gpui::App) {}
+/// Reserve `tab` and `shift-tab` in the underlying picker's field for
+/// completion. Call once at startup, after component initialization.
+///
+/// GPUI dispatches matched actions before key listeners, so without a
+/// `NoAction` binding in the picker's context the component root's focus
+/// cycling would take `tab` before the picker's listener sees it.
+pub fn init(cx: &mut gpui::App) {
+    cx.bind_keys([
+        gpui::KeyBinding::new("tab", gpui::NoAction, Some(tile::PICKER_CONTEXT)),
+        gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some(tile::PICKER_CONTEXT)),
+    ]);
+}

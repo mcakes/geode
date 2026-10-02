@@ -5,6 +5,7 @@
 //! board, the vol batch and the model swap) is [`data`]'s.
 
 mod data;
+mod picker;
 
 use std::sync::Arc;
 
@@ -23,15 +24,26 @@ use geode_shell::module::StackHandle;
 use geode_shell::tiling::TileId;
 use geode_tile::following::FollowingQuery;
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, Hsla, SharedString, Window, div};
+use gpui::{App, Context, Entity, Focusable as _, Hsla, SharedString, Window, div};
 use gpui_component::{ActiveTheme as _, Theme, v_flex};
 
+use crate::commands::{self, Command};
 use crate::content::ACTIONS;
-use crate::core::build::Plan;
-use crate::core::model::{Loaded, State, StripRow};
+use crate::core::build::{Plan, with_split};
+use crate::core::model::{Kind, Loaded, State, StripRow};
 use crate::core::session;
 
 use data::{Fetch, Fetched};
+use picker::Popup;
+
+pub use picker::PICKER_CONTEXT;
+
+/// One keyboard zoom step: the view narrows (or widens) by this factor.
+pub const ZOOM_FACTOR: f64 = 1.25;
+/// One keyboard pan step, as a fraction of the view's width.
+pub const PAN_STEP: f64 = 0.1;
+/// One `[`/`]` step of the split.
+pub const SPLIT_STEP: f32 = 0.05;
 
 /// What the tile paints while it reads no underlying.
 const EMPTY: &str = "no underlying";
@@ -41,9 +53,10 @@ pub struct VolsliceTile {
     id: TileId,
     frame: FrameRef,
     data: DataHandle,
-    // The underlying picker's catalog (the picker arrives with the keys).
-    #[allow(dead_code)]
+    /// The underlying picker's catalog.
     diagnostics: Entity<Diagnostics>,
+    /// The underlying picker or the diff chooser, while one is up.
+    popup: Option<Popup>,
     stack: Option<StackHandle>,
     visible: bool,
     state: State,
@@ -133,6 +146,14 @@ impl VolsliceTile {
             .map(|(lo, hi)| View::with_min_span((lo, hi), 0.0));
         cx.observe(frame.entity(), |this, _, cx| this.on_frame_changed(cx))
             .detach();
+        // An open picker follows the catalog as it lands; anything else the
+        // diagnostics entity announces leaves it alone.
+        cx.observe(&diagnostics, |this, _, cx| {
+            if this.refresh_picker(cx) {
+                cx.notify();
+            }
+        })
+        .detach();
         // Expiry colors come from the theme: derived once per theme change,
         // never in render, and the painted model rebuilt with them.
         cx.observe_global::<Theme>(|this, cx| {
@@ -152,6 +173,7 @@ impl VolsliceTile {
             frame,
             data,
             diagnostics,
+            popup: None,
             stack: None,
             visible: false,
             reset_view: view.is_none(),
@@ -183,15 +205,34 @@ impl VolsliceTile {
         }
     }
 
-    /// No `.counts()`: the bare digits are kind toggles, and a counting
-    /// context would make the matcher swallow them as a pending count.
-    pub fn key_context(&self) -> KeyContext {
-        KeyContext::new(crate::KIND).pair("mode", "normal")
+    /// The key context's `mode`: `insert` while the picker's field holds
+    /// the keys, `menu` while the fieldless diff chooser is up, `normal`
+    /// otherwise.
+    fn mode(&self) -> &'static str {
+        match self.popup {
+            Some(Popup::Picker(_)) => "insert",
+            Some(Popup::Diff(_)) => "menu",
+            None => "normal",
+        }
     }
 
-    /// `true` for this module's own registered actions, which the tile
-    /// owns whatever state it is in; anything else falls through to the
-    /// shell.
+    /// No `.counts()`: the bare digits are kind toggles, and a counting
+    /// context would make the matcher swallow them as a pending count.
+    /// `tilelist` only under the diff chooser: the picker's field must type
+    /// `j` and `k`, which the shared list steps would otherwise claim.
+    pub fn key_context(&self) -> KeyContext {
+        let ctx = KeyContext::new(crate::KIND).pair("mode", self.mode());
+        if matches!(self.popup, Some(Popup::Diff(_))) {
+            ctx.tilelist()
+        } else {
+            ctx
+        }
+    }
+
+    /// `true` for this module's own registered actions and, while a list
+    /// is up, the shell's shared list steps. Anything else falls through to
+    /// the shell. A tile verb other than a popup's own closes the popup
+    /// before it runs.
     pub fn dispatch(
         &mut self,
         action: &ActionId,
@@ -199,22 +240,79 @@ impl VolsliceTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let _ = (count, window);
-        if !ACTIONS.iter().any(|(id, _)| *id == action.0) {
-            return false;
-        }
+        let _ = count;
+        let verb = match action.0.as_str() {
+            geode_tile::motion::MENU_DOWN if self.popup.is_some() => "list_down",
+            geode_tile::motion::MENU_UP if self.popup.is_some() => "list_up",
+            id if ACTIONS.iter().any(|(a, _)| *a == id) => &id["volslice::".len()..],
+            _ => return false,
+        };
         #[cfg(test)]
         self.dispatch_log.push(action.clone());
-        if action.0 == "volslice::underlying"
-            && let Some(g) = self.frame.read(cx).following()
-        {
-            // A follower reads its underlying from the group: picking one
-            // here would be overwritten by the next group change.
-            self.notice(format!(
-                "following {} \u{2014} set the underlying there",
-                g.letter()
-            ));
-            cx.notify();
+        if !matches!(verb, "commit" | "cancel" | "list_down" | "list_up") {
+            self.close_popup(window, cx);
+        }
+        match verb {
+            "strip_down" | "strip_up" => {
+                let delta = if verb == "strip_down" { 1 } else { -1 };
+                self.state.step_cursor(self.strip.len(), delta);
+                cx.notify();
+            }
+            "solo" => {
+                if self.state.solo(&self.strip, self.state.cursor) {
+                    self.resubmit(cx);
+                }
+            }
+            "toggle_expiry" => {
+                if self.state.toggle(&self.strip, self.state.cursor) {
+                    self.resubmit(cx);
+                }
+            }
+            "coordinate" => {
+                self.state.cycle_coordinate();
+                self.reset_view = true;
+                self.resubmit(cx);
+            }
+            "density" => {
+                self.state.density = !self.state.density;
+                self.resubmit(cx);
+            }
+            "diff" => self.open_diff(window, cx),
+            "underlying" => match self.frame.read(cx).following() {
+                // A follower reads its underlying from the group: picking one
+                // here would be overwritten by the next group change.
+                Some(g) => {
+                    self.notice(following_refusal(g));
+                    cx.notify();
+                }
+                None => self.open_picker(window, cx),
+            },
+            "pan_left" | "pan_right" | "zoom_in" | "zoom_out" | "reset_view" => {
+                self.move_view(verb, cx)
+            }
+            "split_shrink" => self.step_split(-SPLIT_STEP, cx),
+            "split_grow" => self.step_split(SPLIT_STEP, cx),
+            "commit" => self.commit_popup(window, cx),
+            "cancel" => self.close_popup(window, cx),
+            "list_down" => {
+                self.step_popup(1, cx);
+            }
+            "list_up" => {
+                self.step_popup(-1, cx);
+            }
+            kind => {
+                // `kind_1`..`kind_9`: the Nth kind in header order. A digit
+                // past the kinds does nothing. An unloaded kind's choice is
+                // kept, so a draft hidden before it arrives arrives hidden.
+                if let Some(n) = kind
+                    .strip_prefix("kind_")
+                    .and_then(|d| d.parse::<usize>().ok())
+                    && let Some(k) = n.checked_sub(1).and_then(|i| Kind::ALL.get(i))
+                {
+                    self.state.toggle_kind(*k);
+                    self.resubmit(cx);
+                }
+            }
         }
         true
     }
@@ -222,14 +320,123 @@ impl VolsliceTile {
     pub fn command(
         &mut self,
         line: &str,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        Err(format!("unknown command: {}", line.trim()))
+        match commands::parse(line)? {
+            Command::Underlying(u) => {
+                if let Some(g) = self.frame.read(cx).following() {
+                    return Err(following_refusal(g));
+                }
+                self.close_popup(window, cx);
+                self.set_underlying(u, cx);
+            }
+            Command::X(c) => {
+                if c != self.state.coordinate {
+                    self.state.coordinate = c;
+                    self.reset_view = true;
+                    self.resubmit(cx);
+                }
+            }
+            Command::Diff(pair) => {
+                // A pair naming a kind with nothing loaded would ask nothing
+                // and paint nothing, silently.
+                if let Some(p) = pair {
+                    for k in [p.minuend, p.subtrahend] {
+                        if !self.loaded.has(k) {
+                            return Err(format!("{} is not loaded", k.label()));
+                        }
+                    }
+                }
+                if self.state.diff != pair {
+                    self.state.diff = pair;
+                    self.resubmit(cx);
+                }
+            }
+        }
+        Ok(())
     }
 
-    pub fn completions(&self, _line: &str, _cursor: usize) -> Vec<String> {
-        Vec::new()
+    pub fn completions(&self, line: &str, cursor: usize) -> Vec<String> {
+        commands::completions(line, cursor, &self.loaded.kinds())
+    }
+
+    /// The shell added this tile and it is focused: with no underlying of
+    /// its own and no group to read one from, ask for one at once.
+    pub fn launched(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popup.is_none()
+            && self.state.underlying.is_none()
+            && self.frame.read(cx).following().is_none()
+        {
+            self.open_picker(window, cx);
+        }
+    }
+
+    /// The tile's own underlying, from the picker or `:underlying`. The old
+    /// question is forgotten, so its late answer is stale; a hidden tile
+    /// asks when it is next shown.
+    fn set_underlying(&mut self, u: String, cx: &mut Context<Self>) {
+        if self.state.underlying.as_deref() == Some(u.as_str()) {
+            return;
+        }
+        self.state.underlying = Some(u);
+        self.following.reset();
+        self.fetch = Fetch::Idle;
+        if self.visible {
+            self.requery(cx);
+        }
+        cx.notify();
+    }
+
+    /// Ask again for the batch the state now needs, once documents are
+    /// installed; before that there is nothing to ask and the choice waits
+    /// for them.
+    fn resubmit(&mut self, cx: &mut Context<Self>) {
+        if self.loaded_for.is_some() {
+            self.submit_batch(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// A keyboard view move, through the axis's own scale so a reversed
+    /// axis pans and zooms the way it reads. Zoom anchors at the view's
+    /// centre: the host cannot read the element's crosshair. The model is
+    /// not rebuilt; the element repaints from its cache key.
+    fn move_view(&mut self, verb: &str, cx: &mut Context<Self>) {
+        let scale = self.model.x.scale();
+        let full = self.full;
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        match verb {
+            "pan_left" => view.pan(-PAN_STEP * scale.pan_sign(), full),
+            "pan_right" => view.pan(PAN_STEP * scale.pan_sign(), full),
+            "zoom_in" => view.zoom(ZOOM_FACTOR, scale.about(0.5), full),
+            "zoom_out" => view.zoom(1.0 / ZOOM_FACTOR, scale.about(0.5), full),
+            _ => view.reset(full),
+        }
+        self.state.view = Some((view.lo, view.hi));
+        cx.notify();
+    }
+
+    fn step_split(&mut self, delta: f32, cx: &mut Context<Self>) {
+        self.set_split(self.state.split + delta, cx);
+    }
+
+    /// Set the split, rounded to a hundredth so the saved value reads as
+    /// typed, and clamped as the chart clamps it. The painted model is the
+    /// same slots under a new version, which the element's caches need.
+    pub(super) fn set_split(&mut self, split: f32, cx: &mut Context<Self>) {
+        use geode_chart::core::layout::{SPLIT_MAX, SPLIT_MIN};
+        let split = ((split * 100.0).round() / 100.0).clamp(SPLIT_MIN, SPLIT_MAX);
+        if split == self.state.split {
+            return;
+        }
+        self.state.split = split;
+        self.version += 1;
+        self.model = with_split(&self.model, split, self.version);
+        cx.notify();
     }
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
@@ -245,8 +452,12 @@ impl VolsliceTile {
         session::to_table(&self.state)
     }
 
-    pub fn holds_focus(&self, _window: &Window, _cx: &App) -> bool {
-        false
+    /// Whether the picker's own field holds window focus.
+    pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+        match &self.popup {
+            Some(Popup::Picker(p)) => p.input.read(cx).focus_handle(cx).is_focused(window),
+            _ => false,
+        }
     }
 
     /// Push a data-side notice once.
@@ -293,15 +504,31 @@ impl VolsliceTile {
     }
 
     #[cfg(test)]
+    pub(crate) fn state(&self) -> &State {
+        &self.state
+    }
+
+    #[cfg(test)]
     pub(crate) fn empty_text(&self) -> SharedString {
         SharedString::new_static(EMPTY)
     }
 }
 
+/// The refusal a follower gives for picking its own underlying.
+fn following_refusal(g: Group) -> String {
+    format!("following {} \u{2014} set the underlying there", g.letter())
+}
+
 impl Render for VolsliceTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id.0;
+        let tile = cx.entity();
+        let popup = self
+            .popup
+            .as_ref()
+            .map(|p| picker::render_popup(p, &tile, id, cx));
         v_flex()
+            .relative()
             .size_full()
             .items_center()
             .justify_center()
@@ -311,6 +538,9 @@ impl Render for VolsliceTile {
                     .debug_selector(move || format!("volslice-empty-{id}"))
                     .child(EMPTY),
             )
+            .when_some(popup, |el, p| {
+                el.child(div().absolute().top_0().right_0().child(p))
+            })
     }
 }
 
