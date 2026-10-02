@@ -1122,7 +1122,10 @@ underlyings paints `no underlying in A`. A tile added with no underlying
 and no group prompts with the picker at once. Following is compared through
 `FrameView::following()` on every frame notification, since following a
 group whose scope was never written moves no version; while following, the
-group's scope generation counts as a change.
+group's scope generation counts as a change. A change of group, joining or
+leaving, clears the painted curves and moves the vol tag before asking
+again: the old group's draft, painted or still in flight, would otherwise
+sit dashed under no draft chip, and stay there if the requery failed.
 
 **Data flow.** The CVI document (full key) and the chain (one-part prefix,
 every expiry) are read in sequence under one `FollowingQuery` tag, both

@@ -167,7 +167,9 @@ The footer shows the first notice and how many more stand behind it:
   draft reaches the batch only while it names the underlying whose
   documents are loaded.
 - Following is compared through `FrameView::following()` on every frame
-  notification; while following, the group's scope counts as a change.
+  notification; while following, the group's scope counts as a change. A
+  change of group clears the model and moves the vol tag, so no old
+  group's draft trace stays painted or lands late.
 - An arrival made from `set_visible` is deferred past the current draw,
   where a notify to the frame would be dropped.
 - The picker holds the keys in `insert` mode and publishes no `tilelist`:
