@@ -74,7 +74,7 @@ for capacity, coalescing, and worker shutdown behavior.
 | `source` | Directory discovery, sentinel parsing, and readiness classification. Configuration types are shared with `geode-core`; stable-mtime readiness is accepted by configuration but unsupported at runtime. |
 | `adapter` | Subscription, upload, and fetch capabilities; a registry, bounded message sink, and topic matching. Includes the in-process `ChannelAdapter`; the app can register additional implementations such as its demo series adapter. |
 | `ingest` | The discovery scheduler, the cold-start priority ladder, the per-file load pipeline, the grain split and conflict detector, the ingest runner (one thread, one writer connection, three queues), the subscribed-source receiver, the `Coalescer`, and the fetch worker. |
-| `store` | The DuckDB store: DDL generated from the schema, the per-file publish transaction and backfill guard, document publish, the series family's bitemporal append (`append_series`, the one door series rows enter by), retention, and the freshness catalog in source time. |
+| `store` | The DuckDB store: DDL generated from the schema, the per-file publish transaction and backfill guard, document publish, the series family's bitemporal append (`append_series`, the one door series rows enter by), retention, the freshness catalog in source time, and the payload-table drift check made at open. |
 | `query` | Scope lowering, grain-aware view compilation, distinct values, document and series queries, catalog reads, and the read pool. View/document planning, provenance, and execution share a worker transaction; superseded results are dropped. |
 | `pricing` | App-supplied pricer registry and a separate bounded worker queue. Queued batches coalesce by key; cancellation stops a running batch at the next line boundary. |
 | `vol` | App-supplied vol model registry and a bounded worker queue shaped like `pricing`'s: batches coalesce by key, cancellation stops a running batch at the next job boundary, a panicking job fails alone. |
@@ -138,8 +138,11 @@ often tripped:
 - Health is keyed by source, never by dataset; deciding and emitting a
   transition are one step under the lock.
 - `apply_schema` is `CREATE TABLE IF NOT EXISTS` and publish moves rows
-  positionally. A column change in `datasets.toml` against an existing
-  database is not migrated; delete the database first.
+  positionally, so open compares every existing payload table with its
+  declaration (`store::drift`) and refuses a drifted dataset for the run:
+  sources `Failed`, writes refused at the runner, reads refused at the
+  service, one error diagnostic. Delete the table or fix the dataset, then
+  restart.
 - Series timestamps are naive UTC, bound and read as epoch micros, so no
   session time zone can shift them.
 - A green suite can miss wrong-data behavior when its fixture cannot reach

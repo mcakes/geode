@@ -28678,6 +28678,68 @@ run_mutation "silence: path problems never reach the scheduler" \
   geode-data \
   a_missing_source_directory_is_degraded_and_clears_when_it_appears
 
+# Drift is reported, not passed as a matching table.
+run_mutation "silence: a drifted table reads as matching" \
+  crates/geode-data/src/store/drift.rs \
+  '    if differences.is_empty() {' \
+  '    if true {' \
+  geode-data \
+  reordered_same_type_columns_are_drift
+
+# Column names compare as DuckDB resolves them, without case.
+run_mutation "silence: drift compares column names with case" \
+  crates/geode-data/src/store/drift.rs \
+  '            (Some(a), Some(e)) if a.name.eq_ignore_ascii_case(&e.name) && a.ty == e.ty => {}' \
+  '            (Some(a), Some(e)) if a.name == e.name && a.ty == e.ty => {}' \
+  geode-data \
+  a_matching_table_spelled_with_aliases_and_other_case_is_not_drift
+
+# The runner refuses a write into a drifted dataset before any INSERT.
+run_mutation "silence: a document is written into a drifted dataset" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if let Some(reason) = drift_refusal(store, &job.dataset) {
+        let failed = sink(IngestEvent::Failed {' \
+  '    if let Some(reason) = None::<String> {
+        let failed = sink(IngestEvent::Failed {' \
+  geode-data \
+  a_document_for_a_drifted_dataset_is_refused_before_any_insert
+
+run_mutation "silence: a file is loaded into a drifted dataset" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        if let Some(reason) = drift_refusal(&store, &item.dataset) {' \
+  '        if let Some(reason) = None::<String> {' \
+  geode-data \
+  a_file_for_a_drifted_dataset_is_refused_before_any_insert
+
+# A drifted dataset's sources report Failed and are not started.
+run_mutation "silence: a drifted dataset's sources run on" \
+  crates/geode-data/src/service.rs \
+  '            if let Some(reason) = drifted.get(&spec.dataset) {' \
+  '            if let Some(reason) = None::<&String> {' \
+  geode-data \
+  a_drifted_dataset_fails_its_sources_refuses_its_reads_and_says_so_once
+
+# A read of a drifted dataset is refused with the drift reason.
+run_mutation "silence: a document read of a drifted dataset is compiled" \
+  crates/geode-data/src/service.rs \
+  '    pub fn document(&self, params: &DocumentParams) -> Result<QueryId, StoreError> {
+        self.refuse_drifted([params.dataset.as_str()])?;' \
+  '    pub fn document(&self, params: &DocumentParams) -> Result<QueryId, StoreError> {' \
+  geode-data \
+  a_drifted_dataset_fails_its_sources_refuses_its_reads_and_says_so_once
+
+# Open never rebuilds a summary from a drifted table.
+run_mutation "silence: open rebuilds a summary from a drifted table" \
+  crates/geode-data/src/service.rs \
+  '            if drifted.contains_key(&ds.name) {
+                continue;
+            }' \
+  '            if drifted.contains_key("") {
+                continue;
+            }' \
+  geode-data \
+  a_local_publish_into_a_drifted_dataset_is_refused_unwritten
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

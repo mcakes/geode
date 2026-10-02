@@ -831,6 +831,15 @@ tile's health chip under the source's own name.
 | Condition | Lane | Key | Health | Reason | Clears when |
 |---|---|---|---|---|---|
 | Source path missing, unreadable, or an invalid pattern | discovery | the source | `Degraded` | `path '<prefix>' not found`, `path '<prefix>' unreadable: <error>`, `invalid pattern '<pattern>': <error>` | the prefix exists and is readable |
+| Payload schema drift at open | discovery | every source of the dataset | `Failed` | `schema drift in '<dataset>': <diff>; delete the table or fix the dataset` | a restart after the table is deleted or the dataset fixed |
+
+A drifted dataset is refused, not guessed at: its sources are not started (a
+running poll would clear the discovery lane), the ingest runner refuses every
+document, series, file and forget into it before any `INSERT`, and the data
+service refuses a view, document, series or distinct read of it — or a fetch
+for its source — with the same reason, before compiling anything. Open skips
+rebuilding a drifted dataset's generation summary. See
+[`drift.rs`](../../crates/geode-data/src/store/drift.rs).
 
 ## Limits and verification
 

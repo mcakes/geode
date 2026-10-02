@@ -718,6 +718,9 @@ pub struct DataService {
     /// Refusing them before compilation keeps configuration failures visible
     /// even when no diagnostics panel is open.
     refused_views: std::collections::BTreeMap<String, String>,
+    /// Datasets whose payload tables drifted at open, with the reason. Reads
+    /// of them are refused before compilation (`refuse_drifted`).
+    drifted: std::collections::BTreeMap<String, String>,
     /// One worker per upload target. They only answer the sink, so they
     /// stop first and depend on nothing below.
     egress: EgressWorkers,
@@ -754,19 +757,45 @@ impl DataService {
         // Captured before every closure below clones `sink` for its own
         // use, so `publish`'s refusal path can send through it directly.
         let stored_sink = Arc::clone(&sink);
-        let store = Store::open(&config.db_path)?;
+        let mut store = Store::open(&config.db_path)?;
         // A computed dataset is answered by a module in process; it owns no
         // table and so has no generation summary to rebuild.
         for ds in config.schema.datasets.iter().filter(|d| !d.computed) {
             store.apply_schema(ds)?;
+            // Decided once per run: `datasets` is restart-required, so the
+            // recovery (delete the table or fix the dataset) takes a restart.
+            if let Some(drift) = store.check_drift(ds)? {
+                store.mark_drifted(&ds.name, drift.reason());
+            }
         }
         Catalog::new(store.writer()).ensure_tables()?;
+        let drifted = store.drifted_all().clone();
+        // One error per drifted dataset, once, at open: the diagnostics page
+        // names the tables and the recovery even if no tile asks for them.
+        if !drifted.is_empty() {
+            let _ = sink(DataEvent::Diagnostics(
+                drifted
+                    .values()
+                    .map(|reason| Diagnostic {
+                        severity: Severity::Error,
+                        layer: None,
+                        file: None,
+                        message: reason.clone(),
+                        path: None,
+                    })
+                    .collect(),
+            ));
+        }
 
         // Rebuild generation summaries only for datasets with payload but no
         // summary entries. This does not validate or repair a partially populated
         // summary; repairing one requires clearing that dataset's summary before
         // reopening.
         for ds in config.schema.datasets.iter().filter(|d| !d.computed) {
+            // A drifted table's columns cannot be trusted to rebuild a summary from.
+            if drifted.contains_key(&ds.name) {
+                continue;
+            }
             let tables = crate::store::ddl::history_of(&ds.name, ds);
             let summarised: i64 = {
                 let sql = "select count(*) from generations where dataset = ?";
@@ -1162,6 +1191,13 @@ impl DataService {
                     },
                 );
             };
+            // A drifted dataset's sources are not started: a running scheduler
+            // or receiver would report `Ok` on the discovery lane and clear the
+            // `Failed` that must stand until a restart after the fix.
+            if let Some(reason) = drifted.get(&spec.dataset) {
+                report_unservable(reason.clone());
+                continue;
+            }
             match spec.shape(&config.schema) {
                 SourceShape::Directory => {
                     directory_sources.push(spec.clone());
@@ -1457,6 +1493,7 @@ impl DataService {
             health: Arc::clone(&health_tracker),
             diagnostics,
             refused_views,
+            drifted,
             egress,
             subscriptions: std::sync::Mutex::new(subscriptions),
             fetchers: std::sync::Mutex::new(fetchers),
@@ -1529,6 +1566,20 @@ impl DataService {
         diagnostics
     }
 
+    /// Refuse a read of a drifted dataset before compiling it: its rows may
+    /// sit in the wrong columns, and an error naming the drift is the answer.
+    fn refuse_drifted<'a>(
+        &self,
+        datasets: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), StoreError> {
+        for name in datasets {
+            if let Some(reason) = self.drifted.get(name) {
+                return Err(StoreError::Drift(reason.clone()));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate caller-owned scope before compilation so errors name its invalid
     /// columns rather than surfacing later as SQL binder failures.
     pub fn validate_scope(&self, dataset: &str, scope: &Scope) -> Vec<Diagnostic> {
@@ -1566,6 +1617,10 @@ impl DataService {
                 source: duckdb::Error::InvalidParameterName(why.clone()),
             });
         }
+        self.refuse_drifted(
+            std::iter::once(spec.dataset.as_str())
+                .chain(spec.joins.iter().map(|j| j.dataset.as_str())),
+        )?;
 
         // A grouping override is a per-query copy of the spec with its
         // grouping replaced; validation runs on the copy so an undeclared
@@ -1625,6 +1680,15 @@ impl DataService {
     /// that carries the column. The caller has already removed the
     /// column's own selection from `params.scope`.
     pub fn distinct(&self, params: &DistinctParams) -> Result<QueryId, StoreError> {
+        // The picker unions every dataset carrying the column; one drifted
+        // contributor refuses the whole answer rather than shorten it.
+        let base = self.config.dimensions.base_column(&params.column);
+        self.refuse_drifted(self.drifted.keys().map(String::as_str).filter(|name| {
+            self.config
+                .schema
+                .dataset(name)
+                .is_some_and(|ds| ds.column(base).is_some())
+        }))?;
         Ok(self.pool.submit(QueryRequest {
             key: params.key,
             tag: params.tag,
@@ -1651,6 +1715,7 @@ impl DataService {
     /// Queue a document query through the shared pool, with the same per-key
     /// supersession and cancellation behavior as view queries.
     pub fn document(&self, params: &DocumentParams) -> Result<QueryId, StoreError> {
+        self.refuse_drifted([params.dataset.as_str()])?;
         Ok(self.pool.submit(QueryRequest {
             key: params.key,
             tag: params.tag,
@@ -1825,6 +1890,7 @@ impl DataService {
     /// shared pool for per-key supersession and cancellation. A cap refusal names
     /// the frequency and span; results arrive as DataEvent::Series.
     pub fn series(&self, params: &SeriesParams) -> Result<QueryId, StoreError> {
+        self.refuse_drifted([params.dataset.as_str()])?;
         let points = params.frequency.buckets_in(params.range.0, params.range.1);
         if points > SERIES_POINT_CAP {
             return Err(StoreError::Series(cap_message(
@@ -1916,6 +1982,16 @@ impl DataService {
                 result,
             });
         };
+        if let Some(reason) = self
+            .config
+            .sources
+            .iter()
+            .find(|s| s.name == params.source)
+            .and_then(|s| self.drifted.get(&s.dataset))
+        {
+            answer(Err(reason.clone()));
+            return;
+        }
         let Some(dataset) = self.fetch_datasets.get(&params.source) else {
             answer(Err(format!(
                 "source '{}' is not a fetch source",
@@ -2939,6 +3015,160 @@ mod tests {
         })
         .unwrap();
         (dir, feed, service, rx)
+    }
+
+    /// A real database file whose `cvi_params` live table gained a column
+    /// since it was created, opened under a subscribed `cvi` source.
+    #[test]
+    fn a_drifted_dataset_fails_its_sources_refuses_its_reads_and_says_so_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geode.duckdb");
+        {
+            let store = Store::open(&path).unwrap();
+            store.apply_schema(&cvi_dataset()).unwrap();
+            store
+                .writer()
+                .execute_batch("alter table cvi_params_document_live add column surprise VARCHAR;")
+                .unwrap();
+        }
+        let (bus, feed) = crate::adapter::ChannelAdapter::new("demo_bus");
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(bus);
+        let mut documents = DocumentRegistry::default();
+        documents.register(Arc::new(crate::store::ddl::tests_support::FakeKind::new()));
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(cvi_dataset());
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: path,
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                adapter: "demo_bus".into(),
+                document: Some("fake_cvi".into()),
+                topics: vec!["cvi/>".into()],
+                coalesce: Duration::ZERO,
+                ..crate::source::SourceSpec::directory("cvi", "cvi_params", Vec::new())
+            }],
+            adapters,
+            documents,
+            egress: Vec::new(),
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+        })
+        .unwrap();
+        let expected = "schema drift in 'cvi_params': 'cvi_params_document_live' column";
+        let mut errors = Vec::new();
+        let failed = until_within(&rx, Duration::from_secs(30), |e| match e {
+            DataEvent::Diagnostics(d) => {
+                errors.extend(
+                    d.into_iter()
+                        .filter(|d| d.severity == Severity::Error)
+                        .map(|d| d.message),
+                );
+                None
+            }
+            DataEvent::Health {
+                source,
+                worst: Health::Failed { reason },
+                ..
+            } => {
+                assert_eq!(source, "cvi");
+                Some(reason)
+            }
+            _ => None,
+        })
+        .expect("the drifted dataset's source reports Failed");
+        assert!(failed.starts_with(expected), "{failed}");
+        assert!(
+            failed.ends_with("; delete the table or fix the dataset"),
+            "{failed}"
+        );
+        assert_eq!(
+            errors,
+            vec![failed.clone()],
+            "one Error diagnostic, at open"
+        );
+        // The read is refused with the drift reason, not compiled.
+        let refused = service
+            .document(&DocumentParams {
+                key: QueryKey(9),
+                tag: 1,
+                submitted: Instant::now(),
+                dataset: "cvi_params".into(),
+                document_key: vec!["SPX.Z".into()],
+                as_of: AsOf::Live,
+            })
+            .unwrap_err();
+        assert_eq!(refused.to_string(), failed);
+        // Nothing subscribed: a message on the bus loads nothing.
+        feed.publish(
+            "cvi/SPX.Z",
+            crate::store::ddl::tests_support::FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+        );
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            if let Ok(DataEvent::Published { dataset, .. }) = rx.recv_timeout(left) {
+                panic!("published into a drifted dataset: {dataset}");
+            }
+        }
+        service.shutdown();
+    }
+
+    /// A drifted local table that already holds rows and has no generation
+    /// summary: open must not try to rebuild the summary from it, and a local
+    /// publish into it is refused unwritten.
+    #[test]
+    fn a_local_publish_into_a_drifted_dataset_is_refused_unwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geode.duckdb");
+        Store::open(&path)
+            .unwrap()
+            .writer()
+            .execute_batch(
+                "create table sheets_document_live (
+                     sheet VARCHAR, line BIGINT, qty BIGINT, batch VARCHAR, book VARCHAR,
+                     source_file_id BIGINT, source_time TIMESTAMPTZ
+                 );
+                 insert into sheets_document_live values ('old', 1, 1, 'old', NULL, 0, now());",
+            )
+            .unwrap();
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(local_dataset());
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: path,
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+        })
+        .expect("a drifted table does not stop the service opening");
+        service.publish(LocalPublish {
+            dataset: "sheets".into(),
+            rows: sheet_rows("S1", &[1, 2]),
+        });
+        let reason = until_within(&rx, Duration::from_secs(30), |e| match e {
+            DataEvent::LocalPublishFailed { reason, .. } => Some(reason),
+            DataEvent::Published { dataset, .. } => panic!("written: {dataset}"),
+            _ => None,
+        })
+        .expect("the publish is answered");
+        assert!(reason.starts_with("schema drift in 'sheets': "), "{reason}");
+        let rows: i64 = service
+            .conn
+            .query_row("select count(*) from sheets_document_live", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1, "only the row that was already there");
+        service.shutdown();
     }
 
     /// The next `Published`, skipping anything else.

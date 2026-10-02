@@ -414,6 +414,12 @@ fn take_work(q: &mut Queue) -> Option<Work> {
     Some(Work::File(it))
 }
 
+/// Why a write into `dataset` is refused before any INSERT: its tables
+/// drifted from the declaration at open (`Store::drifted`).
+fn drift_refusal(store: &Store, dataset: &str) -> Option<String> {
+    store.drifted(dataset).map(str::to_string)
+}
+
 /// Publish one owned document and report its outcome through the same
 /// generation events as files. The rows are consumed by this operation.
 fn publish_one_document(
@@ -452,6 +458,21 @@ fn publish_one_document(
         }
         return;
     };
+    if let Some(reason) = drift_refusal(store, &job.dataset) {
+        let failed = sink(IngestEvent::Failed {
+            source: job.source.clone(),
+            dataset: job.dataset.clone(),
+            batch: batch.clone(),
+            reason,
+        });
+        if !failed {
+            log_refused_event(
+                refusal_logged,
+                &format!("the drift refusal for document {}/{batch}", job.dataset),
+            );
+        }
+        return;
+    }
 
     let source_time = if job.source == LOCAL_SOURCE {
         local_source_time(store, dataset, &batch, job.source_time)
@@ -691,6 +712,9 @@ fn forget_one_document(
             "dataset '{}' is not a local dataset; only a local document can be forgotten",
             job.dataset
         )),
+        Some(_) if store.drifted(&job.dataset).is_some() => {
+            failed(drift_refusal(store, &job.dataset).unwrap_or_default())
+        }
         Some(ds) => {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 geode_core::panic::contained(|| {
@@ -747,6 +771,15 @@ fn append_one_series(
         }
         return;
     };
+    if let Some(reason) = drift_refusal(store, &job.dataset) {
+        if !sink(failed(reason)) {
+            log_refused_event(
+                refusal_logged,
+                &format!("the drift refusal for series {pair}"),
+            );
+        }
+        return;
+    }
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         geode_core::panic::contained(|| {
             append_series(
@@ -964,6 +997,22 @@ fn run(
             }
             continue;
         };
+        if let Some(reason) = drift_refusal(&store, &item.dataset) {
+            let failed = sink(IngestEvent::Failed {
+                source: item.source.clone(),
+                dataset: item.dataset.clone(),
+                batch: item.batch.clone(),
+                reason,
+            });
+            clear_in_flight(&queue);
+            if !failed {
+                log_refused_event(
+                    &refusal_logged,
+                    &format!("the drift refusal for {}/{}", item.dataset, item.batch),
+                );
+            }
+            continue;
+        }
 
         // Contain load panics, report the file as Failed, and continue with the next
         // job. Ordinary load errors use the same failure event.
@@ -2039,6 +2088,61 @@ mod tests {
         }
         handle.shutdown();
         let _ = dir;
+    }
+
+    #[test]
+    fn a_document_for_a_drifted_dataset_is_refused_before_any_insert() {
+        let (_dir, mut store) = document_store();
+        store.mark_drifted("cvi_params", "schema drift in 'cvi_params': test".into());
+        let reader = store.reader().unwrap();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(cvi_dataset()));
+        handle.submit_document(job("cvi_params", spx()));
+        match next_event(&rx) {
+            IngestEvent::Failed {
+                dataset,
+                batch,
+                reason,
+                ..
+            } => {
+                assert_eq!((dataset.as_str(), batch.as_str()), ("cvi_params", "SPX.Z"));
+                assert_eq!(reason, "schema drift in 'cvi_params': test");
+            }
+            other => panic!("expected a refusal: {other:?}"),
+        }
+        let rows: i64 = reader
+            .query_row("select count(*) from cvi_params_document_live", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "refused before any INSERT");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_file_for_a_drifted_dataset_is_refused_before_any_insert() {
+        let (_db, _src, mut store, ds, plan) = harness();
+        store.mark_drifted(
+            "risk_snapshot",
+            "schema drift in 'risk_snapshot': test".into(),
+        );
+        let reader = store.reader().unwrap();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
+        handle.submit(WorkPlan {
+            items: vec![plan.items[0].clone()],
+        });
+        let events = drain(&rx, 1);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                IngestEvent::Failed { reason, .. } if reason == "schema drift in 'risk_snapshot': test"
+            )),
+            "{events:?}"
+        );
+        let generations: i64 = reader
+            .query_row("select count(*) from file_generations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(generations, 0, "nothing was recorded or inserted");
+        handle.shutdown();
     }
 
     /// Local publication must omit Started while still emitting Published.

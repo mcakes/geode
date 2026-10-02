@@ -6,6 +6,7 @@
 pub mod catalog;
 pub mod ddl;
 pub mod document;
+pub mod drift;
 pub mod publish;
 pub mod retention;
 pub mod series;
@@ -43,6 +44,9 @@ pub enum StoreError {
     /// own for the same reason `Document` and `Series` are: there is no
     /// statement to report.
     Scope(String),
+    /// The dataset's payload tables drifted from its declaration at open
+    /// (`store::drift`). The reason names the differences and the recovery.
+    Drift(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -60,6 +64,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Document(reason) => write!(f, "document: {reason}"),
             StoreError::Series(reason) => write!(f, "series: {reason}"),
             StoreError::Scope(reason) => write!(f, "scope: {reason}"),
+            StoreError::Drift(reason) => write!(f, "{reason}"),
         }
     }
 }
@@ -85,6 +90,10 @@ pub(crate) fn commit_transaction(tx: duckdb::Transaction<'_>) -> Result<(), Stor
 pub struct Store {
     writer: Connection,
     path: PathBuf,
+    /// Datasets whose payload tables drifted from their declaration, with the
+    /// reason, recorded at open (`mark_drifted`). The ingest runner owns the
+    /// store and refuses every write into one of these before any INSERT.
+    drifted: std::collections::BTreeMap<String, String>,
 }
 
 impl Store {
@@ -97,7 +106,11 @@ impl Store {
             path: path.clone(),
             source,
         })?;
-        Ok(Store { writer, path })
+        Ok(Store {
+            writer,
+            path,
+            drifted: Default::default(),
+        })
     }
 
     /// The ingest writer connection. Callers serialize publication and maintenance
@@ -122,41 +135,73 @@ impl Store {
     /// measure grain, one pair per document dataset, or one series table and its
     /// coverage table. Repeated calls leave existing tables unchanged.
     ///
-    /// This does not migrate payload schemas. An existing table with different
-    /// columns can therefore fail publication with a column-count mismatch.
+    /// This does not migrate payload schemas. `check_drift` compares an
+    /// existing table with the declaration; `DataService::open` refuses a
+    /// drifted dataset rather than publish into it positionally.
     pub fn apply_schema(&self, ds: &DatasetSpec) -> Result<(), StoreError> {
-        if ds.is_series() {
-            // Series and coverage tables are created once; neither has a live/archive pair.
-            for sql in series::create_series_tables_sql(ds) {
-                self.writer
-                    .execute_batch(&sql)
-                    .map_err(|source| StoreError::Sql {
-                        statement: sql,
-                        source,
-                    })?;
-            }
-            return Ok(());
-        }
-        for kind in [TableKind::Live, TableKind::Archive] {
-            let statements: Vec<String> = if ds.is_document() {
-                vec![ddl::create_document_table_sql(ds, kind)]
-            } else {
-                ds.grains()
-                    .into_iter()
-                    .map(|g| ddl::create_table_sql(ds, g, kind))
-                    .collect()
-            };
-            for sql in statements {
-                self.writer
-                    .execute_batch(&sql)
-                    .map_err(|source| StoreError::Sql {
-                        statement: sql,
-                        source,
-                    })?;
-            }
+        for (_, sql) in managed_tables(ds) {
+            self.writer
+                .execute_batch(&sql)
+                .map_err(|source| StoreError::Sql {
+                    statement: sql,
+                    source,
+                })?;
         }
         Ok(())
     }
+
+    /// Compare every table `apply_schema` manages for `ds` with its declaration.
+    pub fn check_drift(&self, ds: &DatasetSpec) -> Result<Option<drift::Drift>, StoreError> {
+        drift::check_drift(&self.writer, ds)
+    }
+
+    /// Record `dataset` as drifted for the rest of this run.
+    pub fn mark_drifted(&mut self, dataset: &str, reason: String) {
+        self.drifted.insert(dataset.to_string(), reason);
+    }
+
+    /// Why writes into `dataset` are refused, if its tables drifted.
+    pub fn drifted(&self, dataset: &str) -> Option<&str> {
+        self.drifted.get(dataset).map(String::as_str)
+    }
+
+    /// Every drifted dataset with its reason.
+    pub fn drifted_all(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.drifted
+    }
+}
+
+/// Every table `apply_schema` manages for `ds`, each with its CREATE
+/// statement, in creation order. The drift check builds its probe from the
+/// same statements, so the two can never disagree about a table's shape.
+pub(crate) fn managed_tables(ds: &DatasetSpec) -> Vec<(String, String)> {
+    if ds.is_series() {
+        let names = [
+            series::series_table(&ds.name),
+            series::coverage_table(&ds.name),
+        ];
+        return names
+            .into_iter()
+            .zip(series::create_series_tables_sql(ds))
+            .collect();
+    }
+    let mut out = Vec::new();
+    for kind in [TableKind::Live, TableKind::Archive] {
+        if ds.is_document() {
+            out.push((
+                ddl::TablePair::for_document(&ds.name).of(kind).to_string(),
+                ddl::create_document_table_sql(ds, kind),
+            ));
+        } else {
+            for g in ds.grains() {
+                out.push((
+                    ddl::table_name(&ds.name, g, kind),
+                    ddl::create_table_sql(ds, g, kind),
+                ));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

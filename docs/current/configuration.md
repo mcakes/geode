@@ -156,11 +156,16 @@ persisted without validating them against this document at all: resolution,
 not the reader, is what a missing or invalid name fails against (see
 [the shared frame](shell.md#the-shared-frame)).
 
-Schema changes do not migrate an existing DuckDB database. `apply_schema`
-creates missing tables and columns needed by its own metadata, while payload
-publication remains positional. Rebuild a demo database after changing column
-membership, roles, grains, or order. A production schema migration must be an
-explicit operation.
+Schema changes do not migrate an existing DuckDB database. At open, each
+payload table is compared with the DDL its dataset declares (names, types,
+number and order of columns; DuckDB type aliases and identifier case are not
+differences). A table that differs is drift: the dataset is refused for the
+run — its sources report `Failed` with `schema drift in '<dataset>': <diff>;
+delete the table or fix the dataset`, loads into it and reads of it are
+refused, and one error diagnostic names the tables. Recover by deleting the
+drifted table (or the demo database) or by correcting `datasets.toml`, then
+restarting; `datasets` is restart-required, so drift is decided once per
+run. A table that does not exist yet is created and is never drift.
 
 Every build declares two datasets in its builtin layer: `pricer_sheets`, the
 line pricer's local document dataset, and `pricer`, its computed vocabulary
