@@ -1610,6 +1610,16 @@ impl SheetDelegate {
 }
 
 impl SheetDelegate {
+    /// Whether `(row_ix, col)` (a plan column; `None` is the tree cell)
+    /// is the open editor's own cell: a press there is the editor's.
+    fn is_editor_cell(&self, row_ix: usize, col: Option<usize>) -> bool {
+        col.is_some()
+            && self
+                .editor
+                .as_ref()
+                .is_some_and(|ed| ed.row == row_ix && Some(ed.col) == col)
+    }
+
     /// Grid row `row_ix`'s grip: the drag handle of a movable row, at the
     /// tree cell's left edge. It straddles that edge, half over the
     /// column's own left padding and half over the cell, so it clears a
@@ -1680,10 +1690,14 @@ impl SheetDelegate {
     /// modifiers, and arms no drag: the chevron toggles its package and
     /// never starts a selection.
     ///
+    /// A right press reports [`CellPointer::Context`] on its row, except
+    /// in the open editor's own cell (the editor's, as for a left press).
+    ///
     /// None of the listeners stops propagation: the table's own
     /// `SelectCell` click and the shell's tile-focus press must still
     /// arrive, and a fast double-click still reaches gpui's click-count
-    /// tracking and so `DoubleClickedCell`.
+    /// tracking and so `DoubleClickedCell`. (The table itself stops a
+    /// cell's right press after these run; the shell captures its own.)
     fn wire_pointer(
         el: Div,
         cx: &Context<TableState<Self>>,
@@ -1708,11 +1722,7 @@ impl SheetDelegate {
                     });
                     return;
                 }
-                if col.is_some()
-                    && d.editor
-                        .as_ref()
-                        .is_some_and(|ed| ed.row == row_ix && Some(ed.col) == col)
-                {
+                if d.is_editor_cell(row_ix, col) {
                     d.inner_press = Some(InnerPress::Editor);
                     return;
                 }
@@ -1725,18 +1735,11 @@ impl SheetDelegate {
                 });
             }),
         )
-        // A right press reports its row for the shell's row menu, except
-        // in the open editor's own cell (the editor's, as the left press
-        // rule above). It stops nothing: the shell captures its own.
+        // The shell's row menu reads the row this records.
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                let d = this.delegate_mut();
-                if col.is_some()
-                    && d.editor
-                        .as_ref()
-                        .is_some_and(|ed| ed.row == row_ix && Some(ed.col) == col)
-                {
+                if this.delegate().is_editor_cell(row_ix, col) {
                     return;
                 }
                 cx.emit(CellPointer::Context { row: row_ix });
