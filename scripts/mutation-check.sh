@@ -28710,11 +28710,69 @@ run_mutation "link: set_scope on a follower writes the group" \
 
 # Every other scope verb names the workspace lane even through a
 # follower's view: sent to the group it would overwrite the group's scope
-# with an edited copy of the lane's.
-run_mutation "link: the scope bar's verbs edit the lane through a follower's view" \
+# with an edited copy of the lane's. One entry per lane editor that could
+# be sent to the group. The text session, undo and redo read and write the
+# lane's own fields and have no group route to take.
+run_mutation "link: loading a saved scope edits the lane through a follower's view" \
   crates/geode-shell/src/frame.rs \
   '        Ok(self.set_lane_scope(scope))' \
   '        Ok(self.set_scope(scope))' \
+  geode-shell the_scope_bars_other_verbs_edit_the_lane_through_a_followers_view
+
+run_mutation "link: dropping a dimension edits the lane through a follower's view" \
+  crates/geode-shell/src/frame.rs \
+  '        if s.dimensions.len() == before {
+            return false;
+        }
+        self.set_lane_scope(s)' \
+  '        if s.dimensions.len() == before {
+            return false;
+        }
+        self.set_scope(s)' \
+  geode-shell the_scope_bars_other_verbs_edit_the_lane_through_a_followers_view
+
+run_mutation "link: dropping a named expression edits the lane through a follower's view" \
+  crates/geode-shell/src/frame.rs \
+  '        if s.named.len() == before {
+            return false;
+        }
+        self.set_lane_scope(s)' \
+  '        if s.named.len() == before {
+            return false;
+        }
+        self.set_scope(s)' \
+  geode-shell the_scope_bars_other_verbs_edit_the_lane_through_a_followers_view
+
+run_mutation "link: an expression term edit edits the lane through a follower's view" \
+  crates/geode-shell/src/frame.rs \
+  '        Ok(self.set_lane_scope(s))' \
+  '        Ok(self.set_scope(s))' \
+  geode-shell the_scope_bars_other_verbs_edit_the_lane_through_a_followers_view
+
+run_mutation "link: clearing the expression edits the lane through a follower's view" \
+  crates/geode-shell/src/frame.rs \
+  '        s.expression = None;
+        self.set_lane_scope(s)' \
+  '        s.expression = None;
+        self.set_scope(s)' \
+  geode-shell the_scope_bars_other_verbs_edit_the_lane_through_a_followers_view
+
+run_mutation "link: the text filter edits the lane through a follower's view" \
+  crates/geode-shell/src/frame.rs \
+  '        s.text = text.filter(|t| !t.trim().is_empty());
+        self.set_lane_scope(s)' \
+  '        s.text = text.filter(|t| !t.trim().is_empty());
+        self.set_scope(s)' \
+  geode-shell the_scope_bars_other_verbs_edit_the_lane_through_a_followers_view
+
+run_mutation "link: saving a scope saves the lane's through a follower's view" \
+  crates/geode-shell/src/frame.rs \
+  '        let scope = self.frame.lane(self.ws).scope.clone();
+        self.frame
+            .saved_scopes' \
+  '        let scope = self.scope().clone();
+        self.frame
+            .saved_scopes' \
   geode-shell the_scope_bars_other_verbs_edit_the_lane_through_a_followers_view
 
 # A group's scope generation is drawn from the frame's one counter, so a
@@ -29577,7 +29635,7 @@ run_mutation "link: a package across underlyings emits no scope" \
 
 # A market-data panel posts its underlying and, while its draft is not
 # clean and the upload builder assembles it, that whole document. The rows
-# are cached on the underlying, the painted base and the draft: a repeated
+# are cached on the document key, the painted base and the draft: a repeated
 # pull hands back the same allocation, which the frame reads as no change.
 run_mutation "link: a panel posts its underlying as the scope" \
   crates/geode-marketdata/src/tile.rs \
@@ -29587,14 +29645,14 @@ run_mutation "link: a panel posts its underlying as the scope" \
 
 run_mutation "link: a clean panel posts no board" \
   crates/geode-marketdata/src/tile.rs \
-  '        let unsent = self.draft.state != DraftState::Clean;' \
-  '        let unsent = true;' \
+  '        let not_clean = self.draft.state != DraftState::Clean;' \
+  '        let not_clean = true;' \
   geode-marketdata a_clean_panel_emits_its_underlying_and_no_board
 
 run_mutation "link: a reverted draft leaves the board" \
   crates/geode-marketdata/src/tile.rs \
-  '        let unsent = self.draft.state != DraftState::Clean;' \
-  '        let unsent = true;' \
+  '        let not_clean = self.draft.state != DraftState::Clean;' \
+  '        let not_clean = true;' \
   geode-marketdata a_reverted_draft_empties_the_board
 
 run_mutation "link: an edited panel posts the document under its dataset" \
@@ -29905,6 +29963,106 @@ run_mutation "link: duplication copies no membership" \
 
     /// Focus an existing occupant of `kind`' \
   geode-shell a_duplicated_tile_is_in_no_group
+
+# An emission with no scope leaves the group's scope as it is: the cursor
+# resting on a total or a mixed row must not clear what the followers show.
+run_mutation "link: a scope-less emission leaves the group's scope" \
+  crates/geode-shell/src/link.rs \
+  '            _ => false,
+        };
+        self.seq += 1;' \
+  '            None => self.set_scope(g, Scope::default(), generation),
+            _ => false,
+        };
+        self.seq += 1;' \
+  geode-shell a_scope_none_emission_leaves_the_groups_scope
+
+# The status bar's segment names the group the focused tile FOLLOWS; a tile
+# that only emits shows none.
+run_mutation "link: emitting alone shows no segment" \
+  crates/geode-shell/src/shell/link.rs \
+  '            let group = frame.membership(tile).follow?;' \
+  '            let group = frame.membership(tile).follow.or(frame.membership(tile).emit)?;' \
+  geode-shell emitting_alone_shows_no_following_segment
+
+# The shell hears an emitter only through its tile entity's notifications,
+# so each emitter's own notify, at its source, is what carries a change:
+# the blotter's cursor sync, the pricer's and the panel's dispatch tails, and
+# the panel's popup close (the only notify on a refused `:upload`).
+run_mutation "link: the blotter's cursor sync notifies the tile" \
+  crates/geode-blotter/src/tile.rs \
+  '        self.take_selection_notice(cx);
+        cx.notify();
+    }' \
+  '        self.take_selection_notice(cx);
+    }' \
+  geode-blotter a_cursor_move_tells_the_shell_the_emission_changed
+
+run_mutation "link: the pricer's dispatch tail notifies the tile" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.sync_cursor(cx);
+        self.rebuild_chrome();
+        cx.notify();
+        true
+    }' \
+  '        self.sync_cursor(cx);
+        self.rebuild_chrome();
+        true
+    }' \
+  geode-pricer a_cursor_move_tells_the_shell_the_emission_changed
+
+run_mutation "link: the panel's dispatch tail notifies the tile" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if chrome {
+            self.rebuild_chrome();
+        }
+        cx.notify();
+        true
+    }' \
+  '        if chrome {
+            self.rebuild_chrome();
+        }
+        true
+    }' \
+  geode-marketdata an_edit_tells_the_shell_the_emission_changed
+
+run_mutation "link: the panel's popup close notifies the tile" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if was_choice {
+            self.sync_editor(cx);
+        }
+        cx.notify();
+    }' \
+  '        if was_choice {
+            self.sync_editor(cx);
+        }
+    }' \
+  geode-marketdata a_refused_upload_that_takes_live_steps_back_tells_the_shell
+
+# The row an emission names is the row on screen: under a sort the display
+# order and the snapshot's part ways.
+run_mutation "link: the blotter emission maps the cursor through the shown rows" \
+  crates/geode-blotter/src/tile.rs \
+  '        let row = *d.shown.get(d.cursor.row)? as usize;
+        crate::core::context::values_at(snapshot, plan, row)' \
+  '        let row = d.cursor.row;
+        crate::core::context::values_at(snapshot, plan, row)' \
+  geode-blotter the_emission_is_the_shown_rows_underlying_under_a_sort
+
+# A draft the builder refuses is remembered like a result, so it is walked
+# once and not once per pull; a draft held `Behind` posts its own retained
+# base, the one the panel paints, not the newer document delivered over it.
+run_mutation "link: a refused draft is remembered" \
+  crates/geode-marketdata/src/tile.rs \
+  '            .is_some_and(|e| e.is_for(key, &snapshot, &self.draft));' \
+  '            .is_some_and(|e| e.rows.is_some() && e.is_for(key, &snapshot, &self.draft));' \
+  geode-marketdata a_draft_the_builder_refuses_posts_nothing
+
+run_mutation "link: a Behind draft posts its painted base" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.base_snapshot.clone().or_else(|| self.snapshot.clone())' \
+  '        self.snapshot.clone()' \
+  geode-marketdata a_behind_draft_posts_its_retained_base_with_the_edit
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
