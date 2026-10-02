@@ -1,12 +1,13 @@
 //! The header strip every tile paints: one height, the shared stack marker
 //! first, the module's own left side taking the free width (clipped when it
 //! runs out), and a right cluster in a fixed order — the mode icon, status,
-//! notices, times, link chips, health, `⋯`. The mode icon shows only while the tile is
-//! in edit or visual mode ([`Mode`]). Status and notices are text of any
-//! length: they shrink, one line each and cut with an ellipsis, within at
-//! most [`TEXT_SHARE`] of the header; times, link chips, health and `⋯` never shrink. The frame formats nothing: every
-//! string arrives prepared, and a time run's stale flag is the only thing a
-//! tile decides per frame.
+//! notices, times, link chips, health, `⋯`. The mode icon shows only while
+//! the tile is in edit or visual mode ([`Mode`]). Status and notices are
+//! text of any length: they shrink, one line each and cut with an ellipsis,
+//! within at most [`TEXT_SHARE`] of the header; times, link chips, health
+//! and `⋯` never shrink. The frame formats nothing: every string arrives
+//! prepared, and a time run's stale flag is the only thing a tile decides
+//! per frame.
 //!
 //! A tile in a link group shows it in the fixed tail, after the times: a
 //! chip per group it follows or emits into ([`link_chips`], read from the
@@ -1021,6 +1022,47 @@ mod tests {
             "tile-link-3-B-both",
         ] {
             assert!(vcx.debug_bounds(s).is_none(), "left the group: no {s}");
+        }
+    }
+
+    /// What the chip paints is the group's color itself, as its fill. The
+    /// bundled-theme sweep holds the four group colors apart and readable
+    /// as fills; a header that painted the color some other way (as text
+    /// on a neutral chip, or through another floor) would show colors the
+    /// sweep never measured. Read from the painted scene: the quad at the
+    /// chip's bounds.
+    #[gpui::test]
+    fn the_link_chip_fill_is_the_group_color_unchanged(cx: &mut TestAppContext) {
+        let (view, _, _, vcx) = open_strip(cx);
+        for group in Group::ALL {
+            link(&view, vcx, Some(group), None);
+            let chip = vcx
+                .debug_bounds(match group {
+                    Group::A => "tile-link-3-A-follow",
+                    Group::B => "tile-link-3-B-follow",
+                    Group::C => "tile-link-3-C-follow",
+                    Group::D => "tile-link-3-D-follow",
+                })
+                .expect("the chip is painted");
+            let (fills, color) = vcx.update(|window, cx| {
+                let at = chip.scale(window.scale_factor());
+                let close = |a: gpui::ScaledPixels, b: gpui::ScaledPixels| {
+                    (a.as_f32() - b.as_f32()).abs() < 0.5
+                };
+                let fills: Vec<Hsla> = window
+                    .painted_quads()
+                    .iter()
+                    .filter(|q| {
+                        close(q.bounds.origin.x, at.origin.x)
+                            && close(q.bounds.origin.y, at.origin.y)
+                            && close(q.bounds.size.width, at.size.width)
+                            && close(q.bounds.size.height, at.size.height)
+                    })
+                    .filter_map(|q| q.background.as_solid())
+                    .collect();
+                (fills, group_color(cx.theme(), group))
+            });
+            assert_eq!(fills, vec![color], "group {}", group.letter());
         }
     }
 

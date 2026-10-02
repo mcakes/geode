@@ -31,9 +31,12 @@ pub trait Barrier {
     /// This tile's reading of the frame's counters now. An open barrier
     /// holds each awaited key to the identity its own tile reads: the shell
     /// enrolls every tile under its reading (`Frame::open_flip_each`), a
-    /// later scope, grouping or as-of change replaces the barrier, and a
-    /// tile that starts or stops following a link group has its key
-    /// re-identified. So these are what a closing tile answers with.
+    /// later change to the workspace lane's scope, grouping or as-of
+    /// replaces the barrier, a link group's scope change joins it, taking
+    /// that group's followers under their new reading
+    /// (`Frame::extend_flip`), and a tile that starts or stops following a
+    /// link group has its key re-identified. So these are what a closing
+    /// tile answers with.
     fn current(&self) -> FrameVersions;
     /// Whether an open barrier waits for `key` at `versions`.
     fn wants(&self, key: QueryKey, versions: FrameVersions) -> bool;
