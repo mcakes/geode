@@ -29253,19 +29253,19 @@ run_mutation "link: mod+u opens the chooser" \
 
 run_mutation "link: the chooser needs a tile" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '    let Some((tile, emits)) = focused else {
+  '    let Some((tile, follows, emits)) = focused else {
         view.notice = Some(NO_TILE_TO_LINK.into());
         cx.notify();
         return;
     };' \
-  '    let (tile, emits) = focused.unwrap_or((TileId(0), false));' \
+  '    let (tile, follows, emits) = focused.unwrap_or((TileId(0), true, false));' \
   geode-shell the_chooser_refuses_without_a_tile
 
 run_mutation "link: the chooser refuses a placeholder" \
   crates/geode-shell/src/shell/choicedialog.rs \
   '        .filter(|(_, o)| o.kind != PLACEHOLDER_KIND)
-        .map(|(tile, o)| (tile, o.content.emits()));' \
-  '        .map(|(tile, o)| (tile, o.content.emits()));' \
+        .map(|(tile, o)| (tile, o.content.follows(), o.content.emits()));' \
+  '        .map(|(tile, o)| (tile, o.content.follows(), o.content.emits()));' \
   geode-shell the_chooser_refuses_on_a_placeholder
 
 run_mutation "link: the chooser is refused over a page" \
@@ -29302,7 +29302,7 @@ run_mutation "link: a row picks its change" \
 # untouched chooser changes nothing.
 run_mutation "link: the chooser opens on the current follow row" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '        list.place(Some(link_opening_row(current)));' \
+  '        list.place(Some(link_opening_row(follows, current)));' \
   '        list.place(None);' \
   geode-shell the_highlight_opens_on_the_current_follow_row
 
@@ -29311,9 +29311,11 @@ run_mutation "link: the chooser opens on the current follow row" \
 # and Enter would follow nothing.
 run_mutation "link: a typed query lights the top-ranked row" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '            Target::LinkGroup { current, .. } => self
+  '            Target::LinkGroup {
+                follows, current, ..
+            } => self
                 .list
-                .set_query_placing(query, Some(link_opening_row(*current))),' \
+                .set_query_placing(query, Some(link_opening_row(*follows, *current))),' \
   '            Target::LinkGroup { .. } => self.list.set_query(query),' \
   geode-shell a_typed_query_lights_its_top_ranked_row
 
@@ -29732,6 +29734,36 @@ run_mutation "link: the production follower reads its group through its own hand
   '            let frame = FrameRef::for_tile(self.frame.clone(), ws, *id);' \
   '            let frame = FrameRef::new(self.frame.clone(), ws);' \
   geode-app the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows
+
+# A tile whose queries ignore the frame's scope cannot follow: it is offered
+# no follow row, the follow door refuses it, and a follow restored for it is
+# cleared once its occupant exists. A tile that neither follows nor emits has
+# nothing to choose and gets a notice, not an empty chooser.
+run_mutation "link: follow rows only for a follower" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        if follows {
+            for (ix, text) in FOLLOW_ROWS.iter().enumerate() {' \
+  '        if true {
+            for (ix, text) in FOLLOW_ROWS.iter().enumerate() {' \
+  geode-shell the_link_rows_offer_following_only_to_a_tile_that_follows
+
+run_mutation "link: a non-follower is never set following" \
+  crates/geode-shell/src/shell/link.rs \
+  '        let group = group.filter(|_| follows);' \
+  '        let group = group.filter(|_| true);' \
+  geode-shell a_tile_that_does_not_follow_is_never_set_following
+
+run_mutation "link: a restored follow on a non-follower is dropped" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '                cx.defer_in(window, move |view, _, cx| view.set_follow(id, None, cx));' \
+  '                let _ = id;' \
+  geode-shell a_restored_follow_on_a_tile_that_does_not_follow_is_dropped
+
+run_mutation "link: a tile that neither follows nor emits has no chooser" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    if !follows && !emits {' \
+  '    if false {' \
+  geode-shell the_chooser_offers_only_what_the_tile_can_do
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
