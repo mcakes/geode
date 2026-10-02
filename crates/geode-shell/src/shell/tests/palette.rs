@@ -1577,6 +1577,17 @@ fn painted_palette_rows(cx: &mut gpui::VisualTestContext, total: usize) -> Vec<u
         .collect()
 }
 
+/// The most rows a viewport of the painted list can show, from measured
+/// bounds: the list's height over a painted row's, rounded up, plus one row
+/// the scroll offset can split across the top edge. Measured rather than
+/// derived from `VISIBLE_ROWS`, so a font or rem change does not move it.
+fn max_painted_palette_rows(cx: &mut gpui::VisualTestContext, row: usize) -> usize {
+    let list = cx.debug_bounds("palette-list").expect("the list paints");
+    let selector: &'static str = Box::leak(format!("palette-row-{row}").into_boxed_str());
+    let row = cx.debug_bounds(selector).expect("the row paints");
+    (list.size.height / row.size.height).ceil() as usize + 1
+}
+
 /// The open palette's prepared rows against a fresh preparation from the
 /// shell's own inputs (registry, themes, keymap badges, saved scopes, usage)
 /// and its current query: a stale view would paint rows a key no longer acts on.
@@ -1620,8 +1631,22 @@ fn the_palette_paints_only_the_visible_rows(cx: &mut gpui::TestAppContext) {
         "fixture has {total} rows"
     );
     let painted = painted_palette_rows(&mut vcx, total);
+    // The viewport itself is capped at VISIBLE_ROWS slots at the window's
+    // rem; the painted-row bound below is measured against it.
+    let slots = vcx.update(|window, _| {
+        crate::shell::scale::design_px(crate::palette::ROW_HEIGHT, window.rem_size())
+            * crate::palette::VISIBLE_ROWS as f32
+    });
+    let list = vcx.debug_bounds("palette-list").expect("the list paints");
     assert!(
-        painted.len() <= crate::palette::VISIBLE_ROWS + 2,
+        list.size.height <= px(slots + 0.5),
+        "the list viewport {:?} exceeds {} rows",
+        list.size,
+        crate::palette::VISIBLE_ROWS
+    );
+    let bound = max_painted_palette_rows(&mut vcx, 0);
+    assert!(
+        painted.len() <= bound,
         "{} of {total} rows painted",
         painted.len()
     );
@@ -1643,7 +1668,7 @@ fn the_palette_paints_only_the_visible_rows(cx: &mut gpui::TestAppContext) {
     );
     assert!(
         narrowed.len() >= typed.min(crate::palette::VISIBLE_ROWS)
-            && narrowed.len() <= typed.min(crate::palette::VISIBLE_ROWS + 2),
+            && narrowed.len() <= typed.min(bound),
         "{} of {typed} narrowed rows painted",
         narrowed.len()
     );
