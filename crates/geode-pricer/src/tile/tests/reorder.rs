@@ -339,9 +339,12 @@ fn a_sort_mid_drag_refuses_the_drop(cx: &mut gpui::TestAppContext) {
     start_drag(&mut vcx, 0, to);
     assert_eq!(drop_gap(&h, &vcx), Some(4));
     h.command(&mut vcx, "sort strike desc").unwrap();
-    held_move(&mut vcx, to);
+    // The top of the sorted table: a gap that would move the dragged line
+    // in sheet order, were the drop not refused.
+    let top = over_row(&mut vcx, 0, false);
+    held_move(&mut vcx, top);
     assert_eq!(drop_gap(&h, &vcx), None);
-    up(&mut vcx, to, 1);
+    up(&mut vcx, top, 1);
     let roots: Vec<String> = h.tile.read_with(&vcx, |t, _| {
         t.sheet.roots().map(|r| t.sheet.shorthand(r)).collect()
     });
