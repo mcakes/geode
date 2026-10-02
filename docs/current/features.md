@@ -1454,7 +1454,9 @@ from the cursor row, with its absolute number on that row, and numbers
 absolutely when there is no cursor row.
 
 Lines and packages are rows of one table; a package row sums its legs and opens and closes like a tree node
-(`space`/`z a`, `z o`, `z c`, `z shift+r`, `z shift+m`, or its chevron). A
+(`space`/`z a`, `z o`, `z c`, `z shift+r`, `z shift+m`, its chevron, or a
+double-click on its name in the tree column; a double-click on its value
+cells edits them, and one on a leg's name changes nothing). A
 package created in the session opens so its legs show; a restored tile opens
 the packages its session record names. A package row's text columns show
 its legs' distinct values in leg order joined with `/` (a call spread reads
@@ -1503,7 +1505,7 @@ Normal-mode keys:
 |---|---|
 | `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end; a package typed inside a package lands just after that package) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
 | `shift+o` | The same bar, but the first line lands above the cursor row (on a leg, before that leg in its package; on a package or a top-level line, before it; on the first row, `at top`; on a grouping row, `at end`); each further line lands after the one just added, so a typed run reads top to bottom |
-| `i`, `enter`, double-click | Edit the cell in place with the caret at the end of text; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
+| `i`, `enter`, double-click | Edit the cell in place (a double-click on a package's tree cell opens or closes it instead; on a group row, anywhere, it does too) with the caret at the end of text; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `I` (`shift+i`) | Edit the cell with the caret at the start of text, without selecting it; date fields and choice pickers open as usual |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
@@ -1598,7 +1600,8 @@ hit. Closing the bar moves the table up on screen, so a double-click whose
 first press closed it edits the line that press hit, not the row that slid
 under the pointer; the hand-off lasts for the next press only. A chevron
 press that closes the bar hands off the same way, so the cursor stays on the
-package it toggled.
+package it toggled, and the double-click's second press does not toggle it
+back.
 Commands and search close open fields and menus. A text editor remains open
 after a click outside the grid; a typeahead closes on an outside click.
 

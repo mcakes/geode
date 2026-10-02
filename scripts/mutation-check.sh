@@ -25047,6 +25047,32 @@ run_mutation "pricer right press: a v block holding the row is kept" \
   '                    .is_some_and(|r| r.contains_row(row))' \
   geode-pricer a_right_press_outside_the_selection_clears_it
 
+# A double-click on a package row's tree cell toggles it, as space does.
+run_mutation "pricer double-click: a package's tree cell toggles nothing" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    {\n                        self.tree_verb(None, cx);\n                    }\n                    self.rebuild_chrome();' \
+  $'                    {\n                        let _ = &cx;\n                    }\n                    self.rebuild_chrome();' \
+  geode-pricer double_clicking_a_packages_tree_cell_toggles_it
+
+# Only a package's own row: a leg's tree cell would collapse its package
+# through tree_verb's leaf-to-parent rule.
+run_mutation "pricer double-click: a leg's tree cell collapses its package" \
+  crates/geode-pricer/src/tile.rs \
+  '                            Some(GridRowKind::Package { .. })
+                        )
+                    {' \
+  '                            Some(GridRowKind::Package { .. })
+                        ) || true
+                    {' \
+  geode-pricer double_clicking_a_legs_tree_cell_does_not_collapse_its_package
+
+# A double-click whose first press was the chevron's toggles once.
+run_mutation "pricer double-click: a chevron's double-click toggles twice" \
+  crates/geode-pricer/src/tile.rs \
+  '                    if !self.pressed_chevron' \
+  '                    if true' \
+  geode-pricer a_chevron_double_click_while_the_bar_is_open_keeps_the_package
+
 # The pricer's TileContent forwarder is the production press_context seam;
 # the trait default (None) would leave the pricer's row menu dead.
 run_mutation "pricer right press: the content drops press_context" \
