@@ -2549,3 +2549,40 @@ delivery under a sort runs the same rank before its structural comparison;
 when the order is unchanged it still refills only (the tile test
 `a_price_refresh_re_ranks_a_measure_sort_and_the_cursor_stays_on_its_line`
 asserts no index build), and with no sort no rank runs.
+
+## Prepared chrome models: before — 2026-10-02
+
+Apple M5 Pro, 18 cores, rustc 1.96.0 (ac68faa20 2026-05-25), bench profile.
+Two runs, because the first started above load 8. Run 1 load average at start:
+12.43 5.36 3.12; at end: 5.85 4.87 3.18. Run 2 at start: 5.85 4.87 3.18; at
+end: 4.01 4.57 3.26. Binary kept as `bench-chrome/shell_cores-before` for
+alternating runs.
+
+Fixtures. `keybindings_rows`: the shell's builtin actions plus 400 synthetic
+module actions in eight contexts (507 actions in all), keymap of the builtin
+layer plus a user layer of 200 rebinds and five `"none"` shadows; `geode-shell`
+cannot depend on the composition root, so module registrations are synthetic.
+`settings_rows`: every bundled theme (44), four fetch sources.
+`object_browse_rows`: 500 views. `object_edit_rows`: the demo desk's view with
+the most edit rows (`wide`, 111 rows). `palette_rows`: builtin plus 400 actions
+and every bundled theme (551 items).
+
+Each `derive_rank_*` is what one render paid before this slice, and what each
+key and click handler paid again: rows derived and ranked from scratch.
+
+| Benchmark | Before median, run 1 | Before median, run 2 |
+|---|---:|---:|
+| `keybindings_rows/derive_rank_empty` | 696.02 µs | 720.31 µs |
+| `keybindings_rows/derive_rank_typed` | 802.28 µs | 807.92 µs |
+| `keybindings_rows/rank_typed` | 115.40 µs | 107.89 µs |
+| `settings_rows/derive_rank_empty` | 2.267 µs | 2.266 µs |
+| `settings_rows/derive_rank_typed` | 3.539 µs | 3.395 µs |
+| `object_browse_rows/derive_rank_empty` | 192.05 µs | 190.15 µs |
+| `object_browse_rows/derive_rank_typed` | 406.14 µs | 405.20 µs |
+| `object_browse_rows/rank_typed` | 209.10 µs | 208.07 µs |
+| `object_edit_rows/derive_rank_empty` | 1.855 µs | 1.836 µs |
+| `object_edit_rows/derive_rank_typed` | 13.626 µs | 13.181 µs |
+| `palette_rows/paint_rows_empty` | 38.890 µs | 39.335 µs |
+| `palette_rows/paint_rows_typed` | 7.053 µs | 7.183 µs |
+
+Headless model work only: no layout, paint or text shaping.

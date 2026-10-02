@@ -14,19 +14,28 @@ use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
+use geode_core::config::Layer;
 use geode_core::config::LayerDoc;
+use geode_shell::actions::ActionDef;
 use geode_shell::actions::{ActionId, ActionRegistry};
 use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
+use geode_shell::fontsize::FontSize;
 use geode_shell::keymap::{
     KeyContext, Keymap, MatchResult, Matcher, build_keymap, parse_keystroke,
 };
+use geode_shell::linenumbers::LineNumbers;
+use geode_shell::listfilter;
+use geode_shell::palette;
 use geode_shell::palette::{PaletteItem, PaletteState, fuzzy_match};
 use geode_shell::session;
 use geode_shell::shell::objectdialog::{Destination, Domain, apply};
+use geode_shell::shell::{keybindings_view, objectdialog, settings_view};
+use geode_shell::tileadd::AddDirection;
 use geode_shell::tiling::{
     DIVIDER_HIT_WIDTH, DockSide, Orientation, Rect, TileId, Tree, Workspaces, divider_strips,
     resolve_drop_target,
 };
+use geode_shell::vimfind::FindStyle;
 
 /// A 1440p-ish content area — the geometry ShellView hands `Tree::layout`.
 const BOUNDS: Rect = Rect {
@@ -438,6 +447,236 @@ fn bench_expr_complete(c: &mut Criterion) {
     group.finish();
 }
 
+/// Synthetic module actions on top of the shell's builtin ones. `geode-shell`
+/// may not depend on the composition root or a feature module (CLAUDE.md), so
+/// these stand in for the modules' registrations: eight module contexts of 50
+/// actions each.
+const MODULE_ACTIONS: usize = 400;
+/// User-layer overrides, spread across the eight module contexts.
+const USER_OVERRIDES: usize = 200;
+
+/// The builtin registry plus [`MODULE_ACTIONS`], and the keymap built from the
+/// builtin layer plus a user layer of [`USER_OVERRIDES`] rebinds and five
+/// `"none"` shadows of builtin workspace keys — the shape `effective_binding`
+/// and `user_overrides_for` scan per action.
+fn bench_registry_and_keymap() -> (ActionRegistry, Keymap) {
+    let mut registry = ActionRegistry::default();
+    register_builtin_actions(&mut registry);
+    for i in 0..MODULE_ACTIONS {
+        registry
+            .register(ActionDef {
+                id: ActionId(format!("bench{}::action_{i:03}", i % 8)),
+                title: format!("Bench action {i:03}"),
+                category: format!("Bench module {}", i % 8),
+            })
+            .expect("bench action ids are unique");
+    }
+    const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+    let mut user = String::from(
+        "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\
+         \"mod+h\" = \"none\"\n\"mod+j\" = \"none\"\n\"mod+k\" = \"none\"\n\
+         \"mod+l\" = \"none\"\n\"mod+e\" = \"none\"\n",
+    );
+    for m in 0..8 {
+        user.push_str(&format!(
+            "[[bindings]]\ncontext = \"bench{m}\"\n[bindings.keys]\n"
+        ));
+        for i in (m..USER_OVERRIDES).step_by(8) {
+            let (a, b) = (LETTERS[(i / 26) % 26] as char, LETTERS[i % 26] as char);
+            user.push_str(&format!(
+                "\"ctrl+shift+{a} {b}\" = \"bench{m}::action_{i:03}\"\n"
+            ));
+        }
+    }
+    let docs = vec![
+        LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+        LayerDoc {
+            layer: Layer::User,
+            name: "keymap".to_string(),
+            file: "<bench:user>/keymap.toml".into(),
+            table: user.parse().expect("bench user keymap parses"),
+        },
+    ];
+    let (keymap, diags) = build_keymap(&docs, default_mod(), &registry);
+    assert!(diags.is_empty(), "bench keymap diagnostics: {diags:?}");
+    (registry, keymap)
+}
+
+/// 500 views over one dataset: the browse list's derive-and-rank load.
+fn bench_browse_config() -> geode_core::config::Config {
+    let mut views = String::new();
+    for i in 0..500 {
+        views.push_str(&format!(
+            "[view_{i:03}]\ndataset = \"risk_snapshot\"\n[[view_{i:03}.columns]]\nname = \"npv\"\n"
+        ));
+    }
+    geode_core::config::Config::load(&geode_core::config::ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("datasets", BENCH_DATASETS).unwrap(),
+            LayerDoc::builtin("views", &views).unwrap(),
+        ],
+        desk: None,
+        user: None,
+    })
+}
+
+/// The demo desk's view with the most edit rows: the largest real draft.
+fn bench_edit_draft() -> objectdialog::Draft {
+    let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("datasets", DEMO_DATASETS).unwrap(),
+            LayerDoc::builtin("views", DEMO_VIEWS).unwrap(),
+        ],
+        desk: None,
+        user: None,
+    });
+    Domain::Views
+        .objects(&config)
+        .into_iter()
+        .map(|row| Domain::Views.draft(&config, &row.name))
+        .max_by_key(|draft| draft.rows().len())
+        .expect("the demo desk defines views")
+}
+
+/// Rank `texts` the way every config dialog did per render and per handler.
+fn rank_all(texts: &[String], query: &str) -> Vec<listfilter::Ranked> {
+    listfilter::rank(texts, query)
+}
+
+fn bench_chrome_rows(c: &mut Criterion) {
+    // Keybindings: `derive_rows` walks every action; `visible_rows` builds one
+    // `String` per row and ranks.
+    let (registry, keymap) = bench_registry_and_keymap();
+    let mut group = c.benchmark_group("keybindings_rows");
+    group.sample_size(30);
+    for (name, query) in [("derive_rank_empty", ""), ("derive_rank_typed", "rst al")] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let rows = keybindings_view::derive_rows(black_box(&registry), black_box(&keymap));
+                let texts: Vec<String> =
+                    rows.iter().map(keybindings_view::searchable_text).collect();
+                black_box(rank_all(&texts, black_box(query)))
+            })
+        });
+    }
+    let rows = keybindings_view::derive_rows(&registry, &keymap);
+    let texts: Vec<String> = rows.iter().map(keybindings_view::searchable_text).collect();
+    group.bench_function("rank_typed", |b| {
+        b.iter(|| black_box(rank_all(black_box(&texts), black_box("rst al"))))
+    });
+    group.finish();
+
+    // Settings: `rows_for` allocates the theme list each call.
+    let (themes, _) = geode_shell::theme::load_bundled();
+    let sources: Vec<String> = (0..4).map(|i| format!("source_{i}")).collect();
+    let mut group = c.benchmark_group("settings_rows");
+    group.sample_size(50);
+    for (name, query) in [("derive_rank_empty", ""), ("derive_rank_typed", "fnt")] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let rows = settings_view::derive_rows(
+                    &themes.names(),
+                    "Gruvbox Dark",
+                    FontSize::Medium,
+                    FindStyle::Vim,
+                    LineNumbers::Off,
+                    AddDirection::Auto,
+                    None,
+                    black_box(&sources),
+                );
+                let texts: Vec<String> = rows.iter().map(settings_view::searchable_text).collect();
+                black_box(rank_all(&texts, black_box(query)))
+            })
+        });
+    }
+    group.finish();
+
+    // Object browse: 500 objects, one layer walk and one rank.
+    let config = bench_browse_config();
+    let mut group = c.benchmark_group("object_browse_rows");
+    group.sample_size(30);
+    for (name, query) in [("derive_rank_empty", ""), ("derive_rank_typed", "vw 42")] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let rows = Domain::Views.objects(black_box(&config));
+                let texts: Vec<String> = rows.iter().map(objectdialog::searchable_text).collect();
+                black_box(rank_all(&texts, black_box(query)))
+            })
+        });
+    }
+    let rows = Domain::Views.objects(&config);
+    let texts: Vec<String> = rows.iter().map(objectdialog::searchable_text).collect();
+    group.bench_function("rank_typed", |b| {
+        b.iter(|| black_box(rank_all(black_box(&texts), black_box("vw 42"))))
+    });
+    group.finish();
+
+    // Object edit: the largest demo draft; `rows()` then `visible_rows()` (which
+    // rebuilt `rows()` again, allocated every label and ranked).
+    let draft = bench_edit_draft();
+    let mut typed = draft.clone();
+    typed.query = "e".to_string();
+    let mut group = c.benchmark_group("object_edit_rows");
+    group.sample_size(50);
+    group.bench_function("derive_rank_empty", |b| {
+        b.iter(|| {
+            let rows = draft.rows();
+            let visible = draft.visible_rows();
+            black_box((rows.len(), visible.len()))
+        })
+    });
+    group.bench_function("derive_rank_typed", |b| {
+        b.iter(|| {
+            let rows = typed.rows();
+            let visible = typed.visible_rows();
+            black_box((rows.len(), visible.len()))
+        })
+    });
+    group.finish();
+
+    // Palette: the per-render row walk — an owned `title()` per row, the
+    // category index split, and two highlighted labels — over every result.
+    let mut palette_registry = ActionRegistry::default();
+    register_builtin_actions(&mut palette_registry);
+    for i in 0..MODULE_ACTIONS {
+        palette_registry
+            .register(ActionDef {
+                id: ActionId(format!("bench{}::action_{i:03}", i % 8)),
+                title: format!("Bench action {i:03}"),
+                category: format!("Bench module {}", i % 8),
+            })
+            .unwrap();
+    }
+    let bindings = palette::build_binding_index(&keymap);
+    let items = palette::build_items(&palette_registry, &themes, &bindings, &Default::default());
+    let mut group = c.benchmark_group("palette_rows");
+    group.sample_size(30);
+    for (name, query) in [("paint_rows_empty", ""), ("paint_rows_typed", "th gr")] {
+        let mut state = PaletteState::new(items.clone());
+        state.set_query(query);
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let mut painted = 0usize;
+                for (_ix, item, indices, title_len) in state.rows() {
+                    let split = indices.partition_point(|&ix| ix < title_len);
+                    let cat: Vec<usize> = indices[split..]
+                        .iter()
+                        .filter(|&&ix| ix > title_len)
+                        .map(|&ix| ix - title_len - 1)
+                        .collect();
+                    let title =
+                        palette::highlighted_title(&item.title(), &indices[..split], gpui::black());
+                    let category = palette::highlighted_title(item.category(), &cat, gpui::black());
+                    black_box((title, category));
+                    painted += 1;
+                }
+                black_box(painted)
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_config_edit,
@@ -447,6 +686,7 @@ criterion_group!(
     bench_matcher,
     bench_palette,
     bench_session,
-    bench_expr_complete
+    bench_expr_complete,
+    bench_chrome_rows
 );
 criterion_main!(benches);
