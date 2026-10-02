@@ -15,8 +15,9 @@
 //! Messages the bounded queue refused are reported on the load lane under
 //! `<source>:queue` (`health::condition_key`): `Degraded "N messages dropped
 //! since HH:MM:SS"` while drops continue, `Ok` after `DROP_QUIET` without one.
-//! Only this receiver clears that slot, so a `Degraded` standing when the
-//! subscription ends (disconnect or stop) stays until restart.
+//! Only this receiver clears that slot, so when the subscription ends
+//! (disconnect or stop) it clears an open episode with `Ok`: no receiver, no
+//! drops.
 //!
 //! Parsed columns move into DocumentJob without per-row copies. Shutdown
 //! unsubscribes, sets the stop flag, and joins; pending coalesced documents are
@@ -126,6 +127,12 @@ impl DropEpisode {
             });
         }
         None
+    }
+
+    /// Close the open episode, if any, when the subscription ends; whether
+    /// one was open (its `Degraded` needs clearing).
+    pub(crate) fn end(&mut self) -> bool {
+        self.open.take().is_some()
     }
 }
 
@@ -396,7 +403,7 @@ impl Receiving {
                 // arrive again: the subscription was dropped or
                 // unsubscribed (`shutdown`, or an adapter that ended it).
                 // Nothing to wait for.
-                Err(RecvTimeoutError::Disconnected) => return,
+                Err(RecvTimeoutError::Disconnected) => break,
             }
             // After a message AND after a timeout: an offer that was held
             // back may be due by now, and a quiet feed is exactly when a
@@ -405,6 +412,20 @@ impl Receiving {
                 self.submit(pending);
             }
             self.watch_drops();
+        }
+        self.end_drops();
+    }
+
+    /// The subscription ended (disconnect or stop): with no receiver there
+    /// are no drops, and only this thread clears `<source>:queue`, so an
+    /// open episode is cleared here rather than left standing until restart.
+    fn end_drops(&mut self) {
+        if self.drops.end() {
+            (self.report_load)(
+                &self.queue_key,
+                Health::Ok,
+                format!("{}: subscription ended", self.queue_key),
+            );
         }
     }
 

@@ -3448,6 +3448,21 @@ mod tests {
         assert!(reason.contains(" messages dropped since "), "{reason}");
         assert!(detail.starts_with("cvi:queue: "), "{detail}");
         service.shutdown();
+        // Stopping the subscription ends the receiver: its open episode is
+        // cleared, not left on the chip until restart. Nothing else could
+        // turn the source Ok inside the 60 s quiet interval.
+        let cleared = until_within(&rx, Duration::from_secs(5), |e| match e {
+            DataEvent::Health {
+                source,
+                worst: Health::Ok,
+                ..
+            } if source == "cvi" => Some(()),
+            _ => None,
+        });
+        assert!(
+            cleared.is_some(),
+            "the queue Degraded clears when the subscription ends"
+        );
     }
 
     /// The blotter's read path: live and archive are unioned with `select *`

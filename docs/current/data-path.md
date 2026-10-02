@@ -940,9 +940,9 @@ first observed it, on the display clock captured at open (within one receive
 cycle, later if a parser held the receiver). A growing count is re-reported
 at most once a second. The `ChannelAdapter` bus's own inbound refusals happen
 before topic routing, belong to no source, and are not reported as health.
-The `<source>:queue` clear is the receiver's own: when a subscription ends
-(its feed disconnects or the service stops it), a `Degraded` standing at
-that moment is never cleared and stays until restart.
+The `<source>:queue` clear is the receiver's own, so when a subscription
+ends (its feed disconnects or the service stops it) the receiver clears an
+open episode with `Ok` as it exits: with no receiver there are no drops.
 
 A drifted dataset is refused, not guessed at: its sources are not started (a
 running poll would clear the discovery lane), the ingest runner refuses every

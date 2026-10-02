@@ -29745,6 +29745,15 @@ run_mutation "silence: a fired stale wake-up never arms the next time" \
   geode-blotter \
   an_idle_blotter_turns_its_stalest_time_stale_without_another_event
 
+# A subscription that ends clears its open drop episode.
+run_mutation "silence: an ended subscription leaves its queue Degraded" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        self.end_drops();
+    }' \
+  '    }' \
+  geode-data \
+  a_flooded_subscription_reports_its_drops_as_degraded_source_health
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
