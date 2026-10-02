@@ -2475,6 +2475,31 @@ mod tests {
     }
 
     #[test]
+    fn a_series_job_for_a_drifted_dataset_is_refused_before_any_insert() {
+        let (_d, mut store, schema) = series_store();
+        store.mark_drifted("series", "schema drift in 'series': test".into());
+        let reader = store.reader().unwrap();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        handle.submit_series(series_job(
+            "SPX.close",
+            series_rows("2026-01-05T14:30:00Z", 3, 100.0),
+        ));
+        let reason = loop {
+            match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                IngestEvent::SeriesFailed { reason, .. } => break reason,
+                IngestEvent::SeriesAppended { .. } => panic!("appended into a drifted dataset"),
+                _ => continue,
+            }
+        };
+        assert_eq!(reason, "schema drift in 'series': test");
+        let rows: i64 = reader
+            .query_row("select count(*) from series_series", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "refused before any INSERT");
+        handle.shutdown();
+    }
+
+    #[test]
     fn a_series_job_for_an_undeclared_dataset_fails_by_name() {
         let (_d, store, schema) = series_store();
         let (handle, rx) = IngestRunner::spawn_channel(store, schema);

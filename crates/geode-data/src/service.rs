@@ -2211,6 +2211,19 @@ mod tests {
         DataService,
         std::sync::mpsc::Receiver<DataEvent>,
     ) {
+        service_with(|_| {})
+    }
+
+    /// `service()` with `prepare` run on the loaded store before the service
+    /// opens it, so a test can change the database open then finds.
+    fn service_with(
+        prepare: impl FnOnce(&Store),
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
         let (db, src, store, ds, emitted) = crate::ingest::load::tests_support::fixture();
         for file in emitted.files.iter().filter(|f| f.sentinel_path.is_some()) {
             let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
@@ -2227,6 +2240,7 @@ mod tests {
                 },
             );
         }
+        prepare(&store);
         drop(store);
 
         let mut schema = SchemaSpec::default();
@@ -3116,6 +3130,100 @@ mod tests {
         service.shutdown();
     }
 
+    /// The blotter's read path: live and archive are unioned with `select *`
+    /// by position, so a view over a drifted dataset must be refused with the
+    /// drift reason rather than read values out of the wrong columns. The
+    /// picker's distinct read over the same dataset is refused the same way.
+    #[test]
+    fn a_view_or_distinct_read_of_a_drifted_dataset_is_refused_with_the_drift() {
+        let (_db, _src, service, rx) = service_with(|store| {
+            store
+                .writer()
+                .execute_batch(
+                    "alter table risk_snapshot_position_archive add column surprise VARCHAR;",
+                )
+                .unwrap();
+        });
+        let refused = service
+            .query(&params(1, "tree", &Scope::default(), AsOf::Live, 3))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.starts_with(
+                "schema drift in 'risk_snapshot': 'risk_snapshot_position_archive' column"
+            ),
+            "{refused}"
+        );
+        assert!(
+            refused.ends_with("; delete the table or fix the dataset"),
+            "{refused}"
+        );
+        let distinct = service
+            .distinct(&DistinctParams {
+                key: QueryKey(2),
+                tag: 2,
+                column: "book".into(),
+                scope: Scope::default(),
+                as_of: AsOf::Live,
+            })
+            .unwrap_err()
+            .to_string();
+        assert_eq!(distinct, refused);
+        assert!(
+            until_within(&rx, Duration::from_millis(300), |e| match e {
+                DataEvent::Query(o) => Some(o.key),
+                DataEvent::Distinct(o) => Some(o.key),
+                _ => None,
+            })
+            .is_none(),
+            "nothing was submitted to the pool"
+        );
+        service.shutdown();
+    }
+
+    /// A drifted series dataset: its fetch source reports `Failed`, a series
+    /// read is refused before compiling, and a fetch is answered with the
+    /// drift reason without asking the adapter.
+    #[test]
+    fn a_series_read_or_fetch_of_a_drifted_dataset_is_refused_with_the_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+            store
+                .apply_schema(&crate::store::ddl::tests_support::series_dataset())
+                .unwrap();
+            store
+                .writer()
+                .execute_batch("alter table series_series add column surprise VARCHAR;")
+                .unwrap();
+        }
+        let (_dir, calls, service, rx) = fetch_service_over(dir, None, false);
+        let refused = service
+            .series(&series_params("SPX.close"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.starts_with("schema drift in 'series': 'series_series' column"),
+            "{refused}"
+        );
+        service.fetch(&fetch_params(
+            "SPX.close",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+        ));
+        let fetched = until_within(&rx, Duration::from_secs(30), |e| match e {
+            DataEvent::SeriesFetched { result, .. } => Some(result),
+            _ => None,
+        })
+        .expect("the fetch is answered");
+        assert_eq!(fetched, Err(refused));
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "the adapter was not asked"
+        );
+        service.shutdown();
+    }
+
     /// A drifted local table that already holds rows and has no generation
     /// summary: open must not try to rebuild the summary from it, and a local
     /// publish into it is refused unwritten.
@@ -3277,7 +3385,20 @@ mod tests {
         DataService,
         std::sync::mpsc::Receiver<DataEvent>,
     ) {
-        let dir = tempfile::tempdir().unwrap();
+        fetch_service_over(tempfile::tempdir().unwrap(), catalogue, fail_once)
+    }
+
+    /// `fetch_service_with` over a database directory the caller prepared.
+    fn fetch_service_over(
+        dir: tempfile::TempDir,
+        catalogue: Option<Vec<String>>,
+        fail_once: bool,
+    ) -> (
+        tempfile::TempDir,
+        Arc<std::sync::Mutex<Vec<crate::adapter::FetchRequest>>>,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut adapters = AdapterRegistry::default();
         adapters.register(Arc::new(FakeFetchAdapter {

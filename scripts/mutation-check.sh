@@ -28740,6 +28740,49 @@ run_mutation "silence: open rebuilds a summary from a drifted table" \
   geode-data \
   a_local_publish_into_a_drifted_dataset_is_refused_unwritten
 
+# A view read of a drifted dataset is refused with the drift reason.
+run_mutation "silence: a view read of a drifted dataset is compiled" \
+  crates/geode-data/src/service.rs \
+  '            std::iter::once(spec.dataset.as_str())' \
+  '            std::iter::empty::<&str>()' \
+  geode-data \
+  a_view_or_distinct_read_of_a_drifted_dataset_is_refused_with_the_drift
+
+# A distinct read over a drifted contributor is refused, not shortened.
+run_mutation "silence: a distinct read of a drifted dataset is compiled" \
+  crates/geode-data/src/service.rs \
+  '        self.refuse_drifted(self.drifted.keys().map(String::as_str).filter(|name| {' \
+  '        self.refuse_drifted(self.drifted.keys().map(String::as_str).filter(|_| false).filter(|name| {' \
+  geode-data \
+  a_view_or_distinct_read_of_a_drifted_dataset_is_refused_with_the_drift
+
+# A series read of a drifted dataset is refused with the drift reason.
+run_mutation "silence: a series read of a drifted dataset is compiled" \
+  crates/geode-data/src/service.rs \
+  '        self.refuse_drifted([params.dataset.as_str()])?;
+        let points = params.frequency.buckets_in(params.range.0, params.range.1);' \
+  '        let points = params.frequency.buckets_in(params.range.0, params.range.1);' \
+  geode-data \
+  a_series_read_or_fetch_of_a_drifted_dataset_is_refused_with_the_drift
+
+# A fetch for a drifted dataset's source is answered with the drift reason.
+run_mutation "silence: a fetch for a drifted dataset loses the drift reason" \
+  crates/geode-data/src/service.rs \
+  '            .and_then(|s| self.drifted.get(&s.dataset))' \
+  '            .and_then(|s| self.drifted.get(&s.name))' \
+  geode-data \
+  a_series_read_or_fetch_of_a_drifted_dataset_is_refused_with_the_drift
+
+# The runner refuses a series append into a drifted dataset before any INSERT.
+run_mutation "silence: a series is appended into a drifted dataset" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if let Some(reason) = drift_refusal(store, &job.dataset) {
+        if !sink(failed(reason)) {' \
+  '    if let Some(reason) = None::<String> {
+        if !sink(failed(reason)) {' \
+  geode-data \
+  a_series_job_for_a_drifted_dataset_is_refused_before_any_insert
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

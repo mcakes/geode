@@ -837,8 +837,11 @@ A drifted dataset is refused, not guessed at: its sources are not started (a
 running poll would clear the discovery lane), the ingest runner refuses every
 document, series, file and forget into it before any `INSERT`, and the data
 service refuses a view, document, series or distinct read of it — or a fetch
-for its source — with the same reason, before compiling anything. Open skips
-rebuilding a drifted dataset's generation summary. See
+for its source — with the same reason, before compiling anything. A drifted
+dataset reached through an optional join refuses the whole view, where an
+ordinary optional-join failure warns and is skipped: dropping the join would
+answer with a plausible but narrower result, so the refusal is deliberate.
+Open skips rebuilding a drifted dataset's generation summary. See
 [`drift.rs`](../../crates/geode-data/src/store/drift.rs).
 
 ## Limits and verification
