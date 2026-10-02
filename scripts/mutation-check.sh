@@ -31446,8 +31446,8 @@ run_mutation "volslice: a pair naming an unloaded kind says so" \
 
 run_mutation "volslice: a restored pair naming an unloaded kind is a notice" \
   crates/geode-volslice/src/core/build.rs \
-  '        notices.push(format!("diff {}: {} is not loaded", pair.label(), k.label()));' \
-  '        let _ = (pair, k);' \
+  '            "diff {}: {} is not loaded",' \
+  '            "diff {}: {} is loaded",' \
   geode-volslice a_restored_pair_naming_an_unloaded_kind_is_a_notice
 
 run_mutation "volslice: the draft curve is dashed" \
