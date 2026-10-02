@@ -12,8 +12,8 @@
 //! `dialog::sync_dialog_text` reconciles focus and input afterward.
 //!
 //! Rebinding validates and persists the complete user keymap through the ordered
-//! configuration writer. Rows derive from the current registry and effective keymap
-//! rather than being cached across reloads.
+//! configuration writer. Rows are prepared from the registry and keymap and
+//! re-derived after every applied reload (`ShellView::config_revision`).
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -41,6 +41,7 @@ use crate::keymap_edit::{
 };
 use crate::listfilter::{self, Ranked};
 use crate::palette;
+use crate::prepared::{Prepared, RowText};
 // Share the palette's title/category match-index splitter with settings.
 pub(crate) use crate::palette::split_label_indices;
 use crate::vimnav;
@@ -96,8 +97,8 @@ pub struct KeybindingRow {
 /// context source; it does not evaluate predicates against a live context stack.
 /// [`user_overrides_for`] finds reset targets beyond the displayed key.
 ///
-/// Re-derive on rendering and input handling so accepted keymap reloads supply the
-/// rows; [`KeybindingsState`] does not cache bindings or write outcomes.
+/// This is the derivation the prepared rows ([`KeybindingsState::rows`]) are built
+/// from; tests and benches compare the prepared list against it.
 pub fn derive_rows(registry: &ActionRegistry, keymap: &Keymap) -> Vec<KeybindingRow> {
     let bindings = keymap.bindings();
     let mut rows: Vec<KeybindingRow> = registry
@@ -214,6 +215,12 @@ pub struct KeybindingsState {
     /// Armed destructive question. Other keys and list/action clicks are consumed until
     /// it is answered.
     pub confirm: Option<KeybindingConfirm>,
+    /// The rows derived from the registry and keymap at `config_revision`, ranked
+    /// for `query`. Render and every handler read this one list; the shell
+    /// refreshes it (`ShellView::refresh_dialog_rows`).
+    pub rows: Prepared<u64, String, KeybindingRow>,
+    /// `user_binding_count` at the same derivation, for `shift+r` and its button.
+    pub user_bindings: usize,
 }
 
 /// Opening mode is explicit per dialog; `DialogMode` has no global default.
@@ -227,6 +234,8 @@ impl Default for KeybindingsState {
             mode: DialogMode::Normal,
             notice: None,
             confirm: None,
+            rows: Prepared::new(),
+            user_bindings: 0,
         }
     }
 }
@@ -246,10 +255,41 @@ impl KeybindingsState {
         self.listening = None;
         self.notice = None;
     }
+
+    /// Re-key the prepared rows. The registry is not part of the key: it is fixed
+    /// once the shell is built.
+    pub fn refresh_rows(
+        &mut self,
+        registry: &ActionRegistry,
+        keymap: &Keymap,
+        config_revision: u64,
+    ) {
+        let refreshed = self.rows.refresh(
+            &config_revision,
+            &self.query,
+            || {
+                derive_rows(registry, keymap)
+                    .into_iter()
+                    .map(|row| {
+                        let text = RowText {
+                            primary: row.title.clone().into(),
+                            secondary: row.category.clone().into(),
+                        };
+                        (row, text)
+                    })
+                    .collect()
+            },
+            RowText::two_line,
+            |_, texts, query| listfilter::rank(texts, query),
+        );
+        if refreshed == crate::prepared::Refreshed::Derived {
+            self.user_bindings = user_binding_count(keymap.bindings());
+        }
+    }
 }
 
-/// Rank rows against their visible title/category text. Recompute from current state
-/// for rendering, key handling, and click resolution.
+/// Rank rows against their visible title/category text: the fresh ranking the
+/// prepared rows must agree with. Render and handlers read [`KeybindingsState::rows`].
 pub fn visible_rows(state: &KeybindingsState, rows: &[KeybindingRow]) -> Vec<Ranked> {
     let texts: Vec<String> = rows.iter().map(searchable_text).collect();
     listfilter::rank(&texts, &state.query)
@@ -554,8 +594,6 @@ fn handle_key(
     _window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
-    let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
-    let user_bindings = user_binding_count(shell.services.keymap.bindings());
     let user_dir = shell.user_dir.clone();
     let Some(state) = shell.keybindings.as_mut() else {
         return false;
@@ -566,7 +604,7 @@ fn handle_key(
     if state.notice.take().is_some() {
         cx.notify();
     }
-    let visible = visible_rows(state, &rows);
+    let visible_len = state.rows.len();
 
     if let Some(pending) = state.listening.as_mut() {
         let outcome = press_while_listening(pending, ks);
@@ -580,8 +618,7 @@ fn handle_key(
             }
             CaptureOutcome::Commit(keystrokes) => {
                 state.listening = None;
-                let selected = state.selected;
-                if let Some(row) = visible.get(selected).and_then(|m| rows.get(m.row))
+                if let Some(row) = state.rows.at(state.selected)
                     && !is_same_key_recapture(row, &keystrokes)
                 {
                     spawn_rebind(row, keystrokes, user_dir, cx);
@@ -596,10 +633,11 @@ fn handle_key(
         match dialog::ConfirmAnswer::from_key(ks) {
             Some(dialog::ConfirmAnswer::Yes) => {
                 state.confirm = None;
-                let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
+                let row = state.rows.at(state.selected).cloned();
+                let user_bindings = state.user_bindings;
                 state.notice = match confirm {
-                    KeybindingConfirm::Unbind => unbind_selected(row, &user_dir, cx),
-                    KeybindingConfirm::Reset => reset_selected(row, &user_dir, cx),
+                    KeybindingConfirm::Unbind => unbind_selected(row.as_ref(), &user_dir, cx),
+                    KeybindingConfirm::Reset => reset_selected(row.as_ref(), &user_dir, cx),
                     KeybindingConfirm::ResetAll => reset_all(user_bindings, &user_dir, cx),
                 };
             }
@@ -643,7 +681,7 @@ fn handle_key(
         };
         match cmd {
             NormalCommand::Nav(nav) => {
-                state.selected = vimnav::apply(state.selected, visible.len(), nav);
+                state.selected = vimnav::apply(state.selected, visible_len, nav);
                 let selected = state.selected;
                 shell.keybindings_scroll.scroll_to_item(selected);
             }
@@ -656,12 +694,13 @@ fn handle_key(
                 );
             }
             NormalCommand::Commit => {
-                begin_capture(state, visible.len());
+                begin_capture(state, visible_len);
             }
             // Destructive verbs share confirmation and refusal handling with buttons.
             NormalCommand::Verb(key @ ('d' | 'r' | 'R')) => {
-                let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
-                arm_verb(state, key, row, user_bindings, &user_dir, cx);
+                let row = state.rows.at(state.selected).cloned();
+                let user_bindings = state.user_bindings;
+                arm_verb(state, key, row.as_ref(), user_bindings, &user_dir, cx);
             }
             // `Toggle`, `EditText`, `MoveItem` and any other verb belong
             // to surfaces that have something to toggle, edit or reorder;
@@ -697,7 +736,7 @@ fn handle_key(
     }
 
     if let Some(cmd) = listfilter::nav_command(ks) {
-        state.selected = vimnav::apply(state.selected, visible.len(), cmd);
+        state.selected = vimnav::apply(state.selected, visible_len, cmd);
         let selected = state.selected;
         shell.keybindings_scroll.scroll_to_item(selected);
         cx.notify();
@@ -733,7 +772,7 @@ fn begin_capture(state: &mut KeybindingsState, visible_len: usize) {
     state.listening = Some(Vec::new());
 }
 
-/// Resolve the clicked ActionId against freshly derived filtered rows and start a fresh
+/// Resolve the clicked ActionId against the prepared filtered rows and start a fresh
 /// capture through `click_listens`. Unlike list-filter Enter, a row click can start
 /// capture directly in either list mode. Synchronize input and focus afterward so
 /// capture receives raw keys.
@@ -743,7 +782,6 @@ fn on_row_clicked(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
     let Some(state) = shell.keybindings.as_mut() else {
         return;
     };
@@ -756,13 +794,13 @@ fn on_row_clicked(
     if state.confirm.is_some() {
         return;
     }
-    let visible = visible_rows(state, &rows);
-    let Some(ix) = filtered_position(&visible, &rows, clicked) else {
+    let Some(ix) = state.rows.position(|r| &r.action == clicked) else {
         return;
     };
     click_listens(state, ix);
     let selected = state.selected;
     shell.keybindings_scroll.scroll_to_item(selected);
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -1013,8 +1051,6 @@ pub(crate) fn highlighted_text(text: &str, indices: &[usize], primary: Hsla) -> 
 /// while capture or confirmation owns input; otherwise clear the previous notice, arm a
 /// question or report a refusal, and synchronize the dialog.
 fn press_verb(shell: &mut ShellView, key: char, window: &mut Window, cx: &mut Context<ShellView>) {
-    let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
-    let user_bindings = user_binding_count(shell.services.keymap.bindings());
     let user_dir = shell.user_dir.clone();
     let Some(state) = shell.keybindings.as_mut() else {
         return;
@@ -1025,9 +1061,10 @@ fn press_verb(shell: &mut ShellView, key: char, window: &mut Window, cx: &mut Co
     if state.confirm.is_some() || state.listening.is_some() {
         return;
     }
-    let visible = visible_rows(state, &rows);
-    let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
-    arm_verb(state, key, row, user_bindings, &user_dir, cx);
+    let row = state.rows.at(state.selected).cloned();
+    let user_bindings = state.user_bindings;
+    arm_verb(state, key, row.as_ref(), user_bindings, &user_dir, cx);
+    shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -1073,7 +1110,7 @@ fn action_block(
         if can_reset(row) {
             verbs.push(("r", 'r', "Reset to lower layer"));
         }
-        if user_binding_count(bindings) > 0 {
+        if state.user_bindings > 0 {
             verbs.push(("shift+r", 'R', "Reset all"));
         }
     }
@@ -1117,7 +1154,8 @@ fn build(
     let Some(state) = shell.keybindings.as_ref() else {
         return div().into_any_element();
     };
-    let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
+    #[cfg(debug_assertions)]
+    shell.assert_rows_current(cx);
     let theme = cx.theme();
     // Copied out so the render closures below don't have to hold the
     // `theme` borrow.
@@ -1125,29 +1163,26 @@ fn build(
 
     // The list renders ONLY the rows that survive the filter. Safe
     // because row click handlers are keyed by `ActionId`, not position
-    // (see [`filtered_position`]); the `debug_selector` index below stays
+    // (see [`Prepared::position`]); the `debug_selector` index below stays
     // the row's index in the FULL list, so a row keeps its identity
     // across filtering.
-    let visible = visible_rows(state, &rows);
 
     let mut list = v_flex()
         .id("keybindings-list")
         .w(scale::design(WIDTH))
         .h(scale::design(
-            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
+            (state.rows.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
         ))
         .overflow_y_scroll()
         .track_scroll(&shell.keybindings_scroll)
         .debug_selector(|| "keybindings-list".to_string());
 
-    for (position, m) in visible.iter().enumerate() {
-        let row_ix = m.row;
-        let row = &rows[row_ix];
+    for (position, shown) in state.rows.shown().iter().enumerate() {
+        let row_ix = shown.row;
+        let row = &state.rows.rows()[row_ix];
+        let text = &state.rows.texts()[row_ix];
         let is_selected = position == state.selected;
         let is_listening = is_selected && state.listening.is_some();
-
-        let title_len = row.title.chars().count();
-        let (title_ix, cat_ix) = split_label_indices(&m.indices, title_len);
 
         let row_el = h_flex()
             .id(("keybindings-row", row_ix))
@@ -1162,13 +1197,14 @@ fn build(
 
         let label = v_flex()
             .gap_0p5()
-            .child(highlighted_text(&row.title, &title_ix, row_paint.accent))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(highlighted_text(&row.category, &cat_ix, row_paint.accent)),
-            );
+            .child(palette::highlighted_runs(
+                &text.primary,
+                &shown.primary,
+                row_paint.accent,
+            ))
+            .child(div().text_xs().text_color(theme.muted_foreground).child(
+                palette::highlighted_runs(&text.secondary, &shown.secondary, row_paint.accent),
+            ));
 
         let binding_el: AnyElement = if is_listening {
             let pending = state.listening.as_ref().expect("is_listening implies Some");
@@ -1207,7 +1243,7 @@ fn build(
         list = list.child(row_el);
     }
 
-    if visible.is_empty() {
+    if state.rows.is_empty() {
         // An empty result displays a message and supplies no capture target. Filter
         // Enter still accepts the query and returns to Normal.
         list = list.child(
@@ -1328,7 +1364,7 @@ fn build(
         },
     );
 
-    let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
+    let row = state.rows.at(state.selected);
 
     v_flex()
         .gap_2()

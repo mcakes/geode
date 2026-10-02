@@ -254,6 +254,7 @@ impl ShellView {
             self.services.config = new_config;
             self.services.mod_alias = mod_alias;
             self.services.keymap = keymap;
+            self.config_revision += 1;
             cx.set_global(crate::tips::Chords(Arc::new(
                 self.services.keymap.bindings().to_vec(),
             )));
@@ -409,6 +410,8 @@ impl ShellView {
             }
             cx.emit(ShellEvent::ReloadRejected(rejected));
         }
+        // Every open dialog re-derives against what this reload applied.
+        self.refresh_dialog_rows(cx);
         cx.notify();
     }
 }

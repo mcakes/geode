@@ -33,6 +33,7 @@ pub mod palette;
 pub mod palette_usage;
 pub mod perf;
 pub mod popover;
+pub mod prepared;
 pub mod reload;
 pub mod scopebar;
 pub mod series;

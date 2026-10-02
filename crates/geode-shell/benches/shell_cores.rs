@@ -564,6 +564,22 @@ fn bench_chrome_rows(c: &mut Criterion) {
     group.bench_function("rank_typed", |b| {
         b.iter(|| black_box(rank_all(black_box(&texts), black_box("rst al"))))
     });
+    // A query change on prepared rows: re-rank only, no re-derivation.
+    group.bench_function("prepared_rerank", |b| {
+        let mut state = keybindings_view::KeybindingsState::new();
+        state.refresh_rows(&registry, &keymap, 1);
+        let mut flip = false;
+        b.iter(|| {
+            flip = !flip;
+            state.set_query(if flip {
+                "rst al".into()
+            } else {
+                "rst a".into()
+            });
+            state.refresh_rows(black_box(&registry), black_box(&keymap), 1);
+            black_box(state.rows.len())
+        })
+    });
     group.finish();
 
     // Settings: `rows_for` allocates the theme list each call.

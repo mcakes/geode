@@ -346,6 +346,7 @@ pub(crate) fn step_back(view: &mut ShellView, window: &mut Window, cx: &mut Cont
         return;
     }
     (back.step)(view, window, cx);
+    view.refresh_dialog_rows(cx);
     sync_dialog_text(view, window, cx);
     cx.notify();
 }
@@ -478,7 +479,7 @@ pub fn open_shell_dialog_with_key<F>(
         title: title.into(),
         title_extra: None,
         build: Rc::new(build),
-        on_key,
+        on_key: on_key.map(refreshing),
         back: None,
         saved_input: None,
         workspace: view.services.workspaces.active_ix(),
@@ -496,11 +497,24 @@ pub fn open_shell_dialog_with_key<F>(
     // Prevent the same opening mouse-down from bubbling to a tracked ancestor and
     // taking focus back from the modal's input.
     window.prevent_default();
+    // The new dialog's state is installed: derive its rows before anything reads them.
+    view.refresh_dialog_rows(cx);
     // Dialog state is installed before this call so synchronization can choose its
     // initial text and focus.
     sync_dialog_text(view, window, cx);
 
     cx.notify();
+}
+
+/// Wrap a dialog's key handler so its rows are refreshed after every key it sees,
+/// claimed or not: any key can change a query or, through a write, nothing until
+/// reload. One seam instead of one call per handler return path.
+fn refreshing(handler: ModalKeyHandler) -> ModalKeyHandler {
+    Rc::new(move |shell, ks, window, cx| {
+        let claimed = handler(shell, ks, window, cx);
+        shell.refresh_dialog_rows(cx);
+        claimed
+    })
 }
 
 /// Mirror the active dialog's effective query and focus into the shared Input. The
@@ -690,6 +704,7 @@ pub fn filter_row(
                 .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                     entity.update(cx, |shell, cx| {
                         enter_filter_by_mouse(shell);
+                        shell.refresh_dialog_rows(cx);
                         sync_dialog_text(shell, window, cx);
                         cx.notify();
                     });
@@ -1193,6 +1208,7 @@ pub(crate) fn confirm_row(
                         let on_yes = on_yes.clone();
                         go_ahead.update(cx, |shell, cx| {
                             on_yes(shell, window, cx);
+                            shell.refresh_dialog_rows(cx);
                             sync_dialog_text(shell, window, cx);
                             cx.notify();
                         });
@@ -1205,6 +1221,7 @@ pub(crate) fn confirm_row(
                     let on_no = on_no.clone();
                     leave_it.update(cx, |shell, cx| {
                         on_no(shell, window, cx);
+                        shell.refresh_dialog_rows(cx);
                         sync_dialog_text(shell, window, cx);
                         cx.notify();
                     });

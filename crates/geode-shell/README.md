@@ -43,6 +43,7 @@ GPUI globals or provide rendering helpers.
 | `colfit` | The pure column-fit measure behind `:autosize` and `tile::autosize_columns`: `FitMetrics` (mono advance at `text_sm`, the `XSmall` cell padding and cursor border at the window's rem, clamped to 2.5–40 rem), the `FittedWidths` map by stable column key, and its lenient `column_widths` session read/write, which clamps a restored width to 25–560 px. `NO_TABLE` and `NOTHING_TO_FIT` are the two refusals. See [autosized columns](../../docs/current/features.md#autosized-columns). |
 | `perf` | The always-compiled frame-time histogram. |
 | `menu` | The action menu model and renderer: `Row` (`Action`/`Separator`/`Section`), `ActionRow` (a key hint resolved through the live keymap, `enabled` with its reason), `Menu` (`step` lands only on enabled actions; `pick` answers a disabled row's reason), `render_menu` over a `MenuHost` (a press outside runs the caller's close). The shell's row menu and every tile's `.` menu use it; `geode-tile` re-exports it. |
+| `prepared` | Prepared dialog rows: `Prepared<K, Q, R>` derives once per input change, ranks once per query change, and is read by render and handlers alike; `RowText` and `Shown` carry painted text and byte-range highlights. |
 | `popover` | Popup geometry, the popover `surface`, `anchor_popup` and the `row_shell`/`empty_row` row frames; `geode-tile` re-exports it. |
 | `dimension` | The row menu's plugin seam: `DimensionAction` (`id`, `title`, the `column` whose section it sits in, `available` — enabled, or disabled with the reason its row shows — `run` against an `ActionCx` once the menu has closed, and `chosen`, the value picked from `ActionCx::choose_value`), `RowPick` (`Open { kind }` or `Action { index }`), and `menu_rows`: one section `{column} · {value}` per context column that has rows, the clicked column (`first`) leading, each "Open {Kind}" in the first section whose column that kind accepts, then that column's actions. Actions are Rust impls registered with `ModuleRoster::add_action` in `geode-app`. `UrlOpener` is a gpui global wrapping an `OpenUrl` function: when set, `ActionCx::open_url` calls it instead of the OS (tests record URLs through it). |
 | `defaults` | The builtin action set and keymap, the Builtin config layer; `MOTION_ACTIONS` (the shared `motion::*` vocabulary, category "Motion", handled by no shell code so it falls through to the focused tile) and `GRID_MOTION_CONTEXT`, the one context the grid motions ship under; `shared_motion_context` names where the keybindings dialog writes a Motion row's edits, after clearing the action's user overrides. |
@@ -115,6 +116,9 @@ change most often hits:
   reconciles the shared input's text and focus after state transitions.
   Expression completion replaces the selected range directly to preserve input
   undo, then updates the object draft before synchronization.
+- Keybinding dialog rows are prepared (`crate::prepared`); refresh them
+  through `ShellView::refresh_dialog_rows` at any new seam that changes a key
+  input. Render asserts, never refreshes.
 - A multi-screen dialog registers its back step with `dialog::set_back`.
   The title row paints the Back button only while the step is available, and
   the step uses Escape's parent-stage transition. One Back click also discards

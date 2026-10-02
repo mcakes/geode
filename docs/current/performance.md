@@ -165,11 +165,20 @@ measure already reads. Re-measure on an idle machine before quoting them.
   or a NaN group value rebuilds. The scope and the rollup are still
   re-derived on every delivery, because a price can move a line in or out of
   the scope or between groups.
-- Config dialogs derive rows at each render, key-handling, and click-resolution
-  call site; they do not retain a row cache. Small row sets have measured costs
-  in the tens of microseconds. Keybinding resolution repeatedly scans bindings
-  for actions and candidates, so its cost grows with the action registry and
-  user overrides. See the [measurement log](../perf.md).
+- The keybindings dialog holds prepared rows (`geode_shell::prepared::Prepared`):
+  derived from exactly the inputs they read, ranked for the query, and read by
+  render and by every handler, so a key or click acts on the painted rows. A
+  query change re-ranks without re-deriving. The shell refreshes them at its
+  event seams (`ShellView::refresh_dialog_rows`: open, each dialog key, the
+  dialog input's Change, each dialog pointer transition, an applied reload);
+  render never refreshes, and a debug-build assertion in the dialog's `build`
+  refuses a stale list. The list is keyed by the config revision that every
+  applied reload bumps; the action registry is fixed once the shell is built.
+  An in-dialog rebind, unbind or reset changes nothing in memory: it writes
+  through the ordered writer and the reload re-derives. Settings and object
+  dialogs still derive their rows at each render, key-handling and
+  click-resolution call site; their measured costs are in the tens of
+  microseconds. See the [measurement log](../perf.md).
 - Large module tables use virtualization or prepared visible rows.
 
 ## Known gaps

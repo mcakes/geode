@@ -210,7 +210,11 @@ mod tests {
         let mut offenders = Vec::new();
         let mut calls = 0;
         for (name, text) in sources {
-            for needle in ["highlighted_text(", "highlighted_title("] {
+            for needle in [
+                "highlighted_text(",
+                "highlighted_title(",
+                "highlighted_runs(",
+            ] {
                 for (at, _) in text.match_indices(needle) {
                     // Skip the definitions themselves.
                     if text[..at].ends_with("fn ") || text[..at].ends_with("pub(crate) fn ") {

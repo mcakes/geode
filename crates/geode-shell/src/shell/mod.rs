@@ -35,6 +35,7 @@ mod pin;
 pub mod profiling_hook;
 mod render;
 pub mod row_menu;
+mod rows;
 pub mod scale;
 pub mod scope_expr_view;
 mod session_io;
@@ -498,6 +499,10 @@ pub struct ShellView {
     /// The result of the last reload attempt, `Unchanged` until the first
     /// one runs. Drives the status bar's reload indicator.
     last_reload: reload::ReloadOutcome,
+    /// Bumped by every applied reload — the one place `services.config` and
+    /// `services.keymap` are replaced. Config dialog rows derived from either are
+    /// keyed by it (`crate::prepared`).
+    config_revision: u64,
     /// Layout changes awaiting snapshot extraction. The periodic watcher
     /// clears this flag before serialization and writes in the background;
     /// it is not a record of whether the disk write succeeded.
@@ -996,6 +1001,8 @@ impl ShellView {
                 }
                 Some(dialog::DialogKind::Plain) | None => {}
             }
+            // Typing changed the top dialog's query: re-rank its prepared rows.
+            view.refresh_dialog_rows(cx);
             cx.notify();
         })
         .detach();
@@ -1409,6 +1416,7 @@ impl ShellView {
             user_dir,
             last_snapshot: reload::Snapshot::default(),
             last_reload: reload::ReloadOutcome::Unchanged,
+            config_revision: 0,
             session_dirty: false,
             last_tiles_written: crate::session::TileRecords::new(),
             last_pages_written: crate::session::PageRecords::new(),

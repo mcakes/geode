@@ -655,6 +655,24 @@ pub fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) ->
     StyledText::new(title.to_string()).with_highlights(runs.into_iter().map(|r| (r, style)))
 }
 
+/// [`highlighted_title`] over prepared byte ranges and shared text: no index
+/// conversion and no text copy at paint.
+pub fn highlighted_runs(
+    text: &gpui::SharedString,
+    runs: &[std::ops::Range<usize>],
+    primary: gpui::Hsla,
+) -> StyledText {
+    if runs.is_empty() {
+        return StyledText::new(text.clone());
+    }
+    let style = HighlightStyle {
+        color: Some(primary),
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    };
+    StyledText::new(text.clone()).with_highlights(runs.iter().cloned().map(|r| (r, style)))
+}
+
 /// Render a centered palette panel with Input and a scrollable full result
 /// list. The viewport shows at most VISIBLE_ROWS estimated rows; rows are not
 /// virtualized. Selection scrolling is the controller's responsibility.

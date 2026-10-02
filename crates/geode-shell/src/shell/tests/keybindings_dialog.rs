@@ -2675,3 +2675,187 @@ fn d_on_a_motion_row_clears_old_overrides_and_silences_the_shared_key(
         "only the shared shadow is left for r to lift"
     );
 }
+
+// ---- Prepared rows ----------------------------------------------------
+
+/// Painted row indices, top to bottom, read from the `keybindings-row-{ix}`
+/// selectors (`ix` is the row's index in the full list).
+fn painted_keybinding_rows(cx: &mut gpui::VisualTestContext, total: usize) -> Vec<usize> {
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let mut painted: Vec<(gpui::Pixels, usize)> = (0..total)
+        .filter_map(|ix| {
+            let selector: &'static str =
+                Box::leak(format!("keybindings-row-{ix}").into_boxed_str());
+            cx.debug_bounds(selector).map(|b| (b.origin.y, ix))
+        })
+        .collect();
+    painted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    painted.into_iter().map(|(_, ix)| ix).collect()
+}
+
+/// The rows a fresh derivation would show now, as full-list indices in display
+/// order, and their rows.
+fn fresh_keybinding_rows(
+    shell: &Entity<ShellView>,
+    cx: &gpui::VisualTestContext,
+) -> (Vec<usize>, Vec<keybindings_view::KeybindingRow>) {
+    shell.read_with(cx, |shell, _| {
+        let rows = keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+        let state = shell.keybindings.as_ref().expect("dialog open");
+        let visible = keybindings_view::visible_rows(state, &rows);
+        (visible.iter().map(|m| m.row).collect(), rows)
+    })
+}
+
+fn assert_keybinding_rows_are_fresh(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {
+    let (order, rows) = fresh_keybinding_rows(shell, cx);
+    let prepared = shell.read_with(cx, |shell, _| {
+        shell.keybindings.as_ref().unwrap().rows.rows().to_vec()
+    });
+    assert_eq!(prepared, rows, "the prepared rows are a fresh derivation");
+    assert_eq!(
+        painted_keybinding_rows(cx, rows.len()),
+        order,
+        "the painted rows are the fresh ranking"
+    );
+}
+
+#[gpui::test]
+fn typing_reranks_keybinding_rows_without_re_deriving(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    let derives = shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().rows.derives);
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("focus");
+    cx.run_until_parked();
+    assert_keybinding_rows_are_fresh(&shell, &mut cx);
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().rows.derives),
+        derives,
+        "typing re-ranks the rows already derived"
+    );
+}
+
+#[gpui::test]
+fn escape_clears_the_keybinding_query_and_the_rows_follow(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("focus");
+    cx.simulate_keystrokes("enter escape");
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().query.is_empty()));
+    assert_keybinding_rows_are_fresh(&shell, &mut cx);
+}
+
+/// An external `keymap.toml` write while the dialog is open: the reload the
+/// watcher runs must repaint the rows with the new binding.
+#[gpui::test]
+fn a_keymap_reload_repaints_the_keybinding_rows(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+    std::fs::write(
+        dir.path().join("keymap.toml"),
+        "config_version = 1\n[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+shift+z\" = \"palette::toggle\"\n",
+    )
+    .unwrap();
+    let builtin = shell.read_with(&vcx, |s, _| s.services.builtin.clone());
+    let config = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
+    shell.update(&mut vcx, |s, cx| s.apply_reload(config, cx));
+    vcx.run_until_parked();
+    assert_keybinding_rows_are_fresh(&shell, &mut vcx);
+    let rebound = shell.read_with(&vcx, |s, _| {
+        s.keybindings
+            .as_ref()
+            .unwrap()
+            .rows
+            .rows()
+            .iter()
+            .find(|r| r.action.0 == "palette::toggle")
+            .and_then(|r| r.current.as_ref())
+            .map(|b| crate::palette::render_binding(&b.keystrokes))
+    });
+    assert_eq!(
+        rebound.as_deref(),
+        Some("alt+shift+z"),
+        "the row shows the reloaded binding"
+    );
+}
+
+/// A missed refresh is refused at render, never repaired there.
+#[gpui::test]
+#[should_panic(expected = "prepared rows are stale")]
+fn render_refuses_keybinding_rows_a_refresh_missed(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    shell.update(&mut cx, |s, _| s.config_revision += 1);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+}
+
+/// A rebind captured inside the open dialog writes `keymap.toml` through the
+/// ordered writer and changes nothing in memory; the reload that write
+/// triggers bumps the config revision, and the very next paint shows the new
+/// binding with no other event.
+#[gpui::test]
+fn a_rebind_inside_the_dialog_repaints_its_row_on_the_reload(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, test_services(), dir.path(), "keybindings::open");
+    select_the_palette_row(&mut cx);
+    let (action, _) = selected_row(&shell, &cx);
+    assert_eq!(action.0, "palette::toggle");
+    let revision = shell.read_with(&cx, |s, _| s.config_revision);
+    cx.simulate_keystrokes("enter ctrl-alt-q enter");
+    cx.run_until_parked();
+    assert!(
+        std::fs::read_to_string(dir.path().join("keymap.toml"))
+            .expect("the capture wrote keymap.toml")
+            .contains("palette::toggle"),
+        "the rebind went through the writer"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.config_revision),
+        revision,
+        "a write changes nothing in memory until its reload"
+    );
+    // The reload the watcher runs once it sees the write.
+    let builtin = shell.read_with(&cx, |s, _| s.services.builtin.clone());
+    let config = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
+    shell.update(&mut cx, |s, cx| s.apply_reload(config, cx));
+    assert_keybinding_rows_are_fresh(&shell, &mut cx);
+    let shown = shell.read_with(&cx, |s, _| {
+        let state = s.keybindings.as_ref().unwrap();
+        state
+            .rows
+            .at(state.selected)
+            .and_then(|r| r.current.as_ref())
+            .map(|b| crate::palette::render_binding(&b.keystrokes))
+    });
+    assert_eq!(
+        shown.as_deref(),
+        Some("ctrl+alt+q"),
+        "the selected row shows the binding just captured"
+    );
+}
+
+/// A row click resolves against the painted list: under a filter, clicking the
+/// painted top row selects that row's action.
+#[gpui::test]
+fn a_click_selects_the_painted_keybinding_row(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    select_the_palette_row(&mut cx);
+    cx.simulate_keystrokes("j");
+    let bounds = top_match_bounds(&shell, &mut cx);
+    cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    let (order, rows) = fresh_keybinding_rows(&shell, &cx);
+    let (selected_action, _) = selected_row(&shell, &cx);
+    assert_eq!(
+        selected_action, rows[order[0]].action,
+        "the click selected the painted top row"
+    );
+    assert_keybinding_rows_are_fresh(&shell, &mut cx);
+}
