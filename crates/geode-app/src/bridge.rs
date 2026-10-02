@@ -3771,7 +3771,8 @@ role = "key"
                              [[flat.columns]]\nname = \"delta01\"\n";
 
     /// A [`ShellBlotter`] with the row actions startup registers
-    /// (`add_dimension_actions`: Open in Nemo), a recording
+    /// (`add_dimension_actions`: Open in Nemo, then Move LHU with a
+    /// position service configured), a recording
     /// [`geode_shell::dimension::UrlOpener`] (the returned list), and one
     /// delivered snapshot grouped by `lhu`: root; L1 over P7 and P8; L2 over
     /// P9; L3 over P6. `position_ref` is a HIDDEN unanimity column (the view
@@ -3829,7 +3830,7 @@ role = "key"
     }
 
     /// Right press on L2's `delta01` (a measure, so no leading column):
-    /// the menu's one row is Open in Nemo under `position_ref · P9`, read
+    /// the menu's first row is Open in Nemo under `position_ref · P9`, read
     /// from a column the view never shows. `enter` opens the URL through
     /// the production `ActionCx::open_url` and the shell paints the
     /// action's own notice.
