@@ -137,6 +137,9 @@ often tripped:
   `testdata/demo_tree_view.sql`.
 - Health is keyed by source, never by dataset; deciding and emitting a
   transition are one step under the lock.
+- Source-wide conditions use their own load-lane keys from
+  `health::condition_key` (`<source>:queue`, `<source>:backlog`) so each is
+  reported and cleared alone; health events still carry the source name.
 - `apply_schema` is `CREATE TABLE IF NOT EXISTS` and publish moves rows
   positionally, so open compares every existing payload table with its
   declaration (`store::drift`) and refuses a drifted dataset for the run:

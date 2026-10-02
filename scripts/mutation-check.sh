@@ -28783,6 +28783,65 @@ run_mutation "silence: a series is appended into a drifted dataset" \
   geode-data \
   a_series_job_for_a_drifted_dataset_is_refused_before_any_insert
 
+# A drop episode ends after DROP_QUIET without a new drop.
+run_mutation "silence: a drop episode never clears" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        if now.saturating_duration_since(open.last_drop) >= DROP_QUIET {' \
+  '        if false {' \
+  geode-data \
+  a_drop_episode_clears_after_sixty_quiet_seconds
+
+# A drop observed as the quiet interval ends keeps the episode open.
+run_mutation "silence: a drop at the quiet boundary is ignored" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '                Some(open) => open.last_drop = now,' \
+  '                Some(_) => {}' \
+  geode-data \
+  a_drop_observed_as_the_quiet_interval_ends_keeps_the_episode_open
+
+# The receiver watches its sink's refusal counter.
+run_mutation "silence: the receiver never watches its drops" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            self.watch_drops();' \
+  '            let _ = &self.refused;' \
+  geode-data \
+  a_subscription_whose_queue_fills_reports_its_drops_under_the_queue_key
+
+# Drops are filed under <source>:queue, never the bare source or a batch.
+run_mutation "silence: drops are filed under the bare source" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            queue_key: crate::health::condition_key(&spec.name, crate::health::QUEUE),' \
+  '            queue_key: spec.name.clone(),' \
+  geode-data \
+  a_subscription_whose_queue_fills_reports_its_drops_under_the_queue_key
+
+# The drop time is on the display clock.
+run_mutation "silence: the drop time ignores the display clock" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            let reason = format!("{dropped} messages dropped since {}", clock.hms(*since));' \
+  '            let reason = format!("{dropped} messages dropped since {}", Clock::utc().hms(*since));' \
+  geode-data \
+  drop_health_formats_the_reason_on_the_display_clock
+
+# The perf row reads the same counter as the status bar.
+run_mutation "silence: the refused-requests row reads zero" \
+  crates/geode-diagnostics/src/model.rs \
+  '        refused: d.refused,' \
+  '        refused: 0,' \
+  geode-diagnostics \
+  perf_model_carries_the_refused_request_total
+
+# A refusal change repaints the perf section.
+run_mutation "silence: a refusal change leaves the perf section stale" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        self.refused = total;
+        self.version += 1;
+        self.versions.perf += 1;' \
+  '        self.refused = total;
+        self.version += 1;' \
+  geode-shell \
+  refused_submissions_move_the_perf_version
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -51,7 +51,7 @@ The ingestion boundaries have different capacity and replacement rules:
 | Boundary | Accepted work and refusal |
 |---|---|
 | `DataHandle` request channel | Bounded; `try_send` refuses `Busy` without waiting when full, and `Stopped` when the request loop has ended or admission is closed. |
-| Adapter message sink | Bounded; refused messages are counted and dropped. |
+| Adapter message sink | Bounded; refused messages are counted, dropped, and reported as `<source>:queue` health. |
 | Subscription coalescer | One pending document per key; newer documents replace it without moving its release deadline. Already submitted jobs are unaffected. |
 | Fetch worker | Up to 64 waiting requests per source; a refused fetch is reported as an outcome. |
 | Egress worker | Up to 8 waiting uploads per target, behind the one in flight; queue refusal emits an upload error naming the target. |
@@ -832,6 +832,13 @@ tile's health chip under the source's own name.
 |---|---|---|---|---|---|
 | Source path missing, unreadable, or an invalid pattern | discovery | the source | `Degraded` | `path '<prefix>' not found`, `path '<prefix>' unreadable: <error>`, `invalid pattern '<pattern>': <error>` | the prefix exists and is readable |
 | Payload schema drift at open | discovery | every source of the dataset | `Failed` | `schema drift in '<dataset>': <diff>; delete the table or fix the dataset` | a restart after the table is deleted or the dataset fixed |
+| A subscription's receiver dropping messages | load | `<source>:queue` | `Degraded` | `N messages dropped since HH:MM:SS` | 60 s pass with no new drop |
+
+`N` counts from the episode's first drop, and the time is when the receiver
+first observed it, on the display clock captured at open (within one receive
+cycle, later if a parser held the receiver). A growing count is re-reported
+at most once a second. The `ChannelAdapter` bus's own inbound refusals happen
+before topic routing, belong to no source, and are not reported as health.
 
 A drifted dataset is refused, not guessed at: its sources are not started (a
 running poll would clear the discovery lane), the ingest runner refuses every

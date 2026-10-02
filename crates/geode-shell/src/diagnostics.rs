@@ -609,13 +609,15 @@ impl Diagnostics {
     }
 
     /// The data handle's running total of `Busy` refusals. The same total
-    /// again does not bump.
+    /// again does not bump. The status bar and the performance page's
+    /// "Refused requests" row both read it.
     pub fn note_refused(&mut self, total: u64) {
         if self.refused == total {
             return;
         }
         self.refused = total;
         self.version += 1;
+        self.versions.perf += 1;
     }
 
     /// The prepared stopped segment, `None` while every data thread lives.
@@ -1811,6 +1813,20 @@ mod tests {
         d.note_refused(3);
         d.note_dropped(2);
         assert_eq!(d.summary().as_ref(), "2 dropped · 3 refused");
+    }
+
+    #[test]
+    fn refused_submissions_move_the_perf_version() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let before = d.versions().perf;
+        d.note_refused(2);
+        assert_eq!(d.versions().perf, before + 1);
+        d.note_refused(2);
+        assert_eq!(
+            d.versions().perf,
+            before + 1,
+            "the same total does not bump"
+        );
     }
 
     #[test]

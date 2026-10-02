@@ -310,6 +310,7 @@ fn service_with(
         adapters: Default::default(),
         documents: Default::default(),
         egress: Vec::new(),
+        clock: geode_core::clock::Clock::utc(),
         pricer: Default::default(),
         vol: Default::default(),
     })
@@ -340,6 +341,7 @@ fn reopen(
         adapters: Default::default(),
         documents: Default::default(),
         egress: Vec::new(),
+        clock: geode_core::clock::Clock::utc(),
         pricer: Default::default(),
         vol: Default::default(),
     })
@@ -437,6 +439,7 @@ fn service_with_history(
         adapters: Default::default(),
         documents: Default::default(),
         egress: Vec::new(),
+        clock: geode_core::clock::Clock::utc(),
         pricer: Default::default(),
         vol: Default::default(),
     })

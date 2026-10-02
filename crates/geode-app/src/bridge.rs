@@ -253,6 +253,7 @@ pub fn data_setup(
                 }
                 documents
             },
+            clock: geode_core::clock::Clock::from_config(config).0,
             pricer,
             vol,
             egress,
@@ -5749,6 +5750,68 @@ role = "key"
         });
         let asked = diagnostics.read_with(&vcx, |d, _| d.health_for_datasets(&["risk"]));
         assert_eq!(asked.map(|h| h.source), Some("risk_src".to_string()));
+    }
+
+    /// A subscription's drops are filed on the load lane under
+    /// `<source>:queue`, but the service emits them as the SOURCE's health
+    /// (pinned in `geode-data` by
+    /// `a_flooded_subscription_reports_its_drops_as_degraded_source_health`).
+    /// That event, through the bridge's drain, reaches the tile chip's
+    /// question: the source's dataset reads Degraded with the drop reason,
+    /// and no source named `cvi:queue` appears.
+    #[gpui::test]
+    fn a_subscription_drop_report_reaches_its_datasets_tile_health(cx: &mut gpui::TestAppContext) {
+        let window = open_test_window(cx, test_shell_services());
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let (tx, rx) = crate::events::channel();
+        let mut bridge = test_bridge(handle);
+        bridge.events = rx;
+        bridge.sources = vec![(
+            SourceSpec {
+                adapter: "demo_bus".into(),
+                document: Some("cvi".into()),
+                topics: vec!["cvi/>".into()],
+                ..SourceSpec::directory("cvi", "cvi_params", Vec::new())
+            },
+            SourceShape::Subscribed,
+        )];
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        let reason = "12 messages dropped since 09:30:05";
+        tx.try_send(DataEvent::Health {
+            source: "cvi".into(),
+            worst: geode_data::health::Health::Degraded {
+                reason: reason.into(),
+            },
+            detail: format!(
+                "{}: {reason}",
+                geode_data::health::condition_key("cvi", geode_data::health::QUEUE)
+            ),
+        })
+        .unwrap();
+        vcx.run_until_parked();
+        let asked = diagnostics
+            .read_with(&vcx, |d, _| d.health_for_datasets(&["cvi_params"]))
+            .expect("the dataset's tiles see the drop");
+        assert_eq!(asked.source, "cvi");
+        assert_eq!(
+            asked.worst,
+            geode_shell::diagnostics::Health::Degraded {
+                reason: reason.into()
+            }
+        );
+        assert_eq!(asked.reason, reason);
+        assert!(
+            diagnostics.read_with(&vcx, |d, _| !d.sources.contains_key("cvi:queue")),
+            "no source is named after the condition key"
+        );
     }
 
     #[test]

@@ -95,6 +95,7 @@ fn service() -> (
         adapters: Default::default(),
         documents: Default::default(),
         egress: Vec::new(),
+        clock: geode_core::clock::Clock::utc(),
         pricer: PricerConfig::default(),
         vol: geode_data::VolConfig::default(),
     })

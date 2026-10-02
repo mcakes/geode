@@ -77,6 +77,10 @@ pub struct DataServiceConfig {
     /// its own worker thread at open; empty means every upload answers
     /// "unknown target".
     pub egress: Vec<EgressSpec>,
+    /// The display clock at open. Formats the times inside health reasons
+    /// (`N messages dropped since HH:MM:SS`); a later `[time]` reload re-zones
+    /// them on restart.
+    pub clock: geode_core::clock::Clock,
 }
 
 /// Outcomes and state changes delivered through the service's event sink.
@@ -1422,6 +1426,7 @@ impl DataService {
                 Arc::clone(&ingest),
                 report_load,
                 on_connection,
+                config.clock,
                 Arc::clone(&sink),
             ) {
                 Ok(worker) => subscriptions.push(worker),
@@ -2255,6 +2260,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -2297,6 +2303,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -2395,6 +2402,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -2454,6 +2462,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -2489,6 +2498,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::with(Arc::new(crate::pricing::worker::tests::FakePricer {
                 asked: Default::default(),
                 delay,
@@ -3024,6 +3034,7 @@ mod tests {
             adapters,
             documents,
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -3068,6 +3079,7 @@ mod tests {
             adapters,
             documents,
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -3127,6 +3139,43 @@ mod tests {
                 panic!("published into a drifted dataset: {dataset}");
             }
         }
+        service.shutdown();
+    }
+
+    /// The drop report leaves the service as the SOURCE's health — the name
+    /// the app describes with its dataset — so a tile's chip shows it.
+    #[test]
+    fn a_flooded_subscription_reports_its_drops_as_degraded_source_health() {
+        use crate::store::ddl::tests_support::{FakeKind, GateKind};
+        let (kind, gate) = GateKind::new();
+        let (_dir, feed, service, rx) = subscribed_service(kind, "demo_bus");
+        let body = FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while service.subscriptions.lock().unwrap()[0].refused() == 0 {
+            assert!(Instant::now() < deadline, "the queue never overflowed");
+            feed.publish("cvi/SPX.Z", body.clone());
+        }
+        GateKind::open(&gate);
+        let (worst, detail) = until_within(&rx, Duration::from_secs(30), |e| match e {
+            DataEvent::Health {
+                source,
+                worst: worst @ Health::Degraded { .. },
+                detail,
+            } => {
+                assert_eq!(
+                    source, "cvi",
+                    "filed under the source, not '<source>:queue'"
+                );
+                Some((worst, detail))
+            }
+            _ => None,
+        })
+        .expect("the source reports its drops as Degraded");
+        let Health::Degraded { reason } = worst else {
+            unreachable!()
+        };
+        assert!(reason.contains(" messages dropped since "), "{reason}");
+        assert!(detail.starts_with("cvi:queue: "), "{detail}");
         service.shutdown();
     }
 
@@ -3254,6 +3303,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -3424,6 +3474,7 @@ mod tests {
             adapters,
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -3484,6 +3535,7 @@ mod tests {
             adapters,
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -3553,6 +3605,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -3866,6 +3919,7 @@ mod tests {
                 adapters: Default::default(),
                 documents: Default::default(),
                 egress: Vec::new(),
+                clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
             },
@@ -4100,6 +4154,7 @@ mod tests {
             adapters,
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -4726,6 +4781,7 @@ mod tests {
                 adapters: Default::default(),
                 documents: Default::default(),
                 egress: Vec::new(),
+                clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
             },
@@ -4761,6 +4817,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -4800,6 +4857,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -4857,6 +4915,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -5131,6 +5190,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -5201,6 +5261,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -5301,6 +5362,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -5379,6 +5441,7 @@ mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -5501,6 +5564,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -5585,6 +5649,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -5686,6 +5751,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         }
@@ -6482,6 +6548,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -6582,6 +6649,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -6677,6 +6745,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -6777,6 +6846,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -6879,6 +6949,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -6953,6 +7024,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -7011,6 +7083,7 @@ source_name = "NPV"
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
         })
@@ -7166,6 +7239,7 @@ source_name = "NPV"
                 adapters,
                 documents: Default::default(),
                 egress: Vec::new(),
+                clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
             },

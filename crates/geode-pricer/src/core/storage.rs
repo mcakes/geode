@@ -1266,6 +1266,7 @@ pub(crate) mod tests {
             adapters: Default::default(),
             documents: Default::default(),
             egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::missing("none"),
             vol: geode_data::VolConfig::default(),
         })
