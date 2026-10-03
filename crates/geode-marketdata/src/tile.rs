@@ -180,10 +180,6 @@ const ECHO_REFUSED: &str = "the echo differs — :rebase or :revert first";
 /// target a row scheduled for removal. Revert restores the draft's rows.
 pub(crate) const DELETED_REFUSED: &str = "row is deleted — :revert restores it";
 
-/// Upload refusal while Behind: the displayed draft is based on an older document.
-const UPLOAD_BEHIND: &str =
-    "rebase or revert first: an upload must be of a document you have seen whole";
-
 /// The notice every non-`y` answer to the confirm leaves — a key, focus
 /// leaving the confirm, or a pointer press on the tile.
 const UPLOAD_CANCELLED: &str = "upload cancelled";
@@ -1223,8 +1219,15 @@ impl MarketDataTile {
                 // The WHOLE draft, `base` included: a rebase while the
                 // upload was in flight keeps the same edits on a base
                 // that was never sent.
+                // A Behind upload is Sent too: the held delivery is superseded
+                // by what went out, and the echo check decides from here.
                 let unchanged = submitted.is_some_and(|d| d == self.draft);
-                if unchanged && self.draft.state == DraftState::Editing {
+                if unchanged
+                    && matches!(
+                        self.draft.state,
+                        DraftState::Editing | DraftState::Behind { .. }
+                    )
+                {
                     self.draft.state = DraftState::Sent {
                         at: chrono::Utc::now().to_rfc3339(),
                     };
@@ -1295,9 +1298,6 @@ impl MarketDataTile {
         if let Some(refusal) = self.not_live(cx) {
             return Err(refusal);
         }
-        if self.draft.is_behind() {
-            return Err(UPLOAD_BEHIND.into());
-        }
         if self.draft.is_sent() {
             return Err("already sent".into());
         }
@@ -1324,8 +1324,20 @@ impl MarketDataTile {
             n => format!("{n} attributes, "),
         };
         let key = self.key.as_deref().map(display_key).unwrap_or_default();
+        // A Behind upload is allowed (restoring an older fit with changes over
+        // a bad newer one), but it replaces a document the trader has not
+        // taken in, so the question names the update it overrides.
+        let overrides = match &self.draft.state {
+            DraftState::Behind { newer } => {
+                format!(
+                    "overrides update {} — ",
+                    local_hhmm(&newer.as_of, self.clock)
+                )
+            }
+            _ => String::new(),
+        };
         let prompt = format!(
-            "upload {cells}, {attrs}{added}, {} removed of {key} to {target}? (y/n)",
+            "{overrides}upload {cells}, {attrs}{added}, {} removed of {key} to {target}? (y/n)",
             self.draft.rows_removed()
         );
         // A confirm already armed is replaced, never stacked.
@@ -15003,23 +15015,46 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(h.upload_request().is_none());
     }
 
+    /// A Behind draft uploads on purpose (restoring an older fit with
+    /// changes over a bad newer one): the confirm warns which update the
+    /// upload overrides, `y` sends the held base with its edits, the
+    /// accepted draft is Sent, and the upstream's publish of it confirms.
     #[gpui::test]
-    fn upload_is_refused_on_a_behind_draft(cx: &mut gpui::TestAppContext) {
+    fn a_behind_draft_uploads_over_the_newer_document_with_a_warning(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        const ECHOED: &str = "2026-09-12T14:15:00Z";
         let (h, mut vcx) = open_upload(cx);
         h.with_document(&mut vcx);
         h.edit_one_cell(&mut vcx);
         let tag = h.tile.read_with(&vcx, |t, _| t.following.tag());
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
-        assert_eq!(
-            h.command(&mut vcx, "upload"),
-            Err(
-                "rebase or revert first: an upload must be of a document you have seen whole"
-                    .into()
-            )
+
+        h.command(&mut vcx, "upload").expect("armed with a warning");
+        let newer = h.tile.read_with(&vcx, |t, _| local_hhmm(NEWER, t.clock));
+        let prompt = h.upload_prompt(&vcx).expect("a confirm");
+        assert!(
+            prompt.starts_with(&format!("overrides update {newer} — upload ")),
+            "{prompt}"
         );
-        assert_eq!(h.upload_prompt(&vcx), None);
-        assert!(h.upload_request().is_none());
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        let req = h.upload_request().expect("y submits");
+        h.deliver_upload(&mut vcx, req.tag, Ok(()));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_sent()),
+            "an accepted Behind upload is Sent, awaiting its echo"
+        );
+        assert_eq!(h.painted_as_of(&vcx).as_deref(), Some(BASE));
+
+        h.echo(
+            &mut vcx,
+            test_fixtures::snapshot_of_at(&CVI, &req.rows, ECHOED),
+        );
+        let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert_eq!(draft.state, DraftState::Clean, "the echo confirms");
+        assert_eq!(h.painted_as_of(&vcx).as_deref(), Some(ECHOED));
     }
 
     #[gpui::test]

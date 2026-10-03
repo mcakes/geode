@@ -14297,14 +14297,13 @@ run_mutation "mdattr: the strip clears the table selection" \
             }),' \
   geode-marketdata k_from_the_top_row_enters_the_strip_and_i_edits_the_attribute
 
-# Upload reports rebase or revert first while Behind. Skipping that gate
-# gives the wrong refusal or permits an upload despite the pending document
-# change.
-run_mutation "mdmenu: upload is greyed while behind" \
+# Upload stays live while Behind: restoring an older fit with changes over a
+# bad newer one is a deliberate upload, warned in its confirm.
+run_mutation "mdmenu: upload stays live while behind" \
   crates/geode-marketdata/src/core/menu.rs \
-  '} else if behind {' \
-  '} else if false {' \
-  geode-marketdata behind_shows_rebase_and_greys_upload
+  '            } else if matches!(i.badge, DraftBadge::Sent { .. }) {' \
+  '            } else if matches!(i.badge, DraftBadge::Sent { .. } | DraftBadge::Behind { .. }) {' \
+  geode-marketdata behind_shows_rebase_and_leaves_upload_live
 
 # An unrelated dispatched action closes the popup before running. Without
 # this guard, cursor motions act behind an open menu.
@@ -20882,14 +20881,25 @@ run_mutation "marketdata: create narrows the factory's egress list to this panel
   geode-marketdata \
   the_tile_stores_the_targets_its_factory_resolves_for_its_document
 
-# Upload refuses a Behind draft whose newer document has not been applied.
-# Sending its old base would overwrite data the user has not reviewed.
-run_mutation "panel: upload refused while Behind" \
+# A Behind upload replaces a newer document the trader has not taken in, so
+# its confirm names the update it overrides. Without the warning, `y` would
+# overwrite that document unannounced.
+run_mutation "panel: a behind upload's confirm names the update it overrides" \
   crates/geode-marketdata/src/tile.rs \
-  '            return Err(UPLOAD_BEHIND.into());' \
-  '            let _ = UPLOAD_BEHIND;' \
+  '                    "overrides update {} — ",' \
+  '                    "{}",' \
   geode-marketdata \
-  upload_is_refused_on_a_behind_draft
+  a_behind_draft_uploads_over_the_newer_document_with_a_warning
+
+# An accepted Behind upload is Sent, so the echo check confirms it. Left
+# Behind, the upstream's publish of the upload would read as yet another
+# held delivery and the draft would never clear.
+run_mutation "panel: an accepted behind upload is Sent" \
+  crates/geode-marketdata/src/tile.rs \
+  '                        DraftState::Editing | DraftState::Behind { .. }' \
+  '                        DraftState::Editing' \
+  geode-marketdata \
+  a_behind_draft_uploads_over_the_newer_document_with_a_warning
 
 # The armed confirm consumes the key that answers it: a `j` that cancels
 # must not also bubble to the shell root and move the cursor or feed the

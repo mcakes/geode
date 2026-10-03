@@ -524,7 +524,7 @@ differing delivery. `:auto` selects how unsent edits handle the transition:
 A Behind draft whose base is retained stays editable: cell, attribute, row,
 step and bump edits land against the painted base, the draft stays Behind,
 and `:rebase` later carries every edit onto the delivered generation by label.
-Upload still refuses until the delivery is resolved.
+Upload stays available with a warning; see [uploads](#uploads).
 
 Changing policy does not retroactively apply it to a held delivery. Redelivery
 of the same generation does not trigger it, and the first usable delivery
@@ -753,8 +753,8 @@ from the palette acts on the cursor cell alone; the footer shows no totals.
 ### Uploads
 
 `:upload [target]` and the action list's `Upload` row send the edited document
-to a configured egress target. Upload requires a complete Editing draft, an
-eligible target, and no other upload in flight from the tile. Both the frame
+to a configured egress target. Upload requires a complete Editing or Behind
+draft, an eligible target, and no other upload in flight from the tile. Both the frame
 and the painted generation must be live. A live frame can still show a
 historical generation while a requery is pending or after it fails; uploading
 that document would overwrite untouched rows with old values.
@@ -769,8 +769,13 @@ cancels. A delivery that changes the draft or painted generation,
 or a switch of underlying, withdraws the prompt unanswered. The prompt is the
 shared `geode_tile::confirm` door.
 
+A Behind draft uploads its held base with its edits, which replaces the newer
+delivered document upstream: the deliberate route for restoring an older fit
+with changes after a bad newer one. The prompt opens with `overrides update
+HH:MM —` naming the generation it replaces, and `y` is the override.
+
 Transport success marks the draft `sent HH:MM` only if the current draft is
-still Editing and equals the submitted draft, including its base. Failure
+still Editing or Behind and equals the submitted draft, including its base. Failure
 keeps the draft editable and shows `upload failed: <e>`. Service admission,
 transport success, and a stored echo are separate stages; see
 [document uploads](request-delivery.md#document-uploads) for delivery limits.
