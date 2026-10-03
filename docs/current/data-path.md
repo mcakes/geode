@@ -326,6 +326,8 @@ by source time, then generation ID, live; `resolve_generations` as of an
 instant) and returns every cell cast to text in SQL, ordered by key, so the
 shell needs no column types. It answers `None` only when no generation
 exists at that instant; an empty snapshot reads as a table with no rows.
+Resolving the generation and reading its rows share one read transaction, so
+a publish committing between them cannot answer a generation with no rows.
 
 ### Snapshot sources
 

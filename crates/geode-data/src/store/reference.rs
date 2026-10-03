@@ -43,8 +43,9 @@ pub enum ReferencePublished {
         rows: usize,
         outcome: PublishOutcome,
     },
-    /// Live already holds exactly these rows; nothing was written and no
-    /// identifier was spent.
+    /// Live already holds exactly these rows: nothing was published and no
+    /// identifier was spent. The shared staging table was still rewritten,
+    /// since the comparison reads the staged rows.
     Unchanged,
 }
 
@@ -244,7 +245,28 @@ fn cell(col: &RefColumn, i: usize) -> Value {
 /// under `Live` is the live generation. Reading it from the summary rather
 /// than from a live row keeps an empty snapshot a table with no rows instead
 /// of "nothing published".
+///
+/// Both statements run in one read transaction, so they see one database
+/// snapshot: a publish committing between them would move the resolved
+/// generation's rows to the archive and answer it with none.
 pub fn read_reference(
+    conn: &Connection,
+    ds: &DatasetSpec,
+    as_of: &AsOf,
+) -> Result<Option<ReferenceTable>, StoreError> {
+    let sql_err = |statement: &str| {
+        let statement = statement.to_string();
+        move |source| StoreError::Sql { statement, source }
+    };
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(sql_err("begin transaction"))?;
+    let table = read_reference_in(&tx, ds, as_of)?;
+    tx.commit().map_err(sql_err("commit"))?;
+    Ok(table)
+}
+
+fn read_reference_in(
     conn: &Connection,
     ds: &DatasetSpec,
     as_of: &AsOf,
@@ -416,6 +438,45 @@ mod tests {
             vec![Some("SPX".into()), Some("USD".into()), Some("100.0".into())]
         );
         assert_eq!(table.source_time, t(0));
+    }
+
+    /// A live read resolves the generation and reads its rows from one
+    /// database snapshot: a publish landing between the two would archive
+    /// the resolved generation's rows and answer it with none. Concurrent
+    /// publishes and reads, so each iteration is a chance at the gap.
+    #[test]
+    fn a_live_read_never_answers_a_generation_without_its_rows() {
+        let ds = ds();
+        let (_dir, store) = store_with(&ds);
+        let a = conformed(&[("SPX", Some("USD"), Some(100.0))]);
+        let b = conformed(&[("SPX", Some("EUR"), Some(100.0))]);
+        publish(&store, &ds, &a, t(0));
+        let reader = store.reader().unwrap();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = std::thread::spawn({
+            let ds = ds.clone();
+            let done = done.clone();
+            move || {
+                for i in 1..60 {
+                    let rows = if i % 2 == 0 { &a } else { &b };
+                    publish(&store, &ds, rows, t(i));
+                }
+                done.store(true, std::sync::atomic::Ordering::Release);
+            }
+        });
+        let mut reads = 0;
+        while !done.load(std::sync::atomic::Ordering::Acquire) {
+            let table = read_reference(&reader, &ds, &AsOf::Live).unwrap().unwrap();
+            assert_eq!(
+                table.rows.len(),
+                1,
+                "gen {} answered with {} rows after {reads} reads",
+                table.gen_id,
+                table.rows.len()
+            );
+            reads += 1;
+        }
+        writer.join().unwrap();
     }
 
     #[test]

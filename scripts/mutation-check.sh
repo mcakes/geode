@@ -33295,6 +33295,21 @@ run_mutation "diagnostics sources: a snapshot source reads Ready 0" \
   '        ready: if polled {' \
   geode-diagnostics a_snapshot_source_row_names_no_priority_and_no_ready_count
 
+# Resolving the live generation and reading its rows outside one transaction
+# lets a publish between them answer "gen N · 0 rows". The test races
+# publishes against reads; it has caught the gap within a few dozen reads.
+run_mutation "reference read: the live read spans two snapshots" \
+  crates/geode-data/src/store/reference.rs \
+  '    let tx = conn
+        .unchecked_transaction()
+        .map_err(sql_err("begin transaction"))?;
+    let table = read_reference_in(&tx, ds, as_of)?;
+    tx.commit().map_err(sql_err("commit"))?;
+    Ok(table)' \
+  '    let _ = sql_err;
+    read_reference_in(conn, ds, as_of)' \
+  geode-data a_live_read_never_answers_a_generation_without_its_rows
+
 
 run_mutation "keystroke parser: an uppercase letter parses as the lowercase key" \
   crates/geode-shell/src/keymap/keystroke.rs \
