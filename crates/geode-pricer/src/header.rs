@@ -10,7 +10,7 @@ use crate::core::complete::Completion;
 use crate::core::rollup::EffectiveChain;
 use crate::core::sheet::{LineState, Sheet};
 use crate::popup;
-use crate::tile::{LOADING, PendingRemove, PricerTile};
+use crate::tile::{LOADING, PendingSheet, PricerTile};
 use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
 use geode_shell::actions::ActionId;
@@ -249,7 +249,7 @@ pub(crate) struct HeaderChrome<'a> {
     /// The header's health chip (the sheet store's dataset), if any.
     pub health: Option<&'a HealthChip>,
     /// The armed `:rm` confirm: its prompt is painted through the confirm door.
-    pub confirm: Option<&'a Confirm<PendingRemove>>,
+    pub confirm: Option<&'a Confirm<PendingSheet>>,
     /// The tile's mode, read from the key context's own decision
     /// (`PricerTile::mode`), painted as the cluster's mode icon.
     pub mode: Mode,
@@ -462,8 +462,9 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
         });
     let mut cluster = Cluster::new(c.tile_id);
     cluster.mode = c.mode;
-    // The removal prompt owns the keyboard; the confirm door answers every
-    // key on it before the shell root sees one, and paints its Yes/No.
+    // The confirm prompt (`:rm` or a take-over) owns the keyboard; the
+    // confirm door answers every key on it before the shell root sees one,
+    // and paints its Yes/No.
     if let Some(pending) = h.prompt.as_ref().and(c.confirm) {
         cluster.status.push(
             confirm::prompt(

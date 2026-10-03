@@ -17855,14 +17855,14 @@ run_mutation "pricer names: every tile asks for a catalog" \
   '' \
   geode-pricer a_factory_with_no_catalog_asks_for_one_exactly_once
 
-run_mutation "pricer sheets: :e takes a sheet another tile holds" \
+run_mutation "pricer sheets: :e takes a sheet another tile holds without asking" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.shared.open.borrow().contains(&name) {
-            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));
-        }
-        self.switch_sheet(name, true, cx)' \
-  '        self.switch_sheet(name, true, cx)' \
-  geode-pricer colon_e_saves_the_sheet_it_leaves_and_loads_the_other
+  '            confirm::arm(self, PendingSheet::Take { sheet: name }, prompt, window, cx);
+            self.rebuild_chrome();
+            cx.notify();
+            return Ok(());' \
+  '            let _ = prompt;' \
+  geode-pricer colon_e_on_a_sheet_open_elsewhere_asks_and_y_takes_it
 
 run_mutation "pricer sheets: :e of the current name reloads it" \
   crates/geode-pricer/src/tile.rs \
@@ -17872,13 +17872,82 @@ run_mutation "pricer sheets: :e of the current name reloads it" \
             }
             return Ok(());
         }
-        self.shared.refuse_retiring(&name)?;
-        if self.shared.open.borrow().contains(&name) {
-            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));' \
-  '        self.shared.refuse_retiring(&name)?;
-        if self.shared.open.borrow().contains(&name) && name != self.sheet.name {
-            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));' \
+        self.shared.refuse_retiring(&name)?;' \
+  '        if name == self.sheet.name && self.save_blocked {
+            return self.switch_sheet(name, true, cx);
+        }
+        self.shared.refuse_retiring(&name)?;' \
   geode-pricer colon_e_saves_the_sheet_it_leaves_and_loads_the_other
+
+# A take-over's `y`: the holder lets go before this tile claims the name,
+# its refusal stops the take, and this tile's own refused flush stops it
+# before the holder is asked.
+run_mutation "pricer take: y never asks the holder to let go" \
+  crates/geode-pricer/src/tile.rs \
+  '                holder.update(cx, |t, cx| t.give_up_sheet(window, cx))?;' \
+  '                let _ = holder;' \
+  geode-pricer colon_e_on_a_sheet_open_elsewhere_asks_and_y_takes_it
+
+run_mutation "pricer take: a holder that cannot save is taken anyway" \
+  crates/geode-pricer/src/tile.rs \
+  '                holder.update(cx, |t, cx| t.give_up_sheet(window, cx))?;' \
+  '                let _ = holder.update(cx, |t, cx| t.give_up_sheet(window, cx));
+                if self.shared.open.borrow().contains(&sheet) {
+                    self.shared.open.borrow_mut().remove(&sheet);
+                }' \
+  geode-pricer a_take_over_is_refused_when_the_holder_cannot_save
+
+run_mutation "pricer take: this tile's refused flush is not checked first" \
+  crates/geode-pricer/src/tile.rs \
+  '            if unsaved && !self.save_now() {' \
+  '            if unsaved && false {' \
+  geode-pricer a_take_over_is_refused_when_this_tile_cannot_save
+
+run_mutation "pricer take: the holder is not told why its sheet went" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.footer = Some(
+            format!(
+                "sheet '"'"'{name}'"'"' was opened in another tile; opened {}{lost}",
+                self.sheet.name
+            )
+            .into(),
+        );' \
+  '        let _ = (&name, lost);' \
+  geode-pricer colon_e_on_a_sheet_open_elsewhere_asks_and_y_takes_it
+
+# The holder saves before it closes anything: a refused save leaves its
+# open line alone.
+run_mutation "pricer take: the holder drops its open line before its save is refused" \
+  crates/geode-pricer/src/tile.rs \
+  '        // Saved before any field closes: a refused save leaves this tile
+        // exactly as it was, its open edit included.
+        if (self.save_failed || self.dirty) && !self.save_now() {' \
+  '        if false {' \
+  geode-pricer a_take_over_is_refused_when_the_holder_cannot_save
+
+run_mutation "pricer take: the holder does not say its open line was dropped" \
+  crates/geode-pricer/src/tile.rs \
+  '        let cancelled = self.editor.is_some() || self.entry.is_some();' \
+  '        let cancelled = false;' \
+  geode-pricer colon_e_on_a_sheet_open_elsewhere_asks_and_y_takes_it
+
+# A save that failed after another tile took the sheet reaches the tile
+# waiting to load it: what loads is older than the holder last showed.
+run_mutation "pricer take: a taker never hears the holder's failed save" \
+  crates/geode-pricer/src/content.rs \
+  '                    if let Some(reason) = failed.clone()
+                        && origin != Some(t.id)
+                    {' \
+  '                    if let Some(reason) = failed.clone()
+                        && false
+                    {' \
+  geode-pricer colon_e_on_a_sheet_open_elsewhere_asks_and_y_takes_it
+
+run_mutation "pricer take: a no answers as a removal" \
+  crates/geode-pricer/src/tile.rs \
+  '                PendingSheet::Take { .. } => NOT_OPENED,' \
+  '                PendingSheet::Take { .. } => NOT_REMOVED,' \
+  geode-pricer colon_e_take_over_answered_no_moves_nothing
 
 run_mutation "pricer sheets: a switch drops the unsaved sheet it leaves" \
   crates/geode-pricer/src/tile.rs \
@@ -18005,7 +18074,7 @@ run_mutation "pricer rm: a modified y confirms" \
 
 run_mutation "pricer rm: y forgets nothing" \
   crates/geode-pricer/src/tile.rs \
-  '            match self.shared.store.forget(&pending.sheet) {' \
+  '            match self.shared.store.forget(&sheet) {' \
   '            match Err::<(), Refusal>(Refusal::Busy) {' \
   geode-pricer colon_rm_asks_and_y_forgets
 
@@ -18101,12 +18170,9 @@ run_mutation "pricer retiring: an answered forget keeps its name reserved" \
 
 run_mutation "pricer retiring: an rm's forget does not reserve its name" \
   crates/geode-pricer/src/tile.rs \
-  '                    self.shared
-                        .retiring
-                        .borrow_mut()
-                        .insert(pending.sheet.clone());
-                    self.forgetting.push(pending.sheet);' \
-  '                    self.forgetting.push(pending.sheet);' \
+  '                    self.shared.retiring.borrow_mut().insert(sheet.clone());
+                    self.forgetting.push(sheet);' \
+  '                    self.forgetting.push(sheet);' \
   geode-pricer a_name_removed_by_rm_is_reserved_until_answered
 
 run_mutation "pricer deferred load: :e reads past a queued save" \
@@ -18123,10 +18189,11 @@ run_mutation "pricer deferred load: a restore reads past a queued save" \
 
 run_mutation "pricer deferred load: a save answer never starts the waiting load" \
   crates/geode-pricer/src/content.rs \
-  '                if t.load_waiting && t.sheet.name == sheet {
-                    t.start_load(cx);
-                }' \
-  '                let _ = (&t.load_waiting, sheet, &cx);' \
+  '                    t.start_load(cx);
+                }
+            });' \
+  '                }
+            });' \
   geode-pricer colon_e_back_to_a_sheet_with_a_queued_save_waits_for_its_answer
 
 run_mutation "pricer save origin: an outcome goes to the tile holding the name" \
@@ -22352,13 +22419,13 @@ run_mutation "pricer names: a stale catalog revives a removed sheet" \
 
 run_mutation "pricer rm: y forgets a sheet opened since the question" \
   crates/geode-pricer/src/tile.rs \
-  '        let refusal = if self.shared.open.borrow().contains(&pending.sheet) {' \
+  '        let refusal = if self.shared.open.borrow().contains(&sheet) {' \
   '        let refusal = if false {' \
   geode-pricer y_refuses_a_sheet_opened_or_retiring_since_the_rm_armed
 
 run_mutation "pricer rm: y forgets a sheet retiring since the question" \
   crates/geode-pricer/src/tile.rs \
-  '        } else if self.shared.retiring.borrow().contains(&pending.sheet) {' \
+  '        } else if self.shared.retiring.borrow().contains(&sheet) {' \
   '        } else if false {' \
   geode-pricer y_refuses_a_sheet_opened_or_retiring_since_the_rm_armed
 
@@ -24654,8 +24721,8 @@ run_mutation "pricer tile: a refused load loses its kind" \
 
 run_mutation "pricer tile: a refused remove loses its kind" \
   crates/geode-pricer/src/tile.rs \
-  '                        Some(format!("sheet '"'"'{}'"'"' not removed: {refused}", pending.sheet).into());' \
-  '                        Some({ let _ = refused; format!("sheet '"'"'{}'"'"' not removed", pending.sheet).into() });' \
+  '                    self.footer = Some(format!("sheet '"'"'{sheet}'"'"' not removed: {refused}").into());' \
+  '                    self.footer = Some({ let _ = refused; format!("sheet '"'"'{sheet}'"'"' not removed").into() });' \
   geode-pricer a_stopped_remove_names_the_stopped_service
 
 run_mutation "pricer tile: a refused rename forget loses its kind" \
@@ -25609,14 +25676,14 @@ run_mutation "pricer sheets: the name click does not toggle the picker" \
 # A pick takes `:e`'s route, refusals included.
 run_mutation "pricer sheets: an open pick skips :e's refusals" \
   crates/geode-pricer/src/tile.rs \
-  '            PickerPurpose::Open => self.edit_sheet(name, cx),' \
+  '            PickerPurpose::Open => self.edit_sheet(name, window, cx),' \
   '            PickerPurpose::Open => self.switch_sheet(name, true, cx),' \
-  geode-pricer picking_a_sheet_open_elsewhere_refuses_like_colon_e
+  geode-pricer picking_a_sheet_open_elsewhere_asks_like_colon_e
 
 run_mutation "pricer sheets: a remove pick opens the sheet" \
   crates/geode-pricer/src/tile.rs \
   '            PickerPurpose::Remove => self.arm_remove(name, window, cx),' \
-  '            PickerPurpose::Remove => self.edit_sheet(name, cx),' \
+  '            PickerPurpose::Remove => self.edit_sheet(name, window, cx),' \
   geode-pricer the_remove_picker_arms_colon_rms_confirm
 
 run_mutation "pricer sheets: tab does not complete the picker" \

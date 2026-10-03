@@ -1708,8 +1708,22 @@ tile holds:
   the generation before the save. A restored tile waits the same way. Switching
   sheets clears undo history, package expansion, cursor, and per-sheet save
   state, and cancels pricing in flight for the outgoing sheet. A sheet open in
-  another tile is refused
-  (`sheet 'x' is open in another tile`). The tile's own name does nothing,
+  another tile is not switched to at once: two tiles never write one sheet,
+  so the header asks `sheet 'x' is open in another tile: open it here and
+  close it there? (y/n)` with the `:rm` confirm's keys, buttons and cancels
+  (any answer but `y` leaves `sheet not opened`). `y` decides again: this
+  tile's own unsaved changes are saved first, then the holding tile's. A
+  refused save on either side stops the take there (`sheet 'x' not opened
+  here: …`); the holder keeps its sheet and any open field, though this
+  tile's own save may already have gone. Otherwise the holder cancels any
+  open cell edit, entry bar, sheet field or menu and moves to the next
+  `untitled-N` (its footer says `sheet 'x' was opened in another tile;
+  opened untitled-N`, adding `(an unfinished edit was dropped)` when a
+  cell edit or entry line was open), and the sheet loads here, waiting for
+  the holder's save. If that save then fails, this tile's save slot says
+  so (`sheet 'x' was not saved: …; its last edits were not stored`): what
+  loaded is older than what the holder showed, and this tile's next save
+  replaces it. The tile's own name does nothing,
   unless its load failed (`did not load`): then `:e` of it asks again,
   which is the way to retry a refused or failed load in place. Retrying
   discards edits made in the unsaved fallback sheet.
@@ -1766,7 +1780,8 @@ default key.
   another tile holds says `open`. Typing filters (the shared fuzzy match),
   `up`/`down` step, `tab` completes the field to the highlighted name, a
   hover moves the highlight, and `enter` or a row click picks through `:e`.
-  A refusal shows in the footer and keeps the picker open; `enter` with
+  A refusal shows in the footer and keeps the picker open; a sheet another
+  tile holds closes the picker for `:e`'s take-over question; `enter` with
   nothing matching says `no sheet matches`. `escape`, a second click on the
   name, or a press outside closes it. The rows are prepared when the picker
   opens and do not follow later catalog changes; the pick itself decides.

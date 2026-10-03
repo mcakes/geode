@@ -810,6 +810,7 @@ impl PricerFactory {
             self.shared.store.note_saved(sheet);
         }
         let origin = self.shared.save_origins.borrow().get(sheet).copied();
+        let failed = answer.as_ref().err().cloned();
         let tiles = self.live_tiles();
         if let Some(tile) = origin.and_then(|id| tiles.iter().find(|t| t.read(cx).id == id)) {
             tile.update(cx, |t, cx| {
@@ -821,10 +822,18 @@ impl PricerFactory {
             });
         }
         // A waiting tile re-checks: with a save of `sheet` still queued it
-        // keeps waiting (`start_load` defers again).
+        // keeps waiting (`start_load` defers again). A failure queued by
+        // another tile (one whose sheet this tile took over) is painted
+        // here too: what loads is older than what that tile last showed,
+        // and this tile's next save would replace it.
         for tile in tiles {
             tile.update(cx, |t, cx| {
                 if t.load_waiting && t.sheet.name == sheet {
+                    if let Some(reason) = failed.clone()
+                        && origin != Some(t.id)
+                    {
+                        t.left_save_answered(sheet, Err(reason), cx);
+                    }
                     t.start_load(cx);
                 }
             });
