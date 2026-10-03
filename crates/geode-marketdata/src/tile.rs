@@ -60,7 +60,9 @@ use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
 use geode_tile::confirm::{self, Confirm, ConfirmHost};
 use geode_tile::edit::EditCaret;
-use geode_tile::following::{Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered};
+use geode_tile::following::{
+    Arrival, DeferredDoor, Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered,
+};
 use geode_tile::header::HealthWatch;
 use geode_tile::menu::{Menu, MenuHost, MenuIds};
 use gpui::prelude::*;
@@ -1101,6 +1103,13 @@ impl MarketDataTile {
     /// Submit this panel's document request, keyed by the tile so two
     /// panels on one document never supersede each other.
     fn requery(&mut self, cx: &mut Context<Self>) {
+        self.requery_with(Arrival::Now, cx);
+    }
+
+    /// [`Self::requery`], answering the barrier for a refusal through the
+    /// door `arrival` names: deferred from `set_visible`, which the shell
+    /// calls while it draws.
+    fn requery_with(&mut self, arrival: Arrival, cx: &mut Context<Self>) {
         let Some(document_key) = self.key.clone() else {
             return;
         };
@@ -1136,7 +1145,7 @@ impl MarketDataTile {
         self.following.submitted(
             queued.is_ok(),
             Unanswered::Retry,
-            &mut FrameDoor::new(&self.frame, cx),
+            &mut arrival.door(&self.frame, cx),
             key,
         );
         self.changed(cx);
@@ -1722,7 +1731,9 @@ impl MarketDataTile {
     /// applied, so no draft policy runs against a document nobody asked
     /// about. Showing again requeries only if a
     /// counter this panel follows moved since it last asked. Closing is
-    /// `closed`.
+    /// `closed`. The shell calls this while it draws, so an arrival it makes
+    /// is deferred: a release notified during the draw would be dropped,
+    /// holding every other tile to the barrier's deadline.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
@@ -1738,7 +1749,7 @@ impl MarketDataTile {
                     .following
                     .follows_changed(now, Self::differs_on_followed)
             {
-                self.requery(cx);
+                self.requery_with(Arrival::Deferred, cx);
             }
         }
         self.changed(cx);
@@ -1748,12 +1759,13 @@ impl MarketDataTile {
     /// and answer any barrier still waiting on it, so a flip never waits out
     /// its deadline for a panel that is gone. Runs inside the shell's
     /// occupant reconciliation, so it updates only the frame and the data
-    /// handle, never the shell.
+    /// handle, never the shell, and its arrival is deferred: a release
+    /// notified during the shell's draw would be dropped.
     pub fn closed(&mut self, cx: &mut Context<Self>) {
         let key = QueryKey(self.id.0);
         self.data.cancel(key);
         self.following
-            .close(&mut FrameDoor::new(&self.frame, cx), key);
+            .close(&mut DeferredDoor::new(&self.frame, cx), key);
     }
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
@@ -5423,8 +5435,20 @@ mod tests {
     /// Test host rendering one tile beneath Root. Its bubble-phase mouse counter stands
     /// in for shell click-to-focus and drag listeners, verifying that capture handlers
     /// preserve propagation where ordinary tile clicks require it.
+    ///
+    /// It also stands in for the shell's draw-time doors: the shell tells an
+    /// occupant its visibility, and that it is closing, from inside its own
+    /// render, where a notify is dropped. A test queues either here and the
+    /// next draw delivers it from this render. Like the shell's, this render
+    /// reads the frame, so the window tracks it and a notify the frame is
+    /// sent during a draw is dropped here as it is in the app: a release
+    /// made from a draw-time door is heard only if deferred.
     struct Host {
         tile: Entity<MarketDataTile>,
+        frame: Entity<Frame>,
+        content: Rc<dyn TileContent>,
+        pending_visible: Option<bool>,
+        pending_closed: bool,
         clicks: Rc<StdCell<u32>>,
         /// Bubble-phase key-downs that reached the host — the stand-in
         /// for the shell root's own `handle_key_down`: a key the date
@@ -5439,8 +5463,15 @@ mod tests {
         fn render(
             &mut self,
             _w: &mut Window,
-            _cx: &mut gpui::Context<Self>,
+            cx: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
+            let _ = self.frame.read(cx).data_version();
+            if let Some(visible) = self.pending_visible.take() {
+                self.content.set_visible(visible, cx);
+            }
+            if std::mem::take(&mut self.pending_closed) {
+                self.content.closed(cx);
+            }
             let clicks = self.clicks.clone();
             let moves = self.moves.clone();
             let keys = self.keys.clone();
@@ -5462,7 +5493,8 @@ mod tests {
     /// What the window closure hands back: it can return only one value,
     /// so everything a test drives or reads is parked here on the way out.
     struct Built {
-        content: Box<dyn TileContent>,
+        content: Rc<dyn TileContent>,
+        host: Entity<Host>,
         tile: Entity<MarketDataTile>,
         frame: Entity<Frame>,
         diagnostics: Entity<Diagnostics>,
@@ -5476,7 +5508,9 @@ mod tests {
         /// Driven through the trait, never by poking the entity: the
         /// shell's own door is what a key, a `:` line and a delivery all
         /// arrive through.
-        content: Box<dyn TileContent>,
+        content: Rc<dyn TileContent>,
+        /// The test host, for the draw-time doors.
+        host: Entity<Host>,
         frame: Entity<Frame>,
         diagnostics: Entity<Diagnostics>,
         rx: Receiver<Request>,
@@ -5594,17 +5628,23 @@ mod tests {
                     let clicks = Rc::new(StdCell::new(0));
                     let moves = Rc::new(StdCell::new(0));
                     let keys = Rc::new(StdCell::new(0));
-                    *slot.borrow_mut() = Some(Built {
-                        content: occupant.content,
+                    let content: Rc<dyn TileContent> = occupant.content.into();
+                    let host = cx.new(|_| Host {
                         tile: tile.clone(),
-                        frame,
-                        diagnostics,
+                        frame: frame.clone(),
+                        content: content.clone(),
+                        pending_visible: None,
+                        pending_closed: false,
                         clicks: clicks.clone(),
                         moves: moves.clone(),
                         keys: keys.clone(),
                     });
-                    let host = cx.new(|_| Host {
+                    *slot.borrow_mut() = Some(Built {
+                        content,
+                        host: host.clone(),
                         tile,
+                        frame,
+                        diagnostics,
                         clicks,
                         moves,
                         keys,
@@ -5631,6 +5671,7 @@ mod tests {
             Harness {
                 tile: built.tile,
                 content: built.content,
+                host: built.host,
                 frame: built.frame,
                 diagnostics: built.diagnostics,
                 rx,
@@ -5674,7 +5715,7 @@ mod tests {
                 let occupant = factory.create(
                     TileId(TILE),
                     None,
-                    FrameRef::new(frame, WorkspaceIx::FIRST),
+                    FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                     diagnostics,
                     window,
                     cx,
@@ -5683,6 +5724,10 @@ mod tests {
                 *out.borrow_mut() = Some(tile.clone());
                 let host = cx.new(|_| Host {
                     tile,
+                    frame,
+                    content: occupant.content.into(),
+                    pending_visible: None,
+                    pending_closed: false,
                     clicks: Rc::new(StdCell::new(0)),
                     moves: Rc::new(StdCell::new(0)),
                     keys: Rc::new(StdCell::new(0)),
@@ -7305,6 +7350,94 @@ label = "skew"
             2,
             "a late reply to a closed panel paints nothing"
         );
+    }
+
+    impl Harness {
+        /// Deliver visibility as the shell does: from inside its render,
+        /// on the next draw.
+        fn visible_in_draw(&self, vcx: &mut gpui::VisualTestContext, visible: bool) {
+            self.host.update(vcx, |h, cx| {
+                h.pending_visible = Some(visible);
+                cx.notify();
+            });
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+
+        /// Close the panel as the shell does: from inside its render, on
+        /// the next draw.
+        fn close_in_draw(&self, vcx: &mut gpui::VisualTestContext) {
+            self.host.update(vcx, |h, cx| {
+                h.pending_closed = true;
+                cx.notify();
+            });
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+
+        /// A counter of the notifications frame observers hear from now on.
+        fn frame_heard(
+            &self,
+            vcx: &mut gpui::VisualTestContext,
+        ) -> (Rc<StdCell<usize>>, gpui::Subscription) {
+            let heard = Rc::new(StdCell::new(0));
+            let count = heard.clone();
+            let sub =
+                vcx.update(|_, cx| cx.observe(&self.frame, move |_, _| count.set(count.get() + 1)));
+            (heard, sub)
+        }
+    }
+
+    /// A panel the shell closes from inside its draw, while the flip awaits
+    /// its document request, answers the flip through a deferred arrival
+    /// that frame observers hear, so every staged tile promotes now rather
+    /// than at the barrier's deadline. Inline, the release's notify falls
+    /// in the draw and is dropped.
+    #[gpui::test]
+    fn a_close_from_the_draw_releases_the_flip_to_frame_observers(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], 60);
+        assert!(h.document_request().is_some(), "an as-of change asks again");
+        assert!(h.barrier_open(&vcx));
+        let (heard, _sub) = h.frame_heard(&mut vcx);
+        h.close_in_draw(&mut vcx);
+        vcx.run_until_parked();
+        assert!(!h.barrier_open(&vcx), "the closing panel arrived");
+        assert!(heard.get() > 0, "frame observers heard the release");
+    }
+
+    /// A show from inside the shell's draw, after the as-of moved while
+    /// hidden, whose document request is refused answers the open flip
+    /// through a deferred arrival that frame observers hear.
+    #[gpui::test]
+    fn a_refused_show_from_the_draw_releases_the_flip_to_frame_observers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let first = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, first, Arc::new(cvi(BASE)));
+        h.visible_in_draw(&mut vcx, false);
+        open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], 60);
+        assert!(h.barrier_open(&vcx));
+        let (heard, _sub) = h.frame_heard(&mut vcx);
+        h.data.fill_for_tests();
+        h.visible_in_draw(&mut vcx, true);
+        vcx.run_until_parked();
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("document request refused: the data service is busy".to_string())
+        );
+        assert!(!h.barrier_open(&vcx), "the refusal arrived");
+        assert!(heard.get() > 0, "frame observers heard the release");
     }
 
     #[gpui::test]
