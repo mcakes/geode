@@ -1319,7 +1319,7 @@ and the row count. The values come from one `DataHandle::distinct` read
 keyed by the tile, sent when a classification is shown, when a reload
 changes its source column, and on `shift+r`; an answer another read has
 overtaken is dropped. A refused or failed read keeps the map's own rows on
-screen with a header notice (`values not loaded: … — R retries`). The
+screen with a header notice (`values not loaded: … — shift+r retries`). The
 default order is unclassified rows first, then by label. A label blank
 after trimming is unclassified everywhere: in the counts, the sort and the
 paint, including a hand-written `''`. `:sort <source|label|rows>
@@ -1372,9 +1372,9 @@ unknown. The `⋯` menu shows each refusal in its row's lane and in full
 when picked, and lists Revert… only over a shadowed user copy.
 
 **Notices.** The tile hears the door's outcome on its frame
-notification. A fork (`copied '<name>' to your config — r restores the desk
-copy`) shows as status: editing a desk or builtin classification copies it
-whole into the user layer. A refusal shows as danger and drops the
+notification. A fork (`copied '<name>' to your config — Revert… restores
+the <layer> copy`, naming the layer it shadows) shows as status: editing a
+desk or builtin classification copies it whole into the user layer. A refusal shows as danger and drops the
 pending edit; a create, rename or delete that was refused shows what was
 shown before. A verb's notices last until the next verb or another
 classification is shown; the session restore's until the trader's first key

@@ -241,7 +241,7 @@ fn a_door_edit_to_a_desk_object_forks_records_and_tells_its_tile(cx: &mut gpui::
     assert_eq!(
         take_notices(&shell, &mut cx),
         vec![TileNotice::Forked(
-            "copied 'desk' to your config — r restores the desk copy".to_string()
+            "copied 'desk' to your config — Revert… restores the desk copy".to_string()
         )]
     );
     assert_eq!(take_notices(&shell, &mut cx), vec![], "a take drains");

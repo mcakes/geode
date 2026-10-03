@@ -1395,8 +1395,9 @@ moment ago is already the user's and a second edit neither forks again nor
 overwrites the recorded baseline.
 
 The tile that asked hears the outcome through the frame: a fork posts
-`TileNotice::Forked` with the dialogs' fork wording (`copied '<name>' to your
-config — r restores the desk copy`), and a refusal posts
+`TileNotice::Forked` (`copied '<name>' to your config — Revert… restores the
+<layer> copy`, naming the layer the copy shadows; not the dialogs' wording,
+whose `r` no tile binds), and a refusal posts
 `TileNotice::Refused` once per tile per drain. The shell posts from a deferred
 update and then notifies the frame once; the tile drains its own notices with
 `Frame::take_tile_notices` on that notification. Notices live on the frame,

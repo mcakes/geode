@@ -3258,9 +3258,8 @@ grain = "underlying"
     }
 
     /// A tile-keyed values answer through the bridge's drain reaches the
-    /// classifications tile that asked; a shell-keyed one (the picker's)
-    /// goes to the shell's own consumers and never to a tile, even
-    /// carrying that tile's tag and column.
+    /// classifications tile that asked; a shell-keyed one (the picker's,
+    /// over the same column) reaches the open picker and no tile.
     #[gpui::test]
     fn a_tile_keyed_distinct_reaches_a_classifications_tile_and_a_picker_one_does_not(
         cx: &mut gpui::TestAppContext,
@@ -3282,15 +3281,32 @@ grain = "underlying"
             "fixture: SMI is not in the map"
         );
 
-        s.answer(
-            geode_shell::shell::PICKER_KEY,
-            first.tag,
-            &[("SMI", 4), ("DAX", 2)],
+        // The picker asks for the same column under the shell's key.
+        let shell = s.shell.clone();
+        s.vcx.update(|window, cx| {
+            shell.update(cx, |view, cx| {
+                geode_shell::shell::picker::open(view, Some("underlying_ref".into()), window, cx);
+            });
+        });
+        s.draw();
+        let picked = s
+            .distinct_requests()
+            .into_iter()
+            .find(|p| p.key == geode_shell::shell::PICKER_KEY)
+            .expect("the picker asks for its values");
+        s.answer(picked.key, picked.tag, &[("SMI", 4), ("DAX", 2)]);
+        assert_eq!(
+            s.shell
+                .read_with(&s.vcx, |sh, _| sh.picker().and_then(|p| p.values.clone())),
+            Some(Ok(vec![("SMI".to_string(), 4), ("DAX".to_string(), 2)])),
+            "the shell's key reaches the picker"
         );
         assert!(
             s.vcx.debug_bounds("classifications-row-SMI").is_none(),
-            "a picker answer reaches no tile"
+            "and no tile"
         );
+        s.vcx.simulate_keystrokes("escape");
+        s.draw();
 
         s.answer(QueryKey(1), first.tag, &[("SMI", 4), ("DAX", 2)]);
         assert!(

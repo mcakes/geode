@@ -86,7 +86,7 @@ Showing a classification, a reload that changes its source column, and
 keyed by the tile (`QueryKey(tile id)`, live, unscoped) with a fresh tag;
 an answer with another tag or column is dropped. A refused read (`Busy`) or
 a failed one leaves the map's rows on screen with a header notice
-(`values not loaded: … — R retries`); `Stopped` says so without the retry
+(`values not loaded: … — shift+r retries`); `Stopped` says so without the retry
 hint. Keys: the shell's grid motions, `v`/`shift+v` start a row selection,
 `escape` ends it. A row press moves the cursor, shift-press extends a
 selection, a double-click dispatches `classifications::edit`. `/` narrows

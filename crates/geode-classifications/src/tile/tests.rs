@@ -611,7 +611,7 @@ fn a_refused_or_failed_read_shows_the_map_alone_with_a_notice_and_shift_r_retrie
     assert_eq!(h.shown(&vcx), ["DAX", "SX5E"], "the map alone");
     assert_eq!(
         h.notices(&vcx),
-        ["values not loaded: the data service is busy \u{2014} R retries"]
+        ["values not loaded: the data service is busy \u{2014} shift+r retries"]
     );
     assert!(
         h.distinct_requests().is_empty(),
@@ -633,7 +633,7 @@ fn a_refused_or_failed_read_shows_the_map_alone_with_a_notice_and_shift_r_retrie
     );
     assert_eq!(
         h.notices(&vcx),
-        ["values not loaded: no such column \u{2014} R retries"]
+        ["values not loaded: no such column \u{2014} shift+r retries"]
     );
     assert_eq!(h.shown(&vcx), ["DAX", "SX5E"]);
     vcx.simulate_keystrokes("shift-r");
@@ -1311,7 +1311,7 @@ fn a_fork_notice_from_the_shell_shows_once(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = editing(cx);
     h.press(&mut vcx, "x");
     h.edits(&mut vcx);
-    let text = "region copied to your layer: r reverts it";
+    let text = "copied 'region' to your config — Revert… restores the builtin copy";
     h.shell_says(&mut vcx, TileNotice::Forked(text.into()));
     assert_eq!(h.notices(&vcx), [text]);
     // A later frame notification brings nothing new.

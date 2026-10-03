@@ -458,10 +458,10 @@ pub(crate) fn queue_edits(
     let mut notices = Vec::new();
     for e in edits {
         if let Some(value) = &e.value
-            && let Some(notice) = fork_record(&config, e.doc, &e.object, &mut batch)
+            && let Some(layer) = fork_record(&config, e.doc, &e.object, &mut batch)
         {
             if let Some(tile) = e.origin {
-                notices.push((tile, notice));
+                notices.push((tile, door_fork_notice(&e.object, layer)));
             }
             // A later edit to the same object in this drain must find it
             // the user's, or it would fork and announce a second time.
@@ -481,8 +481,8 @@ pub(crate) fn queue_edits(
 
 /// Record a user-layer write of `name` in `doc` as a fork when `config`'s
 /// winning copy comes from a lower layer: prune stale sidecar keys into
-/// `edits`, insert the shadowed copy's sidecar entry, and return the fork's
-/// announcement. `None`, touching nothing, when the user layer already wins
+/// `edits`, insert the shadowed copy's sidecar entry, and return the
+/// shadowed copy's layer. `None`, touching nothing, when the user layer already wins
 /// or no layer defines the object — there is nothing to shadow.
 ///
 /// The fresh entry is inserted after the prune so it wins over a stale twin
@@ -493,7 +493,7 @@ fn fork_record(
     doc: &'static str,
     name: &str,
     edits: &mut BTreeMap<(&'static str, String), ObjectEdit>,
-) -> Option<String> {
+) -> Option<Layer> {
     // The last layer defining the object wins, the merge's own rule.
     let winner = config
         .layered_docs(doc)
@@ -512,7 +512,17 @@ fn fork_record(
         (super::OVERRIDES_DOC, super::override_key(doc, name)),
         Some(super::override_entry(layer, name, &value)),
     );
-    Some(fork_notice_of(config, doc, name))
+    Some(layer)
+}
+
+/// A config-door fork's announcement to the tile that asked. The dialogs'
+/// wording names `r`, which only a dialog binds; a tile restores the lower
+/// copy with its own Revert… verb, so the door names that instead.
+fn door_fork_notice(name: &str, layer: Layer) -> String {
+    format!(
+        "copied '{name}' to your config — Revert… restores the {} copy",
+        layer.name()
+    )
 }
 
 /// Queue `chain` as slot `slot`'s user-layer definition, with zero delay,
@@ -536,7 +546,8 @@ pub(super) fn queue_slot_chain(
     // forking it again would overwrite its recorded baseline.
     let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
     let mut edits: BTreeMap<(&'static str, String), ObjectEdit> = BTreeMap::new();
-    let notice = fork_record(&config, doc, &name, &mut edits);
+    let notice =
+        fork_record(&config, doc, &name, &mut edits).map(|_| fork_notice_of(&config, doc, &name));
     edits.insert(
         (doc, name),
         Some(toml::Value::Array(

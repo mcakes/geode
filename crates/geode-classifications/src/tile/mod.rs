@@ -508,7 +508,7 @@ impl ClassificationsTile {
         };
         if let Err(refusal) = self.data.distinct(params) {
             self.values_notice = Some(match refusal {
-                Refusal::Busy => format!("values not loaded: {refusal} \u{2014} R retries"),
+                Refusal::Busy => format!("values not loaded: {refusal} \u{2014} shift+r retries"),
                 Refusal::Stopped => format!("values not loaded: {refusal}"),
             });
         }
@@ -531,7 +531,8 @@ impl ClassificationsTile {
                 true
             }
             Err(why) => {
-                self.values_notice = Some(format!("values not loaded: {why} \u{2014} R retries"));
+                self.values_notice =
+                    Some(format!("values not loaded: {why} \u{2014} shift+r retries"));
                 false
             }
         };

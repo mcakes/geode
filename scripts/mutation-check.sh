@@ -18074,8 +18074,8 @@ run_mutation "grouping dialog: saving an equal chain writes nothing" \
 # A fork records the inherited value, so drift and revert see it.
 run_mutation "grouping dialog: a save that forks records its baseline" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    let notice = fork_record(&config, doc, &name, &mut edits);' \
-  '    let notice = None::<String>;' \
+  '        fork_record(&config, doc, &name, &mut edits).map(|_| fork_notice_of(&config, doc, &name));' \
+  '        None::<Layer>.map(|_| fork_notice_of(&config, doc, &name));' \
   geode-shell \
   saving_over_an_inherited_slot_forks_it_without_asking
 
@@ -35532,10 +35532,28 @@ run_mutation "config door: drained edits are queued" \
 # record drift and revert cannot see the shadowed copy.
 run_mutation "config door: an inherited object is fork-recorded" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '            && let Some(notice) = fork_record(&config, e.doc, &e.object, &mut batch)' \
-  '            && let Some(notice) = None::<String>' \
+  '            && let Some(layer) = fork_record(&config, e.doc, &e.object, &mut batch)' \
+  '            && let Some(layer) = None::<Layer>' \
   geode-shell \
   a_door_edit_to_a_desk_object_forks_records_and_tells_its_tile
+
+# A tile has no `r`: the door names the tile's Revert… verb and the
+# layer the copy shadows, not the dialogs' wording.
+run_mutation "config door: a fork names the tile's revert verb" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '                notices.push((tile, door_fork_notice(&e.object, layer)));' \
+  '                notices.push((tile, fork_notice_of(&config, e.doc, &e.object)));' \
+  geode-shell \
+  a_door_edit_to_a_desk_object_forks_records_and_tells_its_tile
+
+# A shell-keyed answer delivered as a tile's reaches no tile and leaves
+# the picker waiting.
+run_mutation "distinct: the bridge hands shell keys to the shell" \
+  crates/geode-app/src/bridge.rs \
+  '                        if is_shell_key(outcome.key) {' \
+  '                        if false {' \
+  geode-app \
+  a_tile_keyed_distinct_reaches_a_classifications_tile_and_a_picker_one_does_not
 
 # A refused drain must tell the tile, or its optimistic edit stays shown.
 run_mutation "config door: the origin tile hears the refusal" \
@@ -35755,7 +35773,7 @@ run_mutation "classifications: delete refuses a desk object" \
 
 # The new object and the old one's removal travel together: one batch,
 # one reload, never a moment with both or neither.
-run_mutation "classifications: rename writes both objects in one queue call" \
+run_mutation "classifications: rename writes the new object and the old one's removal together" \
   crates/geode-classifications/src/tile/mod.rs \
   '            vec![set_edit(&renamed), remove_edit(&from)],' \
   '            vec![set_edit(&renamed)],' \
