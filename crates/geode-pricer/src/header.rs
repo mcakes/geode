@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
 use geode_shell::actions::ActionId;
 use geode_shell::fonts;
-use geode_shell::module::StackHandle;
+use geode_shell::module::{CloseHandle, StackHandle};
 use geode_shell::shell::aggregates::{self, AggregateCell};
 use geode_shell::shell::chip::{Tone, chip_paint};
 use geode_shell::shell::control::{self, PointerStates as _};
@@ -294,6 +294,8 @@ pub(crate) struct HeaderChrome<'a> {
     /// writes the prepared model.
     pub stale: bool,
     pub stack: Option<&'a StackHandle>,
+    /// The shell's close handle; its × paints last in the cluster.
+    pub close: Option<&'a CloseHandle>,
     pub tile_id: TileId,
     pub tile: &'a Entity<PricerTile>,
     pub menu_open: bool,
@@ -514,6 +516,7 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
             )
         });
     let mut cluster = Cluster::new(c.tile_id);
+    cluster.close = c.close.cloned();
     cluster.mode = c.mode;
     if let Some(p) = h.pricing.clone() {
         cluster.status.push(div().child(p).into_any_element());

@@ -30,7 +30,7 @@ use geode_shell::fonts;
 use geode_shell::frame::{FrameRef, FrameVersions, FrameView, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
-use geode_shell::module::{FindEvent, StackHandle};
+use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
 use geode_shell::shell::aggregates;
 use geode_shell::shell::chip::{self, Tone};
 use geode_shell::shell::scale;
@@ -188,6 +188,8 @@ pub struct BlotterTile {
     title: SharedString,
     /// This tile's stack membership, shown in the header; `None` outside a stack.
     stack: Option<StackHandle>,
+    /// The shell's close handle; the header paints its × last.
+    close: Option<CloseHandle>,
     delivered_at: Option<Instant>,
     visible: bool,
     /// Header notice. Dropped sorts and selections are warnings; query and
@@ -509,6 +511,7 @@ impl BlotterTile {
             health: HealthWatch::new(diagnostics, tile),
             title,
             stack: None,
+            close: None,
             delivered_at: None,
             visible: false,
             error: restored_view_computed.clone().map(Notice::danger),
@@ -1045,6 +1048,11 @@ impl BlotterTile {
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
         self.stack = stack;
+        cx.notify();
+    }
+
+    pub fn set_close(&mut self, close: CloseHandle, cx: &mut Context<Self>) {
+        self.close = Some(close);
         cx.notify();
     }
 
@@ -2240,6 +2248,7 @@ impl gpui::Render for BlotterTile {
         }
         let now = chrono::Utc::now();
         let mut cluster = Cluster::new(self.tile);
+        cluster.close = self.close.clone();
         cluster.mode = geode_tile::header::Mode::from_key_mode(self.mode(cx));
         cluster.notices.extend(self.error.clone());
         cluster.times = self
@@ -6777,6 +6786,35 @@ mod tests {
             vcx.debug_bounds("stack-marker-7").is_none(),
             "a stack of one paints no marker"
         );
+    }
+
+    /// The header paints the shell's close button last once the handle is
+    /// delivered, and a press runs it.
+    #[gpui::test]
+    fn the_header_paints_the_close_button(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut vcx, p.tag, Ok(snapshot()));
+        let pressed = std::rc::Rc::new(std::cell::Cell::new(false));
+        h.tile.update(&mut vcx, |t, cx| {
+            let pressed = pressed.clone();
+            t.set_close(
+                geode_shell::module::CloseHandle::new(move |_, _| pressed.set(true)),
+                cx,
+            );
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let x = vcx.debug_bounds("tile-close-7").expect("painted");
+        let header = vcx.debug_bounds("blotter-header-7").unwrap();
+        assert!(
+            header.right() - x.right() < gpui::px(20.0),
+            "last in the strip"
+        );
+        vcx.simulate_mouse_down(x.center(), gpui::MouseButton::Left, gpui::Modifiers::none());
+        assert!(pressed.get());
     }
 
     /// The header shows the link group the tile follows, read from the

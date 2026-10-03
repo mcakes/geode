@@ -1,13 +1,13 @@
 //! The header strip every tile paints: one height, the shared stack marker
 //! first, the module's own left side taking the free width (clipped when it
 //! runs out), and a right cluster in a fixed order — the mode icon, status,
-//! notices, times, link chips, health, `⋯`. The mode icon shows only while
-//! the tile is in edit or visual mode ([`Mode`]). Status and notices are
-//! text of any length: they shrink, one line each and cut with an ellipsis,
-//! within at most [`TEXT_SHARE`] of the header; times, link chips, health
-//! and `⋯` never shrink. The frame formats nothing: every string arrives
-//! prepared, and a time run's stale flag is the only thing a tile decides
-//! per frame.
+//! notices, times, link chips, health, `⋯`, ×. The mode icon shows only
+//! while the tile is in edit or visual mode ([`Mode`]). Status and notices
+//! are text of any length: they shrink, one line each and cut with an
+//! ellipsis, within at most [`TEXT_SHARE`] of the header; times, link chips,
+//! health, `⋯` and × never shrink. The frame formats nothing: every string
+//! arrives prepared, and a time run's stale flag is the only thing a tile
+//! decides per frame.
 //!
 //! A tile in a link group shows it in the fixed tail, after the times: a
 //! chip per group it follows or emits into ([`link_chips`], read from the
@@ -31,6 +31,7 @@ use geode_core::link::Group;
 use geode_shell::diagnostics::{Diagnostics, Health, TileHealth};
 use geode_shell::frame::FrameRef;
 use geode_shell::link::group_color;
+use geode_shell::module::CloseHandle;
 use geode_shell::shell::chip::{self, chip_paint};
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
@@ -323,6 +324,9 @@ pub struct Cluster<'a> {
     pub health: Option<&'a HealthChip>,
     /// `None` for a tile without an action menu (the blotter).
     pub menu: Option<MenuTrigger>,
+    /// The shell's close handle; its × paints last, after `⋯`. `None` only
+    /// before the shell's first delivery.
+    pub close: Option<CloseHandle>,
 }
 
 impl Cluster<'_> {
@@ -336,6 +340,7 @@ impl Cluster<'_> {
             links: TileLinks::default(),
             health: None,
             menu: None,
+            close: None,
         }
     }
 }
@@ -355,8 +360,8 @@ pub fn frame(
     // The left side has no basis of its own: it takes what the cluster
     // leaves and clips. The cluster's text takes its natural width up to
     // TEXT_SHARE and then cuts, so neither side collapses the other; the
-    // tail (times, link chips, health, `⋯`) never shrinks, so it stays on the tile
-    // unless the tile is narrower than the tail alone.
+    // tail (times, link chips, health, `⋯`, ×) never shrinks, so it stays
+    // on the tile unless the tile is narrower than the tail alone.
     let slot = h_flex().min_w_0().overflow_hidden();
     h_flex()
         .w_full()
@@ -428,6 +433,7 @@ fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> (Option<Stateful<Div>>, Div) 
     }
     row = row.children(c.health.map(|h| health_chip(h, theme)));
     row = row.children(c.menu.map(|m| menu_button(m, theme)));
+    row = row.children(c.close.map(|h| h.button(theme, c.tile)));
     (text, row)
 }
 
@@ -822,6 +828,8 @@ mod tests {
         /// The tile's own handle on a frame: what its link chips are read
         /// from, each paint, as a module reads them.
         frame: FrameRef,
+        /// The shell's close handle, once delivered.
+        close: Option<geode_shell::module::CloseHandle>,
     }
 
     fn plain_time() -> TimeRun {
@@ -856,6 +864,7 @@ mod tests {
                 open: false,
                 on_press: Rc::new(move |_, _| presses.set(presses.get() + 1)),
             });
+            cluster.close = self.close.clone();
             div()
                 .on_mouse_down(MouseButton::Left, move |_, _, _| {
                     parent.set(parent.get() + 1)
@@ -899,6 +908,7 @@ mod tests {
                 notice: Notice::warning("not saved"),
                 mode: Mode::Normal,
                 frame: FrameRef::for_tile(frame, WorkspaceIx::FIRST, TILE),
+                close: None,
             }
         });
         (view, diagnostics, presses, vcx)
@@ -1205,6 +1215,34 @@ mod tests {
                 "{selector}"
             );
         }
+        assert_eq!(parent_presses(&view, vcx), 0);
+    }
+
+    /// The × is the last element of the header, after `⋯`, and a press on
+    /// it runs the handle and stops there.
+    #[gpui::test]
+    fn the_close_button_paints_last_and_runs_its_handle(cx: &mut TestAppContext) {
+        let (view, _, presses, vcx) = open_strip(cx);
+        let pressed = Rc::new(Cell::new(0u32));
+        view.update(vcx, |s, cx| {
+            let pressed = pressed.clone();
+            s.close = Some(geode_shell::module::CloseHandle::new(move |_, _| {
+                pressed.set(pressed.get() + 1)
+            }));
+            cx.notify();
+        });
+        let at = centre(vcx, "tile-close-3");
+        let x = vcx.debug_bounds("tile-close-3").unwrap();
+        let menu = vcx.debug_bounds("strip-menu").expect("menu painted");
+        let strip = vcx.debug_bounds("strip").unwrap();
+        assert!(x.left() >= menu.right(), "the × follows ⋯");
+        assert!(
+            strip.right() - x.right() < gpui::px(20.0),
+            "last in the strip"
+        );
+        click(vcx, at);
+        assert_eq!(pressed.get(), 1);
+        assert_eq!(presses.get(), 0, "the menu never sees the press");
         assert_eq!(parent_presses(&view, vcx), 0);
     }
 

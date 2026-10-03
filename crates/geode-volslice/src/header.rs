@@ -12,7 +12,7 @@
 use geode_core::link::{DraftMark, Group};
 use geode_shell::actions::ActionId;
 use geode_shell::keymap::{Keystroke, Modifiers, parse_binding};
-use geode_shell::module::StackHandle;
+use geode_shell::module::{CloseHandle, StackHandle};
 use geode_shell::shell::chip::{Tone, chip_paint};
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::{kbd, scale};
@@ -239,6 +239,7 @@ pub(crate) fn render_header(
     tile: &Entity<VolsliceTile>,
     tile_id: u64,
     stack: Option<&StackHandle>,
+    close: Option<&CloseHandle>,
     health: Option<&HealthChip>,
     mode: Mode,
     links: TileLinks,
@@ -324,6 +325,7 @@ pub(crate) fn render_header(
         .child(h.diff.clone()),
     );
     let mut cluster = Cluster::new(TileId(tile_id));
+    cluster.close = close.cloned();
     cluster.mode = mode;
     cluster.links = links;
     cluster.health = health;

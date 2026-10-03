@@ -13,7 +13,7 @@ use crate::tile::{DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, dis
 use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
 use geode_shell::fonts;
-use geode_shell::module::StackHandle;
+use geode_shell::module::{CloseHandle, StackHandle};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
@@ -307,7 +307,7 @@ impl HeaderModel {
 
 /// Render the header through the shared frame: kind badge, underlying and
 /// attributes on the left; state, incomplete rows, echo and upload error
-/// as cluster status; then the notice, the time, the health chip and `⋯`
+/// as cluster status; then the notice, the time, the health chip, `⋯` and ×
 /// from the shared cluster. The attribute cursor and editor are passed
 /// separately from prepared values; `menu_open` keeps the action button's
 /// selected fill; `mode` (the key context's own) paints the cluster's mode
@@ -327,6 +327,7 @@ pub(crate) fn render(
     menu_tip_selector: SharedString,
     state_tip_selector: SharedString,
     stack: Option<&StackHandle>,
+    close: Option<&CloseHandle>,
     health: Option<&HealthChip>,
     mode: Mode,
     links: TileLinks,
@@ -488,9 +489,10 @@ pub(crate) fn render(
         );
     }
     // The shared cluster: status, the notice, the time (its stale label
-    // prepared), the health chip, `⋯`. The trigger toggles in the capture
+    // prepared), the health chip, `⋯`, ×. The trigger toggles in the capture
     // phase and lets the press bubble on so the shell still focuses the tile.
     let mut cluster = Cluster::new(TileId(tile_id));
+    cluster.close = close.cloned();
     cluster.mode = mode;
     cluster.status = status;
     cluster.notices.extend(h.notice.clone());

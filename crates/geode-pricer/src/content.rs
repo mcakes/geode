@@ -417,7 +417,9 @@ impl TileContent for PricerContent {
     fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_stack(stack, cx))
     }
-    fn set_close(&self, _close: CloseHandle, _cx: &mut App) {}
+    fn set_close(&self, close: CloseHandle, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.set_close(close, cx))
+    }
 
     fn title(&self, cx: &App) -> SharedString {
         self.tile.read(cx).title()

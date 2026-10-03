@@ -79,7 +79,8 @@ line, and the blotter the notice line. Diagnostics has none of them.
 - Every tile header is `geode_tile::header::frame`: 22 px at the design rem,
   the stack marker first, the module's own left side, then a right cluster in
   a fixed order — the mode icon, status items, notices, source times, the
-  health chip, `⋯`.
+  health chip, `⋯`, and last the shell's close button (×), which closes that
+  tile.
   Status items and notices shrink: each is one line, cut with an ellipsis
   when it does not fit, and together they take at most half the header
   (`TEXT_SHARE`); a cut notice shows its whole text in its tooltip. Source
@@ -579,7 +580,7 @@ reason becomes the notice.
 The header is the [shared frame](#shared-tile-interaction): kind badge,
 underlying and attributes on the left; then the state, incomplete rows, echo,
 upload error and the upload prompt, the notice, the source time (`HH:MM:SS
-stale` in the warning text tone once stale), the health chip and `⋯`. The
+stale` in the warning text tone once stale), the health chip, `⋯` and ×. The
 header's health chip covers the panel's dataset.
 
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
@@ -1408,7 +1409,7 @@ reprice timer's ticks repaint it, and with `refresh = "off"` an idle pricer's
 `stale` waits for its next repaint (known limitation) — and a `⋯` button at the trailing
 edge that opens and closes the action menu (the pointer's `.`). The header is
 the [shared frame](#shared-tile-interaction): notices paint after the status
-items, and the health chip sits between the time and `⋯`. The health chip
+items, the health chip sits between the time and `⋯`, and × is last. The health chip
 covers `pricer_sheets` only (see the pricer README's limits). A pending load
 paints `loading…` muted in the header and `Loading sheet…` in the empty table;
 an empty loaded sheet says `No lines — press o to add one`. A pricer this

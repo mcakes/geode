@@ -4104,6 +4104,32 @@ fn the_header_is_the_shared_height(cx: &mut gpui::TestAppContext) {
     assert!((f32::from(header.size.height) - want).abs() < 0.5);
 }
 
+/// The header paints the shell's close button last once the handle is
+/// delivered, and a press runs it.
+#[gpui::test]
+fn the_header_paints_the_close_button(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    let pressed = std::rc::Rc::new(std::cell::Cell::new(false));
+    h.tile.update(&mut vcx, |t, cx| {
+        let pressed = pressed.clone();
+        t.set_close(
+            geode_shell::module::CloseHandle::new(move |_, _| pressed.set(true)),
+            cx,
+        );
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let x = vcx.debug_bounds("tile-close-7").expect("painted");
+    let header = vcx.debug_bounds("timeseries-header-7").unwrap();
+    assert!(
+        header.right() - x.right() < gpui::px(20.0),
+        "last in the strip"
+    );
+    vcx.simulate_mouse_down(x.center(), gpui::MouseButton::Left, gpui::Modifiers::none());
+    assert!(pressed.get());
+}
+
 /// A timeseries tile charts the series it was given and never reads the
 /// frame's scope, and it has nothing to post: it neither follows a link
 /// group nor emits into one, so the shell offers it no chooser.

@@ -30,7 +30,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{FrameRef, FrameVersions};
 use geode_shell::keymap::KeyContext;
-use geode_shell::module::{FindEvent, StackHandle};
+use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
 use geode_shell::series::SeriesSettings;
 use geode_shell::shell::colours::{
     anchors_from_theme, theme_signature, to_hsla, tokens_from_theme,
@@ -155,6 +155,8 @@ pub struct TimeseriesTile {
     header: HeaderModel,
     title: SharedString,
     stack: Option<StackHandle>,
+    /// The shell's close handle; the header paints its × last.
+    close: Option<CloseHandle>,
     /// One local popup: series list, add picker, expression editor, custom dates
     /// editor, menu, or color picker. List and menu rows are prepared with chrome;
     /// date segments are prepared by field transitions rather than during render.
@@ -376,6 +378,7 @@ impl TimeseriesTile {
             header,
             title,
             stack: None,
+            close: None,
             popup: None,
             footer: header::footer_hints(cx),
             chart_bounds: ChartBounds::default(),
@@ -438,6 +441,11 @@ impl TimeseriesTile {
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
         self.stack = stack;
+        cx.notify();
+    }
+
+    pub fn set_close(&mut self, close: CloseHandle, cx: &mut Context<Self>) {
+        self.close = Some(close);
         cx.notify();
     }
 
@@ -1194,6 +1202,7 @@ impl Render for TimeseriesTile {
                 &tile,
                 tile_id,
                 self.stack.as_ref(),
+                self.close.as_ref(),
                 header::HeaderPopups {
                     menu_open: open.actions,
                     range_open: open.range,
