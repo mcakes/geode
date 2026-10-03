@@ -104,7 +104,8 @@ filter gate, before any toolchain step.
   scale own application presentation; avoid literal colors, radii, and
   unexplained fixed pixels.
 - The five module-visible GPUI globals are `UiSettings`, `Chords`, `AppClock`,
-  `SeriesSettings`, and `ReferenceGlobal` (live reference tables). Add a global only for genuinely app-wide state that
+  `SeriesSettings`, and `ReferenceGlobal` (live reference tables).
+  Add a global only for genuinely app-wide state that
   independently hosted modules must observe.
 
 ## Data and configuration rules

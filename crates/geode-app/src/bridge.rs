@@ -886,19 +886,19 @@ impl ReferenceCache {
     /// flight. `Busy` arms a retry; `Stopped` drops the demand, since nothing
     /// would ever serve it.
     fn refresh(self: &Rc<Self>, dataset: &str, cx: &mut App) {
-        let tag = {
-            let mut tags = self.tags.borrow_mut();
-            let tag = tags.entry(dataset.to_string()).or_default();
-            *tag += 1;
-            *tag
-        };
+        // The tag becomes the latest only once submitted: a refused read
+        // sends nothing, and advancing the tag anyway would drop the answer
+        // to the read still in flight.
+        let tag = self.tags.borrow().get(dataset).copied().unwrap_or(0) + 1;
         match self.handle.reference(ReferenceParams {
             key: REFERENCE_KEY,
             tag,
             dataset: dataset.to_string(),
             as_of: AsOf::Live,
         }) {
-            Ok(()) => {}
+            Ok(()) => {
+                self.tags.borrow_mut().insert(dataset.to_string(), tag);
+            }
             Err(Refusal::Busy) => self.retry(dataset, cx),
             Err(Refusal::Stopped) => {}
         }
@@ -934,11 +934,14 @@ impl ReferenceCache {
             return;
         }
         let dataset = outcome.dataset;
+        // Unreachable in practice: only a refreshed dataset has a tag.
+        let Some(&key_columns) = self.key_columns.get(&dataset) else {
+            return;
+        };
         let current = cx.global::<ReferenceGlobal>().0.clone();
         let next = match outcome.table {
             Ok(Some(table)) => {
                 self.note_succeeded(&dataset);
-                let key_columns = self.key_columns.get(&dataset).copied().unwrap_or(1);
                 current.with_table(&dataset, &table, key_columns)
             }
             Ok(None) => {
@@ -7844,6 +7847,23 @@ role = "key"
             .unwrap();
         vcx.run_until_parked();
         assert_eq!(live_currency(&mut vcx).as_deref(), Some("EUR"));
+    }
+
+    /// A refused reread sends nothing, so the read already in flight stays
+    /// the latest and its answer applies at once, without waiting for the retry.
+    #[gpui::test]
+    fn a_refused_reread_keeps_the_in_flight_answer_current(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let first = next_live_reference(&f).unwrap();
+        f.bridge.handle.fill_for_tests();
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        f.events
+            .try_send(live_answer(&first, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("USD"));
     }
 
     #[gpui::test]

@@ -4404,6 +4404,19 @@ run_mutation "reference global: one retry timer per dataset" \
   '        if false && !self.retry.borrow_mut().insert(dataset.to_string()) {' \
   geode-app a_busy_refusal_retries_and_keeps_the_cache
 
+# A refused reread sends nothing; advancing the tag before the submission
+# is accepted drops the answer to the read still in flight.
+run_mutation "reference global: a refused reread leaves the latest tag" \
+  crates/geode-app/src/bridge.rs \
+  '        let tag = self.tags.borrow().get(dataset).copied().unwrap_or(0) + 1;' \
+  '        let tag = {
+            let mut tags = self.tags.borrow_mut();
+            let tag = tags.entry(dataset.to_string()).or_default();
+            *tag += 1;
+            *tag
+        };' \
+  geode-app a_refused_reread_keeps_the_in_flight_answer_current
+
 run_mutation "reference global: a run of failures warns once" \
   crates/geode-app/src/bridge.rs \
   '        self.failing.borrow_mut().insert(dataset.to_string())' \
