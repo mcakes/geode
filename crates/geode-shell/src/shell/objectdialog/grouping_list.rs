@@ -234,6 +234,10 @@ pub(super) fn finish_list_chain(
     // the frame holds it) was never checked against this field's vocabulary.
     render::revalidate(shell);
     if let Some(refusal) = super::apply::blocking_diagnostic(shell) {
+        // Refused in place, as a typed unknown name is: the field reopens on
+        // the same chain, so the fix is an edit, not a retype from the list.
+        render::open_field(shell);
+        mark_chain_from_list(shell);
         render::set_notice(shell, refusal);
         return;
     }
@@ -395,9 +399,13 @@ pub(super) fn list_hints(query_is_empty: bool) -> Vec<Hint> {
     ]
 }
 
-/// Whether `name` is one of the two rows the frame supplies rather than the config.
-pub fn is_lead(name: &str) -> bool {
-    name == VIEW_DEFAULT || name == AD_HOC
+/// Whether `name` in `domain` is one of the two rows the frame supplies
+/// rather than the config. Only Groupings has them: another domain accepts
+/// `0` and `*` as ordinary object names, and dropping those from a count or
+/// carrying them over as leading rows would miscount the list and paint the
+/// object twice.
+pub fn is_lead(domain: super::Domain, name: &str) -> bool {
+    domain == super::Domain::Groupings && (name == VIEW_DEFAULT || name == AD_HOC)
 }
 
 /// The two leading rows for `frame`'s lane. Neither has a layer: nothing in
@@ -478,7 +486,9 @@ mod tests {
         assert_eq!(kind_of("7"), Some(RowKind::Slot(7)));
         assert_eq!(kind_of("10"), None);
         assert_eq!(kind_of("book"), None);
-        assert!(is_lead("0") && is_lead("*") && !is_lead("1"));
+        let g = super::super::Domain::Groupings;
+        assert!(is_lead(g, "0") && is_lead(g, "*") && !is_lead(g, "1"));
+        assert!(!is_lead(super::super::Domain::Views, "0"));
     }
 
     #[test]

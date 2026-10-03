@@ -818,6 +818,34 @@ fn an_untouched_seed_the_field_cannot_check_is_refused_not_applied(cx: &mut gpui
 }
 
 #[gpui::test]
+fn an_untouched_ad_hoc_seed_the_field_cannot_check_is_refused_not_applied(
+    cx: &mut gpui::TestAppContext,
+) {
+    // The lane stores an ad hoc chain no dataset column backs.
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["nope"]));
+    });
+    let before = (stored(&shell, &cx), choice(&shell, &cx));
+    assert_eq!(
+        cursor_name(&shell, &cx).as_deref(),
+        Some("*"),
+        "the dialog opens on the active ad hoc row"
+    );
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(is_open(&shell, &cx), "the refusal keeps the field open");
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
+    assert!(
+        notice(&shell, &cx).contains("nope"),
+        "{}",
+        notice(&shell, &cx)
+    );
+    assert_eq!((stored(&shell, &cx), choice(&shell, &cx)), before);
+}
+
+#[gpui::test]
 fn a_failed_slot_write_leaves_an_open_ad_hoc_editor_as_it_was(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx, dir) = open_dialog(cx);
     std::fs::write(dir.path().join("groupings.toml"), "3 = [\n").unwrap();

@@ -221,7 +221,7 @@ pub(crate) fn crumb_text(shell: &ShellView) -> String {
                 .rows
                 .rows()
                 .iter()
-                .filter(|row| !super::grouping_list::is_lead(&row.name))
+                .filter(|row| !super::grouping_list::is_lead(state.domain, &row.name))
                 .count();
             format!("{n} {}", state.domain.crumb_noun())
         }
@@ -2581,7 +2581,7 @@ fn landing_rows(shell: &ShellView) -> Vec<ObjectRow> {
             .rows
             .rows()
             .iter()
-            .filter(|row| super::grouping_list::is_lead(&row.name))
+            .filter(|row| super::grouping_list::is_lead(state.domain, &row.name))
             .cloned()
             .chain(state.domain.objects(&config))
             .collect(),

@@ -4887,6 +4887,55 @@ fn the_browse_crumb_counts_and_a_slot_crumb_names_its_chord(cx: &mut gpui::TestA
     assert_eq!(crumb, "ctrl+3");
 }
 
+/// Only the Groupings dialog leads with the frame's `0` and `*` rows. In
+/// another domain those are ordinary object names: a view named `0` counts
+/// in the crumb, and a landing after leaving an edit stage resolves against
+/// a list holding it once, so the cursor comes back to the row it left.
+#[gpui::test]
+fn a_view_named_like_a_leading_row_is_an_ordinary_view(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let views = LayerDoc::builtin(
+        "views",
+        "[\"0\"]\ndataset = \"risk\"\n[[\"0\".columns]]\nname = \"npv\"\n\
+         [wide]\ndataset = \"risk\"\n[[wide.columns]]\nname = \"npv\"\n\
+         [zeta]\ndataset = \"risk\"\n[[zeta.columns]]\nname = \"npv\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![views],
+        desk: None,
+        user: None,
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    let crumb = shell.read_with(&cx, |shell, _| objectdialog::render::crumb_text(shell));
+    assert!(
+        crumb.starts_with("3 "),
+        "the view named 0 is a view: {crumb}"
+    );
+
+    let cursor = |cx: &gpui::VisualTestContext| {
+        dialog_state(&shell, cx, |s| {
+            s.rows.at(s.selected).map(|r| r.name.clone())
+        })
+    };
+    cx.simulate_keystrokes("j");
+    cx.run_until_parked();
+    assert_eq!(cursor(&cx).as_deref(), Some("wide"));
+    // An edit leaves a pending batch, so the landing resolves against the
+    // pending-aware rows rather than the painted ones.
+    cx.simulate_keystrokes("enter space");
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.pending_config_write.is_some()));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        cursor(&cx).as_deref(),
+        Some("wide"),
+        "the landing list holds the view named 0 once"
+    );
+}
+
 /// A desk view whose dataset has enough columns that its edit stage
 /// overflows `VISIBLE_ROWS` — `book`/`npv` as `tree`'s two members, plus
 /// fourteen more measures (`m0`..`m13`) it has not picked up, so both
