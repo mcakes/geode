@@ -4,9 +4,11 @@
 //! Everything here is pure: the reader, the check against the schema and
 //! the color definitions, and the layer arithmetic behind the pick list.
 
-use crate::colour::RESERVED_PREFIX;
+use crate::colour::{NamedColours, RESERVED_PREFIX};
 use crate::config::{Diagnostic, MergedDoc, Severity, VALUE_COLORS_DOC};
-use std::collections::BTreeMap;
+use crate::dimensions::DerivedDimensions;
+use crate::schema::{ColumnRole, ColumnType, SchemaSpec};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// The entry that means "no color": how a higher layer clears a lower
@@ -40,7 +42,7 @@ pub struct ValueColors {
 
 impl ValueColors {
     /// Read the merged `value_colors` document. Knows nothing of the schema
-    /// or the color definitions; `check_value_colors` does.
+    /// or the color definitions; [`check_value_colors`] does.
     pub fn from_doc(doc: &MergedDoc) -> (ValueColors, Vec<Diagnostic>) {
         let mut out = ValueColors::default();
         let mut diags = Vec::new();
@@ -138,10 +140,130 @@ impl ValueColors {
     }
 }
 
+/// What a name is, as far as value colors care.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DimensionKind {
+    /// A utf8 `dimension` or `key` column of some dataset, or a derived
+    /// dimension (its values are labels). Values of it can be colored.
+    Text,
+    /// Declared as a dimension or key, but never as text.
+    NotText,
+    /// No dataset or derived dimension declares it.
+    Undeclared,
+}
+
+fn is_dimension_role(role: ColumnRole) -> bool {
+    matches!(role, ColumnRole::Dimension { .. } | ColumnRole::Key)
+}
+
+/// Classify `name`. Text wins when any dataset declares it as a utf8
+/// dimension or key, so one numeric spelling elsewhere does not hide it.
+pub fn dimension_kind(schema: &SchemaSpec, dims: &DerivedDimensions, name: &str) -> DimensionKind {
+    if dims.get(name).is_some() {
+        return DimensionKind::Text;
+    }
+    let mut declared = false;
+    for column in schema
+        .datasets
+        .iter()
+        .flat_map(|d| d.columns.iter())
+        .filter(|c| c.name == name && is_dimension_role(c.role))
+    {
+        if column.ty == ColumnType::Utf8 {
+            return DimensionKind::Text;
+        }
+        declared = true;
+    }
+    if declared {
+        DimensionKind::NotText
+    } else {
+        DimensionKind::Undeclared
+    }
+}
+
+/// Every name [`dimension_kind`] calls `Text`, so a surface offering to
+/// color a dimension and the check agree on which ones can be colored.
+pub fn text_dimensions(schema: &SchemaSpec, dims: &DerivedDimensions) -> BTreeSet<String> {
+    let mut out: BTreeSet<String> = schema
+        .datasets
+        .iter()
+        .flat_map(|d| d.columns.iter())
+        .filter(|c| c.ty == ColumnType::Utf8 && is_dimension_role(c.role))
+        .map(|c| c.name.clone())
+        .collect();
+    out.extend(dims.all().map(|d| d.name.clone()));
+    out
+}
+
+/// Remove what cannot paint, warning once per removal: a dimension nothing
+/// declares, a dimension that is not text, and a value naming a color
+/// `named` does not define. What is returned is exactly what a tile may
+/// look up, so paint needs no second validity check.
+pub fn check_value_colors(
+    values: ValueColors,
+    named: &NamedColours,
+    kind_of: impl Fn(&str) -> DimensionKind,
+) -> (ValueColors, Vec<Diagnostic>) {
+    let mut out = ValueColors::default();
+    let mut diags = Vec::new();
+    let mut warn = |path: String, message: String| {
+        diags.push(Diagnostic {
+            severity: Severity::Warning,
+            layer: None,
+            file: None,
+            message,
+            path: Some(path),
+        })
+    };
+    for (dimension, colors) in &values.by_dimension {
+        match kind_of(dimension) {
+            DimensionKind::Text => {}
+            DimensionKind::NotText => {
+                warn(
+                    format!("{VALUE_COLORS_DOC}.{dimension}"),
+                    format!(
+                        "value colors '{dimension}': value colors apply to text dimensions; ignored"
+                    ),
+                );
+                continue;
+            }
+            DimensionKind::Undeclared => {
+                warn(
+                    format!("{VALUE_COLORS_DOC}.{dimension}"),
+                    format!(
+                        "value colors '{dimension}': no dataset declares dimension '{dimension}'; ignored"
+                    ),
+                );
+                continue;
+            }
+        }
+        for (value, color) in colors.iter() {
+            if named.get(color).is_none() {
+                warn(
+                    format!("{VALUE_COLORS_DOC}.{dimension}.{value}"),
+                    format!(
+                        "value colors '{dimension}': '{value}' names unknown color '{color}'; painted without a color"
+                    ),
+                );
+                continue;
+            }
+            out.insert(dimension, value, color);
+        }
+    }
+    (out, diags)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{LayerDoc, Severity, merge_docs};
+
+    use crate::colour::{Definition, NamedColours, Tone};
+    use crate::dimensions::DerivedDimensions;
+    use crate::schema::SchemaSpec;
+
+    const DEMO_DATASETS: &str = include_str!("../../../../examples/demo-config/datasets.toml");
+    const DEMO_DIMENSIONS: &str = include_str!("../../../../examples/demo-config/dimensions.toml");
 
     fn doc(text: &str) -> crate::config::MergedDoc {
         merge_docs(
@@ -221,5 +343,115 @@ mod tests {
         let (values, _) = ValueColors::from_doc(&doc("[underlying_ref]\nSPX = \"none\"\n"));
         assert!(values.is_empty());
         assert!(values.dimension("underlying_ref").is_none());
+    }
+
+    fn demo() -> (SchemaSpec, DerivedDimensions) {
+        let schema = SchemaSpec::from_doc(&merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", DEMO_DATASETS).unwrap()],
+        ))
+        .0;
+        let dims = DerivedDimensions::from_doc(&merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin("dimensions", DEMO_DIMENSIONS).unwrap()],
+        ))
+        .0;
+        (schema, dims)
+    }
+
+    fn named(names: &[&str]) -> NamedColours {
+        let mut out = NamedColours::default();
+        for name in names {
+            out.insert(name.to_string(), Definition::hue(240.0, Tone::Normal));
+        }
+        out
+    }
+
+    #[test]
+    fn a_dimension_is_text_not_text_or_undeclared() {
+        let (schema, dims) = demo();
+        // utf8, role = dimension.
+        assert_eq!(
+            dimension_kind(&schema, &dims, "underlying_ref"),
+            DimensionKind::Text
+        );
+        // f64, role = dimension.
+        assert_eq!(
+            dimension_kind(&schema, &dims, "strike"),
+            DimensionKind::NotText
+        );
+        // A derived dimension's values are labels.
+        assert_eq!(dimension_kind(&schema, &dims, "desk"), DimensionKind::Text);
+        assert_eq!(
+            dimension_kind(&schema, &dims, "nonsense"),
+            DimensionKind::Undeclared
+        );
+        let text = text_dimensions(&schema, &dims);
+        assert!(text.contains("underlying_ref") && text.contains("desk"));
+        assert!(!text.contains("strike"));
+    }
+
+    #[test]
+    fn the_check_prunes_what_cannot_paint_and_says_why() {
+        let mut values = ValueColors::default();
+        values.insert("underlying_ref", "SPX", "blue");
+        values.insert("underlying_ref", "NDX", "missing");
+        values.insert("strike", "5000", "blue");
+        values.insert("nonsense", "x", "blue");
+        let kind_of = |name: &str| match name {
+            "underlying_ref" => DimensionKind::Text,
+            "strike" => DimensionKind::NotText,
+            _ => DimensionKind::Undeclared,
+        };
+        let (checked, diags) = check_value_colors(values, &named(&["blue"]), kind_of);
+        assert_eq!(
+            checked.get("underlying_ref", "SPX").map(|c| &**c),
+            Some("blue")
+        );
+        assert_eq!(checked.get("underlying_ref", "NDX"), None, "unknown color");
+        assert!(
+            checked.dimension("strike").is_none(),
+            "not a text dimension"
+        );
+        assert!(checked.dimension("nonsense").is_none(), "undeclared");
+        assert!(diags.iter().all(|d| d.severity == Severity::Warning));
+        let said: Vec<(String, &str)> = diags
+            .iter()
+            .map(|d| (d.path.clone().unwrap(), d.message.as_str()))
+            .collect();
+        assert_eq!(said.len(), 3, "{said:?}");
+        assert!(said.iter().any(|(p, m)| p == "value_colors.nonsense"
+            && m.contains("no dataset declares dimension 'nonsense'")));
+        assert!(said.iter().any(|(p, m)| p == "value_colors.strike"
+            && m.contains("value colors apply to text dimensions")));
+        assert!(
+            said.iter()
+                .any(|(p, m)| p == "value_colors.underlying_ref.NDX"
+                    && m.contains("unknown color 'missing'"))
+        );
+    }
+
+    #[test]
+    fn from_config_carries_the_checked_mapping_with_the_definitions() {
+        let config = crate::config::Config::from_docs(vec![
+            LayerDoc::builtin("datasets", DEMO_DATASETS).unwrap(),
+            LayerDoc::builtin("colors", "[blue]\nhue = 240\n").unwrap(),
+            LayerDoc::builtin(
+                "value_colors",
+                "[underlying_ref]\nSPX = \"blue\"\nNDX = \"missing\"\n",
+            )
+            .unwrap(),
+        ]);
+        let (colors, diags) = NamedColours::from_config(&config);
+        assert!(colors.get("blue").is_some());
+        assert_eq!(
+            colors.values().get("underlying_ref", "SPX").map(|c| &**c),
+            Some("blue")
+        );
+        assert_eq!(colors.values().get("underlying_ref", "NDX"), None);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        // Without the documents, both are empty and nothing is said.
+        let (empty, diags) = NamedColours::from_config(&crate::config::Config::default());
+        assert!(empty.is_empty() && empty.values().is_empty() && diags.is_empty());
     }
 }

@@ -6,7 +6,10 @@
 pub mod oklab;
 pub mod values;
 
-pub use values::{DimensionColors, ValueColors};
+pub use values::{
+    DimensionColors, DimensionKind, ValueColors, check_value_colors, dimension_kind,
+    text_dimensions,
+};
 
 use crate::config::{Diagnostic, MergedDoc, Severity, check_object_name};
 pub use crate::format::Sign;
@@ -156,6 +159,10 @@ pub const RESERVED_PREFIX: char = '#';
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NamedColours {
     by_name: BTreeMap<String, Definition>,
+    /// The checked value → color mapping, carried with the definitions it
+    /// names: a tile that holds one `Arc<NamedColours>` can never see a
+    /// mapping from one reload beside definitions from another.
+    values: ValueColors,
 }
 
 /// Report mutually exclusive `hue` and `token` fields. The caller skips
@@ -325,6 +332,46 @@ impl NamedColours {
     }
     pub fn insert(&mut self, name: String, def: Definition) {
         self.by_name.insert(name, def);
+    }
+
+    /// The value → color mapping these definitions were checked against;
+    /// empty unless built by [`Self::from_config`] or [`Self::with_values`].
+    pub fn values(&self) -> &ValueColors {
+        &self.values
+    }
+
+    pub fn with_values(mut self, values: ValueColors) -> NamedColours {
+        self.values = values;
+        self
+    }
+
+    /// The color definitions and the value mapping checked against them
+    /// and the declared dimensions, from the merged configuration. The
+    /// diagnostics are the colors reader's, the value reader's, then the
+    /// check's.
+    pub fn from_config(config: &crate::config::Config) -> (NamedColours, Vec<Diagnostic>) {
+        let (named, mut diags) = config
+            .doc(crate::config::COLORS_DOC)
+            .map(NamedColours::from_doc)
+            .unwrap_or_default();
+        let (values, value_diags) = config
+            .doc(crate::config::VALUE_COLORS_DOC)
+            .map(ValueColors::from_doc)
+            .unwrap_or_default();
+        diags.extend(value_diags);
+        let schema = config
+            .doc("datasets")
+            .map(|d| crate::schema::SchemaSpec::from_doc(d).0)
+            .unwrap_or_default();
+        let dims = config
+            .doc("dimensions")
+            .map(|d| crate::dimensions::DerivedDimensions::from_doc(d).0)
+            .unwrap_or_default();
+        let (values, check_diags) = values::check_value_colors(values, &named, |name| {
+            values::dimension_kind(&schema, &dims, name)
+        });
+        diags.extend(check_diags);
+        (named.with_values(values), diags)
     }
 }
 

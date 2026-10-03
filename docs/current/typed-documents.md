@@ -273,6 +273,20 @@ layer clears a lower layer's color. A dimension whose entries are all cleared
 or refused is absent. The reader does not consult the schema or the color
 definitions.
 
+[`check_value_colors`](../../crates/geode-core/src/colour/values.rs) then
+prunes what cannot paint. A dimension is text, per `dimension_kind`, when some
+dataset declares it as a utf8 `dimension` or `key` column, or when it is a
+derived dimension (its values are labels); `text_dimensions` lists exactly
+those names. Three warnings each remove their entry: a dimension no dataset or
+derived dimension declares, a declared dimension that is never text (a numeric
+`strike` is not colored by its printed number), and a value naming a color
+`colors.toml` does not define, which paints without a color. What survives is
+exactly what a tile may look up, so paint performs no second validity check.
+`NamedColours::from_config` returns the color definitions together with the
+checked mapping (`NamedColours::values`), so one `Arc<NamedColours>` never
+pairs a mapping from one reload with definitions from another; its
+diagnostics are the colors reader's, the value reader's, then the check's.
+
 [`format_number`](../../crates/geode-core/src/format.rs) scales, rounds, then
 applies grouping and negative notation. Its returned sign follows the
 rounded result, so a small negative rounded to zero receives zero styling.

@@ -34109,6 +34109,22 @@ run_mutation "value colors: sign is refused" \
   geode-core \
   refused_entries_are_dropped_with_an_error_at_their_path
 
+# The check prunes an unknown color: a pruned value must not reach paint.
+run_mutation "value colors: an unknown color is pruned" \
+  crates/geode-core/src/colour/values.rs \
+  '            if named.get(color).is_none() {' \
+  '            if false {' \
+  geode-core \
+  the_check_prunes_what_cannot_paint_and_says_why
+
+# A non-text dimension is ignored, not colored by its printed number.
+run_mutation "value colors: a non-text dimension is ignored" \
+  crates/geode-core/src/colour/values.rs \
+  '        if column.ty == ColumnType::Utf8 {' \
+  '        if true {' \
+  geode-core \
+  a_dimension_is_text_not_text_or_undeclared
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
