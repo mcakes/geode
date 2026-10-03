@@ -38,7 +38,11 @@ pub(crate) struct RecoveryWindow {
     /// Replies for a key notified at or after this instant are dropped.
     started_at: DateTime<Utc>,
     deadline: Instant,
-    asked: usize,
+    /// The topics the request named. Only these count as answered, so a
+    /// reply on any other topic can neither close the window early nor
+    /// change its report.
+    asked: HashSet<String>,
+    /// The subset of `asked` some reply has arrived on.
     answered: HashSet<String>,
 }
 
@@ -86,21 +90,21 @@ impl RecoveryWindow {
         RecoveryWindow {
             started_at,
             deadline,
-            asked: asked.len(),
+            asked: asked.iter().cloned().collect(),
             answered: HashSet::new(),
         }
     }
 
     /// Judge one reply on `topic`. `last_notify`: when a NOTIFY for this
-    /// reply's key last arrived. Any reply answers its topic, even one
-    /// dropped, because the transport did respond.
+    /// reply's key last arrived. A reply on an asked topic answers it, even
+    /// one dropped, because the transport did respond.
     pub(crate) fn on_reply(
         &mut self,
         now: Instant,
         topic: &str,
         last_notify: Option<DateTime<Utc>>,
     ) -> ReplyVerdict {
-        if !self.answered.contains(topic) {
+        if self.asked.contains(topic) && !self.answered.contains(topic) {
             self.answered.insert(topic.to_string());
         }
         if now >= self.deadline {
@@ -114,7 +118,7 @@ impl RecoveryWindow {
 
     /// The deadline passed, or every asked topic answered.
     pub(crate) fn done(&self, now: Instant) -> bool {
-        now >= self.deadline || self.answered.len() >= self.asked
+        now >= self.deadline || self.answered.len() >= self.asked.len()
     }
 
     /// When the receiver must next look at this window.
@@ -218,6 +222,29 @@ mod tests {
         assert!(matches!(
             w.report(&asked),
             RecoveryReport::NoReplies { asked: 3 }
+        ));
+    }
+
+    #[test]
+    fn a_reply_on_a_topic_never_asked_answers_nothing() {
+        let t0 = Instant::now();
+        let asked = topics(&["a", "b"]);
+        let mut w = RecoveryWindow::start(t0, utc(100), Duration::from_secs(10), &asked);
+        w.on_reply(t0, "z", None);
+        w.on_reply(t0, "y", None);
+        assert!(
+            !w.done(t0),
+            "two unasked replies do not close a two-topic window"
+        );
+        assert!(matches!(
+            w.report(&asked),
+            RecoveryReport::NoReplies { asked: 2 }
+        ));
+        w.on_reply(t0, "a", None);
+        assert!(!w.done(t0));
+        assert!(matches!(
+            w.report(&asked),
+            RecoveryReport::Partial { unanswered: 1, .. }
         ));
     }
 }

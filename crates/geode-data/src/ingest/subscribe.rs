@@ -21,8 +21,8 @@
 //!
 //! Recovery. A transport that can answer a GET is asked for the latest
 //! document on every concrete topic the receiver knows: the topics the
-//! service read from the store at open, plus each topic a document arrived
-//! on this run. It is asked once at start and again after each reconnect
+//! service read from the store at open, plus the topic of each document
+//! submitted to the runner this run. It is asked once at start and again after each reconnect
 //! (a `Connected` report following a non-`Connected` one). Replies arrive on
 //! the same sink marked `recovered` and take the ordinary parse, source-time
 //! and coalescer path, judged by a [`RecoveryWindow`] under two rules:
@@ -41,7 +41,11 @@
 //! reports on the load lane under `<source>:recovery`: `Degraded` when the
 //! request failed or no topic answered, `Ok` otherwise. An open window at
 //! stop reports nothing. Only one window is open at a time: a reconnect
-//! during recovery finishes and reports the open one first.
+//! during recovery supersedes the open window, which reports nothing, and
+//! the new window starts at the latest disconnect. Known limit: a `Message`
+//! carries no request id, so a reply to the superseded request that lands
+//! in the new window is judged by the new start; after two reconnects
+//! inside one window a key can stay stale until its next NOTIFY.
 //!
 //! A topic is carried to the runner for recording on its first document per
 //! run, and again once its record here is `RERECORD_AFTER` old.
@@ -247,20 +251,17 @@ impl Reconnect {
     }
 
     /// The first non-`Connected` report of an outage marks its start; the
-    /// `Connected` that ends it hands that start to the receiver. A second
-    /// outage before the receiver noticed the first keeps the earlier start,
-    /// which drops more replies under rule 1, never fewer.
+    /// `Connected` that ends it hands that start to the receiver, replacing
+    /// any start the receiver has not taken yet. Rule 1 is sound only when
+    /// a window starts no earlier than the most recent disconnect: a NOTIFY
+    /// received between two outages predates what the second outage missed,
+    /// and an earlier start would let it drop the reply carrying that update.
     fn observe(&self, state: &ConnectionState) {
         match state {
             ConnectionState::Connected => {
                 let down = self.down_at.swap(0, Ordering::AcqRel);
                 if down != 0 {
-                    let _ = self.reconnected_at.compare_exchange(
-                        0,
-                        down,
-                        Ordering::AcqRel,
-                        Ordering::Relaxed,
-                    );
+                    self.reconnected_at.store(down, Ordering::Release);
                 }
             }
             ConnectionState::Reconnecting | ConnectionState::Lost { .. } => {
@@ -575,10 +576,18 @@ impl Receiving {
 
     /// Ask for every known topic under a window opened at `started_at`,
     /// before the request goes out so no reply arrives unjudged. An open
-    /// window is finished and reported first.
+    /// window is finished first: reported if it was done, otherwise
+    /// superseded, which logs and reports nothing (its outcome was cut
+    /// short, and the new window reports for the source).
     fn start_recovery(&mut self, started_at: DateTime<Utc>) {
-        if self.window.is_some() {
+        if self.window.as_ref().is_some_and(|w| w.done(Instant::now())) {
             self.finish_recovery();
+        } else if self.window.take().is_some() {
+            tracing::info!(
+                target: "geode::ingest",
+                "source {}: recovery superseded by a reconnect before its window ended",
+                self.source,
+            );
         }
         if self.known.is_empty() {
             return;
@@ -2204,6 +2213,156 @@ mod tests {
                 "{topic} was recorded by its first document only"
             );
         }
+        h.worker.shutdown();
+    }
+
+    // ---- recovery: reconnect starts, superseded windows, stray replies --
+
+    /// Two outages before the receiver looks: the second outage's start
+    /// is the one handed over.
+    #[test]
+    fn a_second_outage_before_the_receiver_looks_hands_over_the_latest_disconnect() {
+        let r = Reconnect::default();
+        let lost = || ConnectionState::Lost {
+            reason: "broker gone".into(),
+        };
+        r.observe(&lost());
+        let t1 = r.down_at.load(Ordering::Acquire);
+        r.observe(&ConnectionState::Connected);
+        assert_eq!(r.reconnected_at.load(Ordering::Acquire), t1);
+        std::thread::sleep(Duration::from_millis(2));
+        r.observe(&ConnectionState::Reconnecting);
+        r.observe(&lost());
+        let t2 = r.down_at.load(Ordering::Acquire);
+        assert!(t2 > t1, "the second outage starts later");
+        r.observe(&ConnectionState::Connected);
+        assert_eq!(
+            r.reconnected_at.load(Ordering::Acquire),
+            t2,
+            "a window starting at the first outage would let a NOTIFY between the two drop the reply"
+        );
+        assert_eq!(r.down_at.load(Ordering::Acquire), 0);
+    }
+
+    /// A gated kind that says when a parse is parked on its gate, so a test
+    /// knows the receiver is busy rather than at its loop top.
+    struct HoldKind {
+        inner: GateKind,
+        entered: std::sync::atomic::AtomicBool,
+    }
+
+    impl DocumentKind for HoldKind {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+
+        fn columns(&self) -> &[(&'static str, ColumnType)] {
+            self.inner.columns()
+        }
+
+        fn parse(
+            &self,
+            bytes: &[u8],
+        ) -> Result<geode_core::document::ParsedDocument, geode_core::document::ParseError>
+        {
+            self.entered.store(true, Ordering::Release);
+            self.inner.parse(bytes)
+        }
+
+        fn write(&self, rows: &DocumentRows) -> Result<Vec<u8>, geode_core::document::WriteError> {
+            self.inner.write(rows)
+        }
+    }
+
+    /// NOTIFY X for SPX.Z arrives between two outages; the update the
+    /// second outage missed comes back as a reply. The window starts at the
+    /// second disconnect, so X (older) does not beat the reply.
+    #[test]
+    fn a_reply_to_a_second_outage_beats_a_notify_from_between_the_outages() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let kind = Arc::new(HoldKind {
+            inner: GateKind {
+                inner: FakeKind::new(),
+                gate: Arc::clone(&gate),
+            },
+            entered: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (mut setup, script) = scripted();
+        setup.kind = kind.clone();
+        let mut h = setup.spawn();
+        // D parks the receiver inside its parse for the whole sequence.
+        h.feed
+            .publish("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.1; 6]));
+        wait_until("the receiver parked in a parse", || {
+            kind.entered.load(Ordering::Acquire)
+        });
+        h.feed.set_state(ConnectionState::Lost {
+            reason: "first".into(),
+        });
+        h.feed.set_state(ConnectionState::Connected);
+        std::thread::sleep(Duration::from_millis(2));
+        h.feed
+            .publish("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.5; 6]));
+        std::thread::sleep(Duration::from_millis(2));
+        h.feed.set_state(ConnectionState::Lost {
+            reason: "second".into(),
+        });
+        h.feed.set_state(ConnectionState::Connected);
+        GateKind::open(&gate);
+
+        assert_eq!(published(&h.events).0, "SPX.Z", "D");
+        wait_until("the reconnect's recovery", || script.calls().len() == 1);
+        assert_eq!(published(&h.events).0, "SPX.Z", "X");
+        script.reply("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.9; 6]));
+        script.reply("cvi/NDX.Z", FakeKind::message("NDX.Z", [2.0; 6]));
+        assert_eq!(
+            published(&h.events).0,
+            "SPX.Z",
+            "the reply carrying the missed update publishes before NDX.Z's"
+        );
+        assert_eq!(live_params(&h.conn, "SPX.Z"), vec![0.9; 6]);
+        h.worker.shutdown();
+    }
+
+    #[test]
+    fn a_superseded_recovery_window_reports_nothing() {
+        let (mut setup, script) = scripted();
+        setup.known_topics = vec!["cvi/SPX.Z".into()];
+        setup.recover_timeout = Duration::from_secs(60);
+        let mut h = setup.spawn();
+        wait_until("the start's recovery", || script.calls().len() == 1);
+        reconnect(&h);
+        wait_until("the reconnect's recovery", || script.calls().len() == 2);
+        script.reply("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.3; 6]));
+        assert_eq!(published(&h.events).0, "SPX.Z");
+        wait_until("the second window's report", || {
+            !recovery_reports(&h).is_empty()
+        });
+        h.worker.shutdown();
+        let reports = recovery_reports(&h);
+        assert_eq!(
+            reports.len(),
+            1,
+            "only the finished window reports: {reports:?}"
+        );
+        assert_eq!(reports[0].0, Health::Ok);
+    }
+
+    #[test]
+    fn a_recovered_message_with_no_window_open_never_publishes() {
+        // No known topics: no recovery runs and no window opens.
+        let (setup, script) = scripted();
+        let mut h = setup.spawn();
+        script.reply("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.4; 6]));
+        h.feed
+            .publish("cvi/NDX.Z", FakeKind::message("NDX.Z", [1.0; 6]));
+        assert_eq!(
+            published(&h.events).0,
+            "NDX.Z",
+            "the stray reply ahead of it was dropped"
+        );
+        assert!(live_params(&h.conn, "SPX.Z").is_empty());
+        assert!(script.calls().is_empty());
         h.worker.shutdown();
     }
 }

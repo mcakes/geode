@@ -34669,6 +34669,49 @@ run_mutation "recovery: a topic is recorded once per run" \
   '        if false {' \
   geode-data a_topics_first_document_per_run_is_recorded_once
 
+# A reconnect hands over the LATEST disconnect. Keeping the first outage's
+# start lets a NOTIFY received between two outages drop the reply carrying
+# the update the second outage missed, leaving live stale with no error.
+run_mutation "recovery: a reconnect hands over the latest disconnect" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '                    self.reconnected_at.store(down, Ordering::Release);' \
+  '                    let _ = self.reconnected_at.compare_exchange(0, down, Ordering::AcqRel, Ordering::Relaxed);' \
+  geode-data a_second_outage_before_the_receiver_looks_hands_over_the_latest_disconnect
+
+run_mutation "recovery: a second outage's reply is judged from the second disconnect" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '                    self.reconnected_at.store(down, Ordering::Release);' \
+  '                    let _ = self.reconnected_at.compare_exchange(0, down, Ordering::AcqRel, Ordering::Relaxed);' \
+  geode-data a_reply_to_a_second_outage_beats_a_notify_from_between_the_outages
+
+# A window cut short by a reconnect reports nothing; reported, its partial
+# outcome (often "no replies") flaps the source Degraded on every reconnect.
+run_mutation "recovery: a superseded window reports nothing" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        if self.window.as_ref().is_some_and(|w| w.done(Instant::now())) {
+            self.finish_recovery();
+        } else if self.window.take().is_some() {' \
+  '        if self.window.is_some() {
+            self.finish_recovery();
+        } else if self.window.take().is_some() {' \
+  geode-data a_superseded_recovery_window_reports_nothing
+
+# A recovered message with no window open is never published: nothing can
+# judge it under rule 1.
+run_mutation "recovery: a reply with no window is dropped" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '                None => ReplyVerdict::DropLate,' \
+  '                None => ReplyVerdict::Publish,' \
+  geode-data a_recovered_message_with_no_window_open_never_publishes
+
+# Only asked topics count as answered; an unasked reply would close the
+# window early and skew its report.
+run_mutation "recovery: only asked topics count as answered" \
+  crates/geode-data/src/ingest/recover.rs \
+  '        if self.asked.contains(topic) && !self.answered.contains(topic) {' \
+  '        if !self.answered.contains(topic) {' \
+  geode-data a_reply_on_a_topic_never_asked_answers_nothing
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
