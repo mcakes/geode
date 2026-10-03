@@ -145,10 +145,13 @@ impl ShellView {
     /// under a modal exactly as `page::toggle_<kind>` is. The request is the
     /// pointer route of that action, so it begins as the action does: the
     /// crash tail records `page::toggle_<kind>` (the registered id, so the
-    /// report can name it) and the last notice expires.
+    /// report can name it) and the last notice expires. The page then
+    /// reveals `target`, whether it was just opened or already open, so the
+    /// request lands where it points rather than where the page last was.
     pub(super) fn open_page_on_request(
         &mut self,
         kind: &str,
+        target: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -159,5 +162,11 @@ impl ShellView {
             return;
         }
         self.open_page(kind, window, cx);
+        if let Some(page) = &self.page
+            && page.open
+            && page.occupant.kind == kind
+        {
+            page.occupant.content.reveal(target, window, cx);
+        }
     }
 }

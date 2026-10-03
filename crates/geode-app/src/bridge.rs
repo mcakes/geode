@@ -2873,6 +2873,11 @@ role = "key"
         // `open_page`'s `prevent_default` does nothing on this route (the
         // chip's own mouse-down already ran), so focus is the fact to pin.
         assert!(log.borrow().contains(&PageRecorded::Visible(true)));
+        assert!(
+            log.borrow()
+                .contains(&PageRecorded::Reveal("sheets_src".into())),
+            "the page reveals the chip's source"
+        );
         assert_eq!(
             shell.read_with(&vcx, |s, _| s.open_page_kind_for_test()),
             Some("diagnostics"),

@@ -1230,7 +1230,9 @@ frame's requery statistics supply the state. `page::toggle_diagnostics`,
 bound to `mod+d` by default, opens and closes it from the keymap, the
 sidebar button, the palette row "Diagnostics: Open page", or the status
 bar's diagnostics summary; Escape with nothing above the page closes it, as
-does any workspace switch. The page is retained while the window lives, so
+does any workspace switch. A tile's health chip only opens it, and lands on
+Sources with the cursor on the chip's source (the tile's worst), whichever
+section was last shown; a Sources filter hiding that row is cleared. The page is retained while the window lives, so
 filters, cursors, expansion, and the log tail survive a close and reopen;
 the session saves only the selected section. The toolbar stays above the
 page with every frame control live, so the as-of the Data section's

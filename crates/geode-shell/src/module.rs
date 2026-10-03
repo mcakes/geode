@@ -729,6 +729,10 @@ pub trait PageContent {
     fn title(&self, cx: &App) -> SharedString;
     /// Opaque state for `[pages.<kind>]` in the session file.
     fn serialize(&self, cx: &App) -> toml::Table;
+    /// Show what a request from outside the shell names, once the page is
+    /// open: the diagnostics page takes a source name from a tile's health
+    /// chip. A target the page does not know leaves it as it was.
+    fn reveal(&self, _target: &str, _window: &mut Window, _cx: &mut App) {}
 }
 
 pub struct PageOccupant {
@@ -1840,6 +1844,7 @@ pub mod recording {
         Created,
         Visible(bool),
         Action(String),
+        Reveal(String),
     }
 
     /// The recording page's view. Public so a test can `update` it and
@@ -1911,6 +1916,11 @@ pub mod recording {
         }
         fn set_visible(&self, visible: bool, _cx: &mut App) {
             self.log.borrow_mut().push(PageRecorded::Visible(visible));
+        }
+        fn reveal(&self, target: &str, _window: &mut Window, _cx: &mut App) {
+            self.log
+                .borrow_mut()
+                .push(PageRecorded::Reveal(target.to_string()));
         }
         fn focus_handle(&self, cx: &App) -> FocusHandle {
             self.view.read(cx).focus_handle.clone()

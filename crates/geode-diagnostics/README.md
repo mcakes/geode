@@ -3,8 +3,11 @@
 The diagnostics page: six sections over the shell-owned `Diagnostics`
 entity, the log ring, the loaded configuration, and the frame's requery
 statistics, hosted through the shell's page seam. Open it with `mod+d`, the
-sidebar's diagnostics button, the palette's "Diagnostics: Open page" row, or
-the status bar's diagnostics summary.
+sidebar's diagnostics button, the palette's "Diagnostics: Open page" row,
+the status bar's diagnostics summary, or a tile's health chip. The chip's
+open arrives through `PageContent::reveal` with its source: the page selects
+Sources with the cursor on that source's row, whatever section it last
+showed, and clears a Sources filter that hides the row.
 
 Current behavior and rationale:
 [`docs/current/features.md`](../../docs/current/features.md#diagnostics).

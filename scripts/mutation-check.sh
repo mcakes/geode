@@ -29257,17 +29257,39 @@ run_mutation "tile health: the bridge links a source to its dataset" \
 # The shell drains a tile's page request; skipped, the chip does nothing.
 run_mutation "tile header: the shell opens a queued diagnostics page" \
   crates/geode-shell/src/shell/mod.rs \
-  '        if pending_page {' \
-  '        if false && pending_page {' \
+  '        if let Some(source) = pending_page {' \
+  '        if let Some(source) = pending_page.filter(|_| false) {' \
   geode-shell a_queued_page_open_opens_the_diagnostics_page
 
 # Opening only: drained through the toggle, a second chip click closes it.
 run_mutation "tile header: a queued page open never closes the page" \
   crates/geode-shell/src/shell/page.rs \
   '        self.open_page(kind, window, cx);
-    }' \
+        if let Some(page) = &self.page' \
   '        self.toggle_page(kind, window, cx);
-    }' \
+        if let Some(page) = &self.page' \
+  geode-shell a_queued_page_open_never_closes_the_page
+
+# The opened page is told what the request names; skipped, the page shows
+# whichever section it last showed.
+run_mutation "tile header: a queued page open reveals its source" \
+  crates/geode-shell/src/shell/page.rs \
+  '            page.occupant.content.reveal(target, window, cx);' \
+  '' \
+  geode-shell a_queued_page_open_opens_the_diagnostics_page
+
+# An already-open page still reveals; gated on a fresh open, a chip click
+# over the open page changes nothing.
+run_mutation "tile header: an open page still reveals the source" \
+  crates/geode-shell/src/shell/page.rs \
+  '        self.open_page(kind, window, cx);
+        if let Some(page) = &self.page
+            && page.open' \
+  '        let was_open = self.page_open();
+        self.open_page(kind, window, cx);
+        if let Some(page) = &self.page
+            && page.open
+            && !was_open' \
   geode-shell a_queued_page_open_never_closes_the_page
 
 # A queued open under a modal is refused with the close-the-dialog notice;
@@ -29290,9 +29312,42 @@ run_mutation "tile header: health re-asks only when sources moved" \
 # The chip's click queues the page.
 run_mutation "tile header: the chip click asks for the page" \
   crates/geode-tile/src/header.rs \
-  '                d.request_diagnostics_page();' \
+  '                d.request_diagnostics_page(&source);' \
   '' \
-  geode-tile clicking_the_health_chip_queues_the_diagnostics_page
+  geode-tile clicking_the_health_chip_queues_the_diagnostics_page_at_its_source
+
+# The request names the chip's own source, not a blank one.
+run_mutation "tile header: the chip click names its source" \
+  crates/geode-tile/src/header.rs \
+  '                d.request_diagnostics_page(&source);' \
+  '                d.request_diagnostics_page("");' \
+  geode-tile clicking_the_health_chip_queues_the_diagnostics_page_at_its_source
+
+# Reveal selects Sources; without the switch the page stays on the section
+# it last showed.
+run_mutation "diagnostics page: reveal selects Sources" \
+  crates/geode-diagnostics/src/page.rs \
+  '            self.set_section(Section::Sources, window, cx);
+        }
+        let shown' \
+  '        }
+        let shown' \
+  geode-diagnostics reveal_selects_sources_at_the_named_source
+
+# A Sources filter hiding the source is cleared; kept, the cursor rests on
+# another source.
+run_mutation "diagnostics page: reveal clears a filter hiding the source" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if !shown(self) && !self.filters[slot].is_empty() {' \
+  '        if false && !shown(self) && !self.filters[slot].is_empty() {' \
+  geode-diagnostics reveal_selects_sources_at_the_named_source
+
+# Only a filter that hides the source is cleared; one that keeps it stays.
+run_mutation "diagnostics page: reveal keeps a filter showing the source" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if !shown(self) && !self.filters[slot].is_empty() {' \
+  '        if !self.filters[slot].is_empty() {' \
+  geode-diagnostics reveal_selects_sources_at_the_named_source
 
 # Cluster order; the tail reversed, the chip lands left of the times.
 run_mutation "tile header: the cluster paints in order" \
@@ -29373,7 +29428,7 @@ run_mutation "tile health: the pricer refreshes on a health change" \
 # End to end in the app: the chip's click reaches the page.
 run_mutation "tile header: a chip click opens the page in the app" \
   crates/geode-tile/src/header.rs \
-  '                d.request_diagnostics_page();' \
+  '                d.request_diagnostics_page(&source);' \
   '' \
   geode-app a_health_chip_click_opens_the_diagnostics_page
 
