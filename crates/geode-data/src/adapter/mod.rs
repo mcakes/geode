@@ -28,11 +28,16 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 /// the body because it is also a `source_time` policy in its own right
 /// (`SourceTime::Receive`), and a body's own timestamp field is the other
 /// one.
+///
+/// `recovered` marks a reply to [`Recovery::recover`]: the transport's
+/// latest document on that topic, which may repeat one already delivered.
+/// Every ordinary delivery is `false`.
 #[derive(Debug, Clone)]
 pub struct Message {
     pub topic: String,
     pub received: DateTime<Utc>,
     pub bytes: Vec<u8>,
+    pub recovered: bool,
 }
 
 /// Capacity of each subscription queue and the ChannelAdapter inbound queue.
@@ -151,6 +156,28 @@ pub trait Subscription: Send {
     /// sinks so receivers can observe disconnection. ChannelAdapter can still
     /// finish delivery from a snapshot taken before unsubscribe.
     fn unsubscribe(&mut self);
+
+    /// The recovery side, asked for once after `subscribe` returns `Ok` and
+    /// owned by the receiver thread. `None`: this transport cannot recover.
+    fn recovery(&mut self) -> Option<Box<dyn Recovery>> {
+        None
+    }
+}
+
+/// Asks the transport for its latest document per topic, at start and
+/// after a reconnect, so a document published while nobody listened is not
+/// missed until its next update.
+pub trait Recovery: Send {
+    /// Ask for the latest document on each of `topics` (concrete NOTIFY
+    /// topics, never patterns). Replies arrive on the subscription's sink
+    /// under the NOTIFY topic with `recovered = true`. `timeout` travels
+    /// with each request. Returns promptly: `Ok` means requested, not
+    /// answered. A topic with nothing to send is simply not answered.
+    fn recover(
+        &mut self,
+        topics: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<(), AdapterError>;
 }
 
 /// Optional upload capability, independent of subscription and fetch.
@@ -346,6 +373,7 @@ mod tests {
             topic: t.into(),
             received: Utc::now(),
             bytes: vec![],
+            recovered: false,
         };
         assert!(sink.push(m("a")) && sink.push(m("b")));
         assert!(!sink.push(m("c")));

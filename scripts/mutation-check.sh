@@ -34575,6 +34575,38 @@ run_mutation "runner: a job's topic reaches the publish" \
   '                    topic: None,' \
   geode-data a_document_job_with_a_topic_records_it
 
+# ---- channel adapter recovery
+# The bus records each topic's newest message. Forgetting it leaves a GET
+# with nothing to answer, so a fresh subscriber misses the current document.
+run_mutation "channel: the bus records each topic's last message" \
+  crates/geode-data/src/adapter/channel.rs \
+  '                .insert(message.topic.clone(), message.clone());' \
+  '                .remove(&message.topic);' \
+  geode-data recovery_resends_the_last_message_on_each_asked_topic_marked_recovered
+
+# A recovery reply is marked. Unmarked, the receiver treats it as a live
+# NOTIFY and skips the live comparison, republishing an unchanged document.
+run_mutation "channel: a recovery reply is marked recovered" \
+  crates/geode-data/src/adapter/channel.rs \
+  '                recovered: true,' \
+  '                recovered: false,' \
+  geode-data recovery_resends_the_last_message_on_each_asked_topic_marked_recovered
+
+# An ordinary publish is not marked recovered.
+run_mutation "channel: an ordinary publish is not marked recovered" \
+  crates/geode-data/src/adapter/channel.rs \
+  '                recovered: false,' \
+  '                recovered: true,' \
+  geode-data ordinary_messages_are_not_marked_recovered
+
+# A reply goes to the asking registration's own sink, not another
+# subscriber's on the same topic.
+run_mutation "channel: recovery answers only the asking subscription" \
+  crates/geode-data/src/adapter/channel.rs \
+  '                .find(|r| r.id == self.id)' \
+  '                .find(|r| r.id != self.id)' \
+  geode-data recovery_replies_reach_only_the_subscription_that_asked
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

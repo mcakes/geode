@@ -8,6 +8,15 @@
 //! deliver. Unsubscribe removes future interest but cannot retract a snapshot
 //! already taken. No callback runs under a bus lock; locks are not nested.
 //!
+//! The bus also keeps the newest message per concrete topic, the simulator's
+//! answer to a broker GET. Recovery snapshots the asking registration's sink
+//! under the registration lock, then the asked topics' last messages under
+//! the last-value lock, releases both, and pushes copies marked `recovered`
+//! into that one sink: a reply reaches the subscription that asked, never
+//! every subscriber on the topic. The dispatcher records a message's last
+//! value under its own lock, taken apart from the registration lock and
+//! released before delivery.
+//!
 //! Feeds and egress handles own strong senders; the bus keeps only a weak one.
 //! Dropping the last sender lets the dispatcher drain and exit. Its handle is
 //! not joined. The channel cannot reopen: egress returns None and subscribe
@@ -19,13 +28,15 @@
 
 use super::{
     Adapter, AdapterError, ConnectionState, Egress, HealthSink, MESSAGE_BOUND, Message,
-    MessageSink, Subscription, topic::topic_matches,
+    MessageSink, Recovery, Subscription, topic::topic_matches,
 };
 use chrono::Utc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 /// One subscribe call's standing interest in the bus.
 struct Registration {
@@ -52,6 +63,9 @@ struct Bus {
     /// again.
     inbound: Mutex<Option<Receiver<Message>>>,
     registrations: Mutex<Vec<Registration>>,
+    /// The newest message per concrete topic, the simulator's answer to a
+    /// GET; grows with distinct topics, which is bounded in the demo.
+    last: Mutex<HashMap<String, Message>>,
     next_id: AtomicU64,
     /// Messages [`ChannelFeed::publish`] could not put on the bus, over the
     /// bus's whole life. Shared by every feed and read through
@@ -118,6 +132,13 @@ impl Bus {
                     .map(|r| r.sink.clone())
                     .collect()
             };
+            // Recorded whether or not anyone is subscribed now, so a later
+            // subscriber can recover a document published before it arrived.
+            // Its own lock, released before any `push`.
+            self.last
+                .lock()
+                .unwrap()
+                .insert(message.topic.clone(), message.clone());
             // One clone of the body per extra subscriber and none for the
             // last — each sink owns its bytes, and the ordinary case is a
             // single subscription per topic space, which then costs none.
@@ -170,6 +191,7 @@ impl ChannelAdapter {
             feed: Mutex::new(Arc::downgrade(&tx)),
             inbound: Mutex::new(Some(inbound)),
             registrations: Mutex::new(Vec::new()),
+            last: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(0),
             refused: AtomicU64::new(0),
             dispatcher: Mutex::new(None),
@@ -228,6 +250,7 @@ impl ChannelFeed {
                 topic: topic.to_string(),
                 received: Utc::now(),
                 bytes,
+                recovered: false,
             })
             .is_ok();
         if !queued {
@@ -335,6 +358,53 @@ impl Subscription for ChannelSubscription {
 
     fn unsubscribe(&mut self) {
         self.remove();
+    }
+
+    fn recovery(&mut self) -> Option<Box<dyn Recovery>> {
+        Some(Box::new(ChannelRecovery {
+            bus: Arc::clone(&self.bus),
+            id: self.id,
+        }))
+    }
+}
+
+/// One subscription's GET side. Holds the registration id rather than its
+/// sink, so recovering after `unsubscribe` is refused instead of feeding a
+/// receiver its owner has stopped.
+struct ChannelRecovery {
+    bus: Arc<Bus>,
+    id: u64,
+}
+
+impl Recovery for ChannelRecovery {
+    /// Push the last message on each asked topic into this registration's
+    /// own sink, marked `recovered`. The in-process bus answers at once, so
+    /// `timeout` is unused. A full sink refuses and counts like any delivery.
+    fn recover(&mut self, topics: &[String], _timeout: Duration) -> Result<(), AdapterError> {
+        let sink = {
+            let registrations = self.bus.registrations.lock().unwrap();
+            registrations
+                .iter()
+                .find(|r| r.id == self.id)
+                .map(|r| r.sink.clone())
+        };
+        let Some(sink) = sink else {
+            return Err(AdapterError {
+                message: format!("channel adapter '{}': not subscribed", self.bus.name),
+            });
+        };
+        let replies: Vec<Message> = {
+            let last = self.bus.last.lock().unwrap();
+            topics.iter().filter_map(|t| last.get(t).cloned()).collect()
+        };
+        for message in replies {
+            sink.push(Message {
+                received: Utc::now(),
+                recovered: true,
+                ..message
+            });
+        }
+        Ok(())
     }
 }
 
@@ -608,5 +678,88 @@ mod tests {
         assert!(feed.publish("marketdata/cvi/SPX.Z", b"4".to_vec()));
         let next = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(next.bytes.as_slice(), b"4");
+    }
+
+    #[test]
+    fn recovery_resends_the_last_message_on_each_asked_topic_marked_recovered() {
+        let (adapter, feed) = ChannelAdapter::new("t");
+        let mut sub = adapter.subscription().unwrap();
+        let (sink, rx) = MessageSink::bounded(16);
+        sub.subscribe(&["md/*/NOTIFY".into()], sink, Arc::new(|_| {}))
+            .unwrap();
+        feed.publish("md/SPX/NOTIFY", b"one".to_vec());
+        feed.publish("md/SPX/NOTIFY", b"two".to_vec());
+        for _ in 0..2 {
+            rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        let mut rec = sub.recovery().expect("the channel adapter recovers");
+        rec.recover(
+            &["md/SPX/NOTIFY".into(), "md/NONE/NOTIFY".into()],
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let m = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            (m.topic.as_str(), m.bytes.as_slice(), m.recovered),
+            ("md/SPX/NOTIFY", &b"two"[..], true)
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "an unknown topic is not answered"
+        );
+    }
+
+    #[test]
+    fn recovery_after_unsubscribe_is_an_error() {
+        let (adapter, _feed) = ChannelAdapter::new("t");
+        let mut sub = adapter.subscription().unwrap();
+        let (sink, _rx) = MessageSink::bounded(4);
+        sub.subscribe(&["md/>".into()], sink, Arc::new(|_| {}))
+            .unwrap();
+        let mut rec = sub.recovery().unwrap();
+        sub.unsubscribe();
+        assert!(
+            rec.recover(&["md/SPX/NOTIFY".into()], Duration::from_secs(1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ordinary_messages_are_not_marked_recovered() {
+        let (adapter, feed) = ChannelAdapter::new("t");
+        let mut sub = adapter.subscription().unwrap();
+        let (sink, rx) = MessageSink::bounded(4);
+        sub.subscribe(&["md/>".into()], sink, Arc::new(|_| {}))
+            .unwrap();
+        feed.publish("md/SPX/NOTIFY", b"x".to_vec());
+        assert!(!rx.recv_timeout(Duration::from_secs(1)).unwrap().recovered);
+    }
+
+    #[test]
+    fn recovery_replies_reach_only_the_subscription_that_asked() {
+        let (adapter, feed) = ChannelAdapter::new("t");
+        let (asking_sink, asking_rx) = MessageSink::bounded(8);
+        let (other_sink, other_rx) = MessageSink::bounded(8);
+        let mut asking = adapter.subscription().unwrap();
+        asking
+            .subscribe(&["md/*/NOTIFY".into()], asking_sink, Arc::new(|_| {}))
+            .unwrap();
+        let mut other = adapter.subscription().unwrap();
+        other
+            .subscribe(&["md/>".into()], other_sink, Arc::new(|_| {}))
+            .unwrap();
+        feed.publish("md/SPX/NOTIFY", b"doc".to_vec());
+        asking_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        other_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let mut rec = asking.recovery().unwrap();
+        rec.recover(&["md/SPX/NOTIFY".into()], Duration::from_secs(1))
+            .unwrap();
+        let m = asking_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(m.recovered);
+        assert!(
+            other_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "a GET reply answers the asker, not every subscriber on the topic"
+        );
     }
 }
