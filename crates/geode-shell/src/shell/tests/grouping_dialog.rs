@@ -1557,6 +1557,20 @@ fn the_readout_reads_open_while_the_dialog_is_up(cx: &mut gpui::TestAppContext) 
     assert!(cx.debug_bounds("scope-grouping-open").is_none());
 }
 
+/// Another domain's object dialog is not the Grouping dialog: the readout
+/// stays at rest under it.
+#[gpui::test]
+fn another_object_dialog_leaves_the_readout_at_rest(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    dispatch_action(&shell, "config::views", &mut cx);
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.object_dialog.is_some()));
+    assert!(cx.debug_bounds("scope-grouping-open").is_none());
+    assert!(cx.debug_bounds("scope-grouping-chevron").is_some());
+}
+
 #[gpui::test]
 fn hovering_the_readout_names_the_chord(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
