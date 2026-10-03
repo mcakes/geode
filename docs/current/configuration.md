@@ -597,7 +597,7 @@ Accepted candidates update runtime state according to their inputs:
 | `scopes`, `datasets`, or `dimensions` | Rebuild saved scopes |
 | `expressions`, `datasets`, or `dimensions` | Rebuild named expressions; a changed or redefined entry bumps the frame's config version so a tile whose scope references it requeries |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
-| Views, either presentation document, dimensions, or colors | Emit `ConfigReloaded` for the app bridge |
+| Views, either presentation document, dimensions, colors, or value colors | Emit `ConfigReloaded` for the app bridge |
 | `app` | Emit `AppSettingsReloaded`; the bridge hands `blotter.stale_after` to the blotter and panel factories |
 | Sources, datasets, egress, positions, panels, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
@@ -619,9 +619,11 @@ data service, so a full request queue cannot permanently lose a configuration
 reload.
 
 The bridge's `ConfigReloaded` handler runs for changes to views, view/dataset
-presentation, dimensions, or colors. It uses the same presentation-aware
-view loader as startup, updates module factories, and offers views/dimensions
-to the service. This is not an atomic update across factories and workers;
+presentation, dimensions, colors, or value colors. It uses the same
+presentation-aware view loader as startup, updates module factories, and
+offers views/dimensions to the service. The colors it hands the blotter and
+timeseries factories carry the `value_colors` mapping, checked against those
+definitions and the declared dimensions, as startup's do. This is not an atomic update across factories and workers;
 the handle acknowledges retention, not application. See
 [view replacement](request-delivery.md#view-replacement-and-shutdown).
 
@@ -629,8 +631,11 @@ That handler also rereads the factory validation schema. Dataset edits
 require restart, so a later eligible reload can update the factory schema
 before the running service is rebuilt. The stale threshold lives in `app` and
 reaches the blotter and panel factories through `AppSettingsReloaded`, on its
-own; the pricer reads it in its own revision observer. Presentation and color-reader
-diagnostics append to the retained data-diagnostics lane; the shell remains
+own; the pricer reads it in its own revision observer. That observer's key
+also covers `colors` and `value_colors`, so an edit to either alone re-runs
+the pricer's reload and hands its factory colors carrying the mapping; their
+diagnostics are the `ConfigReloaded` handler's to report. Presentation and
+color-reader (including value-color) diagnostics append to the retained data-diagnostics lane; the shell remains
 responsible for replacing the current config-diagnostics batch.
 
 ## Keymaps and actions

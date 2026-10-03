@@ -12464,8 +12464,8 @@ run_mutation "colours: the browse swatch resolves the row's own definition" \
 # A colours change reaches the tiles like a views change.
 run_mutation "hot_reload: a colours change fires ConfigReloaded" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                || changed(geode_core::config::COLORS_DOC);' \
-  '                || changed("views");' \
+  '                || changed(geode_core::config::COLORS_DOC)' \
+  '                || changed("views")' \
   geode-shell \
   a_colours_change_fires_config_reloaded
 
@@ -34141,6 +34141,30 @@ run_mutation "value colors: a user none clears the effective color" \
   '        ;' \
   geode-core \
   the_state_separates_the_user_entry_from_the_layers_below
+
+# A value_colors edit alone reaches the app's reload handler.
+run_mutation "value colors: a change alone emits ConfigReloaded" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                || changed(geode_core::config::VALUE_COLORS_DOC);' \
+  '                ;' \
+  geode-shell \
+  a_value_colors_change_alone_emits_config_reloaded
+
+# A value_colors edit alone must re-run the pricer's reload.
+run_mutation "value colors: the pricer reload key covers value_colors" \
+  crates/geode-app/src/bridge.rs \
+  '            .doc(geode_core::config::VALUE_COLORS_DOC)' \
+  '            .doc(geode_core::config::COLORS_DOC)' \
+  geode-app \
+  the_pricer_reload_key_changes_with_value_colors
+
+# The reload handler's colors carry the value mapping, not the definitions alone.
+run_mutation "value colors: the reload hands the blotter the mapping" \
+  crates/geode-app/src/bridge.rs \
+  '                let (colours, colour_diags) = NamedColours::from_config(config);' \
+  '                let (colours, colour_diags) = config.doc(geode_core::config::COLORS_DOC).map(NamedColours::from_doc).unwrap_or_default();' \
+  geode-app \
+  a_config_reload_hands_the_blotter_factory_the_value_colors
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

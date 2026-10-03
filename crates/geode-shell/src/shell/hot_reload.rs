@@ -208,13 +208,15 @@ impl ShellView {
             // Entry warnings name columns, so a schema change re-reads the entries.
             let named_changed =
                 changed(EXPRESSIONS_DOC) || changed("datasets") || changed("dimensions");
-            // Presentation, dimensions, and named colors all affect the views or
-            // factory settings refreshed by the app's `ConfigReloaded` handler.
+            // Presentation, dimensions, named colors, and value colors all
+            // affect the views or factory settings refreshed by the app's
+            // `ConfigReloaded` handler.
             let views_changed = changed("views")
                 || changed("view_presentation")
                 || changed("dataset_presentation")
                 || changed("dimensions")
-                || changed(geode_core::config::COLORS_DOC);
+                || changed(geode_core::config::COLORS_DOC)
+                || changed(geode_core::config::VALUE_COLORS_DOC);
             // `app` settings the bridge hands to module factories.
             let app_changed = changed("app");
             // Dimension picker columns depend on dataset columns and derived dimensions.
