@@ -477,11 +477,15 @@ pub fn title_of(domain: super::Domain, name: &str) -> String {
     }
 }
 
-/// The pending save: the chain, and the slot awaiting a y/n.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The pending save: the chain, the slot awaiting a y/n (with the label of
+/// the chain a yes would lose), and whether `mod+s` in a list-opened chain
+/// field armed it, so cancelling returns to that field.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SaveToSlot {
     pub chain: Vec<String>,
     pub replace: Option<u8>,
+    pub replaced: String,
+    pub from_field: bool,
 }
 
 /// What saving a chain into a slot would do to what the slot holds.
@@ -525,6 +529,64 @@ pub const NOTHING_TO_SAVE: &str = "this row has no chain to save";
 /// `s`: ask which slot to save the chain to. From the list, the cursor
 /// row's chain; from an edit stage or its chain field, the draft's.
 pub(super) fn arm_save(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    arm(shell, false, cx);
+}
+
+/// `mod+s` in a chain field opened from the list: take the typed chain into
+/// the draft, then ask which slot to save it to. Any refusal (a typed name
+/// the field does not know, or a chain the draft's check refuses, such as an
+/// untouched seed naming a column that no longer exists) keeps the field
+/// open with the refusal, as `enter` does.
+pub(super) fn save_from_field(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let step = shell
+        .object_dialog
+        .as_mut()
+        .and_then(|state| state.draft.as_mut())
+        .map(super::Draft::apply_chain);
+    match step {
+        Some(super::Step::Changed | super::Step::Inert) => {
+            if let Some(state) = shell.object_dialog.as_mut() {
+                state.mode = crate::dialogmode::DialogMode::Normal;
+            }
+            render::revalidate(shell);
+            if let Some(refusal) = super::apply::blocking_diagnostic(shell) {
+                reopen_list_field(shell);
+                render::set_notice(shell, refusal);
+                return;
+            }
+            if let Some(state) = shell.object_dialog.as_mut() {
+                state.chain_from_list = false;
+            }
+            arm(shell, true, cx);
+        }
+        Some(super::Step::Refused(reason)) => render::set_notice(shell, reason),
+        None => {}
+    }
+}
+
+/// Reopen the open draft's chain field, as opened from the list: its text is
+/// the draft's chain, and its `enter`/`escape` are the list-opened ones.
+fn reopen_list_field(shell: &mut ShellView) {
+    render::open_field(shell);
+    mark_chain_from_list(shell);
+}
+
+/// Cancel the save prompt. One armed from a chain field returns to that
+/// field, so the typed chain is never left applied to a tick list whose
+/// next tick would commit it.
+fn cancel_save(shell: &mut ShellView) {
+    let from_field = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.save.as_ref())
+        .is_some_and(|save| save.from_field);
+    clear_save(shell);
+    if from_field {
+        reopen_list_field(shell);
+    }
+}
+
+fn arm(shell: &mut ShellView, from_field: bool, cx: &mut Context<ShellView>) {
     let from_draft = shell
         .object_dialog
         .as_ref()
@@ -548,7 +610,8 @@ pub(super) fn arm_save(shell: &mut ShellView, cx: &mut Context<ShellView>) {
             if let Some(state) = shell.object_dialog.as_mut() {
                 state.save = Some(SaveToSlot {
                     chain,
-                    replace: None,
+                    from_field,
+                    ..SaveToSlot::default()
                 });
             }
         }
@@ -570,11 +633,11 @@ pub(super) fn handle_save_key(
     if let Some(slot) = save.replace {
         match ConfirmAnswer::from_key(ks) {
             Some(ConfirmAnswer::Yes) => carry_out_save(shell, slot, save.chain, window, cx),
-            Some(ConfirmAnswer::No) => clear_save(shell),
+            Some(ConfirmAnswer::No) => cancel_save(shell),
             None => {}
         }
     } else if ks.key == "escape" {
-        clear_save(shell);
+        cancel_save(shell);
     } else if let Some(slot) = slot_digit(ks) {
         choose_slot(shell, slot, window, cx);
     }
@@ -621,15 +684,31 @@ fn choose_slot(shell: &mut ShellView, slot: u8, window: &mut Window, cx: &mut Co
     let Some(save) = shell.object_dialog.as_ref().and_then(|s| s.save.clone()) else {
         return;
     };
-    let target = {
-        let frame = shell.target_frame();
-        let view = frame.read(cx);
-        let rows = shell
-            .object_dialog
-            .as_ref()
-            .map(|s| s.rows.rows())
-            .unwrap_or_default();
-        classify(rows, view.slots().get(slot), slot, &save.chain)
+    // Against the pending batch when one is queued: an edit a moment ago
+    // may have forked this slot (so a save would lose the user's chain) or
+    // changed its chain (so an "equal" one is not), and neither reaches the
+    // list's rows or the frame until promotion.
+    let (target, held) = match super::apply::config_with_pending(shell) {
+        Some(config) => {
+            let rows = super::Domain::Groupings.objects(&config);
+            let slots = super::super::hot_reload::rebuild_slots(&config);
+            let held = slots.get(slot).map(GroupingSlots::label_of);
+            (classify(&rows, slots.get(slot), slot, &save.chain), held)
+        }
+        None => {
+            let frame = shell.target_frame();
+            let view = frame.read(cx);
+            let held = view.slots().get(slot).map(GroupingSlots::label_of);
+            let rows = shell
+                .object_dialog
+                .as_ref()
+                .map(|s| s.rows.rows())
+                .unwrap_or_default();
+            (
+                classify(rows, view.slots().get(slot), slot, &save.chain),
+                held,
+            )
+        }
     };
     match target {
         SaveTarget::Owned => {
@@ -637,11 +716,16 @@ fn choose_slot(shell: &mut ShellView, slot: u8, window: &mut Window, cx: &mut Co
                 && let Some(save) = state.save.as_mut()
             {
                 save.replace = Some(slot);
+                save.replaced = held.unwrap_or_default();
             }
         }
         SaveTarget::Equal => {
+            // Staged even though nothing is written: the slot may be one the
+            // pending batch defines and the frame does not hold yet, which
+            // `set_active_slot` would refuse. On a slot the frame holds with
+            // this chain, staging changes nothing.
             clear_save(shell);
-            activate_and_close(shell, slot, None, window, cx);
+            activate_and_close(shell, slot, Some(save.chain), window, cx);
         }
         SaveTarget::Empty | SaveTarget::Inherited => {
             carry_out_save(shell, slot, save.chain, window, cx)
@@ -691,32 +775,6 @@ fn activate_and_close(
     shell.close_modal(window, cx);
 }
 
-/// `mod+s` as a footer chip, spelled with the user's alias. `None` for an
-/// alias no single chip can name.
-pub(super) fn mod_s_spec(alias: Modifiers) -> Option<&'static str> {
-    match alias {
-        Modifiers {
-            ctrl: true,
-            alt: false,
-            shift: false,
-            cmd: false,
-        } => Some("ctrl+s"),
-        Modifiers {
-            ctrl: false,
-            alt: true,
-            shift: false,
-            cmd: false,
-        } => Some("alt+s"),
-        Modifiers {
-            ctrl: false,
-            alt: false,
-            shift: false,
-            cmd: true,
-        } => Some("cmd+s"),
-        _ => None,
-    }
-}
-
 /// The save prompt, painted where the action bar sits: the chain, nine
 /// digit buttons (an empty slot's outlined, so the slots a save loses
 /// nothing to stand out), and a line saying what each kind of slot does.
@@ -728,13 +786,7 @@ pub(super) fn save_prompt(
     cx: &mut App,
 ) -> AnyElement {
     if let Some(slot) = save.replace {
-        let held = state
-            .rows
-            .rows()
-            .iter()
-            .find(|row| row.name == slot.to_string())
-            .map(|row| row.summary.clone())
-            .unwrap_or_default();
+        let held = save.replaced.clone();
         let on_yes: ConfirmHandler = Rc::new(move |shell, window, cx| {
             let Some(chain) = shell
                 .object_dialog
@@ -747,7 +799,7 @@ pub(super) fn save_prompt(
             };
             carry_out_save(shell, slot, chain, window, cx);
         });
-        let on_no: ConfirmHandler = Rc::new(|shell, _window, _cx| clear_save(shell));
+        let on_no: ConfirmHandler = Rc::new(|shell, _window, _cx| cancel_save(shell));
         return v_flex()
             .debug_selector(|| "objectdialog-save".to_string())
             .child(

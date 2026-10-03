@@ -1208,3 +1208,169 @@ fn a_click_on_replace_saves_over_a_user_owned_slot(cx: &mut gpui::TestAppContext
     assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(5));
     assert_eq!(in_force(&shell, &cx), Some(chain(&["lhu"])));
 }
+
+#[gpui::test]
+fn a_filter_row_click_under_the_save_prompt_is_ignored(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+    });
+    cx.simulate_keystrokes("s");
+    cx.run_until_parked();
+    let row = cx
+        .debug_bounds("dialog-filter-frozen")
+        .expect("the list's filter row is frozen in normal mode");
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(20.0), row.origin.y + gpui::px(4.0)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-save").is_some(),
+        "the prompt is still up"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.mode),
+        crate::dialogmode::DialogMode::Normal
+    );
+}
+
+#[gpui::test]
+fn a_back_click_under_the_save_prompt_is_ignored(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    cx.simulate_keystrokes("j j e s"); // slot 1's editor, then the prompt
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-save").is_some());
+    let back = cx
+        .debug_bounds("shell-modal-back")
+        .expect("the Back button paints in an edit stage");
+    cx.simulate_click(back.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-save").is_some(),
+        "the prompt is still up"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "1".to_string()
+        }
+    );
+}
+
+#[gpui::test]
+fn saving_over_a_slot_the_pending_batch_just_forked_asks(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["position_ref"]));
+    });
+    // The cursor opens on the active `*` row: `j` is slot 1 (builtin).
+    cx.simulate_keystrokes("j e j space");
+    cx.run_until_parked();
+    assert!(
+        shell.read_with(&cx, |s, _| s.pending_config_write.is_some()),
+        "the tick queued a fork of slot 1, not yet promoted"
+    );
+    cx.simulate_keystrokes("escape k");
+    cx.run_until_parked();
+    assert_eq!(cursor_name(&shell, &cx).as_deref(), Some("*"));
+    cx.simulate_keystrokes("s 1");
+    cx.run_until_parked();
+    assert!(is_open(&shell, &cx), "slot 1 is the user's now: ask");
+    assert!(cx.debug_bounds("objectdialog-save-replace").is_some());
+}
+
+#[gpui::test]
+fn saving_the_chain_a_pending_edit_just_gave_a_slot_activates_it(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+    });
+    // Define empty slot 2 by ticking its first dimension, `lhu`, without
+    // waiting for the write: the frame does not hold slot 2 yet.
+    cx.simulate_keystrokes("j j e j space escape");
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.pending_config_write.is_some()));
+    cx.simulate_keystrokes("k k");
+    cx.run_until_parked();
+    assert_eq!(cursor_name(&shell, &cx).as_deref(), Some("*"));
+    cx.simulate_keystrokes("s 2");
+    cx.run_until_parked();
+    assert!(!is_open(&shell, &cx), "an equal chain is not a question");
+    assert_eq!(
+        choice(&shell, &cx),
+        GroupingChoice::Slot(2),
+        "the slot the pending batch defines is activated, not refused"
+    );
+    assert_eq!(in_force(&shell, &cx), Some(chain(&["lhu"])));
+}
+
+#[gpui::test]
+fn mod_s_on_an_untouched_seed_the_field_cannot_check_keeps_the_field_open(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["nope"]));
+    });
+    assert_eq!(cursor_name(&shell, &cx).as_deref(), Some("*"));
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("alt-s");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-save").is_none());
+    assert!(
+        edit_draft(&shell, &cx, |d| d.chain_entry()),
+        "the field is still open"
+    );
+    assert!(
+        notice(&shell, &cx).contains("nope"),
+        "{}",
+        notice(&shell, &cx)
+    );
+}
+
+#[gpui::test]
+fn a_save_with_no_user_directory_is_refused_and_changes_nothing(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell_with(cx, services(), DOOR);
+    cx.simulate_keystrokes("j j s 6"); // slot 1 holds book / lhu
+    cx.run_until_parked();
+    assert!(is_open(&shell, &cx));
+    assert!(
+        notice(&shell, &cx).contains("user config directory"),
+        "{}",
+        notice(&shell, &cx)
+    );
+    assert_eq!(
+        frame_of(&shell, &cx).read_with(&cx, |f, _| f.slots().get(6).map(<[String]>::to_vec)),
+        None
+    );
+    assert_eq!(choice(&shell, &cx), GroupingChoice::ViewDefault);
+}
+
+#[gpui::test]
+fn escape_from_a_mod_s_prompt_returns_to_the_chain_field(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, dir) = open_dialog(cx);
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_input("book lhu");
+    cx.simulate_keystrokes("alt-s");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-save").is_some());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-save").is_none());
+    assert!(
+        edit_draft(&shell, &cx, |d| d.chain_entry()),
+        "back in the field"
+    );
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "book / lhu");
+    // The field's own escape is the list-opened one: back to the list,
+    // nothing applied.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert_eq!(stored(&shell, &cx), None);
+    flush_config_write(&mut cx);
+    assert_eq!(written(&dir), "");
+}

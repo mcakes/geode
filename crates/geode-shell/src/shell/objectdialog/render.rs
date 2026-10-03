@@ -1758,11 +1758,6 @@ fn handle_edit_key_inner(
             }
             set_notice(shell, format!("{n} is not a verb here"));
         }
-        // A letter this stage has no verb for. Named rather than
-        // dropped: `d` and `r` have just taught the user that
-        // letters act here, so a silent `z` reads as the dialog having
-        // stopped responding — and it is the one branch where the key
-        // that did nothing is not otherwise on screen to explain itself.
         NormalCommand::Verb('s')
             if shell
                 .object_dialog
@@ -1771,6 +1766,11 @@ fn handle_edit_key_inner(
         {
             super::grouping_list::arm_save(shell, cx)
         }
+        // A letter this stage has no verb for. Named rather than
+        // dropped: `d` and `r` have just taught the user that
+        // letters act here, so a silent `z` reads as the dialog having
+        // stopped responding — and it is the one branch where the key
+        // that did nothing is not otherwise on screen to explain itself.
         NormalCommand::Verb(letter) => {
             set_notice(shell, format!("{letter} is not a verb here"));
         }
@@ -2042,18 +2042,7 @@ fn handle_text_key(
         .as_ref()
         .is_some_and(|state| state.chain_from_list);
     if from_list && ks.key == "s" && ks.mods == shell.services.mod_alias {
-        match draft_mut(shell).map(Draft::apply_chain) {
-            Some(Step::Changed | Step::Inert) => {
-                if let Some(state) = shell.object_dialog.as_mut() {
-                    state.mode = DialogMode::Normal;
-                    state.chain_from_list = false;
-                }
-                revalidate(shell);
-                super::grouping_list::arm_save(shell, cx);
-            }
-            Some(Step::Refused(reason)) => set_notice(shell, reason),
-            None => {}
-        }
+        super::grouping_list::save_from_field(shell, cx);
         cx.notify();
         return true;
     }
@@ -4472,10 +4461,17 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 hints.push(Hint::new(HintRow::Move, &["up", "down"], "move"));
                 hints.push(Hint::new(HintRow::Go, &["tab"], "complete"));
                 hints.push(Hint::new(HintRow::Go, &["enter"], "apply"));
-                if state.chain_from_list
-                    && let Some(spec) = super::grouping_list::mod_s_spec(shell.services.mod_alias)
-                {
-                    hints.push(Hint::new(HintRow::Go, &[spec], "save to slot…"));
+                if state.chain_from_list {
+                    // The chip shows the user's own alias, so it is a
+                    // keystroke rather than a spec, which parses with none.
+                    hints.push(Hint::keystroke(
+                        HintRow::Go,
+                        Keystroke {
+                            key: "s".to_string(),
+                            mods: shell.services.mod_alias,
+                        },
+                        "save to slot…",
+                    ));
                 }
             }
             Completions::Choice => {

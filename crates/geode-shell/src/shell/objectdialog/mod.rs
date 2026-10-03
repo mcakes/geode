@@ -3574,7 +3574,9 @@ impl ObjectDialogState {
     /// Returns `false` and changes nothing while a confirmation is pending, because the
     /// question owns input until answered, or when no parent stage exists.
     pub fn abandon_for_back(&mut self) -> bool {
-        if self.confirm.is_some() || !self.has_previous_stage() {
+        // A pending question (a confirm or the save prompt) refuses: the
+        // stage change would disarm it without an answer.
+        if self.confirm.is_some() || self.save.is_some() || !self.has_previous_stage() {
             return false;
         }
         self.notice = None;
@@ -6934,6 +6936,17 @@ mod tests {
         assert!(!state.abandon_for_back());
         assert_eq!(state.effective_query(), "np", "nothing was discarded");
         assert_eq!(state.confirm, Some(Confirm::Revert));
+
+        let mut state = tree_edit_state();
+        state.save = Some(grouping_list::SaveToSlot {
+            chain: vec!["book".to_string()],
+            ..Default::default()
+        });
+        assert!(
+            !state.abandon_for_back(),
+            "the save prompt is a question too"
+        );
+        assert!(state.save.is_some());
 
         let mut state = ObjectDialogState::new(Domain::Views);
         assert!(!state.abandon_for_back());
