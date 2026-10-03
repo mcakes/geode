@@ -919,13 +919,19 @@ section does not read:
 | `data` | Publication events and catalog snapshots |
 | `config` | Current config-load batch, batch history, retained data conditions |
 | `log_levels` | Target-level settings |
-| `perf` | Copied frame histogram, dropped-event count, and the mirrored overlay value |
+| `perf` | Copied frame histogram, copied process memory reading, dropped-event count, and the mirrored overlay value |
 
 Equal snapshots leave their counters unchanged; loading and publication events
 always advance theirs. Frame as-of/config versions and log ring sequences are
 separate inputs observed by the page. Catalog resource metrics and frame
 requery statistics have no dedicated perf invalidation, so they appear on the
 next perf-section rebuild.
+
+The reload poll copies the frame histogram and the process memory reading only
+while a page watches, and only when they change at the granularity the page
+shows (histogram count or maximum; the displayed text of current or peak
+memory), so an idle poll never notifies. Memory is sampled and logged on every
+tick regardless; see [memory instrumentation](performance.md#memory).
 
 `set_catalog` stores the snapshot together with the arrival time its caller
 supplies, `catalog_at`. An equal snapshot changes neither the counters nor
