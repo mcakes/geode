@@ -1757,6 +1757,14 @@ impl ShellView {
             })
             .detach();
         }
+        // Whole-object config edits queued by a module tile join the object
+        // dialogs' pending batch: one debounce, one write, one reload. With
+        // no user directory the refusal shows on the status bar.
+        let edits = frame.update(cx, |f, _| f.take_pending_config_edits());
+        if let Err(e) = objectdialog::apply::queue_edits(self, edits, cx) {
+            self.config_write_error = Some(e.into());
+            cx.notify();
+        }
         // A pressed header link chip opens the chooser on its own tile.
         if let Some(tile) = frame.update(cx, |f, _| f.take_pending_link_chooser()) {
             self.open_link_chooser_on(tile, window, cx);

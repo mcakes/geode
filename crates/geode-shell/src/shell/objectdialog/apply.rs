@@ -417,6 +417,30 @@ pub(crate) fn queue_object(
     Ok(())
 }
 
+/// Queue module-requested whole-object edits into the pending batch with the
+/// field-edit debounce, so a burst from a tile coalesces into one write and
+/// one reload. Refuses, with nothing queued, when there is no writable user
+/// directory. Later edits to the same object overwrite earlier ones: each
+/// carries the whole object.
+pub(crate) fn queue_edits(
+    shell: &mut ShellView,
+    edits: Vec<crate::frame::ConfigEdit>,
+    cx: &mut Context<ShellView>,
+) -> Result<(), String> {
+    if edits.is_empty() {
+        return Ok(());
+    }
+    let Some(user_dir) = shell.user_dir.clone() else {
+        return Err("no writable user config directory — nothing was changed".to_string());
+    };
+    let edits = edits
+        .into_iter()
+        .map(|e| ((e.doc, e.object), e.value))
+        .collect::<BTreeMap<_, _>>();
+    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, None, cx);
+    Ok(())
+}
+
 /// Capture the batch's initial documents and schedule its accumulated edits. Callers
 /// resolve the writable directory before advancing any draft baseline. `origin` is the
 /// object dialog whose draft produced the edits, if any.

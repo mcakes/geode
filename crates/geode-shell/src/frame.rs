@@ -255,6 +255,17 @@ type BarCache = RefCell<
     )>,
 >;
 
+/// One whole configuration object a module asks the shell to write to the
+/// user layer: `Some` sets `[object]` in `doc`, `None` removes it. Modules
+/// never write config themselves; the shell folds these into the same
+/// pending batch the object dialogs use (debounce, promotion, revert).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigEdit {
+    pub doc: &'static str,
+    pub object: String,
+    pub value: Option<toml::Value>,
+}
+
 #[derive(Debug)]
 pub struct Frame {
     /// The lane every unpinned workspace resolves to.
@@ -293,6 +304,10 @@ pub struct Frame {
     /// group chooser. A module reaches the frame and never `ShellView`, so
     /// the press queues here and the shell's frame observer drains it.
     pending_link_chooser: Option<TileId>,
+    /// Whole-object config edits queued by module tiles, in arrival order,
+    /// awaiting the shell's frame observer. A module cannot reach the
+    /// shell's config batch, so it queues here instead of writing.
+    pending_config_edits: Vec<ConfigEdit>,
     /// Lazy model cache keyed by versions excluding flip, clock, and local date.
     /// `Rc` makes a hit cheap; interior mutability permits caching through `&self`.
     /// Lane generations are unique across lanes, so one cache serves them all.
@@ -319,6 +334,7 @@ impl Frame {
             user_dir,
             pending_persist: None,
             pending_link_chooser: None,
+            pending_config_edits: Vec::new(),
             bar_cache: RefCell::new(None),
             barrier: None,
         }
@@ -673,6 +689,17 @@ impl Frame {
     /// Drain the pending link chooser request for the shell's frame observer.
     pub fn take_pending_link_chooser(&mut self) -> Option<TileId> {
         self.pending_link_chooser.take()
+    }
+
+    /// Queue whole-object config edits for the shell to write. Moves no
+    /// version: a write reaches tiles through the reload it causes.
+    pub fn queue_config_edits(&mut self, edits: Vec<ConfigEdit>) {
+        self.pending_config_edits.extend(edits);
+    }
+
+    /// Drain queued config edits for the shell's frame observer.
+    pub fn take_pending_config_edits(&mut self) -> Vec<ConfigEdit> {
+        std::mem::take(&mut self.pending_config_edits)
     }
 
     /// Drain the latest pending slot write for the shell's background writer.

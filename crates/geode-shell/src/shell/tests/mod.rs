@@ -658,6 +658,7 @@ mod autosize;
 mod chrome_and_dialogs;
 mod close;
 mod commandline;
+mod config_door;
 mod diagnostics;
 mod dialog_stack;
 mod dock;
