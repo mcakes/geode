@@ -509,7 +509,7 @@ impl ShellView {
             asof_view::open(self, window, cx);
         } else if action.0 == "frame::add_expression" {
             // Open the expression editor in add mode: the typed expression is
-            // joined to the current one with `and` (the `+` menu's Expression row).
+            // joined to the current one with `and` (`x` in the Scope dialog).
             scope_expr_view::open(self, scope_expr_view::Mode::Add, window, cx);
         } else if action.0 == "frame::clear_expression" {
             // Drop the whole expression layer through the undoable set_scope path.

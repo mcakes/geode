@@ -8292,9 +8292,8 @@ run_mutation "expr-dialog: enter commits the parsed expression to the frame" \
   geode-shell \
   typing_an_expression_and_enter_sets_it_through_set_scope
 
-# ---- Expression term chips and the add-a-filter menu: the scope bar
-# splits the expression into its top-level `and` terms, one chip each,
-# and the `+` opens a menu onto the picker and the dialog's add mode.
+# ---- Expression term chips: the scope bar splits the expression into its
+# top-level `and` terms, one chip each.
 
 # A left-nested `and` must flatten too; pushing the left operand whole
 # leaves `(a and b) and c` as two terms.
@@ -8426,6 +8425,15 @@ run_mutation "scope dialog: rows under the text step ignore presses" \
   '' \
   geode-shell \
   rows_under_the_text_step_ignore_the_pointer
+
+# Opened by the `+` from the scope text field, the dialog's close hands
+# focus back to the field; without the record it lands on the shell root.
+run_mutation "scope dialog: closing the + dialog returns focus to the field" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        view.overlay_return_to_filter = view.filter_field_focused(window, cx);' \
+  '        view.overlay_return_to_filter = false;' \
+  geode-shell \
+  closing_the_plus_dialog_returns_focus_to_the_text_field
 
 # ---- Adding tiles -----------------------------------------------------
 #

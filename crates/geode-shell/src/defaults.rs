@@ -488,9 +488,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Swap to the previous as of",
         "Frame",
     );
-    // Join a new expression to the current one with `and` (the toolbar's
-    // add-a-filter menu reaches the same action; `mod+x`), and drop the
-    // whole expression layer undoably (no default chord).
+    // Join a new expression to the current one with `and` (`mod+x`; `x` in
+    // the Scope dialog opens the same step), and drop the whole expression
+    // layer undoably (no default chord).
     action(
         reg,
         "frame::add_expression",

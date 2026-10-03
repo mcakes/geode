@@ -244,10 +244,10 @@ impl ShellView {
 
     /// Open the menu on `context`, hung at `at`. A no-op while a modal is
     /// open; with no rows the notice says so and nothing opens. Closes the
-    /// palette, the command line, the stack list and the add-a-filter menu
-    /// first, and takes the shell root's focus, as the add-a-filter menu
-    /// does. `by_pointer` is a right press: that press moved focus to the
-    /// tile, so the menu never hands focus back to the scope bar's field.
+    /// palette, the command line and the stack list first, and takes the
+    /// shell root's focus, so its keys reach the shell. `by_pointer` is a
+    /// right press: that press moved focus to the tile, so the menu never
+    /// hands focus back to the scope bar's field.
     pub(crate) fn open_row_menu(
         &mut self,
         context: DimensionContext,

@@ -123,7 +123,7 @@ fn chip(
         .debug_selector(selector)
 }
 
-/// A bare verb glyph on the title bar — the `+` add-a-filter door, the
+/// A bare verb glyph on the title bar — the `+` Scope dialog door, the
 /// save door — the toolbar's answer to the guide's ghost button: no fill
 /// at rest, the control door's hover and pressed fills, the icon
 /// inheriting the box's text so it recolours with it. Data is a filled

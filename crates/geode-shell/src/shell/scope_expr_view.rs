@@ -7,17 +7,17 @@
 //!   order. The mode carries the seeded term: if the scope changed
 //!   underneath so that index no longer holds it, an edit or a removal
 //!   refuses inline rather than touch a different term.
-//! - **Add** (`frame::add_expression`, the toolbar's add-a-filter menu):
-//!   empty; Enter joins the typed expression to the current one with
-//!   `and` (or sets it when there is none), and an empty field closes
-//!   without a change when no named expressions are staged.
+//! - **Add** (`frame::add_expression`, `x` in the Scope dialog): empty;
+//!   Enter joins the typed expression to the current one with `and` (or
+//!   sets it when there is none), and an empty field closes without a
+//!   change when no named expressions are staged.
 //!
 //! Add also stages named expressions: a named row's accept stages its
 //! name as a `≡ name` chip above the field, and Enter applies the staged
 //! names with the text in one `set_scope`. Add opens with none staged and
-//! Enter appends the ones the frame lacks. Backspace at the field's start with no selection
-//! removes the last chip; a chip's `×` removes that chip. Term mode offers
-//! and stages no names.
+//! Enter appends the ones the frame lacks. Backspace at the field's start
+//! with no selection removes the last chip; a chip's `×` removes that
+//! chip. Term mode offers and stages no names.
 //!
 //! `mod+s` in every mode turns the field into a name entry for the
 //! typed text (suggestions off, staged chips kept); on an empty field it
@@ -31,10 +31,11 @@
 //! nothing to stage: the name replaces the term in one `set_scope` and the
 //! dialog closes.
 //!
-//! Every scope change goes through `Frame`'s undoable `set_scope` path. A parse
-//! error stays inline in every mode, and editing clears the error. Escape
-//! from expression entry closes without applying the draft; definitions already
-//! queued by save-as-named remain. Each open seeds a draft from the current frame.
+//! Every scope change goes through `Frame`'s undoable `set_scope` path. A
+//! parse error stays inline in every mode, and editing clears the error.
+//! Escape from expression entry closes without applying the draft;
+//! definitions already queued by save-as-named remain. Each open seeds a
+//! draft from the current frame.
 //!
 //! While typing, `expr_suggest` lists what fits at the caret and warns
 //! about schema problems. Enter refuses a syntax error or an unknown
@@ -194,8 +195,8 @@ pub fn named_offers(
 
 /// The scope a new expression will be ANDed with, which narrows its value
 /// suggestions. Add joins both, so the expression is kept and the staged
-/// names join the frame's.
-/// Term keeps the other terms. The in-progress text never narrows.
+/// names join the frame's. Term keeps the other terms. The in-progress
+/// text never narrows.
 pub fn request_scope(mode: &Mode, current: &Scope, staged: &[String]) -> Scope {
     let mut scope = current.clone();
     match mode {
@@ -252,8 +253,9 @@ fn append_missing(named: &mut Vec<String>, staged: &[String]) {
 /// names and the expression in ONE `set_scope`: two calls would leave two
 /// undo entries, and one undo would restore half the edit.
 ///
-/// Add appends the staged names the frame lacks and joins the text with `and`; with neither, it
-/// changes nothing. Term ignores `staged` (it never has any).
+/// Add appends the staged names the frame lacks and joins the text with
+/// `and`; with neither, it changes nothing. Term ignores `staged` (it never
+/// has any).
 pub fn apply(
     frame: &mut FrameViewMut<'_>,
     mode: &Mode,

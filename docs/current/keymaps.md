@@ -145,7 +145,9 @@ toggle and the other application-wide chords, because a switch is
 navigation that must reach from a page as well as from the tile surface.
 `mod+u` (`tile::link_group`, the
 [link group chooser](input-and-dialogs.md#scope-tile-log-and-column-choices))
-sits in the same context-free block beside `mod+g` and `mod+o`. It acts on
+sits in the same context-free block beside `mod+g` (`frame::grouping`) and
+`mod+o` (`frame::scope`, "Scope…", the
+[Scope dialog](input-and-dialogs.md#scope-dialog)). It acts on
 the focused tile, so over a page the chord still dispatches and the action
 is refused with `close the page first (esc)`.
 Predicates support flags, comparisons, boolean operators, and parentheses:

@@ -800,6 +800,39 @@ fn the_plus_chip_opens_the_scope_dialog_and_stays_pressed(cx: &mut gpui::TestApp
     assert!(vcx.debug_bounds("scope-pick-chip-open").is_none());
 }
 
+/// Opened by the `+` while the scope text field held focus, the dialog
+/// hands focus back to the field when it closes: the press on the chip
+/// must not leave the user stranded on the shell root.
+#[gpui::test]
+fn closing_the_plus_dialog_returns_focus_to_the_text_field(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services());
+    let shell = shell_of(&window, &mut vcx);
+    draw(&mut vcx);
+    dispatch_action(&shell, "frame::focus_text", &mut vcx);
+    draw(&mut vcx);
+    assert!(
+        filter_is_focused(&shell, &mut vcx),
+        "sanity: the field holds focus"
+    );
+    let plus = vcx
+        .debug_bounds("scope-pick-chip")
+        .expect("the + chip paints");
+    vcx.simulate_click(plus.center(), gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+    assert!(
+        filter_is_focused(&shell, &mut vcx),
+        "escape: back to the field"
+    );
+}
+
 /// Hovering the `+` names the Scope dialog and `frame::scope`'s chord.
 #[gpui::test]
 fn hovering_the_plus_chip_names_the_scope_chord(cx: &mut gpui::TestAppContext) {
