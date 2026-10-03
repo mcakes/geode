@@ -11,8 +11,8 @@ use super::{Destination, Draft, Field, FieldKind};
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
 use geode_core::schema::SchemaSpec;
 use geode_core::source_config::{
-    CSV_DIR_ADAPTER, DEFAULT_COALESCE, DEFAULT_PENDING_TIMEOUT, DEFAULT_POLL, SourceSpec,
-    check_batch_pattern, parse_duration,
+    CSV_DIR_ADAPTER, DEFAULT_COALESCE, DEFAULT_PENDING_TIMEOUT, DEFAULT_POLL,
+    DEFAULT_SNAPSHOT_POLL, SourceSpec, check_batch_pattern, parse_duration,
 };
 use std::time::Duration;
 
@@ -90,10 +90,13 @@ fn choice(options: &[&str], current: &str) -> FieldKind {
 }
 
 /// Build nine fields for directory sources, adding document/topics/coalesce/
-/// source_time for other adapters. Missing objects use the directory defaults. Dataset
-/// and priority are choices; readiness splits kind from stable poll count. Only the
-/// supported paths, duration, and batch-pattern text fields are editable; adapter and
-/// subscribed-only text fields are read-only.
+/// source_time for other adapters. A snapshot source (another adapter over a reference
+/// dataset) shows only dataset, priority, poll interval, table and adapter, with the
+/// reader's snapshot defaults (`latest_other`, `DEFAULT_SNAPSHOT_POLL`). Missing
+/// objects use the directory defaults. Dataset and priority are choices; readiness
+/// splits kind from stable poll count. Only the supported paths, duration,
+/// batch-pattern and table text fields are editable; adapter and subscribed-only text
+/// fields are read-only.
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let table = object
         .and_then(|name| config.doc(DOC).and_then(|doc| doc.value.get(name)))
@@ -176,6 +179,30 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     // trader whether the four subscribed-only rows below apply at all.
     let adapter = get_str("adapter").unwrap_or(CSV_DIR_ADAPTER);
     let subscribed = adapter != CSV_DIR_ADAPTER;
+    // `SourceSpec::shape`'s own rule, read off the raw table: another adapter over a
+    // reference dataset is a snapshot source. The directory rows mean nothing to it and
+    // its defaults differ, so showing them would misstate what the reader applies.
+    let snapshot = subscribed
+        && schema
+            .dataset(&current_dataset)
+            .is_some_and(|d| d.is_reference());
+    if snapshot {
+        return vec![
+            field("dataset", "Dataset", choice(&datasets, &current_dataset)),
+            field(
+                "priority",
+                "Priority",
+                choice(&PRIORITY, get_str("priority").unwrap_or("latest_other")),
+            ),
+            text(
+                "poll_interval",
+                "Poll interval",
+                duration("poll_interval", DEFAULT_SNAPSHOT_POLL),
+            ),
+            text("table", "Table", get_str("table").unwrap_or("").to_string()),
+            text("adapter", "Adapter", adapter.to_string()),
+        ];
+    }
 
     let mut out = vec![
         field("dataset", "Dataset", choice(&datasets, &current_dataset)),
@@ -269,11 +296,11 @@ pub fn seed_dataset(draft: &mut Draft, dataset: &str) {
 /// May `i` edit the `Text` row keyed `key`? Every genuinely free-text
 /// field: `dataset`/`readiness`/`priority`/`stable_polls` are `Choice`
 /// and `Number` rows already reachable through `space`/`i` on their own
-/// kind, so only the four text fields need this door.
+/// kind, so only the five text fields need this door.
 pub fn text_editable(key: &str) -> bool {
     matches!(
         key,
-        "paths" | "poll_interval" | "pending_timeout" | "batch_pattern"
+        "paths" | "poll_interval" | "pending_timeout" | "batch_pattern" | "table"
     )
 }
 
@@ -362,7 +389,8 @@ pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
     if let Some(priority) = draft.choice("priority") {
         table["priority"] = toml_edit::value(priority);
     }
-    for key in ["poll_interval", "pending_timeout"] {
+    // `table` exists only on a snapshot source's draft, so no other shape gains it.
+    for key in ["poll_interval", "pending_timeout", "table"] {
         if let Some(value) = text(key) {
             table[key] = toml_edit::value(value);
         }
@@ -432,14 +460,19 @@ pub fn help(key: &str) -> &'static str {
             "Polls of unchanged size and mtime before a load — stable_mtime only, unbuilt"
         }
         "priority" => "Cold-start order: latest_risk first, then latest_other, then backfill",
-        "poll_interval" => "How often the directories are scanned for new files — 30s, 2m, 1h",
+        "poll_interval" => {
+            "How often directories are scanned, or a snapshot's table reread — 30s, 5m"
+        }
         "pending_timeout" => {
             "How long a file may wait for its sentinel before it is reported stuck — 10m"
         }
         "batch_pattern" => {
             "Regex over the file stem with a named 'batch' capture — empty uses the stem"
         }
-        "adapter" => "csv_dir watches directories; any other adapter subscribes to a message bus",
+        "adapter" => {
+            "csv_dir watches directories; another adapter subscribes, fetches or reads a table"
+        }
+        "table" => "The table a snapshot source reads whole on every poll, as its adapter names it",
         "document" => "The document kind a subscribed source publishes, which decides its parsing",
         "topics" => {
             "Topic patterns to subscribe to, levels '/'-separated — '*' one level, '>' the rest"
@@ -654,10 +687,10 @@ role = "value"
         }
     }
 
-    /// Readiness, poll counts, durations, and path separators round-trip through the
-    /// same adapter fields used by the dialog.
+    /// A directory source keeps its nine rows, in order, with no subscribed-only or
+    /// snapshot-only row among them.
     #[test]
-    fn a_directory_source_paints_no_subscribed_only_rows() {
+    fn a_directory_source_still_shows_its_rows() {
         let keys: Vec<String> = fields(&config(), Some("live"))
             .into_iter()
             .map(|f| f.key)
@@ -676,6 +709,73 @@ role = "value"
                 "adapter",
             ]
         );
+    }
+
+    /// A reference dataset and a snapshot source over it that sets neither priority
+    /// nor poll interval, so the dialog has to spell both defaults.
+    fn snapshot_config() -> Config {
+        Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                     [underlyings]\nfamily = \"reference\"\nkey = [\"underlying_ref\"]\n\
+                     [underlyings.columns.underlying_ref]\ntype = \"utf8\"\n\
+                     role = \"dimension\"\n[underlyings.columns.currency]\n\
+                     type = \"utf8\"\nrole = \"attribute\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "sources",
+                    "[refdb]\nadapter = \"demo_refdb\"\ndataset = \"underlyings\"\n\
+                     table = \"underlyings\"\n",
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        })
+    }
+
+    /// A snapshot source has no directory rows and no subscription rows; it shows the
+    /// table it reads and the reader's snapshot defaults, not the directory ones.
+    #[test]
+    fn a_snapshot_source_shows_table_and_its_defaults() {
+        let fields = fields(&snapshot_config(), Some("refdb"));
+        let keys: Vec<&str> = fields.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["dataset", "priority", "poll_interval", "table", "adapter"]
+        );
+        let by_key = |k: &str| fields.iter().find(|f| f.key == k).unwrap();
+        assert_eq!(by_key("table").label, "Table");
+        assert_eq!(by_key("table").kind, FieldKind::Text("underlyings".into()));
+        assert_eq!(by_key("poll_interval").kind, FieldKind::Text("5m".into()));
+        assert!(
+            matches!(&by_key("priority").kind, FieldKind::Choice { options, selected } if options[*selected] == "latest_other"),
+            "{:?}",
+            by_key("priority").kind
+        );
+        assert!(text_editable("table"));
+        assert!(!help("table").is_empty());
+    }
+
+    #[test]
+    fn editing_the_table_row_writes_table() {
+        let config = snapshot_config();
+        let mut draft = Domain::Sources.draft(&config, "refdb");
+        let i = draft.fields.iter().position(|f| f.key == "table").unwrap();
+        draft.fields[i].kind = FieldKind::Text("underlyings_v2".into());
+        let text = super::super::object_text("refdb", to_table(&draft, Destination::Doc));
+        assert!(text.contains("table = \"underlyings_v2\""), "{text}");
+        for key in ["paths", "readiness", "pending_timeout", "batch_pattern"] {
+            assert!(
+                !text.contains(key),
+                "{key} written to a snapshot source: {text}"
+            );
+        }
+        let diags = validate(&draft, &config);
+        assert!(diags.is_empty(), "{diags:?}");
     }
 
     #[test]

@@ -6731,6 +6731,70 @@ fn sources_rows_are_dataset_first_and_i_types_a_duration(cx: &mut gpui::TestAppC
     );
 }
 
+/// A snapshot source alone in its doc over a reference dataset; it sets no poll
+/// interval, so the dialog shows the snapshot default.
+fn services_with_a_snapshot_source() -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[underlyings]\nfamily = \"reference\"\nkey = [\"underlying_ref\"]\n\
+         [underlyings.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [underlyings.columns.currency]\ntype = \"utf8\"\nrole = \"attribute\"\n",
+    )
+    .unwrap();
+    let sources = LayerDoc::builtin(
+        "sources",
+        "[refdb]\nadapter = \"demo_refdb\"\ndataset = \"underlyings\"\n\
+         table = \"underlyings\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+            sources,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// `i` on a snapshot source's Table row types the table name, and the write carries
+/// it to the user layer's source table.
+#[gpui::test]
+fn i_on_a_snapshot_sources_table_row_writes_table(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_snapshot_source(),
+        dir.path(),
+        "config::sources",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    // The edit opens on `priority`: a one-option dataset choice has no verb, so it is
+    // not a cursor stop. Two rows down is `table` (dataset, priority, poll_interval,
+    // table, adapter).
+    cx.simulate_keystrokes("j j");
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "underlyings",
+        "seeded with the table"
+    );
+    cx.simulate_input("_v2");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_none()));
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("sources.toml")).unwrap();
+    assert!(written.contains("table = \"underlyings_v2\""), "{written}");
+    assert!(written.contains("poll_interval = \"5m\""), "{written}");
+    assert!(!written.contains("paths"), "{written}");
+}
+
 /// Creating a source seeds its dataset and an available name from the selected row.
 /// Empty paths leave it idle with a warning, not an error.
 #[gpui::test]

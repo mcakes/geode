@@ -11000,6 +11000,22 @@ run_mutation "sources: polls are written only under stable_mtime" \
   geode-shell \
   to_table_writes_readiness_polls_only_under_stable_mtime
 
+# A snapshot source shows its own rows and defaults, not the directory ones.
+run_mutation "sources: a snapshot source is recognized by its reference dataset" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '            .is_some_and(|d| d.is_reference());' \
+  '            .is_some_and(|d| d.is_reference() && false);' \
+  geode-shell \
+  a_snapshot_source_shows_table_and_its_defaults
+
+# A Table edit is written back to the source table.
+run_mutation "sources: the table row is written back" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '    for key in ["poll_interval", "pending_timeout", "table"] {' \
+  '    for key in ["poll_interval", "pending_timeout"] {' \
+  geode-shell \
+  editing_the_table_row_writes_table
+
 # An idle source is a WARNING — an error would block `n`.
 run_mutation "sources: empty paths is a warning not an error" \
   crates/geode-core/src/source_config.rs \
