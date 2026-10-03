@@ -39,6 +39,9 @@ fn build_catalog_with(
     }
     let (database_bytes, used_blocks, block_size) = database_size(conn)?;
     let memory_bytes = memory_bytes(conn)?;
+    let memory_limit_bytes = memory_limit_bytes(conn)?;
+    let temp_bytes = temp_bytes(conn)?;
+    let memory_top = memory_top(conn)?;
     let threads = threads(conn)?;
     crate::store::commit_transaction(tx)?;
     Ok(CatalogSnapshot {
@@ -48,6 +51,9 @@ fn build_catalog_with(
         used_blocks,
         block_size,
         memory_bytes,
+        memory_limit_bytes,
+        temp_bytes,
+        memory_top,
         threads,
         // The service fills source identities from fetch-worker catalog results;
         // the database does not contain the source's available-identity catalog.
@@ -282,6 +288,88 @@ fn memory_bytes(conn: &Connection) -> Result<u64, StoreError> {
         .map_err(err)
 }
 
+/// DuckDB's `memory_limit` in bytes, 0 when its text is not a size. The
+/// setting has no numeric form: `current_setting` answers DuckDB's
+/// human-readable text, so it is parsed by [`parse_duckdb_bytes`]. An
+/// unreadable value warns rather than failing the whole catalog, because
+/// the limit is a readout, not an input to any other figure.
+fn memory_limit_bytes(conn: &Connection) -> Result<u64, StoreError> {
+    let sql = "select current_setting('memory_limit')::varchar";
+    let err = |source| StoreError::Sql {
+        statement: sql.to_string(),
+        source,
+    };
+    let text: String = conn.query_row(sql, [], |r| r.get(0)).map_err(err)?;
+    Ok(parse_duckdb_bytes(&text).unwrap_or_else(|| {
+        tracing::warn!(
+            target: "geode::query",
+            "memory_limit setting '{text}' is not a size; shown as unknown"
+        );
+        0
+    }))
+}
+
+/// A size in DuckDB's text form: a number, optional spaces, then a unit.
+/// DuckDB writes `memory_limit` with binary units and one decimal
+/// (`"38.3 GiB"`, `"512.0 KiB"`, `"0 bytes"`, `"1 byte"`); its own parser
+/// also accepts decimal units (`kB`, `MB`, `GB`, `TB`, `PB`) and the
+/// single letters, case-insensitively, which are mirrored here. Anything
+/// else, including a negative or non-finite number, is `None`.
+pub(crate) fn parse_duckdb_bytes(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let number: f64 = number.parse().ok()?;
+    let multiplier: f64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "byte" | "bytes" | "b" => 1.0,
+        "kib" => 1024f64,
+        "mib" => 1024f64.powi(2),
+        "gib" => 1024f64.powi(3),
+        "tib" => 1024f64.powi(4),
+        "pib" => 1024f64.powi(5),
+        "kb" | "k" => 1e3,
+        "mb" | "m" => 1e6,
+        "gb" | "g" => 1e9,
+        "tb" | "t" => 1e12,
+        "pb" => 1e15,
+        _ => return None,
+    };
+    let bytes = number * multiplier;
+    (bytes.is_finite() && bytes >= 0.0 && bytes < u64::MAX as f64).then(|| bytes.round() as u64)
+}
+
+fn temp_bytes(conn: &Connection) -> Result<u64, StoreError> {
+    let sql = "select coalesce(sum(size), 0)::bigint from duckdb_temporary_files()";
+    let err = |source| StoreError::Sql {
+        statement: sql.to_string(),
+        source,
+    };
+    conn.query_row(sql, [], |r| r.get::<_, i64>(0))
+        .map(|n| n.max(0) as u64)
+        .map_err(err)
+}
+
+/// The three largest non-zero `duckdb_memory()` tags, largest first; ties
+/// order by tag so equal snapshots compare equal.
+fn memory_top(conn: &Connection) -> Result<Vec<(String, u64)>, StoreError> {
+    let sql = "select tag, memory_usage_bytes from duckdb_memory() \
+               where memory_usage_bytes > 0 \
+               order by memory_usage_bytes desc, tag limit 3";
+    let err = |source| StoreError::Sql {
+        statement: sql.to_string(),
+        source,
+    };
+    let mut stmt = conn.prepare(sql).map_err(err)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
+        })
+        .map_err(err)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(err)
+}
+
 fn threads(conn: &Connection) -> Result<u64, StoreError> {
     // The brief's verified type is VARCHAR, but this pinned DuckDB
     // returns `current_setting('threads')` as BIGINT directly — cast to
@@ -496,6 +584,57 @@ grain = "position"
                 && snap.memory_bytes > 0
                 && snap.threads > 0
         );
+        // The limit is DuckDB's default share of RAM, never unknown here;
+        // nothing has spilled, and the tags list the non-zero ones, largest
+        // first. (Their sum is not compared with `memory_bytes`: each is its
+        // own read, and DuckDB's allocations move between them.)
+        assert!(snap.memory_limit_bytes > 0);
+        assert_eq!(snap.temp_bytes, 0);
+        assert!(!snap.memory_top.is_empty() && snap.memory_top.len() <= 3);
+        assert!(snap.memory_top.iter().all(|(_, b)| *b > 0));
+        assert!(snap.memory_top.windows(2).all(|w| w[0].1 >= w[1].1));
+    }
+
+    /// A limit set on the connection reads back through DuckDB's text form.
+    #[test]
+    fn the_catalog_reads_a_configured_memory_limit() {
+        let f = fixture_with_two_generations();
+        f.store
+            .writer()
+            .execute_batch("set memory_limit = '3GiB'")
+            .unwrap();
+        let snap = build_catalog(f.store.writer(), &f.schema, &AsOf::Live).unwrap();
+        assert_eq!(snap.memory_limit_bytes, 3 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn duckdb_size_text_parses_in_every_form_duckdb_writes() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(
+            parse_duckdb_bytes("38.3 GiB"),
+            Some((38.3 * GIB as f64).round() as u64)
+        );
+        assert_eq!(parse_duckdb_bytes("3.0 GiB"), Some(3 * GIB));
+        assert_eq!(parse_duckdb_bytes("512.0 KiB"), Some(512 * 1024));
+        assert_eq!(parse_duckdb_bytes("1.5 MiB"), Some(1024 * 1024 * 3 / 2));
+        assert_eq!(parse_duckdb_bytes("2.0 TiB"), Some(2 * 1024 * GIB));
+        assert_eq!(parse_duckdb_bytes("1.0 PiB"), Some(1024 * 1024 * GIB));
+        assert_eq!(parse_duckdb_bytes("0 bytes"), Some(0));
+        assert_eq!(parse_duckdb_bytes("1 byte"), Some(1));
+        assert_eq!(parse_duckdb_bytes("  4GB "), Some(4_000_000_000));
+        assert_eq!(parse_duckdb_bytes("10 kB"), Some(10_000));
+        assert_eq!(parse_duckdb_bytes("7gib"), Some(7 * GIB));
+        for bad in [
+            "",
+            "GiB",
+            "12",
+            "Unlimited",
+            "-1 GiB",
+            "1.2.3 GiB",
+            "3 parsecs",
+        ] {
+            assert_eq!(parse_duckdb_bytes(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

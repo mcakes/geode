@@ -128,6 +128,16 @@ pub struct CatalogSnapshot {
     pub block_size: u64,
     /// `sum(memory_usage_bytes)` from `duckdb_memory()`.
     pub memory_bytes: u64,
+    /// DuckDB's `memory_limit` setting in bytes. DuckDB reports it only as
+    /// text with one truncated decimal (`"38.3 GiB"`), so this is that
+    /// figure, at most a tenth of a unit below the exact limit. Zero means
+    /// the text could not be read as a size.
+    pub memory_limit_bytes: u64,
+    /// `sum(size)` from `duckdb_temporary_files()`: data spilled to disk.
+    pub temp_bytes: u64,
+    /// The largest `duckdb_memory()` tags by `memory_usage_bytes`, at most
+    /// three, largest first, zero-byte tags omitted.
+    pub memory_top: Vec<(String, u64)>,
     /// `current_setting('threads')`.
     pub threads: u64,
     /// Each fetch source that answered a catalogue, with its identities
