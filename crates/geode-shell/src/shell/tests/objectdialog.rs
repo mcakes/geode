@@ -8207,33 +8207,45 @@ fn a_double_click_on_a_door_row_opens_the_stage_and_nothing_more(cx: &mut gpui::
 }
 
 /// A browse-row double-click opens its edit stage once. Its second click must not
-/// activate a control newly painted under the pointer, such as a Views column row.
+/// activate a control newly painted under the pointer: here the Colors `delta`
+/// row's stage paints value rows where the list was, and a double-click on a
+/// value row is `i`.
 #[gpui::test]
 fn a_double_click_on_a_browse_row_opens_the_edit_stage_and_nothing_more(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) =
-        dialog_test_shell_in_dir(cx, services_with_views(), dir.path(), "config::views");
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colors");
     let row = cx
-        .debug_bounds("objectdialog-row-wide")
-        .expect("the wide view's browse row is painted");
-    // Low in the row: the edit stage paints its Dataset row there, so the
-    // second click lands on a row a double-click would open.
-    let at = gpui::point(row.origin.x + gpui::px(40.0), row.origin.y + gpui::px(30.0));
+        .debug_bounds("objectdialog-row-delta")
+        .expect("the delta browse row is painted");
+    // Find where the stage will paint a value row inside the browse row's
+    // band, then go back: the double-click must land its second half there.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let under = ["objectdialog-field-hue", "objectdialog-field-token"]
+        .into_iter()
+        .filter_map(|selector| cx.debug_bounds(selector))
+        .find_map(|field| {
+            let top = field.top().max(row.top());
+            let bottom = field.bottom().min(row.bottom());
+            (bottom - top > gpui::px(4.0)).then(|| top + (bottom - top) / 2.0)
+        })
+        .expect("fixture: a value row of the stage sits under the browse row");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    let at = gpui::point(row.origin.x + gpui::px(40.0), under);
     double_click(&mut cx, at, gpui::Modifiers::none());
     cx.run_until_parked();
     assert!(matches!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
         objectdialog::Stage::Edit { .. }
     ));
-    let dataset = cx
-        .debug_bounds("objectdialog-field-dataset")
-        .expect("the edit stage paints its Dataset row");
-    assert!(
-        dataset.contains(&at),
-        "fixture: the second click lands on the Dataset row"
-    );
     assert!(
         !edit_draft(&shell, &cx, |d| d.text_entry.is_some() || d.choice_entry()),
         "the second click opened no field in the freshly opened stage"

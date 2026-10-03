@@ -10459,8 +10459,8 @@ run_mutation "dblclick: the click that opened a stage does not also open a field
   geode-shell a_double_click_on_a_door_row_opens_the_stage_and_nothing_more
 
 # The browse list is a door too: mutated so the flag is not set there,
-# a double-click on Groupings' slot 3 opens the chain field on the stage
-# the first click painted.
+# a double-click on a Colors row opens the value field the first click's
+# stage painted under the pointer.
 run_mutation "dblclick: the browse click that opened a stage does not also open a field" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '        if let Some(state) = shell.object_dialog.as_mut() {
