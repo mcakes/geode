@@ -95,6 +95,9 @@ const CHEVRON_PX: f32 = 14.0;
 const DETERMINED_MARK: &str = "†";
 
 pub struct BlotterDelegate {
+    /// The find table's match colour, floored on table grounds and
+    /// memoised on the theme tokens it reads.
+    find_accent: geode_shell::shell::listrow::TableAccent,
     pub snapshot: Option<Arc<Snapshot>>,
     pub plan: Option<ColumnPlan>,
     pub expansion: Expansion,
@@ -423,7 +426,7 @@ impl BlotterDelegate {
             el.child(geode_shell::palette::highlighted_title(
                 &cell.text,
                 &indices,
-                geode_shell::shell::listrow::row_paint(theme).accent,
+                self.find_accent.get(theme),
             ))
         } else {
             el.child(SharedString::from(cell.text.clone()))
@@ -437,6 +440,7 @@ impl BlotterDelegate {
 
     pub fn new() -> Self {
         BlotterDelegate {
+            find_accent: Default::default(),
             snapshot: None,
             plan: None,
             expansion: Expansion::default(),
@@ -1811,6 +1815,29 @@ mod tests {
     use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
     use geode_core::view::{Colour, ViewPresentationSpec, ViewSpec};
     use geode_shell::linenumbers::GUTTER_DIGIT_PX;
+
+    /// The find table's match run takes the table accent every table's
+    /// match highlights share (`listrow::table_accent`, floored on the
+    /// table's cursor, hover, and rest grounds), not the list accent,
+    /// which floors on popover grounds; a plain `foreground` run is
+    /// invisible on its own text.
+    #[test]
+    fn find_highlights_take_the_table_accent() {
+        let text = include_str!("delegate.rs");
+        // Spelled in two parts so the scan does not find itself.
+        let needle = ["highlighted_", "title("].concat();
+        let calls: Vec<&str> = text
+            .match_indices(needle.as_str())
+            .map(|(at, _)| &text[at..(at + 200).min(text.len())])
+            .collect();
+        assert!(!calls.is_empty(), "the scan found no highlight call");
+        for window in calls {
+            assert!(
+                window.contains("find_accent.get("),
+                "a find highlight bypasses the table accent:\n{window}"
+            );
+        }
+    }
 
     fn dim(name: &str) -> ColumnMeta {
         ColumnMeta {

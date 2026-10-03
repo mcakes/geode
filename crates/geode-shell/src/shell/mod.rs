@@ -534,6 +534,13 @@ pub struct ShellView {
     /// for a key event is unsafe: dropping a focused overlay can leave no live
     /// focus target through which that event could reach the shell.
     pending_focus_restore: bool,
+    /// Set when a tile's × closed it; the shell root's capture-phase press
+    /// listener swallows the rest of that double-click (any press with
+    /// `click_count > 1`) and the next first press clears it. Closing
+    /// changes what lies under the pointer — a neighbour's ×, a focused
+    /// placeholder, the empty tree, a module's header — and each has its
+    /// own double-click gesture the follow-on press must not reach.
+    swallow_double_click_followup: bool,
     /// Whether the scope input held focus when an overlay opened. Closing the
     /// overlay consumes this flag and restores either the input or shell focus.
     /// Palette selection closes before dispatching, so a dialog launched from
@@ -1300,6 +1307,9 @@ impl ShellView {
                 let mut s = f.shared_mut();
                 s.set_scope(record.scope);
                 s.set_active_slot(record.active_slot);
+                if let Some(chain) = record.ad_hoc {
+                    s.restore_ad_hoc(chain, record.ad_hoc_active);
+                }
                 s.set_as_of(record.as_of);
                 s.clear_history();
             });
@@ -1325,15 +1335,35 @@ impl ShellView {
                 f.pin(ws);
                 let mut lane = f.view_mut(ws);
                 lane.set_scope(record.scope);
-                // Pinning copied the shared slot. Clear it first so a
-                // recorded slot that is now empty (refused below) leaves
-                // no slot rather than the shared lane's.
+                // Pinning copied the shared slot and ad hoc chain. Clear
+                // both first so a recorded slot that is now empty (refused
+                // below) leaves no slot rather than the shared lane's, and a
+                // record without a chain does not keep the shared lane's
+                // chain, which the session writer would then save as this
+                // workspace's own.
                 lane.set_active_slot(None);
+                lane.forget_ad_hoc();
                 lane.set_active_slot(record.active_slot);
+                // After the slot, so an active chain wins over it; before
+                // `clear_history`, like every other restored value.
+                if let Some(chain) = record.ad_hoc {
+                    lane.restore_ad_hoc(chain, record.ad_hoc_active);
+                }
                 lane.set_as_of(record.as_of);
                 lane.clear_history();
             });
         }
+        // A session written under another configuration can name columns
+        // this one cannot group by. Checked once for every restored lane.
+        let groupable = hot_reload::groupable_names(&services.config);
+        frame.update(cx, |f, _| {
+            for column in f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column)) {
+                tracing::warn!(
+                    target: "geode::session",
+                    "restored ad hoc grouping dropped: '{column}' is not a groupable column"
+                );
+            }
+        });
         // A group keeps its last scope across a restart. Restored before any
         // membership is applied and before the flip baselines below are
         // seeded, and nothing is notified: a restored follower's first
@@ -1449,6 +1479,7 @@ impl ShellView {
             last_frame_generation_written: 0,
             last_session_text: None,
             pending_focus_restore: false,
+            swallow_double_click_followup: false,
             overlay_return_to_filter: false,
             divider_drag: None,
             tile_drag: None,

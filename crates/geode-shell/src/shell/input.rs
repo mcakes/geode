@@ -56,6 +56,9 @@ pub(super) const CLOSE_PAGE_FIRST: &str = "close the page first (esc)";
 /// column (`ModuleRoster::context_columns`) that no listed kind accepts.
 pub(crate) const NO_MODULE_OPENS: &str = "no module opens on the context at the cursor";
 
+/// The status notice for `frame::grouping_adhoc` on a lane with no stored chain.
+pub(crate) const NO_AD_HOC: &str = "no ad hoc grouping yet: type one in the Grouping dialog (i)";
+
 /// The action ids refused with [`CLOSE_PAGE_FIRST`] while a page is open:
 /// the transient tile chrome (the `:` line, find, the stack list, the row
 /// menu, the link chooser) and every layout edit — add, open-with,
@@ -165,6 +168,38 @@ impl ShellView {
         self.row_menu = None;
     }
 
+    /// Why `id` may not run now, or `None`. One predicate for the keyboard
+    /// and palette route (`dispatch`) and the pointer routes that stand in
+    /// for an action (a tile's ×), so the two cannot drift.
+    pub(super) fn action_refusal(&self, id: &str) -> Option<&'static str> {
+        // The palette reaches every action while a dialog is open. Refuse
+        // transient tile controls here: the modal would hide them and block
+        // their keyboard route. Refuse workspace switches and the pin toggle
+        // too: they would move the active lane under a dialog that commits
+        // to the lane it opened in, and the toolbar would then mix the two.
+        // Other palette actions may run behind the stack.
+        if self.modal_open()
+            && (matches!(
+                id,
+                "tile::command_line"
+                    | "tile::find"
+                    | "stack::pick"
+                    | "tile::context_menu"
+                    | "frame::pin_workspace"
+            ) || id.starts_with("workspace::switch_"))
+        {
+            return Some(CLOSE_DIALOG_FIRST);
+        }
+        // A page covers the tile surface: it cannot host a `:` line, find,
+        // or stack list, and no layout edit may reach a tile the trader
+        // cannot see. The palette reaches these ids over a page as the
+        // keymap does, so the refusal lives here, not in a context.
+        if self.page_open() && refused_over_a_page(id) {
+            return Some(CLOSE_PAGE_FIRST);
+        }
+        None
+    }
+
     /// Dispatch a resolved action from either the keymap or palette. Workspace
     /// actions go through `apply_workspace_action`; shell actions are handled
     /// here, and remaining ids reach the focused occupant with their count.
@@ -185,31 +220,8 @@ impl ShellView {
         // branch that resolved it says so on its own line just before.
         tracing::debug!(target: "geode::shell", action = %action.0, count = ?count, "dispatch");
 
-        // The palette reaches every action while a dialog is open. Refuse
-        // transient tile controls here: the modal would hide them and block
-        // their keyboard route. Refuse workspace switches and the pin toggle
-        // too: they would move the active lane under a dialog that commits
-        // to the lane it opened in, and the toolbar would then mix the two.
-        // Other palette actions may run behind the stack.
-        if self.modal_open()
-            && (matches!(
-                action.0.as_str(),
-                "tile::command_line"
-                    | "tile::find"
-                    | "stack::pick"
-                    | "tile::context_menu"
-                    | "frame::pin_workspace"
-            ) || action.0.starts_with("workspace::switch_"))
-        {
-            self.notice = Some(CLOSE_DIALOG_FIRST.into());
-            return;
-        }
-        // A page covers the tile surface: it cannot host a `:` line, find,
-        // or stack list, and no layout edit may reach a tile the trader
-        // cannot see. The palette reaches these ids over a page as the
-        // keymap does, so the refusal lives here, not in a context.
-        if self.page_open() && refused_over_a_page(&action.0) {
-            self.notice = Some(CLOSE_PAGE_FIRST.into());
+        if let Some(refusal) = self.action_refusal(&action.0) {
+            self.notice = Some(refusal.into());
             return;
         }
         if let Some(kind) = action.0.strip_prefix("page::toggle_") {
@@ -426,6 +438,20 @@ impl ShellView {
                     cx.notify();
                 }
             });
+        } else if action.0 == "frame::grouping_adhoc" {
+            // Return to the lane's stored ad hoc chain. With none stored the
+            // action says so: a palette row that does nothing reads as broken.
+            let frame = self.target_frame();
+            if frame.read(cx).ad_hoc().is_some() {
+                frame.update(cx, |f, cx| {
+                    if f.activate_ad_hoc() {
+                        cx.notify();
+                    }
+                });
+            } else {
+                self.notice = Some(NO_AD_HOC.into());
+                cx.notify();
+            }
         } else if action.0 == "frame::scope_undo" {
             // Walk the bounded scope undo stack.
             self.target_frame().update(cx, |f, cx| {

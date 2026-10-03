@@ -345,6 +345,24 @@ impl Workspace {
         }
     }
 
+    /// Close `id` wherever it sits in this workspace, for the tile's own
+    /// close button. The focused tile of the focused region closes through
+    /// [`Workspace::close_tile`], so the pointer and the key cannot
+    /// diverge. Any other tile leaves focus where it was, and a dock it
+    /// empties hides. Focus needs no repair there: a tile that is not the
+    /// focused one cannot be the last in the focused region.
+    /// `false` for a tile this workspace does not hold (a stale press).
+    pub fn close_tile_id(&mut self, id: TileId) -> bool {
+        let Some(region) = self.region_of(id) else {
+            return false;
+        };
+        if region == self.region && self.focused_tile() == Some(id) {
+            self.close_tile();
+            return true;
+        }
+        self.remove_tile_anywhere(id).is_some()
+    }
+
     /// Cycle the focused region's stack member; return false for a plain tile.
     pub fn stack_step(&mut self, delta: i64) -> bool {
         let region = self.region;
@@ -2812,6 +2830,107 @@ mod tests {
             !ws.active().tree().contains(moved),
             "close removes the tile entirely — it does not return to the tree"
         );
+    }
+
+    #[test]
+    fn close_tile_id_on_the_focused_tile_matches_close_tile() {
+        let mut by_key = two_tiles();
+        let mut by_id = two_tiles();
+        let focused = by_id.active().focused_tile().unwrap();
+        apply_workspace_action(&mut by_key, &act("workspace::close_tile"));
+        assert!(by_id.active_mut().close_tile_id(focused));
+        assert_eq!(
+            by_id.active().tree().tiles(),
+            by_key.active().tree().tiles()
+        );
+        assert_eq!(
+            by_id.active().focused_tile(),
+            by_key.active().focused_tile()
+        );
+        assert_eq!(by_id.active().region(), by_key.active().region());
+    }
+
+    #[test]
+    fn close_tile_id_on_an_unfocused_tile_keeps_focus() {
+        let mut ws = two_tiles();
+        let focused = ws.active().focused_tile().unwrap();
+        let other = *ws
+            .active()
+            .tree()
+            .tiles()
+            .iter()
+            .find(|t| **t != focused)
+            .unwrap();
+        assert!(ws.active_mut().close_tile_id(other));
+        assert!(!ws.active().tree().contains(other));
+        assert_eq!(ws.active().focused_tile(), Some(focused));
+    }
+
+    #[test]
+    fn close_tile_id_on_an_unfocused_stack_member_keeps_focus_and_shows_a_sibling() {
+        // Main: [a | stack(b, c)] with c active; focus moves back to a.
+        let mut ws = two_tiles();
+        let b = ws.active().focused_tile().unwrap();
+        let c = ws.stack_active().expect("stack onto b");
+        let a = *ws
+            .active()
+            .tree()
+            .tiles()
+            .iter()
+            .find(|t| **t != b && **t != c)
+            .unwrap();
+        assert!(ws.active_mut().focus_main_tile(a));
+        assert!(ws.active_mut().close_tile_id(c));
+        assert_eq!(ws.active().focused_tile(), Some(a), "focus stays put");
+        assert!(ws.active().tree().contains(b), "the sibling survives");
+        assert!(
+            ws.active()
+                .tree()
+                .layout(Rect::UNIT)
+                .iter()
+                .any(|(id, _)| *id == b),
+            "the surviving member is the visible one"
+        );
+    }
+
+    #[test]
+    fn close_tile_id_of_an_unfocused_docks_last_tile_hides_it_and_keeps_focus() {
+        let mut ws = two_tiles();
+        let docked = ws.active().focused_tile().unwrap();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        // Focus back to the main tree's tile.
+        let main_tile = ws.active().tree().tiles()[0];
+        assert!(ws.active_mut().focus_main_tile(main_tile));
+        assert!(ws.active_mut().close_tile_id(docked));
+        let dock = ws.active().docks().get(DockSide::Left);
+        assert!(dock.tree().is_empty());
+        assert!(!dock.visible(), "an emptied dock hides");
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_eq!(ws.active().focused_tile(), Some(main_tile));
+    }
+
+    #[test]
+    fn close_tile_id_of_the_fullscreen_tile_clears_fullscreen() {
+        let mut ws = two_tiles();
+        let focused = ws.active().focused_tile().unwrap();
+        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
+        assert!(ws.active_mut().close_tile_id(focused));
+        assert_eq!(
+            ws.active().tree().layout(Rect::UNIT).len(),
+            1,
+            "no fullscreen left"
+        );
+        assert_eq!(ws.active().tree().fullscreen(), None);
+    }
+
+    #[test]
+    fn close_tile_id_of_an_absent_tile_changes_nothing() {
+        let mut ws = two_tiles();
+        let before = ws.active().tree().tiles();
+        let focused = ws.active().focused_tile();
+        assert!(!ws.active_mut().close_tile_id(TileId(999)));
+        assert_eq!(ws.active().tree().tiles(), before);
+        assert_eq!(ws.active().focused_tile(), focused);
     }
 
     #[test]

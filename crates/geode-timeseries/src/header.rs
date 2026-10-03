@@ -14,7 +14,7 @@ use geode_core::series::SlotKind;
 use geode_shell::actions::ActionId;
 use geode_shell::fonts;
 use geode_shell::keymap::{Keystroke, Modifiers, parse_binding};
-use geode_shell::module::StackHandle;
+use geode_shell::module::{CloseHandle, StackHandle};
 use geode_shell::shell::chip::{Tone, chip_paint};
 use geode_shell::shell::control::{self, PointerStates};
 use geode_shell::shell::kbd;
@@ -297,6 +297,7 @@ pub(crate) fn render_header(
     tile: &Entity<TimeseriesTile>,
     tile_id: u64,
     stack: Option<&StackHandle>,
+    close: Option<&CloseHandle>,
     popups: HeaderPopups,
     menu_selector: SharedString,
     health: Option<&HealthChip>,
@@ -472,6 +473,7 @@ pub(crate) fn render_header(
     }
 
     let mut cluster = Cluster::new(TileId(tile_id));
+    cluster.close = close.cloned();
     cluster.mode = mode;
     cluster.links = links;
     cluster.health = health;

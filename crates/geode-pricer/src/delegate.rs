@@ -451,6 +451,9 @@ impl FindPaint {
 }
 
 pub struct SheetDelegate {
+    /// The find table's match colour, floored on table grounds and
+    /// memoised on the theme tokens it reads.
+    find_accent: geode_shell::shell::listrow::TableAccent,
     /// The grid index shared with the tile; installs replace it.
     pub(crate) model: Rc<GridIndex>,
     /// The tile's sort, mirrored by `install_model` through `set_sort`:
@@ -572,6 +575,7 @@ fn named_colour_of(model: &GridIndex, plan_col: usize) -> Option<&str> {
 impl SheetDelegate {
     pub(crate) fn new(theme: &Theme, tile: WeakEntity<PricerTile>) -> Self {
         SheetDelegate {
+            find_accent: Default::default(),
             model: Rc::new(GridIndex::default()),
             sort: None,
             abs_label: None,
@@ -762,7 +766,7 @@ impl SheetDelegate {
                         .child(geode_shell::palette::highlighted_title(
                             row.search,
                             &indices,
-                            geode_shell::shell::listrow::row_paint(cx.theme()).accent,
+                            self.find_accent.get(cx.theme()),
                         )),
                 )
                 .into_any_element();
@@ -1828,11 +1832,13 @@ mod tests {
         assert_eq!(super::tree_gaps(true, true), 3, "slot, chip, text, note");
     }
 
-    /// The find table's match run takes the list-row accent every other
-    /// fuzzy surface highlights with (the blotter's find, the palette,
-    /// pickers); a plain `foreground` run is invisible on its own text.
+    /// The find table's match run takes the table accent every table's
+    /// match highlights share (`listrow::table_accent`, floored on the
+    /// table's cursor, hover, and rest grounds), not the list accent,
+    /// which floors on popover grounds; a plain `foreground` run is
+    /// invisible on its own text.
     #[test]
-    fn find_highlights_take_the_list_row_accent() {
+    fn find_highlights_take_the_table_accent() {
         let text = include_str!("delegate.rs");
         // Spelled in two parts so the scan does not find itself.
         let needle = ["highlighted_", "title("].concat();
@@ -1843,8 +1849,8 @@ mod tests {
         assert!(!calls.is_empty(), "the scan found no highlight call");
         for window in calls {
             assert!(
-                window.contains("row_paint("),
-                "a find highlight bypasses RowPaint::accent:\n{window}"
+                window.contains("find_accent.get("),
+                "a find highlight bypasses the table accent:\n{window}"
             );
         }
     }

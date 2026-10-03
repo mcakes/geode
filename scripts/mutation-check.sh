@@ -2555,8 +2555,8 @@ run_mutation "frame: set_scope bumps only the scope counter" \
 
 run_mutation "frame: a vanished active slot is cleared on reload" \
   crates/geode-shell/src/frame.rs \
-  '            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {' \
-  '            if false {' \
+  '                && slots.get(n).is_none()' \
+  '                && false' \
   geode-shell \
   replacing_slots_bumps_config_and_grouping_and_drops_a_vanished_active_slot
 
@@ -2578,9 +2578,11 @@ run_mutation "frame: lane generations come from the shared counter" \
 run_mutation "frame: a slot reload regroups hidden pinned lanes" \
   crates/geode-shell/src/frame.rs \
   '        for lane in std::iter::once(shared).chain(pinned.values_mut()) {
-            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {' \
+            if let GroupingChoice::Slot(n) = lane.grouping
+                && slots.get(n).is_none()' \
   '        for lane in std::iter::once(shared) {
-            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {' \
+            if let GroupingChoice::Slot(n) = lane.grouping
+                && slots.get(n).is_none()' \
   geode-shell \
   a_slot_reload_regroups_every_lane_and_clears_a_vanished_slot_in_a_hidden_lane
 
@@ -3089,10 +3091,10 @@ run_mutation "dialog stack: transient chrome runs behind the stack instead of be
   crates/geode-shell/src/shell/input.rs \
   '        if self.modal_open()
             && (matches!(
-                action.0.as_str(),' \
+                id,' \
   '        if false
             && (matches!(
-                action.0.as_str(),' \
+                id,' \
   geode-shell \
   palette_transient_chrome_is_refused_over_a_dialog
 
@@ -3100,7 +3102,7 @@ run_mutation "dialog stack: transient chrome runs behind the stack instead of be
 # commits to the lane it opened in; the toolbar then mixes the two lanes.
 run_mutation "dialog stack: a workspace switch runs behind the stack instead of being refused" \
   crates/geode-shell/src/shell/input.rs \
-  '            ) || action.0.starts_with("workspace::switch_"))' \
+  '            ) || id.starts_with("workspace::switch_"))' \
   '            ) || false)' \
   geode-shell \
   switching_and_pinning_are_refused_behind_a_dialog
@@ -3502,8 +3504,20 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
             }
             if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
+                // The same inputs decide what an ad hoc chain may name. A
+                // chain left naming a removed column would be refused by
+                // every following tile'"'"'s query with no way to see why.
+                let groupable = groupable_names(&self.services.config);
                 self.frame.update(cx, |f, cx| {
-                    if f.replace_slots(slots) {
+                    let replaced = f.replace_slots(slots);
+                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));
+                    for column in &dropped {
+                        tracing::warn!(
+                            target: "geode::config",
+                            "ad hoc grouping dropped: '"'"'{column}'"'"' is no longer a groupable column"
+                        );
+                    }
+                    if replaced || !dropped.is_empty() {
                         cx.notify();
                     }
                 });
@@ -3514,8 +3528,20 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
             }
             if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
+                // The same inputs decide what an ad hoc chain may name. A
+                // chain left naming a removed column would be refused by
+                // every following tile'"'"'s query with no way to see why.
+                let groupable = groupable_names(&self.services.config);
                 self.frame.update(cx, |f, cx| {
-                    if f.replace_slots(slots) {
+                    let replaced = f.replace_slots(slots);
+                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));
+                    for column in &dropped {
+                        tracing::warn!(
+                            target: "geode::config",
+                            "ad hoc grouping dropped: '"'"'{column}'"'"' is no longer a groupable column"
+                        );
+                    }
+                    if replaced || !dropped.is_empty() {
                         cx.notify();
                     }
                 });
@@ -6729,7 +6755,7 @@ run_mutation "shell page: a workspace switch leaves the page open" \
 
 run_mutation "shell page: nothing is refused over a page" \
   crates/geode-shell/src/shell/input.rs \
-  '        if self.page_open() && refused_over_a_page(&action.0) {' \
+  '        if self.page_open() && refused_over_a_page(id) {' \
   '        if false {' \
   geode-shell \
   layout_edits_are_refused_while_a_page_is_open
@@ -7095,21 +7121,287 @@ run_mutation "diagnostics page: hiding leaves the Levels popover open" \
 
 run_mutation "diagnostics leaf filter: dataset-only matching drops leaves" \
   crates/geode-diagnostics/src/prepared.rs \
-  '        if !dataset_matches && children.peek().is_none() {' \
+  '        if !dataset_matches && children.is_empty() {' \
   '        if !dataset_matches {' \
   geode-diagnostics data_filter_matches_leaf_fields_and_preserves_dataset_context
 
 run_mutation "diagnostics leaf filter: unrelated siblings remain visible" \
   crates/geode-diagnostics/src/prepared.rs \
-  '            .filter(|c| dataset_matches || partition_matches(c, &query))' \
-  '            .filter(|c| dataset_matches || !query.is_empty() || partition_matches(c, &query))' \
+  '                None => None,
+            })
+            .collect();
+        if !dataset_matches && children.is_empty() {' \
+  '                None => Some((c, ColumnMarks::default())),
+            })
+            .collect();
+        if !dataset_matches && children.is_empty() {' \
   geode-diagnostics data_filter_matches_leaf_fields_and_preserves_dataset_context
 
 run_mutation "diagnostics leaf filter: collapsed datasets hide matching leaves" \
   crates/geode-diagnostics/src/prepared.rs \
-  '        let expanded = !query.is_empty() || !collapsed.contains(&r.name);' \
+  '        let expanded = !narrow.is_empty() || !collapsed.contains(&r.name);' \
   '        let expanded = !collapsed.contains(&r.name);' \
   geode-diagnostics data_filter_input_reveals_collapsed_leaves_and_reset_restores_expansion
+
+# ---- the diagnostics page: fuzzy filters and their marks
+
+# A generation's fields map to the cells they paint in; a shuffled map
+# marks the wrong cell.
+run_mutation "diagnostics fuzzy: generation marks land in the wrong cells" \
+  crates/geode-diagnostics/src/prepared.rs \
+  'const PARTITION_CELLS: [usize; 6] = [0, 2, 3, 7, 4, 6];' \
+  'const PARTITION_CELLS: [usize; 6] = [0, 2, 3, 4, 7, 6];' \
+  geode-diagnostics the_data_filter_marks_dataset_names_and_generation_cells
+
+run_mutation "diagnostics fuzzy: a matching dataset name is not marked" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '                cell(name, tone).marked(dataset_marks.map(|mut m| m.take(0)).unwrap_or_default()),' \
+  '                cell(name, tone),' \
+  geode-diagnostics the_data_filter_marks_dataset_names_and_generation_cells
+
+run_mutation "diagnostics fuzzy: Sources ignores the Since clock text" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '                &r.since_hms,' \
+  '                "",' \
+  geode-diagnostics the_sources_filter_is_fuzzy_over_every_column_and_marks_cells
+
+run_mutation "diagnostics fuzzy: Sources ignores the Loading column" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '                &r.loading,' \
+  '                "",' \
+  geode-diagnostics the_sources_filter_is_fuzzy_over_every_column_and_marks_cells
+
+run_mutation "diagnostics fuzzy: issues stop matching their full text" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '                    .chain(std::iter::once(r.full.as_str()))' \
+  '                    .chain(std::iter::empty())' \
+  geode-diagnostics the_issue_filter_matches_cells_and_detail_and_marks_cells_only
+
+run_mutation "diagnostics fuzzy: the Log stops matching time and level" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '        narrow.row_lowered(&columns)' \
+  '        narrow.row_lowered(&columns[2..])' \
+  geode-diagnostics the_log_narrows_fuzzily_over_every_column_after_level_and_target
+
+run_mutation "diagnostics fuzzy: the Log ignores its level and target gates" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '        if !filter.gates(e.level, e.target) {' \
+  '        if false {' \
+  geode-diagnostics the_log_narrows_fuzzily_over_every_column_after_level_and_target
+
+# A record the held narrowing has not answered for must wait for its pass,
+# not show unfiltered under the query.
+run_mutation "diagnostics fuzzy: unanswered records show unfiltered" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '            Some(_) => continue,' \
+  '            Some(_) => None,' \
+  geode-diagnostics new_records_are_narrowed_alone_and_appended
+
+run_mutation "diagnostics fuzzy: a narrowing takes in a stretch it already answered" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '        if more.query != self.query || more.through <= self.through {' \
+  '        if more.query != self.query {' \
+  geode-diagnostics new_records_are_narrowed_alone_and_appended
+
+run_mutation "diagnostics fuzzy: a narrowing keeps entries the tail dropped" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '        self.kept.retain(|seq, _| *seq >= first);' \
+  '        self.kept.retain(|_, _| true);' \
+  geode-diagnostics new_records_are_narrowed_alone_and_appended
+
+run_mutation "diagnostics fuzzy: the cache keeps records the tail dropped" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '                while self.entries.front().is_some_and(|e| e.seq < first) {' \
+  '                while self.entries.front().is_some_and(|_| false) {' \
+  geode-diagnostics the_cache_formats_only_new_records_and_follows_the_tail
+
+run_mutation "diagnostics fuzzy: a clock change keeps the old time text" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '        if self.clock != Some(clock) {' \
+  '        if self.clock.is_none() {' \
+  geode-diagnostics the_cache_formats_only_new_records_and_follows_the_tail
+
+# A clock change reformats every time cell; an answer held from before it
+# matched the old text and must go.
+run_mutation "diagnostics fuzzy: a clock change keeps the stale narrowing" \
+  crates/geode-diagnostics/src/page.rs \
+  '                        .is_some_and(|n| n.is_stale(&self.log_cache))' \
+  '                        .is_some_and(|_| false)' \
+  geode-diagnostics a_clock_change_drops_a_narrowing_of_the_old_time_text
+
+run_mutation "diagnostics fuzzy: a clock change keeps the cache generation" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '            self.generation += 1;' \
+  '            {}' \
+  geode-diagnostics a_clock_change_drops_a_narrowing_of_the_old_time_text
+
+run_mutation "diagnostics fuzzy: a narrowing mixes cache generations" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '        if matches!((self.generation, more.generation), (Some(a), Some(b)) if a != b) {' \
+  '        if false {' \
+  geode-diagnostics the_cache_formats_only_new_records_and_follows_the_tail
+
+# Restarting the pass per arriving record could starve it under a busy
+# source; one pass per query stays in flight.
+run_mutation "diagnostics fuzzy: every arrival restarts the pass in flight" \
+  crates/geode-diagnostics/src/page.rs \
+  '            .is_some_and(|(q, g, _)| *q == query && *g == generation)' \
+  '            .is_some_and(|_| false)' \
+  geode-diagnostics a_pass_in_flight_survives_arrivals_and_an_extension_follows
+
+run_mutation "diagnostics fuzzy: leaves past the cap mark the document name" \
+  crates/geode-diagnostics/src/model.rs \
+  '            matched.truncate(MAX_LEAVES_PER_DOC);
+            // Bytes of the name a shown leaf matched; a leaf past the cap
+            // marks nothing, as it shows nothing.
+            let mut name_hits = vec![false; doc_name.len()];
+            for (_, _, marks) in &matched {
+                for r in marks.get(0) {
+                    name_hits[r.clone()].fill(true);
+                }
+            }' \
+  '            let mut name_hits = vec![false; doc_name.len()];
+            for (_, _, marks) in &matched {
+                for r in marks.get(0) {
+                    name_hits[r.clone()].fill(true);
+                }
+            }
+            matched.truncate(MAX_LEAVES_PER_DOC);' \
+  geode-diagnostics config_docs_cap_counts_only_matching_leaves
+
+run_mutation "diagnostics fuzzy: a pass for a query the input dropped still applies" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if narrowed.query() != self.log_filter.text || narrowed.is_stale(&self.log_cache) {' \
+  '        if narrowed.is_stale(&self.log_cache) {' \
+  geode-diagnostics records_arriving_under_a_filter_are_narrowed_and_stale_passes_dropped
+
+run_mutation "diagnostics fuzzy: spaces force collapsed documents open" \
+  crates/geode-diagnostics/src/page.rs \
+  '                        if filter.trim().is_empty() {' \
+  '                        if filter.is_empty() {' \
+  geode-diagnostics a_blank_filter_leaves_collapsed_documents_collapsed
+
+# A leaf's document name is a column of its own; joined to the path as a
+# prefix, `keys` aligns through "keymap" and the `s` of "bindings".
+run_mutation "diagnostics fuzzy: a leaf matches through its document prefix" \
+  crates/geode-diagnostics/src/model.rs \
+  '                    let marks = narrow.row(&[doc_name, &path, &value])?;' \
+  '                    let full = format!("{doc_name}.{path}");
+                    let marks = narrow.row(&["", &full, &value])?;' \
+  geode-diagnostics config_docs_narrow_fuzzily_and_mark_keys_values_and_documents
+
+run_mutation "diagnostics fuzzy: a matching document name is not marked" \
+  crates/geode-diagnostics/src/model.rs \
+  '                    name_hits[r.clone()].fill(true);
+                }
+            }
+            let leaves' \
+  '                    let _ = r;
+                }
+            }
+            let leaves' \
+  geode-diagnostics config_docs_narrow_fuzzily_and_mark_keys_values_and_documents
+
+# The typed text must reach the Log's narrowing through the input route.
+run_mutation "diagnostics fuzzy: the typed filter never reaches the Log" \
+  crates/geode-diagnostics/src/page.rs \
+  '                    self.log_filter.text = filter;' \
+  '                    self.log_filter.text = String::new();' \
+  geode-diagnostics typing_a_fuzzy_filter_narrows_in_order_and_marks_the_painted_cells
+
+run_mutation "diagnostics fuzzy: an expander shifts nothing" \
+  crates/geode-diagnostics/src/table.rs \
+  '                .map(|r| r.start + shift..r.end + shift)' \
+  '                .map(|r| r.start..r.end)' \
+  geode-diagnostics painted_marks_follow_the_expander
+
+run_mutation "diagnostics fuzzy: matches paint in raw primary" \
+  crates/geode-diagnostics/src/table.rs \
+  '            let accent = self.accent.get(theme);' \
+  '            let accent = theme.primary;' \
+  geode-diagnostics match_runs_take_the_table_accent
+
+run_mutation "listrow: the table accent memo ignores a theme change" \
+  crates/geode-shell/src/shell/listrow.rs \
+  '            Some((k, accent)) if k == key => accent,' \
+  '            Some((_, accent)) => accent,' \
+  geode-shell the_table_accent_memo_follows_the_theme
+
+# ---- shell: order-keeping table narrowing and the table accent
+
+run_mutation "narrow: two words share a character in one column" \
+  crates/geode-shell/src/listfilter.rs \
+  '                let claims = if several && !self.placed[c].is_empty() {' \
+  '                let claims = if false {' \
+  geode-shell narrow_words_in_one_column_take_distinct_characters
+
+run_mutation "narrow: marks come back in placement order" \
+  crates/geode-shell/src/listfilter.rs \
+  '                placed.sort_unstable();' \
+  '                {}' \
+  geode-shell narrow_words_in_one_column_take_distinct_characters
+
+run_mutation "narrow: a word takes the first column it fits" \
+  crates/geode-shell/src/listfilter.rs \
+  '                if best.as_ref().is_none_or(|(s, _, _)| score > *s) {' \
+  '                if best.is_none() {' \
+  geode-shell narrow_places_a_word_in_its_best_column
+
+run_mutation "narrow: equal scores take the rightmost column" \
+  crates/geode-shell/src/listfilter.rs \
+  '                if best.as_ref().is_none_or(|(s, _, _)| score > *s) {' \
+  '                if best.as_ref().is_none_or(|(s, _, _)| score >= *s) {' \
+  geode-shell narrow_places_a_word_in_its_best_column
+
+run_mutation "narrow: a word matching nowhere keeps the row" \
+  crates/geode-shell/src/listfilter.rs \
+  '            let (_, c, indices) = best?;' \
+  '            let Some((_, c, indices)) = best else { continue };' \
+  geode-shell narrow_needs_every_word_somewhere
+
+run_mutation "narrow: ASCII columns keep their case" \
+  crates/geode-shell/src/listfilter.rs \
+  '            out.push(ch.to_ascii_lowercase());' \
+  '            out.push(ch);' \
+  geode-shell narrow_is_case_insensitive_both_ways
+
+run_mutation "narrow: placements leak into the next row" \
+  crates/geode-shell/src/listfilter.rs \
+  '            self.placed[c].clear();' \
+  '            {}' \
+  geode-shell narrow_scratch_does_not_leak_between_rows
+
+run_mutation "narrow: a blank query still builds per-column marks" \
+  crates/geode-shell/src/listfilter.rs \
+  '        if self.words.is_empty() {
+            return Some(ColumnMarks::default());
+        }
+        let mut lowered' \
+  '        if false {
+            return Some(ColumnMarks::default());
+        }
+        let mut lowered' \
+  geode-shell narrow_with_a_blank_query_keeps_every_row_unmarked
+
+# The column at the window's start has no predecessor below row 0; scoring
+# one there indexes left of the window.
+run_mutation "palette: the window's first column looks left for a predecessor" \
+  crates/geode-shell/src/palette.rs \
+  '                } else if j > lo {' \
+  '                } else {' \
+  geode-shell the_scoring_window_ends_at_the_last_char_s_last_occurrence
+
+run_mutation "palette: the scoring window ends at the last char's first occurrence" \
+  crates/geode-shell/src/palette.rs \
+  '    let hi = (0..m).rev().find(|&j| c[j] == q[n - 1] && free(j))?;' \
+  '    let hi = (0..m).find(|&j| c[j] == q[n - 1] && free(j))?;' \
+  geode-shell the_scoring_window_ends_at_the_last_char_s_last_occurrence
+
+run_mutation "listrow: the table accent is raw primary" \
+  crates/geode-shell/src/shell/listrow.rs \
+  '            readable_on(accent, ground, pole(ground))' \
+  '            accent' \
+  geode-shell the_table_accent_is_readable_on_every_table_ground
 
 
 run_mutation "diagnostics data: sources sorted best-first instead of worst-first" \
@@ -7247,11 +7539,10 @@ run_mutation "diagnostics log: loss gap is never measured" \
 
 run_mutation "diagnostics log: the filter ignores level and target" \
   crates/geode-diagnostics/src/log.rs \
-  '        self.levels[Self::level_index(r.level)]
-            && self.target.as_deref().is_none_or(|t| t == r.target)' \
+  '        self.levels[Self::level_index(level)] && self.target.as_deref().is_none_or(|t| t == target)' \
   '        true' \
   geode-diagnostics \
-  the_filter_gates_on_level_target_and_text
+  the_filter_gates_on_level_and_target
 
 run_mutation "diagnostics log: a notice row paints in the first column" \
   crates/geode-diagnostics/src/prepared.rs \
@@ -17190,6 +17481,168 @@ run_mutation "stacks: the marker is gated on len > 1" \
   geode-blotter \
   the_stack_marker_paints_only_while_a_member
 
+# ---- Ad hoc grouping: the lane's own chain ----
+
+# Tiles read one door. If it does not resolve the ad hoc chain, every
+# following tile silently groups by its view default.
+run_mutation "ad hoc: the stored chain is the grouping in force" \
+  crates/geode-shell/src/frame.rs \
+  '            GroupingChoice::AdHoc => self.lane.ad_hoc.as_deref(),' \
+  '            GroupingChoice::AdHoc => None,' \
+  geode-shell \
+  an_ad_hoc_chain_is_the_grouping_in_force_and_survives_a_slot_switch
+
+# A pinned workspace starts from the shared lane's chain.
+run_mutation "ad hoc: pinning copies the chain" \
+  crates/geode-shell/src/frame.rs \
+  '            ad_hoc: self.ad_hoc.clone(),' \
+  '            ad_hoc: None,' \
+  geode-shell \
+  pinning_copies_the_ad_hoc_chain_and_the_lanes_then_diverge
+
+# Forgetting the active chain must leave the lane on a choice that exists.
+run_mutation "ad hoc: forgetting the active chain falls to view default" \
+  crates/geode-shell/src/frame.rs \
+  '            lane.grouping = GroupingChoice::ViewDefault;
+            self.bump_grouping();
+        } else {' \
+  '            self.bump_grouping();
+        } else {' \
+  geode-shell \
+  forgetting_the_active_chain_falls_to_view_default
+
+# The stored chain is session state even when nothing requeries.
+run_mutation "ad hoc: forgetting an inactive chain dirties the session" \
+  crates/geode-shell/src/frame.rs \
+  '            fresh(&mut self.frame.generation);
+        }
+        true' \
+  '        }
+        true' \
+  geode-shell \
+  forgetting_an_inactive_chain_requeries_nothing_but_dirties_the_session
+
+# Kept whole or dropped whole: the drop must clear the chain, not skip it.
+run_mutation "ad hoc: a stale chain is dropped" \
+  crates/geode-shell/src/frame.rs \
+  '                .and_then(|chain| chain.iter().find(|column| !known(column)).cloned())' \
+  '                .and_then(|chain| chain.iter().find(|_| false).cloned())' \
+  geode-shell \
+  a_stale_ad_hoc_chain_is_dropped_whole_and_an_active_lane_falls_to_view_default
+
+# An active chain is written without a slot beside it and read back active.
+run_mutation "ad hoc: the session writes the active marker" \
+  crates/geode-shell/src/session.rs \
+  '            if self.ad_hoc_active {' \
+  '            if false {' \
+  geode-shell \
+  an_active_ad_hoc_chain_round_trips_and_writes_no_slot
+
+# `grouping = "ad_hoc"` with no chain must not leave an ad hoc choice.
+run_mutation "ad hoc: an active marker needs a chain" \
+  crates/geode-shell/src/session.rs \
+  '                Some("ad_hoc") if ad_hoc.is_some() => true,' \
+  '                Some("ad_hoc") => true,' \
+  geode-shell \
+  ad_hoc_active_without_a_chain_warns_and_falls_back_to_the_slot
+
+# A hand-edited record holding both a slot and an active chain must read
+# as the chain alone; a slot beside it would be restored over the chain.
+run_mutation "ad hoc: an active chain hides the record's slot" \
+  crates/geode-shell/src/session.rs \
+  '        let active_slot = if ad_hoc_active { None } else { active_slot };' \
+  '        let active_slot = if false { None } else { active_slot };' \
+  geode-shell \
+  an_active_ad_hoc_marker_beside_a_slot_reads_without_the_slot
+
+# A chain naming a column twice is refused whole, never deduplicated.
+run_mutation "ad hoc: a chain with a repeated name is refused" \
+  crates/geode-shell/src/session.rs \
+  '                                .all(|(i, n)| !names[..i].contains(n)) =>' \
+  '                                .all(|_| true) =>' \
+  geode-shell \
+  a_malformed_ad_hoc_chain_warns_and_is_ignored
+
+# Restore applies the chain to the lane.
+run_mutation "ad hoc: the session restore reaches the lane" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                if let Some(chain) = record.ad_hoc {
+                    s.restore_ad_hoc(chain, record.ad_hoc_active);
+                }' \
+  '                let _ = (&record.ad_hoc, record.ad_hoc_active);' \
+  geode-shell \
+  a_restored_active_ad_hoc_chain_is_the_grouping_in_force
+
+# A pinned workspace's record restores into its own lane, not the shared one.
+run_mutation "ad hoc: a pinned restore applies its own chain" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                if let Some(chain) = record.ad_hoc {
+                    lane.restore_ad_hoc(chain, record.ad_hoc_active);
+                }' \
+  '                let _ = (&record.ad_hoc, record.ad_hoc_active);' \
+  geode-shell \
+  a_pinned_lane_restores_its_own_ad_hoc_chain
+
+# The session writer must capture the shared lane's chain, or a chain the
+# user built vanishes on restart.
+run_mutation "ad hoc: the session writer captures the shared chain" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '            ad_hoc: frame.ad_hoc().map(<[String]>::to_vec),' \
+  '            ad_hoc: None,' \
+  geode-shell \
+  the_session_writer_saves_each_lanes_ad_hoc_chain
+
+# Each pinned lane's chain is captured into its own workspace record.
+run_mutation "ad hoc: the session writer captures a pinned chain" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '                        ad_hoc: lane.ad_hoc().map(<[String]>::to_vec),' \
+  '                        ad_hoc: None,' \
+  geode-shell \
+  the_session_writer_saves_each_lanes_ad_hoc_chain
+
+# Pinning at restore copies the shared lane's chain; a pinned record
+# without one must not keep it, or the writer saves it as the pin's own.
+run_mutation "ad hoc: a pinned restore clears the copied chain" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                lane.set_active_slot(None);
+                lane.forget_ad_hoc();' \
+  '                lane.set_active_slot(None);' \
+  geode-shell \
+  a_pinned_lane_without_a_chain_does_not_inherit_the_shared_one
+
+# A session written under another configuration can name a column this
+# one cannot group by; startup must drop that chain whole.
+run_mutation "ad hoc: startup checks the restored chain" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            for column in f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column)) {' \
+  '            for column in f.retain_ad_hoc(|_| true) {' \
+  geode-shell \
+  a_restored_chain_naming_an_unknown_column_is_dropped
+
+# A reload that removes a column drops the chain naming it.
+run_mutation "ad hoc: a reload checks the chain" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));' \
+  '                    let dropped = f.retain_ad_hoc(|_| true);' \
+  geode-shell \
+  a_reload_that_removes_a_column_drops_the_chain_naming_it
+
+# The readout must not call an ad hoc chain the view default.
+run_mutation "ad hoc: the readout names the chain" \
+  crates/geode-shell/src/scopebar.rs \
+  '        (GroupingChoice::AdHoc, _) => format!(' \
+  '        (GroupingChoice::AdHoc, _) if false => format!(' \
+  geode-shell \
+  an_ad_hoc_chain_reads_with_a_star_where_the_slot_number_goes
+
+# With nothing stored the action reports instead of appearing inert.
+run_mutation "ad hoc: the action with nothing stored says so" \
+  crates/geode-shell/src/shell/input.rs \
+  '                self.notice = Some(NO_AD_HOC.into());' \
+  '                let _ = NO_AD_HOC;' \
+  geode-shell \
+  the_ad_hoc_action_with_nothing_stored_says_so
+
 # ---- Grouping picker: toolbar click, frame::grouping and mod-g ----
 
 # Only FILLED slots are rows: an empty slot listed would be a row that
@@ -26069,8 +26522,10 @@ run_mutation "shell: a restored pinned lane has no undo back to empty" \
 run_mutation "shell: a restored pinned lane drops an empty recorded slot" \
   crates/geode-shell/src/shell/mod.rs \
   '                lane.set_active_slot(None);
+                lane.forget_ad_hoc();
                 lane.set_active_slot(record.active_slot);' \
-  '                lane.set_active_slot(record.active_slot);' \
+  '                lane.forget_ad_hoc();
+                lane.set_active_slot(record.active_slot);' \
   geode-shell a_restored_pin_with_an_empty_slot_drops_the_slot
 
 # A pin restored onto a workspace the layout lacks would surface as an
@@ -28174,7 +28629,7 @@ run_mutation "pricer grouping: a V edit of the grouped value loses its anchor" \
   crates/geode-pricer/src/tile.rs \
   '            } => self.exact_row(*id, within).or_else(|| self.only_row(*id)),' \
   '            } => self.exact_row(*id, within),' \
-  geode-pricer a_selection_edit_of_the_grouped_value_keeps_the_selection
+  geode-pricer a_selection_edit_of_the_grouped_value_follows_the_line
 
 run_mutation "pricer grouping: a split package counts as painted once" \
   crates/geode-pricer/src/tile.rs \
@@ -29149,6 +29604,67 @@ run_mutation "edit caret: pricer visual binds I to end placement" \
 [bindings.keys]
 "shift+i" = "pricer::edit"' \
   geode-pricer edit_keys_select_the_text_or_place_the_caret_at_the_end
+
+# A commit over a selection that settles ends visual mode; a refusal keeps it.
+run_mutation "visual commit: pricer close keeps the selection" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.close_editor(window, cx);
+        self.clear_selection();
+        // The table'"'"'s highlight goes' \
+  '        self.close_editor(window, cx);
+        // The table'"'"'s highlight goes' \
+  geode-pricer i_over_rows_writes_the_cursor_column_on_every_target_line_in_one_undo
+
+run_mutation "visual commit: pricer written commit only closes the editor" \
+  crates/geode-pricer/src/tile.rs \
+  '            } else if self.commit_selection(&value, None, cx) {
+                self.close_ending_selection(window, cx);' \
+  '            } else if self.commit_selection(&value, None, cx) {
+                self.close_editor(window, cx);' \
+  geode-pricer i_over_rows_writes_the_cursor_column_on_every_target_line_in_one_undo
+
+run_mutation "visual commit: pricer untouched date only closes the editor" \
+  crates/geode-pricer/src/tile.rs \
+  '            if date == initial && !typed {
+                self.close_ending_selection(window, cx);' \
+  '            if date == initial && !typed {
+                self.close_editor(window, cx);' \
+  geode-pricer an_unchanged_untyped_date_over_a_selection_writes_nothing
+
+run_mutation "visual commit: marketdata end keeps the selection" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '        self.clear_selection();
+        self.sync_cursor(cx);' \
+  '        self.sync_cursor(cx);' \
+  geode-marketdata i_over_a_block_writes_one_value_to_every_accepting_cell
+
+run_mutation "visual commit: marketdata bulk write keeps the selection" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '        self.rebuild_model(cx);
+        self.end_selection_on_commit(cx);' \
+  '        self.rebuild_model(cx);' \
+  geode-marketdata i_over_a_block_writes_one_value_to_every_accepting_cell
+
+run_mutation "visual commit: marketdata untouched choice keeps the selection" \
+  crates/geode-marketdata/src/tile.rs \
+  '            self.close_popup_with_window(window, cx);
+            self.end_selection_on_commit(cx);' \
+  '            self.close_popup_with_window(window, cx);' \
+  geode-marketdata an_untouched_choice_commit_over_a_selection_writes_nothing
+
+# A selection's edit passes over group rows, open or closed, and writes
+# only the visible lines it holds.
+run_mutation "pricer selection: a group row refuses the edit" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'    pub(crate) fn selection_read_only(&self) -> Option<&\'static str> {\n' \
+  $'    pub(crate) fn selection_read_only(&self) -> Option<&\'static str> {\n        if self.selection_holds_group() {\n            return Some(GROUP_ROW);\n        }\n' \
+  geode-pricer a_selection_across_groups_edits_its_lines
+
+run_mutation "pricer selection: a closed group's hidden lines are written" \
+  crates/geode-pricer/src/tile/select.rs \
+  '            .filter_map(|g| self.model.sheet_row(g))' \
+  '            .flat_map(|g| self.grid_rows_under(g))' \
+  geode-pricer a_selection_over_a_closed_group_edits_only_the_visible_lines
 
 run_mutation "nemo: ids are not encoded" \
   crates/geode-nemo/src/lib.rs \
@@ -31709,19 +32225,25 @@ run_mutation "pricer tile: a double-click on a group row toggles it" \
   '                let group = false;' \
   geode-pricer a_double_click_on_a_group_row_toggles_it
 
-# The pricer's and market data's find tables highlight the match run in the
-# list-row accent, as every other fuzzy surface does.
-run_mutation "find-window: pricer match run takes the list-row accent" \
+# The blotter's, pricer's and market data's find tables highlight the match
+# run in the table accent every table's match highlights share.
+run_mutation "find-window: pricer match run takes the table accent" \
   crates/geode-pricer/src/delegate.rs \
-  '                            geode_shell::shell::listrow::row_paint(cx.theme()).accent,' \
+  '                            self.find_accent.get(cx.theme()),' \
   '                            cx.theme().foreground,' \
-  geode-pricer find_highlights_take_the_list_row_accent
+  geode-pricer find_highlights_take_the_table_accent
 
-run_mutation "find-window: market data match run takes the list-row accent" \
+run_mutation "find-window: market data match run takes the table accent" \
   crates/geode-marketdata/src/delegate.rs \
-  '                    geode_shell::shell::listrow::row_paint(cx.theme()).accent,' \
+  '                    self.find_accent.get(cx.theme()),' \
   '                    cx.theme().foreground,' \
-  geode-marketdata find_highlights_take_the_list_row_accent
+  geode-marketdata find_highlights_take_the_table_accent
+
+run_mutation "find-window: blotter match run takes the table accent" \
+  crates/geode-blotter/src/delegate.rs \
+  '                self.find_accent.get(theme),' \
+  '                geode_shell::shell::listrow::row_paint(theme).accent,' \
+  geode-blotter find_highlights_take_the_table_accent
 
 # ---- pricer column sort
 
@@ -33086,6 +33608,22 @@ run_mutation "diagnostics reference: the badge counts a stale answer" \
   '            .and_then(|ds| d.reference.as_ref().filter(|o| o.dataset == ds))' \
   geode-diagnostics the_reference_badge_counts_only_the_current_question
 
+# The Reference filter narrows over each cell's value; a NULL's dash is
+# display only, so matching it would keep every row with a NULL for `—`.
+run_mutation "diagnostics reference: a NULL's dash matches the filter" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '            matched.extend(r.iter().map(|c| c.as_deref().unwrap_or("")));' \
+  '            matched.extend(r.iter().map(|c| c.as_deref().unwrap_or(NULL_TEXT)));' \
+  geode-diagnostics the_reference_filter_is_fuzzy_and_marks_cells
+
+# Matched characters paint from the prepared marks; dropping them leaves a
+# narrowed Reference table with nothing in the accent.
+run_mutation "diagnostics reference: the filter marks nothing" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '                    .map(|(ix, c)| cell(text(c), Tone::Normal).marked(marks.take(ix)))' \
+  '                    .map(|(ix, c)| cell(text(c), Tone::Normal).marked({ let _ = ix; Vec::new() }))' \
+  geode-diagnostics the_reference_filter_is_fuzzy_and_marks_cells
+
 # A historical generation may be days old: its time must carry its date.
 run_mutation "diagnostics reference: the source time loses its date" \
   crates/geode-diagnostics/src/model.rs \
@@ -33355,6 +33893,196 @@ run_mutation "keybinding capture: the round-trip check accepts everything" \
   '        (!reads_back).then(' \
   '        false.then(' \
   geode-shell a_capture_the_parser_cannot_read_back_is_refused
+
+# ---- Tile close button ----
+#
+# Every tile paints a × that closes THAT tile: a focused tile closes as
+# `ctrl+w` does, any other leaves focus where it was. The press runs the
+# key's path (refusals, `:` line, session) and only a first press closes.
+
+run_mutation "close: an unfocused tile is removed by id, not by focus" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        self.remove_tile_anywhere(id).is_some()' \
+  '        self.close_tile();
+        true' \
+  geode-shell close_tile_id_on_an_unfocused_tile_keeps_focus
+
+run_mutation "close: an emptied dock hides" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '                if dock.tree().is_empty() {
+                    dock.set_visible(false);
+                }
+            }
+        }
+        Some(region)' \
+  '                if false {
+                    dock.set_visible(false);
+                }
+            }
+        }
+        Some(region)' \
+  geode-shell close_tile_id_of_an_unfocused_docks_last_tile_hides_it_and_keeps_focus
+
+# The press is the button's: unstopped, it also reaches the listeners
+# beneath it, a module header's own press handlers among them.
+run_mutation "close: the press stops at the button" \
+  crates/geode-shell/src/module.rs \
+  '                cx.stop_propagation();
+                window.prevent_default();
+                // Only a first press closes.' \
+  '                window.prevent_default();
+                // Only a first press closes.' \
+  geode-tile the_close_button_paints_last_and_runs_its_handle
+
+# Closing the right tile slides its neighbour's × under the pointer; the
+# double-click's second press must not close that one too. The root's
+# swallow also stops it, so this guard is checked where the button alone
+# meets a second press: the header strip, with no shell above it.
+run_mutation "close: a double-click's second press closes nothing" \
+  crates/geode-shell/src/module.rs \
+  '                if event.click_count > 1 {
+                    return;
+                }
+                handle.close(window, cx);' \
+  '                let _ = event.click_count;
+                handle.close(window, cx);' \
+  geode-tile a_double_clicks_second_press_on_the_close_button_runs_nothing
+
+run_mutation "close: every occupant receives its close handle" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            occupant.content.set_close(close, cx);' \
+  '            let _ = close;' \
+  geode-shell the_close_button_closes_its_own_tile_and_keeps_focus
+
+run_mutation "close: the pointer route shares the refusals" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if let Some(refusal) = self.action_refusal(crate::module::CLOSE_ACTION) {' \
+  '        if let Some(refusal) = None::<&str> {' \
+  geode-shell the_close_button_is_refused_over_a_page
+
+run_mutation "close: the pointer route leaves the command line" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        self.leave_command_line(window, cx);
+        self.begin_action(crate::module::CLOSE_ACTION);' \
+  '        self.begin_action(crate::module::CLOSE_ACTION);' \
+  geode-shell the_close_button_leaves_an_open_command_line
+
+run_mutation "close: the pointer route records the action" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        self.begin_action(crate::module::CLOSE_ACTION);
+        tracing::debug!(target: "geode::shell", tile = tile.0, "close by pointer");' \
+  '        tracing::debug!(target: "geode::shell", tile = tile.0, "close by pointer");' \
+  geode-shell the_close_button_records_the_close_action
+
+run_mutation "close: a pointer close dirties the session" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if self.services.workspaces.active_mut().close_tile_id(tile) {
+            self.session_dirty = true;' \
+  '        if self.services.workspaces.active_mut().close_tile_id(tile) {' \
+  geode-shell the_close_button_closes_its_own_tile_and_keeps_focus
+
+run_mutation "close: the placeholder paints the ×" \
+  crates/geode-shell/src/module.rs \
+  '                .children(self.close.as_ref().map(|c| {' \
+  '                .children(self.close.as_ref().filter(|_| false).map(|c| {' \
+  geode-shell the_placeholder_paints_the_close_button
+
+run_mutation "close: the header paints the ×" \
+  crates/geode-tile/src/header.rs \
+  '    row = row.children(c.close.map(|h| h.button(theme, c.tile)));' \
+  '    let _ = c.close;' \
+  geode-tile the_close_button_paints_last_and_runs_its_handle
+
+run_mutation "close: the blotter header carries its handle" \
+  crates/geode-blotter/src/tile.rs \
+  '        cluster.close = self.close.clone();' \
+  '        cluster.close = None;' \
+  geode-blotter the_header_paints_the_close_button
+
+run_mutation "close: the market-data header carries its handle" \
+  crates/geode-marketdata/src/header.rs \
+  '    cluster.close = close.cloned();' \
+  '    cluster.close = None;' \
+  geode-marketdata the_header_paints_the_close_button
+
+run_mutation "close: the pricer header carries its handle" \
+  crates/geode-pricer/src/header.rs \
+  '    cluster.close = c.close.cloned();' \
+  '    cluster.close = None;' \
+  geode-pricer the_header_paints_the_close_button
+
+run_mutation "close: the timeseries header carries its handle" \
+  crates/geode-timeseries/src/header.rs \
+  '    cluster.close = close.cloned();' \
+  '    cluster.close = None;' \
+  geode-timeseries the_header_paints_the_close_button
+
+run_mutation "close: the vol slice header carries its handle" \
+  crates/geode-volslice/src/header.rs \
+  '    cluster.close = close.cloned();' \
+  '    cluster.close = None;' \
+  geode-volslice the_header_paints_the_close_button
+
+# A pointer close changes what lies under the pointer (the empty tree's
+# hint, a focused placeholder, a module header); the rest of that
+# double-click must reach none of their double-click gestures.
+run_mutation "close: the shell root swallows a closing double-click" \
+  crates/geode-shell/src/shell/render.rs \
+  '                if event.click_count > 1 {
+                    cx.stop_propagation();' \
+  '                if false {
+                    cx.stop_propagation();' \
+  geode-shell a_double_click_on_the_last_tiles_close_button_opens_nothing
+
+run_mutation "close: a successful pointer close arms the swallow" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            self.swallow_double_click_followup = true;' \
+  '' \
+  geode-shell a_double_click_on_the_left_close_button_reaches_no_neighbour
+
+run_mutation "close: a first press ends the swallow" \
+  crates/geode-shell/src/shell/render.rs \
+  '                    view.swallow_double_click_followup = false;' \
+  '' \
+  geode-shell a_fresh_double_click_after_a_close_still_reaches_its_gesture
+
+run_mutation "close: a modified press passes to the tile" \
+  crates/geode-shell/src/module.rs \
+  '                if event.modifiers.modified() {' \
+  '                if false {' \
+  geode-shell a_mod_press_on_the_close_button_arms_a_drag
+
+# Each module forwards the shell's handle from its `TileContent` door to
+# its tile; dropped there, the header never paints the ×.
+run_mutation "close: the blotter content forwards its handle" \
+  crates/geode-blotter/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.set_close(close, cx))' \
+  '        let _ = (close, cx);' \
+  geode-blotter the_header_paints_the_close_button
+
+run_mutation "close: the market-data content forwards its handle" \
+  crates/geode-marketdata/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.set_close(close, cx))' \
+  '        let _ = (close, cx);' \
+  geode-marketdata the_header_paints_the_close_button
+
+run_mutation "close: the pricer content forwards its handle" \
+  crates/geode-pricer/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.set_close(close, cx))' \
+  '        let _ = (close, cx);' \
+  geode-pricer the_header_paints_the_close_button
+
+run_mutation "close: the timeseries content forwards its handle" \
+  crates/geode-timeseries/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.set_close(close, cx))' \
+  '        let _ = (close, cx);' \
+  geode-timeseries the_header_paints_the_close_button
+
+run_mutation "close: the vol slice content forwards its handle" \
+  crates/geode-volslice/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.set_close(close, cx))' \
+  '        let _ = (close, cx);' \
+  geode-volslice the_header_paints_the_close_button
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

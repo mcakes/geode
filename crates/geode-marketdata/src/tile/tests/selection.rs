@@ -664,7 +664,7 @@ fn a_selection_bump_with_no_numbers_refuses(cx: &mut gpui::TestAppContext) {
 }
 
 /// `i` then `enter` over a block writes the one typed value to every
-/// member, keeps the selection, and one revert takes all of it back.
+/// member, ends visual mode, and one revert takes all of it back.
 #[gpui::test]
 fn i_over_a_block_writes_one_value_to_every_accepting_cell(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
@@ -680,7 +680,7 @@ fn i_over_a_block_writes_one_value_to_every_accepting_cell(cx: &mut gpui::TestAp
     assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.2500", "0.2500", "0.3000"]);
     assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.2500", "0.2500", "0.6000"]);
     assert!(h.header_texts(&vcx).iter().any(|t| t == "set 4 cells"));
-    assert_eq!(h.mode(&vcx), "visual", "a block commit keeps the selection");
+    assert_eq!(h.mode(&vcx), "normal", "a block commit ends visual mode");
     h.command(&mut vcx, "revert").unwrap();
     assert!(
         h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
@@ -781,7 +781,7 @@ fn a_choice_pick_over_a_selection_writes_the_option_to_every_choice_cell(
             .contains(&"set 2 cells, skipped 4 (4 wrong type)".to_string())
     );
     assert!(!h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
-    assert_eq!(h.mode(&vcx), "visual", "a pick keeps the selection");
+    assert_eq!(h.mode(&vcx), "normal", "a pick ends visual mode");
 }
 
 /// The date field's value commits to every selected date cell.
@@ -797,7 +797,7 @@ fn a_date_commit_over_a_selection_writes_every_date_cell(cx: &mut gpui::TestAppC
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(h.col_texts(&vcx, 0), vec!["2027-03-02", "2027-03-02"]);
     assert!(h.header_texts(&vcx).contains(&"set 2 cells".to_string()));
-    assert_eq!(h.mode(&vcx), "visual", "a date commit keeps the selection");
+    assert_eq!(h.mode(&vcx), "normal", "a date commit ends visual mode");
 }
 
 /// A block over the first two nodes of both terms, the cursor ending on
@@ -837,7 +837,7 @@ fn arrows_step_every_selected_number_live_and_enter_keeps_them(cx: &mut gpui::Te
             .any(|t| t == "stepped 4 cells +12")
     );
     h.dispatch(&mut vcx, "commit", None);
-    assert_eq!(h.mode(&vcx), "visual");
+    assert_eq!(h.mode(&vcx), "normal", "keeping the steps ends visual mode");
     assert_eq!(h.row_texts(&vcx, 1)[4], "0.5012");
     // Each cell keeps its own step: the editor's text is not written
     // across the block.
@@ -1289,11 +1289,14 @@ fn an_untouched_commit_on_a_text_cell_writes_nothing(cx: &mut gpui::TestAppConte
     assert_eq!(notice_of(&h, &vcx), None);
     assert_eq!(
         h.mode(&vcx),
-        "visual",
-        "the editor closed; the selection stays"
+        "normal",
+        "an untouched commit still ends visual mode"
     );
 
     // A changed text still writes to every accepting cell.
+    h.motion(&mut vcx, "up", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     h.set_editor(&mut vcx, "odd");
     h.dispatch(&mut vcx, "commit", None);
@@ -1322,8 +1325,16 @@ fn an_untouched_choice_commit_over_a_selection_writes_nothing(cx: &mut gpui::Tes
     assert_eq!(h.col_texts(&vcx, 2), vec!["declared", "estimated"]);
     assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
     assert!(!h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+    assert_eq!(
+        h.mode(&vcx),
+        "normal",
+        "an untouched commit ends visual mode"
+    );
 
     // Moving the highlight is a pick: it writes.
+    h.motion(&mut vcx, "up", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     h.dispatch(&mut vcx, "insert_up", None);
     h.dispatch(&mut vcx, "commit", None);
@@ -1345,8 +1356,16 @@ fn an_untouched_date_commit_over_a_selection_writes_nothing(cx: &mut gpui::TestA
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(h.col_texts(&vcx, 0), vec!["2026-12-18", "2027-03-19"]);
     assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    assert_eq!(
+        h.mode(&vcx),
+        "normal",
+        "an untouched commit ends visual mode"
+    );
 
     // A stepped date is a change: it writes.
+    h.motion(&mut vcx, "up", None);
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.motion(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
     h.dispatch(&mut vcx, "insert_up", None);
     h.dispatch(&mut vcx, "commit", None);

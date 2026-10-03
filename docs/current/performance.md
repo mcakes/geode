@@ -120,6 +120,7 @@ cargo bench -p geode-chart
 cargo bench -p geode-timeseries
 cargo bench -p geode-volslice
 cargo bench -p geode-pricer
+cargo bench -p geode-diagnostics
 cargo bench --workspace --no-run
 ```
 
@@ -168,6 +169,10 @@ the measurement log for fixture and hardware details.
 | Object browse rows | 500 views: derive and rank, per input change | 188 µs |
 | Object browse filter keystroke | the same, prepared re-rank | 240 µs |
 | Palette paint | 551 items, the rows in view, prepared labels | 275 ns |
+| Diagnostics Log keystroke | full 4,096-record tail, a query every record matches (two to five words, or one 19-character word): the page's `rebuild` on the UI thread, timed inside the update, which shows the held answer and starts the narrowing (load average 22 to 39 on 18 cores) | 0.41 to 0.54 ms |
+| Diagnostics Log settled rebuild | the same tail under a held narrowing (records or gates changed, query unchanged; unfiltered 0.47 ms) | 0.60 to 0.95 ms |
+| Diagnostics Log cache fill | `LogCache::sync` formatting and lowering all 4,096 records cold, on the UI thread: paid when the Log is first shown over a full tail and after a clock change, then only for new records (load 29 to 31) | 5.14 ms |
+| Diagnostics Log narrowing, off the UI thread | the same: `log_cache::Narrowed::run`, two words / three / five / one 19-character word | 6.1 / 10.2 / 12.1 / 8.5 ms |
 
 Production view queries also carry the roster's context columns
 (`underlying_ref`, `position_ref`, `instrument_ref`; see
@@ -287,6 +292,16 @@ measure already reads. Re-measure on an idle machine before quoting them.
 - Large module tables use virtualization or prepared visible rows.
 
 ## Known gaps
+
+- The Diagnostics Log's fuzzy narrowing over a full tail exceeds the 8 ms UI
+  budget for phrase queries (6 to 12 ms on the reference machine, loaded, and
+  more on a slower one), so it runs on the background executor and the UI
+  thread only builds the table from the held answer (under 1 ms). The cost:
+  after a keystroke the table shows the previous answer for one pass, and
+  records arriving under a query appear after their own pass. A changed query
+  always re-narrows the whole tail; extending the previous query is not used
+  to narrow only its kept rows, because the greedy word placement does not
+  guarantee that a row the longer query keeps was kept by the shorter one.
 
 - Object-dialog paint still formats per-row element ids (layer, override,
   drift badges; field and provenance ids) and resolves the Colors browse

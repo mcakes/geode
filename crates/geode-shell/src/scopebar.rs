@@ -4,8 +4,10 @@
 //! rendering clones the prepared strings instead of rebuilding them.
 
 use crate::frame::FrameView;
+use crate::frame::GroupingChoice;
 use chrono::NaiveDate;
 use geode_core::clock::Clock;
+use geode_core::groupings::GroupingSlots;
 use geode_core::named::{NamedExpr, NamedExpressions};
 use geode_core::scope::Scope;
 use gpui::SharedString;
@@ -92,7 +94,7 @@ pub(crate) fn elide(s: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScopeBarModel {
     pub slot: Option<(u8, String)>,
-    /// `n · label` for an active slot, otherwise `view default`.
+    /// `n · label` for an active slot, `* · label` for an ad hoc chain, otherwise `view default`.
     pub slot_label: String,
     pub chips: Vec<Chip>,
     /// One chip per `Scope.named` entry, in list order; the toolbar paints
@@ -226,9 +228,15 @@ pub fn build_model(frame: &FrameView<'_>, clock: Clock, today: NaiveDate) -> Sco
             (Some(elided), Some(full))
         }
     };
-    let slot_label = match &slot {
-        Some((n, label)) => format!("{n} · {label}"),
-        None => "view default".to_string(),
+    let slot_label = match (frame.grouping_choice(), &slot) {
+        // `*` where the slot number goes: the chain is in force but no
+        // `ctrl+N` returns to it.
+        (GroupingChoice::AdHoc, _) => format!(
+            "* · {}",
+            GroupingSlots::label_of(frame.ad_hoc().unwrap_or_default())
+        ),
+        (_, Some((n, label))) => format!("{n} · {label}"),
+        (_, None) => "view default".to_string(),
     };
     let as_of_badge: Option<SharedString> = as_of.as_ref().map(|t| format!("AS OF {t}").into());
     let as_of_status: Option<SharedString> = as_of
@@ -361,6 +369,27 @@ mod tests {
         );
         assert_eq!(m.named[0].close_title, "Remove liq");
         assert!(m.savable, "a scope of names alone is not empty");
+    }
+
+    #[test]
+    fn an_ad_hoc_chain_reads_with_a_star_where_the_slot_number_goes() {
+        let mut slots = GroupingSlots::default();
+        slots.set(1, vec!["book".into(), "lhu".into()]);
+        let mut f = Frame::new(slots, SavedScopes::new(), None);
+        f.shared_mut()
+            .set_ad_hoc(vec!["underlying_ref".into(), "expiry".into()]);
+        let clock = geode_core::clock::Clock::utc();
+        let today = clock.today(chrono::Utc::now());
+        let m = build_model(&f.shared(), clock, today);
+        assert_eq!(m.slot_label, "* · underlying_ref / expiry");
+        assert_eq!(m.slot, None, "ad hoc is not a slot");
+
+        f.shared_mut().set_active_slot(Some(1));
+        let m = build_model(&f.shared(), clock, today);
+        assert_eq!(
+            m.slot_label, "1 · book / lhu",
+            "a slot still reads by its number while a chain is stored"
+        );
     }
 
     /// The model carries finished slot and as-of strings for rendering.

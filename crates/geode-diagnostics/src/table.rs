@@ -3,17 +3,19 @@
 //! row selection through `TableEvent::SelectRow` on the `TableState`; the
 //! delegate only paints.
 
+use std::borrow::Cow;
+use std::ops::Range;
 use std::rc::Rc;
 
-use geode_shell::fonts;
-use geode_shell::shell::{chip, scale};
+use geode_shell::shell::{chip, listrow, scale};
+use geode_shell::{fonts, palette};
 use gpui::prelude::*;
 use gpui::{App, Context, Div, Entity, FocusHandle, SharedString, TextAlign, Window, div, px};
 use gpui_component::table::{Column, DataTable, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, v_flex};
 
 use crate::model::Tone;
-use crate::prepared::{PreparedTable, RowKind};
+use crate::prepared::{Cell, PreparedTable, RowKind};
 
 /// Design pixels of left padding per nesting level of a child cell.
 const INDENT_STEP: f32 = 12.0;
@@ -58,6 +60,7 @@ pub struct SectionDelegate {
     row_selector: &'static str,
     empty_title: SharedString,
     empty_help: SharedString,
+    accent: listrow::TableAccent,
 }
 
 impl SectionDelegate {
@@ -73,6 +76,7 @@ impl SectionDelegate {
             row_selector,
             empty_title: SharedString::new_static("No rows"),
             empty_help: SharedString::default(),
+            accent: listrow::TableAccent::default(),
         }
     }
 
@@ -192,12 +196,14 @@ impl TableDelegate for SectionDelegate {
             (0, RowKind::Parent { expanded: false }) => "▸ ",
             _ => "",
         };
-        // Parents are few, so their per-paint `SharedString` is cheap; a
-        // plain cell hands over the prepared text without allocating.
-        let text = if expander.is_empty() {
-            cell.text.clone()
+        let (text, marks) = painted_text(cell, expander);
+        // Matched runs take the table accent over the cell's tone, which
+        // still colours the rest of the text through `text_color`.
+        let content = if marks.is_empty() {
+            text.into_any_element()
         } else {
-            SharedString::from(format!("{expander}{}", cell.text))
+            let accent = self.accent.get(theme);
+            palette::highlighted_runs(&text, &marks, accent).into_any_element()
         };
         // The first cell names its row for pointer tests; a no-op outside
         // test builds.
@@ -213,14 +219,83 @@ impl TableDelegate for SectionDelegate {
             .whitespace_nowrap()
             .overflow_hidden()
             .text_ellipsis()
-            .child(text)
+            .child(content)
     }
+}
+
+/// The text a cell paints and its match ranges into that text. A parent's
+/// first cell leads with its expander, which shifts the prepared ranges by
+/// the expander's bytes. Parents are few, so their per-paint copy is
+/// cheap; any other cell hands over its prepared text and ranges without
+/// allocating.
+fn painted_text<'a>(cell: &'a Cell, expander: &str) -> (SharedString, Cow<'a, [Range<usize>]>) {
+    if expander.is_empty() {
+        return (cell.text.clone(), Cow::Borrowed(&cell.marks));
+    }
+    let shift = expander.len();
+    (
+        SharedString::from(format!("{expander}{}", cell.text)),
+        Cow::Owned(
+            cell.marks
+                .iter()
+                .map(|r| r.start + shift..r.end + shift)
+                .collect(),
+        ),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prepared::log_table;
+    use crate::prepared::data_table;
+
+    /// A parent's expander shifts its marks by the expander's bytes, so
+    /// the accent still lands on the matched letters; other cells paint
+    /// the prepared ranges as they are.
+    #[test]
+    fn painted_marks_follow_the_expander() {
+        let rows = vec![crate::model::DatasetRow {
+            name: "risk".into(),
+            has_catalog: true,
+            live_rows: "1".into(),
+            archive_rows: "0".into(),
+            partitions: 0,
+            latest_gen: "".into(),
+            published: "".into(),
+            resolved: "".into(),
+            children: Vec::new(),
+        }];
+        let t = data_table(&rows, &Default::default(), "sk");
+        let cell = &t.rows[0].cells[0];
+        let (text, marks) = painted_text(cell, "▾ ");
+        assert_eq!(text.as_ref(), "▾ risk");
+        assert_eq!(marks.len(), 1);
+        assert_eq!(&text[marks[0].clone()], "sk");
+        let (text, marks) = painted_text(cell, "");
+        assert_eq!(&text[marks[0].clone()], "sk");
+        assert!(
+            matches!(marks, Cow::Borrowed(_)),
+            "no copy without an expander"
+        );
+    }
+
+    /// Matched runs paint in the table accent, floored on the table's
+    /// grounds, not `RowPaint::accent` (floored on list grounds) or a raw
+    /// `primary`. A source scan, as for the pricer's find highlights.
+    #[test]
+    fn match_runs_take_the_table_accent() {
+        let text = include_str!("table.rs");
+        let needle = ["palette::highlighted_", "runs("].concat();
+        let calls: Vec<usize> = text
+            .match_indices(needle.as_str())
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(calls.len(), 1, "one highlight call");
+        let window = &text[calls[0].saturating_sub(120)..calls[0]];
+        assert!(window.contains("self.accent.get(theme)"), "{window}");
+        let memo = ["listrow::Table", "Accent"].concat();
+        assert!(text.contains(memo.as_str()), "the shared table-accent memo");
+    }
 
     /// Column widths are design pixels: identity at the design rem and
     /// proportional to the rem the page hands over, so a larger font size
@@ -234,7 +309,12 @@ mod tests {
             assert_eq!(d.columns_count(cx), 0);
             assert_eq!(d.rows_count(cx), 0);
         });
-        d.set(Rc::new(log_table(&[], 3)));
+        d.set(Rc::new(crate::log_cache::log_table(
+            &Default::default(),
+            &crate::log::LogFilter::all(),
+            None,
+            3,
+        )));
         cx.update(|cx| {
             assert_eq!(d.columns_count(cx), 4);
             assert_eq!(d.rows_count(cx), 1, "the loss notice is a row");

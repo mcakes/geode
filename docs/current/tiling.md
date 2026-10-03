@@ -50,6 +50,7 @@ focused dock does nothing; removing its last tile hides it.
 | Directional move of a stack member | Pop it out beside its stack in the requested direction |
 | Move to a named dock | Insert at that dock's focus and show it; if already focused there, send one tile back to main |
 | Close | Remove focus, retaining focus in a surviving stack or selecting a tree-order neighbor |
+| Close by id (a tile's ×) | The focused tile closes as Close does; any other tile is removed and focus stays where it was; an emptied dock hides, and focus falls back only if that dock held it |
 | Edge drop | Insert beside the target's slot, within or across regions |
 | Centre drop | Insert after the target in its stack; a plain target becomes a stack |
 | Dock-background drop | Insert into that dock; dropping into the source dock does nothing |

@@ -186,6 +186,96 @@ impl std::fmt::Debug for StackHandle {
     }
 }
 
+/// The action a tile's close button stands in for: its tooltip names this
+/// action's live key, the button's keyboard route.
+pub const CLOSE_ACTION: &str = "workspace::close_tile";
+
+/// The shape of [`CloseHandle`]'s closure, named for the reason
+/// [`OpenStackList`] is.
+type CloseTile = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// What the shell hands every occupant: a closure over the shell's own
+/// weak entity and the tile's id, so a module's close button closes THIS
+/// tile without a path to `ShellView`. Delivered once per occupant.
+#[derive(Clone)]
+pub struct CloseHandle {
+    close: CloseTile,
+}
+
+impl CloseHandle {
+    pub fn new(close: impl Fn(&mut Window, &mut App) + 'static) -> CloseHandle {
+        CloseHandle {
+            close: Rc::new(close),
+        }
+    }
+
+    /// Close the tile this handle was made for. A no-op once it is gone.
+    pub fn close(&self, window: &mut Window, cx: &mut App) {
+        (self.close)(window, cx)
+    }
+
+    /// The × every tile paints last in its header (and the placeholder in
+    /// its corner): a bare muted glyph with the control door's hover and
+    /// pressed fills on the tile surface, id `("tile-close", tile)`,
+    /// selector `tile-close-{tile}`. An unmodified press is the button's
+    /// own: it stops propagation so the tile is not focused on its way
+    /// out. A modified press passes to the tile (mod+press arms a drag).
+    pub fn button(&self, theme: &gpui_component::Theme, tile: TileId) -> gpui::Stateful<gpui::Div> {
+        use gpui::prelude::*;
+        use gpui_component::{Icon, IconName, Sizable as _};
+        let muted = theme.muted_foreground;
+        let handle = self.clone();
+        gpui::div()
+            .id(gpui::ElementId::NamedInteger(
+                SharedString::new_static("tile-close"),
+                tile.0,
+            ))
+            .flex_none()
+            .flex()
+            .items_center()
+            .rounded(theme.radius_tokens().sm)
+            .text_color(muted)
+            .pointer_states(control::paint(
+                theme,
+                control::Rest::Bare,
+                theme.background,
+                muted,
+            ))
+            .debug_selector(move || format!("tile-close-{}", tile.0))
+            .child(Icon::new(IconName::Close).small())
+            .tooltip(crate::tips::tip_with(
+                SharedString::new_static("tip-tile-close"),
+                SharedString::new_static("Close tile"),
+                Some(CLOSE_ACTION),
+                None,
+            ))
+            .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+                // A modified press is the tile's own gesture (mod+press arms
+                // a tile drag): it passes through to the tile cell.
+                if event.modifiers.modified() {
+                    return;
+                }
+                cx.stop_propagation();
+                window.prevent_default();
+                // Only a first press closes. Closing one tile can slide a
+                // neighbour's × under the pointer; the shell root swallows
+                // the rest of the double-click after a close, and this
+                // guard keeps a later press of a double-click from closing
+                // whatever × it lands on even where that swallow is not set.
+                if event.click_count > 1 {
+                    return;
+                }
+                handle.close(window, cx);
+            })
+    }
+}
+
+impl std::fmt::Debug for CloseHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CloseHandle")
+    }
+}
+
 /// What the shell asks of a tile's occupant and tells it.
 ///
 /// Two rules bind every implementation.
@@ -270,6 +360,11 @@ pub trait TileContent {
     /// `(index, len)` changes. Modules paint the marker first in their header
     /// when `len > 1` and open the member list when it is clicked.
     fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App);
+    /// Hand this tile its close button's handle. The shell calls this once
+    /// per occupant, right after creating it. Required, so no occupant
+    /// can lack the button: a module stores it and passes it to the
+    /// header's cluster ([`CloseHandle::button`] paints it).
+    fn set_close(&self, close: CloseHandle, cx: &mut App);
     /// The row this tile paints as in the stack list: the
     /// same words its own header leads with (`risk · book, lhu`,
     /// `CVI · SPX.Z`, `diagnostics · log`).
@@ -391,6 +486,13 @@ pub trait TileContent {
     /// stored handle.
     #[cfg(any(test, feature = "test-support"))]
     fn stack_handle_for_test(&self) -> Option<StackHandle> {
+        None
+    }
+    /// Expose the close handle the shell delivered, for the same reason
+    /// as [`TileContent::stack_handle_for_test`]: a test calls the
+    /// production closure on an occupant that paints no ×.
+    #[cfg(any(test, feature = "test-support"))]
+    fn close_handle_for_test(&self) -> Option<CloseHandle> {
         None
     }
 }
@@ -846,6 +948,8 @@ pub mod placeholder {
     struct PlaceholderView {
         tile: TileId,
         stack: Option<StackHandle>,
+        /// The shell's close handle; the corner's × (see `CloseHandle`).
+        close: Option<CloseHandle>,
     }
 
     impl Render for PlaceholderView {
@@ -861,7 +965,10 @@ pub mod placeholder {
                 .child(crate::shell::kbd::marked(
                     "double-click or `ctrl+k` → Add a tile",
                 ));
+            // No header to carry the ×, so it sits in the top-right
+            // corner, over the centred hint.
             div()
+                .relative()
                 .size_full()
                 .flex()
                 .items_center()
@@ -869,6 +976,13 @@ pub mod placeholder {
                 .text_color(theme.muted_foreground)
                 .debug_selector(|| format!("tile-content-{}", self.tile.0))
                 .child(content)
+                .children(self.close.as_ref().map(|c| {
+                    div()
+                        .absolute()
+                        .top_1()
+                        .right_1()
+                        .child(c.button(theme, self.tile))
+                }))
         }
     }
 
@@ -912,6 +1026,12 @@ pub mod placeholder {
                 cx.notify();
             });
         }
+        fn set_close(&self, close: CloseHandle, cx: &mut App) {
+            self.view.update(cx, |v, cx| {
+                v.close = Some(close);
+                cx.notify();
+            });
+        }
         fn title(&self, _: &App) -> SharedString {
             SharedString::new_static("empty")
         }
@@ -934,7 +1054,11 @@ pub mod placeholder {
             _: &mut Window,
             cx: &mut App,
         ) -> TileOccupant {
-            let view = cx.new(|_| PlaceholderView { tile, stack: None });
+            let view = cx.new(|_| PlaceholderView {
+                tile,
+                stack: None,
+                close: None,
+            });
             TileOccupant {
                 kind: PLACEHOLDER_KIND,
                 view: view.clone().into(),
@@ -1244,6 +1368,10 @@ pub mod recording {
         /// — a test's window into `set_stack`, since the field itself is
         /// only ever written by the trait method.
         pub stack: RefCell<Option<StackHandle>>,
+        /// The close handle the shell delivered, for
+        /// [`TileContent::close_handle_for_test`]: this occupant paints no
+        /// ×, so a test calls the production closure through it.
+        close: RefCell<Option<CloseHandle>>,
         /// Shared with [`RecordingFactory::dimension_context`]; see it for
         /// why it is mutable after creation.
         dimension_context: Rc<RefCell<Option<DimensionContext>>>,
@@ -1520,6 +1648,9 @@ pub mod recording {
             ));
             *self.stack.borrow_mut() = stack;
         }
+        fn set_close(&self, close: CloseHandle, _: &mut App) {
+            *self.close.borrow_mut() = Some(close);
+        }
         fn title(&self, _: &App) -> SharedString {
             format!("rec {}", self.tile.0).into()
         }
@@ -1537,6 +1668,9 @@ pub mod recording {
         }
         fn stack_handle_for_test(&self) -> Option<StackHandle> {
             self.stack.borrow().clone()
+        }
+        fn close_handle_for_test(&self) -> Option<CloseHandle> {
+            self.close.borrow().clone()
         }
         fn dimension_context(&self, _cx: &App) -> Option<DimensionContext> {
             self.dimension_context.borrow().clone()
@@ -1680,6 +1814,7 @@ pub mod recording {
                     insert: Cell::new(false),
                     input: self.input.clone(),
                     stack: RefCell::new(None),
+                    close: RefCell::new(None),
                     dimension_context: self.dimension_context.clone(),
                     press_context: self.press_context.clone(),
                     tile_columns: self.tile_columns.clone(),

@@ -51,6 +51,83 @@ pub fn row_paint(theme: &Theme) -> RowPaint {
     }
 }
 
+/// The fuzzy-match colour inside a `DataTable`: `primary` floored to the
+/// readable ratio on each ground a table row paints on: the cursor row's
+/// `table_active`, the pointer's `table_hover`, both over the `table`
+/// surface, and that surface at rest.
+///
+/// [`RowPaint::accent`] floors against `list_active` over `popover`, the
+/// grounds a dialog list paints on. A table paints on neither, and a theme
+/// may set its table fills apart from the list ones. Each floor moves
+/// toward whichever of black or white contrasts more with its ground; on
+/// grounds of one polarity the moves only add contrast, so a later floor
+/// keeps the earlier ones. Grounds of mixed polarity can leave one state
+/// short, which the theme sweep reports.
+pub fn table_accent(theme: &Theme) -> Hsla {
+    let table = to_rgb(theme.table);
+    let grounds = [
+        over(theme.table_active, table),
+        over(theme.table_hover, table),
+        table,
+    ];
+    let accent = grounds
+        .into_iter()
+        .fold(to_rgb(theme.primary), |accent, ground| {
+            readable_on(accent, ground, pole(ground))
+        });
+    to_hsla(accent)
+}
+
+/// [`table_accent`] memoised on the tokens it reads, for a table delegate
+/// that paints match runs every frame: the floor runs three OKLCH
+/// searches, too much to repeat per marked cell, and a theme change must
+/// still reach it. `get` takes `&self` so a delegate painting through a
+/// shared reference can hold one.
+#[derive(Debug, Clone, Default)]
+pub struct TableAccent(std::cell::Cell<Option<([Hsla; 4], Hsla)>>);
+
+impl TableAccent {
+    /// The table accent for `theme`, recomputed only when a token it
+    /// reads has changed since the last call.
+    pub fn get(&self, theme: &Theme) -> Hsla {
+        let key = [
+            theme.primary,
+            theme.table,
+            theme.table_active,
+            theme.table_hover,
+        ];
+        match self.0.get() {
+            Some((k, accent)) if k == key => accent,
+            _ => {
+                let accent = table_accent(theme);
+                self.0.set(Some((key, accent)));
+                accent
+            }
+        }
+    }
+}
+
+/// Black or white, whichever contrasts more with `ground`: an endpoint
+/// that can always reach the readable ratio, which a theme's own
+/// foreground cannot promise.
+fn pole(ground: Rgb) -> Rgb {
+    let black = Rgb {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+    };
+    let white = Rgb {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+    };
+    if contrast_ratio(black, ground) >= contrast_ratio(white, ground) {
+        black
+    } else {
+        white
+    }
+}
+
 /// Paints a list row's state: the active fill and text when
 /// `highlighted`, else the hover fill under the pointer.
 ///
@@ -125,6 +202,71 @@ mod tests {
         assert!(
             failures.is_empty(),
             "unreadable rows:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// The memo answers `table_accent` and recomputes when a token it
+    /// reads changes.
+    #[gpui::test]
+    fn the_table_accent_memo_follows_the_theme(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let memo = TableAccent::default();
+        cx.update(|cx| {
+            let first = memo.get(cx.theme());
+            assert_eq!(first, table_accent(cx.theme()));
+            let mut theme = cx.theme().clone();
+            theme.primary = theme.danger;
+            let second = memo.get(&theme);
+            assert_eq!(second, table_accent(&theme));
+            assert_ne!(first, second);
+            assert_eq!(memo.get(cx.theme()), first, "and back");
+        });
+    }
+
+    /// A table's match accent stays readable on the cursor row, under the
+    /// pointer, and at rest, on every bundled theme.
+    #[gpui::test]
+    fn the_table_accent_is_readable_on_every_table_ground(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (service, _) = crate::theme::load_bundled();
+        let mut failures = Vec::new();
+        let mut checked = 0;
+        let mut list_accent_short = 0;
+        for name in service.names() {
+            let entry = service.resolve(&name).unwrap().clone();
+            cx.update(|cx| {
+                Theme::global_mut(cx).apply_config(&entry);
+                let theme = cx.theme();
+                let accent = to_rgb(table_accent(theme));
+                let list_accent = to_rgb(row_paint(theme).accent);
+                let table = to_rgb(theme.table);
+                let mut list_short = false;
+                for (state, ground) in [
+                    ("on the cursor row", over(theme.table_active, table)),
+                    ("under the pointer", over(theme.table_hover, table)),
+                    ("at rest", table),
+                ] {
+                    checked += 1;
+                    if contrast_ratio(accent, ground) < READABLE_RATIO {
+                        failures.push(format!("{name}: {state}"));
+                    }
+                    list_short |= contrast_ratio(list_accent, ground) < READABLE_RATIO;
+                }
+                list_accent_short += usize::from(list_short);
+            });
+        }
+        assert!(checked >= 3 * 40, "the sweep saw {checked} checks");
+        // The negative control: the list accent, floored on list grounds,
+        // falls short on some table ground, which is why tables floor
+        // their own.
+        assert!(
+            list_accent_short > 0,
+            "RowPaint::accent reads on every table ground — the sweep has lost its teeth"
+        );
+        assert!(
+            failures.is_empty(),
+            "unreadable table accents:\n{}",
             failures.join("\n")
         );
     }

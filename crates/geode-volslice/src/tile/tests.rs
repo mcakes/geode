@@ -342,4 +342,29 @@ fn a_fresh_tile_asks_nothing_and_shows_no_underlying(cx: &mut gpui::TestAppConte
     );
 }
 
+/// The header paints the shell's close button last once the handle is
+/// delivered, and a press runs it.
+#[gpui::test]
+fn the_header_paints_the_close_button(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    let pressed = std::rc::Rc::new(std::cell::Cell::new(false));
+    // Delivered through the shell's door, `TileContent::set_close`.
+    let close = {
+        let pressed = pressed.clone();
+        geode_shell::module::CloseHandle::new(move |_, _| pressed.set(true))
+    };
+    vcx.update(|_, cx| h.content.set_close(close, cx));
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let x = vcx.debug_bounds("tile-close-7").expect("painted");
+    let header = vcx.debug_bounds("volslice-header-7").unwrap();
+    assert!(
+        header.right() - x.right() < gpui::px(20.0),
+        "last in the strip"
+    );
+    vcx.simulate_mouse_down(x.center(), gpui::MouseButton::Left, gpui::Modifiers::none());
+    assert!(pressed.get());
+}
+
 mod data;

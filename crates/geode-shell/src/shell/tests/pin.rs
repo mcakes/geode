@@ -469,6 +469,8 @@ fn a_restored_pinned_workspace_is_pinned_with_its_record(cx: &mut gpui::TestAppC
     let mut record = crate::session::FrameRecord {
         scope: geode_core::scope::Scope::default(),
         active_slot: None,
+        ad_hoc: None,
+        ad_hoc_active: false,
         as_of: geode_core::query::AsOf::Live,
     };
     record.scope.text = Some("spx".into());
@@ -512,6 +514,8 @@ fn a_restored_pin_with_an_empty_slot_drops_the_slot(cx: &mut gpui::TestAppContex
     let record = |slot| crate::session::FrameRecord {
         scope: geode_core::scope::Scope::default(),
         active_slot: slot,
+        ad_hoc: None,
+        ad_hoc_active: false,
         as_of: geode_core::query::AsOf::Live,
     };
     services.restored_frame = Some(record(Some(1)));
@@ -545,6 +549,8 @@ fn a_restored_pin_without_its_workspace_is_skipped(cx: &mut gpui::TestAppContext
     let record = crate::session::FrameRecord {
         scope: geode_core::scope::Scope::default(),
         active_slot: None,
+        ad_hoc: None,
+        ad_hoc_active: false,
         as_of: geode_core::query::AsOf::Live,
     };
     services.restored_pinned.insert(ws(7), record);

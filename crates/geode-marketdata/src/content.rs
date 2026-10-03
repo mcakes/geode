@@ -13,7 +13,7 @@ use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{
-    Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
+    CloseHandle, Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
 };
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
@@ -226,6 +226,9 @@ impl TileContent for MarketDataContent {
     }
     fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_stack(stack, cx))
+    }
+    fn set_close(&self, close: CloseHandle, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.set_close(close, cx))
     }
     fn title(&self, cx: &App) -> SharedString {
         self.tile.read(cx).title()

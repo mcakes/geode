@@ -54,6 +54,16 @@ pub(super) fn rebuild_slots(config: &Config) -> GroupingSlots {
     slots
 }
 
+/// The column names a grouping chain may hold under `config`: the Groupings
+/// editor's vocabulary, and the test an ad hoc chain must still pass after a
+/// reload or a session restore.
+pub(super) fn groupable_names(config: &Config) -> Vec<String> {
+    super::groupable_columns(config)
+        .into_iter()
+        .map(|pickable| pickable.column)
+        .collect()
+}
+
 // Count calls that report saved-scope diagnostics, allowing tests to check
 // startup deduplication without capturing logs.
 #[cfg(test)]
@@ -347,8 +357,20 @@ impl ShellView {
             }
             if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
+                // The same inputs decide what an ad hoc chain may name. A
+                // chain left naming a removed column would be refused by
+                // every following tile's query with no way to see why.
+                let groupable = groupable_names(&self.services.config);
                 self.frame.update(cx, |f, cx| {
-                    if f.replace_slots(slots) {
+                    let replaced = f.replace_slots(slots);
+                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));
+                    for column in &dropped {
+                        tracing::warn!(
+                            target: "geode::config",
+                            "ad hoc grouping dropped: '{column}' is no longer a groupable column"
+                        );
+                    }
+                    if replaced || !dropped.is_empty() {
                         cx.notify();
                     }
                 });

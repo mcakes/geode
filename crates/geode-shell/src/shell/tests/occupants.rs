@@ -15,7 +15,7 @@ mod watching {
     use super::*;
     use crate::keymap::KeyContext;
     use crate::module::{
-        Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
+        CloseHandle, Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
     };
     use gpui::{App, Context, FocusHandle, Render, SharedString, div};
 
@@ -87,6 +87,7 @@ mod watching {
             });
         }
         fn set_stack(&self, _: Option<StackHandle>, _: &mut App) {}
+        fn set_close(&self, _: CloseHandle, _: &mut App) {}
         fn title(&self, _: &App) -> SharedString {
             "watching".into()
         }

@@ -619,6 +619,23 @@ impl Render for ShellView {
                 "GeodeShell"
             })
             .on_key_down(cx.listener(Self::handle_key_down))
+            // The rest of a double-click whose first press closed a tile by
+            // its × reaches nothing. Captured at the root, so it precedes
+            // every tile's, dock's, hint's and module's own listener: the
+            // close moved something else under the pointer, and that press
+            // would run its double-click gesture (picker, fullscreen, a
+            // module header's). A first press ends the swallow and passes.
+            .capture_any_mouse_down(cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                if event.button != MouseButton::Left || !view.swallow_double_click_followup {
+                    return;
+                }
+                if event.click_count > 1 {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                } else {
+                    view.swallow_double_click_followup = false;
+                }
+            }))
             // Cover releases between drag arming and the first catcher paint.
             // Hovered and non-hovered listeners together cover mouse and keyboard
             // modality; `heal_drags_on_root_release` preserves active tile drops.
@@ -957,9 +974,11 @@ impl Render for ShellView {
                 // open dialog stack would also reach whatever the catcher
                 // covers: `shell-modal-backdrop` (popping the dialog) or a
                 // dialog row (committing or opening it). `occlude()` is
-                // conditioned on a dialog being open because with none the
-                // catcher covers only tiles, which have no click handler this
-                // would wrongly swallow.
+                // conditioned on a dialog being open. With none, the
+                // catcher covers only tiles, and a press there both closes
+                // the palette and reaches the tile under it: the tile cell
+                // focuses its tile, and tile chrome (×, ⋯, chips, the
+                // marker) runs its own press.
                 el.child(
                     div()
                         .id("palette-click-catcher")

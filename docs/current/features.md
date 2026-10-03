@@ -79,14 +79,15 @@ line, and the blotter the notice line. Diagnostics has none of them.
 - Every tile header is `geode_tile::header::frame`: 22 px at the design rem,
   the stack marker first, the module's own left side, then a right cluster in
   a fixed order — the mode icon, status items, notices, source times, the
-  health chip, `⋯`.
+  link chips, the health chip, `⋯`, and last the shell's close button (×),
+  which closes that tile.
   Status items and notices shrink: each is one line, cut with an ellipsis
   when it does not fit, and together they take at most half the header
   (`TEXT_SHARE`); a cut notice shows its whole text in its tooltip. Source
-  times, the chip and `⋯` never shrink. The left side takes what remains and
-  clips, so neither a long left side nor a long notice pushes the times, the
-  chip or `⋯` off the tile — they leave it only when the tile is narrower
-  than those three alone.
+  times, the link chips, the health chip, `⋯` and × never shrink. The left
+  side takes what remains and clips, so neither a long left side nor a long
+  notice pushes that fixed tail off the tile — it leaves only when the tile
+  is narrower than the tail alone.
   A stale source time takes the warning text tone. It turns stale while the
   tile is idle, too: market-data arms a wake-up at its source time plus
   `stale_after`, and the blotter one per dataset time, each firing in turn so
@@ -282,10 +283,11 @@ persisted by the tile.
 
 The tile's grouping is, in order of precedence: a `:group <columns>` pin; a
 `:group slot <n>` pin (the view's own grouping while that slot is empty);
-the frame's active slot; the view's own `grouping`. The blotter always
-groups: an empty grouping would be one grand-total row, so `:group none`
-(the pricer's flat-sheet pin), and `none` anywhere in a column list, is
-refused with `the blotter always groups: :group takes columns or \`slot
+the frame's grouping (its active slot or ad hoc chain); the view's own
+`grouping`. The blotter always groups: an empty grouping would be one
+grand-total row, so `:group none` (the pricer's flat-sheet pin), and
+`none` anywhere in a column list, is refused with
+`the blotter always groups: :group takes columns or \`slot
 N\``. A bare `:group` refuses with `group needs columns or \`slot N\``.
 `:group` completes the groupable dimensions and `slot`. While a pin holds,
 a frame grouping change or slot switch does not regroup the tile; `:unpin`
@@ -578,7 +580,7 @@ reason becomes the notice.
 The header is the [shared frame](#shared-tile-interaction): kind badge,
 underlying and attributes on the left; then the state, incomplete rows, echo,
 upload error and the upload prompt, the notice, the source time (`HH:MM:SS
-stale` in the warning text tone once stale), the health chip and `⋯`. The
+stale` in the warning text tone once stale), the health chip, `⋯` and ×. The
 header's health chip covers the panel's dataset.
 
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
@@ -701,8 +703,9 @@ so a no-op gesture never copies one cell's value across the selection:
 text still equal to what the editor opened on, a date field no digit was
 typed into whose date is unchanged, or `enter` on the option the cell
 already holds. Stepping a date or moving the choice highlight is a change;
-a click on a choice row is always a pick. The selection stays after a
-commit.
+a click on a choice row is always a pick. A commit that settles (written,
+or an untouched `enter`) ends the selection, as `escape` would; a refused
+commit keeps it with the editor open.
 
 **Live steps.** On a number cursor cell with its text untouched, the editor's
 arrows (`up`/`down`, `shift+` for ten) step every selected number in the
@@ -716,7 +719,7 @@ any cell refuses (an overflow), nothing is written. A step refuses while the
 draft is Behind with its base gone or its upload echo differs, as every edit
 does.
 
-- `enter` on the untouched text keeps the steps and the selection.
+- `enter` on the untouched text keeps the steps and ends the selection.
 - `escape` restores the draft exactly as `i` found it, provided the steps are
   still its last change and the painted document has not moved; a delivery
   held Behind meanwhile stays reported, and a draft that was Sent comes back
@@ -1248,13 +1251,29 @@ Copy and `y` copy those details without truncation. Empty views explain
 whether there is no data or the filters match nothing. A footer shows the
 current keyboard workflow using the shell's keycaps.
 
+Every section's text filter is fuzzy and keeps the table's order: rows drop
+out, nothing is ranked. Each whitespace-separated word must match as a
+case-insensitive subsequence inside a single column; words may land in
+different columns but are never stitched across one. Matched characters paint
+bold in the table accent over the cell's tone, from ranges prepared with the
+table. A word that lands only in text the table does not show (an issue's
+full text) keeps its row without a mark; a configuration leaf matches its
+document's name, path, and value as three columns, so no word aligns across
+the dot between them. The placement is greedy, longest word first, so a row
+only another assignment would fit is dropped. The Log narrows off the UI
+thread: after a keystroke its table keeps the previous answer until the pass
+lands (every row, unfiltered, when there was no query before), and records
+arriving under a query appear after their own pass. A clock change drops the
+held answer, since it matched the old time text, and narrows again. See the
+crate README for each section's columns.
+
 | Section | Table and toolbar |
 |---|---|
-| Sources | Source, Health (title-case label with the reason), Since (clock time and age), Shape, Last poll, Next poll, Ready (blank for a snapshot source, which reads a table rather than ready files), Loading. Worst reported health first by variant then name; unreported sources last, and a source known only from an ingest load gets a "no report yet" row with its loading text. Toolbar: a filter over name and health. Detail: the spec lines by shape (a snapshot source names only its adapter: it has no priority) and the health history. |
-| Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: a case-insensitive filter over dataset names and generation fields (partition/book, generation ID, times, row count, live/archive status), a chip reading `Catalog up to date` or `Refreshing catalog`, Refresh catalog, Expand all, Collapse all. A dataset-name match includes all its generations; leaf-only matches retain the dataset heading and hide unmatched siblings. Filtering temporarily reveals collapsed results; clearing it restores stored expansion. Catalog totals are not narrowed by filtering. |
-| Reference | One row per row of the selected reference dataset's generation at the frame's as-of, with the dataset's declared columns; NULL cells read `—`. Toolbar: a case-insensitive filter over every cell; a status chip reading `gen N · <dated source time> · N rows`, `Loading`, `No generation published yet`, `No generation at <dated time>`, a read error, or a refused read or poll (warning-toned); when a source filling the dataset is Degraded or Failed, its reason follows the generation text (` · <reason>`) or, with no table, stands alone, warning-toned; Poll now (`r`); and, when more than one reference dataset is declared, one button per dataset (Tab / Shift+Tab step them). While a new as-of's answer is outstanding the previous rows for the same dataset stay, under `Loading`. The result strip reads "{visible} of {total} rows" (`row` for a total of one, as in the chip and the empty state), both counted from the answer the table shows. The empty state names the status, "No reference datasets declared", or "Filter matches nothing (N rows)". Detail and `y`: one `column: value` line per column, NULL as `—`. |
-| Config | Three full-width views: Current issues (config and data lanes), History (prior batches newest first), and Effective values (expandable documents and their leaves, with Key, Value, and Layer from `Config::explain`). The active view owns row navigation and Copy. Search filters issue text or document keys and values; unmatched documents disappear and matches inside collapsed documents are revealed. Open config directory remains available. |
-| Log | Time with milliseconds, Lvl, Target, and Message over the retained tail. Toolbar: level toggles, a target select over the targets seen in the tail plus `All targets`, a text filter over message and target, Follow, Clear log, and Log levels. Detail: the full record with a Copy button that puts it on the clipboard. |
+| Sources | Source, Health (title-case label with the reason), Since (clock time and age), Shape, Last poll, Next poll, Ready (blank for a snapshot source, which reads a table rather than ready files), Loading. Worst reported health first by variant then name; unreported sources last, and a source known only from an ingest load gets a "no report yet" row with its loading text. Toolbar: a filter over every column (Since by its clock text). Detail: the spec lines by shape (a snapshot source names only its adapter: it has no priority) and the health history. |
+| Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: a filter over dataset names and generation fields (partition/book, generation ID, times, row count, live/archive status), a chip reading `Catalog up to date` or `Refreshing catalog`, Refresh catalog, Expand all, Collapse all. A dataset-name match includes all its generations; leaf-only matches retain the dataset heading and hide unmatched siblings. Filtering temporarily reveals collapsed results; clearing it restores stored expansion. Catalog totals are not narrowed by filtering. |
+| Reference | One row per row of the selected reference dataset's generation at the frame's as-of, with the dataset's declared columns; NULL cells read `—`. Toolbar: a filter over every cell (a NULL's `—` never matches); a status chip reading `gen N · <dated source time> · N rows`, `Loading`, `No generation published yet`, `No generation at <dated time>`, a read error, or a refused read or poll (warning-toned); when a source filling the dataset is Degraded or Failed, its reason follows the generation text (` · <reason>`) or, with no table, stands alone, warning-toned; Poll now (`r`); and, when more than one reference dataset is declared, one button per dataset (Tab / Shift+Tab step them). While a new as-of's answer is outstanding the previous rows for the same dataset stay, under `Loading`. The result strip reads "{visible} of {total} rows" (`row` for a total of one, as in the chip and the empty state), both counted from the answer the table shows. The empty state names the status, "No reference datasets declared", or "Filter matches nothing (N rows)". Detail and `y`: one `column: value` line per column, NULL as `—`. |
+| Config | Three full-width views: Current issues (config and data lanes), History (prior batches newest first), and Effective values (expandable documents and their leaves, with Key, Value, and Layer from `Config::explain`). The active view owns row navigation and Copy. Search filters issue cells and full text, or a leaf's document name, path, and value; unmatched documents disappear and matches inside collapsed documents are revealed. Open config directory remains available. |
+| Log | Time with milliseconds, Lvl, Target, and Message over the retained tail. Toolbar: level toggles, a target select over the targets seen in the tail plus `All targets`, a text filter over time, level, target, and message, Follow, Clear log, and Log levels. Detail: the full record with a Copy button that puts it on the clipboard. |
 | Performance | Aligned median, p95, maximum, and sample-count readouts for frame intervals, query→snapshot, and snapshot→paint, with explanations of each stage. A labeled logarithmic frame-interval histogram shows bucket ranges and counts on hover, with a separate overflow count above 100 ms. Frame cadence is not pure UI work and is not classified against the 8 ms UI budget. UI and requery targets remain explanatory guidance. A Memory section shows process memory (macOS physical footprint, Windows private bytes) with its peak and the time the peak was first seen, then DuckDB memory in use against its limit, temporary files spilled to disk, and the largest DuckDB memory tags, the last three labelled as coming from the last catalog snapshot. Storage, dropped events, refused requests (both warning-toned when non-zero), and the Performance overlay switch share the scrolling region. Missing samples show dashes and zero counts; memory rows read "Not available" until the first sample or catalog snapshot, and on a platform the sampler cannot read. |
 
 Keys in the page's own context: `j`/`k` move the cursor, `g g`/`G` jump,
@@ -1404,13 +1423,14 @@ while lines are stale, `N failed` in danger text while any line's last answer
 was a failure, `pricer <name>`, the last priced time, which reads `stale` once
 it is older than the shell's `stale_after` — re-evaluated on each repaint: the
 reprice timer's ticks repaint it, and with `refresh = "off"` an idle pricer's
-`stale` waits for its next repaint (known limitation) — and a `⋯` button at the trailing
-edge that opens and closes the action menu (the pointer's `.`). The header is
-the [shared frame](#shared-tile-interaction): notices paint after the status
-items, and the health chip sits between the time and `⋯`. The health chip
-covers `pricer_sheets` only (see the pricer README's limits). A pending load
-paints `loading…` muted in the header and `Loading sheet…` in the empty table;
-an empty loaded sheet says `No lines — press o to add one`. A pricer this
+`stale` waits for its next repaint (known limitation) — and a `⋯` button
+that opens and closes the action menu (the pointer's `.`). The header is the
+[shared frame](#shared-tile-interaction): notices paint after the status
+items, the health chip sits between the time and `⋯`, and the × is last, at
+the trailing edge. The health chip covers `pricer_sheets` only (see the
+pricer README's limits). A pending load paints `loading…` muted in the
+header and `Loading sheet…` in the empty table; an empty loaded sheet says
+`No lines — press o to add one`. A pricer this
 binary lacks is named in danger text with its recovery (`set [pricing]
 adapter and restart`).
 
@@ -1989,9 +2009,10 @@ The tile arranges its shown lines under a grouping chain, as a blotter
 arranges positions, and follows the frame's grouping the way a blotter
 does. The chain is, in order of precedence: a `:group <columns>` pin; a
 `:group slot <n>` pin, which reads frame slot `n` (the view's own grouping
-while that slot is empty); the frame's active slot; the planned view's own
-`grouping`. `:group none` pins the empty chain: the flat sheet, whatever
-the frame's grouping, with moves and a counted `g p` as in any flat sheet.
+while that slot is empty); the frame's grouping (its active slot or ad hoc
+chain); the planned view's own `grouping`. `:group none` pins the empty
+chain: the flat sheet, whatever the frame's grouping, with moves and a
+counted `g p` as in any flat sheet.
 `none` is reserved beside `slot` — never read as a column, and `:group none
 <anything>` is refused with `usage: group none`. `:unpin` drops any pin and
 the tile follows the frame again at once. `:group` takes columns separated
@@ -2100,8 +2121,12 @@ row would reach legs another group paints. Both refuse cell edits (`i`,
 structural verbs `d`, `shift+j`/`shift+k`, `g p` and `g u` (keys, the `.`
 menu, `:package`, `:unpackage`), with `a grouping row: edit its lines` and
 `split package: edit its legs` in the footer; a package both split and
-partly hidden reads the split reason. A selection containing either refuses
-whole. A split package's legs, and the lines under a group, edit as usual.
+partly hidden reads the split reason. For structural verbs, a selection
+containing either refuses whole. A selection's typed commit or live step
+passes over group rows and edits the visible lines it holds, across groups;
+a closed group inside it is ignored, its hidden lines left as they were. A
+split package row inside it still refuses. A split package's legs, and the
+lines under a group, edit as usual.
 `y y` on a group row copies the shorthand of its lines, and a `V` selection
 over a group row totals and yanks its lines once, whether or not their rows
 are selected too. `y y` or `V y` on a split package row yanks that row's
@@ -2299,8 +2324,9 @@ changes nothing records no entry. The header notices `set 5 cells, skipped 3
 (2 read-only, 1 n/a)`, counting read-only cells, barrier cells on a vanilla
 line (`n/a`), and refused values.
 When no selected cell accepts the value, nothing is written and the editor
-stays open with `no selected cell accepts '<text>'` in the footer. The
-selection stays after a commit. Because the cursor's column is what a commit
+stays open with `no selected cell accepts '<text>'` in the footer and the
+selection kept. A commit that settles (written, or an untouched `enter`)
+ends the selection, as `escape` would. Because the cursor's column is what a commit
 writes, `enter` re-checks that the cursor still sits on the editor's cell;
 if it does not, nothing is written and the editor closes with `the cell
 moved; edit refused`.

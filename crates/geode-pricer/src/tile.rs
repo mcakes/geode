@@ -53,7 +53,7 @@ use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
 use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
-use geode_shell::module::{FindEvent, StackHandle};
+use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
 use geode_shell::shell::aggregates::AggregateCell;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -665,6 +665,8 @@ pub struct PricerTile {
     /// source health or descriptions move.
     health: HealthWatch,
     stack: Option<StackHandle>,
+    /// The shell's close handle; the header paints its × last.
+    close: Option<CloseHandle>,
     pub(crate) clock: Clock,
     /// What `p`/`shift+p` put: the last `y y`, `d d`, or `y`/`d` over a
     /// `V` selection, in painted order (sheet order on a flat, unsorted
@@ -1126,6 +1128,7 @@ impl PricerTile {
             menu_selector: SharedString::new_static("pricer-menu-button"),
             health,
             stack: None,
+            close: None,
             clock: app_clock(cx),
             register: None,
             find: None,
@@ -1356,6 +1359,11 @@ impl PricerTile {
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
         self.stack = stack;
+        cx.notify();
+    }
+
+    pub fn set_close(&mut self, close: CloseHandle, cx: &mut Context<Self>) {
+        self.close = Some(close);
         cx.notify();
     }
 
@@ -2166,9 +2174,7 @@ impl PricerTile {
                 if let Some(bulk) = self.take_bulk() {
                     self.settle_bulk(bulk, true, cx);
                 }
-                self.close_editor(window, cx);
-                self.rebuild_chrome();
-                cx.notify();
+                self.close_ending_selection(window, cx);
                 return;
             }
             if let Some(bulk) = self.take_bulk() {
@@ -2232,9 +2238,7 @@ impl PricerTile {
         // filled across every target would be a plausible wrong block
         // from a no-op gesture. No edit, no notice, no undo entry.
         if unchanged && self.selection.is_some() {
-            self.close_editor(window, cx);
-            self.rebuild_chrome();
-            cx.notify();
+            self.close_ending_selection(window, cx);
             return;
         }
         let value = match value {
@@ -2262,7 +2266,7 @@ impl PricerTile {
             if !self.cursor_on_editor(line, kind) {
                 self.refuse_moved(window, cx);
             } else if self.commit_selection(&value, None, cx) {
-                self.close_editor(window, cx);
+                self.close_ending_selection(window, cx);
             }
             return;
         }
@@ -2362,6 +2366,20 @@ impl PricerTile {
 
     /// Close the editor with `MOVED`: its commit no longer means what the
     /// trader saw when it opened.
+    /// A commit over a selection settled — written, or a no-op left as
+    /// it was: the editor closes and visual mode ends with it, as `escape`
+    /// would. A refusal never comes here, so the selection survives for
+    /// the trader to retype or adjust.
+    fn close_ending_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_editor(window, cx);
+        self.clear_selection();
+        // The table's highlight goes, and an order the selection held
+        // under a sort re-ranks now.
+        self.sync_cursor(cx);
+        self.rebuild_chrome();
+        cx.notify();
+    }
+
     fn refuse_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_editor(window, cx);
         self.footer = Some(MOVED.into());
@@ -2407,16 +2425,14 @@ impl PricerTile {
         // from a no-op gesture.
         if self.selection.is_some() {
             if date == initial && !typed {
-                self.close_editor(window, cx);
-                self.rebuild_chrome();
-                cx.notify();
+                self.close_ending_selection(window, cx);
                 return;
             }
             let text = date.format("%Y-%m-%d").to_string();
             if !self.cursor_on_editor(line, kind) {
                 self.refuse_moved(window, cx);
             } else if self.commit_selection(&text, Some(date), cx) {
-                self.close_editor(window, cx);
+                self.close_ending_selection(window, cx);
             }
             return;
         }
@@ -6082,6 +6098,7 @@ impl gpui::Render for PricerTile {
             header::HeaderChrome {
                 stale,
                 stack: self.stack.as_ref(),
+                close: self.close.as_ref(),
                 tile_id: self.id,
                 tile: &tile,
                 menu_open: self.menu.is_some() && self.menu_kind == MenuKind::Actions,
@@ -9491,6 +9508,31 @@ pub(crate) mod tests {
             vcx.debug_bounds("tile-link-5-A-follow").is_none(),
             "following the workspace again removes the chip"
         );
+    }
+
+    /// The header paints the shell's close button last once the handle is
+    /// delivered, and a press runs it.
+    #[gpui::test]
+    fn the_header_paints_the_close_button(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let pressed = std::rc::Rc::new(std::cell::Cell::new(false));
+        // Delivered through the shell's door, `TileContent::set_close`.
+        let close = {
+            let pressed = pressed.clone();
+            geode_shell::module::CloseHandle::new(move |_, _| pressed.set(true))
+        };
+        vcx.update(|_, cx| h.content.set_close(close, cx));
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let x = vcx.debug_bounds("tile-close-5").expect("painted");
+        let header = vcx.debug_bounds("pricer-header-5").unwrap();
+        assert!(
+            header.right() - x.right() < gpui::px(20.0),
+            "last in the strip"
+        );
+        vcx.simulate_mouse_down(x.center(), gpui::MouseButton::Left, gpui::Modifiers::none());
+        assert!(pressed.get());
     }
 
     #[gpui::test]

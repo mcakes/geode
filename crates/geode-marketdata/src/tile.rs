@@ -51,7 +51,7 @@ use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{FrameRef, FrameVersions, PublicationWatch};
 use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
-use geode_shell::module::{FindEvent, StackHandle, UploadDelivery};
+use geode_shell::module::{CloseHandle, FindEvent, StackHandle, UploadDelivery};
 use geode_shell::shell::aggregates;
 use geode_shell::shell::colours::{to_hsla, to_rgb};
 use geode_shell::shell::scale;
@@ -629,6 +629,8 @@ pub struct MarketDataTile {
     chords: Arc<Vec<Binding>>,
     /// Stack membership rendered in the header; None outside a stack.
     stack: Option<StackHandle>,
+    /// The shell's close handle; the header paints its × last.
+    close: Option<CloseHandle>,
     /// Prepared title from the panel title and key. Updated by set_key so title()
     /// returns cached text without formatting.
     title: SharedString,
@@ -994,6 +996,7 @@ impl MarketDataTile {
             ),
             chords: geode_tile::menu::live_bindings(cx),
             stack: None,
+            close: None,
             clock: cx
                 .try_global::<geode_shell::clock::AppClock>()
                 .map(|c| c.0)
@@ -1781,6 +1784,11 @@ impl MarketDataTile {
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
         self.stack = stack;
+        cx.notify();
+    }
+
+    pub fn set_close(&mut self, close: CloseHandle, cx: &mut Context<Self>) {
+        self.close = Some(close);
         cx.notify();
     }
 
@@ -2917,11 +2925,13 @@ impl MarketDataTile {
                     // before the close, which would otherwise undo them.
                     editing.bulk = None;
                     self.close_editor(window, cx);
+                    self.end_selection_on_commit(cx);
                     return true;
                 }
                 if self.selection.is_some() && text == editing.opened {
                     // Untouched over a selection: nothing to write.
                     self.close_editor(window, cx);
+                    self.end_selection_on_commit(cx);
                     return true;
                 }
                 self.commit_cell_edit(cell, labels, &text, window, cx)
@@ -2959,6 +2969,7 @@ impl MarketDataTile {
                     if !editing.typed && text == editing.opened {
                         // Untouched over a selection: nothing to write.
                         self.close_editor(window, cx);
+                        self.end_selection_on_commit(cx);
                         return true;
                     }
                     return self.commit_bulk(&text, window, cx);
@@ -3762,6 +3773,7 @@ impl MarketDataTile {
             // `enter` on the value the cell already holds, over a
             // selection: nothing to write. A row click stays a pick.
             self.close_popup_with_window(window, cx);
+            self.end_selection_on_commit(cx);
             return true;
         }
         self.pick_option(option, window, cx)
@@ -5101,6 +5113,7 @@ impl gpui::Render for MarketDataTile {
             self.menu_tip_selector.clone(),
             self.state_tip_selector.clone(),
             self.stack.as_ref(),
+            self.close.as_ref(),
             self.health.chip(),
             geode_tile::header::Mode::from_key_mode(self.mode()),
             geode_tile::header::link_chips(&self.frame, cx),
@@ -6661,6 +6674,31 @@ label = "skew"
             "first in the strip"
         );
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.title()).as_ref(), "CVI");
+    }
+
+    /// The header paints the shell's close button last once the handle is
+    /// delivered, and a press runs it.
+    #[gpui::test]
+    fn the_header_paints_the_close_button(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let pressed = std::rc::Rc::new(std::cell::Cell::new(false));
+        // Delivered through the shell's door, `TileContent::set_close`.
+        let close = {
+            let pressed = pressed.clone();
+            geode_shell::module::CloseHandle::new(move |_, _| pressed.set(true))
+        };
+        vcx.update(|_, cx| h.content.set_close(close, cx));
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let x = vcx.debug_bounds("tile-close-3").expect("painted");
+        let header = vcx.debug_bounds("marketdata-header-3").unwrap();
+        assert!(
+            header.right() - x.right() < gpui::px(20.0),
+            "last in the strip"
+        );
+        vcx.simulate_mouse_down(x.center(), gpui::MouseButton::Left, gpui::Modifiers::none());
+        assert!(pressed.get());
     }
 
     /// The header shows the link group the tile follows, read from the

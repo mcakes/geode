@@ -29,7 +29,7 @@ use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{FrameRef, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::link::BoardWatch;
-use geode_shell::module::StackHandle;
+use geode_shell::module::{CloseHandle, StackHandle};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_tile::following::FollowingQuery;
@@ -76,6 +76,8 @@ pub struct VolsliceTile {
     /// The underlying picker or the diff chooser, while one is up.
     popup: Option<Popup>,
     stack: Option<StackHandle>,
+    /// The shell's close handle; the header paints its × last.
+    close: Option<CloseHandle>,
     visible: bool,
     state: State,
     /// Both documents under one flip-barrier answer: the pair is handed to
@@ -268,6 +270,7 @@ impl VolsliceTile {
             diagnostics,
             popup: None,
             stack: None,
+            close: None,
             visible: false,
             reset_view: view.is_none(),
             view,
@@ -653,6 +656,11 @@ impl VolsliceTile {
         cx.notify();
     }
 
+    pub fn set_close(&mut self, close: CloseHandle, cx: &mut Context<Self>) {
+        self.close = Some(close);
+        cx.notify();
+    }
+
     pub fn title(&self) -> SharedString {
         SharedString::new_static(TITLE)
     }
@@ -860,6 +868,7 @@ impl Render for VolsliceTile {
                 &tile,
                 id,
                 self.stack.as_ref(),
+                self.close.as_ref(),
                 self.health.chip(),
                 Mode::from_key_mode(self.mode()),
                 link_chips(&self.frame, cx),

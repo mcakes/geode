@@ -2,15 +2,17 @@
 //! expansion and filtering applied. Pure; `Rc`-shared with the delegate.
 
 use std::collections::BTreeSet;
+use std::ops::Range;
 use std::time::SystemTime;
 
 use geode_core::config::Severity;
 use geode_core::log::Level;
 use geode_core::query::ReferenceTable;
+use geode_shell::listfilter::{ColumnMarks, Narrow};
 use gpui::SharedString;
 
 use crate::model::{
-    ConfigDoc, DatasetRow, DiagnosticRow, Lane, LogRow, PartitionRow, SourceRow, Tone, age_text,
+    ConfigDoc, DatasetRow, DiagnosticRow, Lane, PartitionRow, SourceRow, Tone, age_text,
     health_title,
 };
 
@@ -32,6 +34,21 @@ pub struct Cell {
     pub text: SharedString,
     pub tone: Tone,
     pub indent: u8,
+    /// Byte ranges of `text` the filter matched, painted in the match
+    /// accent; empty when no filter word landed in this cell.
+    pub marks: Vec<Range<usize>>,
+}
+
+impl Cell {
+    fn marked(mut self, marks: Vec<Range<usize>>) -> Cell {
+        self.marks = marks;
+        self
+    }
+
+    fn indented(mut self) -> Cell {
+        self.indent = 1;
+        self
+    }
 }
 
 fn cell(text: impl Into<SharedString>, tone: Tone) -> Cell {
@@ -39,6 +56,7 @@ fn cell(text: impl Into<SharedString>, tone: Tone) -> Cell {
         text: text.into(),
         tone,
         indent: 0,
+        marks: Vec::new(),
     }
 }
 
@@ -158,16 +176,33 @@ pub const SINCE_SEPARATOR: &str = " · ";
 /// `since` time. The page's ages timer rewrites the Since cells from that
 /// list in place, so it must index the rows the table paints, not every
 /// typed row.
+///
+/// The filter narrows over every column. Since matches on its clock text
+/// only: the age after it changes every second, and the ages tick keeps
+/// the clock prefix, so marks placed there stay valid across ticks.
 pub fn sources_table(
     rows: &[SourceRow],
     now: SystemTime,
     filter: &str,
 ) -> (PreparedTable, Vec<Option<SystemTime>>) {
+    let mut narrow = Narrow::new(filter);
     let mut since_times = Vec::new();
     let rows = rows
         .iter()
-        .filter(|r| filter.is_empty() || r.name.contains(filter) || r.health.contains(filter))
-        .map(|r| {
+        .filter_map(|r| {
+            let marks = narrow.row(&[
+                &r.name,
+                &r.health,
+                &r.since_hms,
+                &r.shape,
+                &r.last_poll,
+                &r.next_poll,
+                &r.ready,
+                &r.loading,
+            ])?;
+            Some((r, marks))
+        })
+        .map(|(r, mut marks)| {
             since_times.push(r.since);
             let since = if r.since_hms.is_empty() {
                 String::new()
@@ -190,14 +225,14 @@ pub fn sources_table(
                 key: r.name.clone(),
                 kind: RowKind::Plain,
                 cells: vec![
-                    cell(r.name.clone(), Tone::Normal),
-                    cell(r.health.clone(), r.tone),
-                    cell(since, Tone::Muted),
-                    cell(r.shape.clone(), Tone::Muted),
-                    cell(r.last_poll.clone(), Tone::Muted),
-                    cell(r.next_poll.clone(), Tone::Muted),
-                    cell(r.ready.clone(), Tone::Muted),
-                    cell(r.loading.clone(), Tone::Muted),
+                    cell(r.name.clone(), Tone::Normal).marked(marks.take(0)),
+                    cell(r.health.clone(), r.tone).marked(marks.take(1)),
+                    cell(since, Tone::Muted).marked(marks.take(2)),
+                    cell(r.shape.clone(), Tone::Muted).marked(marks.take(3)),
+                    cell(r.last_poll.clone(), Tone::Muted).marked(marks.take(4)),
+                    cell(r.next_poll.clone(), Tone::Muted).marked(marks.take(5)),
+                    cell(r.ready.clone(), Tone::Muted).marked(marks.take(6)),
+                    cell(r.loading.clone(), Tone::Muted).marked(marks.take(7)),
                 ],
                 detail,
                 tone: r.tone,
@@ -224,7 +259,8 @@ pub const DATA_COLUMNS: [ColumnSpec; 8] = [
     col("loaded", "Loaded", 90.0),
 ];
 
-fn partition_matches(row: &PartitionRow, query: &str) -> bool {
+/// A generation's searchable fields, in [`PARTITION_CELLS`] order.
+fn partition_columns(row: &PartitionRow) -> [&str; 6] {
     [
         row.label.as_str(),
         row.gen_id.as_str(),
@@ -233,30 +269,39 @@ fn partition_matches(row: &PartitionRow, query: &str) -> bool {
         row.rows.as_str(),
         row.kind,
     ]
-    .iter()
-    .any(|text| text.to_lowercase().contains(query))
 }
+
+/// The child-row cell each of [`partition_columns`] paints in: label,
+/// generation, source time, loaded, rows, kind.
+const PARTITION_CELLS: [usize; 6] = [0, 2, 3, 7, 4, 6];
 
 pub fn data_table(
     rows: &[DatasetRow],
     collapsed: &BTreeSet<String>,
     filter: &str,
 ) -> PreparedTable {
-    let query = filter.to_lowercase();
+    let mut narrow = Narrow::new(filter);
     let mut out = Vec::new();
     for r in rows {
-        let dataset_matches = query.is_empty() || r.name.to_lowercase().contains(&query);
-        let mut children = r
+        // A dataset matches on its name alone; a generation on its own
+        // fields. Words do not combine across the two levels.
+        let dataset_marks = narrow.row(&[&r.name]);
+        let dataset_matches = dataset_marks.is_some();
+        let children: Vec<(&PartitionRow, ColumnMarks)> = r
             .children
             .iter()
-            .filter(|c| dataset_matches || partition_matches(c, &query))
-            .peekable();
-        if !dataset_matches && children.peek().is_none() {
+            .filter_map(|c| match narrow.row(&partition_columns(c)) {
+                Some(marks) => Some((c, marks)),
+                None if dataset_matches => Some((c, ColumnMarks::default())),
+                None => None,
+            })
+            .collect();
+        if !dataset_matches && children.is_empty() {
             continue;
         }
         // Search reveals matches without changing the saved expansion. A
         // matching dataset keeps all children; leaf matches keep their parent.
-        let expanded = !query.is_empty() || !collapsed.contains(&r.name);
+        let expanded = !narrow.is_empty() || !collapsed.contains(&r.name);
         let tone = if r.has_catalog {
             Tone::Normal
         } else {
@@ -271,7 +316,8 @@ pub fn data_table(
             key: r.name.clone(),
             kind: RowKind::Parent { expanded },
             cells: vec![
-                cell(name, tone),
+                // `name` starts with the dataset name the marks index.
+                cell(name, tone).marked(dataset_marks.map(|mut m| m.take(0)).unwrap_or_default()),
                 cell(r.partitions.to_string(), Tone::Muted),
                 cell(r.latest_gen.clone(), Tone::Normal),
                 cell(r.published.clone(), Tone::Muted),
@@ -295,25 +341,25 @@ pub fn data_table(
         if !expanded {
             continue;
         }
-        for c in children {
+        for (c, mut marks) in children {
             let tone = if c.marked { Tone::Marked } else { Tone::Normal };
+            let mut cells = vec![
+                cell(c.label.clone(), Tone::Muted).indented(),
+                cell(String::new(), Tone::Muted),
+                cell(c.gen_id.clone(), tone),
+                cell(c.source_time.clone(), tone),
+                cell(c.rows.clone(), tone),
+                cell(if c.marked { "●" } else { "" }, Tone::Marked),
+                cell(c.kind, tone),
+                cell(c.loaded.clone(), Tone::Muted),
+            ];
+            for (field, &cell_ix) in PARTITION_CELLS.iter().enumerate() {
+                cells[cell_ix].marks = marks.take(field);
+            }
             out.push(PreparedRow {
                 key: format!("{}/{}/{}", r.name, c.label, c.gen_id),
                 kind: RowKind::Child,
-                cells: vec![
-                    Cell {
-                        text: c.label.clone().into(),
-                        tone: Tone::Muted,
-                        indent: 1,
-                    },
-                    cell(String::new(), Tone::Muted),
-                    cell(c.gen_id.clone(), tone),
-                    cell(c.source_time.clone(), tone),
-                    cell(c.rows.clone(), tone),
-                    cell(if c.marked { "●" } else { "" }, Tone::Marked),
-                    cell(c.kind, tone),
-                    cell(c.loaded.clone(), Tone::Muted),
-                ],
+                cells,
                 detail: vec![
                     format!(
                         "gen {} · source {} · loaded {} · rows {} · {}",
@@ -346,10 +392,15 @@ pub const HISTORY_COLUMNS: [ColumnSpec; 5] = [
     col("message", "Message", 520.0),
 ];
 
-pub fn diagnostics_table(rows: &[DiagnosticRow], history: bool) -> PreparedTable {
+/// The Current issues or History table, narrowed by `filter` over every
+/// visible cell and the full diagnostic text the detail strip shows. Only
+/// cells carry marks: a word that landed in the detail text keeps its row
+/// without a highlight.
+pub fn diagnostics_table(rows: &[DiagnosticRow], history: bool, filter: &str) -> PreparedTable {
+    let mut narrow = Narrow::new(filter);
     let rows = rows
         .iter()
-        .map(|r| {
+        .filter_map(|r| {
             let (sev, tone) = match r.severity {
                 Severity::Error => ("error", Tone::Error),
                 Severity::Warning => ("warn", Tone::Warn),
@@ -368,13 +419,24 @@ pub fn diagnostics_table(rows: &[DiagnosticRow], history: bool) -> PreparedTable
                 cell(r.location.clone(), Tone::Muted),
                 cell(r.message.clone(), Tone::Normal),
             ]);
-            PreparedRow {
+            if !narrow.is_empty() {
+                let columns: Vec<&str> = cells
+                    .iter()
+                    .map(|c| c.text.as_ref())
+                    .chain(std::iter::once(r.full.as_str()))
+                    .collect();
+                let mut marks = narrow.row(&columns)?;
+                for (ix, c) in cells.iter_mut().enumerate() {
+                    c.marks = marks.take(ix);
+                }
+            }
+            Some(PreparedRow {
                 key: format!("{}|{}", r.batch.clone().unwrap_or_default(), r.full),
                 kind: RowKind::Plain,
                 cells,
                 detail: vec![r.full.clone().into()],
                 tone,
-            }
+            })
         })
         .collect();
     PreparedTable {
@@ -402,7 +464,7 @@ pub fn config_table(docs: &[ConfigDoc], collapsed: &BTreeSet<String>) -> Prepare
             key: doc.name.clone(),
             kind: RowKind::Parent { expanded },
             cells: vec![
-                cell(doc.name.clone(), Tone::Normal),
+                cell(doc.name.clone(), Tone::Normal).marked(doc.name_marks.clone()),
                 cell(format!("{count} leaves"), Tone::Muted),
                 cell(String::new(), Tone::Muted),
             ],
@@ -417,12 +479,10 @@ pub fn config_table(docs: &[ConfigDoc], collapsed: &BTreeSet<String>) -> Prepare
                 key: format!("{}.{}", doc.name, leaf.key),
                 kind: RowKind::Child,
                 cells: vec![
-                    Cell {
-                        text: leaf.key.clone().into(),
-                        tone: Tone::Normal,
-                        indent: 1,
-                    },
-                    cell(leaf.value.clone(), Tone::Normal),
+                    cell(leaf.key.clone(), Tone::Normal)
+                        .indented()
+                        .marked(leaf.key_marks.clone()),
+                    cell(leaf.value.clone(), Tone::Normal).marked(leaf.value_marks.clone()),
                     cell(leaf.layer.clone(), Tone::Muted),
                 ],
                 detail: vec![
@@ -440,11 +500,7 @@ pub fn config_table(docs: &[ConfigDoc], collapsed: &BTreeSet<String>) -> Prepare
                 key: format!("{}.…", doc.name),
                 kind: RowKind::Child,
                 cells: vec![
-                    Cell {
-                        text: format!("… {} more", doc.omitted).into(),
-                        tone: Tone::Muted,
-                        indent: 1,
-                    },
+                    cell(format!("… {} more", doc.omitted), Tone::Muted).indented(),
                     cell(String::new(), Tone::Muted),
                     cell(String::new(), Tone::Muted),
                 ],
@@ -475,38 +531,41 @@ fn level_tone(level: Level) -> Tone {
     }
 }
 
-pub fn log_table(rows: &[LogRow], lost: u64) -> PreparedTable {
-    let mut out = Vec::with_capacity(rows.len() + 1);
-    if lost > 0 {
-        out.push(PreparedRow {
-            key: "lost".into(),
-            kind: RowKind::Notice,
-            cells: vec![cell(
-                format!("{lost} records lost — the ring wrapped before the last drain"),
-                Tone::Warn,
-            )],
-            detail: Vec::new(),
-            tone: Tone::Warn,
-        });
+/// The loss notice that leads the Log table when the ring wrapped.
+pub fn log_notice(lost: u64) -> PreparedRow {
+    PreparedRow {
+        key: "lost".into(),
+        kind: RowKind::Notice,
+        cells: vec![cell(
+            format!("{lost} records lost — the ring wrapped before the last drain"),
+            Tone::Warn,
+        )],
+        detail: Vec::new(),
+        tone: Tone::Warn,
     }
-    out.extend(rows.iter().map(|r| {
-        let tone = level_tone(r.level);
-        PreparedRow {
-            key: r.seq.to_string(),
-            kind: RowKind::Plain,
-            cells: vec![
-                cell(r.hms_millis.clone(), Tone::Muted),
-                cell(r.level.to_string(), tone),
-                cell(r.target, Tone::Muted),
-                cell(r.message.clone(), tone),
-            ],
-            detail: vec![format!("{} {} {} {}", r.hms_millis, r.level, r.target, r.message).into()],
-            tone,
-        }
-    }));
-    PreparedTable {
-        columns: LOG_COLUMNS.to_vec(),
-        rows: out,
+}
+
+/// One log record's row, unmarked: time, level, target, message.
+pub fn log_row(
+    seq: u64,
+    level: Level,
+    target: &'static str,
+    hms_millis: SharedString,
+    message: SharedString,
+) -> PreparedRow {
+    let tone = level_tone(level);
+    let detail = format!("{hms_millis} {level} {target} {message}").into();
+    PreparedRow {
+        key: seq.to_string(),
+        kind: RowKind::Plain,
+        cells: vec![
+            cell(hms_millis, Tone::Muted),
+            cell(level.as_str(), tone),
+            cell(target, Tone::Muted),
+            cell(message, tone),
+        ],
+        detail: vec![detail],
+        tone,
     }
 }
 
@@ -520,12 +579,13 @@ const REFERENCE_WIDTH: f32 = 120.0;
 /// identifies a row whenever the first key column is unique on its own,
 /// which holds for every declared reference dataset today. A composite key
 /// whose first column repeats would share selection between its rows. The
-/// filter matches any cell, case-insensitively.
+/// filter narrows fuzzily over every cell, as every section's does, and
+/// marks the matched characters; a NULL cell's dash is never matched.
 pub fn reference_table(table: Option<&ReferenceTable>, filter: &str) -> PreparedTable {
     let Some(table) = table else {
         return PreparedTable::empty();
     };
-    let query = filter.to_lowercase();
+    let mut narrow = Narrow::new(filter);
     let text = |c: &Option<String>| c.as_deref().unwrap_or(NULL_TEXT).to_string();
     let columns = table
         .columns
@@ -540,26 +600,30 @@ pub fn reference_table(table: Option<&ReferenceTable>, filter: &str) -> Prepared
             }
         })
         .collect();
+    let mut matched: Vec<&str> = Vec::with_capacity(table.columns.len());
     let rows = table
         .rows
         .iter()
-        .filter(|r| {
-            query.is_empty()
-                || r.iter()
-                    .flatten()
-                    .any(|c| c.to_lowercase().contains(&query))
-        })
-        .map(|r| PreparedRow {
-            key: r.first().map(text).unwrap_or_default(),
-            kind: RowKind::Plain,
-            cells: r.iter().map(|c| cell(text(c), Tone::Normal)).collect(),
-            detail: table
-                .columns
-                .iter()
-                .zip(r)
-                .map(|(name, c)| SharedString::from(format!("{name}: {}", text(c))))
-                .collect(),
-            tone: Tone::Normal,
+        .filter_map(|r| {
+            matched.clear();
+            matched.extend(r.iter().map(|c| c.as_deref().unwrap_or("")));
+            let mut marks = narrow.row(&matched)?;
+            Some(PreparedRow {
+                key: r.first().map(text).unwrap_or_default(),
+                kind: RowKind::Plain,
+                cells: r
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, c)| cell(text(c), Tone::Normal).marked(marks.take(ix)))
+                    .collect(),
+                detail: table
+                    .columns
+                    .iter()
+                    .zip(r)
+                    .map(|(name, c)| SharedString::from(format!("{name}: {}", text(c))))
+                    .collect(),
+                tone: Tone::Normal,
+            })
         })
         .collect();
     PreparedTable { columns, rows }
@@ -702,35 +766,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_log_table_leads_with_a_loss_notice_when_records_were_lost() {
-        let rows = vec![LogRow {
-            hms_millis: "09:00:00.000".into(),
-            level: geode_core::log::Level::ERROR,
-            target: "geode::shell",
-            message: "boom".into(),
-            seq: 1,
-        }];
-        let t = log_table(&rows, 7);
-        assert!(matches!(t.rows[0].kind, RowKind::Notice));
-        assert!(t.rows[0].cells[0].text.contains("7 records lost"));
-        assert_eq!(t.rows[1].tone, Tone::Error);
-        assert_eq!(
-            t.rows[1].detail,
-            vec![gpui::SharedString::from(
-                "09:00:00.000 ERROR geode::shell boom"
-            )]
-        );
-        assert_eq!(log_table(&rows, 0).rows.len(), 1);
-    }
-
     /// The notice's one cell must land where it has room: the `Time`
     /// column would clip it to "7 records l…".
     #[test]
     fn a_notice_row_paints_its_cell_in_the_widest_column_only() {
         let message = LOG_COLUMNS.iter().position(|c| c.key == "message").unwrap();
         assert_eq!(widest_column(&LOG_COLUMNS), message);
-        let t = log_table(&[], 7);
+        let t = PreparedTable {
+            columns: LOG_COLUMNS.to_vec(),
+            rows: vec![log_notice(7)],
+        };
         assert!(t.cell_at(0, 0).is_none(), "nothing in Time");
         assert!(t.cell_at(0, 1).is_none());
         let cell = t.cell_at(0, message).expect("the notice in Message");
@@ -799,8 +844,197 @@ mod tests {
         );
     }
 
+    /// The Reference filter is the shared fuzzy narrowing: words are
+    /// subsequences within one cell, may land in different cells, and
+    /// mark what they matched. A NULL cell's dash never matches.
+    #[test]
+    fn the_reference_filter_is_fuzzy_and_marks_cells() {
+        let table = crate::model::tests::ref_table();
+        let keys = |filter: &str| -> Vec<String> {
+            reference_table(Some(&table), filter)
+                .rows
+                .into_iter()
+                .map(|r| r.key)
+                .collect()
+        };
+        assert_eq!(keys("xnys"), ["SPX"]);
+        assert_eq!(keys("sx5 xer"), ["SX5E"], "words in two cells, fuzzy");
+        assert!(keys("spx xeur").is_empty(), "every word must land");
+        assert!(keys("—").is_empty(), "a NULL cell does not match its dash");
+        let t = reference_table(Some(&table), "sx5 xer");
+        let cells = &t.rows[0].cells;
+        assert_eq!(marked(&cells[0]), ["SX5"]);
+        assert!(cells[1].marks.is_empty(), "the NULL cell is unmarked");
+        assert_eq!(marked(&cells[2]), ["XE", "R"]);
+    }
+
+    fn marked(cell: &Cell) -> Vec<&str> {
+        cell.marks.iter().map(|r| &cell.text[r.clone()]).collect()
+    }
+
+    fn source(name: &str, health: &str, shape: &str, loading: &str) -> SourceRow {
+        SourceRow {
+            name: name.into(),
+            tone: Tone::Normal,
+            health: health.into(),
+            since: None,
+            since_hms: "09:15:00".into(),
+            shape: shape.into(),
+            last_poll: "".into(),
+            next_poll: "".into(),
+            ready: "3".into(),
+            loading: loading.into(),
+            detail: Vec::new(),
+            history: Vec::new(),
+        }
+    }
+
+    /// Sources narrow fuzzily, case-insensitively, over every column, and
+    /// mark the cells the words landed in.
+    #[test]
+    fn the_sources_filter_is_fuzzy_over_every_column_and_marks_cells() {
+        let now = std::time::SystemTime::UNIX_EPOCH;
+        let rows = vec![
+            source("Positions", "Ok", "fetch", ""),
+            source(
+                "vols",
+                "Degraded — stale",
+                "subscribe",
+                "eu_tech 2026-09-27",
+            ),
+        ];
+        let keys = |filter: &str| -> Vec<String> {
+            sources_table(&rows, now, filter)
+                .0
+                .rows
+                .into_iter()
+                .map(|r| r.key)
+                .collect()
+        };
+        assert_eq!(keys("positions"), ["Positions"], "name, any case");
+        assert_eq!(keys("DGRD"), ["vols"], "health, fuzzy");
+        assert_eq!(keys("subscr"), ["vols"], "shape");
+        assert_eq!(keys("eutch"), ["vols"], "loading");
+        assert_eq!(keys("09:15"), ["Positions", "vols"], "since clock text");
+        assert_eq!(keys("pos ftch"), ["Positions"], "words in two columns");
+        assert!(keys("pos subscribe").is_empty(), "every word must land");
+        let (t, _) = sources_table(&rows, now, "vls stale");
+        let cells = &t.rows[0].cells;
+        assert_eq!(marked(&cells[0]), ["v", "ls"]);
+        assert_eq!(marked(&cells[1]), ["stale"]);
+        assert!(cells[2..].iter().all(|c| c.marks.is_empty()));
+    }
+
+    /// A match in the clock text of Since stays inside the prefix the
+    /// ages tick keeps, so the marks survive the age being rewritten.
+    #[test]
+    fn since_marks_fall_in_the_clock_prefix_only() {
+        let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100);
+        let mut row = source("s", "Ok", "fetch", "");
+        row.since = Some(now - std::time::Duration::from_secs(5));
+        let (t, _) = sources_table(&[row], now, "15");
+        let since = &t.rows[0].cells[SINCE_COLUMN];
+        assert_eq!(since.text.as_ref(), "09:15:00 · 5 s");
+        assert_eq!(marked(since), ["15"]);
+        assert!(since.marks.iter().all(|r| r.end <= "09:15:00".len()));
+        // No other column holds a `7`: the age "7 s" is all that could.
+        let mut aged = source("x", "Ok", "fetch", "");
+        aged.since = Some(now - std::time::Duration::from_secs(7));
+        let (t, _) = sources_table(&[aged], now, "7");
+        assert!(t.rows.is_empty(), "the ticking age is not matched");
+    }
+
+    /// Data keeps its two levels under a fuzzy filter: a dataset matches
+    /// on its name and marks it; a generation on its own fields, marked in
+    /// the cell each field paints in.
+    #[test]
+    fn the_data_filter_marks_dataset_names_and_generation_cells() {
+        let mut risk = dataset("risk", 2);
+        risk.children[0].gen_id = "654".into();
+        risk.children[0].loaded = "09:23:45".into();
+        risk.children[0].kind = "archive";
+        risk.has_catalog = false;
+        let rows = vec![risk, dataset("vol", 1)];
+        let t = data_table(&rows, &BTreeSet::new(), "rsk");
+        assert_eq!(t.rows.len(), 3, "a dataset match keeps every generation");
+        assert_eq!(t.rows[0].cells[0].text.as_ref(), "risk (no catalog yet)");
+        assert_eq!(marked(&t.rows[0].cells[0]), ["r", "sk"]);
+        assert!(
+            t.rows[1..]
+                .iter()
+                .all(|r| r.cells.iter().all(|c| c.marks.is_empty())),
+            "unmatched generations kept by their dataset carry no marks"
+        );
+        let t = data_table(&rows, &BTreeSet::new(), "654 arch 23:45");
+        let keys: Vec<_> = t.rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(keys, ["risk", "risk/p0/654"]);
+        assert!(t.rows[0].cells[0].marks.is_empty(), "the parent is context");
+        let leaf = &t.rows[1].cells;
+        assert_eq!(marked(&leaf[2]), ["654"], "generation");
+        assert_eq!(marked(&leaf[6]), ["arch"], "kind");
+        assert_eq!(marked(&leaf[7]), ["23:45"], "loaded");
+        assert!(
+            data_table(&rows, &BTreeSet::new(), "risk 654")
+                .rows
+                .is_empty()
+        );
+    }
+
     #[test]
     fn no_reference_answer_is_an_empty_table() {
         assert!(reference_table(None, "").rows.is_empty());
+    }
+
+    fn issue(location: &str, message: &str, full: &str) -> DiagnosticRow {
+        DiagnosticRow {
+            severity: Severity::Warning,
+            lane: Lane::Config,
+            batch: Some("09:00:00".into()),
+            location: location.into(),
+            message: message.into(),
+            full: full.into(),
+        }
+    }
+
+    /// Issues narrow fuzzily over their cells and the full text the
+    /// detail strip shows; only cells are marked.
+    #[test]
+    fn the_issue_filter_matches_cells_and_detail_and_marks_cells_only() {
+        let rows = vec![
+            issue(
+                "keymap.toml › bindings",
+                "unknown action",
+                "keymap: unknown action x::y",
+            ),
+            issue(
+                "app.toml › theme",
+                "bad colour",
+                "app: bad colour in theme.name",
+            ),
+        ];
+        let keys = |t: &PreparedTable| {
+            t.rows
+                .iter()
+                .map(|r| r.cells[2].text.to_string())
+                .collect::<Vec<_>>()
+        };
+        let t = diagnostics_table(&rows, false, "unk act");
+        assert_eq!(keys(&t), ["keymap.toml › bindings"]);
+        assert_eq!(marked(&t.rows[0].cells[3]), ["unk", "act"]);
+        let t = diagnostics_table(&rows, false, "x::y");
+        assert_eq!(t.rows.len(), 1, "the detail text matches");
+        assert!(
+            t.rows[0].cells.iter().all(|c| c.marks.is_empty()),
+            "but is not marked"
+        );
+        let t = diagnostics_table(&rows, true, "WARN thm");
+        assert_eq!(t.rows.len(), 1);
+        assert_eq!(
+            marked(&t.rows[0].cells[1]),
+            ["warn"],
+            "the batch column shifts the cells"
+        );
+        assert_eq!(marked(&t.rows[0].cells[3]), ["th", "m"]);
+        assert_eq!(diagnostics_table(&rows, true, " ").rows.len(), 2);
     }
 }

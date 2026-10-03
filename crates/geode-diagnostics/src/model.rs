@@ -2,17 +2,17 @@
 //! entity, the loaded `Config`, the log tail, and the frame's requery stats.
 //! Pure: explicit `now` and clock inputs, no GPUI, no I/O.
 
+use std::ops::Range;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
 use geode_core::config::{Config, Diagnostic, Severity};
-use geode_core::log::{Level, Record};
+use geode_core::log::Record;
 use geode_core::query::{AsOf, ReferenceOutcome, ReferenceTable};
 use geode_shell::diagnostics::{Diagnostics, Health, SourceShape, SourceState};
+use geode_shell::listfilter::{ColumnMarks, Narrow};
 use geode_shell::perf::{BUCKET_UPPER_BOUNDS_MICROS, FrameHistogram, RequeryStats, format_ms};
-
-use crate::log::LogFilter;
 
 /// A row's visual weight; the page maps it to theme paint. `Marked`
 /// highlights the generation resolved under a historical as-of.
@@ -68,11 +68,6 @@ fn local_hms(t: SystemTime, clock: Clock) -> String {
 
 fn local_hms_utc(t: DateTime<Utc>, clock: Clock) -> String {
     clock.hms(t)
-}
-
-fn local_hms_millis(t: SystemTime, clock: Clock) -> String {
-    let dt = DateTime::<Utc>::from(t);
-    format!("{}.{:03}", clock.hms(dt), dt.timestamp_subsec_millis())
 }
 
 // ------------------------------------------------------------ Sources
@@ -423,6 +418,10 @@ pub struct ConfigLeaf {
     pub key: String,
     pub value: String,
     pub layer: String,
+    /// Filter matches in `key`, as byte ranges; empty without a match.
+    pub key_marks: Vec<Range<usize>>,
+    /// Filter matches in `value`, as byte ranges.
+    pub value_marks: Vec<Range<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -431,48 +430,88 @@ pub struct ConfigDoc {
     pub leaves: Vec<ConfigLeaf>,
     /// Leaves past the cap, after filtering.
     pub omitted: usize,
+    /// Filter matches in `name`: every character a kept leaf matched in
+    /// the document column, merged.
+    pub name_marks: Vec<Range<usize>>,
 }
 
 /// Every loaded document with its leaves (`a.b.0.c = value [layer]`),
-/// filtered by substring over `doc.key` and value, capped per document.
+/// narrowed by the fuzzy `filter`, capped per document after narrowing. A
+/// document no leaf matches disappears.
+///
+/// A leaf narrows over three columns: its document's name, its path, and
+/// its value. The name is a column of its own rather than a prefix of the
+/// path, so a word lands wholly in the name or wholly in the path and
+/// never aligns across the dot. A name that holds the whole query keeps
+/// every leaf; the name's matches mark the document row, and the Key cell
+/// marks only what matched in the path.
 pub fn config_docs(config: &Config, filter: &str) -> Vec<ConfigDoc> {
-    let filter = filter.to_lowercase();
+    let mut narrow = Narrow::new(filter);
     config
         .doc_names()
         .filter_map(|doc_name| {
             let doc = config.doc(doc_name)?;
             let mut leaves = Vec::new();
             walk_leaves(&doc.value, "", &mut leaves);
-            let mut kept: Vec<ConfigLeaf> = leaves
+            let mut matched: Vec<(String, String, ColumnMarks)> = leaves
                 .into_iter()
-                .filter(|(path, value)| {
-                    filter.is_empty()
-                        || format!("{doc_name}.{path}")
-                            .to_lowercase()
-                            .contains(&filter)
-                        || value.to_lowercase().contains(&filter)
+                .filter_map(|(path, value)| {
+                    let marks = narrow.row(&[doc_name, &path, &value])?;
+                    Some((path, value, marks))
                 })
-                .map(|(path, value)| ConfigLeaf {
+                .collect();
+            if !narrow.is_empty() && matched.is_empty() {
+                return None;
+            }
+            let omitted = matched.len().saturating_sub(MAX_LEAVES_PER_DOC);
+            matched.truncate(MAX_LEAVES_PER_DOC);
+            // Bytes of the name a shown leaf matched; a leaf past the cap
+            // marks nothing, as it shows nothing.
+            let mut name_hits = vec![false; doc_name.len()];
+            for (_, _, marks) in &matched {
+                for r in marks.get(0) {
+                    name_hits[r.clone()].fill(true);
+                }
+            }
+            let leaves = matched
+                .into_iter()
+                .map(|(path, value, mut marks)| ConfigLeaf {
                     layer: config
                         .explain(doc_name, &path)
                         .map(|l| l.name().to_string())
                         .unwrap_or_else(|| "?".into()),
+                    key_marks: marks.take(1),
+                    value_marks: marks.take(2),
                     key: path,
                     value,
                 })
                 .collect();
-            if !filter.is_empty() && kept.is_empty() {
-                return None;
-            }
-            let omitted = kept.len().saturating_sub(MAX_LEAVES_PER_DOC);
-            kept.truncate(MAX_LEAVES_PER_DOC);
             Some(ConfigDoc {
                 name: doc_name.to_string(),
-                leaves: kept,
+                leaves,
                 omitted,
+                name_marks: runs_of(&name_hits),
             })
         })
         .collect()
+}
+
+/// The maximal runs of `true` in `hits`, as ranges. Marks are char-aligned
+/// byte ranges, so the runs they set are too.
+fn runs_of(hits: &[bool]) -> Vec<Range<usize>> {
+    let mut runs = Vec::new();
+    let mut start = None;
+    for (ix, &hit) in hits.iter().chain(std::iter::once(&false)).enumerate() {
+        match (hit, start) {
+            (true, None) => start = Some(ix),
+            (false, Some(s)) => {
+                runs.push(s..ix);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    runs
 }
 
 /// Walk nested tables and arrays, giving each leaf its own indexed path
@@ -502,32 +541,6 @@ fn walk_value(value: &toml::Value, path: &str, out: &mut Vec<(String, String)>) 
 }
 
 // ------------------------------------------------------------ Log
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LogRow {
-    pub hms_millis: String,
-    pub level: Level,
-    pub target: &'static str,
-    pub message: String,
-    pub seq: u64,
-}
-
-pub fn log_rows<'a>(
-    records: impl Iterator<Item = &'a Record>,
-    filter: &LogFilter,
-    clock: Clock,
-) -> Vec<LogRow> {
-    records
-        .filter(|r| filter.accepts(r))
-        .map(|r| LogRow {
-            hms_millis: local_hms_millis(r.at, clock),
-            level: r.level,
-            target: r.target,
-            message: r.message.clone(),
-            seq: r.seq,
-        })
-        .collect()
-}
 
 /// Distinct targets in the tail, sorted, for the target select.
 pub fn log_targets<'a>(records: impl Iterator<Item = &'a Record>) -> Vec<&'static str> {
@@ -1361,6 +1374,124 @@ pub(crate) mod tests {
             docs.iter()
                 .all(|d| d.leaves.len() <= MAX_LEAVES_PER_DOC && d.omitted == 0)
         );
+    }
+
+    fn marked<'a>(text: &'a str, marks: &[Range<usize>]) -> Vec<&'a str> {
+        marks.iter().map(|r| &text[r.clone()]).collect()
+    }
+
+    fn two_doc_config() -> Config {
+        use geode_core::config::{ConfigSources, LayerDoc};
+        Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("app", "config_version = 1\n[theme]\nname = \"Solarized\"\n")
+                    .unwrap(),
+                LayerDoc::builtin(
+                    "keymap",
+                    "config_version = 1\n[[bindings]]\nwhen = \"grid\"\n[bindings.keys]\n\"j\" = \"x::down\"\n",
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        })
+    }
+
+    /// Effective values narrow fuzzily over three columns: the document's
+    /// name, the leaf's path, and its value. The Key cell marks only the
+    /// path, and a name match marks the document row.
+    #[test]
+    fn config_docs_narrow_fuzzily_and_mark_keys_values_and_documents() {
+        let config = two_doc_config();
+        let docs = config_docs(&config, "thm nm");
+        assert_eq!(docs.len(), 1);
+        let leaf = &docs[0].leaves[0];
+        assert_eq!(leaf.key, "theme.name");
+        assert_eq!(marked(&leaf.key, &leaf.key_marks), ["th", "m", "n", "m"]);
+        assert!(leaf.value_marks.is_empty());
+        assert!(docs[0].name_marks.is_empty(), "the query is not in `app`");
+
+        let docs = config_docs(&config, "SOLAR");
+        let leaf = &docs[0].leaves[0];
+        assert_eq!(marked(&leaf.value, &leaf.value_marks), ["Solar"]);
+        assert!(leaf.key_marks.is_empty());
+
+        let docs = config_docs(&config, "keymap");
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].name, "keymap");
+        assert_eq!(docs[0].name_marks, vec![0..6]);
+        assert_eq!(docs[0].leaves.len(), 3, "the name keeps every leaf");
+        assert!(
+            docs[0].leaves.iter().all(|l| l.key_marks.is_empty()),
+            "the whole query landed in the name"
+        );
+
+        // `keys` must not align through the hidden name: `key` in
+        // "keymap" and the `s` of "bindings" would keep every keymap leaf
+        // and mark one stray letter of the path.
+        let docs = config_docs(&config, "keys");
+        assert_eq!(docs.len(), 1);
+        let keys: Vec<&str> = docs[0].leaves.iter().map(|l| l.key.as_str()).collect();
+        assert_eq!(keys, ["bindings.0.keys.j"], "the `when` leaf drops");
+        let leaf = &docs[0].leaves[0];
+        assert_eq!(marked(&leaf.key, &leaf.key_marks), ["keys"]);
+        assert!(docs[0].name_marks.is_empty());
+
+        // Words split across the name and the path mark both rows.
+        let docs = config_docs(&config, "kmp when");
+        let leaf = &docs[0].leaves[0];
+        assert_eq!(leaf.key, "bindings.0.when");
+        assert_eq!(marked(&leaf.key, &leaf.key_marks), ["when"]);
+        assert_eq!(marked(&docs[0].name, &docs[0].name_marks), ["k", "m", "p"]);
+
+        let all = config_docs(&config, "  ");
+        assert_eq!(all.len(), 2, "a blank query narrows nothing");
+        assert!(all.iter().all(|d| d.name_marks.is_empty()));
+    }
+
+    /// The cap applies after narrowing: `omitted` counts matching leaves
+    /// past it, never the leaves the filter dropped.
+    #[test]
+    fn config_docs_cap_counts_only_matching_leaves() {
+        use geode_core::config::{ConfigSources, LayerDoc};
+        let mut text = String::from("config_version = 1\n");
+        for i in 0..MAX_LEAVES_PER_DOC + 3 {
+            text.push_str(&format!("a{i} = {i}\n"));
+        }
+        for i in 0..5 {
+            text.push_str(&format!("b{i} = {i}\n"));
+        }
+        let config = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("big", &text).unwrap()],
+            desk: None,
+            user: None,
+        });
+        let docs = config_docs(&config, "a");
+        assert_eq!(docs[0].leaves.len(), MAX_LEAVES_PER_DOC);
+        assert_eq!(docs[0].omitted, 3);
+        assert!(docs[0].leaves.iter().all(|l| l.key.starts_with('a')));
+        assert!(config_docs(&config, "zz").is_empty());
+
+        // Only leaves past the cap match through the document's name: the
+        // `v` of "xv" scores below a word-start `v` in every shown path,
+        // and the `z` leaves, which hold no `v`, sit past the cap. The
+        // name row marks nothing, since no shown leaf matched it.
+        let mut text = String::from("config_version = 1\n");
+        for i in 0..MAX_LEAVES_PER_DOC {
+            text.push_str(&format!("v{i} = {i}\n"));
+        }
+        for i in 0..3 {
+            text.push_str(&format!("z{i} = {i}\n"));
+        }
+        let config = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("xv", &text).unwrap()],
+            desk: None,
+            user: None,
+        });
+        let docs = config_docs(&config, "v");
+        assert_eq!(docs[0].omitted, 4, "one `v` leaf and three `z` leaves");
+        assert!(docs[0].leaves.iter().all(|l| !l.key_marks.is_empty()));
+        assert!(docs[0].name_marks.is_empty(), "omitted leaves mark nothing");
     }
 
     #[test]

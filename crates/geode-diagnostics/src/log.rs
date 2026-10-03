@@ -91,6 +91,8 @@ pub struct LogFilter {
     /// Indexed by [`LogFilter::level_index`]; all true by default.
     pub levels: [bool; 5],
     pub target: Option<String>,
+    /// The fuzzy text filter. The page narrows the cached rows by it
+    /// ([`crate::log_cache::Narrowed`]); [`LogFilter::accepts`] never sees it.
     pub text: String,
 }
 
@@ -107,12 +109,15 @@ impl LogFilter {
         LEVELS.iter().position(|l| *l == level).unwrap_or(2)
     }
 
+    /// Whether the level toggles and the exact target select pass `r`.
+    /// The text filter is applied after, where the time is formatted.
     pub fn accepts(&self, r: &Record) -> bool {
-        self.levels[Self::level_index(r.level)]
-            && self.target.as_deref().is_none_or(|t| t == r.target)
-            && (self.text.is_empty()
-                || r.message.contains(&self.text)
-                || r.target.contains(&self.text))
+        self.gates(r.level, r.target)
+    }
+
+    /// [`LogFilter::accepts`] over a record's level and target alone.
+    pub fn gates(&self, level: Level, target: &str) -> bool {
+        self.levels[Self::level_index(level)] && self.target.as_deref().is_none_or(|t| t == target)
     }
 }
 
@@ -162,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_gates_on_level_target_and_text() {
+    fn the_filter_gates_on_level_and_target() {
         let mut f = LogFilter::all();
         let r = rec(Level::DEBUG, "geode::query", "planned 3 tables");
         assert!(f.accepts(&r));
@@ -171,10 +176,9 @@ mod tests {
         f.levels[LogFilter::level_index(Level::DEBUG)] = true;
         f.target = Some("geode::shell".into());
         assert!(!f.accepts(&r));
-        f.target = None;
-        f.text = "tables".into();
+        f.target = Some("geode::query".into());
         assert!(f.accepts(&r));
-        f.text = "query".into();
-        assert!(f.accepts(&r), "target text matches too");
+        f.text = "absent".into();
+        assert!(f.accepts(&r), "text narrows later, over the cached rows");
     }
 }

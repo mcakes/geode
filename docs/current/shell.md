@@ -56,6 +56,49 @@ into tiles. The shell dispatches both rather than the pure workspace router:
 the split's orientation needs the slot's geometry, and a refused pull leaves a
 notice.
 
+Every tile paints a × that closes it. The shell sends each occupant a
+`CloseHandle` once, when the occupant is created
+(`TileContent::set_close`, required so a new occupant cannot silently lack
+the button); the handle is a closure over the shell's weak entity and the
+tile's id, so a module closes its own tile without a path to `ShellView`.
+`CloseHandle::button` paints the × itself: a bare muted glyph with the
+control door's hover and pressed fills, tooltip `Close tile` with the live
+key of `workspace::close_tile`, selector `tile-close-{tile}`. A module puts
+it last in its header's fixed tail (after health and `⋯`), which never
+shrinks, so a narrow tile keeps it; the placeholder, which has no header,
+paints it in its top-right corner. The × is always painted, not gated on
+hover or focus, so the header never reflows under the pointer.
+
+A press closes the tile whose × it is, never "the focused tile". It
+stops at the button and prevents default: the press is the button's, so no
+listener beneath it — the tile cell's focus and gestures, a module's own
+header handlers — also acts on it. A modified press is not the button's: it
+passes to the tile, where mod+press arms a tile drag. If the pressed tile
+was focused, the result is exactly `ctrl+w`'s (stack sibling, else
+tree-order neighbor; an emptied dock hides and focus falls back). If another
+tile held focus, that tile keeps it (`Workspace::close_tile_id`).
+
+A double-click on a × closes one tile, and the rest of that double-click
+reaches nothing. Closing changes what lies under the pointer — a
+neighbor's ×, a focused placeholder whose double-click opens the tile
+picker, the empty tree's hint, a module header's own double-click — so a
+successful pointer close arms `ShellView::swallow_double_click_followup`,
+and the shell root's capture-phase press listener, which runs before every
+tile's and module's listener, stops any press with `click_count > 1` while
+it is set. The next first press clears it and passes. The button also
+ignores a press with `click_count > 1` itself. There is no confirmation and
+no undo; the pricer flushes a dirty sheet when its tile drops, so only
+layout and view state go.
+
+The press runs the key's path (`ShellView::close_tile_by_pointer`): it leaves
+an open `:` line as any press on another tile does, records
+`workspace::close_tile` in the action tail, and asks the same
+`action_refusal` predicate as `dispatch`, then marks the session dirty and
+arms focus restoration. Over a page the close is refused with
+`close the page first (esc)`; the page covers the tiles in any case. A dialog
+does not refuse it (the palette may close a tile behind a dialog), but the
+modal overlay covers every ×. A handle outliving its tile closes nothing.
+
 A fullscreen tile paints with the same chrome as a workspace's only tile,
 so the status bar marks it instead. The bar's right region is its
 view-state section: how the window is being shown, then the active
@@ -391,12 +434,18 @@ follow.
 ### Workspace lanes
 
 The selection lives in a lane: scope with its undo/redo stacks and open text
-session, the active grouping slot, and as-of with its one remembered previous
-value. The frame holds one shared lane and one lane per pinned workspace. An
-unpinned workspace reads and writes the shared lane; a pinned one reads and
-writes only its own. Definitions stay shared across lanes — grouping slot
-contents, saved scopes, named expressions — as do recent publications and the
-data and config versions.
+session, the grouping, and as-of with its one remembered previous value. A
+lane's grouping is one of three choices: each view's own grouping, a
+numbered slot, or the lane's own ad hoc chain. The ad hoc chain is stored on
+the lane beside the choice, so it survives a switch to a slot and can be
+returned to (`frame::grouping_adhoc`, "Ad hoc grouping", no default
+binding; with no chain stored it reports that in the status bar). The
+toolbar's grouping readout reads `n · chain` for a slot, `* · chain` for an
+ad hoc chain, and `view default` otherwise. The frame holds one shared lane
+and one lane per pinned workspace. An unpinned workspace reads and writes
+the shared lane; a pinned one reads and writes only its own. Definitions
+stay shared across lanes — grouping slot contents, saved scopes, named
+expressions — as do recent publications and the data and config versions.
 
 Every lane draws its scope, grouping, and as-of generations from one
 frame-wide counter, so a generation number names exactly one value in any
@@ -410,6 +459,11 @@ workspace reads the shared lane again. A grouping reload (`replace_slots`)
 bumps grouping in every lane, hidden pinned ones included, and clears an
 active slot that no longer exists in each lane separately; saving a slot
 (`save_slot`) bumps grouping only in the lanes where that slot is active.
+A reload that changes `groupings`, `datasets` or `dimensions` also checks
+each lane's ad hoc chain against the groupable columns. A chain naming a
+column outside them is dropped whole, with a warning, and a lane it was
+active in returns to each view's own grouping. It is never narrowed: a
+partly kept chain would be a plausible wrong grouping.
 
 Tiles receive a `FrameRef` bound to their own tile and its workspace (see
 [architecture](architecture.md)), so a pin or unpin changes the lane a tile
@@ -803,8 +857,9 @@ older than the last one the group held.
 
 `TileContent` is the module boundary. An occupant supplies its key context,
 handles actions and local commands, receives find events and deliveries,
-reports focus ownership, and accepts visibility and stack state. Required
-methods make lifecycle obligations explicit for every feature.
+reports focus ownership, and accepts visibility, stack state and its close
+handle. Required methods make lifecycle obligations explicit for every
+feature.
 
 `Delivery` is an exhaustive enum. Adding a new outcome type forces every
 occupant to decide how it handles that variant at compile time. Query, pricing,
@@ -1099,11 +1154,19 @@ The writer emits `config_version = 1` and these records:
 | `workspaces.N` | Main tree, focused tile, optional fullscreen tile, and focused region |
 | `workspaces.N.docks.<side>` | Left, right, or bottom dock tree, focused tile, visibility, and size |
 | `workspaces.N.tiles.<id>` | Module name, its opaque state table, and the link groups the tile is in: `follow` and `emit`, each a group letter `"a"` to `"d"`, written only when set |
-| `frame` | Dimension selections, named-expression references, text/expression scope, grouping slot, and as-of |
+| `frame` | Dimension selections, named-expression references, text/expression scope, grouping (`slot`, or `ad_hoc` with `grouping = "ad_hoc"` while the ad hoc chain is active), and as-of |
 | `workspaces.N.frame` | Pinned lane for workspace N (same fields as `frame`); present iff workspace N is pinned |
 | `links.<letter>` | One link group's scope, under `scope`, in the encoding `frame` uses for its own (dimension selections, text, expression, named-expression references); written only for a group whose scope is not empty, and an absent table reads as an empty scope |
 | `palette.usage` | Per-row usage count and last-used timestamp |
 | `pages.<kind>` | One opaque table per page kind from `PageContent::serialize`, kept for kinds that never opened this session; the diagnostics page writes its `section` |
+
+`ad_hoc` holds the lane's stored chain whenever one exists; `slot` is
+omitted while the chain is active. A malformed `ad_hoc` warns and is
+ignored, and `grouping = "ad_hoc"` without a usable chain warns and falls
+back to `slot` when one is present, else to each view's own grouping. A
+restored chain is checked against the groupable columns like a reloaded
+one. Each pinned workspace's record restores its own ad hoc chain, or none;
+a pin made at runtime copies the shared lane's.
 
 Trees use recursive `leaf`, `split`, and `stack` nodes. Splits store orientation,
 children, and ratios; stacks store tile IDs and the active member index. All

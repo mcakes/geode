@@ -191,46 +191,83 @@ fn align(
     title_len: usize,
     claimed: Option<&[bool]>,
 ) -> Option<(u32, Vec<usize>)> {
-    if query.is_empty() {
+    let q: Vec<char> = query.chars().collect();
+    let c: Vec<char> = candidate.chars().collect();
+    align_in(&mut AlignScratch::default(), &q, &c, title_len, claimed)
+}
+
+/// The score tables [`align_in`] fills, kept by a caller that aligns many
+/// candidates so each alignment reuses them instead of allocating.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AlignScratch {
+    ends_at: Vec<Option<u32>>,
+    within: Vec<Option<u32>>,
+}
+
+/// [`align`] over decoded characters and caller-owned tables: the same
+/// alignment and score, without decoding or allocating per candidate.
+pub(crate) fn align_in(
+    scratch: &mut AlignScratch,
+    q: &[char],
+    c: &[char],
+    title_len: usize,
+    claimed: Option<&[bool]>,
+) -> Option<(u32, Vec<usize>)> {
+    if q.is_empty() {
         return Some((0, Vec::new()));
     }
 
-    let q: Vec<char> = query.chars().collect();
-    let c: Vec<char> = candidate.chars().collect();
+    let AlignScratch { ends_at, within } = scratch;
     let (n, m) = (q.len(), c.len());
     if n > m {
         return None;
     }
-    let base_at = |j: usize| discounted(char_base(&c, j), j, title_len);
+    let base_at = |j: usize| discounted(char_base(c, j), j, title_len);
     let run_at = |j: usize| discounted(RUN_BONUS, j, title_len);
+    // No alignment starts before the first free occurrence of the query's
+    // first character or ends after the last of its last, so only the
+    // columns between them are scored; the cells outside stay `None`.
+    let free = |j: usize| !claimed.is_some_and(|taken| taken[j]);
+    let lo = (0..m).find(|&j| c[j] == q[0] && free(j))?;
+    let hi = (0..m).rev().find(|&j| c[j] == q[n - 1] && free(j))?;
+    if lo > hi {
+        return None;
+    }
+    // The tables hold only the window's `w` columns: cell `(i, j)` lives
+    // at `i * w + (j - lo)`. A cell left of the window is `None`, which
+    // is why the column at `lo` has no predecessor below row 0.
+    let w = hi - lo + 1;
+    let at = |i: usize, j: usize| i * w + (j - lo);
 
     // Track best scores ending at each cell and within each prefix. Both
-    // n-by-m tables are retained for alignment backtracking.
-    let mut ends_at: Vec<Option<u32>> = vec![None; n * m];
-    let mut within: Vec<Option<u32>> = vec![None; n * m];
+    // n-by-w tables are retained for alignment backtracking.
+    ends_at.clear();
+    ends_at.resize(n * w, None);
+    within.clear();
+    within.resize(n * w, None);
     for i in 0..n {
         let mut best_so_far: Option<u32> = None;
         let mut any = false;
-        for j in 0..m {
+        for j in lo..=hi {
             let mut cell = None;
             if c[j] == q[i] && j >= i && !claimed.is_some_and(|taken| taken[j]) {
                 let base = base_at(j);
                 if i == 0 {
                     cell = Some(base);
-                } else {
-                    let prev = (i - 1) * m + (j - 1);
+                } else if j > lo {
+                    let prev = at(i - 1, j - 1);
                     let fresh = within[prev];
                     let cont = ends_at[prev].map(|s| s + run_at(j));
                     cell = fresh.max(cont).map(|s| s + base);
                 }
             }
-            ends_at[i * m + j] = cell;
+            ends_at[at(i, j)] = cell;
             if let Some(s) = cell
                 && best_so_far.is_none_or(|b| s > b)
             {
                 best_so_far = Some(s);
             }
-            within[i * m + j] = best_so_far;
+            within[at(i, j)] = best_so_far;
             any |= cell.is_some();
         }
         if !any {
@@ -238,22 +275,23 @@ fn align(
         }
     }
 
-    let score = within[(n - 1) * m + (m - 1)]?;
+    let score = within[at(n - 1, hi)]?;
 
     // Backtrack through the same score rules, preferring a continuing run
     // when it attains the cell's score, otherwise the earliest matching endpoint.
+    // A scored cell below row 0 always has its predecessor inside the window.
     let mut indices = vec![0usize; n];
-    let mut j = (0..m).find(|&j| ends_at[(n - 1) * m + j] == Some(score))?;
+    let mut j = (lo..=hi).find(|&j| ends_at[at(n - 1, j)] == Some(score))?;
     indices[n - 1] = j;
     for i in (1..n).rev() {
-        let cell = ends_at[i * m + j]?;
+        let cell = ends_at[at(i, j)]?;
         let base = base_at(j);
-        let prev = (i - 1) * m + (j - 1);
+        let prev = at(i - 1, j - 1);
         j = match ends_at[prev] {
             Some(s) if s + run_at(j) + base == cell => j - 1,
             _ => {
                 let target = within[prev];
-                (0..j).find(|&jj| ends_at[(i - 1) * m + jj] == target)?
+                (lo..j).find(|&jj| ends_at[at(i - 1, jj)] == target)?
             }
         };
         indices[i - 1] = j;
@@ -1065,6 +1103,23 @@ mod tests {
     }
 
     // -- fuzzy_match indices ----------------------------------------------
+
+    /// Alignment scores only the columns between the first occurrence of
+    /// the query's first character and the last of its last. The last
+    /// character's earlier occurrences sit before the first one's here, so
+    /// a window cut at the earliest would lose the match.
+    #[test]
+    fn the_scoring_window_ends_at_the_last_char_s_last_occurrence() {
+        let (_, indices) = fuzzy_match("ab", "bab").unwrap();
+        assert_eq!(indices, vec![1, 2]);
+        let (_, indices) = fuzzy_match("ac", "c b a c").unwrap();
+        assert_eq!(indices, vec![4, 6]);
+        assert!(fuzzy_match("ba", "a b").is_none());
+        // A later query character on the window's first column has no
+        // predecessor inside the window.
+        let (_, indices) = fuzzy_match("pp", "apple").unwrap();
+        assert_eq!(indices, vec![1, 2]);
+    }
 
     #[test]
     fn indices_are_contiguous_for_a_prefix_match() {

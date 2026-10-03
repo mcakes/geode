@@ -16,16 +16,17 @@ The seam it sits on: [pages](../../docs/current/shell.md#pages).
 |---|---|
 | [`lib`](src/lib.rs) | `DiagnosticsPageFactory`: kind, title, icon, action registration, the default keymap fragment (`diagnostics && mode == normal` for the bare keys, `diagnostics && mode == insert` for Escape), the `mod+d` toggle binding, and the `PageContent` adapter over the page entity. |
 | [`section`](src/section.rs) | The six sections in rail order (Sources, Data, Reference, Config, Log, Performance): names, titles, and cycling. |
-| [`model`](src/model.rs) | Typed rows per section (`SourceRow`, `DatasetRow`, `DiagnosticRow`, `ConfigDoc`, `LogRow`, `PerfModel`), the badges (the Reference badge counts only the answer for the selected dataset at the frame's as-of), the header chips, `reference_answer`, the stored answer when it answers a dataset at an as-of, and `reference_status`, the Reference section's status line for a dataset at the frame's as-of (`Loading` while the stored answer is for another dataset or as-of; either lane's refusal for the dataset; source and no-generation times dated, because a historical as-of may span days; display only, it never asks for a read). Pure: explicit `now` and clock inputs, no GPUI, no I/O. |
-| [`prepared`](src/prepared.rs) | `PreparedTable`: the column specs and rows a section paints, with expansion and filtering applied; a `ColumnSpec` names its column with a `SharedString`, static for the fixed sections and built once per table by `reference_table`, whose columns are the dataset's declared names, so the per-frame header reads only clone a reference; `cell_at` places a notice row's one cell in the widest column. Pure; `Rc`-shared with the delegate. |
-| [`table`](src/table.rs) | `SectionDelegate`, the one `TableDelegate` for every table section: paints a shared prepared table and its empty state (static text shared, formatted text only for Reference), scales column widths with the window rem, and formats nothing per paint but a parent row's expander. |
-| [`page`](src/page.rs) | `DiagnosticsPage`: the observers, the selected section, per-section cursors and filters, the expansion sets, the log tail and its filter, the target select, the Levels state, the selected reference dataset and its prepared status and dataset buttons, the edge-only reference requests, the cached badge and header strings, the ages timer, key dispatch, visibility, serialization, and the frame layout. |
+| [`model`](src/model.rs) | Typed rows per section (`SourceRow`, `DatasetRow`, `DiagnosticRow`, `ConfigDoc`, `PerfModel`), the badges (the Reference badge counts only the answer for the selected dataset at the frame's as-of), the header chips, `reference_answer`, the stored answer when it answers a dataset at an as-of, and `reference_status`, the Reference section's status line for a dataset at the frame's as-of (`Loading` while the stored answer is for another dataset or as-of; either lane's refusal for the dataset; source and no-generation times dated, because a historical as-of may span days; display only, it never asks for a read). Pure: explicit `now` and clock inputs, no GPUI, no I/O. |
+| [`prepared`](src/prepared.rs) | `PreparedTable`: the column specs and rows a section paints, with expansion and fuzzy filtering applied and each cell's match ranges; a `ColumnSpec` names its column with a `SharedString`, static for the fixed sections and built once per table by `reference_table`, whose columns are the dataset's declared names, so the per-frame header reads only clone a reference; `cell_at` places a notice row's one cell in the widest column. Pure; `Rc`-shared with the delegate. |
+| [`table`](src/table.rs) | `SectionDelegate`, the one `TableDelegate` for every table section: paints a shared prepared table and its empty state (static text shared, formatted text only for Reference), scales column widths with the window rem, paints match ranges in the memoised table accent, and formats nothing per paint but a parent row's expander. |
+| [`page`](src/page.rs) | `DiagnosticsPage`: the observers, the selected section, per-section cursors and filters, the expansion sets, the log tail, its filter, row cache, and off-thread narrowing, the target select, the Levels state, the selected reference dataset and its prepared status and dataset buttons, the edge-only reference requests, the cached badge and header strings, the ages timer, key dispatch, visibility, serialization, and the frame layout. |
 | [`page_chrome`](src/page_chrome.rs) | The breadcrumb header and Back control, native section buttons with counts, wrapped and scrollable row details with Copy, and the shell-style keyboard hints. |
 | [`config_view`](src/config_view.rs) | The Config body: Current issues, History, and Effective values share one full-width table region. Keyboard motions and Copy follow the visible view. |
 | [`log_view`](src/log_view.rs) | The Log toolbar: level toggles, the target select, the text filter, Follow, Clear, and the Levels popover. |
 | [`levels`](src/levels.rs) | The Levels popover's pure rows: the read-only default, then the known targets, then any configured target outside that list (a hand-edited `[log]` key, shown but not offered for adding), each with the effective level resolved by the longest configured prefix, spelled as `LogLevels` stores them. |
 | [`perf_view`](src/perf_view.rs) | The Performance body and its prepared readouts: aligned percentile and sample-count columns, a labeled frame-interval histogram, a Memory section (sampled process memory with its peak and peak time, then DuckDB memory against its limit, temporary files and the largest tags from the catalog snapshot), storage metrics, dropped events and refused requests (both warning-toned when non-zero), and the overlay switch in a scrolling region. |
-| [`log`](src/log.rs) | `LogTail`, a bounded copy of the ring from the sequence at creation (4,096 records, the loss gap measured per drain), and `LogFilter` over level, target, and text. Pure. |
+| [`log`](src/log.rs) | `LogTail`, a bounded copy of the ring from the sequence at creation (4,096 records, the loss gap measured per drain), and `LogFilter`: the level and target gates, plus the text the page narrows the cached rows by. Pure. |
+| [`log_cache`](src/log_cache.rs) | `LogCache`, the tail's rows formatted and lowered once per record; `Narrowed`, one query's narrowing over them (run off the UI thread, appended for new records, pruned with the tail); `log_table`, the table from the cache and the held narrowing. Pure. |
 
 ## Interaction
 
@@ -47,8 +48,8 @@ the header's back control through the shell-actions handle. The retired
 
 `g s`, `g d`, `g r`, `g c`, `g l`, and `g p` jump directly to a section.
 `tab` / `shift+tab` (and `ctrl+tab` / `ctrl+shift+tab`) step the section's
-views, wrapping; only Config has views (Current issues, History, Effective
-values), and elsewhere the keys are consumed and do nothing. `y` copies the
+views, wrapping; only Config (Current issues, History, Effective values)
+and Reference (its declared datasets) have views, and elsewhere the keys are consumed and do nothing. `y` copies the
 active row's full details in any table; `r` refreshes the catalog;
 `z shift+r` / `z shift+m` expand or collapse all datasets; `o` in Config
 opens the config directory. In Log, `-` / `=` step the minimum shown level
@@ -66,7 +67,7 @@ declared reference dataset at a time, read at the frame's as-of; Tab and
 Shift+Tab, or the toolbar's dataset buttons when more than one is declared,
 step the dataset. `reference_table` lays out one row per reference row with
 the dataset's declared columns, NULL cells as `—`, the first column's text
-as the row key, and a case-insensitive filter over every cell; the detail
+as the row key, and the fuzzy filter over every cell; the detail
 and `y` give one `column: value` line per column. The toolbar holds the
 filter, a status chip from `reference_status` (warning-toned for a refusal,
 an error, or an unhealthy source filling the dataset: a Degraded or Failed
@@ -79,17 +80,68 @@ total counts the answer the table shows, and the rail badge counts only an
 answer at the frame's as-of. The empty state is the status text, "No
 reference datasets declared", or "Filter matches nothing (N rows)".
 
-Sources filters by name and health; Data by dataset name and generation
-fields (partition/book label, generation ID, source/load time, row count,
-and live/archive status); Config by issue text or `document.key` and value;
-Log by message and target text, plus the level toggles and the target select. Data matching is case insensitive: a
-matching dataset includes all its generations; a leaf-only match shows just
-matching generations beneath their dataset. A nonempty filter temporarily
-expands results without changing the stored collapse state. Clearing it restores
-the stored expansion, and dataset totals always describe the full catalog.
-Configuration matching is case insensitive, hides unmatched documents, and
-reveals matches in collapsed
-documents without losing their collapse state. Selection follows row identity
+Every section's filter is fuzzy and keeps the table's own order
+(`geode_shell::listfilter::Narrow`): rows are dropped, never ranked. The query
+splits on whitespace; each word must match as a case-insensitive subsequence
+inside one column's text, and different words may land in different columns.
+Columns are never joined, so a word cannot be stitched from the end of one
+column and the start of the next, and two words in one column take characters
+of their own. Words are placed longest first, each in the column where it
+scores best (the leftmost of equals); the placement is greedy, so a row only a
+different assignment would fit is dropped (`ab ba` against `abab`). A blank
+query narrows nothing. Matching runs on lowercased text and marks map back by
+character position, so a character whose lowercase is longer (`İ`) shifts the
+marks after it in that cell; matching is unaffected.
+
+The matched characters paint in the table accent, bold, over the cell's own
+tone. Marks are byte ranges computed with the prepared table, never in paint.
+`listrow::table_accent` floors `primary` to the readable ratio on the cursor
+row's `table_active`, the pointer's `table_hover`, and the `table` surface;
+the list accent (`RowPaint::accent`) floors on popover grounds instead and
+falls short on some themes' table grounds. The delegate holds a
+`listrow::TableAccent` memo, the same one the blotter, pricer, and market-data
+find tables use, so every table match paints one colour.
+
+What each section matches: Sources, every column, with Since matched on its
+clock text only (the age after it ticks every second; the ages tick keeps the
+clock prefix, so its marks stay valid). Data, a dataset by its name and a
+generation by its own fields (partition/book label, generation ID,
+source/load time, row count, and live/archive status); words do not combine
+across the two levels. A matching dataset includes all its generations, marked
+only where a generation matches on its own; a generation-only match shows just
+the matching generations beneath their unmarked dataset. Config issues, every
+visible cell plus the full diagnostic text the detail strip shows; a word that
+lands only in that text keeps its row unmarked. Effective values, three
+columns per leaf: its document's name, its path, and its value. The name is its
+own column, not a prefix of the path, so a word never aligns across the dot
+(`keys` does not match `keymap.bindings…` through `key` and the `s` of
+`bindings`). A name holding the whole query keeps every leaf; the document row
+marks every character a kept leaf matched in the name, and the Key cell marks
+only the path. The per-document leaf cap applies after narrowing. Reference,
+every declared column; a NULL cell's `—` is display only and never matches.
+Log, the
+displayed time, level, target, and message, after the level toggles and the
+target select.
+
+The Log caches each record's formatted, lowered row (`log_cache`) and
+reformats only records it has not seen. Narrowing a query costs a DP per word
+per row, too much for one keystroke over a full tail, so it runs on the
+background executor: a changed query keeps showing the previous answer (every
+row, unfiltered, when there was no query before) until the pass lands, and a
+pass for a query the input no longer holds is dropped. One pass per query is
+in flight: records arriving while it runs do not restart it; when it lands,
+one pass over just the newer records follows. Level and target changes reuse
+the held answer. Records that arrive under an unchanged query wait for a pass
+over just those records, appended to the held answer, rather than showing
+unfiltered. A clock change reformats every entry (a new cache generation) and
+drops the held answer and any pass in flight, since they matched the old time
+text. Filling the cache cold costs about 5 ms over a full tail on the UI
+thread, paid when the Log is first shown and after a clock change.
+
+A nonempty filter temporarily expands Data and Effective values results
+without changing the stored collapse state. Clearing it restores the stored
+expansion, and dataset totals always describe the full catalog. Unmatched
+documents are hidden. Selection follows row identity
 through refreshes and filtering while the selected row remains visible. The Log section follows new records until a
 row motion; a bare `G`, `f`, or the Follow switch resumes following, and a
 counted `G` jumps to that row without following. Clear forgets
@@ -128,8 +180,11 @@ window's lifetime.
 
 ```sh
 cargo test -p geode-diagnostics
-# The headless rebuild reading recorded in docs/perf.md:
+# The headless Log readings recorded in docs/current/performance.md: per
+# query, the keystroke and settled rebuilds and the off-thread narrowing:
 cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --nocapture
+# The cache fill, each query's narrowing, and the table build over a full tail:
+cargo bench -p geode-diagnostics --bench log_filter
 ```
 
 ## Rules this crate pins
