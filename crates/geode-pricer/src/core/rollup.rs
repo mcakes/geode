@@ -944,6 +944,7 @@ mod tests {
         assert_eq!(shape(&r).last().unwrap(), "  P1 []");
         assert!(legs_under(&r, null).is_empty());
         let r = roll(&s, &["template"]);
-        assert!(legs_under(&r, group_node(&r, "CS")).is_empty());
+        // Its legs gone, it is no structure: CUSTOM.
+        assert!(legs_under(&r, group_node(&r, "CUSTOM")).is_empty());
     }
 }

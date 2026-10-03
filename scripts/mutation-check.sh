@@ -17678,6 +17678,36 @@ run_mutation "pricer core: group accepts a package in the run" \
   '        if (first..end).any(|r| self.depth(r) != 0) {' \
   geode-pricer group_refuses_a_run_that_is_not_contiguous_roots
 
+run_mutation "pricer core: a leg edit leaves the package's name" \
+  crates/geode-pricer/src/core/edit.rs \
+  '        self.reidentify(reshaped, &mut undo);' \
+  '        let _ = reshaped;' \
+  geode-pricer a_leg_edit_renames_the_package_to_the_structure_its_legs_now_form
+
+run_mutation "pricer tile: a leg type edit leaves the package chip" \
+  crates/geode-pricer/src/core/edit.rs \
+  '        self.reidentify(reshaped, &mut undo);' \
+  '        let _ = reshaped;' \
+  geode-pricer a_type_edit_on_a_leg_renames_the_package_chip
+
+run_mutation "pricer core: a rename's undo forgets the stale name" \
+  crates/geode-pricer/src/core/edit.rs \
+  '                undo.inverse.push(Edit::SetTemplate { row, template: old });' \
+  '                let _ = old;' \
+  geode-pricer a_stale_name_survives_until_a_leg_edit_and_comes_back_on_undo
+
+run_mutation "pricer shorthand: identify ignores the current name" \
+  crates/geode-pricer/src/core/shorthand.rs \
+  '    if templates.resolve(current.token()).is_some_and(fits) {' \
+  '    if false && templates.resolve(current.token()).is_some_and(fits) {' \
+  geode-pricer a_name_the_legs_still_fit_is_kept_over_an_identical_earlier_table
+
+run_mutation "pricer shorthand: identify falls to CUSTOM without trying tables" \
+  crates/geode-pricer/src/core/shorthand.rs \
+  '        .find(|def| fits(def))' \
+  '        .find(|_| false)' \
+  geode-pricer grouping_lines_that_form_a_structure_names_it
+
 run_mutation "pricer shorthand: the third Friday is the first" \
   crates/geode-pricer/src/core/shorthand.rs \
   '    first.checked_add_days(chrono::Days::new(u64::from(to_friday) + 14))' \

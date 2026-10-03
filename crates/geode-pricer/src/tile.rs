@@ -11625,7 +11625,8 @@ pub(crate) mod tests {
             h.tree(&vcx),
             vec![
                 "SPX Z26 5000 C".to_string(),
-                "CS SPX Z26 5000/4800/5200".to_string(),
+                // A third leg leaves the CS table.
+                "CUSTOM SPX Z26 5000/4800/5200".to_string(),
                 "SPX Z26 5000 C".to_string(),
                 "-5 SPX Z26 4800 C".to_string(),
                 "5 SPX Z26 5200 C".to_string(),
@@ -11639,6 +11640,26 @@ pub(crate) mod tests {
             Some(2),
             "the cursor lands on the new leg, not wherever it fell back to"
         );
+    }
+
+    /// The package chip follows its legs: an RR whose put leg turns call
+    /// is a call spread, and undo brings the RR back.
+    #[gpui::test]
+    fn a_type_edit_on_a_leg_renames_the_package_chip(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4800/5200 RR"]);
+        h.dispatch(&mut vcx, "toggle", None);
+        h.motion(&mut vcx, "down", None); // the short put leg
+        h.motion(&mut vcx, "right", Some(4)); // type
+        h.dispatch(&mut vcx, "edit", None);
+        vcx.simulate_input("c");
+        h.draw(&mut vcx);
+        h.dispatch(&mut vcx, "commit", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.cell(&vcx, 1, "option_type"), "C");
+        assert_eq!(h.tags(&vcx)[0], "CS");
+        h.dispatch(&mut vcx, "undo", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.tags(&vcx)[0], "RR");
     }
 
     /// Menu rows paint above the table and receive clicks without table occlusion.

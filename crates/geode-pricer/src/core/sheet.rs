@@ -6,7 +6,7 @@
 //! folding update pricing state without changing row identity or requests. Sheet name,
 //! view, and refresh policy are independent metadata.
 
-use crate::core::shorthand::{render_line, render_package};
+use crate::core::shorthand::{identify, render_line, render_package};
 use crate::core::template::{Template, TemplateSet};
 use chrono::{DateTime, Utc};
 use geode_core::pricing::{
@@ -532,10 +532,7 @@ impl Sheet {
                 None => String::new(),
             },
             RowKind::Package { template } => {
-                let legs: Vec<(i64, &Instrument)> = self
-                    .children(row)
-                    .filter_map(|l| self.instrument[l].as_ref().map(|i| (self.qty[l], i)))
-                    .collect();
+                let legs = self.package_legs(row);
                 self.templates
                     .resolve(template.token())
                     .and_then(|def| render_package(def, &legs))
@@ -547,6 +544,23 @@ impl Sheet {
                     })
             }
         }
+    }
+
+    /// A package's legs as the shorthand reads them: (qty, instrument)
+    /// in sheet order.
+    fn package_legs(&self, row: usize) -> Vec<(i64, &Instrument)> {
+        self.children(row)
+            .filter_map(|l| self.instrument[l].as_ref().map(|i| (self.qty[l], i)))
+            .collect()
+    }
+
+    /// The template package `row`'s legs now form ([`identify`]);
+    /// `None` on a row that is not a package.
+    pub(crate) fn identified_template(&self, row: usize) -> Option<Template> {
+        let RowKind::Package { template } = self.kind[row] else {
+            return None;
+        };
+        Some(identify(&self.templates, template, &self.package_legs(row)))
     }
 
     // ---- the structural primitives `edit.rs` builds on (pub(crate)) ----
@@ -620,6 +634,12 @@ impl Sheet {
     // `edit.rs`'s `SetInstrument`/`SetQty`/`SetShift` arms are the callers.
     pub(crate) fn set_instrument(&mut self, row: usize, instrument: Instrument) {
         self.instrument[row] = Some(instrument);
+    }
+
+    /// `row` must be a package.
+    pub(crate) fn set_template(&mut self, row: usize, template: Template) {
+        debug_assert!(self.is_package(row));
+        self.kind[row] = RowKind::Package { template };
     }
 
     pub(crate) fn set_qty(&mut self, row: usize, qty: i64) {

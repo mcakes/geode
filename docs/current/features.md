@@ -1518,12 +1518,23 @@ first and then the templates in document order (`unknown type 'X': C P CS PS
 …`). A reload reaches every open tile: the entry bar parses against the new
 set at once.
 
+A package's template chip follows its legs. An edit that changes, adds,
+removes or moves a leg renames the package to the table its legs now fit —
+the current name while it still fits, otherwise the first fitting table in
+document order — or `CUSTOM` when none fits. A risk reversal whose put leg
+becomes a call is a (short) `CS`; a call spread given a third leg is
+`CUSTOM`; grouping two lines that form a risk reversal (`g p`) makes an `RR`.
+Legs are read in sheet order, as the shorthand prints them, so a risk
+reversal moved to call-first fits no table. Undo restores the previous name.
+A typed package keeps the type it was typed as.
+
 A stored package keeps its template's name whatever the configuration later
-says. When that template is removed, or redefined so the package's legs no
-longer fit its table, the package still loads with its name as its tag, and
-its shorthand (for `y y` and find) prints its legs one per line instead of
-the template form. Its legs, quantities, and prices are unchanged; only a
-package typed after the change uses the new table.
+says, until one of its legs is edited. When that template is removed, or
+redefined so the package's legs no longer fit its table, the package still
+loads with its name as its tag, and its shorthand (for `y y` and find)
+prints its legs one per line instead of the template form. Its legs,
+quantities, and prices are unchanged; only a package typed after the change
+uses the new table.
 
 Normal-mode keys:
 
