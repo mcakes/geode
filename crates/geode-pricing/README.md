@@ -31,8 +31,18 @@ moneyness through knots the node ladder places (`node/100`), lifted by
 the forward log-linear. It refuses an expiry outside the document's
 terms rather than extrapolating, floors vol at `0.01`, places points by
 Black call delta and returns a Breeden–Litzenberger density unclamped,
-per unit of the requested coordinate (`NaN` where delta saturates). It
-refuses a `Grid::Job`, which only the vol worker can resolve.
+per unit of the requested coordinate (`NaN` where delta saturates). A
+`Grid::Dense` spans a term's node ladder (between terms, the union of the
+two ladders), widened to the request's `cover`; past the ladder the smile
+continues the spline's end slope, floored, and a cover that is not an
+ascending pair of positive strikes fails the job. It refuses a
+`Grid::Job`, which only the vol worker can resolve.
+
+`black` holds the undiscounted Black call price and delta over Hart's
+double-precision normal CDF (about 1e-14 absolute near the money, exactly
+0.5 at zero). The density is a second difference of these prices, which
+divides a price error by the square of the strike step, so a
+single-precision CDF would show as noise on a fine grid.
 Any other `VolModel` implementation registered by `geode-app` in
 `geode-data`'s `VolModelRegistry` is selected by name through `[vol] model`.
 

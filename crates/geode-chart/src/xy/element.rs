@@ -3,7 +3,8 @@
 //! Layout uses a zero origin so cached paths can be translated to the
 //! element's current bounds. Each pane paints its grid and axes, then every
 //! visible slot the view shows something of: a line as a solid or dashed
-//! stroke, a points slot as a diamond per point with a vertical bar over its
+//! stroke, over a translucent fill to its axis's zero when the slot asks for
+//! one, a points slot as a diamond per point with a vertical bar over its
 //! range, or from its mid to the one end it has. One x axis sits below the
 //! lowest pane.
 //!
@@ -20,9 +21,11 @@
 //! * `Buffers` caches side scales, y ticks and labels, and x ticks. Its key
 //!   includes model version, slot count, view, bounds size and rem.
 //!   Changing one of these inputs derives the chart chrome again.
-//! * [`PathCaches`] caches decimation, dashing and tessellation, one path
-//!   per slot. A key includes model version, slot number, pane, view, plot
-//!   geometry and rem, which sizes the dashes and the markers.
+//! * [`PathCaches`] caches decimation, dashing and tessellation, a stroke
+//!   path per slot and a fill path per filled line. A key includes model
+//!   version, slot number, pane, view, plot geometry and rem, which sizes
+//!   the dashes and the markers; the fill's zero is the side scale's, which
+//!   those inputs determine.
 //!
 //! Callers must bump [`XyModel::version`] whenever model contents change:
 //! the keys do not independently include every model field.
@@ -31,7 +34,8 @@
 //! paths before painting, and its grid and axis interfaces collect vectors.
 //! A line's path follows decimated output: up to two extrema per finite run
 //! per pixel column, plus breaks, and a dashed line's dashes are bounded by
-//! the plot rectangle. A points slot carries up to five segments for every
+//! the plot rectangle. A fill outlines the same decimated points, two more
+//! per finite run. A points slot carries up to five segments for every
 //! point in view. A path of separate segments holds [`MAX_STROKE_SEGMENTS`]
 //! at most: a points slot whose points in view, at five segments each, come
 //! to more than that paints every k-th point and the last, and a dashed line
@@ -51,17 +55,18 @@ use crate::core::axis::{Axis, Pane, Side};
 use crate::core::layout::{Layout, PaneRects};
 use crate::core::linear::{LinearX, XFormat, delta_label_with, step_decimals, x_ticks};
 use crate::core::marks::{
-    Clip, MARKER_R, SEGMENTS_PER_MARK, Segment, dash_polyline, mark_stride, point_marks, strided,
+    Clip, MARKER_R, SEGMENTS_PER_MARK, Segment, dash_polyline, fill_base, fill_outlines,
+    mark_stride, point_marks, strided,
 };
 use crate::core::scale::{
     LinearScale, axis_domain, fmt_percent, fmt_tick, fmt_value, unsigned_zero,
 };
 use crate::core::view::View;
-use crate::core::{DASH, GAP, Rect, TICK_GAP, Tick, design_px};
+use crate::core::{DASH, GAP, Point, Rect, TICK_GAP, Tick, design_px};
 use crate::paint::{
     Ink, LINE_WIDTH, MAX_STROKE_SEGMENTS, Scratch, SideAxis, TOOLTIP_GAP, bounds_of,
-    decimated_points, note_chrome_rebuild, note_rebuild, paint_pane_frame, paint_x_axis,
-    side_scale_of, stroke_points, stroke_segments, y_tick_hint,
+    decimated_points, fill_points, note_chrome_rebuild, note_rebuild, paint_pane_frame,
+    paint_x_axis, side_scale_of, stroke_points, stroke_segments, y_tick_hint,
 };
 
 /// Element-state key of the reused buffers, within this element's scope.
@@ -80,6 +85,11 @@ const _: () = assert!(usize::BITS >= u64::BITS);
 
 /// What a readout shows where there is no value.
 const NONE: &str = "—";
+
+/// A filled line's fill opacity, against the slot's own color (its alpha
+/// included): the region reads as shading under the stroke, and the grid
+/// and any other slot show through it.
+pub const FILL_OPACITY: f32 = 0.3;
 
 /// A y value as its axis reads it in a readout: finer than a tick label,
 /// and never a signed zero.
@@ -197,6 +207,8 @@ pub(crate) struct Buffers {
     /// A line's values in ascending pixel order, beside `scratch.xs`.
     vals: Vec<f64>,
     segments: Vec<Segment>,
+    /// A filled line's outlines, parted by breaks.
+    outlines: Vec<Point>,
     /// A points slot's pixel columns: x, mid, low and high.
     px: [Vec<f32>; 4],
     chrome_key: Option<u64>,
@@ -424,7 +436,7 @@ impl XyElement {
     /// ascending pixel order (a reversed axis is walked backwards), then
     /// leave its decimated layout polyline in `scratch.pts`.
     pub(crate) fn line_points(&self, slot: &XySlot, plot: Rect, y: &LinearScale, b: &mut Buffers) {
-        let SlotKind::Line { xs, ys } = &slot.kind else {
+        let SlotKind::Line { xs, ys, .. } = &slot.kind else {
             b.scratch.pts.clear();
             return;
         };
@@ -517,8 +529,29 @@ impl XyElement {
         }
     }
 
+    /// A filled line's fill at a zero origin: its decimated polyline closed
+    /// down (or up) to the y of its axis's zero, held to the plot, one
+    /// outline per finite run. `None` for a slot that is not a filled line
+    /// or when the view shows nothing of it. Decimates the line afresh, as
+    /// its stroke does: each is built on its own cache miss.
+    fn fill_shape(
+        &self,
+        slot: &XySlot,
+        plot: Rect,
+        y: &LinearScale,
+        b: &mut Buffers,
+    ) -> Option<Path<Pixels>> {
+        if !matches!(slot.kind, SlotKind::Line { fill: true, .. }) {
+            return None;
+        }
+        self.line_points(slot, plot, y, b);
+        let base = fill_base(y.y(0.0), plot.y, plot.bottom());
+        fill_outlines(&b.scratch.pts, base, &mut b.outlines);
+        fill_points(&b.outlines)
+    }
+
     /// Paint one pane in layers: grid, axes, then every visible slot's
-    /// path in slot order.
+    /// path in slot order, a filled line's fill under its own stroke.
     fn paint_pane(
         &self,
         pane: Pane,
@@ -571,7 +604,17 @@ impl XyElement {
                         .f32(plot.h)
                         .f32(self.rem_px)
                         .finish();
-                    let path = caches.slot(k).get(key, bounds.origin, || {
+                    let (stroke, fill) = caches.slot_pair(k);
+                    if matches!(slot.kind, SlotKind::Line { fill: true, .. }) {
+                        let path = fill.get(key, bounds.origin, || {
+                            note_rebuild();
+                            self.fill_shape(slot, plot, &y, buffers)
+                        });
+                        if let Some(path) = path {
+                            window.paint_path(path, slot.color.opacity(FILL_OPACITY));
+                        }
+                    }
+                    let path = stroke.get(key, bounds.origin, || {
                         note_rebuild();
                         self.shape(slot, plot, &y, buffers)
                     });
@@ -753,6 +796,7 @@ mod tests {
                     SlotKind::Line {
                         xs: xs.clone(),
                         ys: curve(0.0),
+                        fill: false,
                     },
                 ),
                 slot(
@@ -762,6 +806,7 @@ mod tests {
                     SlotKind::Line {
                         xs: xs.clone(),
                         ys: curve(0.01),
+                        fill: false,
                     },
                 ),
                 slot(
@@ -782,6 +827,7 @@ mod tests {
                     SlotKind::Line {
                         xs: xs.clone(),
                         ys: curve(1.0),
+                        fill: false,
                     },
                 ),
                 slot(
@@ -1046,6 +1092,7 @@ mod tests {
                 SlotKind::Line {
                     xs: vec![0.5, 0.55, 0.6],
                     ys: vec![5.0, 6.0, 7.0],
+                    fill: false,
                 },
             ));
         }
@@ -1166,6 +1213,7 @@ mod tests {
                         SlotKind::Line {
                             xs: vec![0.8, 0.9, 1.2],
                             ys: vec![0.5, 1.0, 1.5],
+                            fill: false,
                         },
                     ),
                     slot(
@@ -1204,6 +1252,121 @@ mod tests {
             );
             assert!(near(top_tip.y, knot.y - MARKER_R), "{case}");
         }
+    }
+
+    /// One line over `xs`/`ys` on the upper left axis, filled or not.
+    fn line_model(version: u64, xs: Vec<f64>, ys: Vec<f64>, fill: bool) -> Arc<XyModel> {
+        XyModel::new(
+            version,
+            XAxis::default(),
+            [YFormat::Plain; 4],
+            0.7,
+            vec![XySlot {
+                number: 1,
+                label: "density".into(),
+                color: gpui::red(),
+                axis: Axis::Left,
+                visible: true,
+                style: Style::Solid,
+                kind: SlotKind::Line { xs, ys, fill },
+            }],
+        )
+    }
+
+    /// The outlines a filled line's fill was built from, split at breaks.
+    fn outlines(b: &Buffers) -> Vec<Vec<Point>> {
+        b.outlines
+            .split(|p| p.is_break())
+            .map(<[Point]>::to_vec)
+            .collect()
+    }
+
+    #[test]
+    fn a_filled_line_fills_each_finite_run_to_zero_and_a_gap_parts_the_fill() {
+        let xs: Vec<f64> = (0..9).map(f64::from).collect();
+        let ys = vec![0.0, 1.0, 2.0, 1.0, f64::NAN, 1.0, 2.0, 1.0, 0.0];
+        let m = line_model(1, xs.clone(), ys.clone(), true);
+        let plot = Rect::new(44.0, 10.0, 400.0, 200.0);
+        let y = LinearScale::new((-1.0, 3.0), plot.y, plot.bottom());
+        let e = XyElement::new(m.clone(), View::with_min_span(m.full(), 0.01), 12.0, "f");
+        let mut b = Buffers::default();
+        assert!(e.fill_shape(&m.slots[0], plot, &y, &mut b).is_some());
+        let runs = outlines(&b);
+        assert_eq!(runs.len(), 2, "the NaN parts the fill: {runs:?}");
+        let zero = y.y(0.0);
+        for run in &runs {
+            // Four knots, framed by their two ends at zero.
+            assert_eq!(run.len(), 6, "{run:?}");
+            let (first, last) = (run[0], run[run.len() - 1]);
+            assert!((first.y - zero).abs() < 1e-3 && (last.y - zero).abs() < 1e-3);
+            assert!((first.x - run[1].x).abs() < 1e-3 && (last.x - run[4].x).abs() < 1e-3);
+        }
+        // The stroke of the same slot is the line alone, and an unfilled
+        // line has no fill.
+        assert!(e.shape(&m.slots[0], plot, &y, &mut b).is_some());
+        let bare = line_model(1, xs, ys, false);
+        let e = XyElement::new(bare.clone(), View::with_min_span(m.full(), 0.01), 12.0, "g");
+        assert!(e.fill_shape(&bare.slots[0], plot, &y, &mut b).is_none());
+    }
+
+    #[test]
+    fn a_fill_runs_to_the_plot_edge_when_zero_is_out_of_view_and_up_to_zero_from_below() {
+        let plot = Rect::new(44.0, 10.0, 400.0, 200.0);
+        let xs: Vec<f64> = (0..5).map(f64::from).collect();
+        // Every value well above zero, on a scale that starts at one: zero
+        // is below the plot, so the fill runs down to its bottom edge.
+        let m = line_model(1, xs.clone(), vec![1.5, 2.0, 2.5, 2.0, 1.5], true);
+        let e = XyElement::new(m.clone(), View::with_min_span(m.full(), 0.01), 12.0, "h");
+        let y = LinearScale::new((1.0, 3.0), plot.y, plot.bottom());
+        let mut b = Buffers::default();
+        assert!(e.fill_shape(&m.slots[0], plot, &y, &mut b).is_some());
+        let run = &outlines(&b)[0];
+        assert_eq!(run[0].y, plot.bottom());
+        assert_eq!(run[run.len() - 1].y, plot.bottom());
+        // Every value below zero: zero is above the plot, its top edge.
+        let m = line_model(1, xs.clone(), vec![-1.5, -2.0, -2.5, -2.0, -1.5], true);
+        let y = LinearScale::new((-3.0, -1.0), plot.y, plot.bottom());
+        let e = XyElement::new(m.clone(), View::with_min_span(m.full(), 0.01), 12.0, "i");
+        assert!(e.fill_shape(&m.slots[0], plot, &y, &mut b).is_some());
+        let run = &outlines(&b)[0];
+        assert_eq!((run[0].y, run[run.len() - 1].y), (plot.y, plot.y));
+        // A negative lobe with zero in view: the outline dips below the
+        // zero line (larger pixel y) and returns to it, one outline.
+        let m = line_model(1, xs, vec![1.0, 2.0, -1.0, 2.0, 1.0], true);
+        let y = LinearScale::new((-2.0, 3.0), plot.y, plot.bottom());
+        let e = XyElement::new(m.clone(), View::with_min_span(m.full(), 0.01), 12.0, "j");
+        assert!(e.fill_shape(&m.slots[0], plot, &y, &mut b).is_some());
+        let runs = outlines(&b);
+        assert_eq!(runs.len(), 1);
+        let zero = y.y(0.0);
+        assert!(runs[0].iter().any(|p| p.y > zero + 1.0), "{runs:?}");
+        assert!((runs[0][0].y - zero).abs() < 1e-3);
+    }
+
+    #[gpui::test]
+    fn a_filled_line_caches_its_fill_beside_its_stroke(cx: &mut gpui::TestAppContext) {
+        let xs: Vec<f64> = (0..200).map(|i| 0.8 + i as f64 * 0.002).collect();
+        let ys: Vec<f64> = xs
+            .iter()
+            .map(|x| (-(x - 1.0) * (x - 1.0) * 50.0).exp())
+            .collect();
+        let before = rebuilds();
+        let (host, mut vcx) = open(cx, line_model(1, xs, ys, true));
+        assert_eq!(
+            rebuilds() - before,
+            2,
+            "a stroke and a fill on the first frame"
+        );
+        draw(&mut vcx);
+        draw(&mut vcx);
+        assert_eq!(rebuilds() - before, 2, "an unchanged frame rebuilt neither");
+        host.update(&mut vcx, |h, cx| {
+            let full = h.model.full();
+            h.view.zoom(2.0, 0.5, full);
+            cx.notify();
+        });
+        draw(&mut vcx);
+        assert_eq!(rebuilds() - before, 4, "a moved view rebuilds both once");
     }
 
     #[test]
@@ -1347,7 +1510,11 @@ mod tests {
                 axis: Axis::Left,
                 visible: true,
                 style: Style::Dashed,
-                kind: SlotKind::Line { xs, ys },
+                kind: SlotKind::Line {
+                    xs,
+                    ys,
+                    fill: false,
+                },
             }],
         );
         let plot = Rect::new(44.0, 0.0, 400.0, 200.0);

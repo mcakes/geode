@@ -15,10 +15,10 @@ xy element's in the vol slice viewer:
 
 | Module | Holds |
 |---|---|
-| `core` | Window-free geometry and labels: y scales and 1-2-5 ticks, axes and panes, layout and the plot under a point, the view window, the time x scale with its ticks and crosshair, the linear x scale with its formats, ticks and zoom and pan orientation (`linear`), dash and point-mark stroke geometry (`marks`), hit testing, decimation, and theme-derived palette values. |
-| `paint` | What elements share once they have a window: rebuild counters, a pane side's resolved y axis, the pane frame (grid and y axes), the x-axis painter, stroke builders, and `MAX_STROKE_SEGMENTS`, the ceiling on a path of separate segments. |
+| `core` | Window-free geometry and labels: y scales and 1-2-5 ticks, axes and panes, layout and the plot under a point, the view window, the time x scale with its ticks and crosshair, the linear x scale with its formats, ticks and zoom and pan orientation (`linear`), dash and point-mark stroke geometry and the outline under a filled line (`marks`), hit testing, decimation, and theme-derived palette values. |
+| `paint` | What elements share once they have a window: rebuild counters, a pane side's resolved y axis, the pane frame (grid and y axes), the x-axis painter, stroke builders, the fill builder, and `MAX_STROKE_SEGMENTS`, the ceiling on a path of separate segments. |
 | `timeseries` | `ChartModel` and `ChartSlot`, the immutable prepared input, and `ChartElement`: polylines over a session or continuous time axis, with percentile rules and density bars. |
-| `xy` | `XyModel` and `XySlot`, the immutable prepared input, and `XyElement`: lines, solid or dashed, and point marks with a range bar, over a linear x axis that can run reversed. Re-exports the axis's `XFormat` and `LinearX`. |
+| `xy` | `XyModel` and `XySlot`, the immutable prepared input, and `XyElement`: lines, solid or dashed and optionally shaded down to zero, and point marks with a range bar, over a linear x axis that can run reversed. Re-exports the axis's `XFormat` and `LinearX`. |
 
 Both elements paint through gpui-component's `Plot`, in up to two panes with
 four y axes, with cached data paths and chrome.
@@ -124,6 +124,15 @@ cargo run -p geode-chart --example xy
   plot's edges, and those two knots count toward its axis's domain. A window
   of fewer than two knots is empty: the line paints nothing and adds nothing
   to its axis's domain.
+- A line with `fill` also shades the region between it and its axis's zero,
+  under its stroke, in the slot's color at `FILL_OPACITY` (0.3) of the slot's
+  own alpha. Each finite run is its own outline, so a gap breaks the fill as
+  it breaks the line. A value below zero shades up to zero from beneath, so a
+  negative lobe is as visible as a positive one. A zero above or below the
+  plot shades to the plot's nearer edge. The outline follows the decimated
+  polyline, so a fill costs what its stroke does, and the view's clip holds
+  it to the pane as it does the line. A filled line is otherwise a line: its
+  window, axis domain, readout and crosshair are a line's.
 - A point paints a diamond at its mid when the mid is finite, and a vertical
   bar over its range when the range's two ends are finite and apart. With a
   finite mid and one end missing, the bar runs from the mid to the end that
@@ -131,10 +140,12 @@ cargo run -p geode-chart --example xy
   spread. A point with no mid and fewer than two ends, or two ends that
   meet, paints nothing; a lone end's value still reaches its axis's domain.
   A points slot's window is the points inside the view, edges included.
-- Each visible slot the view shows something of is one cached stroke path.
+- Each visible slot the view shows something of is one cached stroke path,
+  and a filled line a second, cached fill path beside it under the same key.
   The path key holds the model version, slot number, pane, view, plot
-  geometry and the rem, which sizes dashes and markers. Data is clipped to
-  its pane's plot.
+  geometry and the rem, which sizes dashes and markers; a fill's zero is the
+  side scale's, which those inputs determine. Data is clipped to its pane's
+  plot.
 - A slot too large for one path of separate segments degrades instead of
   vanishing. A points slot with more than `MAX_STROKE_SEGMENTS / 5` points in
   view paints an even stride of them and the last: every point counts as

@@ -59,7 +59,20 @@ impl XAxis {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SlotKind {
     /// A polyline through `(xs[i], ys[i])`. A `NaN` in `ys` is a gap.
-    Line { xs: Vec<f64>, ys: Vec<f64> },
+    ///
+    /// With `fill`, the region between the polyline and `y = 0` on the
+    /// slot's axis is also shaded in the slot's color at the element's
+    /// fill opacity, under the stroke: a value below zero fills up to zero
+    /// from beneath, so a negative lobe shows as plainly as a positive one.
+    /// Each finite run fills on its own, so a gap breaks the fill as it
+    /// breaks the line. A zero outside the plot fills to the plot's nearer
+    /// edge. Everything else (window, axis domain, readout, hover) treats
+    /// a filled line as a line.
+    Line {
+        xs: Vec<f64>,
+        ys: Vec<f64>,
+        fill: bool,
+    },
     /// A marker at `mid` and a vertical bar from `lo` to `hi` per point.
     Points {
         xs: Vec<f64>,
@@ -76,7 +89,7 @@ impl SlotKind {
     /// left untouched.
     fn normalise(&mut self) {
         let mut columns = match self {
-            SlotKind::Line { xs, ys } => [Some(xs), Some(ys), None, None],
+            SlotKind::Line { xs, ys, .. } => [Some(xs), Some(ys), None, None],
             SlotKind::Points { xs, mid, lo, hi } => [Some(xs), Some(mid), Some(lo), Some(hi)],
         };
         let n = columns.iter().flatten().map(|c| c.len()).min().unwrap_or(0);
@@ -125,7 +138,7 @@ impl XySlot {
     /// Points the slot can paint: the shared length of its arrays.
     pub fn len(&self) -> usize {
         match &self.kind {
-            SlotKind::Line { xs, ys } => xs.len().min(ys.len()),
+            SlotKind::Line { xs, ys, .. } => xs.len().min(ys.len()),
             SlotKind::Points { xs, mid, lo, hi } => {
                 xs.len().min(mid.len()).min(lo.len()).min(hi.len())
             }
@@ -210,7 +223,7 @@ impl XySlot {
     /// A line's value at `u`, read between its two knots. `None` for a
     /// points slot, outside the line's own range, or across a gap.
     pub fn line_value_at(&self, u: f64) -> Option<f64> {
-        let SlotKind::Line { xs, ys } = &self.kind else {
+        let SlotKind::Line { xs, ys, .. } = &self.kind else {
             return None;
         };
         let n = self.len();
@@ -342,6 +355,7 @@ mod tests {
             kind: SlotKind::Line {
                 xs: xs.to_vec(),
                 ys: ys.to_vec(),
+                fill: false,
             },
         }
     }
@@ -537,6 +551,33 @@ mod tests {
             &[12.0, 11.5, 21.0],
         );
         assert_eq!(p, want);
+    }
+
+    /// A filled line is normalised, windowed and read as any line, and
+    /// keeps its fill through construction.
+    #[test]
+    fn a_filled_line_is_a_line_that_keeps_its_fill() {
+        let mut slot = line(
+            Axis::Right,
+            &[1.2, f64::NAN, 0.8, 1.0],
+            &[3.0, 9.0, 1.0, 2.0],
+        );
+        let SlotKind::Line { fill, .. } = &mut slot.kind else {
+            unreachable!()
+        };
+        *fill = true;
+        let l = built(slot);
+        assert_eq!(
+            l.kind,
+            SlotKind::Line {
+                xs: vec![0.8, 1.0, 1.2],
+                ys: vec![1.0, 2.0, 3.0],
+                fill: true,
+            }
+        );
+        assert_eq!(l.window(View::with_min_span((0.9, 1.1), 0.01)), (0, 3));
+        assert_eq!(l.line_value_at(0.9), Some(1.5));
+        assert_eq!(l.values_in((0, 3)).collect::<Vec<_>>(), [1.0, 2.0, 3.0]);
     }
 
     #[test]
