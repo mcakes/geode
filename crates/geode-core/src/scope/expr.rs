@@ -6,6 +6,11 @@
 //!
 //! Precedence, loosest first: `or`, `and`, `not`, comparison.
 
+/// The words the grammar reads as keywords, matched case-insensitively. The
+/// completer lexes by this list, and a classification may not take one as its
+/// name: `not = 'X'` would read as negation, not as a column.
+pub(crate) const KEYWORDS: [&str; 7] = ["and", "or", "not", "in", "like", "true", "false"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareOp {
     Eq,

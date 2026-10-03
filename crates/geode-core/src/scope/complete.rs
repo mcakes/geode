@@ -11,6 +11,8 @@
 
 use std::ops::Range;
 
+use super::expr::KEYWORDS;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     /// A run of alphanumerics or `_` that is not a keyword.
@@ -41,7 +43,6 @@ pub struct Token {
     pub span: Range<usize>,
 }
 
-const KEYWORDS: [&str; 7] = ["and", "or", "not", "in", "like", "true", "false"];
 /// Longest first, so `<=` is not read as `<` followed by `=`.
 const OPS: [&str; 7] = ["!=", "<>", "<=", ">=", "=", "<", ">"];
 

@@ -6,6 +6,7 @@ use crate::groupings::GroupingSlots;
 use crate::named::{NamedExpr, NamedExpressions};
 use crate::schema::ColumnType;
 use crate::schema::SchemaSpec;
+use crate::scope::expr::KEYWORDS;
 use crate::scopes::SavedScopes;
 use crate::view::ViewSpec;
 
@@ -16,8 +17,11 @@ fn is_identifier(name: &str) -> bool {
 }
 
 /// A new or renamed classification's name: an identifier (scope expressions
-/// name it bare), not the version stamp, and not already a column or a
-/// dimension — a shadowing name would make grouping by it ambiguous.
+/// name it bare), not a scope-expression keyword, not the version stamp, and
+/// not already a column or a dimension — a shadowing name would make grouping
+/// by it ambiguous. Every clash is case-insensitive: DuckDB resolves
+/// identifiers that way, so `Book` beside `book` still shadows it, and the
+/// expression parser matches keywords that way, so `NOT` still negates.
 pub fn validate_name(
     name: &str,
     schema: &SchemaSpec,
@@ -28,14 +32,25 @@ pub fn validate_name(
             "'{name}' is not a valid name: use letters, digits and _, not starting with a digit"
         ));
     }
-    if name == "config_version" {
-        return Err("'config_version' is reserved".into());
+    if KEYWORDS.iter().any(|k| k.eq_ignore_ascii_case(name)) {
+        return Err(format!("'{name}' is a reserved word in scope expressions"));
     }
-    if schema.datasets.iter().any(|ds| ds.column(name).is_some()) {
-        return Err(format!("'{name}' is already a dataset column"));
+    if name.eq_ignore_ascii_case("config_version") {
+        return Err(format!("'{name}' is reserved ('config_version')"));
     }
-    if dims.get(name).is_some() {
-        return Err(format!("'{name}' already exists"));
+    if let Some(col) = schema
+        .datasets
+        .iter()
+        .flat_map(|ds| &ds.columns)
+        .find(|c| c.name.eq_ignore_ascii_case(name))
+    {
+        return Err(format!(
+            "'{name}' is already a dataset column ('{}')",
+            col.name
+        ));
+    }
+    if let Some(dim) = dims.all().find(|d| d.name.eq_ignore_ascii_case(name)) {
+        return Err(format!("'{name}' already exists ('{}')", dim.name));
     }
     Ok(())
 }
@@ -224,13 +239,39 @@ grain = "underlying"
     fn a_name_may_not_shadow_a_column_a_dimension_or_the_version_stamp() {
         assert_eq!(
             validate_name("book", &schema(), &dims()).unwrap_err(),
-            "'book' is already a dataset column"
+            "'book' is already a dataset column ('book')"
         );
         assert_eq!(
             validate_name("desk", &schema(), &dims()).unwrap_err(),
-            "'desk' already exists"
+            "'desk' already exists ('desk')"
         );
         assert!(validate_name("config_version", &schema(), &dims()).is_err());
+    }
+
+    #[test]
+    fn shadowing_is_case_insensitive() {
+        assert_eq!(
+            validate_name("Book", &schema(), &dims()).unwrap_err(),
+            "'Book' is already a dataset column ('book')"
+        );
+        assert_eq!(
+            validate_name("DESK", &schema(), &dims()).unwrap_err(),
+            "'DESK' already exists ('desk')"
+        );
+        assert!(validate_name("Config_Version", &schema(), &dims()).is_err());
+    }
+
+    #[test]
+    fn a_name_may_not_be_a_scope_expression_keyword() {
+        for kw in [
+            "and", "or", "not", "in", "like", "true", "false", "NOT", "Like",
+        ] {
+            assert_eq!(
+                validate_name(kw, &schema(), &dims()).unwrap_err(),
+                format!("'{kw}' is a reserved word in scope expressions")
+            );
+        }
+        assert!(validate_name("notes", &schema(), &dims()).is_ok());
     }
 
     #[test]
