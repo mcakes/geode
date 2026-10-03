@@ -261,19 +261,15 @@ pub(crate) fn detail_strip(
         .into_any_element()
 }
 
-/// Use the same keycap presentation as the shell's dialogs and menus.
-pub(crate) fn footer(
-    section: Section,
-    filtering: bool,
-    config_values: bool,
-    cx: &Context<DiagnosticsPage>,
-) -> AnyElement {
-    let hint = if filtering {
+/// The footer's keyboard hint for a section: each names that section's own
+/// keys, since the same key (`r`, `tab`) does different things per section.
+pub(crate) fn footer_hint(section: Section, filtering: bool, config_values: bool) -> &'static str {
+    if filtering {
         "`enter` Keep filter   `escape` Cancel filter"
     } else {
         match section {
             Section::Sources => {
-                "`[` / `]` Sections   `tab` Dataset   `/` Filter   `r` Poll now   `y` Copy   `escape` Back"
+                "`[` / `]` Sections   `/` Filter   `up` / `down` Rows   `y` Copy   `escape` Back"
             }
             Section::Data => {
                 "`[` / `]` Sections   `/` Filter   `space` / `enter` Expand   `r` Refresh   `y` Copy   `escape` Back"
@@ -292,7 +288,17 @@ pub(crate) fn footer(
             }
             Section::Perf => "`[` / `]` Sections   `escape` Back",
         }
-    };
+    }
+}
+
+/// Use the same keycap presentation as the shell's dialogs and menus.
+pub(crate) fn footer(
+    section: Section,
+    filtering: bool,
+    config_values: bool,
+    cx: &Context<DiagnosticsPage>,
+) -> AnyElement {
+    let hint = footer_hint(section, filtering, config_values);
     div()
         .flex_none()
         .px_3()
@@ -304,4 +310,23 @@ pub(crate) fn footer(
         .debug_selector(|| "diagnostics-footer".to_string())
         .child(kbd::marked(hint))
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each section's hint names its own keys: Sources has no datasets and
+    /// its `r` refreshes the catalog; Reference steps datasets and polls.
+    #[test]
+    fn sources_and_reference_footers_name_their_own_keys() {
+        assert_eq!(
+            footer_hint(Section::Sources, false, false),
+            "`[` / `]` Sections   `/` Filter   `up` / `down` Rows   `y` Copy   `escape` Back"
+        );
+        assert_eq!(
+            footer_hint(Section::Reference, false, false),
+            "`[` / `]` Sections   `tab` Dataset   `/` Filter   `r` Poll now   `y` Copy   `escape` Back"
+        );
+    }
 }

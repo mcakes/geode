@@ -281,6 +281,30 @@ fn the_reference_filter_and_copy_work_on_rows(cx: &mut gpui::TestAppContext) {
     assert_eq!(empty_title(&h, &vcx), "Filter matches nothing (2 rows)");
 }
 
+/// A NULL cell copies as `—`, distinct from an empty string.
+#[gpui::test]
+fn a_null_cell_copies_as_a_dash(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    shown_with(&h, &mut vcx, &["underlyings"]);
+    key(&h, &mut vcx, "g r");
+    let mut with_null = table(&["SX5E"]);
+    with_null.rows[0][1] = None;
+    h.diagnostics.update(&mut vcx, |d, cx| {
+        d.set_reference(ReferenceOutcome {
+            key: QueryKey(0),
+            tag: 1,
+            dataset: "underlyings".into(),
+            as_of: AsOf::Live,
+            table: Ok(Some(with_null)),
+        });
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert!(key(&h, &mut vcx, "y"));
+    let copied = vcx.read(|cx| cx.read_from_clipboard().unwrap().text().unwrap());
+    assert_eq!(copied, "underlying_ref: SX5E\ncalendar: —");
+}
+
 /// The summary's total and the rail badge count the answer the table
 /// shows. A stale-as-of answer for the same dataset stays on screen while
 /// Loading, counted as what it is; the badge waits for the current answer.

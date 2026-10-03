@@ -384,7 +384,9 @@ pub struct Diagnostics {
     /// bridge from the schema at attach.
     pub reference_datasets: Vec<String>,
     /// The latest reference answer the bridge accepted. Its `as_of` may
-    /// trail the frame's; the page compares and asks again.
+    /// trail the frame's; the page reads a mismatch as Loading and never
+    /// asks again because of it, only on its edges (section or page shown,
+    /// as-of or dataset change, `r`, a `reference_published` bump).
     pub reference: Option<ReferenceOutcome>,
     /// The last refused reference or poll submission, so the page can say
     /// why nothing arrived. Each lane clears only on its own success; see
