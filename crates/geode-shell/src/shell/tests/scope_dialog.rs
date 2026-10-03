@@ -640,3 +640,95 @@ fn naming_a_term_that_moved_refuses(cx: &mut gpui::TestAppContext) {
         "no name entry opened for the neighbour"
     );
 }
+
+#[gpui::test]
+fn t_types_the_text_filter_and_returns(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, Scope::default());
+    vcx.simulate_keystrokes("t");
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-dialog-text-field").is_some());
+    // The step's footer replaces Current's.
+    assert!(vcx.debug_bounds("scope-dialog-hint-set-text").is_some());
+    assert!(vcx.debug_bounds("scope-dialog-hint-edit-row").is_none());
+    // Surrounding blanks are not part of the filter.
+    vcx.simulate_input("  spx  ");
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(lane_scope(&shell, &vcx).text.as_deref(), Some("spx"));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-dialog-text-field").is_none());
+    assert!(vcx.debug_bounds("scope-dialog-hint-edit-row").is_some());
+    assert!(
+        vcx.debug_bounds("scope-dialog-row-0").is_some(),
+        "the text row paints"
+    );
+}
+
+#[gpui::test]
+fn keys_current_claims_type_into_the_text_step(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    vcx.simulate_keystrokes("t");
+    // `d`, `j`, `x` are Current's verbs; inside the step they are text.
+    vcx.simulate_keystrokes("d j x");
+    let typed = shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(typed, "decdjx");
+    assert_eq!(lane_scope(&shell, &vcx), rich_scope(), "no verb ran");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+}
+
+#[gpui::test]
+fn enter_on_the_text_row_edits_it_and_empty_clears(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(
+        cx,
+        Scope {
+            text: Some("dec".into()),
+            ..Scope::default()
+        },
+    );
+    vcx.simulate_keystrokes("enter");
+    let seeded = shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(seeded, "dec");
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-dialog-text-field").is_some());
+    vcx.simulate_keystrokes("backspace backspace backspace enter");
+    assert_eq!(lane_scope(&shell, &vcx).text, None);
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-dialog-text-field").is_none());
+    assert!(vcx.debug_bounds("scope-dialog-empty-text").is_some());
+}
+
+#[gpui::test]
+fn escape_leaves_the_text_step_without_a_change(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(
+        cx,
+        Scope {
+            text: Some("dec".into()),
+            ..Scope::default()
+        },
+    );
+    vcx.simulate_keystrokes("t");
+    vcx.simulate_input("x");
+    let typed = shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(typed, "decx", "the step's field took the text");
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(lane_scope(&shell, &vcx).text.as_deref(), Some("dec"));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.modal_depth()),
+        1,
+        "escape left the step, not a dialog pushed over it"
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-dialog-text-field").is_none());
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(shell.read_with(&vcx, |s, _| s.top_kind()), None);
+}

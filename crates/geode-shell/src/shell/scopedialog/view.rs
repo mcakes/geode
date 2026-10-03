@@ -21,7 +21,7 @@ use crate::keymap::Keystroke;
 use super::rows::{
     CONTRADICTION, CurrentRows, NamedState, Row, RowId, RowKind, Section, empty_hint,
 };
-use super::state::{Layer, Layers, Step};
+use super::state::{After, Layer, Layers, Step};
 use crate::frame::FrameViewMut;
 use crate::shell::{ShellView, dialog, scale};
 
@@ -265,6 +265,10 @@ fn handle_key(
             open_cursor_row(shell, window, cx);
             return true;
         }
+        ("t", true, false) => {
+            enter_text_step(shell, window, cx);
+            return true;
+        }
         ("i", true, false) => inline_cursor_row(shell, cx),
         ("s", false, false) if ks.mods == shell.services.mod_alias => {
             name_cursor_term(shell, window, cx);
@@ -284,14 +288,47 @@ fn handle_key(
     true
 }
 
-/// The text step's keys; the step has no route onto the screen yet.
+/// Keys while the text step is open. Enter commits the trimmed draft (empty
+/// clears the filter) and returns to Current; Escape returns with nothing
+/// changed, and is claimed here so the shell's unclaimed-escape fallback
+/// does not close the whole dialog. Every other key is the field's, so
+/// Current's verbs type as text.
 fn text_step_key(
-    _shell: &mut ShellView,
-    _ks: &Keystroke,
-    _window: &mut Window,
-    _cx: &mut Context<ShellView>,
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
 ) -> bool {
-    false
+    if ks.mods.is_chord() {
+        return false;
+    }
+    match ks.key.as_str() {
+        "enter" => {
+            let draft = shell
+                .scope_dialog
+                .as_ref()
+                .map(|s| s.text_draft.trim().to_string())
+                .unwrap_or_default();
+            edit_lane(shell, cx, |f| {
+                f.set_text((!draft.is_empty()).then_some(draft))
+            });
+            if let Some(state) = shell.scope_dialog.as_mut() {
+                let after = state.layers.commit_step();
+                debug_assert_eq!(after, After::Show, "Current is beneath the step");
+            }
+        }
+        "escape" => {
+            if let Some(state) = shell.scope_dialog.as_mut() {
+                let after = state.layers.escape();
+                debug_assert_eq!(after, After::Show, "Current is beneath the step");
+            }
+        }
+        _ => return false,
+    }
+    shell.refresh_dialog_rows(cx);
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+    true
 }
 
 fn move_cursor(shell: &mut ShellView, delta: i64) {
@@ -399,8 +436,24 @@ fn open_term_row(
     true
 }
 
-/// The text step; it has no screen yet, so the text row opens nothing.
-fn enter_text_step(_: &mut ShellView, _: &mut Window, _: &mut Context<ShellView>) {}
+/// Open the text step over Current, seeded with the lane's text so `enter`
+/// on the text row edits it rather than retyping it.
+fn enter_text_step(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let seed = shell
+        .target_frame()
+        .read(cx)
+        .scope()
+        .text
+        .clone()
+        .unwrap_or_default();
+    if let Some(state) = shell.scope_dialog.as_mut() {
+        state.text_draft = seed;
+        state.error = None;
+        state.layers.push(Layer::Step(Step::Text));
+    }
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
 
 /// `mod+s`: open the cursor's term in the expression dialog straight into
 /// its name entry. Off a term it refuses, so a dimension or reference is
@@ -596,7 +649,16 @@ fn build(
         }
     }
 
-    let mut body = v_flex().gap_2().w(scale::design(WIDTH)).child(list);
+    let mut body = v_flex().gap_2().w(scale::design(WIDTH));
+    // The text step is drawn here, above the rows it will change.
+    if in_text_step(state) {
+        body = body.child(
+            div()
+                .debug_selector(|| "scope-dialog-text-field".to_string())
+                .child(dialog::filter_row(&shell.dialog_input, None, cx)),
+        );
+    }
+    body = body.child(list);
     if let Some(error) = state.error.as_ref() {
         body = body.child(
             div()
@@ -620,6 +682,13 @@ fn build(
 }
 
 fn hints(shell: &ShellView, state: &ScopeDialogState) -> Vec<Hint> {
+    // Inside the text step only its own two keys act; Current's verbs type.
+    if in_text_step(state) {
+        return vec![
+            Hint::new(HintRow::Go, &["enter"], "set text").selector("scope-dialog-hint-set-text"),
+            Hint::new(HintRow::Go, &["escape"], "back"),
+        ];
+    }
     let mut hints = vec![
         Hint::new(HintRow::Move, &["j", "k"], "row"),
         Hint::new(HintRow::Edit, &["p"], "dimension…"),
@@ -644,7 +713,7 @@ fn hints(shell: &ShellView, state: &ScopeDialogState) -> Vec<Hint> {
         _ => {}
     }
     hints.extend([
-        Hint::new(HintRow::Go, &["enter"], "edit row"),
+        Hint::new(HintRow::Go, &["enter"], "edit row").selector("scope-dialog-hint-edit-row"),
         Hint::new(HintRow::Go, &["o"], "saved scopes…"),
         Hint::new(HintRow::Go, &["s"], "save as…"),
         Hint::new(HintRow::Go, &["escape"], "close"),

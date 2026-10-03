@@ -18362,6 +18362,39 @@ run_mutation "scope dialog: a key clears the last refusal" \
   geode-shell \
   removing_a_term_that_moved_refuses
 
+# `t` opens the text step drawn inside the dialog.
+run_mutation "scope dialog: t opens the text step" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '            enter_text_step(shell, window, cx);' \
+  '' \
+  geode-shell \
+  t_types_the_text_filter_and_returns
+
+# Inside the text step, Current's verbs are text for the field.
+run_mutation "scope dialog: the text step owns its keys" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        return text_step_key(shell, ks, window, cx);' \
+  '        let _ = text_step_key;' \
+  geode-shell \
+  keys_current_claims_type_into_the_text_step
+
+# The committed text is trimmed, so blanks never become part of the filter.
+run_mutation "scope dialog: the text step trims its draft" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '                .map(|s| s.text_draft.trim().to_string())' \
+  '                .map(|s| s.text_draft.clone())' \
+  geode-shell \
+  t_types_the_text_filter_and_returns
+
+# Escape in the text step returns to Current; unclaimed, the shell's
+# fallback would close the whole dialog.
+run_mutation "scope dialog: escape leaves the text step untouched" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        "escape" => {' \
+  '        "escape-unclaimed" => {' \
+  geode-shell \
+  escape_leaves_the_text_step_without_a_change
+
 # The toolbar's load glyph opens the saved-scope picker.
 run_mutation "scope-picker: the load glyph click opens the picker" \
   crates/geode-shell/src/shell/render.rs \
