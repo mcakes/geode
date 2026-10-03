@@ -897,13 +897,13 @@ impl RowVerb {
 /// configuration defines but the reader dropped holds nothing, so offering
 /// `save` there would offer a press that `s` refuses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct HeldChains {
+pub(super) struct HeldChains {
     slots: [bool; 10],
     ad_hoc: bool,
 }
 
 impl HeldChains {
-    pub fn of(frame: &FrameView<'_>) -> Self {
+    pub(super) fn of(frame: &FrameView<'_>) -> Self {
         let mut held = Self {
             ad_hoc: frame.ad_hoc().is_some_and(|chain| !chain.is_empty()),
             ..Self::default()
@@ -967,11 +967,15 @@ pub(super) fn press_row_control(
 }
 
 /// The trailing `edit` and `save` controls of a slot or ad hoc row: `edit`
-/// on every such row, `save` only where the lane holds a chain. Each sits in
-/// an occluding wrapper: the row applies itself on mouse-down, so without
-/// it a press on a control would also apply the row and close the dialog.
-/// `shown` is whether the controls are visible at rest (the cursor row);
-/// other rows reveal them through the row's `objectdialog-row` hover group.
+/// on every such row, `save` only where the lane holds a chain. The row
+/// applies itself on mouse-down, so a press on a control stops at the
+/// control's wrapper; otherwise it would also apply the row and close the
+/// dialog. Hover is not blocked, and stays with the row: an occluding
+/// wrapper would make the row's hitbox report not hovered under the
+/// control, dropping the row's hover group, and with it the controls, the
+/// moment the pointer reached one. `shown` is whether the controls are
+/// visible at rest (the cursor row); other rows reveal them through the
+/// row's `objectdialog-row` hover group.
 pub(super) fn row_controls(
     row: &ObjectRow,
     shown: bool,
@@ -987,7 +991,11 @@ pub(super) fn row_controls(
         let name = row.name.clone();
         let selector = format!("objectdialog-row-{}-{}", verb.word(), row.name);
         div()
-            .occlude()
+            // Runs after the button's own mouse-down (descendants first in
+            // the bubble phase), so the button still sees its press.
+            .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
+                cx.stop_propagation();
+            })
             .debug_selector({
                 let selector = selector.clone();
                 move || selector
