@@ -440,10 +440,14 @@ numbered slot, or the lane's own ad hoc chain. The ad hoc chain is stored on
 the lane beside the choice, so it survives a switch to a slot and can be
 returned to (`frame::grouping_adhoc`, "Ad hoc grouping", no default
 binding; with no chain stored it reports that in the status bar). The
+Grouping dialog is where a chain is typed, edited, and saved to a slot. The
 toolbar's grouping readout reads `n · chain` for a slot, `* · chain` for an
-ad hoc chain, and `view default` otherwise. The frame holds one shared lane
-and one lane per pinned workspace. An unpinned workspace reads and writes
-the shared lane; a pinned one reads and writes only its own. Definitions
+ad hoc chain, and `view default` otherwise; a click on it opens the
+Grouping dialog on the lane (see
+[configuration dialogs](configuration-dialogs.md#the-grouping-dialog)).
+The frame holds one shared lane and one lane per pinned workspace. An
+unpinned workspace reads and writes the shared lane; a pinned one reads and
+writes only its own. Definitions
 stay shared across lanes — grouping slot contents, saved scopes, named
 expressions — as do recent publications and the data and config versions.
 
@@ -459,6 +463,11 @@ workspace reads the shared lane again. A grouping reload (`replace_slots`)
 bumps grouping in every lane, hidden pinned ones included, and clears an
 active slot that no longer exists in each lane separately; saving a slot
 (`save_slot`) bumps grouping only in the lanes where that slot is active.
+`stage_slot` holds a chain in a slot in memory ahead of its config write
+and queues no write of its own. A changed chain bumps grouping in the lanes
+on that slot and the frame's config version, because a tile pinned to the
+slot follows config, and the promotion's reload finds equal slots and bumps
+nothing; an equal chain bumps nothing.
 A reload that changes `groupings`, `datasets` or `dimensions` also checks
 each lane's ad hoc chain against the groupable columns. A chain naming a
 column outside them is dropped whole, with a warning, and a lane it was
@@ -640,7 +649,7 @@ for it.
 The load glyph (a folder-open icon, `scope-load-chip`) follows the `+` and
 paints whatever the scope holds, empty included; a click opens the scope
 picker (`frame::scope`, `mod+o`; see
-[input and dialogs](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices)),
+[input and dialogs](input-and-dialogs.md#scope-tile-log-and-column-choices)),
 and the glyph holds its pressed fill while the picker is open. The save
 glyph, when the scope is savable, comes after it, so its appearance never
 moves the load glyph.
@@ -792,7 +801,7 @@ still pending.
 
 **The chooser.** `tile::link_group` (`mod+u`, the palette, and a click on the
 status bar's `following` segment) opens the link chooser on the focused tile
-(see [input and dialogs](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices)).
+(see [input and dialogs](input-and-dialogs.md#scope-tile-log-and-column-choices)).
 It lists the follow rows for a tile whose module follows and the emit rows
 for one whose module emits. A tile that does neither (a timeseries tile) has
 nothing to choose: no dialog opens and the status bar reads `this tile has
