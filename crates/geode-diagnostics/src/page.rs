@@ -479,21 +479,17 @@ impl DiagnosticsPage {
                             model::current_diagnostics(d)
                         };
                         self.issue_count = diags.len();
-                        let mut issues = prepared::diagnostics_table(&diags, self.config_history);
-                        let query = filter.to_lowercase();
-                        if !query.is_empty() {
-                            issues.rows.retain(|r| {
-                                r.cells
-                                    .iter()
-                                    .any(|c| c.text.to_lowercase().contains(&query))
-                                    || r.detail.iter().any(|s| s.to_lowercase().contains(&query))
-                            });
-                        }
-                        diag_prepared = Some(issues);
+                        diag_prepared = Some(prepared::diagnostics_table(
+                            &diags,
+                            self.config_history,
+                            &filter,
+                        ));
                         let expanded_docs = BTreeSet::new();
                         prepared::config_table(
                             &model::config_docs(&self.config.borrow(), &filter),
-                            if filter.is_empty() {
+                            // A blank query narrows nothing, so it leaves
+                            // the stored expansion alone too.
+                            if filter.trim().is_empty() {
                                 &self.collapsed_docs
                             } else {
                                 &expanded_docs
@@ -501,7 +497,7 @@ impl DiagnosticsPage {
                         )
                     }
                     Section::Log => {
-                        // The one input is the log's message filter.
+                        // The one input is the log's text filter.
                         self.log_filter.text = filter;
                         self.level_rows = Rc::new(levels::level_rows(&d.levels));
                         prepared::log_table(
@@ -2919,9 +2915,10 @@ mod tests {
         assert!(painted.ends_with(" · 4 m"), "{painted}");
     }
 
-    /// The headless measurement recorded in `docs/perf.md`: the Log
-    /// section's `rebuild` over a full 4,096-record tail. Not a painted
-    /// frame. Run with
+    /// The headless measurement recorded in `docs/current/performance.md`:
+    /// the Log section's `rebuild` over a full 4,096-record tail, without
+    /// a filter and under a two-word fuzzy filter every record matches.
+    /// Not a painted frame. Run with
     /// `cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --nocapture`.
     #[gpui::test]
     #[ignore]
@@ -2949,26 +2946,36 @@ mod tests {
             crate::log::LOG_CAP
         );
         const RUNS: u32 = 20;
-        let mut samples = Vec::with_capacity(RUNS as usize);
-        for _ in 0..RUNS {
-            let started = std::time::Instant::now();
-            h.page.update(&mut vcx, |p, cx| p.rebuild(cx));
-            samples.push(started.elapsed());
-        }
-        samples.sort();
-        let median = samples[samples.len() / 2];
-        let max = *samples.last().unwrap();
-        eprintln!(
-            "log rebuild over {} records: median {:?}, max {:?} over {RUNS} runs (headless; {} build)",
-            crate::log::LOG_CAP,
-            median,
-            max,
-            if cfg!(debug_assertions) {
-                "debug"
-            } else {
-                "release"
+        for query in ["", "eutch ld"] {
+            h.page.update(&mut vcx, |p, _| {
+                p.filters[Section::Log as usize] = query.to_string();
+            });
+            let mut samples = Vec::with_capacity(RUNS as usize);
+            for _ in 0..RUNS {
+                let started = std::time::Instant::now();
+                h.page.update(&mut vcx, |p, cx| p.rebuild(cx));
+                samples.push(started.elapsed());
             }
-        );
+            assert_eq!(
+                h.page.read_with(&vcx, |p, _| p.prepared().rows.len()),
+                crate::log::LOG_CAP,
+                "every record matches {query:?}"
+            );
+            samples.sort();
+            let median = samples[samples.len() / 2];
+            let max = *samples.last().unwrap();
+            eprintln!(
+                "log rebuild over {} records, filter {query:?}: median {:?}, max {:?} over {RUNS} runs (headless; {} build)",
+                crate::log::LOG_CAP,
+                median,
+                max,
+                if cfg!(debug_assertions) {
+                    "debug"
+                } else {
+                    "release"
+                }
+            );
+        }
     }
     #[gpui::test]
     fn configuration_views_route_motion_and_copy_to_the_visible_table(
@@ -3072,6 +3079,66 @@ mod tests {
             "keep"
         );
         assert!(!h.page.read_with(&vcx, |p, _| p.insert_mode));
+    }
+
+    /// Typing into the filter narrows fuzzily, keeps the tail's order, and
+    /// hands the delegate cells already marked: the matches are prepared
+    /// with the table, never computed in paint.
+    #[gpui::test]
+    fn typing_a_fuzzy_filter_narrows_in_order_and_marks_the_painted_cells(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        open_log_section(&h, &mut vcx);
+        push(&h.ring, Level::INFO, "geode::ingest", "partition loaded");
+        push(&h.ring, Level::WARN, "geode::shell", "slow paint");
+        push(
+            &h.ring,
+            Level::INFO,
+            "geode::ingest",
+            "Partition LOADED again",
+        );
+        notify(&h, &mut vcx);
+        dispatch(&h, &mut vcx, "diagnostics::filter");
+        vcx.simulate_input("INGST ptn");
+        vcx.run_until_parked();
+        let painted = h.page.read_with(&vcx, |p, cx| {
+            assert!(Rc::ptr_eq(p.table.read(cx).delegate().table(), &p.prepared));
+            p.prepared.clone()
+        });
+        let messages: Vec<&str> = painted
+            .rows
+            .iter()
+            .map(|r| r.cells[3].text.as_ref())
+            .collect();
+        assert_eq!(messages, ["partition loaded", "Partition LOADED again"]);
+        for row in &painted.rows {
+            let target = &row.cells[2];
+            let marked: Vec<&str> = target
+                .marks
+                .iter()
+                .map(|r| &target.text[r.clone()])
+                .collect();
+            assert_eq!(marked, ["ing", "st"]);
+            assert!(!row.cells[3].marks.is_empty(), "ptn lands in the message");
+            assert!(row.cells[0].marks.is_empty() && row.cells[1].marks.is_empty());
+        }
+        assert!(
+            vcx.debug_bounds("diagnostics-row-1").is_some(),
+            "both rows paint"
+        );
+        vcx.simulate_keystrokes(&["backspace"; 9].join(" "));
+        vcx.run_until_parked();
+        h.page.read_with(&vcx, |p, _| {
+            assert_eq!(p.prepared.rows.len(), 3);
+            assert!(
+                p.prepared
+                    .rows
+                    .iter()
+                    .all(|r| r.cells.iter().all(|c| c.marks.is_empty())),
+                "a cleared filter marks nothing"
+            );
+        });
     }
 
     #[gpui::test]

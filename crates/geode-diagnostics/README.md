@@ -17,15 +17,15 @@ The seam it sits on: [pages](../../docs/current/shell.md#pages).
 | [`lib`](src/lib.rs) | `DiagnosticsPageFactory`: kind, title, icon, action registration, the default keymap fragment (`diagnostics && mode == normal` for the bare keys, `diagnostics && mode == insert` for Escape), the `mod+d` toggle binding, and the `PageContent` adapter over the page entity. |
 | [`section`](src/section.rs) | The five sections in rail order: names, titles, and cycling. |
 | [`model`](src/model.rs) | Typed rows per section (`SourceRow`, `DatasetRow`, `DiagnosticRow`, `ConfigDoc`, `LogRow`, `PerfModel`), the badges, and the header chips. Pure: explicit `now` and clock inputs, no GPUI, no I/O. |
-| [`prepared`](src/prepared.rs) | `PreparedTable`: the column specs and rows a section paints, with expansion and filtering applied; `cell_at` places a notice row's one cell in the widest column. Pure; `Rc`-shared with the delegate. |
-| [`table`](src/table.rs) | `SectionDelegate`, the one `TableDelegate` for every table section: paints a shared prepared table, scales column widths with the window rem, and formats nothing per paint but a parent row's expander. |
+| [`prepared`](src/prepared.rs) | `PreparedTable`: the column specs and rows a section paints, with expansion and fuzzy filtering applied and each cell's match ranges; `cell_at` places a notice row's one cell in the widest column. Pure; `Rc`-shared with the delegate. |
+| [`table`](src/table.rs) | `SectionDelegate`, the one `TableDelegate` for every table section: paints a shared prepared table, scales column widths with the window rem, paints match ranges in the memoised table accent, and formats nothing per paint but a parent row's expander. |
 | [`page`](src/page.rs) | `DiagnosticsPage`: the observers, the selected section, per-section cursors and filters, the expansion sets, the log tail and its filter, the target select, the Levels state, the cached badge and header strings, the ages timer, key dispatch, visibility, serialization, and the frame layout. |
 | [`page_chrome`](src/page_chrome.rs) | The breadcrumb header and Back control, native section buttons with counts, wrapped and scrollable row details with Copy, and the shell-style keyboard hints. |
 | [`config_view`](src/config_view.rs) | The Config body: Current issues, History, and Effective values share one full-width table region. Keyboard motions and Copy follow the visible view. |
 | [`log_view`](src/log_view.rs) | The Log toolbar: level toggles, the target select, the text filter, Follow, Clear, and the Levels popover. |
 | [`levels`](src/levels.rs) | The Levels popover's pure rows: the read-only default, then the known targets, then any configured target outside that list (a hand-edited `[log]` key, shown but not offered for adding), each with the effective level resolved by the longest configured prefix, spelled as `LogLevels` stores them. |
 | [`perf_view`](src/perf_view.rs) | The Performance body and its prepared readouts: aligned percentile and sample-count columns, a labeled frame-interval histogram, a Memory section (sampled process memory with its peak and peak time, then DuckDB memory against its limit, temporary files and the largest tags from the catalog snapshot), storage metrics, dropped events and refused requests (both warning-toned when non-zero), and the overlay switch in a scrolling region. |
-| [`log`](src/log.rs) | `LogTail`, a bounded copy of the ring from the sequence at creation (4,096 records, the loss gap measured per drain), and `LogFilter` over level, target, and text. Pure. |
+| [`log`](src/log.rs) | `LogTail`, a bounded copy of the ring from the sequence at creation (4,096 records, the loss gap measured per drain), and `LogFilter`: the level and target gates, plus the text that `model::log_rows` narrows by over the formatted columns. Pure. |
 
 ## Interaction
 
@@ -61,17 +61,43 @@ return focus to navigation. In Log this also restores all levels and targets;
 other sections retain their filters. Toolbar tooltips name each control's
 key; the footer names the section's main keys.
 
-Sources filters by name and health; Data by dataset name and generation
-fields (partition/book label, generation ID, source/load time, row count,
-and live/archive status); Config by issue text or `document.key` and value;
-Log by message and target text, plus the level toggles and the target select. Data matching is case insensitive: a
-matching dataset includes all its generations; a leaf-only match shows just
-matching generations beneath their dataset. A nonempty filter temporarily
-expands results without changing the stored collapse state. Clearing it restores
-the stored expansion, and dataset totals always describe the full catalog.
-Configuration matching is case insensitive, hides unmatched documents, and
-reveals matches in collapsed
-documents without losing their collapse state. Selection follows row identity
+Every section's filter is fuzzy and keeps the table's own order
+(`geode_shell::listfilter::Narrow`): rows are dropped, never ranked. The query
+splits on whitespace; each word must match as a case-insensitive subsequence
+inside one column's text, and different words may land in different columns.
+Columns are never joined, so a word cannot be stitched from the end of one
+column and the start of the next, and two words in one column take characters
+of their own. Words are placed longest first, each in the column where it
+scores best (the leftmost of equals); the placement is greedy, so a row only a
+different assignment would fit is dropped. A blank query narrows nothing.
+
+The matched characters paint in the table accent, bold, over the cell's own
+tone. Marks are byte ranges computed with the prepared table, never in paint.
+`listrow::table_accent` floors `primary` to the readable ratio on the cursor
+row's `table_active`, the pointer's `table_hover`, and the `table` surface;
+the list accent (`RowPaint::accent`) floors on popover grounds instead and
+falls short on some themes' table grounds.
+
+What each section matches: Sources, every column, with Since matched on its
+clock text only (the age after it ticks every second; the ages tick keeps the
+clock prefix, so its marks stay valid). Data, a dataset by its name and a
+generation by its own fields (partition/book label, generation ID,
+source/load time, row count, and live/archive status); words do not combine
+across the two levels. A matching dataset includes all its generations, marked
+only where a generation matches on its own; a generation-only match shows just
+the matching generations beneath their unmarked dataset. Config issues, every
+visible cell plus the full diagnostic text the detail strip shows; a word that
+lands only in that text keeps its row unmarked. Effective values, the full
+`document.key` path and the value: a document's name keeps all its leaves, the
+Key cell's marks exclude the hidden document prefix, and the document row marks
+its own name when the whole query fits it. The per-document leaf cap applies
+after narrowing. Log, the displayed time, level, target, and message, after the
+level toggles and the target select.
+
+A nonempty filter temporarily expands Data and Effective values results
+without changing the stored collapse state. Clearing it restores the stored
+expansion, and dataset totals always describe the full catalog. Unmatched
+documents are hidden. Selection follows row identity
 through refreshes and filtering while the selected row remains visible. The Log section follows new records until a
 row motion; a bare `G`, `f`, or the Follow switch resumes following, and a
 counted `G` jumps to that row without following. Clear forgets
@@ -110,8 +136,11 @@ window's lifetime.
 
 ```sh
 cargo test -p geode-diagnostics
-# The headless rebuild reading recorded in docs/perf.md:
+# The headless rebuild reading recorded in docs/current/performance.md,
+# without a filter and under a two-word fuzzy filter:
 cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --nocapture
+# The Log table build and the narrowing alone over a full tail:
+cargo bench -p geode-diagnostics --bench log_filter
 ```
 
 ## Rules this crate pins
