@@ -32002,8 +32002,8 @@ run_mutation "link: a moved highlight is kept until the query changes" \
 # change.
 run_mutation "link: other dialogs keep the highlight by text" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '            | Target::ValueColor { .. } => self.list.set_query(query),' \
-  '            | Target::ValueColor { .. } => self.list.set_query_placing(query, None),' \
+  '            | Target::ActionValue { .. } => self.list.set_query(query),' \
+  '            | Target::ActionValue { .. } => self.list.set_query_placing(query, None),' \
   geode-shell other_targets_keep_the_highlight_by_text
 
 run_mutation "link: the title names the current groups" \
@@ -35680,12 +35680,12 @@ run_mutation "value colors: follow desk labels an inline entry" \
   geode-shell \
   follow_desk_names_an_inline_desk_entry_by_its_hue
 
-# An inline entry in force opens on Custom…, so an untouched enter cannot
-# clear it.
+# An inline entry that is no preset opens on Custom…, so an untouched enter
+# cannot clear it.
 run_mutation "value colors: an inline entry opens on Custom" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '            Some(ValueEntry::Inline(_)) => Some(custom),' \
-  '            Some(ValueEntry::Inline(_)) => None,' \
+  '                .or(Some(custom)),' \
+  '                .or(None),' \
   geode-shell \
   an_inline_entry_in_force_opens_on_custom
 
@@ -35745,6 +35745,67 @@ run_mutation "value colors: the stage keeps its keys after the palette" \
   '        DialogKind::Choice if false => {' \
   geode-shell \
   the_stage_keeps_its_keys_after_the_palette_closes
+
+# The typed row picks the typed hue.
+run_mutation "value colors: the typed hue row picks the typed hue" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                        let def = Definition::hue(f32::from(n), Tone::Normal);' \
+  '                        let def = Definition::hue(0.0, Tone::Normal);' \
+  geode-shell \
+  a_typed_hue_pins_its_row_and_picks_it
+
+# The typed row is pinned on top and lit.
+run_mutation "value colors: the typed hue row is pinned" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                    self.list.pin_top(0);' \
+  '                    let _ = 0;' \
+  geode-shell \
+  a_typed_hue_pins_its_row_and_picks_it
+
+# Enter's re-feed of an unchanged query keeps a moved highlight.
+run_mutation "value colors: an unchanged query does not re-pin" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                if query == self.list.query() {' \
+  '                if false {' \
+  geode-shell \
+  a_moved_highlight_under_a_typed_hue_is_kept_at_enter
+
+# A preset entry in force opens on its preset, so an untouched enter
+# writes nothing.
+run_mutation "value colors: a preset in force opens on its preset" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                .and_then(|preset| picks.iter().position(|p| p.preset() == Some(preset)))' \
+  '                .and_then(|_| None::<usize>)' \
+  geode-shell \
+  an_inline_preset_in_force_opens_on_its_preset_row
+
+# A pinned row is put in even when the query does not match it.
+run_mutation "choice: a pinned row is put in when filtered out" \
+  crates/geode-shell/src/choice.rs \
+  '            None => Ranked {
+                row: declared,
+                indices: Vec::new(),
+            },' \
+  '            None => return,' \
+  geode-shell \
+  a_pinned_row_ranks_first_and_lights_whatever_the_query_ranks
+
+# Apply on the stage's untouched hue over a named color writes nothing: an
+# inline copy would detach the value from the name.
+run_mutation "value colors: an untouched apply over a name writes nothing" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    if stage.holds_in_force() {' \
+  '    if false {' \
+  geode-shell \
+  an_untouched_apply_over_a_named_color_writes_nothing
+
+# The stage holds the color in force only at its hue and tone.
+run_mutation "value colors: the stage compares hue and tone with the color in force" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        self.in_force == Some((self.hue, self.tone))' \
+  '        self.in_force.is_some()' \
+  geode-shell \
+  the_stage_knows_when_it_holds_the_color_in_force
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

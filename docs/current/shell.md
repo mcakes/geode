@@ -241,18 +241,29 @@ rebuilds them on a configuration reload. A row standing for no single value
 Picking it opens a choice list titled `Color · {column} {value}` (see
 [choice lists](input-and-dialogs.md#scope-tile-log-and-column-choices)):
 one row per named color in `colors.toml`, alphabetical, each with its
-swatch, then `Custom…` (with the swatch of the color in force), then
-`None`, then `Follow desk ({label})` only when the user layer holds an entry
-for this value and a lower layer holds a different, colored one. The label
-is the lower entry's color name, or for an inline entry `hue 210`,
-`hue 30 light`, or the token's name. It opens on the named color in force,
-on `Custom…` when an inline entry is in force, or on `None` when the value
-has no color or its color is no longer defined, so `enter` on an untouched
-list changes nothing (on `Custom…` it opens the hue stage on the color in
-force, whose Apply writes nothing). A row stands for its pick by position,
-so a color named `None` or `Custom…` is still that color. With no named
-color the list holds `Custom…`, `None` and a muted line, `no named colors:
-define one in the Colors dialog`.
+swatch, then the twelve presets, each with its swatch and labelled
+`preset · {name}`: `red` 0, `orange` 30, `yellow` 60, `lime` 90, `green`
+120, `teal` 150, `cyan` 180, `azure` 210, `blue` 240, `violet` 270,
+`magenta` 300 and `rose` 330, all tone normal. Then `Custom…` (with the
+swatch of the color in force), then `None`, then `Follow desk ({label})`
+only when the user layer holds an entry for this value and a lower layer
+holds a different, colored one. The label is the lower entry's color name,
+or for an inline entry `hue 210`, `hue 30 light`, or the token's name. It
+opens on the named color in force; on that preset when an inline entry
+equal to a preset (same hue, tone normal) is in force; on `Custom…` when
+any other inline entry is in force; or on `None` when the value has no
+color or its color is no longer defined, so `enter` on an untouched list
+changes nothing (on `Custom…` it opens the hue stage on the color in force,
+whose Apply writes nothing). A row stands for its pick by position, so a
+color named `None` or `Custom…` is still that color. With no named color
+the list holds the presets, `Custom…`, `None` and a muted line, `no named
+colors: define one in the Colors dialog`.
+
+While the query is a whole number 0–360 (360 reads as 0; `07` is 7, while
+`-5`, `1e2` or `21a` are no hue), a pinned top row `Hue {n}` with its
+swatch appears, lit, and the other rows still filter beneath it. Enter on
+it writes `{ hue = n }`. Moving the highlight off it keeps the move: enter
+does not re-pin an unchanged query.
 
 `Custom…` opens the hue stage: a second stage of the same modal, under the
 same title, with the title row's `‹` back button. The preview shows the
@@ -265,8 +276,10 @@ The field accepts a whole number 0–360 (360 reads as 0); out of range or
 empty it shows `a hue is 0–360` and disables Apply, and the last valid hue
 stays in force. The stage starts on the in-force color's hue and tone (an
 inline entry or a named hue color), else hue 240, normal. Nothing is
-written until Apply, which makes one inline pick and closes the list;
-Apply on the color in force writes nothing. `escape`, `Cancel` or `‹`
+written until Apply, which makes one inline pick and closes the list.
+Apply on the hue and tone of the color in force writes nothing, whether
+that color is inline or a named hue color: an inline copy of a name's hue
+would detach the value from the name. `escape`, `Cancel` or `‹`
 returns to the list as it was, writing nothing. The track and the preview
 are resolved once per theme signature (the preview also per hue and tone),
 a step or slider move resolving only the preview, in its handler.
@@ -288,7 +301,9 @@ writes nothing either (a dangling user entry with no lower one is not
 cleared this way).
 After a write the status bar reads `SPX colored blue`, `SPX colored hue 210`,
 `SPX colored hue 30 light`, `SPX colored warning`, `SPX colored blue preset`,
-`SPX color cleared` or `SPX follows the desk`; the ordinary reload repaints. A failed write (a
+`SPX color cleared` or `SPX follows the desk`. A preset row says `SPX
+colored blue preset`; a typed hue or the stage says `SPX colored hue 240`,
+even when the hue equals a preset. The ordinary reload repaints. A failed write (a
 dimension entry that is not a table, an unreadable file) shows the writer's
 error as the notice and leaves the file untouched. With no user
 configuration directory the notice reads `no user configuration directory:

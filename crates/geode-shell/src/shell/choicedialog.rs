@@ -36,15 +36,18 @@
 //! whose module does neither, nothing opens and the status bar says so.
 //!
 //! The row menu's `Color…` lists, for one value of a text dimension, each
-//! named color (alphabetical, with its swatch), then `Custom…`, then
-//! `None`, then `Follow desk ({name})` when the user layer overrides a
-//! different, colored lower entry. It opens on the color in force (an
-//! inline entry on `Custom…`, `None` without one), so enter on an untouched
-//! list changes nothing; rows stand for their pick by position, so a color
-//! named `None` or `Custom…` is still that color. A pick goes to
-//! `ShellView::set_value_color`, which writes the user layer's
-//! `value_colors` entry off the UI thread. With no named color the list
-//! holds `Custom…`, `None` and a muted line naming the Colors dialog.
+//! named color (alphabetical, with its swatch), then the twelve presets
+//! (`preset · {name}`), then `Custom…`, then `None`, then
+//! `Follow desk ({name})` when the user layer overrides a different, colored
+//! lower entry. While the query is a whole number 0–360 a typed `Hue {n}`
+//! row is pinned on top, lit. It opens on the color in force (an inline
+//! preset on its row, any other inline entry on `Custom…`, `None` without
+//! one), so enter on an untouched list changes nothing; rows stand for their
+//! pick by position, so a color named `None` or `Custom…` is still that
+//! color. A pick goes to `ShellView::set_value_color`, which writes the user
+//! layer's `value_colors` entry off the UI thread. With no named color the
+//! list holds the presets, `Custom…`, `None` and a muted line naming the
+//! Colors dialog.
 //!
 //! `Custom…` opens the hue stage, a second stage of the same modal: the
 //! pure [`HueStage`] on the target, a gpui-component slider whose state
@@ -52,6 +55,7 @@
 //! a hue field, a tone control, and Apply/Cancel. While it is open the list's
 //! field is unpainted and blurred and the stage claims every non-chord key
 //! through the shell's modal route; `escape` or `‹` returns to the list.
+//! Apply on the hue and tone of the color in force writes nothing.
 
 use std::rc::Rc;
 
@@ -64,7 +68,8 @@ use gpui_component::{
 };
 
 use geode_core::colour::{
-    Base, Definition, NamedColours, Tone, ValueColorState, ValueEntry, ValuePick, value_color_state,
+    Base, Definition, NamedColours, PRESETS, Tone, ValueColorState, ValueEntry, ValuePick,
+    preset_of, value_color_state,
 };
 
 use geode_core::config::VALUE_COLORS_DOC;
@@ -171,6 +176,8 @@ pub enum Target {
         resolved: SwatchCache,
         in_force: Option<Definition>,
         stage: Option<Box<HueStage>>,
+        /// The hue the query spells, while it spells one: row 0 is then `Hue {n}`.
+        typed: Option<u16>,
     },
 }
 
@@ -563,8 +570,13 @@ impl ChoiceDialogState {
     /// Lit on the first of the level rows instead, Enter after a shared
     /// prefix would unfollow, or stop the tile emitting. Every other
     /// target keeps the lit row by text.
+    ///
+    /// The value-color list pins a `Hue {n}` row on top while the query is
+    /// a whole number 0–360 ([`parse_hue`]), lit, with the other rows
+    /// filtering beneath it; an unchanged query moves nothing, so enter's
+    /// re-feed keeps a moved highlight.
     pub fn set_query(&mut self, query: &str) -> bool {
-        match &self.target {
+        match &mut self.target {
             Target::LinkGroup { current, .. } => {
                 let current = *current;
                 self.list.set_query_placing_with(query, |top| {
@@ -575,13 +587,46 @@ impl ChoiceDialogState {
                     })
                 })
             }
+            Target::ValueColor {
+                typed,
+                picks,
+                swatches,
+                resolved,
+                ..
+            } => {
+                if query == self.list.query() {
+                    return false;
+                }
+                let hue = parse_hue(query);
+                if hue != *typed {
+                    let mut options = self.list.options().to_vec();
+                    if typed.is_some() {
+                        options.remove(0);
+                        picks.remove(0);
+                        swatches.remove(0);
+                    }
+                    if let Some(n) = hue {
+                        let def = Definition::hue(f32::from(n), Tone::Normal);
+                        options.insert(0, format!("Hue {n}"));
+                        picks.insert(0, ColorRow::set(ValuePick::Inline(def.clone())));
+                        swatches.insert(0, Some(def));
+                    }
+                    *typed = hue;
+                    *resolved = SwatchCache::default();
+                    self.list.replace_options(options);
+                }
+                self.list.set_query(query);
+                if typed.is_some() {
+                    self.list.pin_top(0);
+                }
+                true
+            }
             Target::TileKind { .. }
             | Target::TileKindWith { .. }
             | Target::Column { .. }
             | Target::Scope { .. }
             | Target::LogLevel { .. }
-            | Target::ActionValue { .. }
-            | Target::ValueColor { .. } => self.list.set_query(query),
+            | Target::ActionValue { .. } => self.list.set_query(query),
         }
     }
 
@@ -706,6 +751,14 @@ impl ColorRow {
     pub fn set(pick: ValuePick) -> ColorRow {
         ColorRow::Set { pick, preset: None }
     }
+
+    /// The preset this row is, if it is one.
+    pub fn preset(&self) -> Option<&'static str> {
+        match self {
+            ColorRow::Set { preset, .. } => *preset,
+            ColorRow::Custom => None,
+        }
+    }
 }
 
 /// A hue typed as text: one to three ASCII digits, 0–360, with 360 read as
@@ -728,10 +781,16 @@ pub(crate) fn parse_hue(text: &str) -> Option<u16> {
 pub struct HueStage {
     pub hue: u16,
     pub tone: Tone,
-    pub field: String,
+    /// The hue field's text, rebuilt by the handlers that change it so a
+    /// paint clones a reference count, never the text.
+    pub field: SharedString,
     /// The next digit replaces the field rather than appending: true at open
     /// and after every step, so typing `90` after `l` reads 90.
     fresh: bool,
+    /// The hue and tone of the color in force at open, as the stage reads
+    /// them, when it is a hue (named or inline): Apply on them writes
+    /// nothing, so an untouched stage never detaches a value from its name.
+    in_force: Option<(u16, Tone)>,
     /// The value's text, painted by the preview.
     pub value: SharedString,
     pub cache: StageCache,
@@ -742,8 +801,9 @@ impl HueStage {
         Self {
             hue,
             tone,
-            field: hue.to_string(),
+            field: hue.to_string().into(),
             fresh: true,
+            in_force: None,
             value,
             cache: StageCache::default(),
         }
@@ -753,11 +813,13 @@ impl HueStage {
     /// hue (inline or named), else [`DEFAULT_HUE`], normal.
     pub fn start(in_force: Option<&Definition>, value: SharedString) -> Self {
         match in_force.map(|d| &d.base) {
-            Some(Base::Hue { degrees, tone }) => Self::new(
-                (degrees.round() as i32).rem_euclid(360) as u16,
-                *tone,
-                value,
-            ),
+            Some(Base::Hue { degrees, tone }) => {
+                let hue = (degrees.round() as i32).rem_euclid(360) as u16;
+                Self {
+                    in_force: Some((hue, *tone)),
+                    ..Self::new(hue, *tone, value)
+                }
+            }
             _ => Self::new(DEFAULT_HUE, Tone::Normal, value),
         }
     }
@@ -765,38 +827,45 @@ impl HueStage {
     /// Move `delta` degrees round the wheel, wrapping.
     pub fn step(&mut self, delta: i32) {
         self.hue = (self.hue as i32 + delta).rem_euclid(360) as u16;
-        self.field = self.hue.to_string();
+        self.field = self.hue.to_string().into();
         self.fresh = true;
     }
 
     /// The slider moved to `hue`.
     pub fn set_hue(&mut self, hue: u16) {
         self.hue = hue % 360;
-        self.field = self.hue.to_string();
+        self.field = self.hue.to_string().into();
         self.fresh = true;
     }
 
     /// A digit typed into the field; the hue follows when the text is valid.
     pub fn digit(&mut self, digit: char) {
-        if self.fresh {
-            self.field.clear();
-            self.fresh = false;
+        let mut text = if self.fresh {
+            String::new()
+        } else {
+            self.field.to_string()
+        };
+        self.fresh = false;
+        if text.len() < 3 {
+            text.push(digit);
         }
-        if self.field.len() < 3 {
-            self.field.push(digit);
-        }
-        if let Some(hue) = parse_hue(&self.field) {
-            self.hue = hue;
-        }
+        self.set_field(text);
     }
 
     /// Backspace in the field.
     pub fn erase(&mut self) {
         self.fresh = false;
-        self.field.pop();
-        if let Some(hue) = parse_hue(&self.field) {
+        let mut text = self.field.to_string();
+        text.pop();
+        self.set_field(text);
+    }
+
+    /// The field now reads `text`; the hue follows when it is one.
+    fn set_field(&mut self, text: String) {
+        if let Some(hue) = parse_hue(&text) {
             self.hue = hue;
         }
+        self.field = text.into();
     }
 
     pub fn toggle_tone(&mut self) {
@@ -813,6 +882,12 @@ impl HueStage {
 
     pub fn definition(&self) -> Definition {
         Definition::hue(f32::from(self.hue), self.tone)
+    }
+
+    /// Whether the stage's hue and tone are those of the color in force
+    /// (a named color's `colors.toml` definition, or the inline entry).
+    pub fn holds_in_force(&self) -> bool {
+        self.in_force == Some((self.hue, self.tone))
     }
 }
 
@@ -927,12 +1002,14 @@ pub struct HueSlider {
 }
 
 impl ChoiceDialogState {
-    /// One row per named color (alphabetical), then [`CUSTOM_ROW`], then
+    /// One row per named color (alphabetical), then twelve presets
+    /// (`preset · {name}`, [`PRESETS`]), then [`CUSTOM_ROW`], then
     /// [`NO_COLOR_ROW`], then `Follow desk ({label})` when the user layer
     /// overrides a different lower entry. Opens on the color in force: a
-    /// named color on its row, an inline entry on `Custom…`, none (or a
-    /// name no longer defined) on the no-color row, so `enter` on an
-    /// untouched list changes nothing. Rows are found by position, never by
+    /// named color on its row, an inline entry equal to a preset on that
+    /// preset, any other inline entry on `Custom…`, none (or a name no
+    /// longer defined) on the no-color row, so `enter` on an untouched list
+    /// changes nothing. Rows are found by position, never by
     /// text: a color may be named `None` or `Custom…`.
     pub fn value_colors(
         dimension: String,
@@ -953,6 +1030,15 @@ impl ChoiceDialogState {
             .iter()
             .map(|name| named.get(name).cloned())
             .collect();
+        for (name, degrees) in PRESETS {
+            let definition = Definition::hue(f32::from(degrees), Tone::Normal);
+            options.push(format!("preset \u{b7} {name}"));
+            picks.push(ColorRow::Set {
+                pick: ValuePick::Inline(definition.clone()),
+                preset: Some(name),
+            });
+            swatches.push(Some(definition));
+        }
         let custom = options.len();
         options.push(CUSTOM_ROW.to_string());
         picks.push(ColorRow::Custom);
@@ -970,7 +1056,9 @@ impl ChoiceDialogState {
             Some(ValueEntry::Named(name)) => picks.iter().position(
                 |p| matches!(p, ColorRow::Set { pick: ValuePick::Color(n), .. } if n == name),
             ),
-            Some(ValueEntry::Inline(_)) => Some(custom),
+            Some(ValueEntry::Inline(definition)) => preset_of(definition)
+                .and_then(|preset| picks.iter().position(|p| p.preset() == Some(preset)))
+                .or(Some(custom)),
             None => None,
         }
         .unwrap_or(no_color);
@@ -987,6 +1075,7 @@ impl ChoiceDialogState {
                 resolved: SwatchCache::default(),
                 in_force,
                 stage: None,
+                typed: None,
             },
         }
     }
@@ -1559,14 +1648,20 @@ fn leave_hue_stage(
     true
 }
 
-/// Apply the stage: one inline pick of its hue and tone, closing the list
-/// (a pick equal to the color in force writes nothing). Refused while the
-/// field is out of range; Apply is disabled then.
+/// Apply the stage: one inline pick of its hue and tone, closing the list.
+/// A hue and tone equal to the color in force, named or inline, close it
+/// writing nothing: an inline copy of a name's hue would silently detach
+/// the value from the name. Refused while the field is out of range; Apply
+/// is disabled then.
 fn apply_hue_stage(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let Some(stage) = hue_stage(shell) else {
         return;
     };
     if !stage.valid() {
+        return;
+    }
+    if stage.holds_in_force() {
+        shell.close_modal(window, cx);
         return;
     }
     let definition = stage.definition();
@@ -3049,6 +3144,129 @@ mod tests {
         state.effective = Some(inline);
         let list = value_list(&["blue"], &state);
         assert_eq!(lit(&list), Some(ColorRow::Custom));
+    }
+
+    #[test]
+    fn the_presets_follow_the_named_colors_each_picking_its_hue() {
+        let state = value_list(&["blue"], &value_state(None, None));
+        let options = state.list.options();
+        assert_eq!(
+            &options[1..13],
+            [
+                "preset \u{b7} red",
+                "preset \u{b7} orange",
+                "preset \u{b7} yellow",
+                "preset \u{b7} lime",
+                "preset \u{b7} green",
+                "preset \u{b7} teal",
+                "preset \u{b7} cyan",
+                "preset \u{b7} azure",
+                "preset \u{b7} blue",
+                "preset \u{b7} violet",
+                "preset \u{b7} magenta",
+                "preset \u{b7} rose",
+            ]
+        );
+        assert_eq!(options[13], CUSTOM_ROW);
+        assert_eq!(
+            value_pick(&state, 8),
+            Some(ColorRow::Set {
+                pick: ValuePick::Inline(Definition::hue(210.0, Tone::Normal)),
+                preset: Some("azure"),
+            })
+        );
+    }
+
+    #[test]
+    fn an_inline_preset_in_force_opens_on_its_preset_row() {
+        let opened = |definition: Definition| {
+            let mut state = value_state(None, None);
+            state.user = Some(ValueEntry::Inline(definition.clone()));
+            state.effective = Some(ValueEntry::Inline(definition));
+            let list = value_list(&["blue"], &state);
+            list.list.highlighted_text().map(str::to_string)
+        };
+        assert_eq!(
+            opened(Definition::hue(240.0, Tone::Normal)).as_deref(),
+            Some("preset \u{b7} blue")
+        );
+        assert_eq!(
+            opened(Definition::hue(240.0, Tone::Light)).as_deref(),
+            Some(CUSTOM_ROW),
+            "a light hue is no preset"
+        );
+        assert_eq!(
+            opened(Definition::hue(200.0, Tone::Normal)).as_deref(),
+            Some(CUSTOM_ROW)
+        );
+    }
+
+    #[test]
+    fn a_typed_hue_pins_its_row_and_picks_it() {
+        let mut state = value_list(&["blue"], &value_state(None, None));
+        assert!(state.set_query("210"));
+        assert_eq!(state.list.options()[0], "Hue 210");
+        assert_eq!(state.list.ranked()[0].row, 0, "pinned on top");
+        assert_eq!(
+            lit(&state),
+            Some(ColorRow::set(ValuePick::Inline(Definition::hue(
+                210.0,
+                Tone::Normal
+            ))))
+        );
+        state.set_query("21");
+        assert_eq!(state.list.options()[0], "Hue 21");
+        assert_eq!(
+            state
+                .list
+                .options()
+                .iter()
+                .filter(|o| o.starts_with("Hue "))
+                .count(),
+            1,
+            "one typed row at a time"
+        );
+        state.set_query("360");
+        assert_eq!(state.list.options()[0], "Hue 0", "360 reads as 0");
+        state.set_query("blue");
+        assert_eq!(state.list.options()[0], "blue", "no number, no row");
+        state.set_query("1e2");
+        assert_eq!(state.list.options()[0], "blue");
+    }
+
+    /// Enter re-feeds the live text; an unchanged query must not re-pin and
+    /// take the highlight back from the row the trader moved to.
+    #[test]
+    fn a_moved_highlight_under_a_typed_hue_is_kept_at_enter() {
+        let mut state = value_list(&["c1"], &value_state(None, None));
+        state.set_query("1");
+        assert_eq!(state.list.highlighted_text(), Some("Hue 1"));
+        state.list.nav(crate::vimnav::NavCommand::Move(1));
+        let moved = state.list.highlighted_text().map(str::to_string);
+        assert_ne!(moved.as_deref(), Some("Hue 1"));
+        assert!(!state.set_query("1"));
+        assert_eq!(state.list.highlighted_text().map(str::to_string), moved);
+    }
+
+    /// Apply on a stage whose hue and tone equal the color in force (named
+    /// or inline) changes nothing: writing them inline would detach the
+    /// value from its name.
+    #[test]
+    fn the_stage_knows_when_it_holds_the_color_in_force() {
+        let spx = Definition::hue(210.0, Tone::Normal);
+        let mut s = HueStage::start(Some(&spx), "SPX".into());
+        assert!(s.holds_in_force(), "untouched");
+        s.step(15);
+        assert!(!s.holds_in_force(), "stepped away");
+        s.step(-15);
+        assert!(s.holds_in_force(), "stepped back");
+        s.toggle_tone();
+        assert!(!s.holds_in_force(), "the tone changed");
+        let rounded = HueStage::start(Some(&Definition::hue(12.6, Tone::Normal)), "SPX".into());
+        assert!(rounded.holds_in_force(), "as the stage reads it");
+        let token = Definition::token(geode_core::colour::Token::Warning);
+        assert!(!HueStage::start(Some(&token), "SPX".into()).holds_in_force());
+        assert!(!HueStage::start(None, "SPX".into()).holds_in_force());
     }
 
     #[test]

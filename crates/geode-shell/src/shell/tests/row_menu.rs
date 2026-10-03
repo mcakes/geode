@@ -1611,3 +1611,104 @@ fn the_stage_keeps_its_keys_after_the_palette_closes(cx: &mut gpui::TestAppConte
     draw(&mut vcx);
     assert_eq!(hue_stage(&shell, &vcx).map(|s| s.hue), Some(255));
 }
+
+#[gpui::test]
+fn a_preset_pick_writes_its_hue_and_says_preset(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, Some(dir.path().to_path_buf()));
+    assert!(
+        vcx.debug_bounds("valuecolor-swatch-preset-red").is_some(),
+        "a preset swatch"
+    );
+    light_row(&shell, &mut vcx, "preset \u{b7} red");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    let text = value_colors_file(dir.path()).unwrap();
+    assert!(text.contains("SPX = { hue = 0 }"), "{text}");
+    assert_eq!(
+        shell_notice(&shell, &vcx),
+        Some("SPX colored red preset".into())
+    );
+}
+
+#[gpui::test]
+fn typing_a_hue_then_enter_writes_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, Some(dir.path().to_path_buf()));
+    vcx.simulate_input("210");
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("valuecolor-choice-Hue 210").is_some());
+    assert!(vcx.debug_bounds("valuecolor-swatch-hue").is_some());
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    let text = value_colors_file(dir.path()).unwrap();
+    assert!(text.contains("SPX = { hue = 210 }"), "{text}");
+    assert_eq!(
+        shell_notice(&shell, &vcx),
+        Some("SPX colored hue 210".into())
+    );
+}
+
+/// [`color_services`] over `colors` with `entry` as SPX's user-layer entry.
+fn services_with_spx(colors: &str, entry: &str) -> ShellServices {
+    use geode_core::config::{Config, Layer, LayerDoc, VALUE_COLORS_DOC};
+    let mut services = color_services(colors);
+    services.config = Config::from_docs(vec![
+        LayerDoc::builtin("colors", colors).unwrap(),
+        LayerDoc {
+            layer: Layer::User,
+            name: VALUE_COLORS_DOC.into(),
+            file: "value_colors.toml".into(),
+            table: format!("[underlying_ref]\nSPX = {entry}\n")
+                .parse()
+                .unwrap(),
+        },
+    ]);
+    services
+}
+
+#[gpui::test]
+fn enter_on_an_untouched_preset_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = services_with_spx(TWO_COLORS, "{ hue = 240 }");
+    let (shell, mut vcx) = open_color_list_on(cx, services, Some(dir.path().to_path_buf()));
+    let lit = shell.read_with(&vcx, |s, _| {
+        s.choice_dialog
+            .as_ref()
+            .and_then(|d| d.list.highlighted_text().map(str::to_string))
+    });
+    assert_eq!(lit.as_deref(), Some("preset \u{b7} blue"));
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()),
+        "closed"
+    );
+    assert!(value_colors_file(dir.path()).is_none());
+    assert_eq!(shell_notice(&shell, &vcx), None);
+}
+
+/// A named color in force, the stage opened on it and applied untouched:
+/// nothing is written, so the value stays on the name rather than being
+/// detached onto an inline copy of its hue.
+#[gpui::test]
+fn an_untouched_apply_over_a_named_color_writes_nothing(cx: &mut gpui::TestAppContext) {
+    const SPX_COLORS: &str = "[amber]\nhue = 40\n[spx]\nhue = 210\n";
+    let dir = tempfile::tempdir().unwrap();
+    let services = services_with_spx(SPX_COLORS, "\"spx\"");
+    let (shell, mut vcx) = open_color_list_on(cx, services, Some(dir.path().to_path_buf()));
+    open_stage(&shell, &mut vcx);
+    assert_eq!(
+        hue_stage(&shell, &vcx).map(|s| (s.hue, s.tone)),
+        Some((210, Tone::Normal)),
+        "the stage opens on the name's hue"
+    );
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()),
+        "Apply closes"
+    );
+    assert!(value_colors_file(dir.path()).is_none(), "nothing written");
+    assert_eq!(shell_notice(&shell, &vcx), None);
+}
