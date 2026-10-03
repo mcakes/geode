@@ -205,6 +205,12 @@ struct Lane {
     scope_redo: Vec<Scope>,
     /// An explicitly opened scope-editing session, usually owned by the text field.
     scope_session: Option<ScopeSession>,
+    /// The saved scope this lane's scope was last loaded from or saved as,
+    /// kept while the scope is edited so the Scope dialog can say "changed"
+    /// and offer to save over it. Undo and redo leave it alone: they walk
+    /// the scope, and a provenance that followed them would forget a load
+    /// the user is still working from.
+    loaded_from: Option<String>,
     grouping: GroupingChoice,
     /// The lane's ad hoc chain, kept while a slot or the view default is the
     /// choice so it can be returned to. Never empty when present.
@@ -226,6 +232,7 @@ impl Lane {
             scope: self.scope.clone(),
             grouping: self.grouping,
             ad_hoc: self.ad_hoc.clone(),
+            loaded_from: self.loaded_from.clone(),
             as_of: self.as_of.clone(),
             scope_gen: self.scope_gen,
             grouping_gen: self.grouping_gen,
@@ -1025,6 +1032,13 @@ impl<'a> FrameView<'a> {
         self.lane.ad_hoc.as_deref()
     }
 
+    /// The saved scope the lane's scope was last loaded from or saved as,
+    /// whether or not the scope still equals it. A follower's view answers
+    /// for its workspace lane: a link group has no provenance.
+    pub fn loaded_from(&self) -> Option<&'a str> {
+        self.lane.loaded_from.as_deref()
+    }
+
     /// The chain in force for this lane, or `None` for each view's own
     /// grouping. The one grouping read a tile makes.
     pub fn active_grouping(&self) -> Option<&'a [String]> {
@@ -1204,6 +1218,33 @@ impl<'a> FrameViewMut<'a> {
         self.lane().as_of_gen = g;
     }
 
+    /// The lane's provenance; see [`FrameView::loaded_from`].
+    pub fn loaded_from(&self) -> Option<&str> {
+        self.frame.lane(self.ws).loaded_from.as_deref()
+    }
+
+    /// Record where the lane's scope came from. A change advances the frame
+    /// generation, which the session writer's dirty check reads: loading the
+    /// scope already in force changes no scope version, and without the bump
+    /// the new name would wait for an unrelated edit to be written.
+    fn set_loaded_from(&mut self, name: Option<String>) {
+        if self.lane().loaded_from != name {
+            self.lane().loaded_from = name;
+            fresh(&mut self.frame.generation);
+        }
+    }
+
+    /// Session restore's door for the lane's provenance. Unlike a load it
+    /// changes no scope. A name no saved scope has is refused: the title
+    /// would otherwise read "from <gone>, changed" until the next load.
+    pub fn restore_loaded_from(&mut self, name: String) -> bool {
+        if !self.frame.saved_scopes.contains_key(&name) {
+            return false;
+        }
+        self.set_loaded_from(Some(name));
+        true
+    }
+
     /// Replace the scope, pushing its outgoing value and clearing redo.
     /// An equal value returns false without changing history or versions.
     /// Through the view of a tile that follows a link group, this replaces
@@ -1236,8 +1277,13 @@ impl<'a> FrameViewMut<'a> {
     }
 
     /// Empty the scope `set_scope` writes: the followed group's, else the
-    /// lane's.
+    /// lane's. Clearing the lane also forgets its provenance; clearing a
+    /// group leaves the lane's alone, since the lane's scope is unchanged.
     pub fn clear_scope(&mut self) -> bool {
+        let following = self.tile.and_then(|t| self.frame.links.following(t));
+        if following.is_none() {
+            self.set_loaded_from(None);
+        }
         self.set_scope(Scope::default())
     }
 
@@ -1573,13 +1619,16 @@ impl<'a> FrameViewMut<'a> {
             .insert(name.to_string(), scope.clone());
         self.frame.pending_scope_persist = Some((name.to_string(), scope));
         self.frame.versions.saved_scopes += 1;
+        self.set_loaded_from(Some(name.to_string()));
         Ok(())
     }
 
     /// Load a saved scope by name, going through `set_scope` so it's
     /// undoable like any other scope change. `Err` when no scope by that
     /// name exists; `Ok(false)` when it exists but is already the current
-    /// scope. Loads into the workspace lane even through a follower's view.
+    /// scope. Loads into the workspace lane even through a follower's view,
+    /// and records `name` as the lane's provenance even when the scope was
+    /// already current.
     pub fn load_scope(&mut self, name: &str) -> Result<bool, String> {
         let scope = self
             .frame
@@ -1587,7 +1636,9 @@ impl<'a> FrameViewMut<'a> {
             .get(name)
             .cloned()
             .ok_or_else(|| format!("no saved scope '{name}'"))?;
-        Ok(self.set_lane_scope(scope))
+        let changed = self.set_lane_scope(scope);
+        self.set_loaded_from(Some(name.to_string()));
+        Ok(changed)
     }
 
     /// Clear undo and redo without changing scope or ending an open session.
@@ -3656,6 +3707,83 @@ mod tests {
         f.view_mut(ws(2)).set_ad_hoc(chain(&["lhu"]));
         assert_eq!(f.shared().ad_hoc(), Some(chain(&["book"]).as_slice()));
         assert_eq!(f.view(ws(2)).ad_hoc(), Some(chain(&["lhu"]).as_slice()));
+    }
+
+    fn saved_eu() -> SavedScopes {
+        let mut saved = SavedScopes::new();
+        saved.insert("eu".into(), book_scope("BK001"));
+        saved
+    }
+
+    #[test]
+    fn loading_and_saving_a_scope_record_its_name_and_clearing_forgets_it() {
+        let mut f = Frame::new(slots(), saved_eu(), None);
+        assert_eq!(f.shared().loaded_from(), None);
+        f.shared_mut().load_scope("eu").unwrap();
+        assert_eq!(f.shared().loaded_from(), Some("eu"));
+        // An edit keeps the name: the dialog's title then reads "from eu, changed".
+        f.shared_mut().set_text(Some("spx".into()));
+        assert_eq!(f.shared().loaded_from(), Some("eu"));
+        // Undo walks the scope, not its provenance.
+        assert!(f.shared_mut().undo_scope());
+        assert_eq!(f.shared().loaded_from(), Some("eu"));
+        f.shared_mut().save_scope("asia").unwrap();
+        assert_eq!(f.shared().loaded_from(), Some("asia"));
+        f.shared_mut().clear_scope();
+        assert_eq!(f.shared().loaded_from(), None);
+    }
+
+    #[test]
+    fn loading_the_scope_already_in_force_still_records_its_name_and_advances_the_generation() {
+        let mut f = Frame::new(slots(), saved_eu(), None);
+        f.shared_mut().set_scope(book_scope("BK001"));
+        let before = f.generation();
+        assert_eq!(f.shared_mut().load_scope("eu"), Ok(false));
+        assert_eq!(f.shared().loaded_from(), Some("eu"));
+        assert!(
+            f.generation() > before,
+            "the session writer's dirty check reads the generation"
+        );
+    }
+
+    #[test]
+    fn a_failed_load_or_save_leaves_the_provenance_alone() {
+        let mut f = Frame::new(slots(), saved_eu(), None);
+        f.shared_mut().load_scope("eu").unwrap();
+        assert!(f.shared_mut().load_scope("gone").is_err());
+        assert!(f.shared_mut().save_scope("save_current").is_err());
+        assert_eq!(f.shared().loaded_from(), Some("eu"));
+    }
+
+    #[test]
+    fn clearing_through_a_followers_view_keeps_the_lanes_provenance() {
+        let mut f = Frame::new(slots(), saved_eu(), None);
+        f.shared_mut().load_scope("eu").unwrap();
+        let tile = TileId(7);
+        assert!(f.follow(tile, Some(Group::A)));
+        f.view_mut_for(ws(1), tile).clear_scope();
+        assert_eq!(f.view(ws(1)).loaded_from(), Some("eu"));
+        assert_eq!(f.view(ws(1)).scope(), &book_scope("BK001"));
+    }
+
+    #[test]
+    fn pinning_copies_the_provenance_and_the_lanes_then_diverge() {
+        let mut f = Frame::new(slots(), saved_eu(), None);
+        f.shared_mut().load_scope("eu").unwrap();
+        f.pin(ws(2));
+        assert_eq!(f.view(ws(2)).loaded_from(), Some("eu"));
+        f.view_mut(ws(2)).clear_scope();
+        assert_eq!(f.view(ws(2)).loaded_from(), None);
+        assert_eq!(f.shared().loaded_from(), Some("eu"));
+    }
+
+    #[test]
+    fn restoring_provenance_refuses_a_name_no_saved_scope_has() {
+        let mut f = Frame::new(slots(), saved_eu(), None);
+        assert!(!f.shared_mut().restore_loaded_from("gone".into()));
+        assert_eq!(f.shared().loaded_from(), None);
+        assert!(f.shared_mut().restore_loaded_from("eu".into()));
+        assert_eq!(f.shared().loaded_from(), Some("eu"));
     }
 
     #[test]

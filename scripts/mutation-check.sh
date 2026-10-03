@@ -18164,6 +18164,47 @@ run_mutation "scope-picker: an empty set's footer drops enter" \
   geode-shell \
   with_no_saved_scopes_the_picker_says_how_to_save_one
 
+# ---- Scope dialog: lane provenance, rows, saved rows and layers ----
+
+# A load of the scope already in force must still name its source, or the
+# dialog title says "unsaved" right after a load.
+run_mutation "scope dialog: a load records its source" \
+  crates/geode-shell/src/frame.rs \
+  '        self.set_loaded_from(Some(name.to_string()));
+        Ok(changed)' \
+  '        Ok(changed)' \
+  geode-shell \
+  loading_the_scope_already_in_force_still_records_its_name
+
+# Clearing a followed group's scope must not forget the lane's source.
+run_mutation "scope dialog: clearing a group keeps the lane's source" \
+  crates/geode-shell/src/frame.rs \
+  '        if following.is_none() {
+            self.set_loaded_from(None);
+        }' \
+  '        self.set_loaded_from(None);' \
+  geode-shell \
+  clearing_through_a_followers_view_keeps_the_lanes_provenance
+
+# A new source must reach the session file even when no scope changed.
+run_mutation "scope dialog: a new source dirties the session" \
+  crates/geode-shell/src/frame.rs \
+  '            self.lane().loaded_from = name;
+            fresh(&mut self.frame.generation);' \
+  '            self.lane().loaded_from = name;' \
+  geode-shell \
+  loading_the_scope_already_in_force_still_records_its_name_and_advances_the_generation
+
+# Restore refuses a name no saved scope has.
+run_mutation "scope dialog: restore refuses an unknown source" \
+  crates/geode-shell/src/frame.rs \
+  '        if !self.frame.saved_scopes.contains_key(&name) {
+            return false;
+        }' \
+  '' \
+  geode-shell \
+  restoring_provenance_refuses_a_name_no_saved_scope_has
+
 # ---- Tile picker: placeholder double-click, tile::add and mod-n ----
 
 # Only a PLACEHOLDER's double-click is the door — a real tile's may
