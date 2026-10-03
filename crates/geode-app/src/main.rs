@@ -8,6 +8,7 @@ mod bridge;
 mod crash;
 mod demo;
 mod demo_bus;
+mod demo_refdb;
 mod demo_series;
 mod events;
 
@@ -108,6 +109,8 @@ fn main() {
                 // catalogue and manual-identity discovery.
                 adapters.register(demo_series::DemoSeries::new("demo_kdb", 42, true));
                 adapters.register(demo_series::DemoSeries::new("demo_rest", 42, false));
+                // The demo reference database behind the `refdb` snapshot source.
+                adapters.register(demo_refdb::DemoRefDb::new(Duration::ZERO));
                 // The demo position service rewrites the risk CSVs the demo
                 // source polls; the demo layer's `positions.toml` names it.
                 if let Some(root) = &demo_root {

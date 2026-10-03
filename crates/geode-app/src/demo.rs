@@ -233,6 +233,8 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
 /// and `demo_rest` fetch the `series` dataset; the former offers a
 /// catalogue and the latter requires entered identities. The position
 /// service is `demo_positions`, which rewrites the risk CSVs in place.
+/// `refdb` polls the `underlyings` reference table from `demo_refdb` every
+/// 30 s.
 pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
     let sources = format!(
         "config_version = 1\n[demo]\ndataset = \"risk_snapshot\"\npaths = [{:?}]\n\
@@ -248,7 +250,9 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          document = \"option_chain\"\ntopics = [\"marketdata/chain/>\"]\n\
          coalesce = \"500ms\"\nsource_time = \"receive\"\npriority = \"latest_other\"\n\
          [demo_kdb]\nadapter = \"demo_kdb\"\ndataset = \"series\"\n\
-         [demo_rest]\nadapter = \"demo_rest\"\ndataset = \"series\"\n",
+         [demo_rest]\nadapter = \"demo_rest\"\ndataset = \"series\"\n\
+         [refdb]\nadapter = \"demo_refdb\"\ndataset = \"underlyings\"\n\
+         table = \"underlyings\"\npoll_interval = \"30s\"\n",
         source_dir.join("*.csv").to_string_lossy()
     );
     // The `sophis` target publishes both document kinds through the same
@@ -317,6 +321,14 @@ mod tests {
         let paths = sources.table["demo"]["paths"].as_array().unwrap();
         assert_eq!(paths[0].as_str(), Some("/tmp/geode-demo/100-42/src/*.csv"));
         assert_eq!(sources.table["demo"]["poll_interval"].as_str(), Some("2s"));
+        assert_eq!(
+            sources.table["refdb"]["adapter"].as_str(),
+            Some("demo_refdb")
+        );
+        assert_eq!(
+            sources.table["refdb"]["poll_interval"].as_str(),
+            Some("30s")
+        );
     }
 
     /// The demo `positions` doc names `demo_positions`, reads without
@@ -424,7 +436,7 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
-        assert_eq!(sources.len(), 6);
+        assert_eq!(sources.len(), 7);
     }
 
     /// The dividend source declares its document kind, topic, coalescing,
@@ -455,8 +467,8 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            6,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest"
+            7,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb"
         );
         assert!(sources.iter().any(|s| s.name == "dividend"));
     }
@@ -489,8 +501,8 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            6,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest"
+            7,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb"
         );
         assert!(sources.iter().any(|s| s.name == "opra_sim"));
     }
@@ -531,7 +543,7 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
-        assert_eq!(sources.len(), 6);
+        assert_eq!(sources.len(), 7);
         let kdb = sources.iter().find(|s| s.name == "demo_kdb").unwrap();
         let rest = sources.iter().find(|s| s.name == "demo_rest").unwrap();
         assert_eq!(
@@ -542,6 +554,32 @@ mod tests {
             rest.shape(&schema),
             geode_core::source_config::SourceShape::Fetch
         );
+    }
+
+    /// The `refdb` source resolves to the snapshot shape over the
+    /// `underlyings` reference dataset, reading the table of that name
+    /// every 30 s.
+    #[test]
+    fn the_demo_layer_declares_the_reference_snapshot_source() {
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: layer(std::path::Path::new("/tmp/geode-demo/100-42/src")),
+            ..geode_core::config::ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let (schema, d) = geode_core::schema::SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        assert!(d.is_empty(), "{d:?}");
+        let (sources, d) =
+            geode_data::source::SourceSpec::from_doc(config.doc("sources").unwrap(), &schema);
+        assert!(d.is_empty(), "{d:?}");
+        let refdb = sources.iter().find(|s| s.name == "refdb").unwrap();
+        assert_eq!(
+            refdb.shape(&schema),
+            geode_core::source_config::SourceShape::Snapshot
+        );
+        assert_eq!(refdb.adapter, crate::demo_refdb::DEMO_REFDB);
+        assert_eq!(refdb.dataset, "underlyings");
+        assert_eq!(refdb.table.as_deref(), Some("underlyings"));
+        assert_eq!(refdb.poll_interval, std::time::Duration::from_secs(30));
     }
 
     #[test]
@@ -584,8 +622,9 @@ mod demo_config_integration {
         vol_models
     }
 
-    /// Registers the demo bus required by the `sophis` egress target, and
-    /// the demo position service `positions.toml` names, as `main.rs` does.
+    /// Registers the demo bus required by the `sophis` egress target,
+    /// the demo position service `positions.toml` names, and the demo
+    /// reference database the `refdb` source polls, as `main.rs` does.
     ///
     /// Keep the returned feed alive through `data_setup`: egress resolution
     /// upgrades a weak sender reference, and a dropped feed makes the
@@ -600,6 +639,7 @@ mod demo_config_integration {
         adapters.register(std::sync::Arc::new(DemoPositions::new(
             "/tmp/geode-demo/100000-42/src".into(),
         )));
+        adapters.register(crate::demo_refdb::DemoRefDb::new(std::time::Duration::ZERO));
         (adapters, feed)
     }
 
@@ -756,6 +796,79 @@ mod demo_config_integration {
         handle.shutdown();
     }
 
+    /// End to end through the real service: the demo layer's `refdb` source
+    /// polls `DemoRefDb` at open, publishes the `underlyings` table, and a
+    /// live reference read answers its ten rows keyed by the demo
+    /// underlyings.
+    #[test]
+    fn the_refdb_source_publishes_the_ten_underlyings() {
+        use geode_core::query::{QueryKey, ReferenceParams};
+        use geode_data::query::as_of::AsOf;
+        use geode_data::{DataEvent, DataService};
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = ensure_emitted(dir.path(), 100).unwrap();
+        let config = Config::load(&ConfigSources {
+            builtin: layer(&src),
+            ..ConfigSources::default()
+        });
+        let mut adapters = geode_data::adapter::AdapterRegistry::default();
+        let (bus, _feed) = geode_data::adapter::ChannelAdapter::new("demo_bus");
+        adapters.register(bus);
+        adapters.register(crate::demo_refdb::DemoRefDb::new(Duration::ZERO));
+        let setup = crate::bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            adapters,
+            test_pricers(),
+            test_vol_models(),
+        )
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = DataService::spawn(
+            setup.config,
+            std::sync::Arc::new(move |e| tx.send(e).is_ok()),
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(DataEvent::Published { dataset, .. }) if dataset == "underlyings" => break,
+                Ok(_) => continue,
+                Err(e) => panic!("underlyings never published: {e}"),
+            }
+        }
+        handle
+            .reference(ReferenceParams {
+                key: QueryKey(1),
+                tag: 1,
+                dataset: "underlyings".into(),
+                as_of: AsOf::Live,
+            })
+            .unwrap();
+        let table = loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(DataEvent::Reference(o)) if o.tag == 1 => break o.table.unwrap().unwrap(),
+                Ok(_) => continue,
+                Err(e) => panic!("no reference answer: {e}"),
+            }
+        };
+        assert_eq!(table.rows.len(), 10);
+        let key = table
+            .columns
+            .iter()
+            .position(|c| c == "underlying_ref")
+            .unwrap();
+        let mut refs: Vec<String> = table.rows.iter().map(|r| r[key].clone().unwrap()).collect();
+        let mut expected = geode_demo_data::demo_underlyings();
+        refs.sort();
+        expected.sort();
+        assert_eq!(refs, expected);
+        handle.shutdown();
+    }
+
     /// The demo documents produce a usable data-service configuration
     /// through the normal config loader and setup path. Typed readers must
     /// skip `config_version` headers without reporting invalid entries.
@@ -781,10 +894,10 @@ mod demo_config_integration {
         assert_eq!(names, vec!["tree", "wide"]);
         let wide = setup.views.iter().find(|v| v.name == "wide").unwrap();
         assert_eq!(wide.columns.len(), 100, "the wide view has 100 columns");
-        // All six source definitions survive setup: risk CSVs, the CVI,
-        // dividend and option-chain subscriptions, and the two timeseries
-        // fetch adapters.
-        assert_eq!(setup.config.sources.len(), 6);
+        // All seven source definitions survive setup: risk CSVs, the CVI,
+        // dividend and option-chain subscriptions, the two timeseries fetch
+        // adapters, and the reference snapshot.
+        assert_eq!(setup.config.sources.len(), 7);
         // Setup must carry the resolved egress target into the service config.
         assert_eq!(setup.config.egress.len(), 1);
         assert_eq!(setup.config.egress[0].name, "sophis");

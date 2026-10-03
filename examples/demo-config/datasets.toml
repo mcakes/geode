@@ -457,3 +457,40 @@ role = "attribute"                # RFC 3339 text: document columns cannot be ti
 [series]
 family = "series"
 retention = "7d"
+
+# ---- Underlying reference data. ----
+# One row per underlying: system ticker to vendor tickers and static
+# attributes. `geode-app::demo_refdb` serves it through the generated
+# `[refdb]` snapshot source; every third poll revises one name.
+[underlyings]
+family = "reference"
+key = ["underlying_ref"]
+
+[underlyings.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[underlyings.columns.name]
+type = "utf8"
+role = "attribute"
+[underlyings.columns.bbg_ticker]
+type = "utf8"
+role = "attribute"
+[underlyings.columns.ric]
+type = "utf8"
+role = "attribute"
+[underlyings.columns.currency]
+type = "utf8"
+role = "attribute"
+[underlyings.columns.calendar]
+type = "utf8"
+role = "attribute"                # trading calendar code (ISO 10383 MIC)
+[underlyings.columns.exchange]
+type = "utf8"
+role = "attribute"                # listed-derivatives exchange MIC
+[underlyings.columns.asset_type]
+type = "utf8"
+role = "attribute"
+[underlyings.columns.multiplier]
+type = "f64"
+role = "attribute"                # listed contract multiplier

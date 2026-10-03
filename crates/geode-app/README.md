@@ -47,6 +47,11 @@ sessions from 14:30 to 21:00 UTC, without holiday or daylight-saving rules.
 directory, so a move persists across `--demo` launches until the directory is
 deleted. A move to another book's LHU leaves the position's `Book` unchanged.
 
+`demo_refdb` answers the `refdb` snapshot source every 30 s with the ten demo
+underlyings. Every third poll renames one row, so two in three polls are
+skipped as unchanged and the third publishes a new generation. The poll count
+lives in the process, so each launch starts again from revision 0.
+
 ## What lives here
 
 | Module | Holds |
@@ -56,6 +61,7 @@ deleted. A move to another book's LHU leaves the position's `Book` unchanged.
 | `events` | Coalesced pending state with a one-slot wakeup channel. Retains publication book unions and highest-tagged query results; upload outcomes have separate `(tile key, tag)` entries; local-write and position-command outcomes never coalesce. |
 | `demo` | `--demo`: the temp directory, the emitted sources, the compiled-in demo config layer (including `positions.toml`), and `DemoPositions` (`demo_positions`), the demo position system: a Move LHU rewrites the `LHU` field in the same risk CSV, then its sentinel with a strictly later `as_of`, after refusing any unknown position before writing. `Book` is not rewritten. |
 | `demo_bus` | Demo-only CVI, dividend and option-chain producers publishing through `ChannelAdapter` and the normal document writers/parsers. The startup burst publishes each key `startup_repeats` times, so the chain producer, which rotates through one expiry per publish, sends every expiry of every underlying before the first cadence wait. A producer's `next` returns `None` to skip a publish: the chain producer prices off the latest CVI document the CVI producer stored for that underlying (`cvi_next`/`chain_next`) and skips until there is one. The same adapter accepts configured uploads, whose bus messages follow subscription ingestion. |
+| `demo_refdb` | Demo mode's reference database (`DemoRefDb`, `demo_refdb`): the `underlyings` table with hand-written vendor tickers, currencies, calendars, exchanges and multipliers. Snapshot side only; `fail_next` and the query delay exercise the degraded and slow paths in tests. |
 | `demo_series` | Demo mode's fetch adapter: seeded, span-independent one-minute bars for two dozen identities, behind two sources (`demo_kdb` with a catalogue, `demo_rest` without). |
 | `crash` | Log-file trimming at startup and the process panic hook: marked containment boundaries log without a report; other panics attempt a report before chaining the previous hook. |
 | `assets` | The asset source: gpui-kit's component icons plus the catalogue icons Geode's own surfaces name. |
