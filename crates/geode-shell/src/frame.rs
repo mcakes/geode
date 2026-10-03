@@ -603,6 +603,41 @@ impl Frame {
         true
     }
 
+    /// Drop every lane's ad hoc chain naming a column `known` rejects, and
+    /// return the rejected column of each dropped chain. A chain is kept
+    /// whole or dropped whole: a narrowed chain would group tiles by
+    /// something the trader never asked for. A lane the chain was active in
+    /// falls to the view default and regroups.
+    pub fn retain_ad_hoc(&mut self, known: impl Fn(&str) -> bool) -> Vec<String> {
+        let Frame {
+            shared,
+            pinned,
+            generation,
+            ..
+        } = self;
+        let mut dropped = Vec::new();
+        for lane in std::iter::once(shared).chain(pinned.values_mut()) {
+            let Some(unknown) = lane
+                .ad_hoc
+                .as_ref()
+                .and_then(|chain| chain.iter().find(|column| !known(column)).cloned())
+            else {
+                continue;
+            };
+            lane.ad_hoc = None;
+            if lane.grouping == GroupingChoice::AdHoc {
+                lane.grouping = GroupingChoice::ViewDefault;
+                lane.grouping_gen = fresh(generation);
+            } else {
+                // Nothing in force changed; the generation still moves so the
+                // session writer drops the chain from disk.
+                fresh(generation);
+            }
+            dropped.push(unknown);
+        }
+        dropped
+    }
+
     /// Save a nonempty grouping in slot 1–9 and replace the pending write.
     /// Bump grouping only in the lanes where that slot is active. Production
     /// grouping edits use the Groupings dialog's config writer; this model API
@@ -3536,5 +3571,56 @@ mod tests {
             f.shared().active_grouping(),
             Some(chain(&["book"]).as_slice())
         );
+    }
+
+    #[test]
+    fn a_stale_ad_hoc_chain_is_dropped_whole_and_an_active_lane_falls_to_view_default() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_ad_hoc(chain(&["book", "gone"]));
+        f.pin(ws(2));
+        f.view_mut(ws(2)).set_ad_hoc(chain(&["lhu"]));
+        let shared = f.shared().versions();
+        let pinned = f.view(ws(2)).versions();
+
+        let dropped = f.retain_ad_hoc(|c| c != "gone");
+
+        assert_eq!(dropped, vec!["gone".to_string()]);
+        assert_eq!(
+            f.shared().ad_hoc(),
+            None,
+            "kept whole or dropped whole: a narrowed chain would be a plausible wrong grouping"
+        );
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::ViewDefault);
+        assert_ne!(f.shared().versions().grouping, shared.grouping);
+        assert_eq!(f.view(ws(2)).ad_hoc(), Some(chain(&["lhu"]).as_slice()));
+        assert_eq!(
+            f.view(ws(2)).versions().grouping,
+            pinned.grouping,
+            "a lane whose chain is still valid does not requery"
+        );
+    }
+
+    #[test]
+    fn a_stale_inactive_chain_is_dropped_without_a_requery() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_ad_hoc(chain(&["gone"]));
+        f.shared_mut().set_active_slot(Some(1));
+        let v = f.shared().versions();
+        let generation = f.generation();
+        assert_eq!(f.retain_ad_hoc(|_| false), vec!["gone".to_string()]);
+        assert_eq!(f.shared().ad_hoc(), None);
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::Slot(1));
+        assert_eq!(f.shared().versions().grouping, v.grouping);
+        assert_ne!(f.generation(), generation, "the session must be rewritten");
+    }
+
+    #[test]
+    fn retention_with_every_column_known_changes_nothing() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_ad_hoc(chain(&["book"]));
+        let generation = f.generation();
+        assert!(f.retain_ad_hoc(|_| true).is_empty());
+        assert_eq!(f.generation(), generation);
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::AdHoc);
     }
 }
