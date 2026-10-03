@@ -697,6 +697,58 @@ fn a_refused_chain_after_an_as_of_move_is_retried_by_a_scope_change(cx: &mut gpu
     assert_eq!(asked[0].dataset, CVI);
 }
 
+/// A refused read under the very versions the loaded documents answer
+/// still leaves a refusal standing beside them. Moving to another group
+/// naming the same underlying asks again; when that read is refused, the
+/// next scope change keeping the underlying retries it rather than
+/// skipping on the earlier group's good read.
+#[gpui::test]
+fn a_refused_read_under_unmoved_versions_is_retried_by_a_scope_change(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_bound(cx, None);
+    h.show(&mut vcx);
+    h.follow_a(&mut vcx);
+    h.post(&mut vcx, scope_of("SPX.Z"));
+    let (doc, chains) = published();
+    let reqs = h.answer_documents(&mut vcx, &doc, &chains);
+    let params = vols(&reqs)[0].clone();
+    h.answer_vol(&mut vcx, &params);
+    // The emitter moves to B and names the same underlying there; the
+    // tile still follows A, so nothing is asked yet.
+    h.link(
+        &mut vcx,
+        EMITTER,
+        Membership {
+            follow: None,
+            emit: Some(Group::B),
+        },
+    );
+    h.post(&mut vcx, scope_of("SPX.Z"));
+    let _ = h.requests();
+    h.data.fill_for_tests();
+    h.link(
+        &mut vcx,
+        TileId(TILE),
+        Membership {
+            follow: Some(Group::B),
+            emit: None,
+        },
+    );
+    assert!(
+        h.notices(&vcx)
+            .contains(&"document request refused: the data service is busy".to_string()),
+        "{:?}",
+        h.notices(&vcx)
+    );
+    let _ = h.requests();
+    h.widen_keeping_spx(&mut vcx, "B1");
+    let reqs = h.requests();
+    let asked = docs(&reqs);
+    assert_eq!(asked.len(), 1, "the refused read is asked again: {reqs:?}");
+    assert_eq!(asked[0].dataset, CVI);
+}
+
 /// A follower hidden across a group scope change that keeps its
 /// underlying asks nothing on show, and still answers a flip waiting on
 /// it, from the draw through the deferred door so frame observers hear

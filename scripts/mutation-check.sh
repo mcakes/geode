@@ -32084,14 +32084,23 @@ run_mutation "volslice: a failed cvi read is retried by a scope change" \
   '            .filter(|_| fetched.chain.is_ok());' \
   geode-volslice a_failed_cvi_read_is_retried_by_a_scope_change_keeping_the_underlying
 
-# A refused read keeps the previous as-of's picture for the same underlying;
-# it no longer answers the question, so the skip must not apply.
+# A refused read after an as-of move keeps the previous as-of's picture for
+# the same underlying under the newer asked versions: the skip compares
+# what was read, never what was last asked.
 run_mutation "volslice: a refused chain after an as-of move is retried by a scope change" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        let Some(read) = self.loaded_ok else {' \
+  '        let Some(read) = self.following.acted() else {' \
+  geode-volslice a_refused_chain_after_an_as_of_move_is_retried_by_a_scope_change
+
+# A refused read under the very versions the picture answers still clears
+# `loaded_ok`, so the refusal is retried rather than skipped.
+run_mutation "volslice: a refused read under unmoved versions is retried by a scope change" \
   crates/geode-volslice/src/tile/data.rs \
   '        self.loaded_ok = None;
         if self.loaded_for.as_deref() == Some(asked) {' \
   '        if self.loaded_for.as_deref() == Some(asked) {' \
-  geode-volslice a_refused_chain_after_an_as_of_move_is_retried_by_a_scope_change
+  geode-volslice a_refused_read_under_unmoved_versions_is_retried_by_a_scope_change
 
 # A show that skips the refetch still answers a waiting flip, from the draw.
 run_mutation "volslice: a show keeping the underlying answers the flip deferred" \
