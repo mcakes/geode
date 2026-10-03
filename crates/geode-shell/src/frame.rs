@@ -1,10 +1,9 @@
-//! The shared frame: global scope, undo/redo history, the active grouping slot,
-//! as-of (with one remembered previous value), recent publishes, saved
-//! scopes, and the data and config generations, as one value every tile
-//! observes. Pure: `ShellView` holds it in a gpui entity and notifies; a
-//! module reads it through that entity.
+//! Frame state: workspace scopes, grouping and as-of, link groups, recent
+//! publications, shared definitions, and data/config generations. Pure:
+//! `ShellView` holds it in a GPUI entity and notifies; a module observes
+//! that entity and reads its own workspace and tile through `FrameRef`.
 //!
-//! The selection (scope with its history, active slot, as-of) lives in a
+//! The selection (scope with its history, grouping choice, as-of) lives in a
 //! lane: one shared lane, plus one per pinned workspace. A workspace reads
 //! and writes its lane through `Frame::view`/`Frame::view_mut`; definitions
 //! and publications stay frame-wide. Lane generations all come from one

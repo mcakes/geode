@@ -1535,7 +1535,7 @@ label = "skew"
     }
 
     /// A refused panel is absent from the tile picker, and its Error reaches
-    /// the status bar's config count and the diagnostics tile through the
+    /// the status bar's config count and the diagnostics page through the
     /// real startup composition.
     #[gpui::test]
     fn a_refused_panel_is_absent_from_the_picker_and_named_in_diagnostics(

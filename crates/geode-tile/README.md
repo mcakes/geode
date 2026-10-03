@@ -35,9 +35,10 @@ source time), timeseries
 (popover, menu, notice, and `following` for its series query), the blotter
 (notice, `colour`, `motion` for its grid cursor, `following` for its view
 query, `grid` for its windowed cells, and `stale` for each dataset
-time) and the diagnostics page (`motion` for its row cursor
+time), the vol-slice viewer (popover, notice, `header`, and `following` for
+its document reads), and the diagnostics page (`motion` for its row cursor
 only: it has no popover, menu, confirm or notice line, and submits no frame
-query). Every module tile (pricer, market-data, timeseries, blotter) paints its
+query). Every module tile (pricer, market-data, timeseries, blotter, vol slice) paints its
 header through `header`.
 
 The crate takes a submission's outcome as `submitted: bool` rather than

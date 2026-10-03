@@ -264,7 +264,7 @@ fn scope_from_toml(t: &toml::Table, what: &str, warnings: &mut Vec<String>) -> S
 }
 
 /// Add each link group's scope to a serialized session as
-/// `[links.<letter>]`, its `scope` in [`scope_to_toml`]'s encoding. A group
+/// `[links.<letter>]`, its `scope` in the same encoding as the frame scope. A group
 /// whose scope encodes to nothing writes no table, and with no group to
 /// write, no `links` table at all. `true` when anything was inserted.
 ///

@@ -4105,7 +4105,7 @@ impl PricerTile {
     }
 
     /// Find's targets, as rollup nodes and their keys: every row the grid
-    /// would paint with every group open ([`grid::find_targets`]), so a
+    /// would paint with every group open ([`crate::grid::find_targets`]), so a
     /// line inside a closed group is found; packages keep their own
     /// expansion (a closed package's key already covers its legs).
     fn find_targets(&self) -> (Vec<usize>, Vec<String>) {

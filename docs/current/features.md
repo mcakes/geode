@@ -1,11 +1,14 @@
 # Feature modules
 
-Feature modules turn data and domain state into tiles. Each feature owns its
-model, commands, prepared presentation, module factory, and tests. Features do
-not depend on one another; they meet through shared vocabulary, the shell
-contract, and the data service.
+Features expose tiles, pages, or row-menu actions. Each owns its domain state,
+commands, presentation, and tests. Features do not depend on one another;
+they meet through shared vocabulary, the shell contract, and the data service.
 
 ## Common lifecycle
+
+This lifecycle applies to tiles. Diagnostics uses the shell's
+[page lifecycle](shell.md#pages); Nemo and Move LHU use its
+[row-menu action contract](shell.md#row-menu).
 
 `geode-app` registers a `ModuleFactory` for each available tile kind. The shell
 creates an occupant for a `TileId`, sends its initial visibility and stack

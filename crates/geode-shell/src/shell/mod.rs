@@ -1072,7 +1072,7 @@ impl ShellView {
                     }
                 });
 
-                // Refresh the diagnostics histogram only while a tile watches it.
+                // Refresh the diagnostics histogram only while a consumer watches it.
                 // The source clone is gated as well; the destination compares before
                 // copying and notifying.
                 let Ok((diagnostics, watched)) = this.update(cx, |view, cx| {

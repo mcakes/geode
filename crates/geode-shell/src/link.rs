@@ -1,6 +1,6 @@
 //! Link-group state held by the frame: four group lanes, which tile follows
 //! and emits into which, and each group's board. Pure: no entity, no window.
-//! The frame owns one [`Links`] and draws every scope generation from its
+//! The frame owns one `Links` and draws every scope generation from its
 //! own counter, so a number names one scope in any lane or group.
 //!
 //! A board holds draft documents. It is derived from the last emission of

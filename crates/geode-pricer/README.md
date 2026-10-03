@@ -132,8 +132,10 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   children (`GridIndex::build`, `find_targets`, `/`, `node_rows`) follows the
   ranked order; anything that needs sheet order reads the sheet or
   `legs_under`, which sorts its output. Under a sort a move and a counted
-  `g p` refuse (`MOVE_SORTED`, `PACKAGE_SORTED`), as under a value grouping;
-  `g p` over a `V` range apart in the sheet says `GROUP_SORTED`.
+  `g p` refuse (`MOVE_SORTED`, `PACKAGE_SORTED`); without a sort, moves remain
+  available within the mover's group, while counted packaging still refuses
+  under a value grouping. `g p` over a `V` range apart in the sheet says
+  `GROUP_SORTED`.
 - A selection spans painted rows, so the order must not move under it:
   `start_selection` takes `held_order` (`sort::painted_order`) under a sort,
   every rebuild while the selection lives `sort::hold`s the ranked rollup

@@ -361,8 +361,12 @@ measure already reads. Re-measure on an idle machine before quoting them.
   nodes and sheet rows through a stale index; the status line reads "Results
   out of date — reopen /" so a blank does not read as an unpriced line.
 - The pinned table never reports a visible range of one row; a tile scrolled
-  to show a single row keeps the window it last had, so that row can paint
-  blank, as every `/` table can.
+  to a single row outside its prepared window can therefore paint it blank
+  until another invalidation. Grid tiles cover initial one-row results by
+  seeding the first 64 rows, and `WindowRequest::refill_range` refills the
+  tail when a shrink moves the old window past the end. Fuzzy `/` tables
+  also report their rows at layout after a result change, so narrowing to
+  one match does not depend on the table's omitted callback.
 
 ## Recording a measurement
 

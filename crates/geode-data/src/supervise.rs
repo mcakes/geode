@@ -6,8 +6,9 @@
 //! uncontained thread death is a bug and the file is its report. A body that
 //! returns is a deliberate stop and declares nothing.
 //!
-//! Every long-lived thread this crate spawns goes through
-//! [`spawn_supervised`]; a new one must too, or its death is silent.
+//! Long-lived service workers go through `spawn_supervised`; new workers
+//! must too, or their death is silent. The channel adapter's transport
+//! dispatcher has no event sink and is outside this supervision boundary.
 
 use crate::service::{DataEvent, EventSink};
 use std::thread::JoinHandle;

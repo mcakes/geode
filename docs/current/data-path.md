@@ -2,7 +2,7 @@
 
 This guide describes the current data path: how data enters Geode, becomes
 queryable, and reaches a tile. It covers the contracts shared by file,
-document, and series sources. The [geode-data crate README](../../crates/geode-data/README.md)
+document, series, and reference snapshot sources. The [geode-data crate README](../../crates/geode-data/README.md)
 maps these contracts to modules.
 
 ## Boundary and flow
@@ -14,7 +14,7 @@ thread and gives the app one place to enforce backpressure, health, and
 delivery semantics.
 
 ```text
-file / subscribed document / fetched series
+file / subscribed document / fetched series / reference snapshot
                 │
                 ▼
      discovery or adapter worker
@@ -29,9 +29,10 @@ tile ─► DataHandle ─► DataService ─► read pool
 
 Geode serializes publication on one writer connection. Independent read
 connections serve queries. The ingest runner gives parsed documents priority
-over fetched series, and both priority over queued files; it finishes a file
-already in flight before taking another job. This puts trader-requested work
-ahead of background discovery without attempting concurrent writes.
+over fetched series, then reference snapshots, then queued files. It finishes
+the current operation before taking another job. This prioritizes interactive
+data without attempting concurrent writes; sustained traffic in an earlier
+queue can starve later queues.
 
 Ordinary requests use a bounded channel. `DataHandle` returns `Err(Refusal)`
 when submission was refused — `Busy` for a full queue, `Stopped` once the

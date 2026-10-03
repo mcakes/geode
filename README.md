@@ -11,9 +11,10 @@ walkthrough of tiles, shared scope, grouping, and the everyday workflow.
 Three principles from the charter (`docs/PHILOSOPHY.md`) shape everything
 in this repository:
 
-- **A lens, not a brain.** All financial computation lives upstream. Geode
-  only shapes views: grouping, filtering, aggregating and joining data
-  that other systems produced.
+- **A lens, not a brain.** The shell and UI modules only shape views:
+  grouping, filtering, aggregating and joining supplied data. Financial
+  computation stays behind request/outcome contracts, including calculation
+  crates linked into the binary.
 - **The keyboard is the interface.** i3-style tiling, vim-style modal
   navigation inside tiles, and a command palette as the discoverable
   fallback. Every mouse action has a keyboard twin.
@@ -29,8 +30,10 @@ cargo run -p geode-app -- --demo 1000000  # a larger generated book
 cargo run -p geode-app                    # real sources from config
 ```
 
-The toolchain is stable Rust (`rust-toolchain.toml`). On macOS no Xcode
-install is needed: Metal shaders compile at runtime.
+The toolchain is stable Rust (`rust-toolchain.toml`). Building also requires
+a native C/C++ toolchain: DuckDB is compiled from bundled source. On macOS,
+install the Xcode Command Line Tools; the full Xcode application is not
+needed because Metal shaders compile at runtime. CI covers macOS and Windows.
 
 Demo mode layers `examples/demo-config` under any desk and user config,
 emits a deterministic source directory and database under
@@ -44,7 +47,7 @@ Configuration is three TOML layers, deep-merged with provenance:
 |---|---|
 | Builtin | compiled in |
 | Desk | `$GEODE_DESK_CONFIG` |
-| User | `%APPDATA%\geode` on Windows, `$HOME/.config/geode` elsewhere |
+| User | `$APPDATA/geode` when set, otherwise `$HOME/.config/geode` |
 
 Every setting the dialogs write lands in the user layer, and the app
 hot-reloads a changed file, keeping the last good config if the new one
@@ -65,6 +68,8 @@ is reserved for the shipped literal bindings.
 | `ctrl+1..9`, `ctrl+0` | grouping slots, clear |
 | `mod+g`, `mod+p`, `mod+t` | grouping picker, dimension picker, as-of |
 | `mod+/`, `mod+z`, `mod+shift+z` | scope text, scope undo, redo |
+| `mod+u` | choose the focused tile's link group |
+| `mod+d` | open or close the Diagnostics page |
 | `/`, `:` in a tile | find, the tile's command line |
 | `mod+shift+p` | frame-time overlay |
 
@@ -78,6 +83,7 @@ crates/
   geode-core         shared vocabulary: config, schema, scope, snapshot, colour, log
   geode-data         DataService: sources, ingest, DuckDB store, query path, health
   geode-shell        tiling WM, keymap engine, palette, frame, dialogs, module contract
+  geode-tile         shared tile headers, interaction, caches and query coordination
   geode-widgets      shared application controls below shell and feature crates
   geode-chart        chart geometry, preparation and painting
   geode-blotter      any view as a collapsible keyboard-driven hierarchy
@@ -88,6 +94,8 @@ crates/
   geode-documents    typed parsers and writers per document wire format
   geode-pricing      implementations of the pricing trait
   geode-pricer       the line pricer: pure sheet core and its tile
+  geode-nemo         row-menu links to the external Nemo app
+  geode-positions    row-menu commands for a configured position service
   geode-demo-data    deterministic synthetic risk data and documents
   geode-app          the `geode` binary: wires everything together
 docs/
@@ -107,7 +115,8 @@ Each crate has its own README with a module map and the rules it pins.
 Dependencies are layered and enforced by crate visibility. `geode-shell`
 and `geode-data` never depend on each other, a module depends on both but
 never on another module, and `geode-app` is the only crate where they all
-meet. Only `geode-data` opens a file or a socket.
+meet. Source access and DuckDB connections belong to `geode-data`; config,
+session, log, crash-report, and demo-fixture I/O have their own owners.
 
 See `docs/current/architecture.md` for the maintained crate and runtime
 ownership model.
@@ -129,16 +138,18 @@ cargo bench --workspace --no-run
 cargo check -p geode-shell --features test-support --all-targets
 ```
 
-CI runs those five on macOS and Windows. The macOS job also runs
+CI runs those five on macOS and Windows. The macOS job first runs the
+mutation checker's Python unit tests and
 `zsh scripts/mutation-check.sh --anchors-only` to validate mutation anchors
 and test-name filters.
 
 A green suite can miss wrong-data behavior when its fixture cannot reach the
 relevant branch. `scripts/mutation-check.sh` breaks one load-bearing behavior
-at a time and runs the named test. A `SURVIVED` line is a branch no test sees.
-Run `--changed` after touching the data layer and add an entry for every
-behaviour you change; run `--anchors-only` before every merge. Commit
-before you mutate.
+at a time and runs the named test. A `SURVIVED` line means that named test
+did not detect the injected change. Run targeted entries or `--changed`
+after changing a correctness contract, and add entries for new contracts;
+run `--anchors-only` before every merge. Commit or otherwise preserve your
+work before running mutations: the harness edits tracked files in place.
 
 Start at `docs/README.md` for current guides. `CLAUDE.md` holds workspace
 rules and gotchas. For data-path changes, read

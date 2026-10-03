@@ -190,9 +190,9 @@ pub fn user_binding_count(bindings: &[Binding]) -> usize {
 /// keeping state transitions testable without a window.
 #[derive(Debug)]
 pub struct KeybindingsState {
-    /// Index into [`visible_rows`], bounded by filtered length. Bare single steps wrap;
-    /// larger or counted moves clamp. Resolve row identity through the ranked match's
-    /// `row` index before rebinding.
+    /// Index into the ranked matches in [`Self::rows`], bounded by filtered
+    /// length. Bare single steps wrap; larger or counted moves clamp.
+    /// Resolve row identity through the ranked match's `row` index before rebinding.
     pub selected: usize,
     /// Captured sequence, extended by every key except bare Enter/Escape. Capture owns
     /// routing before list-filter exits and forces the shared input to blur through
