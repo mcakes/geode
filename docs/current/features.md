@@ -35,6 +35,45 @@ Every module follows these interaction rules:
 - Stack state is visible through the shared marker in the module header.
 - Delivery matches are exhaustive so a new outcome cannot be ignored silently.
 
+## User guide
+
+`geode-guide` provides the `guide` tile, registered even when data setup fails.
+It embeds `docs/user-guide.md` at build time and renders one heading's section
+at a time with the component Markdown reader. The tile owns its selected
+section, retained text state, contents menu, and section-find state; it performs
+no I/O and answers frame flip barriers immediately. It neither follows nor
+emits a link group.
+
+The palette's **Guide: Split** and the tile picker's **guide** entry use the
+ordinary module factory. **Contents** (`c`) lists chapters; `[`/`]` and
+Previous/Next step through every heading, including subsections. Contents uses
+the shared tile menu's navigation and Escape dismissal. The header's **⋯**
+and `.` open the ordinary tile actions menu, including scrolling, navigation,
+copy, and search clearing. Controls, the footer, tooltips, and menu rows show
+live shortcut hints; keymap reloads update them, including unbound actions.
+`j`/`k` and the arrows
+scroll, Page Up/Down and Ctrl-B/F/U/D move by 80% of the viewport, `g g`/Home
+and `G`/End reach its ends. Counts multiply moves. `y` copies the section as
+Markdown. `:section <heading-anchor>` opens a section with completion;
+`:section` returns to the introduction. Guide actions are remappable.
+
+`/` previews the first case-insensitive matching section across the whole
+guide. Enter keeps it; Escape restores the entry section and scroll position.
+`n`/`N` cycle the matching sections. Matching text is highlighted in prose,
+headings, tables, and code, and each section opens at its first matching block.
+The footer gives the occurrence count and position among matching sections.
+Escape outside the find prompt clears the search and its highlights.
+Search reads displayed text, including phrases across inline formatting;
+hidden link destinations and Markdown syntax do not match. Fragment links navigate directly to
+their heading. Links to other repository documents display their label and
+path as text; those documents are not bundled destinations.
+
+Session state stores the selected heading anchor. Unknown or invalid anchors
+fall back to the introduction. Scroll offsets, text selections, menus, and
+searches are transient; restoring starts at the top of the saved section.
+The content describes this build's default keys, not a user's remapped keys;
+guide edits require rebuilding.
+
 ## Shared tile interaction
 
 Modules build their popups, `.` action menus, in-tile y/n confirms and

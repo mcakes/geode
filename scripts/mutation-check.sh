@@ -312,6 +312,69 @@ PY
   restore
 }
 
+# ---- bundled user guide
+
+run_mutation "guide: restore the selected heading" \
+  crates/geode-guide/src/tile.rs \
+  '            .and_then(section_for)' \
+  '            .and_then(|_| None)' \
+  geode-guide \
+  keyboard_and_pointer_navigate_and_restore_sections
+
+run_mutation "guide: the rendered reader scrolls" \
+  crates/geode-guide/src/tile/chrome.rs \
+  'TextView::new(&self.text)
+                            .scrollable(true)' \
+  'TextView::new(&self.text)
+                            .scrollable(false)' \
+  geode-guide \
+  scroll_keys_move_rendered_markdown_and_top_resets_it
+
+run_mutation "guide: cancelling find restores the entry section" \
+  crates/geode-guide/src/tile.rs \
+  'if let Some((section, offset)) = self.find_entry.take() {
+                    self.show_section(section, cx);' \
+  'if let Some((section, offset)) = self.find_entry.take() {
+                    let _ = section;
+                    self.show_section(0, cx);' \
+  geode-guide \
+  find_previews_sections_cancel_restores_and_committed_matches_cycle
+
+run_mutation "guide: frame changes acknowledge the offline reader" \
+  crates/geode-guide/src/tile.rs \
+  'cx.observe(frame.entity(), |this, _, cx| this.arrive(cx))' \
+  'cx.observe(frame.entity(), |this, _, cx| { if false { this.arrive(cx); } })' \
+  geode-guide \
+  a_frame_change_never_waits_for_the_offline_reader
+
+run_mutation "guide: startup registers the guide tile" \
+  crates/geode-app/src/main.rs \
+  '    roster.add(Box::new(geode_guide::GuideFactory));' \
+  '    // guide factory omitted' \
+  geode-app \
+  the_bundled_guide_launches_navigates_and_saves_through_the_shell
+
+run_mutation "guide: search paints the matching text" \
+  crates/geode-guide/src/search.rs \
+  '            block.render(&ranges, color, &mut marked.source);' \
+  '            block.render(&[], color, &mut marked.source);' \
+  geode-guide \
+  search_paints_matches_in_prose_code_and_tables_and_escape_removes_them
+
+run_mutation "guide: visible hints follow a rebind" \
+  crates/geode-guide/src/tile.rs \
+  '            this.hints = hint_keys(cx);' \
+  '            // retained hints omitted' \
+  geode-guide \
+  actions_menu_and_visible_hints_follow_the_live_keymap
+
+run_mutation "guide: dot opens the shared actions menu" \
+  crates/geode-guide/src/lib.rs \
+  '"." = "guide::menu"' \
+  '"." = "none"' \
+  geode-guide \
+  actions_menu_and_visible_hints_follow_the_live_keymap
+
 # ---- discovery
 #
 # Readiness checks distinguish files still being written from loadable files.

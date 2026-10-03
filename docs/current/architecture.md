@@ -32,6 +32,9 @@ contract, key chips, the rem scale) as well as through `geode-tile`, and may
 also name `geode-widgets`, `geode-chart` and `geode-core` directly.
 `geode-diagnostics` is a page rather than a tile. It uses `geode-tile::motion`
 for row navigation and does not participate in tile flip barriers.
+`geode-guide` is an offline tile over the bundled user guide. It depends on
+the shell and shared tile mechanisms, owns no data handle, and acknowledges
+frame flips immediately.
 
 `geode-core` is shared vocabulary without window, database, or network
 ownership. Typed interpretation and merging are I/O-free; its configuration

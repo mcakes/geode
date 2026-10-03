@@ -83,6 +83,7 @@ pub(crate) const MODULE_KINDS: &[&str] = &[
     "volslice",
     "pricer",
     "diagnostics",
+    "guide",
     PLACEHOLDER_KIND,
 ];
 
