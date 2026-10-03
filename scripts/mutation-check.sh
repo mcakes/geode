@@ -34502,6 +34502,31 @@ run_mutation "close: the vol slice content forwards its handle" \
   '        let _ = (close, cx);' \
   geode-volslice the_header_paints_the_close_button
 
+# ---- subscription topics
+# A repeat record keeps the later receive time. Taking the incoming time
+# lets a replayed or out-of-order record age a live topic into the prune.
+run_mutation "topics: a repeat record keeps the later receive time" \
+  crates/geode-data/src/store/topics.rs \
+  '               last_received_us = greatest(last_received_us, excluded.last_received_us)";' \
+  '               last_received_us = excluded.last_received_us";' \
+  geode-data recording_again_keeps_the_later_receive_time
+
+# Prune is per source: dropping the source filter lets one source's max age
+# delete another source's topics, which then never recover.
+run_mutation "topics: prune touches only its own source" \
+  crates/geode-data/src/store/topics.rs \
+  '    let sql = "delete from subscription_topics where source = ? and last_received_us < ?";' \
+  '    let sql = "delete from subscription_topics where (source = ? or true) and last_received_us < ?";' \
+  geode-data prune_removes_only_this_sources_old_rows
+
+# Recent reads one source's topics; unfiltered, a recovery asks for topics
+# another source published.
+run_mutation "topics: recent reads only its own source" \
+  crates/geode-data/src/store/topics.rs \
+  '    let sql = "select topic from subscription_topics where source = ? order by topic";' \
+  '    let sql = "select topic from subscription_topics where (source = ? or true) order by topic";' \
+  geode-data a_recorded_topic_is_read_back_per_source
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
