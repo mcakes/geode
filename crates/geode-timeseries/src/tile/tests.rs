@@ -52,16 +52,35 @@ const TILE: u64 = 7;
 /// field's `enter` and `escape` reach its verbs and typing stays text.
 /// Chords in insert mode, and the shell's root `tab` reclaim
 /// (`GeodeShell`), are not modelled; `crate::init`'s own reclaim stands in.
+///
+/// Draw-time doors: the shell tells an occupant its visibility, and that
+/// it is closing, from inside its own render, where a notify is dropped. A
+/// test queues either here and the next draw delivers it from this render.
+/// Like the shell's, this render reads the frame, so the window tracks it
+/// and a notify the frame is sent during a draw is dropped here as it is
+/// in the app: a release made from a draw-time door is heard only if
+/// deferred.
 struct ShellStandIn {
     focus: gpui::FocusHandle,
     tile: Entity<TimeseriesTile>,
+    frame: Entity<Frame>,
+    content: Rc<dyn TileContent>,
     keymap: Rc<Keymap>,
     matcher: Matcher,
+    pending_visible: Option<bool>,
+    pending_closed: bool,
 }
 
 impl gpui::Render for ShellStandIn {
     fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+        let _ = self.frame.read(cx).data_version();
+        if let Some(visible) = self.pending_visible.take() {
+            self.content.set_visible(visible, cx);
+        }
+        if std::mem::take(&mut self.pending_closed) {
+            self.content.closed(cx);
+        }
         gpui::div()
             .size_full()
             .track_focus(&self.focus)
@@ -120,7 +139,8 @@ fn app_keymap(factory: &Rc<TimeseriesFactory>) -> Keymap {
 /// so everything a test drives or reads is parked here on the way
 /// out.
 struct Built {
-    content: Box<dyn TileContent>,
+    content: Rc<dyn TileContent>,
+    host: Entity<ShellStandIn>,
     tile: Entity<TimeseriesTile>,
     frame: Entity<Frame>,
     diagnostics: Entity<Diagnostics>,
@@ -132,7 +152,9 @@ struct Harness {
     /// Driven through the trait, never by poking the entity: the
     /// shell's own door is what a key, a `:` line and a delivery all
     /// arrive through.
-    content: Box<dyn TileContent>,
+    content: Rc<dyn TileContent>,
+    /// The shell stand-in, for the draw-time doors.
+    host: Entity<ShellStandIn>,
     frame: Entity<Frame>,
     diagnostics: Entity<Diagnostics>,
     /// The stand-in shell root's handle: focused at open, as the shell
@@ -377,13 +399,7 @@ fn open_framed(
                 );
                 let tile = occupant.view.clone().downcast::<TimeseriesTile>().unwrap();
                 let shell_focus = cx.focus_handle();
-                *slot.borrow_mut() = Some(Built {
-                    content: occupant.content,
-                    tile: tile.clone(),
-                    frame,
-                    diagnostics,
-                    shell_focus: shell_focus.clone(),
-                });
+                let content: Rc<dyn TileContent> = occupant.content.into();
                 // Wrapped in `Root`, exactly as `main.rs` wraps the
                 // shell: gpui-component registers the focused
                 // `InputState` on the `Root`, so a tile that opens a
@@ -392,10 +408,22 @@ fn open_framed(
                 // focus-tracking stand-in for the shell root, which
                 // takes focus on any press nothing prevented.
                 let host = cx.new(|_| ShellStandIn {
-                    focus: shell_focus,
-                    tile,
+                    focus: shell_focus.clone(),
+                    tile: tile.clone(),
+                    frame: frame.clone(),
+                    content: content.clone(),
                     keymap,
                     matcher: Matcher::default(),
+                    pending_visible: None,
+                    pending_closed: false,
+                });
+                *slot.borrow_mut() = Some(Built {
+                    content,
+                    host: host.clone(),
+                    tile,
+                    frame,
+                    diagnostics,
+                    shell_focus,
                 });
                 cx.new(|cx| gpui_component::Root::new(host, window, cx))
             })
@@ -411,6 +439,7 @@ fn open_framed(
         Harness {
             tile: built.tile,
             content: built.content,
+            host: built.host,
             frame: built.frame,
             diagnostics: built.diagnostics,
             shell_focus: built.shell_focus,
@@ -1765,6 +1794,98 @@ fn closing_the_tile_mid_flip_cancels_its_query_and_releases_the_barrier(
         5,
         "a late answer to a closed tile paints nothing"
     );
+}
+
+impl Harness {
+    /// Deliver visibility as the shell does: from inside its render, on
+    /// the next draw.
+    fn visible_in_draw(&self, vcx: &mut gpui::VisualTestContext, visible: bool) {
+        self.host.update(vcx, |h, cx| {
+            h.pending_visible = Some(visible);
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// Close the tile as the shell does: from inside its render, on the
+    /// next draw.
+    fn close_in_draw(&self, vcx: &mut gpui::VisualTestContext) {
+        self.host.update(vcx, |h, cx| {
+            h.pending_closed = true;
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// A counter of the notifications frame observers hear from now on.
+    fn frame_heard(
+        &self,
+        vcx: &mut gpui::VisualTestContext,
+    ) -> (Rc<std::cell::Cell<usize>>, gpui::Subscription) {
+        let heard = Rc::new(std::cell::Cell::new(0));
+        let count = heard.clone();
+        let sub =
+            vcx.update(|_, cx| cx.observe(&self.frame, move |_, _| count.set(count.get() + 1)));
+        (heard, sub)
+    }
+}
+
+/// A tile the shell closes from inside its draw, while the flip awaits its
+/// query, answers the flip through a deferred arrival that frame observers
+/// hear, so every staged tile promotes now rather than at the barrier's
+/// deadline. Inline, the release's notify falls in the draw and is
+/// dropped.
+#[gpui::test]
+fn a_close_from_the_draw_releases_the_flip_to_frame_observers(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_loaded(cx, 5);
+    h.requests();
+    let at = chrono::Utc::now() - chrono::Duration::days(30);
+    open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], at);
+    assert!(h.series_request().is_some(), "an as-of change queries");
+    assert!(h.frame.read_with(&vcx, |f, _| f.barrier_open()));
+    let (heard, _sub) = h.frame_heard(&mut vcx);
+    h.close_in_draw(&mut vcx);
+    vcx.run_until_parked();
+    assert!(
+        !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+        "the closing tile arrived"
+    );
+    assert!(heard.get() > 0, "frame observers heard the release");
+}
+
+/// A show from inside the shell's draw, after the as-of moved while
+/// hidden, whose series query is refused answers the open flip through a
+/// deferred arrival that frame observers hear.
+#[gpui::test]
+fn a_refused_show_from_the_draw_releases_the_flip_to_frame_observers(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_loaded(cx, 5);
+    h.visible_in_draw(&mut vcx, false);
+    h.requests();
+    let at = chrono::Utc::now() - chrono::Duration::days(30);
+    open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], at);
+    assert!(h.requests().is_empty(), "a hidden tile asks nothing");
+    assert!(h.frame.read_with(&vcx, |f, _| f.barrier_open()));
+    let (heard, _sub) = h.frame_heard(&mut vcx);
+    h.data.fill_for_tests();
+    h.visible_in_draw(&mut vcx, true);
+    vcx.run_until_parked();
+    assert!(
+        h.notice(&vcx)
+            .is_some_and(|n| n.contains("series request refused")),
+        "{:?}",
+        h.notice(&vcx)
+    );
+    assert!(
+        !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+        "the refusal arrived"
+    );
+    assert!(heard.get() > 0, "frame observers heard the release");
 }
 
 /// The series list and the action menu publish `tilelist`, so a real `j`
