@@ -189,6 +189,28 @@ pub fn to_toml(dim: &DerivedDimension) -> toml::Value {
     toml::Value::Table(table)
 }
 
+/// CSV text for `dim`: header `<from>,<name>`, then one row per mapped source,
+/// sorted by source. With `observed`, unmapped observed sources are added with
+/// a blank label — the "fill this in and send it back" file.
+pub fn export(dim: &DerivedDimension, observed: Option<&[(String, u64)]>) -> String {
+    let mut rows: std::collections::BTreeMap<&str, &str> = dim
+        .values
+        .iter()
+        .map(|(s, l)| (s.as_str(), l.as_str()))
+        .collect();
+    if let Some(observed) = observed {
+        for (source, _) in observed {
+            rows.entry(source.as_str()).or_insert("");
+        }
+    }
+    let mut records = vec![vec![dim.from.clone(), dim.name.clone()]];
+    records.extend(
+        rows.into_iter()
+            .map(|(s, l)| vec![s.to_string(), l.to_string()]),
+    );
+    csv::write(&records)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +366,24 @@ mod tests {
     fn labels_are_sorted_and_distinct() {
         let dim = sector(&[("A", "Tech"), ("B", "Energy"), ("C", "Tech")]);
         assert_eq!(labels(&dim), s(&["Energy", "Tech"]));
+    }
+
+    #[test]
+    fn export_writes_the_header_and_mapped_rows_sorted_by_source() {
+        let dim = sector(&[("XOM", "Energy"), ("AAPL", "Consumer, Cyclical")]);
+        assert_eq!(
+            export(&dim, None),
+            "underlying_ref,sector\nAAPL,\"Consumer, Cyclical\"\nXOM,Energy\n"
+        );
+    }
+
+    #[test]
+    fn export_with_unclassified_adds_observed_unmapped_sources_blank() {
+        let dim = sector(&[("XOM", "Energy")]);
+        let observed = vec![("NKY".to_string(), 3), ("XOM".to_string(), 1)];
+        assert_eq!(
+            export(&dim, Some(&observed)),
+            "underlying_ref,sector\nNKY,\nXOM,Energy\n"
+        );
     }
 }
