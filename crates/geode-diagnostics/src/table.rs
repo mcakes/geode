@@ -56,8 +56,8 @@ pub struct SectionDelegate {
     /// Prefix of the per-row debug selector. The Config section paints two
     /// tables at once; distinct prefixes keep their rows addressable.
     row_selector: &'static str,
-    empty_title: &'static str,
-    empty_help: &'static str,
+    empty_title: SharedString,
+    empty_help: SharedString,
 }
 
 impl SectionDelegate {
@@ -71,8 +71,8 @@ impl SectionDelegate {
             table: Rc::new(PreparedTable::empty()),
             rem_px: scale::DESIGN_REM,
             row_selector,
-            empty_title: "No rows",
-            empty_help: "",
+            empty_title: SharedString::new_static("No rows"),
+            empty_help: SharedString::default(),
         }
     }
 
@@ -80,9 +80,19 @@ impl SectionDelegate {
         self.table = table;
     }
 
-    pub(crate) fn set_empty(&mut self, title: &'static str, help: &'static str) {
-        self.empty_title = title;
-        self.empty_help = help;
+    /// A static text shares its literal; only a formatted one allocates.
+    pub(crate) fn set_empty(
+        &mut self,
+        title: impl Into<SharedString>,
+        help: impl Into<SharedString>,
+    ) {
+        self.empty_title = title.into();
+        self.empty_help = help.into();
+    }
+
+    #[cfg(test)]
+    pub fn empty_title(&self) -> &SharedString {
+        &self.empty_title
     }
 
     /// The page keeps its own `Rc` of the table; tests read the delegate's
@@ -119,12 +129,12 @@ impl TableDelegate for SectionDelegate {
             .gap_2()
             .p_4()
             .debug_selector(|| "diagnostics-empty".to_string())
-            .child(div().text_sm().child(self.empty_title))
+            .child(div().text_sm().child(self.empty_title.clone()))
             .child(
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(self.empty_help),
+                    .child(self.empty_help.clone()),
             )
     }
 

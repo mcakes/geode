@@ -1001,12 +1001,19 @@ every snapshot source filling that dataset and is queued whether or not a page
 watches. The bridge submits a reference read under `DIAGNOSTICS_KEY` with the
 active frame's as-of and a fresh tag, and stores only the answer carrying the
 latest tag in `reference`; an older answer cannot replace a newer one. It
-neither retries nor re-asks: the page compares the stored answer's `as_of`
-with the frame and asks again on as-of change or a `reference_published` bump.
-A refused reference or poll submission sets `reference_refusal` to the dataset
-and a reason (`Busy` names `r` to retry; `Stopped` says the service stopped),
-so the page shows why nothing arrived. An answer for the same dataset clears
-it.
+neither retries nor re-asks: the page reads a stored answer whose `as_of`
+differs from the frame as `Loading` and asks again on the edges below.
+A refused reference or poll submission sets `reference_refusal` to a
+`ReferenceRefusal` naming the dataset, a reason (`Busy` names `r` to retry;
+`Stopped` says the service stopped) and its `ReferenceLane`, so the page shows
+why nothing arrived. Each lane clears only on its own success: an answer for
+the dataset clears a `Read` refusal, and `note_poll_submitted`, which the
+bridge calls when a poll is accepted, clears a `Poll` refusal, because a read
+answer says nothing about whether the sources were polled. The page asks for a
+reference read only on edges (section or page shown, as-of change, dataset
+change, `r`, a `reference_published` bump), never because `reference` moved
+or the stored answer is stale, since a refusal bumps `reference` and asking
+on it would loop.
 
 Two request channels let the page change application state without
 holding `ShellView`. `request_level` queues a target and level; the shell

@@ -16,10 +16,10 @@ The seam it sits on: [pages](../../docs/current/shell.md#pages).
 |---|---|
 | [`lib`](src/lib.rs) | `DiagnosticsPageFactory`: kind, title, icon, action registration, the default keymap fragment (`diagnostics && mode == normal` for the bare keys, `diagnostics && mode == insert` for Escape), the `mod+d` toggle binding, and the `PageContent` adapter over the page entity. |
 | [`section`](src/section.rs) | The six sections in rail order (Sources, Data, Reference, Config, Log, Performance): names, titles, and cycling. |
-| [`model`](src/model.rs) | Typed rows per section (`SourceRow`, `DatasetRow`, `DiagnosticRow`, `ConfigDoc`, `LogRow`, `PerfModel`), the badges, the header chips, and `reference_status`, the Reference section's status line for a dataset at the frame's as-of (`Loading` while the stored answer is for another dataset or as-of; display only, it never asks for a read). Pure: explicit `now` and clock inputs, no GPUI, no I/O. |
+| [`model`](src/model.rs) | Typed rows per section (`SourceRow`, `DatasetRow`, `DiagnosticRow`, `ConfigDoc`, `LogRow`, `PerfModel`), the badges (the Reference badge counts only the answer for the selected dataset at the frame's as-of), the header chips, `reference_answer`, the stored answer when it answers a dataset at an as-of, and `reference_status`, the Reference section's status line for a dataset at the frame's as-of (`Loading` while the stored answer is for another dataset or as-of; either lane's refusal for the dataset; source and no-generation times dated, because a historical as-of may span days; display only, it never asks for a read). Pure: explicit `now` and clock inputs, no GPUI, no I/O. |
 | [`prepared`](src/prepared.rs) | `PreparedTable`: the column specs and rows a section paints, with expansion and filtering applied; a `ColumnSpec` names its column with a `SharedString`, static for the fixed sections and built once per table by `reference_table`, whose columns are the dataset's declared names, so the per-frame header reads only clone a reference; `cell_at` places a notice row's one cell in the widest column. Pure; `Rc`-shared with the delegate. |
-| [`table`](src/table.rs) | `SectionDelegate`, the one `TableDelegate` for every table section: paints a shared prepared table, scales column widths with the window rem, and formats nothing per paint but a parent row's expander. |
-| [`page`](src/page.rs) | `DiagnosticsPage`: the observers, the selected section, per-section cursors and filters, the expansion sets, the log tail and its filter, the target select, the Levels state, the cached badge and header strings, the ages timer, key dispatch, visibility, serialization, and the frame layout. |
+| [`table`](src/table.rs) | `SectionDelegate`, the one `TableDelegate` for every table section: paints a shared prepared table and its empty state (static text shared, formatted text only for Reference), scales column widths with the window rem, and formats nothing per paint but a parent row's expander. |
+| [`page`](src/page.rs) | `DiagnosticsPage`: the observers, the selected section, per-section cursors and filters, the expansion sets, the log tail and its filter, the target select, the Levels state, the selected reference dataset and its prepared status and dataset buttons, the edge-only reference requests, the cached badge and header strings, the ages timer, key dispatch, visibility, serialization, and the frame layout. |
 | [`page_chrome`](src/page_chrome.rs) | The breadcrumb header and Back control, native section buttons with counts, wrapped and scrollable row details with Copy, and the shell-style keyboard hints. |
 | [`config_view`](src/config_view.rs) | The Config body: Current issues, History, and Effective values share one full-width table region. Keyboard motions and Copy follow the visible view. |
 | [`log_view`](src/log_view.rs) | The Log toolbar: level toggles, the target select, the text filter, Follow, Clear, and the Levels popover. |
@@ -61,13 +61,21 @@ return focus to navigation. In Log this also restores all levels and targets;
 other sections retain their filters. Toolbar tooltips name each control's
 key; the footer names the section's main keys.
 
-The Reference section sits between Data and Config. Its table builder,
-`reference_table`, lays out one row per stored reference row with the
-dataset's declared columns, NULL cells as `—`, the first column's text as
-the row key, and a case-insensitive filter over every cell. The section is
-not yet wired to reference reads: it shows its filter and the empty state
-"No reference data", and its rail count is the row count of the stored
-reference answer.
+The Reference section sits between Data and Config (`g r`). It shows one
+declared reference dataset at a time, read at the frame's as-of; Tab and
+Shift+Tab, or the toolbar's dataset buttons when more than one is declared,
+step the dataset. `reference_table` lays out one row per reference row with
+the dataset's declared columns, NULL cells as `—`, the first column's text
+as the row key, and a case-insensitive filter over every cell; the detail
+and `y` give one `column: value` line per column. The toolbar holds the
+filter, a status chip from `reference_status` (warning-toned for a refusal
+or an error), and Poll now. `r` and Poll now queue both `request_poll` and
+`request_reference`: an unchanged poll publishes nothing, so the read is
+what retries a refused one. While a new as-of's answer is outstanding the
+previous rows for the same dataset stay under `Loading`; the result strip's
+total counts the answer the table shows, and the rail badge counts only an
+answer at the frame's as-of. The empty state is the status text, "No
+reference datasets declared", or "Filter matches nothing (N rows)".
 
 Sources filters by name and health; Data by dataset name and generation
 fields (partition/book label, generation ID, source/load time, row count,
@@ -129,7 +137,13 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
   Config, or new ring records for Log. Clock changes and local section,
   filter, or expansion changes also rebuild. A perf tick never walks the
   config documents. Badges and header chips refresh on any counter change
-  or new record, whatever section is shown.
+  or new record, whatever section is shown, and on an as-of change, since
+  the Reference badge counts only an answer at the frame's as-of.
+- Reference reads are asked for only on edges: the section or page shown,
+  an as-of change, a dataset change, `r`/Poll now, and a
+  `reference_published` bump. Never on a `reference` bump or a stale
+  answer: a refusal bumps `reference` and rebuilds the section, so asking
+  there would turn one refusal into a loop.
 - A hidden page builds nothing: the page is retained for the window's
   lifetime, so its observers move their version baselines and return while
   it is closed, and `set_visible(true)` rebuilds once with everything that

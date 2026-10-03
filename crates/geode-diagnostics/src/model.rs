@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
 use geode_core::config::{Config, Diagnostic, Severity};
 use geode_core::log::{Level, Record};
-use geode_core::query::{AsOf, ReferenceTable};
+use geode_core::query::{AsOf, ReferenceOutcome, ReferenceTable};
 use geode_shell::diagnostics::{Diagnostics, Health, SourceShape, SourceState};
 use geode_shell::perf::{BUCKET_UPPER_BOUNDS_MICROS, FrameHistogram, RequeryStats, format_ms};
 
@@ -684,7 +684,8 @@ pub struct Badges {
     /// Worst reported health and the source count.
     pub sources: (Option<Health>, usize),
     pub datasets: usize,
-    /// Rows in the stored reference answer; zero without a table.
+    /// Rows in the answer to the selected dataset at the frame's as-of;
+    /// zero while that answer is outstanding.
     pub reference: usize,
     /// (errors, warnings) in the current config batch plus data conditions.
     pub config: (usize, usize),
@@ -692,7 +693,10 @@ pub struct Badges {
     pub perf_p95: String,
 }
 
-pub fn badges(d: &Diagnostics, log_errors: usize) -> Badges {
+/// Badge counts. The Reference badge counts only the answer to the page's
+/// question, `reference` at `as_of`: a stale answer must not badge rows
+/// while the status reads Loading.
+pub fn badges(d: &Diagnostics, log_errors: usize, reference: Option<&str>, as_of: &AsOf) -> Badges {
     let worst = worst_health(d).cloned();
     let current = current_diagnostics(d);
     let errors = current
@@ -706,7 +710,10 @@ pub fn badges(d: &Diagnostics, log_errors: usize) -> Badges {
     Badges {
         sources: (worst, d.sources.len()),
         datasets: d.datasets.len(),
-        reference: match d.reference.as_ref().map(|o| &o.table) {
+        reference: match reference
+            .and_then(|ds| reference_answer(d, ds, as_of))
+            .map(|o| &o.table)
+        {
             Some(Ok(Some(t))) => t.rows.len(),
             _ => 0,
         },
@@ -734,37 +741,45 @@ pub fn reference_status(
     let Some(dataset) = dataset else {
         return ("No reference datasets declared".into(), Tone::Muted);
     };
-    // Field access, not a tuple pattern: the refusal may grow fields.
+    // Either lane's refusal stands: a refused read leaves the table
+    // unanswered and a refused poll leaves the sources unpolled.
     if let Some(refusal) = &d.reference_refusal
-        && refusal.0 == dataset
+        && refusal.dataset == dataset
     {
-        return (refusal.1.clone(), Tone::Warn);
+        return (refusal.reason.clone(), Tone::Warn);
     }
-    let Some(answer) = d
-        .reference
-        .as_ref()
-        .filter(|o| o.dataset == dataset && &o.as_of == as_of)
-    else {
+    let Some(answer) = reference_answer(d, dataset, as_of) else {
         return ("Loading".into(), Tone::Muted);
     };
     match &answer.table {
         Err(e) => (e.clone(), Tone::Warn),
         Ok(None) => match as_of {
             AsOf::Live => ("No generation published yet".into(), Tone::Muted),
-            AsOf::At(t) => (
-                format!("No generation at {}", local_hms_utc(*t, *clock)),
-                Tone::Muted,
-            ),
+            AsOf::At(t) => (format!("No generation at {}", clock.full(*t)), Tone::Muted),
         },
         Ok(Some(t)) => (reference_summary(t, *clock), Tone::Normal),
     }
 }
 
+/// The stored answer when it answers `dataset` at `as_of`; any other is
+/// the previous question's.
+pub fn reference_answer<'a>(
+    d: &'a Diagnostics,
+    dataset: &str,
+    as_of: &AsOf,
+) -> Option<&'a ReferenceOutcome> {
+    d.reference
+        .as_ref()
+        .filter(|o| o.dataset == dataset && &o.as_of == as_of)
+}
+
+/// Dated: a historical as-of may resolve to a generation days old, which a
+/// time of day alone would misdate.
 fn reference_summary(t: &ReferenceTable, clock: Clock) -> String {
     format!(
         "gen {} · {} · {} rows",
         t.gen_id,
-        local_hms_utc(t.source_time, clock),
+        clock.full(t.source_time),
         t.rows.len()
     )
 }
@@ -822,6 +837,7 @@ pub(crate) mod tests {
         CatalogSnapshot, DatasetCatalog, GenerationInfo, PartitionCatalog, QueryKey,
         ReferenceOutcome,
     };
+    use geode_shell::diagnostics::ReferenceLane;
     use std::time::{Duration, SystemTime};
 
     /// The page's worst health is the core severity, not label or reason
@@ -981,7 +997,7 @@ pub(crate) mod tests {
         );
         d.set_reference(reference_answer(AsOf::Live, Ok(Some(ref_table()))));
         let (text, tone) = reference_status(&d, Some("u"), &AsOf::Live, &clock);
-        assert_eq!(text, "gen 7 · 00:00:00 · 2 rows");
+        assert_eq!(text, "gen 7 · 1970-01-01 00:00:00 UTC · 2 rows");
         assert_eq!(tone, Tone::Normal);
         let later = AsOf::At(chrono::DateTime::from_timestamp(100, 0).unwrap());
         assert_eq!(reference_status(&d, Some("u"), &later, &clock).0, "Loading");
@@ -1004,23 +1020,33 @@ pub(crate) mod tests {
         d.set_reference(reference_answer(at.clone(), Ok(None)));
         assert_eq!(
             reference_status(&d, Some("u"), &at, &Clock::utc()).0,
-            "No generation at 00:01:40"
+            "No generation at 1970-01-01 00:01:40 UTC"
         );
         d.set_reference(reference_answer(at.clone(), Err("query failed".into())));
         assert_eq!(
             reference_status(&d, Some("u"), &at, &Clock::utc()),
             ("query failed".to_string(), Tone::Warn)
         );
-        d.note_reference_refused("other", "busy elsewhere");
+        d.note_reference_refused("other", ReferenceLane::Read, "busy elsewhere");
         assert_eq!(
             reference_status(&d, Some("u"), &at, &Clock::utc()).0,
             "query failed",
             "another dataset's refusal does not stand for this one"
         );
-        d.note_reference_refused("u", "the data service is busy — press r to retry");
+        d.note_reference_refused(
+            "u",
+            ReferenceLane::Read,
+            "the data service is busy — press r to retry",
+        );
         let (text, tone) = reference_status(&d, Some("u"), &AsOf::Live, &Clock::utc());
         assert!(text.contains("busy"));
         assert_eq!(tone, Tone::Warn);
+        d.note_reference_refused("u", ReferenceLane::Poll, "the data service has stopped");
+        assert_eq!(
+            reference_status(&d, Some("u"), &AsOf::Live, &Clock::utc()),
+            ("the data service has stopped".to_string(), Tone::Warn),
+            "a refused poll shows as a refused read does"
+        );
         assert_eq!(
             reference_status(&d, None, &AsOf::Live, &Clock::utc()),
             ("No reference datasets declared".to_string(), Tone::Muted)
@@ -1030,11 +1056,25 @@ pub(crate) mod tests {
     #[test]
     fn the_reference_badge_counts_the_answered_rows() {
         let mut d = Diagnostics::new(LogLevels::default());
-        assert_eq!(badges(&d, 0).reference, 0);
+        let live = AsOf::Live;
+        assert_eq!(badges(&d, 0, Some("u"), &live).reference, 0);
         d.set_reference(reference_answer(AsOf::Live, Ok(Some(ref_table()))));
-        assert_eq!(badges(&d, 0).reference, 2);
+        assert_eq!(badges(&d, 0, Some("u"), &live).reference, 2);
         d.set_reference(reference_answer(AsOf::Live, Err("x".into())));
-        assert_eq!(badges(&d, 0).reference, 0);
+        assert_eq!(badges(&d, 0, Some("u"), &live).reference, 0);
+    }
+
+    /// The badge counts only the answer to the page's question: a stale
+    /// as-of or another dataset's answer badges nothing while the status
+    /// reads Loading.
+    #[test]
+    fn the_reference_badge_counts_only_the_current_question() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.set_reference(reference_answer(AsOf::Live, Ok(Some(ref_table()))));
+        let later = AsOf::At(chrono::DateTime::from_timestamp(100, 0).unwrap());
+        assert_eq!(badges(&d, 0, Some("u"), &later).reference, 0);
+        assert_eq!(badges(&d, 0, Some("other"), &AsOf::Live).reference, 0);
+        assert_eq!(badges(&d, 0, None, &AsOf::Live).reference, 0);
     }
 
     pub(crate) fn dataset_catalog() -> DatasetCatalog {
@@ -1171,7 +1211,7 @@ pub(crate) mod tests {
             ],
             t,
         );
-        let b = badges(&d, 3);
+        let b = badges(&d, 3, None, &AsOf::Live);
         assert_eq!(b.sources, (Some(Health::Failed { reason: "x".into() }), 2));
         assert_eq!(b.config, (1, 1));
         assert_eq!(b.log_errors, 3);
@@ -1217,7 +1257,7 @@ pub(crate) mod tests {
         );
         let chips = header_chips(&d, clock());
         assert_eq!(chips[0], ("2 failed".to_string(), Tone::Error));
-        let b = badges(&d, 0);
+        let b = badges(&d, 0, None, &AsOf::Live);
         assert!(
             matches!(b.sources.0, Some(Health::Failed { .. })),
             "worst by variant, not by reason text: {:?}",

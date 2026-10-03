@@ -273,13 +273,13 @@ pub(crate) fn footer(
     } else {
         match section {
             Section::Sources => {
-                "`[` / `]` Sections   `/` Filter   `up` / `down` Rows   `y` Copy   `escape` Back"
+                "`[` / `]` Sections   `tab` Dataset   `/` Filter   `r` Poll now   `y` Copy   `escape` Back"
             }
             Section::Data => {
                 "`[` / `]` Sections   `/` Filter   `space` / `enter` Expand   `r` Refresh   `y` Copy   `escape` Back"
             }
             Section::Reference => {
-                "`[` / `]` Sections   `/` Filter   `up` / `down` Rows   `y` Copy   `escape` Back"
+                "`[` / `]` Sections   `tab` Dataset   `/` Filter   `r` Poll now   `y` Copy   `escape` Back"
             }
             Section::Config if !config_values => {
                 "`[` / `]` Sections   `tab` / `shift+tab` Views   `/` Filter   `y` Copy   `escape` Back"

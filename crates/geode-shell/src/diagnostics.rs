@@ -295,6 +295,26 @@ pub struct DiagVersions {
     pub reference_published: u64,
 }
 
+/// Which submission a reference refusal stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceLane {
+    /// A read of the table at the frame's as-of.
+    Read,
+    /// A poll-now of the dataset's snapshot sources.
+    Poll,
+}
+
+/// A refused reference submission. A read refusal clears when an answer
+/// for its dataset arrives; a poll refusal clears only when a poll for its
+/// dataset is submitted, because a read answer says nothing about whether
+/// the sources were polled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceRefusal {
+    pub dataset: String,
+    pub reason: String,
+    pub lane: ReferenceLane,
+}
+
 /// What a tile's header chip shows: the worst unhealthy source among those
 /// the tile reads. Never built for Ok or Pending — those are silent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -366,10 +386,10 @@ pub struct Diagnostics {
     /// The latest reference answer the bridge accepted. Its `as_of` may
     /// trail the frame's; the page compares and asks again.
     pub reference: Option<ReferenceOutcome>,
-    /// `(dataset, reason)` when the last reference or poll submission was
-    /// refused, so the page can say why nothing arrived. An answer for the
-    /// same dataset clears it.
-    pub reference_refusal: Option<(String, String)>,
+    /// The last refused reference or poll submission, so the page can say
+    /// why nothing arrived. Each lane clears only on its own success; see
+    /// [`ReferenceRefusal`].
+    pub reference_refusal: Option<ReferenceRefusal>,
     pub levels: LogLevels,
     /// Visible diagnostics page count, maintained by `watch`/`unwatch`.
     /// Watched catalog refreshes and histogram copies require at least one
@@ -855,13 +875,14 @@ impl Diagnostics {
         self.pending_reference.take()
     }
 
-    /// Store the bridge's latest accepted answer. It clears a refusal for
-    /// the same dataset, since the read it stood in for has now arrived.
+    /// Store the bridge's latest accepted answer. It clears a read refusal
+    /// for the same dataset, since the read it stood in for has now arrived;
+    /// a poll refusal stays until a poll is submitted.
     pub fn set_reference(&mut self, outcome: ReferenceOutcome) {
         if self
             .reference_refusal
             .as_ref()
-            .is_some_and(|(dataset, _)| *dataset == outcome.dataset)
+            .is_some_and(|r| r.lane == ReferenceLane::Read && r.dataset == outcome.dataset)
         {
             self.reference_refusal = None;
         }
@@ -872,10 +893,30 @@ impl Diagnostics {
 
     /// Record that a reference or poll submission was refused, so the page
     /// says why no answer came rather than waiting silently.
-    pub fn note_reference_refused(&mut self, dataset: &str, reason: &str) {
-        self.reference_refusal = Some((dataset.to_string(), reason.to_string()));
+    pub fn note_reference_refused(&mut self, dataset: &str, lane: ReferenceLane, reason: &str) {
+        self.reference_refusal = Some(ReferenceRefusal {
+            dataset: dataset.to_string(),
+            reason: reason.to_string(),
+            lane,
+        });
         self.version += 1;
         self.versions.reference += 1;
+    }
+
+    /// A poll for `dataset` was submitted: clear that dataset's poll
+    /// refusal. Returns whether anything changed, so the caller notifies
+    /// only then; a submission with nothing to clear moves no counter.
+    pub fn note_poll_submitted(&mut self, dataset: &str) -> bool {
+        let clears = self
+            .reference_refusal
+            .as_ref()
+            .is_some_and(|r| r.lane == ReferenceLane::Poll && r.dataset == dataset);
+        if clears {
+            self.reference_refusal = None;
+            self.version += 1;
+            self.versions.reference += 1;
+        }
+        clears
     }
 
     /// Queue a poll of every snapshot source filling `dataset`. Explicit, so
@@ -1581,13 +1622,18 @@ mod tests {
     #[test]
     fn storing_an_answer_clears_its_refusal() {
         let mut d = Diagnostics::new(LogLevels::default());
-        d.note_reference_refused("underlyings", "the data service is busy — press r to retry");
+        d.note_reference_refused(
+            "underlyings",
+            ReferenceLane::Read,
+            "the data service is busy — press r to retry",
+        );
         assert_eq!(
             d.reference_refusal,
-            Some((
-                "underlyings".to_string(),
-                "the data service is busy — press r to retry".to_string()
-            ))
+            Some(ReferenceRefusal {
+                dataset: "underlyings".to_string(),
+                reason: "the data service is busy — press r to retry".to_string(),
+                lane: ReferenceLane::Read,
+            })
         );
         let v = d.versions().reference;
         d.set_reference(reference_answer("underlyings"));
@@ -1600,9 +1646,53 @@ mod tests {
     #[test]
     fn an_answer_keeps_another_datasets_refusal() {
         let mut d = Diagnostics::new(LogLevels::default());
-        d.note_reference_refused("underlyings", "the data service has stopped");
+        d.note_reference_refused(
+            "underlyings",
+            ReferenceLane::Read,
+            "the data service has stopped",
+        );
         d.set_reference(reference_answer("issuers"));
         assert!(d.reference_refusal.is_some());
+    }
+
+    /// A read answer does not stand for a refused poll: the poll never
+    /// ran, so the page keeps saying so until a poll is submitted.
+    #[test]
+    fn an_answer_keeps_a_refused_poll() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_reference_refused(
+            "underlyings",
+            ReferenceLane::Poll,
+            "the data service is busy — press r to retry",
+        );
+        d.set_reference(reference_answer("underlyings"));
+        assert_eq!(
+            d.reference_refusal.as_ref().map(|r| r.lane),
+            Some(ReferenceLane::Poll)
+        );
+    }
+
+    /// A submitted poll clears that dataset's poll refusal and moves the
+    /// counter; it leaves a read refusal and another dataset's alone.
+    #[test]
+    fn a_submitted_poll_clears_only_its_poll_refusal() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_reference_refused("underlyings", ReferenceLane::Poll, "busy");
+        let v = d.versions().reference;
+        assert!(!d.note_poll_submitted("issuers"));
+        assert!(d.reference_refusal.is_some());
+        assert!(d.note_poll_submitted("underlyings"));
+        assert!(d.reference_refusal.is_none());
+        assert!(d.versions().reference > v);
+
+        d.note_reference_refused("underlyings", ReferenceLane::Read, "busy");
+        let v = d.versions().reference;
+        assert!(!d.note_poll_submitted("underlyings"));
+        assert!(
+            d.reference_refusal.is_some(),
+            "a read refusal waits for its answer"
+        );
+        assert_eq!(d.versions().reference, v, "nothing cleared, nothing moved");
     }
 
     #[test]

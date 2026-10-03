@@ -49,7 +49,7 @@ fn resolve(h: &Harness, vcx: &gpui::VisualTestContext, spec: &str) -> Option<Act
 
 /// Press `spec` and dispatch what it resolves to; panics when nothing
 /// binds it. Returns whether the page consumed the action.
-fn key(h: &Harness, vcx: &mut gpui::VisualTestContext, spec: &str) -> bool {
+pub(super) fn key(h: &Harness, vcx: &mut gpui::VisualTestContext, spec: &str) -> bool {
     let action = resolve(h, vcx, spec).unwrap_or_else(|| panic!("{spec}: no binding"));
     let consumed = vcx.update(|window, cx| {
         h.page

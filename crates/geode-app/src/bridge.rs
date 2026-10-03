@@ -28,7 +28,7 @@ use geode_pricer::core::{
     PRICER_TEMPLATES_DOC, PRICER_VIEWS_DOC, TemplateSet, Views,
 };
 use geode_pricer::store::DuckSheetStore;
-use geode_shell::diagnostics::{CatalogRequest, Diagnostics, SourceSummary};
+use geode_shell::diagnostics::{CatalogRequest, Diagnostics, ReferenceLane, SourceSummary};
 use geode_shell::module::placeholder::PLACEHOLDER_KIND;
 use geode_shell::module::{Delivery, UploadDelivery};
 use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
@@ -951,17 +951,34 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     as_of,
                 }) {
                     diagnostics.update(cx, |d, cx| {
-                        d.note_reference_refused(&dataset, reference_refusal_reason(refusal));
+                        d.note_reference_refused(
+                            &dataset,
+                            ReferenceLane::Read,
+                            reference_refusal_reason(refusal),
+                        );
                         cx.notify();
                     });
                 }
             }
-            if let Some(dataset) = diagnostics.update(cx, |d, _| d.take_poll_request())
-                && let Err(refusal) = handle.poll(dataset.clone())
-            {
+            if let Some(dataset) = diagnostics.update(cx, |d, _| d.take_poll_request()) {
+                // A poll has no answer of its own, so its refusal clears on
+                // the next submission that is accepted.
+                let result = handle.poll(dataset.clone());
                 diagnostics.update(cx, |d, cx| {
-                    d.note_reference_refused(&dataset, reference_refusal_reason(refusal));
-                    cx.notify();
+                    let changed = match result {
+                        Ok(()) => d.note_poll_submitted(&dataset),
+                        Err(refusal) => {
+                            d.note_reference_refused(
+                                &dataset,
+                                ReferenceLane::Poll,
+                                reference_refusal_reason(refusal),
+                            );
+                            true
+                        }
+                    };
+                    if changed {
+                        cx.notify();
+                    }
                 });
             }
         }
@@ -7407,10 +7424,50 @@ role = "key"
         vcx.run_until_parked();
         assert_eq!(
             diagnostics.read_with(&vcx, |d, _| d.reference_refusal.clone()),
-            Some((
-                "underlyings".to_string(),
-                "the data service is busy — press r to retry".to_string()
-            ))
+            Some(geode_shell::diagnostics::ReferenceRefusal {
+                dataset: "underlyings".to_string(),
+                reason: "the data service is busy — press r to retry".to_string(),
+                lane: ReferenceLane::Read,
+            })
+        );
+    }
+
+    /// A poll the handle refuses is recorded on the poll lane; the next
+    /// poll that is submitted clears it.
+    #[gpui::test]
+    fn a_busy_handle_refuses_a_poll_on_the_page(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let (_, diagnostics) = fixture_diagnostics(&f, &mut vcx);
+        f.bridge.handle.fill_for_tests();
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.request_poll("underlyings");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.reference_refusal.clone()),
+            Some(geode_shell::diagnostics::ReferenceRefusal {
+                dataset: "underlyings".to_string(),
+                reason: "the data service is busy — press r to retry".to_string(),
+                lane: ReferenceLane::Poll,
+            })
+        );
+        // Drain the filled queue so the retry is accepted.
+        while f.requests.try_recv().is_ok() {}
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.request_poll("underlyings");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(
+            f.requests
+                .try_iter()
+                .any(|r| matches!(r, geode_data::Request::Poll { .. }))
+        );
+        assert!(
+            diagnostics.read_with(&vcx, |d, _| d.reference_refusal.is_none()),
+            "a submitted poll clears its refusal"
         );
     }
 

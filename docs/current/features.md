@@ -1240,7 +1240,7 @@ the status summary (worst source health with its count, config errors, data
 errors, and the catalog's arrival time or "catalog pending"). Back dispatches
 `page::close`. A rail on the left lists the
 sections with native selected buttons and counts: the source count, the
-dataset count, the row count of the stored reference answer, config error and warning counts, the error count in the
+dataset count, the row count of the selected reference dataset's answer at the frame's as-of (none while it is outstanding), config error and warning counts, the error count in the
 retained log tail, and the frame p95. A click or the bracket keys select a
 section. The content pane is the section's toolbar, its table, and a detail
 strip: table rows stay compact while the full details wrap and scroll below.
@@ -1252,7 +1252,7 @@ current keyboard workflow using the shell's keycaps.
 |---|---|
 | Sources | Source, Health (title-case label with the reason), Since (clock time and age), Shape, Last poll, Next poll, Ready, Loading. Worst reported health first by variant then name; unreported sources last, and a source known only from an ingest load gets a "no report yet" row with its loading text. Toolbar: a filter over name and health. Detail: the spec lines by shape and the health history. |
 | Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: a case-insensitive filter over dataset names and generation fields (partition/book, generation ID, times, row count, live/archive status), a chip reading `Catalog up to date` or `Refreshing catalog`, Refresh catalog, Expand all, Collapse all. A dataset-name match includes all its generations; leaf-only matches retain the dataset heading and hide unmatched siblings. Filtering temporarily reveals collapsed results; clearing it restores stored expansion. Catalog totals are not narrowed by filtering. |
-| Reference | One row per stored reference row with the dataset's declared columns; NULL cells read `—`. Toolbar: a case-insensitive filter over every cell. The section is not yet wired to reference reads, so it shows the empty state "No reference data"; its result strip reads "{visible} of {total} rows". |
+| Reference | One row per row of the selected reference dataset's generation at the frame's as-of, with the dataset's declared columns; NULL cells read `—`. Toolbar: a case-insensitive filter over every cell; a status chip reading `gen N · <dated source time> · N rows`, `Loading`, `No generation published yet`, `No generation at <dated time>`, a read error, or a refused read or poll (warning-toned); Poll now (`r`); and, when more than one reference dataset is declared, one button per dataset (Tab / Shift+Tab step them). While a new as-of's answer is outstanding the previous rows for the same dataset stay, under `Loading`. The result strip reads "{visible} of {total} rows", both counted from the answer the table shows. The empty state names the status, "No reference datasets declared", or "Filter matches nothing (N rows)". Detail and `y`: one `column: value` line per column, NULL as `—`. |
 | Config | Three full-width views: Current issues (config and data lanes), History (prior batches newest first), and Effective values (expandable documents and their leaves, with Key, Value, and Layer from `Config::explain`). The active view owns row navigation and Copy. Search filters issue text or document keys and values; unmatched documents disappear and matches inside collapsed documents are revealed. Open config directory remains available. |
 | Log | Time with milliseconds, Lvl, Target, and Message over the retained tail. Toolbar: level toggles, a target select over the targets seen in the tail plus `All targets`, a text filter over message and target, Follow, Clear log, and Log levels. Detail: the full record with a Copy button that puts it on the clipboard. |
 | Performance | Aligned median, p95, maximum, and sample-count readouts for frame intervals, query→snapshot, and snapshot→paint, with explanations of each stage. A labeled logarithmic frame-interval histogram shows bucket ranges and counts on hover, with a separate overflow count above 100 ms. Frame cadence is not pure UI work and is not classified against the 8 ms UI budget. UI and requery targets remain explanatory guidance. A Memory section shows process memory (macOS physical footprint, Windows private bytes) with its peak and the time the peak was first seen, then DuckDB memory in use against its limit, temporary files spilled to disk, and the largest DuckDB memory tags, the last three labelled as coming from the last catalog snapshot. Storage, dropped events, refused requests (both warning-toned when non-zero), and the Performance overlay switch share the scrolling region. Missing samples show dashes and zero counts; memory rows read "Not available" until the first sample or catalog snapshot, and on a platform the sampler cannot read. |
@@ -1268,10 +1268,12 @@ entry filter and returns to normal mode. Enter keeps the filter and returns
 to navigation; clicking a row does the same. On Performance, which paints
 no input, `/` does nothing. `g s` / `g d` / `g r` / `g c` / `g l` / `g p` jump
 directly to sections. Tab and Shift+Tab step the section's views, wrapping
-(Config: Current issues, History, Effective values), as do `ctrl+tab` and
-`ctrl+shift+tab`; the other sections have no views, so there Tab is
-consumed and does nothing rather than moving focus into the chrome. `y`
-copies details, `r` refreshes the catalog, `z shift+r` / `z shift+m`
+(Config: Current issues, History, Effective values; Reference: the declared
+reference datasets), as do `ctrl+tab` and `ctrl+shift+tab`; the other
+sections have no views, so there Tab is consumed and does nothing rather
+than moving focus into the chrome. `y` copies details, `r` refreshes the
+catalog (on Reference it polls the dataset's snapshot sources and reads the
+table again), `z shift+r` / `z shift+m`
 expand/collapse all datasets, and `o` (Config) opens the config directory.
 In Log, `-` and `=` show one fewer or one more level as a minimum severity
 (ERROR always stays; a hand-picked set steps from its most verbose level
@@ -1328,7 +1330,12 @@ Visibility drives watched demand: opening calls `watch` and closing
 `unwatch`, so a closed page holds no catalog demand while explicit
 consumers keep theirs. An as-of change requests a fresh catalog while the
 page is visible; until the catalog's as-of matches the frame, the resolved
-markers are hidden and the Data chip reads pending. The page submits no
+markers are hidden and the Data chip reads pending. On Reference the page
+asks for the selected dataset's table only on edges: the section shown, the
+page shown, an as-of change, a dataset change, `r` or Poll now, and a
+publication of a reference dataset. A stored answer for another as-of or a
+refusal reads in the chip but never asks again, so a refused read cannot
+loop. The page submits no
 view query, and no flip barrier waits on it: the tiles beneath are hidden
 while it is open.
 
@@ -1354,8 +1361,12 @@ leaf; stopped data threads show on the status bar, not in Sources. The page
 reads the frame of the workspace that was active when it was first opened:
 reopened over a different pinned workspace, its Data section follows that
 first workspace's as-of and its catalog chip can stay at "catalog pending"
-until the page is opened again from that workspace. A rebind on open is the
-planned fix.
+until the page is opened again from that workspace; the bridge reads
+reference tables at the active frame's as-of, so the Reference chip can
+likewise stay at `Loading`. A rebind on open is the planned fix. A
+reference dataset whose first key column repeats shares cursor identity
+between those rows. Poll now polls every snapshot source filling the dataset, not one
+source.
 
 See the [crate guide](../../crates/geode-diagnostics/README.md) for the
 module map and the observer, notification, and allocation contracts.

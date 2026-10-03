@@ -32979,6 +32979,88 @@ run_mutation "diagnostics keys: escape over the popover closes the page" \
             }' \
   geode-app escape_over_the_levels_popover_closes_it_and_keeps_the_page
 
+# ---- Diagnostics Reference section ---------------------------------------
+
+# Reference reads are asked for on edges only. Asking whenever the section
+# rebuilds turns a refusal (which bumps `reference` and rebuilds) into a loop.
+run_mutation "diagnostics reference: a rebuild asks again" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if published {
+                this.request_reference(cx);' \
+  '            if published || relevant {
+                this.request_reference(cx);' \
+  geode-diagnostics a_refused_read_does_not_ask_again
+
+# An as-of change on Reference must ask for the table at the new as-of, or
+# the chip reads Loading forever.
+run_mutation "diagnostics reference: an as-of change asks nothing" \
+  crates/geode-diagnostics/src/page.rs \
+  '                    d.request_catalog_refresh();
+                    cx.notify();
+                });
+                this.request_reference(cx);' \
+  '                    d.request_catalog_refresh();
+                    cx.notify();
+                });' \
+  geode-diagnostics an_as_of_change_on_reference_asks_again_and_reads_loading
+
+# `r` reads the table as well as polling: an unchanged poll publishes
+# nothing, so without the read a refused one is never retried.
+run_mutation "diagnostics reference: r polls without reading" \
+  crates/geode-diagnostics/src/page.rs \
+  '            d.request_poll(&dataset);
+            cx.notify();
+        });
+        self.request_reference(cx);' \
+  '            d.request_poll(&dataset);
+            cx.notify();
+        });' \
+  geode-diagnostics r_on_reference_asks_the_source_to_poll
+
+# The summary's total counts the answer the table shows. Counting whatever
+# answer is stored reads "0 of N rows" over another dataset's answer.
+run_mutation "diagnostics reference: the total counts another dataset's answer" \
+  crates/geode-diagnostics/src/page.rs \
+  '                    self.reference_total = answer.map_or(0, |t| t.rows.len());' \
+  '                    self.reference_total = d.reference.as_ref().and_then(|o| o.table.as_ref().ok()?.as_ref()).map_or(0, |t| t.rows.len());' \
+  geode-diagnostics counts_come_from_the_answer_the_table_shows
+
+# The badge counts only the answer at the frame's as-of; a stale one would
+# badge rows while the chip reads Loading.
+run_mutation "diagnostics reference: the badge counts a stale answer" \
+  crates/geode-diagnostics/src/model.rs \
+  '            .and_then(|ds| reference_answer(d, ds, as_of))' \
+  '            .and_then(|ds| d.reference.as_ref().filter(|o| o.dataset == ds))' \
+  geode-diagnostics the_reference_badge_counts_only_the_current_question
+
+# A historical generation may be days old: its time must carry its date.
+run_mutation "diagnostics reference: the source time loses its date" \
+  crates/geode-diagnostics/src/model.rs \
+  '        clock.full(t.source_time),' \
+  '        clock.hms(t.source_time),' \
+  geode-diagnostics reference_status_reads_loading_until_the_answer_matches_the_frame
+
+# A read answer says nothing about a refused poll; clearing it there hides
+# that the sources were never polled.
+run_mutation "reference refusal: an answer clears a poll refusal" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            .is_some_and(|r| r.lane == ReferenceLane::Read && r.dataset == outcome.dataset)' \
+  '            .is_some_and(|r| r.dataset == outcome.dataset)' \
+  geode-shell an_answer_keeps_a_refused_poll
+
+run_mutation "reference refusal: a submitted poll clears a read refusal" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            .is_some_and(|r| r.lane == ReferenceLane::Poll && r.dataset == dataset);' \
+  '            .is_some_and(|r| r.dataset == dataset);' \
+  geode-shell a_submitted_poll_clears_only_its_poll_refusal
+
+# The bridge reports an accepted poll, or a poll refusal outlives its retry.
+run_mutation "reference refusal: an accepted poll clears nothing" \
+  crates/geode-app/src/bridge.rs \
+  '                        Ok(()) => d.note_poll_submitted(&dataset),' \
+  '                        Ok(()) => false,' \
+  geode-app a_busy_handle_refuses_a_poll_on_the_page
+
 
 run_mutation "keystroke parser: an uppercase letter parses as the lowercase key" \
   crates/geode-shell/src/keymap/keystroke.rs \

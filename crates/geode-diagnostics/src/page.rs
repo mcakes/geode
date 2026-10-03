@@ -28,7 +28,9 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SearchableVec, SelectEvent, SelectState};
 use gpui_component::table::{TableEvent, TableState};
-use gpui_component::{ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, IndexPath, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 
 use crate::config_view::{self, ConfigView};
 use crate::levels::{self, LevelRow, LevelsState};
@@ -64,6 +66,14 @@ fn diag_version_for(section: Section, v: DiagVersions) -> u64 {
         Section::Log => v.log_levels,
         Section::Perf => v.perf,
     }
+}
+
+/// The reference dataset `view` selects, clamped so a shorter list never
+/// strands the selection; `None` when no dataset is declared.
+fn selected_reference(names: &[String], view: usize) -> Option<&str> {
+    names
+        .get(view.min(names.len().saturating_sub(1)))
+        .map(String::as_str)
 }
 
 fn title_for(section: Section) -> SharedString {
@@ -107,6 +117,19 @@ pub struct DiagnosticsPage {
     /// Whether the catalog was taken under the frame's as-of; the Data
     /// toolbar chip. Cached at rebuild: both inputs rebuild the section.
     catalog_matches: bool,
+    /// Index into `Diagnostics::reference_datasets` of the dataset the
+    /// Reference section shows; clamped on read, so a shorter list never
+    /// strands it.
+    pub(crate) reference_view: usize,
+    /// The Reference toolbar chip, formatted at rebuild.
+    pub(crate) reference_status: (SharedString, Tone),
+    /// Rows in the answer the Reference table was built from; the result
+    /// summary's total, so it always counts what the table shows.
+    reference_total: usize,
+    /// One `(element id, label)` per declared reference dataset, for the
+    /// toolbar's dataset buttons; prepared at rebuild so paint formats
+    /// nothing.
+    reference_views: Vec<(SharedString, SharedString)>,
     log: LogTail,
     log_filter: LogFilter,
     follow: bool,
@@ -279,11 +302,17 @@ impl DiagnosticsPage {
             // them on any counter change or new record, whatever section
             // is selected.
             let any = has_new || now != this.last_diag_versions;
+            // A publication of a reference dataset is an edge to re-ask on;
+            // `reference` itself is not, since a refusal bumps it.
+            let published = now.reference_published != this.last_diag_versions.reference_published;
             this.last_diag_versions = now;
             if relevant {
                 this.rebuild(cx);
             } else if any {
                 this.refresh_badges(cx);
+            }
+            if published {
+                this.request_reference(cx);
             }
         })
         .detach();
@@ -322,6 +351,10 @@ impl DiagnosticsPage {
             this.last_frame_versions = now;
             if relevant {
                 this.rebuild(cx);
+            } else if as_of_changed {
+                // The Reference badge counts only an answer at the frame's
+                // as-of, whatever section is shown.
+                this.refresh_badges(cx);
             }
             // The catalog resolves generation markers under the request's
             // as-of: a visible page needs a fresh snapshot when it changes.
@@ -331,6 +364,7 @@ impl DiagnosticsPage {
                     d.request_catalog_refresh();
                     cx.notify();
                 });
+                this.request_reference(cx);
             }
         })
         .detach();
@@ -361,6 +395,10 @@ impl DiagnosticsPage {
             config_history: false,
             config_values: false,
             catalog_matches: false,
+            reference_view: 0,
+            reference_status: (SharedString::new_static("Loading"), Tone::Muted),
+            reference_total: 0,
+            reference_views: Vec::new(),
             log,
             log_filter: LogFilter::all(),
             follow: true,
@@ -455,71 +493,104 @@ impl DiagnosticsPage {
         // version. Both tables are retained across view switches.
         let mut diag_prepared = None;
         let mut source_since = Vec::new();
-        let prepared =
-            {
-                let d = self.diagnostics.read(cx);
-                let frame = self.frame.read(cx);
-                match self.section {
-                    Section::Sources => {
-                        let (table, since) =
-                            prepared::sources_table(&model::source_rows(d, clock), now, &filter);
-                        source_since = since;
-                        table
-                    }
-                    Section::Data => {
-                        self.catalog_matches = model::catalog_matches_frame(d, frame.as_of());
-                        prepared::data_table(
-                            &model::dataset_rows(d, frame.as_of(), clock),
-                            &self.collapsed_datasets,
-                            &filter,
-                        )
-                    }
-                    Section::Reference => prepared::reference_table(None, &filter),
-                    Section::Config => {
-                        let diags = if self.config_history {
-                            model::history_diagnostics(d, clock)
-                        } else {
-                            model::current_diagnostics(d)
-                        };
-                        self.issue_count = diags.len();
-                        let mut issues = prepared::diagnostics_table(&diags, self.config_history);
-                        let query = filter.to_lowercase();
-                        if !query.is_empty() {
-                            issues.rows.retain(|r| {
-                                r.cells
-                                    .iter()
-                                    .any(|c| c.text.to_lowercase().contains(&query))
-                                    || r.detail.iter().any(|s| s.to_lowercase().contains(&query))
-                            });
-                        }
-                        diag_prepared = Some(issues);
-                        let expanded_docs = BTreeSet::new();
-                        prepared::config_table(
-                            &model::config_docs(&self.config.borrow(), &filter),
-                            if filter.is_empty() {
-                                &self.collapsed_docs
-                            } else {
-                                &expanded_docs
-                            },
-                        )
-                    }
-                    Section::Log => {
-                        // The one input is the log's message filter.
-                        self.log_filter.text = filter;
-                        self.level_rows = Rc::new(levels::level_rows(&d.levels));
-                        prepared::log_table(
-                            &model::log_rows(self.log.records(), &self.log_filter, clock),
-                            self.log.lost(),
-                        )
-                    }
-                    Section::Perf => {
-                        self.perf = Some(crate::perf_view::PerformanceView::new(
-                            &model::perf_model(d, &frame.requery, clock),
-                        ));
-                        PreparedTable::empty()
-                    }
+        let prepared = {
+            let d = self.diagnostics.read(cx);
+            let frame = self.frame.read(cx);
+            match self.section {
+                Section::Sources => {
+                    let (table, since) =
+                        prepared::sources_table(&model::source_rows(d, clock), now, &filter);
+                    source_since = since;
+                    table
                 }
-            };
+                Section::Data => {
+                    self.catalog_matches = model::catalog_matches_frame(d, frame.as_of());
+                    prepared::data_table(
+                        &model::dataset_rows(d, frame.as_of(), clock),
+                        &self.collapsed_datasets,
+                        &filter,
+                    )
+                }
+                Section::Reference => {
+                    let names = &d.reference_datasets;
+                    let dataset = selected_reference(names, self.reference_view);
+                    if self.reference_views.len() != names.len()
+                        || self
+                            .reference_views
+                            .iter()
+                            .zip(names)
+                            .any(|((_, label), name)| label.as_ref() != name)
+                    {
+                        self.reference_views = names
+                            .iter()
+                            .map(|n| {
+                                (
+                                    SharedString::from(format!("diagnostics-reference-view-{n}")),
+                                    SharedString::from(n.clone()),
+                                )
+                            })
+                            .collect();
+                    }
+                    let (text, tone) = model::reference_status(d, dataset, frame.as_of(), &clock);
+                    self.reference_status = (text.into(), tone);
+                    // Filtered by dataset, not as-of: the previous
+                    // as-of's rows stay while the chip reads Loading.
+                    let answer = d
+                        .reference
+                        .as_ref()
+                        .filter(|o| Some(o.dataset.as_str()) == dataset)
+                        .and_then(|o| o.table.as_ref().ok())
+                        .and_then(|t| t.as_ref());
+                    self.reference_total = answer.map_or(0, |t| t.rows.len());
+                    prepared::reference_table(answer, &filter)
+                }
+                Section::Config => {
+                    let diags = if self.config_history {
+                        model::history_diagnostics(d, clock)
+                    } else {
+                        model::current_diagnostics(d)
+                    };
+                    self.issue_count = diags.len();
+                    let mut issues = prepared::diagnostics_table(&diags, self.config_history);
+                    let query = filter.to_lowercase();
+                    if !query.is_empty() {
+                        issues.rows.retain(|r| {
+                            r.cells
+                                .iter()
+                                .any(|c| c.text.to_lowercase().contains(&query))
+                                || r.detail.iter().any(|s| s.to_lowercase().contains(&query))
+                        });
+                    }
+                    diag_prepared = Some(issues);
+                    let expanded_docs = BTreeSet::new();
+                    prepared::config_table(
+                        &model::config_docs(&self.config.borrow(), &filter),
+                        if filter.is_empty() {
+                            &self.collapsed_docs
+                        } else {
+                            &expanded_docs
+                        },
+                    )
+                }
+                Section::Log => {
+                    // The one input is the log's message filter.
+                    self.log_filter.text = filter;
+                    self.level_rows = Rc::new(levels::level_rows(&d.levels));
+                    prepared::log_table(
+                        &model::log_rows(self.log.records(), &self.log_filter, clock),
+                        self.log.lost(),
+                    )
+                }
+                Section::Perf => {
+                    self.perf = Some(crate::perf_view::PerformanceView::new(&model::perf_model(
+                        d,
+                        &frame.requery,
+                        clock,
+                    )));
+                    PreparedTable::empty()
+                }
+            }
+        };
         self.prepared = Rc::new(prepared);
         self.source_since = source_since;
         let len = self.prepared.rows.len();
@@ -535,40 +606,41 @@ impl DiagnosticsPage {
         let cursor = self.cursors[ix];
         self.selected_keys[ix] = self.prepared.rows.get(cursor).map(|r| r.key.clone());
         let shared = self.prepared.clone();
-        let (empty_title, empty_help) = if !self.filters[ix].is_empty() {
-            (
-                "No matching rows",
-                "Try a broader filter or clear the search field.",
-            )
-        } else {
-            match self.section {
-                Section::Sources => (
-                    "No sources reported",
-                    "Source health appears here when a configured source reports activity.",
-                ),
-                Section::Data => (
-                    "No datasets available",
-                    "Refresh the catalog to check for stored datasets.",
-                ),
-                Section::Reference => (
-                    "No reference data",
-                    "A declared reference dataset's rows appear here once it publishes.",
-                ),
-                Section::Config => (
-                    "No configuration values",
-                    "Loaded configuration documents appear here.",
-                ),
-                Section::Log if self.log.is_empty() => (
-                    "No log records yet",
-                    "New records appear here while Diagnostics is open.",
-                ),
-                Section::Log => (
-                    "No matching records",
-                    "Enable a level, choose All targets, or clear the search field.",
-                ),
-                Section::Perf => ("", ""),
-            }
-        };
+        let (empty_title, empty_help): (SharedString, SharedString) =
+            if self.section == Section::Reference {
+                self.reference_empty_text(ix)
+            } else if !self.filters[ix].is_empty() {
+                (
+                    "No matching rows".into(),
+                    "Try a broader filter or clear the search field.".into(),
+                )
+            } else {
+                let (title, help) = match self.section {
+                    Section::Sources => (
+                        "No sources reported",
+                        "Source health appears here when a configured source reports activity.",
+                    ),
+                    Section::Data => (
+                        "No datasets available",
+                        "Refresh the catalog to check for stored datasets.",
+                    ),
+                    Section::Config => (
+                        "No configuration values",
+                        "Loaded configuration documents appear here.",
+                    ),
+                    Section::Log if self.log.is_empty() => (
+                        "No log records yet",
+                        "New records appear here while Diagnostics is open.",
+                    ),
+                    Section::Log => (
+                        "No matching records",
+                        "Enable a level, choose All targets, or clear the search field.",
+                    ),
+                    // Reference words its own above; Perf paints no table.
+                    Section::Reference | Section::Perf => ("", ""),
+                };
+                (title.into(), help.into())
+            };
         // `column()` is read only when the table prepares its layout, so
         // every new table needs a `refresh` before it paints.
         self.table.update(cx, |t, cx| {
@@ -624,6 +696,24 @@ impl DiagnosticsPage {
         self.refresh_result_summary(cx);
         self.refresh_badges(cx);
         cx.notify();
+    }
+
+    /// The Reference table's empty state, from the status the chip shows:
+    /// no dataset declared, Loading, a refusal, an error or no generation.
+    /// A filter that hides every row of an answer says how many it hid.
+    fn reference_empty_text(&self, ix: usize) -> (SharedString, SharedString) {
+        if !self.filters[ix].is_empty() && self.reference_total > 0 {
+            return (
+                format!("Filter matches nothing ({} rows)", self.reference_total).into(),
+                "Try a broader filter or clear the search field.".into(),
+            );
+        }
+        let help = if self.reference_views.is_empty() {
+            "Declare a dataset of the reference family in the schema to inspect it here."
+        } else {
+            "Press r to poll the dataset's sources and read it again."
+        };
+        (self.reference_status.0.clone(), help.into())
     }
 
     /// Pull the ring into the tail, when the page is shown. A hidden
@@ -757,16 +847,9 @@ impl DiagnosticsPage {
                 self.diagnostics.read(cx).datasets.len(),
                 rows.len()
             ),
-            Section::Reference => {
-                let total = self
-                    .diagnostics
-                    .read(cx)
-                    .reference
-                    .as_ref()
-                    .and_then(|o| o.table.as_ref().ok()?.as_ref())
-                    .map_or(0, |t| t.rows.len());
-                format!("{} of {total} rows", rows.len())
-            }
+            // The total is the answer the table was built from, so the
+            // two never disagree, even over a stale as-of's rows.
+            Section::Reference => format!("{} of {} rows", rows.len(), self.reference_total),
             Section::Config if self.showing_issues() => format!(
                 "{} of {} {} issue{}",
                 self.diag_prepared.rows.len(),
@@ -885,12 +968,14 @@ impl DiagnosticsPage {
         self.drain_tail();
         let clock = Self::clock(cx);
         let d = self.diagnostics.read(cx);
+        let dataset = selected_reference(&d.reference_datasets, self.reference_view);
+        let as_of = self.frame.read(cx).as_of();
         let log_errors = self
             .log
             .records()
             .filter(|r| r.level == geode_core::log::Level::ERROR)
             .count();
-        self.badges = model::badges(d, log_errors);
+        self.badges = model::badges(d, log_errors, dataset, as_of);
         self.header_chips = model::header_chips(d, clock)
             .into_iter()
             .map(|(s, t)| (SharedString::from(s), t))
@@ -1052,6 +1137,7 @@ impl DiagnosticsPage {
             }
         });
         self.rebuild(cx);
+        self.request_reference(cx);
         self.sync_ages_timer(cx);
     }
 
@@ -1132,6 +1218,78 @@ impl DiagnosticsPage {
             set.remove(&key);
         }
         self.rebuild(cx);
+    }
+
+    /// The selected reference dataset, if any is declared.
+    fn reference_dataset(&self, cx: &App) -> Option<String> {
+        selected_reference(
+            &self.diagnostics.read(cx).reference_datasets,
+            self.reference_view,
+        )
+        .map(str::to_string)
+    }
+
+    /// Ask for the selected reference table at the frame's as-of. Only
+    /// while shown on Reference: the shell also drops a request with no
+    /// watcher, so a hidden page never costs a read. Callers are edges
+    /// only (show, section, as-of, dataset, poll, publication), never a
+    /// rebuild: a refusal rebuilds the section, and asking there would
+    /// turn one refusal into a loop.
+    fn request_reference(&self, cx: &mut Context<Self>) {
+        if !self.visible || self.section != Section::Reference {
+            return;
+        }
+        let Some(dataset) = self.reference_dataset(cx) else {
+            return;
+        };
+        self.diagnostics.update(cx, |d, cx| {
+            d.request_reference(&dataset);
+            cx.notify();
+        });
+    }
+
+    /// `r` and Poll now on Reference: poll the dataset's snapshot sources
+    /// and read the table again. An unchanged poll publishes nothing, so
+    /// the read is what retries a refused one.
+    fn poll_reference(&self, cx: &mut Context<Self>) {
+        let Some(dataset) = self.reference_dataset(cx) else {
+            return;
+        };
+        self.diagnostics.update(cx, |d, cx| {
+            d.request_poll(&dataset);
+            cx.notify();
+        });
+        self.request_reference(cx);
+    }
+
+    /// Show the reference dataset at `ix`: a different table, so the
+    /// cursor restarts at the top.
+    fn set_reference_view(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix == self.reference_view {
+            return;
+        }
+        self.reference_view = ix;
+        let slot = Section::Reference as usize;
+        self.cursors[slot] = 0;
+        self.selected_keys[slot] = None;
+        self.rebuild(cx);
+        self.request_reference(cx);
+    }
+
+    /// Step the shown reference dataset, wrapping; one or none declared
+    /// leaves it alone.
+    fn cycle_reference_view(&mut self, backwards: bool, cx: &mut Context<Self>) {
+        let len = self.diagnostics.read(cx).reference_datasets.len();
+        if len < 2 {
+            return;
+        }
+        let at = self.reference_view.min(len - 1);
+        let next = if backwards {
+            at.checked_sub(1).unwrap_or(len - 1)
+        } else {
+            (at + 1) % len
+        };
+        self.set_reference_view(next, cx);
     }
 
     fn request_catalog(&self, cx: &mut Context<Self>) {
@@ -1223,9 +1381,16 @@ impl DiagnosticsPage {
             "reset_filters" => self.reset_filters(window, cx),
             "next_view" if self.section == Section::Config => self.cycle_config_view(false, cx),
             "prev_view" if self.section == Section::Config => self.cycle_config_view(true, cx),
+            "next_view" if self.section == Section::Reference => {
+                self.cycle_reference_view(false, cx)
+            }
+            "prev_view" if self.section == Section::Reference => {
+                self.cycle_reference_view(true, cx)
+            }
             "next_view" | "prev_view" => {}
             "follow" if self.section == Section::Log => self.set_follow(!self.follow, cx),
             "follow" => {}
+            "refresh" if self.section == Section::Reference => self.poll_reference(cx),
             "refresh" => self.request_catalog(cx),
             "expand_all" if self.section == Section::Data => {
                 self.set_all_datasets_collapsed(false, cx)
@@ -1295,6 +1460,7 @@ impl DiagnosticsPage {
         });
         if visible {
             self.rebuild(cx);
+            self.request_reference(cx);
         }
         self.sync_ages_timer(cx);
     }
@@ -1394,15 +1560,101 @@ impl DiagnosticsPage {
             .w(scale::design(FILTER_WIDTH))
     }
 
+    /// Filter, status chip, Poll now, and one button per dataset when
+    /// there is more than one to choose between. Every string is prepared
+    /// at rebuild.
+    fn render_reference_toolbar(
+        &self,
+        weak: WeakEntity<Self>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let (text, tone) = &self.reference_status;
+        let paint = chip::chip_paint(
+            theme,
+            if *tone == Tone::Warn {
+                chip::Tone::Warning
+            } else {
+                chip::Tone::Neutral
+            },
+        );
+        let poll = weak.clone();
+        h_flex()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .flex_wrap()
+            .items_center()
+            .child(self.filter_input_el())
+            .child(
+                div()
+                    .px_1()
+                    .rounded(theme.radius)
+                    .text_xs()
+                    .when_some(paint.fill, |el, fill| el.bg(fill))
+                    .text_color(paint.text)
+                    .child(text.clone()),
+            )
+            .child(crate::page_chrome::probed(
+                "diagnostics-reference-poll",
+                Button::new("diagnostics-reference-poll")
+                    .ghost()
+                    .small()
+                    .label("Poll now")
+                    .tooltip("Poll this dataset's sources and read it again (R)")
+                    .on_click(move |_, window, cx| {
+                        let _ = poll.update(cx, |p, cx| {
+                            p.poll_reference(cx);
+                            p.focus_handle.focus(window, cx);
+                        });
+                    }),
+            ))
+            .when(self.reference_views.len() > 1, |el| {
+                let selected = self
+                    .reference_view
+                    .min(self.reference_views.len().saturating_sub(1));
+                el.children(
+                    self.reference_views
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, (id, label))| {
+                            let pick = weak.clone();
+                            let selector = id.clone();
+                            div()
+                                .id(id.clone())
+                                .debug_selector(move || selector.to_string())
+                                .child(
+                                    Button::new(id.clone())
+                                        .ghost()
+                                        .small()
+                                        .selected(ix == selected)
+                                        .label(label.clone())
+                                        .tooltip(
+                                            "Show this dataset (Tab / Shift+Tab step datasets)",
+                                        )
+                                        .on_click(move |_, window, cx| {
+                                            let _ = pick.update(cx, |p, cx| {
+                                                p.set_reference_view(ix, cx);
+                                                p.focus_handle.focus(window, cx);
+                                            });
+                                        }),
+                                )
+                        }),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let weak: WeakEntity<Self> = cx.weak_entity();
         match self.section {
-            Section::Sources | Section::Reference => h_flex()
+            Section::Sources => h_flex()
                 .gap_2()
                 .px_3()
                 .py_2()
                 .child(self.filter_input_el())
                 .into_any_element(),
+            Section::Reference => self.render_reference_toolbar(weak, cx),
             Section::Log => log_view::toolbar(
                 LogView {
                     levels_on: self.log_filter.levels,
@@ -1609,6 +1861,7 @@ mod tests {
     use crate::prepared::RowKind;
 
     mod keys;
+    mod reference;
 
     struct Host {
         page: Entity<DiagnosticsPage>,
@@ -1979,6 +2232,20 @@ mod tests {
         }
     }
 
+    /// Move the page's frame lane to `as_of`, as the as-of picker does,
+    /// and let the page's frame observer run.
+    fn set_frame_as_of(
+        h: &Harness,
+        vcx: &mut gpui::VisualTestContext,
+        as_of: geode_core::query::AsOf,
+    ) {
+        h.frame.update(vcx, |f, cx| {
+            let _ = f.shared_mut().set_as_of(as_of);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+
     fn open_data_section(h: &Harness, vcx: &mut gpui::VisualTestContext) {
         vcx.update(|window, cx| {
             h.page
@@ -2001,11 +2268,7 @@ mod tests {
                 .update(&mut vcx, |d, _| d.take_pending_catalog_request())
         );
         let at = geode_core::query::AsOf::At(chrono::Utc::now());
-        h.frame.update(&mut vcx, |f, cx| {
-            let _ = f.shared_mut().set_as_of(at.clone());
-            cx.notify();
-        });
-        vcx.run_until_parked();
+        set_frame_as_of(&h, &mut vcx, at.clone());
         // A watched refresh was requested for the new as-of.
         assert!(
             h.diagnostics
