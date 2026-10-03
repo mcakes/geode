@@ -713,8 +713,8 @@ fn one_step_choice_dialogs_have_no_back_button(cx: &mut gpui::TestAppContext) {
     assert!(vcx.debug_bounds("shell-modal-back").is_none());
 }
 
-/// The reload poll samples process memory on every tick but copies it into
-/// diagnostics only while a page watches. Proven through the production
+/// The reload poll samples and logs process memory on every tick but copies
+/// it into diagnostics only while a page watches. Proven through the production
 /// timer loop, not by calling `refresh_memory` directly.
 #[cfg(any(target_os = "macos", windows))]
 #[gpui::test]
@@ -728,7 +728,22 @@ fn the_reload_poll_copies_process_memory_only_while_watched(cx: &mut gpui::TestA
         vcx.run_until_parked();
     };
 
-    tick(&mut vcx);
+    // Unwatched: the tick still samples and logs the baseline on
+    // `geode::memory`, so the log keeps its record with the page closed.
+    let ring = Arc::new(Ring::new(64));
+    let sub = {
+        use tracing_subscriber::layer::SubscriberExt;
+        tracing_subscriber::registry().with(geode_core::log::RingLayer::new(ring.clone()))
+    };
+    tracing::subscriber::with_default(sub, || tick(&mut vcx));
+    let mut records = Vec::new();
+    ring.drain_since(0, &mut records);
+    assert!(
+        records
+            .iter()
+            .any(|r| r.target == crate::memory::LOG_TARGET && r.level == Level::INFO),
+        "the baseline logs with no watcher: {records:?}"
+    );
     assert_eq!(
         diagnostics.read_with(&vcx, |d, _| d.memory),
         None,

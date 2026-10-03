@@ -6189,10 +6189,12 @@ run_mutation "diagnostics: refresh_frame_hist copies the histogram while unwatch
   crates/geode-shell/src/diagnostics.rs \
   '        if self.watchers == 0 {
             return false;
-        }' \
+        }
+        if self.frame_hist.count() == hist.count()' \
   '        if false {
             return false;
-        }' \
+        }
+        if self.frame_hist.count() == hist.count()' \
   geode-shell the_frame_histogram_is_copied_only_while_watched
 
 run_mutation "bridge: a stale Catalog outcome's tag check is disabled" \
@@ -6241,6 +6243,147 @@ run_mutation "diagnostics: MAJ-3 — refresh_frame_hist copies an unchanged hist
   '        if false {
             return false;' \
   geode-shell refresh_frame_hist_is_a_no_op_when_the_histogram_is_unchanged
+
+run_mutation "memory: the 256 MiB peak step is dropped" \
+  crates/geode-shell/src/memory.rs \
+  'rise > 0 && (rise >= PEAK_STEP_BYTES || rise.saturating_mul(PEAK_STEP_DIVISOR) >= logged)' \
+  'rise > 0 && (rise.saturating_mul(PEAK_STEP_DIVISOR) >= logged)' \
+  geode-shell a_peak_rise_of_256_mib_logs_at_info_even_below_a_quarter
+
+run_mutation "memory: the peak step is 512 MiB, not 256" \
+  crates/geode-shell/src/memory.rs \
+  'pub const PEAK_STEP_BYTES: u64 = 256 * MIB;' \
+  'pub const PEAK_STEP_BYTES: u64 = 512 * MIB;' \
+  geode-shell a_peak_rise_of_256_mib_logs_at_info_even_below_a_quarter
+
+run_mutation "memory: the 25% peak step is dropped" \
+  crates/geode-shell/src/memory.rs \
+  'rise > 0 && (rise >= PEAK_STEP_BYTES || rise.saturating_mul(PEAK_STEP_DIVISOR) >= logged)' \
+  'rise > 0 && (rise >= PEAK_STEP_BYTES)' \
+  geode-shell a_peak_rise_of_a_quarter_logs_at_info_even_below_256_mib
+
+run_mutation "memory: the relative peak step is a third, not a quarter" \
+  crates/geode-shell/src/memory.rs \
+  'pub const PEAK_STEP_DIVISOR: u64 = 4;' \
+  'pub const PEAK_STEP_DIVISOR: u64 = 3;' \
+  geode-shell a_peak_rise_of_a_quarter_logs_at_info_even_below_256_mib
+
+run_mutation "memory: an unchanged zero peak counts as a 25% rise" \
+  crates/geode-shell/src/memory.rs \
+  'rise > 0 && (rise >= PEAK_STEP_BYTES' \
+  '(rise >= PEAK_STEP_BYTES' \
+  geode-shell an_unchanged_peak_logs_nothing_at_info
+
+run_mutation "memory: the step is measured from the last sample, not the last logged peak" \
+  crates/geode-shell/src/memory.rs \
+  'let peak = peak_rose_enough(self.logged_peak, peak_bytes)' \
+  'let peak = peak_rose_enough(prev.peak_bytes, peak_bytes)' \
+  geode-shell the_threshold_is_measured_from_the_last_logged_peak
+
+run_mutation "memory: a logged rise does not move the logged peak" \
+  crates/geode-shell/src/memory.rs \
+  '            let from_bytes = self.logged_peak;
+            self.logged_peak = peak_bytes;' \
+  '            let from_bytes = self.logged_peak;' \
+  geode-shell the_threshold_is_measured_from_the_last_logged_peak
+
+run_mutation "memory: the baseline is not logged" \
+  crates/geode-shell/src/memory.rs \
+  '                peak: Some(PeakLog::Baseline),' \
+  '                peak: None,' \
+  geode-shell the_first_sample_logs_the_baseline_once_and_no_debug
+
+run_mutation "memory: the baseline does not start the debug cadence" \
+  crates/geode-shell/src/memory.rs \
+  '            self.logged_peak = seen;
+            self.last_debug = Some(now);' \
+  '            self.logged_peak = seen;' \
+  geode-shell debug_logs_at_most_once_per_interval
+
+run_mutation "memory: a periodic debug does not restart the cadence" \
+  crates/geode-shell/src/memory.rs \
+  '        if periodic {
+            self.last_debug = Some(now);
+        }' \
+  '        if false {
+            self.last_debug = Some(now);
+        }' \
+  geode-shell debug_logs_at_most_once_per_interval
+
+run_mutation "memory: the debug interval is exclusive" \
+  crates/geode-shell/src/memory.rs \
+  'now.saturating_duration_since(last) >= DEBUG_INTERVAL' \
+  'now.saturating_duration_since(last) > DEBUG_INTERVAL' \
+  geode-shell debug_logs_at_most_once_per_interval
+
+run_mutation "memory: a peak rise keeps the old peak time" \
+  crates/geode-shell/src/memory.rs \
+  '        let (peak_bytes, peak_at) = if seen > prev.peak_bytes {
+            (seen, wall)' \
+  '        let (peak_bytes, peak_at) = if seen > prev.peak_bytes {
+            (seen, prev.peak_at)' \
+  geode-shell the_peak_never_falls_and_keeps_the_time_it_was_reached
+
+run_mutation "memory: the peak follows a falling sample" \
+  crates/geode-shell/src/memory.rs \
+  'let seen = sample.peak_bytes.max(sample.current_bytes);' \
+  'let seen = sample.peak_bytes;' \
+  geode-shell the_peak_never_falls_and_keeps_the_time_it_was_reached
+
+run_mutation "diagnostics: refresh_memory copies while unwatched" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.watchers == 0 {
+            return false;
+        }
+        if let Some(shown) = &self.memory' \
+  '        if false {
+            return false;
+        }
+        if let Some(shown) = &self.memory' \
+  geode-shell the_memory_reading_is_copied_only_while_watched
+
+run_mutation "diagnostics: refresh_memory compares raw bytes, not the displayed text" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            && memory::format_bytes(shown.current_bytes)
+                == memory::format_bytes(reading.current_bytes)' \
+  '            && shown.current_bytes == reading.current_bytes' \
+  geode-shell refresh_memory_copies_only_when_the_displayed_value_changes
+
+run_mutation "diagnostics: refresh_memory ignores a peak-only change" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            && memory::format_bytes(shown.peak_bytes) == memory::format_bytes(reading.peak_bytes)' \
+  '            && true' \
+  geode-shell refresh_memory_copies_only_when_the_displayed_value_changes
+
+run_mutation "shell: the reload poll never copies process memory into diagnostics" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                                if d.refresh_memory(&reading) {' \
+  '                                if false {' \
+  geode-shell the_reload_poll_copies_process_memory_only_while_watched
+
+run_mutation "shell: the reload poll logs process memory only while watched" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                        crate::memory::emit(log, &reading);' \
+  '                        if watched { crate::memory::emit(log, &reading); }' \
+  geode-shell the_reload_poll_copies_process_memory_only_while_watched
+
+run_mutation "catalog: a GiB memory limit reads as GB" \
+  crates/geode-data/src/query/catalog.rs \
+  '        "gib" => 1024f64.powi(3),' \
+  '        "gib" => 1e9,' \
+  geode-data duckdb_size_text_parses_in_every_form_duckdb_writes
+
+run_mutation "catalog: the memory limit is not read" \
+  crates/geode-data/src/query/catalog.rs \
+  '    let memory_limit_bytes = memory_limit_bytes(conn)?;' \
+  '    let memory_limit_bytes = 0;' \
+  geode-data the_catalog_reads_a_configured_memory_limit
+
+run_mutation "catalog: zero-byte memory tags are kept" \
+  crates/geode-data/src/query/catalog.rs \
+  'where memory_usage_bytes > 0' \
+  'where true' \
+  geode-data the_catalog_lists_every_partitions_generations_with_the_live_one_marked
 
 run_mutation "diagnostics: MAJ-4 — restart_required re-embedded in the summary" \
   crates/geode-shell/src/diagnostics.rs \
