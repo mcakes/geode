@@ -56,6 +56,9 @@ pub(super) const CLOSE_PAGE_FIRST: &str = "close the page first (esc)";
 /// column (`ModuleRoster::context_columns`) that no listed kind accepts.
 pub(crate) const NO_MODULE_OPENS: &str = "no module opens on the context at the cursor";
 
+/// The status notice for `frame::grouping_adhoc` on a lane with no stored chain.
+pub(crate) const NO_AD_HOC: &str = "no ad hoc grouping yet: type one in the Grouping dialog (i)";
+
 /// The action ids refused with [`CLOSE_PAGE_FIRST`] while a page is open:
 /// the transient tile chrome (the `:` line, find, the stack list, the row
 /// menu, the link chooser) and every layout edit — add, open-with,
@@ -426,6 +429,20 @@ impl ShellView {
                     cx.notify();
                 }
             });
+        } else if action.0 == "frame::grouping_adhoc" {
+            // Return to the lane's stored ad hoc chain. With none stored the
+            // action says so: a palette row that does nothing reads as broken.
+            let frame = self.target_frame();
+            if frame.read(cx).ad_hoc().is_some() {
+                frame.update(cx, |f, cx| {
+                    if f.activate_ad_hoc() {
+                        cx.notify();
+                    }
+                });
+            } else {
+                self.notice = Some(NO_AD_HOC.into());
+                cx.notify();
+            }
         } else if action.0 == "frame::scope_undo" {
             // Walk the bounded scope undo stack.
             self.target_frame().update(cx, |f, cx| {

@@ -3193,6 +3193,20 @@ members = [1, -4]
     }
 
     #[test]
+    fn an_active_ad_hoc_marker_beside_a_slot_reads_without_the_slot() {
+        let table: toml::Table =
+            toml::from_str("slot = 3\nad_hoc = [\"book\"]\ngrouping = \"ad_hoc\"").unwrap();
+        let mut warnings = Vec::new();
+        let restored = FrameRecord::from_toml(&table, &mut warnings);
+        assert_eq!(
+            restored.active_slot, None,
+            "the active chain hides the slot"
+        );
+        assert!(restored.ad_hoc_active);
+        assert_eq!(restored.ad_hoc, Some(vec!["book".to_string()]));
+    }
+
+    #[test]
     fn a_malformed_ad_hoc_chain_warns_and_is_ignored() {
         for text in [
             "ad_hoc = \"book\"",

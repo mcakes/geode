@@ -203,3 +203,63 @@ fn a_reload_that_keeps_every_column_keeps_the_chain(cx: &mut gpui::TestAppContex
         Some(chain(&["book"]))
     );
 }
+
+#[gpui::test]
+fn the_ad_hoc_action_returns_to_the_stored_chain(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu", "book"]));
+        f.shared_mut().set_active_slot(Some(1));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+
+    dispatch_action(&shell, "frame::grouping_adhoc", &mut vcx);
+    vcx.run_until_parked();
+
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().grouping_choice()),
+        GroupingChoice::AdHoc
+    );
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+}
+
+#[gpui::test]
+fn the_ad_hoc_action_with_nothing_stored_says_so(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    let before = frame.read_with(&vcx, |f, _| f.shared().versions());
+
+    dispatch_action(&shell, "frame::grouping_adhoc", &mut vcx);
+    vcx.run_until_parked();
+
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
+        Some(crate::shell::input::NO_AD_HOC)
+    );
+    assert_eq!(frame.read_with(&vcx, |f, _| f.shared().versions()), before);
+    assert!(
+        shell.read_with(&vcx, |s, _| !s.modal_open()),
+        "the action never opens a dialog, so it stays out of opens_dialog"
+    );
+}
+
+#[gpui::test]
+fn the_ad_hoc_action_is_in_the_palette_under_frame(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services());
+    let shell = shell_of(&window, &mut vcx);
+    let title = shell.read_with(&vcx, |s, _| {
+        s.services
+            .registry
+            .iter()
+            .find(|d| d.id.0 == "frame::grouping_adhoc")
+            .map(|d| (d.title.clone(), d.category.clone()))
+    });
+    assert_eq!(
+        title,
+        Some(("Ad hoc grouping".to_string(), "Frame".to_string()))
+    );
+}

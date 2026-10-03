@@ -437,6 +437,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Clear grouping slot (views' own grouping)",
         "Frame",
     );
+    // Return to the lane's stored ad hoc chain. Palette and user keymaps;
+    // no default chord.
+    action(reg, "frame::grouping_adhoc", "Ad hoc grouping", "Frame");
     // Scope undo/redo traverse Frame's bounded history. Clearing the whole
     // scope is a separate palette action.
     action(reg, "frame::scope_undo", "Undo scope change", "Frame");
