@@ -1,14 +1,15 @@
 //! One ingest thread owns the writer and serializes all publication.
 //!
-//! Each dequeue prefers documents, then fetched series, then files. Documents
-//! (publishes and local forgets, in one queue) and series are FIFO; files
-//! follow planned priority and descending source time. Running work finishes
+//! Each dequeue prefers documents, then fetched series, then reference
+//! snapshots, then files. Documents (publishes and local forgets, in one
+//! queue), series and snapshots are FIFO; files follow planned priority and
+//! descending source time. Running work finishes
 //! before priorities are reconsidered. Sustained
 //! higher-priority traffic can starve lower-priority work.
 //!
 //! File submissions deduplicate queued/in-flight path, size, and source time;
-//! a queued file can be promoted. Document and series queues have no dedupe,
-//! refusal, or fixed capacity; a source past `BACKLOG_DEPTH` queued jobs is
+//! a queued file can be promoted. Document, series and snapshot queues have no
+//! dedupe, refusal, or fixed capacity; a source past `BACKLOG_DEPTH` queued jobs is
 //! reported as `<source>:backlog` health. Upstream coalescing does not bound
 //! these queues.
 //!
@@ -16,8 +17,8 @@
 //! store are unsafe. Shutdown finishes the running operation, then runs the
 //! queued local document work (`local`-source publishes and forgets) in
 //! queue order, each answering as usual, and drops the rest: feed
-//! documents, series and files are resent by their sources after a
-//! restart. See `docs/current/data-path.md` for delivery and health
+//! documents, series, snapshots and files are resent by their sources
+//! after a restart. See `docs/current/data-path.md` for delivery and health
 //! contracts.
 
 use crate::adapter::SeriesRows;
@@ -30,6 +31,7 @@ use crate::store::document::{
     DocumentPublishRequest, DocumentPublished, document_generation_count, document_path,
     forget_document, prune_orphan_provenance, publish_document,
 };
+use crate::store::reference::{ReferencePublishRequest, ReferencePublished, publish_reference};
 use crate::store::retention::{RetentionPolicy, sweep};
 use crate::store::series::{SeriesAppendRequest, SeriesAppended, Span, append_series};
 use crate::store::{Catalog, Store, StoreError};
@@ -37,6 +39,7 @@ use chrono::{DateTime, Utc};
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::document::{DocumentRows, join_key};
 use geode_core::pricing::LOCAL_SOURCE;
+use geode_core::reference::ConformedRows;
 use geode_core::schema::{DatasetSpec, SchemaSpec};
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -94,6 +97,14 @@ pub enum IngestEvent {
         dataset: String,
         identity: String,
         reason: String,
+    },
+    /// A reference snapshot equal to the live table: nothing was written
+    /// and no generation spent. Its source's load lane for `batch` is clean
+    /// again, as after a publish.
+    Unchanged {
+        source: String,
+        dataset: String,
+        batch: String,
     },
     /// A forget deleted every generation of one document (`rows` payload
     /// rows, live plus archive; zero when nothing held the key).
@@ -180,6 +191,17 @@ impl From<DocumentJob> for DocumentWork {
     }
 }
 
+/// One conformed reference snapshot waiting for publication. The dataset
+/// name is its one batch; `received_at` is when the poll started and becomes
+/// the generation's source time.
+#[derive(Debug)]
+pub struct ReferenceJob {
+    pub source: String,
+    pub dataset: String,
+    pub rows: ConformedRows,
+    pub received_at: DateTime<Utc>,
+}
+
 /// Owned fetched rows waiting for the serialized append operation.
 #[derive(Debug)]
 pub struct SeriesJob {
@@ -204,6 +226,10 @@ struct Queue {
     /// fetch was asked for by a trader watching a chart, a file was
     /// found by a poll.
     series: VecDeque<SeriesJob>,
+    /// Polled reference snapshots, taken after series and ahead of files.
+    /// A snapshot worker finishes one poll before starting the next, so a
+    /// source queues few of them.
+    references: VecDeque<ReferenceJob>,
     items: Vec<WorkItem>,
     shutdown: bool,
     /// The file the runner has popped and is loading (or is about to skip
@@ -215,7 +241,7 @@ struct Queue {
     /// before it starts, so `enqueue`'s dedupe still sees it as spoken for
     /// the entire time a poll could otherwise re-add it.
     in_flight: Option<(PathBuf, u64, DateTime<Utc>)>,
-    /// Feed documents and series queued per source (local writes and forgets
+    /// Feed documents, series and snapshots queued per source (local writes and forgets
     /// belong to no configured source and are not counted).
     queued_per_source: std::collections::HashMap<String, usize>,
     /// Sources whose last backlog report was `over`.
@@ -345,6 +371,20 @@ impl IngestHandle {
         cvar.notify_all();
     }
 
+    /// Hand a polled snapshot to the runner, counted toward its source's
+    /// backlog like `submit_document`. No dedupe: the publish itself
+    /// compares the rows with the live table and reports `Unchanged`.
+    pub fn submit_reference(&self, job: ReferenceJob) {
+        let (lock, cvar) = &*self.queue;
+        let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let backlog = backlog_push(&mut q, &job.source);
+        q.references.push_back(job);
+        if let Some(event) = backlog {
+            let _ = (self.sink)(event);
+        }
+        cvar.notify_all();
+    }
+
     /// Stop the runner and join it. Queued local writes (app publishes and
     /// forgets) still run first; every other queued item is dropped.
     pub fn shutdown(&self) {
@@ -410,6 +450,7 @@ fn clear_in_flight(queue: &(Mutex<Queue>, Condvar)) {
 enum Work {
     Document(DocumentWork),
     Series(SeriesJob),
+    Reference(ReferenceJob),
     File(WorkItem),
 }
 
@@ -425,7 +466,8 @@ fn take_local_writes(q: &mut Queue) -> Vec<DocumentWork> {
         .collect()
 }
 
-/// Takes the next unit of work, **documents first, then series** (module
+/// Takes the next unit of work, **documents first, then series, then
+/// snapshots** (module
 /// doc). A free function for the reason `enqueue` is one: the ordering
 /// rule is the whole point and a test can only state it without a race by
 /// driving a bare `Queue` synchronously — through the runner thread,
@@ -440,6 +482,9 @@ fn take_work(q: &mut Queue) -> Option<Work> {
     }
     if let Some(job) = q.series.pop_front() {
         return Some(Work::Series(job));
+    }
+    if let Some(job) = q.references.pop_front() {
+        return Some(Work::Reference(job));
     }
     if q.items.is_empty() {
         return None;
@@ -499,13 +544,15 @@ fn backlog_pop(q: &mut Queue, source: &str) -> Option<IngestEvent> {
     None
 }
 
-/// The source a taken job is counted against: a feed document or a series.
+/// The source a taken job is counted against: a feed document, a series or
+/// a snapshot.
 fn backlog_source(work: &Work) -> Option<&str> {
     match work {
         Work::Document(DocumentWork::Publish(job)) if job.source != LOCAL_SOURCE => {
             Some(&job.source)
         }
         Work::Series(job) => Some(&job.source),
+        Work::Reference(job) => Some(&job.source),
         _ => None,
     }
 }
@@ -842,6 +889,93 @@ fn forget_one_document(
     }
 }
 
+/// Publish one polled snapshot whole, or report it unchanged, through the
+/// same generation events as documents. The batch is the dataset name, so
+/// every outcome lands on the source's load lane under it.
+fn publish_one_reference(
+    store: &Store,
+    schema: &SchemaSpec,
+    sink: &IngestSink,
+    refusal_logged: &AtomicBool,
+    job: ReferenceJob,
+) {
+    let batch = job.dataset.clone();
+    let failed = |reason: String| IngestEvent::Failed {
+        source: job.source.clone(),
+        dataset: job.dataset.clone(),
+        batch: batch.clone(),
+        reason,
+    };
+    let Some(dataset) = schema.dataset(&job.dataset) else {
+        let event = failed(format!("dataset '{}' is not declared", job.dataset));
+        if !sink(event) {
+            log_refused_event(
+                refusal_logged,
+                &format!("the undeclared-dataset failure for snapshot {batch}"),
+            );
+        }
+        return;
+    };
+    if let Some(reason) = drift_refusal(store, &dataset.name) {
+        if !sink(failed(reason)) {
+            log_refused_event(
+                refusal_logged,
+                &format!("the drift refusal for snapshot {batch}"),
+            );
+        }
+        return;
+    }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| {
+            publish_reference(
+                store,
+                &ReferencePublishRequest {
+                    dataset,
+                    source: &job.source,
+                    rows: &job.rows,
+                    source_time: job.received_at,
+                    received_at: job.received_at,
+                },
+            )
+            .map_err(|e| e.to_string())
+        })
+    }));
+    let event = match outcome {
+        Ok(Ok(ReferencePublished::Published { gen_id, rows, .. })) => IngestEvent::Published {
+            source: job.source.clone(),
+            dataset: job.dataset.clone(),
+            batch: batch.clone(),
+            gen_id,
+            // One bookless partition, as a document's.
+            books: vec![None],
+            rows,
+            health: Health::Ok,
+            notes: None,
+        },
+        Ok(Ok(ReferencePublished::Unchanged)) => IngestEvent::Unchanged {
+            source: job.source.clone(),
+            dataset: job.dataset.clone(),
+            batch: batch.clone(),
+        },
+        Ok(Err(reason)) => failed(reason),
+        Err(payload) => {
+            let message = panic_payload_message(payload.as_ref());
+            let path = PathBuf::from(format!("reference://{}/{}", job.source, job.dataset));
+            log_ingest_panic(&path, &message);
+            failed(format!(
+                "reference publish panicked at {}: {message}",
+                path.display()
+            ))
+        }
+    };
+    if !sink(event) {
+        log_refused_event(
+            refusal_logged,
+            &format!("the snapshot publish outcome for {batch}"),
+        );
+    }
+}
+
 /// Resolve the series dataset, append under panic containment, and report
 /// completion or failure. Refused delivery does not stop the runner.
 fn append_one_series(
@@ -966,16 +1100,19 @@ fn run(
                     }
                     return;
                 }
-                // Documents first, then series, then files; `None` means
-                // all three queues are empty, which is the only state
-                // that announces a drain.
+                // Documents first, then series, then snapshots, then
+                // files; `None` means every queue is empty, which is the
+                // only state that announces a drain.
                 if let Some(work) = take_work(&mut q) {
                     announced_idle = false;
                     if let Some(event) = backlog_source(&work).and_then(|s| backlog_pop(&mut q, s))
                     {
                         let _ = sink(event);
                     }
-                    break (work, q.items.len() + q.documents.len() + q.series.len());
+                    break (
+                        work,
+                        q.items.len() + q.documents.len() + q.series.len() + q.references.len(),
+                    );
                 }
                 if !announced_idle {
                     announced_idle = true;
@@ -1029,6 +1166,17 @@ fn run(
                     log_refused_event(&refusal_logged, "a load-started announcement");
                 }
                 append_one_series(&store, &schema, &sink, &refusal_logged, job);
+                continue;
+            }
+            Work::Reference(job) => {
+                if !sink(IngestEvent::Started {
+                    source: job.source.clone(),
+                    path: format!("reference://{}/{}", job.source, job.dataset),
+                    queued,
+                }) {
+                    log_refused_event(&refusal_logged, "a load-started announcement");
+                }
+                publish_one_reference(&store, &schema, &sink, &refusal_logged, job);
                 continue;
             }
             Work::File(item) => item,
@@ -1311,6 +1459,7 @@ mod tests {
                 IngestEvent::Started { .. } => "started",
                 IngestEvent::Published { .. } => "published",
                 IngestEvent::Failed { .. } => "failed",
+                IngestEvent::Unchanged { .. } => "unchanged",
                 IngestEvent::SeriesAppended { .. } => "series_appended",
                 IngestEvent::SeriesFailed { .. } => "series_failed",
                 IngestEvent::Forgotten { .. } => "forgotten",
@@ -2862,7 +3011,7 @@ mod tests {
     }
 
     #[test]
-    fn take_work_pops_documents_then_series_then_files() {
+    fn take_work_pops_documents_then_series_then_snapshots_then_files() {
         // Populate all three queues in reverse priority order. This detects either
         // a document/series or a series/file ordering swap.
         let mut q = Queue::default();
@@ -2875,13 +3024,147 @@ mod tests {
             ts("2026-08-30T07:00:00Z"),
             Priority::Backfill,
         ));
+        q.references.push_back(reference_job("u"));
         let first = take_work(&mut q).unwrap();
         assert!(matches!(first, Work::Document(_)));
         let second = take_work(&mut q).unwrap();
         assert!(matches!(second, Work::Series(_)));
         let third = take_work(&mut q).unwrap();
-        assert!(matches!(third, Work::File(_)));
+        assert!(matches!(third, Work::Reference(_)));
+        let fourth = take_work(&mut q).unwrap();
+        assert!(matches!(fourth, Work::File(_)));
         assert!(take_work(&mut q).is_none());
+    }
+
+    // Reference snapshots.
+
+    fn reference_rows(multiplier: f64) -> geode_core::reference::ConformedRows {
+        use geode_core::reference::{RefColumn, TableRows};
+        TableRows {
+            columns: vec![
+                (
+                    "underlying_ref".into(),
+                    RefColumn::Utf8(vec![Some("NDX".into()), Some("SPX".into())]),
+                ),
+                (
+                    "currency".into(),
+                    RefColumn::Utf8(vec![Some("USD".into()), Some("USD".into())]),
+                ),
+                (
+                    "multiplier".into(),
+                    RefColumn::F64(vec![Some(20.0), Some(multiplier)]),
+                ),
+            ],
+        }
+        .conform(&geode_core::reference::test_support::reference_dataset())
+        .unwrap()
+    }
+
+    fn reference_job(dataset: &str) -> ReferenceJob {
+        ReferenceJob {
+            source: "refdb".into(),
+            dataset: dataset.into(),
+            rows: reference_rows(100.0),
+            received_at: ts("2026-10-02T09:00:00Z"),
+        }
+    }
+
+    fn reference_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        store
+            .apply_schema(&geode_core::reference::test_support::reference_dataset())
+            .unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn a_reference_job_publishes_once_and_the_same_rows_again_are_unchanged() {
+        let (_dir, store) = reference_store();
+        let (handle, rx) = IngestRunner::spawn_channel(
+            store,
+            schema_of(geode_core::reference::test_support::reference_dataset()),
+        );
+        handle.submit_reference(reference_job("u"));
+        let started = loop {
+            match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                IngestEvent::Started { source, path, .. } => break (source, path),
+                IngestEvent::PlanComplete => continue,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            started,
+            ("refdb".to_string(), "reference://refdb/u".to_string())
+        );
+        let first = match next_event(&rx) {
+            IngestEvent::Published {
+                source,
+                dataset,
+                batch,
+                gen_id,
+                books,
+                rows,
+                health,
+                notes,
+            } => {
+                assert_eq!((source.as_str(), dataset.as_str()), ("refdb", "u"));
+                assert_eq!(batch, "u", "the dataset name is the one batch");
+                assert_eq!(books, vec![None]);
+                assert_eq!(rows, 2);
+                assert_eq!(health, Health::Ok);
+                assert!(notes.is_none());
+                gen_id
+            }
+            other => panic!("{other:?}"),
+        };
+        handle.submit_reference(reference_job("u"));
+        match next_event(&rx) {
+            IngestEvent::Unchanged {
+                source,
+                dataset,
+                batch,
+            } => assert_eq!(
+                (source.as_str(), dataset.as_str(), batch.as_str()),
+                ("refdb", "u", "u")
+            ),
+            other => panic!("{other:?}"),
+        }
+        handle.submit_reference(ReferenceJob {
+            rows: reference_rows(50.0),
+            received_at: ts("2026-10-02T09:05:00Z"),
+            ..reference_job("u")
+        });
+        match next_event(&rx) {
+            IngestEvent::Published { gen_id, .. } => assert!(gen_id > first),
+            other => panic!("{other:?}"),
+        }
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_reference_job_for_an_undeclared_dataset_fails_by_name() {
+        let (_dir, store) = reference_store();
+        let (handle, rx) = IngestRunner::spawn_channel(
+            store,
+            schema_of(geode_core::reference::test_support::reference_dataset()),
+        );
+        handle.submit_reference(reference_job("gone"));
+        match next_event(&rx) {
+            IngestEvent::Failed {
+                source,
+                dataset,
+                batch,
+                reason,
+            } => {
+                assert_eq!((source.as_str(), dataset.as_str()), ("refdb", "gone"));
+                assert_eq!(batch, "gone");
+                assert_eq!(reason, "dataset 'gone' is not declared");
+            }
+            other => panic!("{other:?}"),
+        }
+        handle.shutdown();
     }
 
     // Local documents: forget and retention.

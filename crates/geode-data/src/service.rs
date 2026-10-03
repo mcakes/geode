@@ -8,9 +8,13 @@ use crate::egress::{EgressWorkers, UploadOutcome, UploadParams};
 use crate::health::{Health, severity_rank};
 use crate::ingest::fetch::{FetchOutcome, FetchOutcomeSink, FetchWork, FetchWorker};
 use crate::ingest::scheduler::{Scheduler, SchedulerEvent, SchedulerSink};
+use crate::ingest::snapshot::{
+    PolledSink, SnapshotOutcome, SnapshotPlan, SnapshotSink, SnapshotWorker,
+};
 use crate::ingest::subscribe::{LoadReportSink, SubscriptionWorker};
 use crate::ingest::{
-    DocumentJob, ForgetJob, IngestEvent, IngestHandle, IngestRunner, IngestSink, SeriesJob,
+    DocumentJob, ForgetJob, IngestEvent, IngestHandle, IngestRunner, IngestSink, ReferenceJob,
+    SeriesJob,
 };
 use crate::positions::PositionWorker;
 use crate::pricing::{PriceSink, PricerConfig, PricingWorker};
@@ -34,7 +38,7 @@ use geode_core::positions::{CommandOutcome, MoveLhuParams};
 use geode_core::pricing::{LOCAL_SOURCE, LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
     CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
-    QueryOutcome,
+    QueryOutcome, ReferenceOutcome, ReferenceParams,
 };
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
@@ -99,6 +103,9 @@ pub enum DataEvent {
     Distinct(DistinctOutcome),
     /// Catalog metadata for diagnostics and source identities.
     Catalog(CatalogOutcome),
+    /// One reference table, live or as of a time, addressed by the
+    /// requester's key and tag.
+    Reference(ReferenceOutcome),
     /// Pricing result, addressed by the requesting tile's key.
     Price(PriceOutcome),
     /// Vol slice batch result, addressed by the requesting tile's key.
@@ -841,6 +848,11 @@ pub struct DataService {
     /// subscriptions can submit to ingest; they must stop before the writer.
     /// Explicit shutdown follows the same producer-before-consumer order.
     fetchers: std::sync::Mutex<Vec<FetchWorker>>,
+    /// One polling worker per snapshot source; each submits its snapshots
+    /// to ingest, so it stops with the fetchers, before the writer. Joining
+    /// one waits for a poll in flight, which has no deadline, so they are
+    /// stopped here on the service thread, never by a UI-thread drop.
+    snapshots: std::sync::Mutex<Vec<SnapshotWorker>>,
     /// Allows `shutdown(&self)` to stop and join workers whose shutdown needs
     /// mutable access.
     subscriptions: std::sync::Mutex<Vec<SubscriptionWorker>>,
@@ -1162,6 +1174,39 @@ impl DataService {
                     let _ = sink(DataEvent::LoadEnded);
                     health_delivered
                 }
+                // A snapshot equal to live wrote nothing, so readers have
+                // nothing to requery and no `Published` is sent. It is
+                // still a clean load: it clears a failed publish of this
+                // batch, since live now matches the source again.
+                IngestEvent::Unchanged {
+                    source,
+                    dataset,
+                    batch,
+                } => {
+                    tracing::debug!(
+                        target: "geode::ingest",
+                        "{dataset}/{batch} from {source} unchanged",
+                    );
+                    let health_delivered = health_tracker.report_load_and_emit(
+                        &source,
+                        &batch,
+                        Health::Ok,
+                        String::new(),
+                        |reported| match reported {
+                            Some((worst, detail)) => {
+                                log_health_event(&source, &worst, &detail);
+                                sink(DataEvent::Health {
+                                    source: source.clone(),
+                                    worst,
+                                    detail,
+                                })
+                            }
+                            None => true,
+                        },
+                    );
+                    let _ = sink(DataEvent::LoadEnded);
+                    health_delivered
+                }
                 // Series completion is addressed by identity and source, including zero
                 // appends. End progress after either outcome.
                 IngestEvent::SeriesAppended {
@@ -1310,6 +1355,7 @@ impl DataService {
         let mut directory_sources: Vec<SourceSpec> = Vec::new();
         // Fetch sources resolve through the same source configuration loop.
         let mut fetchers: Vec<FetchWorker> = Vec::new();
+        let mut snapshots: Vec<SnapshotWorker> = Vec::new();
         let mut fetch_datasets: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let identities: Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<String>>>> =
@@ -1354,7 +1400,121 @@ impl DataService {
                 }
                 SourceShape::Subscribed => {}
                 SourceShape::Snapshot => {
-                    report_unservable("snapshot sources are not served by this build yet".into());
+                    let Some(adapter) = config.adapters.get(&spec.adapter) else {
+                        report_unservable(format!(
+                            "adapter '{}' is not in this build",
+                            spec.adapter
+                        ));
+                        continue;
+                    };
+                    // Asked for per source, never cached, for the reason
+                    // the subscribed arm's `subscription()` call records.
+                    let Some(query) = adapter.snapshot() else {
+                        report_unservable(format!(
+                            "adapter '{}' has no snapshot side",
+                            spec.adapter
+                        ));
+                        continue;
+                    };
+                    // `SourceSpec::from_doc` refuses a snapshot source with
+                    // no table and one naming an undeclared dataset; a
+                    // config built in code is still reported, not unwrapped.
+                    let Some(dataset) = config.schema.dataset(&spec.dataset) else {
+                        report_unservable(format!("dataset '{}' is not declared", spec.dataset));
+                        continue;
+                    };
+                    let Some(table) = spec.table.clone() else {
+                        report_unservable("a snapshot source needs a table".to_string());
+                        continue;
+                    };
+                    let plan = SnapshotPlan {
+                        source: spec.name.clone(),
+                        dataset: dataset.clone(),
+                        table,
+                        interval: spec.poll_interval,
+                    };
+                    // A poll's outcome: rows go to the runner (the one door
+                    // storage is entered by) and the discovery lane is
+                    // clean; a failed query or refused table degrades the
+                    // discovery lane only. Publish outcomes report on the
+                    // load lane under the batch, so a clean poll never
+                    // clears a failed publish, nor a publish a failed poll.
+                    let outcome_sink: SnapshotSink = {
+                        let ingest = Arc::clone(&ingest);
+                        let sink = Arc::clone(&sink);
+                        let health_tracker = Arc::clone(&health_tracker);
+                        let source = spec.name.clone();
+                        let dataset = spec.dataset.clone();
+                        Arc::new(move |outcome| {
+                            let (health, detail, note) = match outcome {
+                                SnapshotOutcome::Rows {
+                                    rows,
+                                    received_at,
+                                    note,
+                                } => {
+                                    ingest.submit_reference(ReferenceJob {
+                                        source: source.clone(),
+                                        dataset: dataset.clone(),
+                                        rows,
+                                        received_at,
+                                    });
+                                    (Health::Ok, String::new(), note)
+                                }
+                                SnapshotOutcome::Failed { reason } => {
+                                    log_ingest_failure(&dataset, &dataset, &reason);
+                                    (
+                                        Health::Degraded {
+                                            reason: reason.clone(),
+                                        },
+                                        reason,
+                                        None,
+                                    )
+                                }
+                            };
+                            health_tracker.report_discovery_and_emit(
+                                &source,
+                                health,
+                                detail,
+                                |reported| match reported {
+                                    Some((worst, detail)) => {
+                                        log_health_event(&source, &worst, &detail);
+                                        sink(DataEvent::Health {
+                                            source: source.clone(),
+                                            worst,
+                                            detail,
+                                        })
+                                    }
+                                    None => true,
+                                },
+                            );
+                            // Health stays `Ok`: the rows conformed. The note
+                            // is a warning, once per distinct combination.
+                            if let Some(message) = note {
+                                let _ = sink(DataEvent::Diagnostics(vec![Diagnostic {
+                                    path: Some(format!("sources.{source}")),
+                                    ..load_note_warning(message)
+                                }]));
+                            }
+                        })
+                    };
+                    let polled: PolledSink = {
+                        let sink = Arc::clone(&sink);
+                        let source = spec.name.clone();
+                        Arc::new(move |at, next| {
+                            let next_in = next.duration_since(at).unwrap_or_default();
+                            let _ = sink(polled_event(source.clone(), 0, at, next_in));
+                        })
+                    };
+                    match SnapshotWorker::spawn(
+                        plan,
+                        query,
+                        outcome_sink,
+                        polled,
+                        Arc::clone(&sink),
+                    ) {
+                        Ok(worker) => snapshots.push(worker),
+                        Err(e) => report_unservable(e.message),
+                    }
                     continue;
                 }
                 SourceShape::Fetch => {
@@ -1657,6 +1817,7 @@ impl DataService {
             positions,
             subscriptions: std::sync::Mutex::new(subscriptions),
             fetchers: std::sync::Mutex::new(fetchers),
+            snapshots: std::sync::Mutex::new(snapshots),
             identities,
             fetch_datasets,
             context_columns: Arc::default(),
@@ -2245,6 +2406,48 @@ impl DataService {
             .is_some_and(|w| w.request(FetchWork::Identities))
     }
 
+    /// Poll every snapshot source filling `dataset` now. Keyed by dataset
+    /// because that is what the asking page shows; never blocks, and a
+    /// poll already running absorbs the ask into one follow-up poll.
+    pub fn poll(&self, dataset: &str) {
+        let snapshots = self.snapshots.lock().unwrap_or_else(|e| e.into_inner());
+        let mut any = false;
+        for worker in snapshots.iter().filter(|w| w.dataset() == dataset) {
+            worker.poll_now();
+            any = true;
+        }
+        if !any {
+            tracing::warn!(target: "geode::ingest", "poll: no snapshot source fills '{dataset}'");
+        }
+    }
+
+    /// Read one reference table synchronously on the service's reader
+    /// connection: reference tables are small, and the answer is whole.
+    pub fn reference(&self, params: &ReferenceParams) -> ReferenceOutcome {
+        let table = match self.config.schema.dataset(&params.dataset) {
+            Some(ds) if ds.family == geode_core::schema::Family::Reference => self
+                .refuse_drifted([ds.name.as_str()])
+                .and_then(|()| {
+                    crate::store::reference::read_reference(&self.conn, ds, &params.as_of)
+                })
+                .map_err(|e| e.to_string()),
+            _ => Err(format!(
+                "dataset '{}' is not a declared reference dataset",
+                params.dataset
+            )),
+        };
+        if let Err(e) = &table {
+            tracing::warn!(target: "geode::query", "reference request failed: {e}");
+        }
+        ReferenceOutcome {
+            key: params.key,
+            tag: params.tag,
+            dataset: params.dataset.clone(),
+            as_of: params.as_of.clone(),
+            table,
+        }
+    }
+
     /// Read catalog metadata synchronously on the service's reader connection.
     /// These queries inspect metadata rather than scanning payload tables.
     pub fn catalog(&self, params: &CatalogParams) -> CatalogOutcome {
@@ -2346,6 +2549,16 @@ impl DataService {
         // stop delivering before anything downstream of it does.
         for worker in self
             .fetchers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter_mut()
+        {
+            worker.shutdown();
+        }
+        // Snapshot workers for the same reason: each submits its polls to
+        // the runner. Each waits for a poll in flight to finish.
+        for worker in self
+            .snapshots
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter_mut()
@@ -7860,6 +8073,404 @@ source_name = "NPV"
             "{worst:?}"
         );
         assert!(detail.starts_with("SPX@kdb_hist"), "{detail}");
+        handle.shutdown();
+    }
+
+    type SnapshotAnswers = Arc<
+        std::sync::Mutex<
+            std::collections::VecDeque<
+                Result<geode_core::reference::TableRows, crate::adapter::AdapterError>,
+            >,
+        >,
+    >;
+
+    /// A snapshot adapter named `fake`: each query takes the next queued
+    /// answer, or repeats the last one when the queue is empty. `None`
+    /// answers model an adapter with no snapshot side.
+    struct FakeSnapshotAdapter {
+        answers: Option<SnapshotAnswers>,
+    }
+
+    struct FakeSnapshot {
+        answers: SnapshotAnswers,
+        last: Option<Result<geode_core::reference::TableRows, crate::adapter::AdapterError>>,
+    }
+
+    impl crate::adapter::SnapshotQuery for FakeSnapshot {
+        fn query(
+            &mut self,
+            table: &str,
+        ) -> Result<geode_core::reference::TableRows, crate::adapter::AdapterError> {
+            assert_eq!(table, "t", "the configured table is the one read");
+            if let Some(next) = self.answers.lock().unwrap().pop_front() {
+                self.last = Some(next);
+            }
+            self.last.clone().expect("a queued first answer")
+        }
+    }
+
+    impl crate::adapter::Adapter for FakeSnapshotAdapter {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn subscription(&self) -> Option<Box<dyn crate::adapter::Subscription>> {
+            None
+        }
+        fn egress(&self) -> Option<Box<dyn crate::adapter::Egress>> {
+            None
+        }
+        fn snapshot(&self) -> Option<Box<dyn crate::adapter::SnapshotQuery>> {
+            let answers = self.answers.clone()?;
+            Some(Box::new(FakeSnapshot {
+                answers,
+                last: None,
+            }))
+        }
+    }
+
+    /// `u` rows of `(underlying_ref, currency, multiplier)`.
+    fn ref_rows(rows: &[(&str, &str, f64)]) -> geode_core::reference::TableRows {
+        use geode_core::reference::RefColumn;
+        geode_core::reference::TableRows {
+            columns: vec![
+                (
+                    "underlying_ref".into(),
+                    RefColumn::Utf8(rows.iter().map(|r| Some(r.0.to_string())).collect()),
+                ),
+                (
+                    "currency".into(),
+                    RefColumn::Utf8(rows.iter().map(|r| Some(r.1.to_string())).collect()),
+                ),
+                (
+                    "multiplier".into(),
+                    RefColumn::F64(rows.iter().map(|r| Some(r.2)).collect()),
+                ),
+            ],
+        }
+    }
+
+    /// The underlying refs a reference read answered, in order.
+    fn refs_of(table: &geode_core::query::ReferenceTable) -> Vec<String> {
+        table
+            .rows
+            .iter()
+            .map(|r| r[0].clone().expect("a key is never NULL"))
+            .collect()
+    }
+
+    const ROWS_A: &[(&str, &str, f64)] = &[("NDX", "USD", 20.0), ("SPX", "USD", 100.0)];
+    const ROWS_B: &[(&str, &str, f64)] = &[("SPX", "USD", 50.0), ("SX5E", "EUR", 10.0)];
+
+    /// A service, through its request loop, with one snapshot source
+    /// `refdb` reading table `t` into the reference dataset `u` every hour:
+    /// after the poll at start, only `DataHandle::poll` polls it.
+    fn snapshot_service(
+        answers: Option<SnapshotAnswers>,
+    ) -> (
+        tempfile::TempDir,
+        crate::handle::DataHandle,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(Arc::new(FakeSnapshotAdapter { answers }));
+        let mut schema = SchemaSpec::default();
+        schema
+            .datasets
+            .push(geode_core::reference::test_support::reference_dataset());
+        let spec = crate::source::SourceSpec {
+            adapter: "fake".to_string(),
+            table: Some("t".to_string()),
+            poll_interval: Duration::from_secs(3600),
+            ..crate::source::SourceSpec::directory("refdb", "u", Vec::new())
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let handle = DataService::spawn(
+            DataServiceConfig {
+                db_path: dir.path().join("geode.duckdb"),
+                schema,
+                views: Vec::new(),
+                dimensions: DerivedDimensions::default(),
+                query_workers: 1,
+                sources: vec![spec],
+                adapters,
+                documents: Default::default(),
+                egress: Vec::new(),
+                clock: geode_core::clock::Clock::utc(),
+                pricer: PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
+                positions: None,
+            },
+            sink,
+        );
+        (dir, handle, rx)
+    }
+
+    fn answers(first: &[(&str, &str, f64)]) -> SnapshotAnswers {
+        Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+            Ok(ref_rows(first)),
+        ])))
+    }
+
+    /// The next `Published` of `u`, as its generation.
+    fn next_reference_publish(rx: &std::sync::mpsc::Receiver<DataEvent>) -> i64 {
+        until(rx, |e| match e {
+            DataEvent::Published {
+                dataset,
+                batch,
+                gen_id,
+                books,
+            } if dataset == "u" => {
+                assert_eq!(batch, "u", "a reference dataset is one batch, its name");
+                assert_eq!(books, vec![None], "and one bookless partition");
+                Some(gen_id)
+            }
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        })
+    }
+
+    /// Ask for `dataset` as of `as_of` through the handle and wait for its
+    /// answer.
+    fn read_reference(
+        handle: &crate::handle::DataHandle,
+        rx: &std::sync::mpsc::Receiver<DataEvent>,
+        dataset: &str,
+        as_of: AsOf,
+        tag: u64,
+    ) -> Result<Option<geode_core::query::ReferenceTable>, String> {
+        handle
+            .reference(geode_core::query::ReferenceParams {
+                key: QueryKey(77),
+                tag,
+                dataset: dataset.into(),
+                as_of: as_of.clone(),
+            })
+            .unwrap();
+        until(rx, |e| match e {
+            DataEvent::Reference(o) if o.tag == tag => {
+                assert_eq!(o.key, QueryKey(77));
+                assert_eq!(o.dataset, dataset);
+                assert_eq!(o.as_of, as_of);
+                Some(o.table)
+            }
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_snapshot_source_publishes_then_stays_quiet_until_the_table_changes() {
+        let queued = answers(ROWS_A);
+        let (_d, handle, rx) = snapshot_service(Some(queued.clone()));
+        let mut polled = None;
+        let first = until(&rx, |e| match e {
+            DataEvent::Polled {
+                source, at, next, ..
+            } if source == "refdb" => {
+                polled = Some((at, next));
+                None
+            }
+            DataEvent::Published {
+                dataset, gen_id, ..
+            } if dataset == "u" => Some(gen_id),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+        let (at, next) = polled.unwrap_or_else(|| {
+            until(&rx, |e| match e {
+                DataEvent::Polled {
+                    source, at, next, ..
+                } if source == "refdb" => Some((at, next)),
+                _ => None,
+            })
+        });
+        assert_eq!(
+            next.duration_since(at).unwrap(),
+            Duration::from_secs(3600),
+            "the Sources section's next poll is one interval on"
+        );
+
+        // The same rows again: the runner is handed them (Loading),
+        // publishes nothing, and the source stays clean.
+        handle.poll("u".into()).unwrap();
+        let mut loading = false;
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while let Ok(e) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            match e {
+                DataEvent::Loading { source, .. } if source == "refdb" => loading = true,
+                DataEvent::Published { dataset, .. } if dataset == "u" => {
+                    panic!("an unchanged snapshot published a generation")
+                }
+                DataEvent::Health { source, worst, .. } if source == "refdb" => {
+                    assert_eq!(worst, Health::Ok, "an unchanged snapshot is clean")
+                }
+                DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+                _ => {}
+            }
+        }
+        assert!(loading, "the poll reached the runner");
+
+        queued.lock().unwrap().push_back(Ok(ref_rows(ROWS_B)));
+        handle.poll("u".into()).unwrap();
+        let second = next_reference_publish(&rx);
+        assert!(second > first, "{second} after {first}");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_failed_snapshot_degrades_the_source_and_keeps_live_rows() {
+        let queued = answers(ROWS_A);
+        let (_d, handle, rx) = snapshot_service(Some(queued.clone()));
+        next_reference_publish(&rx);
+
+        queued
+            .lock()
+            .unwrap()
+            .push_back(Err(crate::adapter::AdapterError {
+                message: "db down".into(),
+            }));
+        handle.poll("u".into()).unwrap();
+        let (worst, detail) = until(&rx, |e| match e {
+            DataEvent::Health {
+                source,
+                worst: worst @ Health::Degraded { .. },
+                detail,
+            } if source == "refdb" => Some((worst, detail)),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+        assert!(
+            matches!(&worst, Health::Degraded { reason } if reason.contains("db down")),
+            "{worst:?}"
+        );
+        assert!(detail.contains("db down"), "{detail}");
+
+        let live = read_reference(&handle, &rx, "u", AsOf::Live, 1)
+            .unwrap()
+            .expect("the good rows stay live");
+        assert_eq!(refs_of(&live), ["NDX", "SPX"]);
+
+        // Good again, and equal to live: the discovery lane clears and no
+        // generation is spent.
+        queued.lock().unwrap().push_back(Ok(ref_rows(ROWS_A)));
+        handle.poll("u".into()).unwrap();
+        until(&rx, |e| match e {
+            DataEvent::Health { source, worst, .. } if source == "refdb" => {
+                (worst == Health::Ok).then_some(())
+            }
+            DataEvent::Published { dataset, .. } if dataset == "u" => {
+                panic!("an unchanged snapshot published a generation")
+            }
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+        assert!(
+            until_within(&rx, Duration::from_millis(500), |e| match e {
+                DataEvent::Published { dataset, .. } if dataset == "u" => Some(()),
+                _ => None,
+            })
+            .is_none(),
+            "an unchanged snapshot published a generation"
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn reference_answers_live_and_as_of() {
+        let queued = answers(ROWS_A);
+        let (_d, handle, rx) = snapshot_service(Some(queued.clone()));
+        next_reference_publish(&rx);
+        let a = read_reference(&handle, &rx, "u", AsOf::Live, 1)
+            .unwrap()
+            .expect("A is live");
+        assert_eq!(refs_of(&a), ["NDX", "SPX"]);
+        assert_eq!(a.columns, ["underlying_ref", "currency", "multiplier"]);
+
+        queued.lock().unwrap().push_back(Ok(ref_rows(ROWS_B)));
+        handle.poll("u".into()).unwrap();
+        next_reference_publish(&rx);
+        let b = read_reference(&handle, &rx, "u", AsOf::Live, 2)
+            .unwrap()
+            .expect("B is live");
+        assert_eq!(refs_of(&b), ["SPX", "SX5E"]);
+        assert!(b.source_time > a.source_time);
+        assert!(b.gen_id > a.gen_id);
+
+        let between = a.source_time + (b.source_time - a.source_time) / 2;
+        let then = read_reference(&handle, &rx, "u", AsOf::At(between), 3)
+            .unwrap()
+            .expect("A as of between the two");
+        assert_eq!(then, a, "as of between them, A whole");
+
+        let before = a.source_time - chrono::Duration::seconds(1);
+        assert_eq!(
+            read_reference(&handle, &rx, "u", AsOf::At(before), 4),
+            Ok(None),
+            "nothing was published before the first snapshot"
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn an_adapter_without_a_snapshot_side_is_unservable() {
+        let (_d, handle, rx) = snapshot_service(None);
+        let (source, worst, _) = next_health(&rx);
+        assert_eq!(source, "refdb");
+        assert!(
+            matches!(&worst, Health::Failed { reason }
+                if reason == "adapter 'fake' has no snapshot side"),
+            "{worst:?}"
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn reference_for_an_undeclared_dataset_answers_an_error() {
+        let (_d, handle, rx) = snapshot_service(Some(answers(ROWS_A)));
+        let answer = read_reference(&handle, &rx, "nope", AsOf::Live, 1);
+        assert!(
+            answer.as_ref().is_err_and(|e| e.contains("nope")),
+            "{answer:?}"
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_snapshot_with_an_extra_column_publishes_and_warns_against_its_source() {
+        let mut rows = ref_rows(ROWS_A);
+        rows.columns.push((
+            "isin".into(),
+            geode_core::reference::RefColumn::Utf8(vec![None, None]),
+        ));
+        let queued = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+            Ok(rows),
+        ])));
+        let (_d, handle, rx) = snapshot_service(Some(queued));
+        let warning = until(&rx, |e| match e {
+            DataEvent::Diagnostics(d) => d
+                .into_iter()
+                .find(|d| d.severity == Severity::Warning && d.message.contains("isin")),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+        assert_eq!(warning.path.as_deref(), Some("sources.refdb"));
+        next_reference_publish(&rx);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_poll_for_a_dataset_no_snapshot_source_fills_is_harmless() {
+        let (_d, handle, rx) = snapshot_service(Some(answers(ROWS_A)));
+        next_reference_publish(&rx);
+        handle.poll("nope".into()).unwrap();
+        assert!(
+            read_reference(&handle, &rx, "u", AsOf::Live, 1)
+                .unwrap()
+                .is_some(),
+            "the loop serves on"
+        );
         handle.shutdown();
     }
 }

@@ -54,16 +54,17 @@ The ingestion boundaries have different capacity and replacement rules:
 | Adapter message sink | Bounded; refused messages are counted, dropped, and reported as `<source>:queue` health. |
 | Subscription coalescer | One pending document per key; newer documents replace it without moving its release deadline. Already submitted jobs are unaffected. |
 | Fetch worker | Up to 64 waiting requests per source; a refused fetch is reported as an outcome. |
+| Snapshot worker | No queue: one poll runs at a time, and any number of poll-now asks made while it runs become one follow-up poll. |
 | Egress worker | Up to 8 waiting uploads per target, behind the one in flight; queue refusal emits an upload error naming the target. |
 | Position worker | Up to 8 waiting commands behind the one in flight; a full queue is refused `position service busy` at once, answered as a command outcome. |
-| Ingest runner | No fixed capacity. Documents and series are FIFO within their queues; files deduplicate by path, size, and source time. A source with more than 64 queued documents and series reports `<source>:backlog` health; its `N` is the count at the last crossing (65, 129, …), held while the queue drains until the clear. |
+| Ingest runner | No fixed capacity. Documents, series and reference snapshots are FIFO within their queues; files deduplicate by path, size, and source time. A source with more than 64 queued documents, series and snapshots reports `<source>:backlog` health; its `N` is the count at the last crossing (65, 129, …), held while the queue drains until the clear. |
 
 For queued files, resubmission can promote priority without adding another
 job. A catalog check immediately before loading skips work that has already
 been published, without starting progress. Within a file priority, newer
 source times run first. The runner finishes each operation before selecting
-another; sustained document traffic can starve series and files, and sustained
-series traffic can starve files. Coalescing reduces repeated documents but
+another, in the order documents, series, reference snapshots, files; sustained
+traffic in one queue can starve every queue after it. Coalescing reduces repeated documents but
 does not bound the writer backlog or the number of distinct document keys.
 Fixed staging-table names also require serialized file loads on a store.
 
@@ -74,12 +75,14 @@ observed keys without eviction. Unknown-element warning deduplication stops
 growing at 256 paths per source; further unremembered paths can warn repeatedly.
 
 Shutdown stops producers before the ingest writer. Fetch workers drain their
-accepted requests and join. Subscription workers unsubscribe, set a stop flag,
+accepted requests and join. Snapshot workers finish a poll in flight, which
+has no deadline, deliver its outcome, and join without polling again; they are
+stopped on the service thread, never by a drop on the UI thread. Subscription workers unsubscribe, set a stop flag,
 and join without flushing documents still held by their coalescers. Discovery
 stops polling; the ingest runner finishes its current operation, then runs
 the queued local writes (`local`-source publishes and forgets) in queue order,
 each answering its writer as usual, and exits. Every other queued job — feed
-documents, series, files — is dropped; its source resends it after a restart.
+documents, series, reference snapshots, files — is dropped; its source resends it after a restart.
 The local writes are the user's last edits (the pricer saves every unsaved
 sheet at quit, before the data service is told to stop), which nothing would
 resend. Submission to the runner itself has no shutdown refusal, so producer
@@ -310,6 +313,49 @@ by source time, then generation ID, live; `resolve_generations` as of an
 instant) and returns every cell cast to text in SQL, ordered by key, so the
 shell needs no column types. It answers `None` only when no generation
 exists at that instant; an empty snapshot reads as a table with no rows.
+
+### Snapshot sources
+
+A source whose dataset is of the reference family is a snapshot source. Its
+adapter must have a snapshot side; a missing adapter or one without that side
+fails the source on the discovery lane at open (`adapter '<name>' has no
+snapshot side`) and nothing polls it. Each served source gets one supervised
+[`SnapshotWorker`](../../crates/geode-data/src/ingest/snapshot.rs) that polls
+at start, then every `poll_interval`, or sooner on poll-now. A poll reads the
+configured `table` through the adapter and conforms it to the declaration on
+the worker thread, inside a panic boundary; it never writes. An interval too
+large to add to the clock leaves no deadline: the worker then polls only on
+demand, and its next poll reads as the last one.
+
+A conformed table goes to the ingest runner as one job, which publishes it
+with `publish_reference` under the source time the poll started at. Health
+is split by where a failure happened, so one kind of success cannot hide the
+other kind of failure:
+
+| Outcome | Lane | Effect |
+|---|---|---|
+| Table read and conformed | Discovery | `Ok`; the rows are submitted. |
+| Query failed, panicked, or rows refused | Discovery | `Degraded` with the reason; live rows stay as they were. |
+| Published | Load, keyed by the dataset name | `Ok`; `Published` invalidates readers. |
+| Unchanged (equal to live) | Load, keyed by the dataset name | `Ok`; no `Published`, no generation. |
+| Publish failed | Load, keyed by the dataset name | `Failed` with the reason. |
+
+Each lane clears only itself. A clean poll after a failed publish leaves the
+source failed until a later publish succeeds or reports unchanged, which
+proves live matches the source again. Ignored extra columns and optional
+columns read as NULL raise one warning per distinct combination, addressed
+`sources.<name>`; the source stays `Ok`. Every poll emits `Polled` with the
+next due time, so the Sources section shows Last poll and Next poll.
+
+`DataHandle::poll(dataset)` asks every snapshot source filling that dataset
+to poll now. It is keyed by dataset because the asking page shows datasets,
+not sources; it has no answer of its own, and a dataset no snapshot source
+fills is logged and ignored. `DataHandle::reference(ReferenceParams)` reads
+one reference table, live or as of an instant, synchronously on the service
+reader like the catalog, and answers `DataEvent::Reference` under the
+request's key and tag. An undeclared or non-reference dataset answers
+`dataset '<name>' is not a declared reference dataset`; a drifted one answers
+the drift. The app mailbox passes reference answers through uncoalesced.
 
 ## Source discovery and adapters
 

@@ -60,8 +60,8 @@ own either, and are created without an event sink. See
 [containment and liveness](../../docs/current/data-path.md#containment-and-liveness).
 
 The bounded request and adapter channels do not bound the ingest queues.
-Documents precede series, which precede files, with no preemption of running
-work. Sustained higher-priority traffic can starve lower-priority jobs.
+Documents precede series, which precede reference snapshots, which precede
+files, with no preemption of running work. Sustained higher-priority traffic can starve lower-priority jobs.
 See [queues and shutdown](../../docs/current/data-path.md#queues-and-shutdown)
 for capacity, coalescing, and worker shutdown behavior.
 
@@ -71,10 +71,10 @@ for capacity, coalescing, and worker shutdown behavior.
 |---|---|
 | `supervise` | `spawn_supervised`, the one door for long-lived data threads, and `REQUEST_LOOP` (`geode-data`), the request loop's thread name. |
 | `service` | `DataService`, `DataServiceConfig`, `DataEvent`, and the `HealthTracker` (two lanes per source, `discovery` and `load`; the worse by `Health::severity` wins). |
-| `handle` | `DataHandle`, `Refusal`, and `Request`: queries, distinct values, the catalog, a document by key, a series fetch, identities, an upload, a Move LHU command, a local publish, and a local forget. |
+| `handle` | `DataHandle`, `Refusal`, and `Request`: queries, distinct values, the catalog, a document by key, a series fetch, identities, a reference table, a snapshot poll-now (by dataset), an upload, a Move LHU command, a local publish, and a local forget. |
 | `source` | Directory discovery, sentinel parsing, and readiness classification. Configuration types are shared with `geode-core`; stable-mtime readiness is accepted by configuration but unsupported at runtime. |
-| `adapter` | Subscription, upload, fetch, and position-command (`PositionCommands`, through `Adapter::positions`, `None` by default) capabilities; a registry, bounded message sink, and topic matching. Includes the in-process `ChannelAdapter`; the app can register additional implementations such as its demo series adapter. |
-| `ingest` | The discovery scheduler, the cold-start priority ladder, the per-file load pipeline, the grain split and conflict detector, the ingest runner (one thread, one writer connection, three queues), the subscribed-source receiver, the `Coalescer`, and the fetch worker. |
+| `adapter` | Subscription, upload, fetch, snapshot (`SnapshotQuery`, through `Adapter::snapshot`), and position-command (`PositionCommands`, through `Adapter::positions`, `None` by default) capabilities; a registry, bounded message sink, and topic matching. Includes the in-process `ChannelAdapter`; the app can register additional implementations such as its demo series adapter. |
+| `ingest` | The discovery scheduler, the cold-start priority ladder, the per-file load pipeline, the grain split and conflict detector, the ingest runner (one thread, one writer connection, four queues), the subscribed-source receiver, the `Coalescer`, the fetch worker, and the snapshot worker (one per snapshot source: poll at start, every interval and on poll-now; read and conform only, publishing through the runner; query failures on the discovery lane, publish outcomes on the load lane). |
 | `store` | The DuckDB store: DDL generated from the schema, the per-file publish transaction and backfill guard, document publish, reference snapshot publish (an unchanged snapshot is skipped) and read, the series family's bitemporal append (`append_series`, the one door series rows enter by), retention, the freshness catalog in source time, and the payload-table drift check made at open. |
 | `query` | Scope lowering, grain-aware view compilation, distinct values, document and series queries, catalog reads, and the read pool. View/document planning, provenance, and execution share a worker transaction; superseded results are dropped. |
 | `pricing` | App-supplied pricer registry and a separate bounded worker queue. Queued batches coalesce by key; cancellation stops a running batch at the next line boundary. |

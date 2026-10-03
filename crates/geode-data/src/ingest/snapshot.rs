@@ -228,7 +228,9 @@ pub(crate) fn poll_once(
 /// The worker thread: poll, report the schedule, then wait until the
 /// interval elapses, `poll_now` is asked, or `stop` is set. The flags are
 /// read under the lock before every wait, so a wake sent mid-poll is never
-/// lost.
+/// lost. An interval too large to add to the clock (a typo such as
+/// `"18446744073709551615s"`) is no deadline at all: the next poll is
+/// reported as `at`, and only `poll_now` or `stop` wakes the worker.
 fn run(
     plan: SnapshotPlan,
     mut query: Box<dyn SnapshotQuery>,
@@ -240,8 +242,8 @@ fn run(
     loop {
         sink(poll_once(query.as_mut(), &plan, &mut notes));
         let at = SystemTime::now();
-        polled(at, at + plan.interval);
-        let deadline = Instant::now() + plan.interval;
+        polled(at, at.checked_add(plan.interval).unwrap_or(at));
+        let deadline = Instant::now().checked_add(plan.interval);
         let (lock, cvar) = &*wake;
         let mut w = lock.lock().unwrap_or_else(|e| e.into_inner());
         loop {
@@ -251,14 +253,18 @@ fn run(
             if std::mem::take(&mut w.poll_now) {
                 break;
             }
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            w = cvar
-                .wait_timeout(w, deadline - now)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
+            w = match deadline {
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    cvar.wait_timeout(w, deadline - now)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0
+                }
+                None => cvar.wait(w).unwrap_or_else(|e| e.into_inner()),
+            };
         }
     }
 }
@@ -443,6 +449,141 @@ mod tests {
             rx.recv_timeout(Duration::from_millis(200)).is_err(),
             "a stopped worker polls no more"
         );
+    }
+
+    /// Blocks every query until `release` is dropped, announcing each entry
+    /// on `entered`, so a test can act while a poll is provably in flight.
+    struct Held {
+        entered: mpsc::Sender<()>,
+        release: Arc<Mutex<mpsc::Receiver<()>>>,
+    }
+    impl SnapshotQuery for Held {
+        fn query(&mut self, _: &str) -> Result<TableRows, AdapterError> {
+            let _ = self.entered.send(());
+            // Err once the sender is dropped: every later poll runs free.
+            let _ = self.release.lock().unwrap().recv();
+            Ok(good())
+        }
+    }
+
+    fn held() -> (Held, mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (etx, erx) = mpsc::channel();
+        let (rtx, rrx) = mpsc::channel();
+        let q = Held {
+            entered: etx,
+            release: Arc::new(Mutex::new(rrx)),
+        };
+        (q, erx, rtx)
+    }
+
+    fn counting_sink() -> (SnapshotSink, mpsc::Receiver<()>) {
+        let (tx, rx) = mpsc::channel();
+        let sink: SnapshotSink = Arc::new(move |_| {
+            let _ = tx.send(());
+        });
+        (sink, rx)
+    }
+
+    #[test]
+    fn poll_now_asked_while_a_poll_is_held_runs_exactly_one_follow_up() {
+        let (q, entered, release) = held();
+        let (sink, outcomes) = counting_sink();
+        let mut w = SnapshotWorker::spawn(
+            plan(),
+            Box::new(q),
+            sink,
+            Arc::new(|_, _| {}),
+            crate::supervise::unwatched(),
+        )
+        .unwrap();
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first poll is in flight");
+        w.poll_now();
+        w.poll_now();
+        w.poll_now();
+        drop(release);
+        for n in 0..2 {
+            outcomes
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("outcome {n}"));
+        }
+        assert!(
+            outcomes.recv_timeout(Duration::from_millis(300)).is_err(),
+            "three asks during one poll are one follow-up poll"
+        );
+        w.shutdown();
+    }
+
+    #[test]
+    fn shutdown_during_a_held_poll_returns_once_it_is_released_and_polls_no_more() {
+        let (q, entered, release) = held();
+        let (sink, outcomes) = counting_sink();
+        let mut w = SnapshotWorker::spawn(
+            plan(),
+            Box::new(q),
+            sink,
+            Arc::new(|_, _| {}),
+            crate::supervise::unwatched(),
+        )
+        .unwrap();
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first poll is in flight");
+        // Asked for before the stop: the stop must still win.
+        w.poll_now();
+        let (done_tx, done) = mpsc::channel();
+        let stopper = std::thread::spawn(move || {
+            w.shutdown();
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done.recv_timeout(Duration::from_millis(100)).is_err(),
+            "shutdown waits for the poll in flight"
+        );
+        drop(release);
+        done.recv_timeout(Duration::from_secs(5))
+            .expect("shutdown returns once the poll is released");
+        stopper.join().unwrap();
+        outcomes
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the held poll's own outcome still arrives");
+        assert!(
+            outcomes.recv_timeout(Duration::from_millis(300)).is_err(),
+            "no poll after the stop"
+        );
+        assert!(entered.try_recv().is_err(), "no second query was started");
+    }
+
+    #[test]
+    fn an_interval_too_large_to_add_waits_for_poll_now_instead_of_panicking() {
+        let (stop, stops) = crate::supervise::tests_support::recording();
+        let (tx, rx) = mpsc::channel();
+        let sink: SnapshotSink = Arc::new(move |o| {
+            let _ = tx.send(matches!(o, SnapshotOutcome::Rows { .. }));
+        });
+        let (ptx, prx) = mpsc::channel();
+        let polled: PolledSink = Arc::new(move |at, next| {
+            let _ = ptx.send((at, next));
+        });
+        let mut absurd = plan();
+        absurd.interval = Duration::MAX;
+        let mut w =
+            SnapshotWorker::spawn(absurd, Box::new(Scripted(vec![])), sink, polled, stop).unwrap();
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        let (at, next) = prx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(next, at, "an unrepresentable next poll is reported as now");
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "no deadline: the worker waits"
+        );
+        w.poll_now();
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "the worker is alive and polls on demand"
+        );
+        w.shutdown();
+        assert!(stops.try_recv().is_err(), "the worker never died");
     }
 
     #[test]

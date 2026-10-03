@@ -71,6 +71,9 @@ fn key(event: &DataEvent, seq: u64) -> Key {
         // Every position command is answered once and each answer is its
         // own notice, so none may coalesce away.
         DataEvent::Command(_) => Key::Local(seq),
+        // Passed through uncoalesced: each answer is a whole small table,
+        // and the requester's own tag check drops a superseded one.
+        DataEvent::Reference(_) => Key::Local(seq),
         DataEvent::SeriesFetched {
             source,
             identity,
@@ -499,6 +502,28 @@ mod tests {
             DataEvent::VolSlices(o) if o.key == QueryKey(8) && o.tag == 3
         ));
         assert!(rx.recv().await.is_err());
+    }
+
+    #[gpui::test]
+    async fn reference_answers_are_delivered_uncoalesced_in_order() {
+        let (tx, rx) = channel();
+        let answer = |tag| {
+            DataEvent::Reference(geode_core::query::ReferenceOutcome {
+                key: QueryKey(1),
+                tag,
+                dataset: "underlyings".into(),
+                as_of: geode_core::query::AsOf::Live,
+                table: Ok(None),
+            })
+        };
+        tx.try_send(answer(2)).unwrap();
+        tx.try_send(answer(1)).unwrap();
+        for expected in [2, 1] {
+            assert!(matches!(
+                rx.recv().await.unwrap(),
+                DataEvent::Reference(o) if o.tag == expected
+            ));
+        }
     }
 
     /// Each thread stops once, and two different ones stopping between two

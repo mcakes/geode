@@ -19,8 +19,8 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::positions::{CommandOutcome, MoveLhuParams};
 use geode_core::pricing::{LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
-    CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
-    QueryOutcome,
+    AsOf, CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
+    QueryOutcome, ReferenceOutcome, ReferenceParams,
 };
 use geode_core::series::{SeriesOutcome, SeriesParams};
 use geode_core::view::ViewSpec;
@@ -67,6 +67,14 @@ pub enum Request {
     /// Catalog metadata request, answered synchronously on the service reader
     /// rather than through the query pool.
     Catalog(CatalogParams),
+    /// One reference table, answered synchronously on the service reader
+    /// with DataEvent::Reference.
+    Reference(ReferenceParams),
+    /// Poll every snapshot source filling `dataset` now. No answer: the
+    /// poll reports through Polled, Health and Published like any other.
+    Poll {
+        dataset: String,
+    },
     /// Pricing batch, answered by the pricing worker with DataEvent::Price.
     Price(PriceParams),
     /// Vol slice batch, answered by the vol worker with DataEvent::VolSlices.
@@ -244,6 +252,22 @@ impl DataHandle {
     /// DataEvent::Catalog.
     pub fn catalog(&self, params: CatalogParams) -> Result<(), Refusal> {
         self.send(Request::Catalog(params))
+    }
+
+    /// Queue a reference-table read. `Err(Busy)` means the queue was full
+    /// and a later submission can succeed; `Err(Stopped)` means the service
+    /// can no longer serve and no outcome is owed. Outcomes preserve key/tag
+    /// in DataEvent::Reference.
+    pub fn reference(&self, params: ReferenceParams) -> Result<(), Refusal> {
+        self.send(Request::Reference(params))
+    }
+
+    /// Queue a poll of every snapshot source filling `dataset`. `Err(Busy)`
+    /// means the queue was full and a later submission can succeed;
+    /// `Err(Stopped)` means the service can no longer serve. There is no
+    /// dedicated answer: the poll's Polled, Health and any Published follow.
+    pub fn poll(&self, dataset: String) -> Result<(), Refusal> {
+        self.send(Request::Poll { dataset })
     }
 
     /// Queue a pricing batch. `Err(Busy)` means the queue was full and a later
@@ -522,6 +546,12 @@ enum PanicAnswer {
         key: QueryKey,
         tag: u64,
     },
+    Reference {
+        key: QueryKey,
+        tag: u64,
+        dataset: String,
+        as_of: AsOf,
+    },
     Price {
         key: QueryKey,
         tag: u64,
@@ -556,7 +586,7 @@ enum PanicAnswer {
         dataset: String,
         batch: String,
     },
-    /// Identities, cancel and view replacement have no answer path.
+    /// Identities, polls, cancel and view replacement have no answer path.
     Unanswered,
 }
 
@@ -601,6 +631,15 @@ impl PanicAnswer {
                 PanicAnswer::Catalog {
                     key: p.key,
                     tag: p.tag,
+                },
+            ),
+            Request::Reference(p) => (
+                "reference",
+                PanicAnswer::Reference {
+                    key: p.key,
+                    tag: p.tag,
+                    dataset: p.dataset.clone(),
+                    as_of: p.as_of.clone(),
                 },
             ),
             Request::Price(p) => (
@@ -659,6 +698,7 @@ impl PanicAnswer {
                 },
             ),
             Request::Identities { .. } => ("identities", PanicAnswer::Unanswered),
+            Request::Poll { .. } => ("poll", PanicAnswer::Unanswered),
             Request::Cancel { .. } => ("cancel", PanicAnswer::Unanswered),
             Request::ReplaceViews => ("view replacement", PanicAnswer::Unanswered),
             Request::Shutdown => ("shutdown", PanicAnswer::Unanswered),
@@ -704,6 +744,20 @@ impl PanicAnswer {
                     key,
                     tag,
                     snapshot: Err(reason),
+                }));
+            }
+            PanicAnswer::Reference {
+                key,
+                tag,
+                dataset,
+                as_of,
+            } => {
+                let _ = sink(DataEvent::Reference(ReferenceOutcome {
+                    key,
+                    tag,
+                    dataset,
+                    as_of,
+                    table: Err(reason),
                 }));
             }
             PanicAnswer::Price {
@@ -923,6 +977,10 @@ fn dispatch(service: &DataService, sink: &EventSink, req: Request) {
         Request::Catalog(params) => {
             let _ = sink(DataEvent::Catalog(service.catalog(&params)));
         }
+        Request::Reference(params) => {
+            let _ = sink(DataEvent::Reference(service.reference(&params)));
+        }
+        Request::Poll { dataset } => service.poll(&dataset),
         Request::Price(params) => service.price(params),
         Request::VolSlices(params) => service.vol_slices(params),
         Request::Publish(publish) => service.publish(publish),
@@ -1240,6 +1298,23 @@ mod tests {
         assert!(handle.identities("k").is_ok());
         assert!(matches!(rx.recv().unwrap(), Request::Fetch(p) if p.identity == "SPX"));
         assert!(matches!(rx.recv().unwrap(), Request::Identities { source } if source == "k"));
+    }
+
+    #[test]
+    fn reference_and_poll_are_queued_as_requests() {
+        let (handle, rx) = DataHandle::for_tests();
+        let params = ReferenceParams {
+            key: QueryKey(3),
+            tag: 4,
+            dataset: "underlyings".into(),
+            as_of: AsOf::Live,
+        };
+        assert!(handle.reference(params.clone()).is_ok());
+        assert!(handle.poll("underlyings".into()).is_ok());
+        assert!(matches!(rx.recv().unwrap(), Request::Reference(p) if p == params));
+        assert!(
+            matches!(rx.recv().unwrap(), Request::Poll { dataset } if dataset == "underlyings")
+        );
     }
 
     fn series_params(key: u64) -> SeriesParams {
@@ -2084,6 +2159,8 @@ mod tests {
             Request::Document(p) => p.key == MARKED,
             Request::Series(p) => p.key == MARKED,
             Request::Catalog(p) => p.key == MARKED,
+            Request::Reference(p) => p.key == MARKED,
+            Request::Poll { dataset } => dataset == "marked",
             Request::Price(p) => p.key == MARKED,
             Request::VolSlices(p) => p.key == MARKED,
             Request::Upload(p) => p.key == MARKED,
@@ -2448,6 +2525,33 @@ mod tests {
         h.identities("marked").unwrap();
         let seen = serves_on(&h, &rx);
         assert!(error_names(&seen, "identities"), "{seen:?}");
+    }
+
+    #[test]
+    fn a_panicking_poll_is_one_error_diagnostic() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.poll("marked".into()).unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(error_names(&seen, "poll"), "{seen:?}");
+    }
+
+    #[test]
+    fn a_panicking_reference_request_is_answered_on_its_key() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.reference(ReferenceParams {
+            key: MARKED,
+            tag: 7,
+            dataset: "underlyings".into(),
+            as_of: AsOf::Live,
+        })
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::Reference(o)
+            if o.key == MARKED && o.tag == 7 && o.dataset == "underlyings"
+                && o.table.as_ref().is_err_and(|r| panicked(r, "reference")))),
+            "{seen:?}"
+        );
     }
 
     #[test]

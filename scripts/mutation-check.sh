@@ -10532,6 +10532,52 @@ run_mutation "reference: as-of reads include the archive" \
                     tables.live, tables.archive' \
   geode-data a_removed_key_leaves_live_and_stays_in_history
 
+# A poll interval too large to add to the clock is no deadline, not a
+# panic: unchecked, the worker thread dies after its first poll.
+run_mutation "snapshot: an unrepresentable interval is no deadline" \
+  crates/geode-data/src/ingest/snapshot.rs \
+  '        let deadline = Instant::now().checked_add(plan.interval);' \
+  '        let deadline = Some(Instant::now() + plan.interval);' \
+  geode-data an_interval_too_large_to_add_waits_for_poll_now_instead_of_panicking
+
+# Poll-now asked while a poll runs is one follow-up poll. Ignoring the flag
+# loses every ask made mid-poll until the interval elapses.
+run_mutation "snapshot: a poll-now asked mid-poll is kept" \
+  crates/geode-data/src/ingest/snapshot.rs \
+  '            if std::mem::take(&mut w.poll_now) {' \
+  '            if std::mem::take(&mut w.poll_now) && false {' \
+  geode-data poll_now_asked_while_a_poll_is_held_runs_exactly_one_follow_up
+
+# Stop wins over a pending poll-now, so shutdown never starts another poll,
+# whose read has no deadline.
+run_mutation "snapshot: stop wins over a pending poll-now" \
+  crates/geode-data/src/ingest/snapshot.rs \
+  '            if w.stop {' \
+  '            if w.stop && !w.poll_now {' \
+  geode-data shutdown_during_a_held_poll_returns_once_it_is_released_and_polls_no_more
+
+# Poll-now reaches the workers filling the dataset; dropping the ask
+# leaves a changed table unpublished until the next interval.
+run_mutation "service: poll-now reaches the dataset's snapshot workers" \
+  crates/geode-data/src/service.rs \
+  '            worker.poll_now();' \
+  '            let _ = worker;' \
+  geode-data a_snapshot_source_publishes_then_stays_quiet_until_the_table_changes
+
+# A failed poll degrades the discovery lane. Reporting it Ok hides an
+# unreadable reference table behind its last good rows.
+run_mutation "service: a failed snapshot poll degrades its source" \
+  crates/geode-data/src/service.rs \
+  '                                        Health::Degraded {
+                                            reason: reason.clone(),
+                                        },
+                                        reason,
+                                        None,' \
+  '                                        Health::Ok,
+                                        reason,
+                                        None,' \
+  geode-data a_failed_snapshot_degrades_the_source_and_keeps_live_rows
+
 # ---- Document requests ------------------------------------------------
 #
 # `compile_document` resolves and pins the generation for the requested
@@ -11621,8 +11667,10 @@ run_mutation "runner/document: a failure's batch is a constant, not the document
 # see every document publish as having written no data at all.
 run_mutation "runner/document: the publish event reports no partition written" \
   crates/geode-data/src/ingest/runner.rs \
-  '            books: vec![None],' \
-  '            books: Vec::new(),' \
+  '            // is how a load that wrote *nothing* reads.
+            books: vec![None],' \
+  '            // is how a load that wrote *nothing* reads.
+            books: Vec::new(),' \
   geode-data a_submitted_document_publishes_and_reports_its_batch
 
 # Document publishing runs inside `catch_unwind` and `contained`, like
@@ -15239,8 +15287,8 @@ run_mutation "asof: a refreshed highlight scrolls into view too" \
 # paints one queued for a lone file and never reaches zero during loading.
 run_mutation "ingest: queued counts what waits behind the popped job" \
   crates/geode-data/src/ingest/runner.rs \
-  '                    break (work, q.items.len() + q.documents.len() + q.series.len());' \
-  '                    break (work, q.items.len() + q.documents.len() + q.series.len() + 1);' \
+  '                        q.items.len() + q.documents.len() + q.series.len() + q.references.len(),' \
+  '                        q.items.len() + q.documents.len() + q.series.len() + q.references.len() + 1,' \
   geode-data \
   started_precedes_each_publish_and_counts_what_is_still_queued
 
@@ -17535,17 +17583,42 @@ run_mutation "runner: series jobs are taken after files" \
   '    if let Some(job) = q.series.pop_front() {
         return Some(Work::Series(job));
     }
+    if let Some(job) = q.references.pop_front() {
+        return Some(Work::Reference(job));
+    }
     if q.items.is_empty() {
         return None;
     }' \
-  '    if q.items.is_empty() {
+  '    if let Some(job) = q.references.pop_front() {
+        return Some(Work::Reference(job));
+    }
+    if q.items.is_empty() {
         if let Some(job) = q.series.pop_front() {
             return Some(Work::Series(job));
         }
         return None;
     }' \
   geode-data \
-  take_work_pops_documents_then_series_then_files
+  take_work_pops_documents_then_series_then_snapshots_then_files
+
+# Snapshots wait behind series and go before files. Taken first, a
+# poll's whole-table publish would delay the fetch a chart is waiting on.
+run_mutation "runner: snapshots are taken before series" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if let Some(job) = q.series.pop_front() {
+        return Some(Work::Series(job));
+    }
+    if let Some(job) = q.references.pop_front() {
+        return Some(Work::Reference(job));
+    }' \
+  '    if let Some(job) = q.references.pop_front() {
+        return Some(Work::Reference(job));
+    }
+    if let Some(job) = q.series.pop_front() {
+        return Some(Work::Series(job));
+    }' \
+  geode-data \
+  take_work_pops_documents_then_series_then_snapshots_then_files
 
 # The other half of the same order: a document still goes first. Mutated
 # by swapping the two pops, a queued series job delays the document a
@@ -17565,7 +17638,7 @@ run_mutation "runner: series jobs are taken before documents" \
         return Some(Work::Document(job));
     }' \
   geode-data \
-  take_work_pops_documents_then_series_then_files
+  take_work_pops_documents_then_series_then_snapshots_then_files
 
 # A NaN or an infinity from a vendor is dropped at the worker, before the
 # rows reach storage. Mutated away, they are appended as DOUBLE values a

@@ -1394,6 +1394,9 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::VolSlices(outcome), window, cx)
                         });
                     }
+                    // No surface asks for a reference table yet; an answer
+                    // nobody is waiting for is dropped.
+                    DataEvent::Reference(_) => {}
                     // A position command's answer becomes the status notice;
                     // `geode_data::positions` already logs it under
                     // `geode::ingest`.
