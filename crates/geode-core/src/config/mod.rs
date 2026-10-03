@@ -21,6 +21,9 @@ pub const COLORS_DOC: &str = "colors";
 /// The named scope expressions document, `expressions.toml`.
 pub const EXPRESSIONS_DOC: &str = "expressions";
 
+/// The derived-dimension (classification) document's name.
+pub const DIMENSIONS_DOC: &str = "dimensions";
+
 /// Documents whose file was renamed: `(old stem, current doc name)`. A layer
 /// directory still holding only the old file loads it under the current name
 /// with a warning; when a layer holds both, the current file wins and the old
