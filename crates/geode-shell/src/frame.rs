@@ -1401,6 +1401,43 @@ impl<'a> FrameViewMut<'a> {
         self.set_lane_scope(s)
     }
 
+    /// Add named expression `name` to the scope when it is absent, remove it
+    /// when present: the Saved screen's `enter` on an expression row. One
+    /// undoable `set_scope` either way. Edits the workspace lane even through
+    /// a follower's view.
+    pub fn toggle_named(&mut self, name: &str) -> bool {
+        let mut s = self.lane().scope.clone();
+        let applied = s.named.iter().any(|n| n == name);
+        if applied {
+            s.named.retain(|n| n != name);
+        } else {
+            s.named.push(name.to_string());
+        }
+        self.set_lane_scope(s)
+    }
+
+    /// Replace the reference to `name` with its definition, appended as the
+    /// last top-level expression term, in one `set_scope` so a single undo
+    /// restores the reference. Refused, changing nothing, when the scope does
+    /// not refer to `name` or the name is missing or invalid: dropping the
+    /// reference with nothing in its place would widen the scope.
+    pub fn inline_named(&mut self, name: &str) -> Result<bool, String> {
+        let mut s = self.lane().scope.clone();
+        if !s.named.iter().any(|n| n == name) {
+            return Err(format!("the scope does not refer to '{name}'"));
+        }
+        let expr = match self.frame.named.get(name) {
+            None => return Err(format!("named expression '{name}' is missing")),
+            Some(geode_core::named::NamedExpr::Invalid { reason, .. }) => {
+                return Err(format!("named expression '{name}' is invalid: {reason}"));
+            }
+            Some(geode_core::named::NamedExpr::Valid { expr, .. }) => expr.clone(),
+        };
+        s.named.retain(|n| n != name);
+        s.expression = Some(and_join(s.expression.take(), expr));
+        Ok(self.set_lane_scope(s))
+    }
+
     /// Remove top-level expression term `i` (`Expr::conjuncts` order)
     /// through the undoable `set_scope` path; the remaining terms are
     /// rebuilt as a left-folded `and` chain, and removing the last one
@@ -2948,6 +2985,86 @@ mod tests {
         );
         assert!(diags.is_empty(), "{diags:?}");
         n
+    }
+
+    #[test]
+    fn toggling_a_name_adds_it_then_removes_it_each_one_undo_step() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.replace_named_expressions(named("[liq]\nexpression = \"npv > 0\"\n"));
+        f.shared_mut().set_scope(book_scope("BK000"));
+        assert!(f.shared_mut().toggle_named("liq"));
+        assert_eq!(f.shared().scope().named, vec!["liq".to_string()]);
+        assert!(f.shared_mut().toggle_named("liq"));
+        assert!(f.shared().scope().named.is_empty());
+        assert!(f.shared_mut().undo_scope());
+        assert_eq!(f.shared().scope().named, vec!["liq".to_string()]);
+    }
+
+    #[test]
+    fn inlining_a_name_swaps_it_for_its_text_as_the_last_term_in_one_undo_step() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.replace_named_expressions(named("[liq]\nexpression = \"npv > 0\"\n"));
+        let mut scope = book_scope("BK000");
+        scope.expression = Some(geode_core::scope::parse_expr("delta < 5").unwrap());
+        scope.named = vec!["liq".into()];
+        f.shared_mut().set_scope(scope.clone());
+        assert_eq!(f.shared_mut().inline_named("liq"), Ok(true));
+        let now = f.shared().scope().clone();
+        assert!(now.named.is_empty());
+        assert_eq!(
+            now.expression,
+            Some(geode_core::scope::parse_expr("delta < 5 and npv > 0").unwrap())
+        );
+        assert!(f.shared_mut().undo_scope());
+        assert_eq!(f.shared().scope(), &scope);
+    }
+
+    #[test]
+    fn inlining_a_broken_reference_refuses_and_changes_nothing() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.replace_named_expressions(named("[ok]\nexpression = \"npv > 0\"\n"));
+        let scope = Scope {
+            named: vec!["gone".into()],
+            ..Scope::default()
+        };
+        f.shared_mut().set_scope(scope.clone());
+        let generation = f.shared().versions().scope;
+        assert_eq!(
+            f.shared_mut().inline_named("gone"),
+            Err("named expression 'gone' is missing".to_string())
+        );
+        assert_eq!(
+            f.shared_mut().inline_named("ok"),
+            Err("the scope does not refer to 'ok'".to_string())
+        );
+        assert_eq!(f.shared().scope(), &scope);
+        assert_eq!(f.shared().versions().scope, generation);
+
+        // An invalid definition refuses the same way; its diagnostics are
+        // beside the point here.
+        let (bad, _) = geode_core::named::NamedExpressions::from_doc(
+            &geode_core::config::merge_docs(
+                geode_core::config::EXPRESSIONS_DOC,
+                &[geode_core::config::LayerDoc::builtin(
+                    geode_core::config::EXPRESSIONS_DOC,
+                    "[bad]\nexpression = \"npv >\"\n",
+                )
+                .unwrap()],
+            ),
+            &geode_core::scope::complete::ExprVocab::default(),
+        );
+        f.replace_named_expressions(bad);
+        f.shared_mut().set_scope(Scope {
+            named: vec!["bad".into()],
+            ..Scope::default()
+        });
+        assert!(
+            f.shared_mut()
+                .inline_named("bad")
+                .unwrap_err()
+                .starts_with("named expression 'bad' is invalid")
+        );
+        assert_eq!(f.shared().scope().named, vec!["bad".to_string()]);
     }
 
     #[test]

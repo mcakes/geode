@@ -18246,6 +18246,25 @@ run_mutation "scope dialog: the cursor keeps its row" \
   geode-shell \
   the_cursor_keeps_its_row_by_identity_else_its_index_clamped
 
+# Inlining a broken reference must refuse, not drop it and widen the scope.
+run_mutation "scope dialog: inlining a missing name refuses" \
+  crates/geode-shell/src/frame.rs \
+  "            None => return Err(format!(\"named expression '{name}' is missing\"))," \
+  "            None => {
+                s.named.retain(|n| n != name);
+                return Ok(self.set_lane_scope(s));
+            }" \
+  geode-shell \
+  inlining_a_broken_reference_refuses_and_changes_nothing
+
+# Toggle removes an applied name rather than adding it twice.
+run_mutation "scope dialog: toggle removes an applied name" \
+  crates/geode-shell/src/frame.rs \
+  '        let applied = s.named.iter().any(|n| n == name);' \
+  '        let applied = false;' \
+  geode-shell \
+  toggling_a_name_adds_it_then_removes_it_each_one_undo_step
+
 # ---- Tile picker: placeholder double-click, tile::add and mod-n ----
 
 # Only a PLACEHOLDER's double-click is the door — a real tile's may
