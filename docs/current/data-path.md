@@ -347,6 +347,14 @@ columns read as NULL raise one warning per distinct combination, addressed
 `sources.<name>`; the source stays `Ok`. Every poll emits `Polled` with the
 next due time, so the Sources section shows Last poll and Next poll.
 
+Polls stay quiet. A snapshot job announces no `Loading`, so the status bar's
+progress strip does not flash every interval, and an unchanged snapshot sends
+no `LoadEnded` either. A failed poll is not logged per poll: the discovery
+lane's transition to `Degraded` logs one warning naming the source and the
+reason, and a database that stays down logs nothing more until the reason
+changes or the source recovers. A failed publish, an operation on the load
+lane, still logs its own error.
+
 `DataHandle::poll(dataset)` asks every snapshot source filling that dataset
 to poll now. It is keyed by dataset because the asking page shows datasets,
 not sources; it has no answer of its own, and a dataset no snapshot source

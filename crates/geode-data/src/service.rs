@@ -127,7 +127,8 @@ pub enum DataEvent {
         result: Result<u64, String>,
     },
     /// Begins ingest progress after the file stale check, or before a document
-    /// or series write. Local documents omit this event. Ended by LoadEnded.
+    /// or series write. Local documents and reference snapshots omit this
+    /// event. Ended by LoadEnded.
     Loading {
         source: String,
         path: String,
@@ -540,6 +541,75 @@ fn load_report_sink(
                 None => true,
             }
         });
+    })
+}
+
+/// A snapshot source's poll outcome: rows go to the runner (the one door
+/// storage is entered by) and the discovery lane is clean; a failed query or
+/// refused table degrades the discovery lane only. Publish outcomes report on
+/// the load lane under the batch, so a clean poll never clears a failed
+/// publish, nor a publish a failed poll.
+fn snapshot_outcome_sink(
+    spec: &SourceSpec,
+    ingest: &Arc<IngestHandle>,
+    sink: &EventSink,
+    health_tracker: &Arc<HealthTracker>,
+) -> SnapshotSink {
+    let ingest = Arc::clone(ingest);
+    let sink = Arc::clone(sink);
+    let health_tracker = Arc::clone(health_tracker);
+    let source = spec.name.clone();
+    let dataset = spec.dataset.clone();
+    Arc::new(move |outcome| {
+        let (health, detail, note) = match outcome {
+            SnapshotOutcome::Rows {
+                rows,
+                received_at,
+                note,
+            } => {
+                ingest.submit_reference(ReferenceJob {
+                    source: source.clone(),
+                    dataset: dataset.clone(),
+                    rows,
+                    received_at,
+                });
+                (Health::Ok, String::new(), note)
+            }
+            // Not logged here: a database that stays down fails every
+            // poll, and the discovery lane's transition to `Degraded`
+            // below is the one log line, naming the source and reason.
+            SnapshotOutcome::Failed { reason } => (
+                Health::Degraded {
+                    reason: reason.clone(),
+                },
+                reason,
+                None,
+            ),
+        };
+        health_tracker.report_discovery_and_emit(
+            &source,
+            health,
+            detail,
+            |reported| match reported {
+                Some((worst, detail)) => {
+                    log_health_event(&source, &worst, &detail);
+                    sink(DataEvent::Health {
+                        source: source.clone(),
+                        worst,
+                        detail,
+                    })
+                }
+                None => true,
+            },
+        );
+        // Health stays `Ok`: the rows conformed. The note is a warning, once
+        // per distinct combination.
+        if let Some(message) = note {
+            let _ = sink(DataEvent::Diagnostics(vec![Diagnostic {
+                path: Some(format!("sources.{source}")),
+                ..load_note_warning(message)
+            }]));
+        }
     })
 }
 
@@ -1204,7 +1274,8 @@ impl DataService {
                             None => true,
                         },
                     );
-                    let _ = sink(DataEvent::LoadEnded);
+                    // No `LoadEnded`: a snapshot job announces no
+                    // `Loading`, so there is no progress to end.
                     health_delivered
                 }
                 // Series completion is addressed by identity and source, including zero
@@ -1433,70 +1504,7 @@ impl DataService {
                         table,
                         interval: spec.poll_interval,
                     };
-                    // A poll's outcome: rows go to the runner (the one door
-                    // storage is entered by) and the discovery lane is
-                    // clean; a failed query or refused table degrades the
-                    // discovery lane only. Publish outcomes report on the
-                    // load lane under the batch, so a clean poll never
-                    // clears a failed publish, nor a publish a failed poll.
-                    let outcome_sink: SnapshotSink = {
-                        let ingest = Arc::clone(&ingest);
-                        let sink = Arc::clone(&sink);
-                        let health_tracker = Arc::clone(&health_tracker);
-                        let source = spec.name.clone();
-                        let dataset = spec.dataset.clone();
-                        Arc::new(move |outcome| {
-                            let (health, detail, note) = match outcome {
-                                SnapshotOutcome::Rows {
-                                    rows,
-                                    received_at,
-                                    note,
-                                } => {
-                                    ingest.submit_reference(ReferenceJob {
-                                        source: source.clone(),
-                                        dataset: dataset.clone(),
-                                        rows,
-                                        received_at,
-                                    });
-                                    (Health::Ok, String::new(), note)
-                                }
-                                SnapshotOutcome::Failed { reason } => {
-                                    log_ingest_failure(&dataset, &dataset, &reason);
-                                    (
-                                        Health::Degraded {
-                                            reason: reason.clone(),
-                                        },
-                                        reason,
-                                        None,
-                                    )
-                                }
-                            };
-                            health_tracker.report_discovery_and_emit(
-                                &source,
-                                health,
-                                detail,
-                                |reported| match reported {
-                                    Some((worst, detail)) => {
-                                        log_health_event(&source, &worst, &detail);
-                                        sink(DataEvent::Health {
-                                            source: source.clone(),
-                                            worst,
-                                            detail,
-                                        })
-                                    }
-                                    None => true,
-                                },
-                            );
-                            // Health stays `Ok`: the rows conformed. The note
-                            // is a warning, once per distinct combination.
-                            if let Some(message) = note {
-                                let _ = sink(DataEvent::Diagnostics(vec![Diagnostic {
-                                    path: Some(format!("sources.{source}")),
-                                    ..load_note_warning(message)
-                                }]));
-                            }
-                        })
-                    };
+                    let outcome_sink = snapshot_outcome_sink(spec, &ingest, &sink, &health_tracker);
                     let polled: PolledSink = {
                         let sink = Arc::clone(&sink);
                         let source = spec.name.clone();
@@ -7869,6 +7877,47 @@ source_name = "NPV"
         assert!(records[0].message.contains("bad header"));
     }
 
+    /// A reference database that stays down fails every poll. The source's
+    /// discovery lane degrades once, and that transition is the one log
+    /// line: a warning naming the source and the reason, not an error per
+    /// poll.
+    #[test]
+    fn a_snapshot_source_that_keeps_failing_logs_one_warning_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let (ingest, _rx) = IngestRunner::spawn_channel(store, SchemaSpec::default());
+        let ingest = Arc::new(ingest);
+        let sink: EventSink = Arc::new(|_| true);
+        let health_tracker = Arc::new(HealthTracker::default());
+        let spec = crate::source::SourceSpec {
+            adapter: "fake".to_string(),
+            table: Some("t".to_string()),
+            ..crate::source::SourceSpec::directory("refdb", "u", Vec::new())
+        };
+        let outcome = snapshot_outcome_sink(&spec, &ingest, &sink, &health_tracker);
+        let records = logged(|| {
+            for _ in 0..3 {
+                outcome(SnapshotOutcome::Failed {
+                    reason: "db down".into(),
+                });
+            }
+        });
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].level, tracing::Level::WARN);
+        assert_eq!(records[0].target, "geode::ingest");
+        assert!(
+            records[0].message.contains("refdb"),
+            "{}",
+            records[0].message
+        );
+        assert!(
+            records[0].message.contains("db down"),
+            "{}",
+            records[0].message
+        );
+        ingest.shutdown();
+    }
+
     /// A series dataset whose coverage row holds a timestamp past chrono's
     /// range: `from_micros` panics reading it, in the catalog and in a fetch.
     fn out_of_range_coverage_service(
@@ -8292,14 +8341,17 @@ source_name = "NPV"
             "the Sources section's next poll is one interval on"
         );
 
-        // The same rows again: the runner is handed them (Loading),
-        // publishes nothing, and the source stays clean.
+        // The same rows again: the runner is handed them, publishes
+        // nothing, and the source stays clean. A poll starts no load
+        // progress, so the status bar's strip does not flash every
+        // interval.
         handle.poll("u".into()).unwrap();
-        let mut loading = false;
         let deadline = Instant::now() + Duration::from_millis(500);
         while let Ok(e) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             match e {
-                DataEvent::Loading { source, .. } if source == "refdb" => loading = true,
+                DataEvent::Loading { source, .. } if source == "refdb" => {
+                    panic!("an unchanged poll started load progress")
+                }
                 DataEvent::Published { dataset, .. } if dataset == "u" => {
                     panic!("an unchanged snapshot published a generation")
                 }
@@ -8310,11 +8362,22 @@ source_name = "NPV"
                 _ => {}
             }
         }
-        assert!(loading, "the poll reached the runner");
 
+        // The runner takes snapshots in order, so this publish proves the
+        // unchanged one above reached it; a changed table starts no
+        // progress either.
         queued.lock().unwrap().push_back(Ok(ref_rows(ROWS_B)));
         handle.poll("u".into()).unwrap();
-        let second = next_reference_publish(&rx);
+        let second = until(&rx, |e| match e {
+            DataEvent::Loading { source, .. } if source == "refdb" => {
+                panic!("a snapshot publish started load progress")
+            }
+            DataEvent::Published {
+                dataset, gen_id, ..
+            } if dataset == "u" => Some(gen_id),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
         assert!(second > first, "{second} after {first}");
         handle.shutdown();
     }

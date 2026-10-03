@@ -50,9 +50,10 @@ use std::thread::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub enum IngestEvent {
-    /// One job is about to run; `queued` counts waiting jobs across all three
-    /// queues. Files/documents finish with Published or Failed; series finish
-    /// with SeriesAppended or SeriesFailed. Local documents omit this event.
+    /// One job is about to run; `queued` counts waiting jobs across every
+    /// queue. Files/documents finish with Published or Failed; series finish
+    /// with SeriesAppended or SeriesFailed. Local documents and reference
+    /// snapshots omit this event.
     Started {
         source: String,
         path: String,
@@ -1168,14 +1169,11 @@ fn run(
                 append_one_series(&store, &schema, &sink, &refusal_logged, job);
                 continue;
             }
+            // No Started: a snapshot is polled every interval and is
+            // usually unchanged, so announcing each would flash the status
+            // bar's progress strip on every poll. The publish still answers
+            // Published, Unchanged or Failed.
             Work::Reference(job) => {
-                if !sink(IngestEvent::Started {
-                    source: job.source.clone(),
-                    path: format!("reference://{}/{}", job.source, job.dataset),
-                    queued,
-                }) {
-                    log_refused_event(&refusal_logged, "a load-started announcement");
-                }
                 publish_one_reference(&store, &schema, &sink, &refusal_logged, job);
                 continue;
             }
@@ -3087,18 +3085,16 @@ mod tests {
             schema_of(geode_core::reference::test_support::reference_dataset()),
         );
         handle.submit_reference(reference_job("u"));
-        let started = loop {
+        // Raw events, not `next_event`: a snapshot announces no Started,
+        // so a poll never flashes the progress strip.
+        let published = loop {
             match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
-                IngestEvent::Started { source, path, .. } => break (source, path),
                 IngestEvent::PlanComplete => continue,
-                other => panic!("{other:?}"),
+                e @ IngestEvent::Started { .. } => panic!("a snapshot announced {e:?}"),
+                other => break other,
             }
         };
-        assert_eq!(
-            started,
-            ("refdb".to_string(), "reference://refdb/u".to_string())
-        );
-        let first = match next_event(&rx) {
+        let first = match published {
             IngestEvent::Published {
                 source,
                 dataset,
