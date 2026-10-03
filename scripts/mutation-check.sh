@@ -312,6 +312,69 @@ PY
   restore
 }
 
+# ---- bundled user guide
+
+run_mutation "guide: restore the selected heading" \
+  crates/geode-guide/src/tile.rs \
+  '            .and_then(section_for)' \
+  '            .and_then(|_| None)' \
+  geode-guide \
+  keyboard_and_pointer_navigate_and_restore_sections
+
+run_mutation "guide: the rendered reader scrolls" \
+  crates/geode-guide/src/tile/chrome.rs \
+  'TextView::new(&self.text)
+                            .scrollable(true)' \
+  'TextView::new(&self.text)
+                            .scrollable(false)' \
+  geode-guide \
+  scroll_keys_move_rendered_markdown_and_top_resets_it
+
+run_mutation "guide: cancelling find restores the entry section" \
+  crates/geode-guide/src/tile.rs \
+  'if let Some((section, offset)) = self.find_entry.take() {
+                    self.show_section(section, cx);' \
+  'if let Some((section, offset)) = self.find_entry.take() {
+                    let _ = section;
+                    self.show_section(0, cx);' \
+  geode-guide \
+  find_previews_sections_cancel_restores_and_committed_matches_cycle
+
+run_mutation "guide: frame changes acknowledge the offline reader" \
+  crates/geode-guide/src/tile.rs \
+  'cx.observe(frame.entity(), |this, _, cx| this.arrive(cx))' \
+  'cx.observe(frame.entity(), |this, _, cx| { if false { this.arrive(cx); } })' \
+  geode-guide \
+  a_frame_change_never_waits_for_the_offline_reader
+
+run_mutation "guide: startup registers the guide tile" \
+  crates/geode-app/src/main.rs \
+  '    roster.add(Box::new(geode_guide::GuideFactory));' \
+  '    // guide factory omitted' \
+  geode-app \
+  the_bundled_guide_launches_navigates_and_saves_through_the_shell
+
+run_mutation "guide: search paints the matching text" \
+  crates/geode-guide/src/search.rs \
+  '            block.render(&ranges, color, &mut marked.source);' \
+  '            block.render(&[], color, &mut marked.source);' \
+  geode-guide \
+  search_paints_matches_in_prose_code_and_tables_and_escape_removes_them
+
+run_mutation "guide: visible hints follow a rebind" \
+  crates/geode-guide/src/tile.rs \
+  '            this.hints = hint_keys(cx);' \
+  '            // retained hints omitted' \
+  geode-guide \
+  actions_menu_and_visible_hints_follow_the_live_keymap
+
+run_mutation "guide: dot opens the shared actions menu" \
+  crates/geode-guide/src/lib.rs \
+  '"." = "guide::menu"' \
+  '"." = "none"' \
+  geode-guide \
+  actions_menu_and_visible_hints_follow_the_live_keymap
+
 # ---- discovery
 #
 # Readiness checks distinguish files still being written from loadable files.
@@ -17040,6 +17103,53 @@ run_mutation "vol: density needs strictly ascending strikes" \
   '        if req.density && strikes.windows(2).any(|w| w[1] < w[0]) {' \
   geode-pricing density_on_strikes_not_strictly_ascending_is_refused
 
+# A dense grid reaches its cover on either side: a curve stops no shorter
+# than the listed strikes beside it.
+run_mutation "vol: a dense grid widens to its cover below the ladder" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '            self.k_min.min(lo / self.forward - 1.0),' \
+  '            self.k_min,' \
+  geode-pricing a_dense_grid_widens_to_its_cover_on_either_side
+
+run_mutation "vol: a dense grid widens to its cover above the ladder" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '            self.k_max.max(hi / self.forward - 1.0),' \
+  '            self.k_max,' \
+  geode-pricing a_dense_grid_widens_to_its_cover_on_either_side
+
+# A cover only widens: one inside the ladder leaves the grid as it was.
+run_mutation "vol: a cover inside the ladder does not narrow the grid" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '            self.k_min.min(lo / self.forward - 1.0),' \
+  '            lo / self.forward - 1.0,' \
+  geode-pricing a_cover_inside_the_ladder_does_not_narrow_the_grid
+
+# A dense grid packs its points toward the forward on the scale of
+# sigma-root-t: spread evenly, a wide cover leaves a one-week density too
+# few points across its width to read smooth.
+run_mutation "vol: a dense grid packs its points toward the forward" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '                i => c * (u0 + (u1 - u0) * i as f64 / last as f64).sinh(),' \
+  '                i => k_min + (k_max - k_min) * i as f64 / last as f64,' \
+  geode-pricing a_wide_cover_keeps_the_points_per_sigma_root_t_at_the_forward
+
+# An inverted cover is refused naming it, not evaluated as a span that
+# runs backwards.
+run_mutation "vol: an inverted cover is refused" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '        if !(positive(lo) && positive(hi) && lo <= hi) {' \
+  '        if !(positive(lo) && positive(hi)) {' \
+  geode-pricing a_cover_that_is_not_an_ascending_pair_of_positive_strikes_is_refused
+
+# The density is a second difference of call prices on a fine strike
+# step: a CDF with a step at zero (as a single-precision approximation
+# has) shows there as a spike pair around the money.
+run_mutation "vol: the normal CDF has no step at zero" \
+  crates/geode-pricing/src/black.rs \
+  '            gauss * num / den' \
+  '            gauss * num / den * (1.0 + 1e-7)' \
+  geode-pricing call_prices_are_smooth_enough_for_a_fine_second_difference
+
 run_mutation "vol restart: a [vol] model change requires a restart" \
   crates/geode-shell/src/shell/hot_reload.rs \
   '            if new_config.get("app", "vol.model").cloned() != self.vol_baseline {' \
@@ -20981,6 +21091,41 @@ run_mutation "chart xy: a huge points slot still paints" \
   '                let stride = mark_stride(end - start, SEGMENTS_PER_MARK, usize::MAX);' \
   geode-chart \
   a_points_slot_past_the_stroke_cap_is_thinned_not_dropped
+
+# A gap in a filled line is a gap in its fill. One outline over the
+# whole line would join the runs either side of the NaN across it.
+run_mutation "chart xy: a gap parts a line's fill" \
+  crates/geode-chart/src/core/marks.rs \
+  '    for run in points.split(|p| p.is_break()) {' \
+  '    for run in [points] {' \
+  geode-chart \
+  a_filled_line_fills_each_finite_run_to_zero_and_a_gap_parts_the_fill
+
+# A zero outside the plot fills to the plot's nearer edge, not to a y
+# off screen.
+run_mutation "chart xy: a fill's zero is held to the plot" \
+  crates/geode-chart/src/core/marks.rs \
+  '        zero_y.clamp(top, bottom)' \
+  '        zero_y' \
+  geode-chart \
+  a_fill_runs_to_the_plot_edge_when_zero_is_out_of_view_and_up_to_zero_from_below
+
+# A filled line paints a cached fill beside its stroke.
+run_mutation "chart xy: a filled line paints its fill" \
+  crates/geode-chart/src/xy/element.rs \
+  '                            || matches!(s.kind, SlotKind::Line { fill: true, .. }))' \
+  '                            || false)' \
+  geode-chart \
+  a_filled_line_caches_its_fill_beside_its_stroke
+
+# Every fill goes down before any stroke: painted slot by slot, a later
+# slot's fill tints an earlier slot's line.
+run_mutation "chart xy: fills paint before every stroke" \
+  crates/geode-chart/src/xy/element.rs \
+  '        [Layer::Fill, Layer::Stroke]' \
+  '        [Layer::Stroke, Layer::Fill]' \
+  geode-chart \
+  every_fill_is_painted_before_any_stroke
 
 # A points slot reads a point only within the tolerance of the
 # crosshair. Otherwise a crosshair between two quotes reads the nearer as
@@ -33684,7 +33829,7 @@ run_mutation "volslice: a hidden kind asks no curve" \
 run_mutation "volslice: a curve difference evaluates at the minuend's strikes" \
   crates/geode-volslice/src/core/build.rs \
   '                request: slice(expiry, Grid::Job(of), false),' \
-  '                request: slice(expiry, Grid::Dense(GRID_N), false),' \
+  '                request: slice(expiry, Grid::Dense { n: GRID_N, cover: None }, false),' \
   geode-volslice curve_minus_curve_evaluates_the_subtrahend_at_the_minuends_strikes
 
 # Each expiry's difference names its own expiry's minuend job; found by
@@ -33707,8 +33852,46 @@ run_mutation "volslice: a hidden subtrahend still gets its difference" \
 run_mutation "volslice: a curve-chain difference evaluates at the chain strikes" \
   crates/geode-volslice/src/core/build.rs \
   '                request: slice(expiry, Grid::At(c.strikes.clone()), false),' \
-  '                request: slice(expiry, Grid::Dense(GRID_N), false),' \
+  '                request: slice(expiry, Grid::Dense { n: GRID_N, cover: None }, false),' \
   geode-volslice curve_minus_chain_evaluates_the_curve_at_the_chain_strikes
+
+# A chain expiry's curves reach its listed strikes, so a curve is drawn
+# at least as wide as the quotes beside it.
+run_mutation "volslice: dense curves cover the chain's strikes" \
+  crates/geode-volslice/src/core/build.rs \
+  '            cover: cover(chain),' \
+  '            cover: None,' \
+  geode-volslice a_chain_expirys_curves_cover_its_listed_strikes_shown_or_not
+
+# The cover holds with the chain hidden: toggling the chain must not move
+# the curves' x extent.
+run_mutation "volslice: the cover holds with the chain hidden" \
+  crates/geode-volslice/src/core/build.rs \
+  '            cover: cover(chain),' \
+  '            cover: cover(chain.filter(|_| state.visible(loaded, Kind::Chain))),' \
+  geode-volslice a_chain_expirys_curves_cover_its_listed_strikes_shown_or_not
+
+# A cover is the span of the positive, finite listed strikes, in any order.
+run_mutation "volslice: a cover skips strikes that are not positive and finite" \
+  crates/geode-volslice/src/core/build.rs \
+  '        .filter(|k| k.is_finite() && *k > 0.0);' \
+  '        .filter(|k| !k.is_nan());' \
+  geode-volslice a_cover_is_the_chains_positive_finite_strike_span
+
+# Densities shade down to zero; the vol curves do not.
+run_mutation "volslice: a density is a filled line" \
+  crates/geode-volslice/src/core/build.rs \
+  '                            fill: true,' \
+  '                            fill: false,' \
+  geode-volslice densities_paint_filled_on_the_right_axis_and_curves_unfilled
+
+# A short-dated density over a wide chain needs enough points per
+# sigma-root-t to read as one smooth hump.
+run_mutation "volslice: a dense curve has enough points for a smooth density" \
+  crates/geode-volslice/src/core/build.rs \
+  'pub const GRID_N: usize = 1000;' \
+  'pub const GRID_N: usize = 200;' \
+  geode-volslice a_one_week_density_across_a_wide_chain_is_smooth
 
 run_mutation "volslice: a chain-first difference is negated" \
   crates/geode-volslice/src/core/build.rs \

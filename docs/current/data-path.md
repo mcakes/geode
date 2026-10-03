@@ -862,23 +862,37 @@ a model the binary lacks answers every job with that reason. Batches
 coalesce by key, and cancellation by key stops a running batch at its next
 job boundary.
 
-A slice's grid is `Dense(n)` (n strikes over the document's strike range for
-that expiry), `At(strikes)` (echoed in the given order), or `Job(j)`: the
-strikes an earlier `Slice` job `j` of the same batch evaluated at. The worker
-resolves `Job(j)` to `At` before the model sees the request, so two curves
-compare at equal strikes in one round trip without the tile knowing the
-first curve's strikes in advance. A `Job` grid naming a failed job, a `Map`
-job, or a job that does not run before it fails naming why (`job 4 takes
-its strikes from job 2, which failed`); the demo model refuses a `Job` grid
-that reaches it unresolved. `geode_data::vol::evaluate` runs a batch in place on the
-calling thread under the same rules, for tests and benches.
+A slice's grid is `Dense { n, cover }` (n strictly ascending strikes, spaced
+as the model chooses, from end to end of the union of the document's strike
+range for that expiry and `cover`, an optional absolute strike span such as a
+listed chain's lowest and highest strike), `At(strikes)` (echoed in the
+given order), or `Job(j)`: the strikes an earlier `Slice` job `j` of the same
+batch evaluated at. A cover only widens the grid, so a curve is drawn at least
+as wide as the quotes beside it; how a strike past the document's own range is
+evaluated is the model's to say (the demo model continues the smile's end
+slope, floored at its minimum vol). A cover that is not an ascending pair of
+positive, finite strikes fails the job naming it. The worker resolves `Job(j)`
+to `At` before the model sees the request, so two curves compare at equal
+strikes in one round trip without the tile knowing the first curve's strikes
+in advance. A `Job` grid naming a failed job, a `Map` job, or a job that does
+not run before it fails naming why (`job 4 takes its strikes from job 2, which
+failed`); the demo model refuses a `Job` grid that reaches it unresolved.
+`geode_data::vol::evaluate` runs a batch in place on the calling thread under
+the same rules, for tests and benches.
 
 A slice asked with `density` carries `(x, pdf)` at its interior points. The
 pdf is per unit of the requested coordinate: the strike density times
 |dK/dx| by a central difference over the same neighbours, so its area is
 about one in every coordinate and two coordinates' densities compare. Where
 x does not move between neighbours (delta saturating at 0 or 1) the point is
-NaN, which a chart paints as a gap rather than a spike.
+NaN, which a chart paints as a gap rather than a spike. Because the demo
+model's density is a second difference of call prices, its smoothness is
+the grid's points per σ√t·F. It places a dense grid's points as
+`F·(1 + c·sinh(u))`, `u` even between the span's ends and `c` the
+at-the-money σ√t (at least a fiftieth of the span), so the points crowd the
+forward where a short-dated density lives and a long-dated grid is nearly
+even. Its normal CDF is accurate to about 1e-14 so that a fine grid does not
+turn the CDF's own error into noise.
 
 An `option_chain` quote carries each side, its vol and its price, whole or
 not at all, and at least one side; `mid_vol` is required and finite. The

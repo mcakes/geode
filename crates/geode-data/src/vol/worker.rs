@@ -289,7 +289,7 @@ pub(crate) mod tests {
                 "2000" => panic!("the fake vol model exploded"),
                 _ => {
                     let strikes: Vec<f64> = match &req.grid {
-                        Grid::Dense(n) => (0..*n).map(|i| 100.0 + i as f64).collect(),
+                        Grid::Dense { n, .. } => (0..*n).map(|i| 100.0 + i as f64).collect(),
                         Grid::At(ks) => ks.clone(),
                         Grid::Job(_) => return Err(VolError("unresolved job grid".into())),
                     };
@@ -332,7 +332,7 @@ pub(crate) mod tests {
             request: SliceRequest {
                 expiry: chrono::NaiveDate::parse_from_str(expiry, "%Y-%m-%d").unwrap(),
                 coordinate: Coordinate::Moneyness,
-                grid: Grid::Dense(3),
+                grid: Grid::Dense { n: 3, cover: None },
                 density: false,
             },
         }
@@ -562,7 +562,7 @@ pub(crate) mod tests {
     #[test]
     fn a_job_grid_takes_the_strikes_an_earlier_slice_evaluated() {
         let (w, _, rx) = worker(Duration::ZERO);
-        let mut p = params(6, 1, &["2026-01-01"]); // job 0: Dense(3)
+        let mut p = params(6, 1, &["2026-01-01"]); // job 0: a dense grid of 3
         p.jobs.push(job_grid(0, 0));
         assert!(w.request(p));
         let o = next(&rx);

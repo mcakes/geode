@@ -4,9 +4,10 @@
 //! The display fixture has two expiries, `3m` and `1y`. Each has a solid
 //! published curve, a dashed draft curve and a chain of quotes (a diamond at
 //! the mid, a bar from bid to ask) on the upper left axis, in percent. The
-//! `3m` density is a line on the upper right axis, in plain numbers. The lower
-//! pane holds each chain's difference from its published curve: a point at
-//! mid less curve, its bar from bid less curve to ask less curve.
+//! `3m` density is a line shaded down to zero on the upper right axis, in
+//! plain numbers. The lower pane holds each chain's difference from its
+//! published curve: a point at mid less curve, its bar from bid less curve
+//! to ask less curve.
 //!
 //! What to look at:
 //!
@@ -162,6 +163,7 @@ fn model(cx: &App, delta: bool, version: u64) -> Arc<XyModel> {
             SlotKind::Line {
                 xs: curve_x.clone(),
                 ys: knots.iter().map(|k| smile.vol(*k)).collect(),
+                fill: false,
             },
         );
         slot(
@@ -172,6 +174,7 @@ fn model(cx: &App, delta: bool, version: u64) -> Arc<XyModel> {
             SlotKind::Line {
                 xs: curve_x,
                 ys: knots.iter().map(|k| smile.draft(*k)).collect(),
+                fill: false,
             },
         );
 
@@ -237,6 +240,7 @@ fn model(cx: &App, delta: bool, version: u64) -> Arc<XyModel> {
                 .map(|k| if delta { front.call_delta(*k) } else { *k })
                 .collect(),
             ys: knots.iter().map(|k| front.density(*k)).collect(),
+            fill: true,
         },
     );
 

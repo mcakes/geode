@@ -91,6 +91,7 @@ crates/
   geode-timeseries   fetchable series, expressions, statistics and chart tile
   geode-volslice     vol smiles per expiry: CVI, a group's draft and the chain
   geode-diagnostics  the diagnostics page over health, generations, config and the log
+  geode-guide        offline user-guide tile with section navigation and find
   geode-documents    typed parsers and writers per document wire format
   geode-pricing      implementations of the pricing trait
   geode-pricer       the line pricer: pure sheet core and its tile

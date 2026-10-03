@@ -18,10 +18,22 @@ use geode_core::vol::{
 };
 use gpui::Hsla;
 
+use crate::core::docs::ChainExpiry;
 use crate::core::model::{Kind, Loaded, Pair, State, StripRow};
 
-/// Points per dense curve.
-pub const GRID_N: usize = 200;
+/// Points per dense curve over the CVI's node ladder widened to the listed
+/// chain. The density is a second difference over these points, so its
+/// smoothness is points per σ√t·F at the forward, where it has its mass.
+/// The model chooses the spacing; the demo model packs points toward the
+/// forward on the scale of σ√t, so that count holds however wide the
+/// chain. A thousand is enough that even spread evenly over the widest
+/// demo chain (under half the forward) they put some sixty across the
+/// σ√t·F of a one-week, 20%-vol expiry (2.8% of the forward), past the
+/// twenty-five that reads as a smooth hump; the vol curve's wings stay
+/// fine too. A curve's path is decimated to its pixel columns, so the
+/// count costs the chart nothing per frame; the model evaluates a Black
+/// price per point, once per batch.
+pub const GRID_N: usize = 1000;
 
 /// What each job of a batch is for, by position.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +73,21 @@ impl Plan {
     }
 }
 
+/// The strike span a dense curve at a chain's expiry must reach: its
+/// lowest and highest listed strike, so a curve is drawn at least as wide
+/// as the quotes. Asked whether or not the chain is shown, so toggling the
+/// chain does not move the curves' x extent. `None` without a chain, or
+/// with no positive finite strike in it.
+pub fn cover(chain: Option<&ChainExpiry>) -> Option<(f64, f64)> {
+    let mut strikes = chain?
+        .strikes
+        .iter()
+        .copied()
+        .filter(|k| k.is_finite() && *k > 0.0);
+    let first = strikes.next()?;
+    Some(strikes.fold((first, first), |(lo, hi), k| (lo.min(k), hi.max(k))))
+}
+
 pub fn batch(state: &State, loaded: &Loaded, strip: &[StripRow]) -> Plan {
     let mut documents = Vec::new();
     let mut doc_of = [None; 3];
@@ -79,6 +106,11 @@ pub fn batch(state: &State, loaded: &Loaded, strip: &[StripRow]) -> Plan {
         density,
     };
     for &(_, expiry) in &active {
+        let chain = loaded.chain_at(expiry);
+        let grid = Grid::Dense {
+            n: GRID_N,
+            cover: cover(chain),
+        };
         let mut dense_job = [None; 3];
         for kind in [Kind::Cvi, Kind::Draft] {
             let Some(document) = doc_of[kind.index()] else {
@@ -92,7 +124,7 @@ pub fn batch(state: &State, loaded: &Loaded, strip: &[StripRow]) -> Plan {
                 dense_job[kind.index()] = Some(jobs.len());
                 jobs.push(VolJob::Slice {
                     document,
-                    request: slice(expiry, Grid::Dense(GRID_N), trace && state.density),
+                    request: slice(expiry, grid.clone(), trace && state.density),
                 });
                 roles.push(Role::Curve {
                     kind,
@@ -101,7 +133,6 @@ pub fn batch(state: &State, loaded: &Loaded, strip: &[StripRow]) -> Plan {
                 });
             }
         }
-        let chain = loaded.chain_at(expiry);
         if let Some(c) = chain {
             let trace = state.visible(loaded, Kind::Chain);
             let in_pair = state
@@ -165,7 +196,8 @@ pub fn batch(state: &State, loaded: &Loaded, strip: &[StripRow]) -> Plan {
 }
 
 /// A density line's opacity against its curve's expiry color, so the pdf
-/// reads as a companion of the smile rather than a second smile.
+/// reads as a companion of the smile rather than a second smile. Its fill
+/// is the chart's fill opacity of this.
 pub const DENSITY_ALPHA: f32 = 0.55;
 
 /// The y formats in `Axis::ALL` order: vols on the left of either pane,
@@ -372,6 +404,7 @@ pub fn model(
                     SlotKind::Line {
                         xs: s.points.iter().map(|p| p.x).collect(),
                         ys: s.points.iter().map(|p| p.vol).collect(),
+                        fill: false,
                     },
                 );
                 if let Some(density) = &s.density {
@@ -384,9 +417,11 @@ pub fn model(
                         },
                         Axis::Right,
                         style,
+                        // Shaded down to zero, a negative lobe up to it.
                         SlotKind::Line {
                             xs: density.iter().map(|(x, _)| *x).collect(),
                             ys: density.iter().map(|(_, pdf)| *pdf).collect(),
+                            fill: true,
                         },
                     );
                 }
@@ -453,6 +488,7 @@ pub fn model(
                                 .zip(&other.points)
                                 .map(|(a, b)| a.vol - b.vol)
                                 .collect(),
+                            fill: false,
                         },
                     );
                 } else {
@@ -562,7 +598,112 @@ mod tests {
         };
         assert_eq!(
             (*document, &request.grid, request.density),
-            (1, &Grid::Dense(GRID_N), false)
+            (
+                1,
+                &Grid::Dense {
+                    n: GRID_N,
+                    cover: None
+                },
+                false
+            )
+        );
+    }
+
+    /// The dense grids of a chain expiry reach its lowest and highest
+    /// listed strike, the chain shown or not, so hiding the chain does not
+    /// move the curves' x extent.
+    #[test]
+    fn a_chain_expirys_curves_cover_its_listed_strikes_shown_or_not() {
+        let dense = |p: &Plan| -> Vec<Grid> {
+            p.roles
+                .iter()
+                .zip(&p.jobs)
+                .filter_map(|(r, j)| match (r, j) {
+                    (Role::Curve { .. }, VolJob::Slice { request, .. }) => {
+                        Some(request.grid.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let want = Grid::Dense {
+            n: GRID_N,
+            cover: Some((85.0, 115.0)),
+        };
+        let mut st = State {
+            active: Some([d("2026-11-20")].into()),
+            ..State::default()
+        };
+        assert_eq!(dense(&plan(&mut st)), [want.clone(), want.clone()]);
+        st.toggle_kind(Kind::Chain);
+        let p = plan(&mut st);
+        assert!(!p.roles.iter().any(|r| matches!(r, Role::Chain { .. })));
+        assert_eq!(dense(&p), [want.clone(), want]);
+    }
+
+    #[test]
+    fn a_cover_is_the_chains_positive_finite_strike_span() {
+        use crate::core::model::tests::chain;
+        let mut c = chain("2026-11-20");
+        assert_eq!(cover(Some(&c)), Some((85.0, 115.0)));
+        c.strikes = vec![110.0, f64::NAN, 90.0, -5.0, 0.0, 120.0, f64::INFINITY];
+        assert_eq!(cover(Some(&c)), Some((90.0, 120.0)), "in any order");
+        c.strikes = vec![f64::NAN, 0.0];
+        assert_eq!(cover(Some(&c)), None);
+        assert_eq!(cover(None), None);
+    }
+
+    /// A one-week expiry beside a chain about as wide as the widest demo
+    /// chain (46% of the forward): the density's steepest step between
+    /// neighbours stays a small fraction of its peak, which takes some 25
+    /// points or more per σ√t·F.
+    #[test]
+    fn a_one_week_density_across_a_wide_chain_is_smooth() {
+        use crate::core::model::tests::{chain, cvi};
+        let mut c = chain("2026-10-08");
+        c.strikes = (0..=46).map(|i| 70.0 + i as f64).collect();
+        for side in [&mut c.bid, &mut c.mid, &mut c.ask] {
+            *side = vec![0.2; 47];
+        }
+        let l = Loaded {
+            cvi: Some(cvi(&["2026-10-08", "2026-12-18"], None)),
+            draft: None,
+            chain: vec![c],
+        };
+        let s = strip(&l, d(TODAY));
+        let mut st = State {
+            active: Some([d("2026-10-08")].into()),
+            density: true,
+            ..State::default()
+        };
+        st.reconcile(&s);
+        let p = batch(&st, &l, &s);
+        let b = model(&p, &answer(&p), &l, &palette(), st.split, 1).unwrap();
+        assert!(b.notices.is_empty(), "{:?}", b.notices);
+        let density = b
+            .model
+            .slots
+            .iter()
+            .find(|s| s.label.contains("density"))
+            .unwrap();
+        let SlotKind::Line { xs, ys, .. } = &density.kind else {
+            panic!()
+        };
+        assert!(
+            xs[0] < 0.71 && xs[xs.len() - 1] > 1.15,
+            "across the chain: {}..{}",
+            xs[0],
+            xs[xs.len() - 1]
+        );
+        let peak = ys.iter().copied().fold(f64::MIN, f64::max);
+        let steepest = ys
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            steepest / peak < 0.025,
+            "steepest step {} of the peak",
+            steepest / peak
         );
     }
 
@@ -841,18 +982,24 @@ mod tests {
     }
 
     #[test]
-    fn densities_paint_on_the_right_axis() {
+    fn densities_paint_filled_on_the_right_axis_and_curves_unfilled() {
         let mut st = State {
             density: true,
             ..State::default()
         };
         let b = built(&mut st);
+        let fills = |s: &XySlot| matches!(s.kind, SlotKind::Line { fill: true, .. });
+        let (densities, rest): (Vec<_>, Vec<_>) = b
+            .model
+            .slots
+            .iter()
+            .partition(|s| s.label.contains("density"));
+        assert_eq!(densities.len(), 2, "cvi and draft");
         assert!(
-            b.model
-                .slots
-                .iter()
-                .any(|s| s.axis == Axis::Right && s.label.contains("density"))
+            densities.iter().all(|s| s.axis == Axis::Right && fills(s)),
+            "{densities:?}"
         );
+        assert!(!rest.iter().any(|s| fills(s)), "{rest:?}");
     }
 
     #[test]
