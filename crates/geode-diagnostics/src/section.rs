@@ -4,15 +4,17 @@
 pub enum Section {
     Sources,
     Data,
+    Reference,
     Config,
     Log,
     Perf,
 }
 
 impl Section {
-    pub const ALL: [Section; 5] = [
+    pub const ALL: [Section; 6] = [
         Section::Sources,
         Section::Data,
+        Section::Reference,
         Section::Config,
         Section::Log,
         Section::Perf,
@@ -23,6 +25,7 @@ impl Section {
         match self {
             Section::Sources => "sources",
             Section::Data => "data",
+            Section::Reference => "reference",
             Section::Config => "config",
             Section::Log => "log",
             Section::Perf => "perf",
@@ -34,6 +37,7 @@ impl Section {
         match self {
             Section::Sources => "Sources",
             Section::Data => "Data",
+            Section::Reference => "Reference",
             Section::Config => "Config",
             Section::Log => "Log",
             Section::Perf => "Performance",
@@ -65,6 +69,9 @@ mod tests {
             assert_eq!(Section::from_name(s.name()), Some(s));
         }
         assert_eq!(Section::from_name("nope"), None);
+        assert_eq!(Section::from_name("reference"), Some(Section::Reference));
+        assert_eq!(Section::Data.next(), Section::Reference);
+        assert_eq!(Section::Reference.next(), Section::Config);
         assert_eq!(Section::Perf.next(), Section::Sources);
         assert_eq!(Section::Sources.prev(), Section::Perf);
     }

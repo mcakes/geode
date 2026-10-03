@@ -1220,8 +1220,8 @@ table, session keys and module map.
 ## Diagnostics
 
 `geode-diagnostics` is the first [page](shell.md#pages): a surface in place
-of the tile surface presenting shell-owned operational state in five sections, with
-sources, stored data, configuration, logs, and performance. The shell's
+of the tile surface presenting shell-owned operational state in six sections, with
+sources, stored data, reference data, configuration, logs, and performance. The shell's
 `Diagnostics` entity, the shared log ring, the loaded configuration, and the
 frame's requery statistics supply the state. `page::toggle_diagnostics`,
 bound to `mod+d` by default, opens and closes it from the keymap, the
@@ -1240,7 +1240,7 @@ the status summary (worst source health with its count, config errors, data
 errors, and the catalog's arrival time or "catalog pending"). Back dispatches
 `page::close`. A rail on the left lists the
 sections with native selected buttons and counts: the source count, the
-dataset count, config error and warning counts, the error count in the
+dataset count, the row count of the stored reference answer, config error and warning counts, the error count in the
 retained log tail, and the frame p95. A click or the bracket keys select a
 section. The content pane is the section's toolbar, its table, and a detail
 strip: table rows stay compact while the full details wrap and scroll below.
@@ -1252,6 +1252,7 @@ current keyboard workflow using the shell's keycaps.
 |---|---|
 | Sources | Source, Health (title-case label with the reason), Since (clock time and age), Shape, Last poll, Next poll, Ready, Loading. Worst reported health first by variant then name; unreported sources last, and a source known only from an ingest load gets a "no report yet" row with its loading text. Toolbar: a filter over name and health. Detail: the spec lines by shape and the health history. |
 | Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: a case-insensitive filter over dataset names and generation fields (partition/book, generation ID, times, row count, live/archive status), a chip reading `Catalog up to date` or `Refreshing catalog`, Refresh catalog, Expand all, Collapse all. A dataset-name match includes all its generations; leaf-only matches retain the dataset heading and hide unmatched siblings. Filtering temporarily reveals collapsed results; clearing it restores stored expansion. Catalog totals are not narrowed by filtering. |
+| Reference | One row per stored reference row with the dataset's declared columns; NULL cells read `—`. Toolbar: a case-insensitive filter over every cell. The section is not yet wired to reference reads, so it shows the empty state "No reference data"; its result strip reads "{visible} of {total} rows". |
 | Config | Three full-width views: Current issues (config and data lanes), History (prior batches newest first), and Effective values (expandable documents and their leaves, with Key, Value, and Layer from `Config::explain`). The active view owns row navigation and Copy. Search filters issue text or document keys and values; unmatched documents disappear and matches inside collapsed documents are revealed. Open config directory remains available. |
 | Log | Time with milliseconds, Lvl, Target, and Message over the retained tail. Toolbar: level toggles, a target select over the targets seen in the tail plus `All targets`, a text filter over message and target, Follow, Clear log, and Log levels. Detail: the full record with a Copy button that puts it on the clipboard. |
 | Performance | Aligned median, p95, maximum, and sample-count readouts for frame intervals, query→snapshot, and snapshot→paint, with explanations of each stage. A labeled logarithmic frame-interval histogram shows bucket ranges and counts on hover, with a separate overflow count above 100 ms. Frame cadence is not pure UI work and is not classified against the 8 ms UI budget. UI and requery targets remain explanatory guidance. A Memory section shows process memory (macOS physical footprint, Windows private bytes) with its peak and the time the peak was first seen, then DuckDB memory in use against its limit, temporary files spilled to disk, and the largest DuckDB memory tags, the last three labelled as coming from the last catalog snapshot. Storage, dropped events, refused requests (both warning-toned when non-zero), and the Performance overlay switch share the scrolling region. Missing samples show dashes and zero counts; memory rows read "Not available" until the first sample or catalog snapshot, and on a platform the sampler cannot read. |
@@ -1265,7 +1266,7 @@ section's filter input, which puts the page in insert mode, where Space and
 every other bare key type into the filter, and Escape there restores the
 entry filter and returns to normal mode. Enter keeps the filter and returns
 to navigation; clicking a row does the same. On Performance, which paints
-no input, `/` does nothing. `g s` / `g d` / `g c` / `g l` / `g p` jump
+no input, `/` does nothing. `g s` / `g d` / `g r` / `g c` / `g l` / `g p` jump
 directly to sections. Tab and Shift+Tab step the section's views, wrapping
 (Config: Current issues, History, Effective values), as do `ctrl+tab` and
 `ctrl+shift+tab`; the other sections have no views, so there Tab is

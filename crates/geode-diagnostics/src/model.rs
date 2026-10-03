@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
 use geode_core::config::{Config, Diagnostic, Severity};
 use geode_core::log::{Level, Record};
-use geode_core::query::AsOf;
+use geode_core::query::{AsOf, ReferenceTable};
 use geode_shell::diagnostics::{Diagnostics, Health, SourceShape, SourceState};
 use geode_shell::perf::{BUCKET_UPPER_BOUNDS_MICROS, FrameHistogram, RequeryStats, format_ms};
 
@@ -684,6 +684,8 @@ pub struct Badges {
     /// Worst reported health and the source count.
     pub sources: (Option<Health>, usize),
     pub datasets: usize,
+    /// Rows in the stored reference answer; zero without a table.
+    pub reference: usize,
     /// (errors, warnings) in the current config batch plus data conditions.
     pub config: (usize, usize),
     pub log_errors: usize,
@@ -704,6 +706,10 @@ pub fn badges(d: &Diagnostics, log_errors: usize) -> Badges {
     Badges {
         sources: (worst, d.sources.len()),
         datasets: d.datasets.len(),
+        reference: match d.reference.as_ref().map(|o| &o.table) {
+            Some(Ok(Some(t))) => t.rows.len(),
+            _ => 0,
+        },
         config: (errors, warnings),
         log_errors,
         perf_p95: d
@@ -712,6 +718,55 @@ pub fn badges(d: &Diagnostics, log_errors: usize) -> Badges {
             .map(format_ms)
             .unwrap_or_default(),
     }
+}
+
+/// The Reference section's status line for the selected `dataset` at the
+/// frame's `as_of`. A stored answer for another dataset or as-of reads
+/// `Loading`: it is the previous question's answer, not this one's. Pure
+/// display; reading `Loading` never asks for a read, so the page cannot
+/// loop on its own status.
+pub fn reference_status(
+    d: &Diagnostics,
+    dataset: Option<&str>,
+    as_of: &AsOf,
+    clock: &Clock,
+) -> (String, Tone) {
+    let Some(dataset) = dataset else {
+        return ("No reference datasets declared".into(), Tone::Muted);
+    };
+    // Field access, not a tuple pattern: the refusal may grow fields.
+    if let Some(refusal) = &d.reference_refusal
+        && refusal.0 == dataset
+    {
+        return (refusal.1.clone(), Tone::Warn);
+    }
+    let Some(answer) = d
+        .reference
+        .as_ref()
+        .filter(|o| o.dataset == dataset && &o.as_of == as_of)
+    else {
+        return ("Loading".into(), Tone::Muted);
+    };
+    match &answer.table {
+        Err(e) => (e.clone(), Tone::Warn),
+        Ok(None) => match as_of {
+            AsOf::Live => ("No generation published yet".into(), Tone::Muted),
+            AsOf::At(t) => (
+                format!("No generation at {}", local_hms_utc(*t, *clock)),
+                Tone::Muted,
+            ),
+        },
+        Ok(Some(t)) => (reference_summary(t, *clock), Tone::Normal),
+    }
+}
+
+fn reference_summary(t: &ReferenceTable, clock: Clock) -> String {
+    format!(
+        "gen {} · {} · {} rows",
+        t.gen_id,
+        local_hms_utc(t.source_time, clock),
+        t.rows.len()
+    )
 }
 
 /// The header chips, worst first: source health, config errors, data
@@ -763,7 +818,10 @@ pub fn header_chips(d: &Diagnostics, clock: Clock) -> Vec<(String, Tone)> {
 pub(crate) mod tests {
     use super::*;
     use geode_core::log::LogLevels;
-    use geode_core::query::{CatalogSnapshot, DatasetCatalog, GenerationInfo, PartitionCatalog};
+    use geode_core::query::{
+        CatalogSnapshot, DatasetCatalog, GenerationInfo, PartitionCatalog, QueryKey,
+        ReferenceOutcome,
+    };
     use std::time::{Duration, SystemTime};
 
     /// The page's worst health is the core severity, not label or reason
@@ -879,6 +937,104 @@ pub(crate) mod tests {
             "1 h 3 m"
         );
         assert_eq!(age_text(None, now), "");
+    }
+
+    /// A two-row reference answer with a NULL cell; shared with the
+    /// prepared-table tests.
+    pub(crate) fn ref_table() -> ReferenceTable {
+        ReferenceTable {
+            columns: vec![
+                "underlying_ref".into(),
+                "currency".into(),
+                "calendar".into(),
+            ],
+            rows: vec![
+                vec![Some("SPX".into()), Some("USD".into()), Some("XNYS".into())],
+                vec![Some("SX5E".into()), None, Some("XEUR".into())],
+            ],
+            gen_id: 7,
+            source_time: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+        }
+    }
+
+    fn reference_answer(
+        as_of: AsOf,
+        table: Result<Option<ReferenceTable>, String>,
+    ) -> ReferenceOutcome {
+        ReferenceOutcome {
+            key: QueryKey(0),
+            tag: 1,
+            dataset: "u".into(),
+            as_of,
+            table,
+        }
+    }
+
+    #[test]
+    fn reference_status_reads_loading_until_the_answer_matches_the_frame() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.set_reference_datasets(vec!["u".into()]);
+        let clock = Clock::utc();
+        assert_eq!(
+            reference_status(&d, Some("u"), &AsOf::Live, &clock).0,
+            "Loading"
+        );
+        d.set_reference(reference_answer(AsOf::Live, Ok(Some(ref_table()))));
+        let (text, tone) = reference_status(&d, Some("u"), &AsOf::Live, &clock);
+        assert_eq!(text, "gen 7 · 00:00:00 · 2 rows");
+        assert_eq!(tone, Tone::Normal);
+        let later = AsOf::At(chrono::DateTime::from_timestamp(100, 0).unwrap());
+        assert_eq!(reference_status(&d, Some("u"), &later, &clock).0, "Loading");
+        assert_eq!(
+            reference_status(&d, Some("other"), &AsOf::Live, &clock).0,
+            "Loading",
+            "an answer for another dataset is not this one's"
+        );
+    }
+
+    #[test]
+    fn reference_status_names_no_generation_failures_and_refusals() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.set_reference(reference_answer(AsOf::Live, Ok(None)));
+        assert_eq!(
+            reference_status(&d, Some("u"), &AsOf::Live, &Clock::utc()),
+            ("No generation published yet".to_string(), Tone::Muted)
+        );
+        let at = AsOf::At(chrono::DateTime::from_timestamp(100, 0).unwrap());
+        d.set_reference(reference_answer(at.clone(), Ok(None)));
+        assert_eq!(
+            reference_status(&d, Some("u"), &at, &Clock::utc()).0,
+            "No generation at 00:01:40"
+        );
+        d.set_reference(reference_answer(at.clone(), Err("query failed".into())));
+        assert_eq!(
+            reference_status(&d, Some("u"), &at, &Clock::utc()),
+            ("query failed".to_string(), Tone::Warn)
+        );
+        d.note_reference_refused("other", "busy elsewhere");
+        assert_eq!(
+            reference_status(&d, Some("u"), &at, &Clock::utc()).0,
+            "query failed",
+            "another dataset's refusal does not stand for this one"
+        );
+        d.note_reference_refused("u", "the data service is busy — press r to retry");
+        let (text, tone) = reference_status(&d, Some("u"), &AsOf::Live, &Clock::utc());
+        assert!(text.contains("busy"));
+        assert_eq!(tone, Tone::Warn);
+        assert_eq!(
+            reference_status(&d, None, &AsOf::Live, &Clock::utc()),
+            ("No reference datasets declared".to_string(), Tone::Muted)
+        );
+    }
+
+    #[test]
+    fn the_reference_badge_counts_the_answered_rows() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        assert_eq!(badges(&d, 0).reference, 0);
+        d.set_reference(reference_answer(AsOf::Live, Ok(Some(ref_table()))));
+        assert_eq!(badges(&d, 0).reference, 2);
+        d.set_reference(reference_answer(AsOf::Live, Err("x".into())));
+        assert_eq!(badges(&d, 0).reference, 0);
     }
 
     pub(crate) fn dataset_catalog() -> DatasetCatalog {

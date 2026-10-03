@@ -59,6 +59,7 @@ fn diag_version_for(section: Section, v: DiagVersions) -> u64 {
     match section {
         Section::Sources => v.sources,
         Section::Data => v.data,
+        Section::Reference => v.reference,
         Section::Config => v.config,
         Section::Log => v.log_levels,
         Section::Perf => v.perf,
@@ -77,10 +78,10 @@ pub struct DiagnosticsPage {
     focus_handle: FocusHandle,
     section: Section,
     /// Cursor row per section, kept across switches.
-    cursors: [usize; 5],
-    selected_keys: [Option<String>; 5],
+    cursors: [usize; 6],
+    selected_keys: [Option<String>; 6],
     /// Filter text per section; the one input shows the selected section's.
-    filters: [String; 5],
+    filters: [String; 6],
     filter_input: Entity<InputState>,
     filter_entry: Option<String>,
     table: Entity<TableState<SectionDelegate>>,
@@ -123,7 +124,7 @@ pub struct DiagnosticsPage {
     level_rows: Rc<Vec<LevelRow>>,
     badges: Badges,
     /// Rail badge text per section, formatted with the badges.
-    rail_texts: [SharedString; 5],
+    rail_texts: [SharedString; 6],
     header_chips: Vec<(SharedString, Tone)>,
     /// The Config toolbar's History label, formatted with the badges.
     history_label: SharedString,
@@ -310,11 +311,11 @@ impl DiagnosticsPage {
             }
             let as_of_changed = now.as_of != this.last_frame_versions.as_of;
             let config_changed = now.config != this.last_frame_versions.config;
-            // Only data rows read the frame's as-of; only config rows read
-            // the loaded config. Scope and grouping keystrokes rebuild
-            // nothing here.
+            // Only data and reference rows read the frame's as-of; only
+            // config rows read the loaded config. Scope and grouping
+            // keystrokes rebuild nothing here.
             let relevant = match this.section {
-                Section::Data => as_of_changed,
+                Section::Data | Section::Reference => as_of_changed,
                 Section::Config => config_changed,
                 Section::Sources | Section::Log | Section::Perf => false,
             };
@@ -343,7 +344,7 @@ impl DiagnosticsPage {
             actions,
             focus_handle: cx.focus_handle(),
             section,
-            cursors: [0; 5],
+            cursors: [0; 6],
             selected_keys: Default::default(),
             filters: Default::default(),
             filter_input,
@@ -372,6 +373,7 @@ impl DiagnosticsPage {
             badges: Badges {
                 sources: (None, 0),
                 datasets: 0,
+                reference: 0,
                 config: (0, 0),
                 log_errors: 0,
                 perf_p95: String::new(),
@@ -472,6 +474,7 @@ impl DiagnosticsPage {
                             &filter,
                         )
                     }
+                    Section::Reference => prepared::reference_table(None, &filter),
                     Section::Config => {
                         let diags = if self.config_history {
                             model::history_diagnostics(d, clock)
@@ -546,6 +549,10 @@ impl DiagnosticsPage {
                 Section::Data => (
                     "No datasets available",
                     "Refresh the catalog to check for stored datasets.",
+                ),
+                Section::Reference => (
+                    "No reference data",
+                    "A declared reference dataset's rows appear here once it publishes.",
                 ),
                 Section::Config => (
                     "No configuration values",
@@ -750,6 +757,16 @@ impl DiagnosticsPage {
                 self.diagnostics.read(cx).datasets.len(),
                 rows.len()
             ),
+            Section::Reference => {
+                let total = self
+                    .diagnostics
+                    .read(cx)
+                    .reference
+                    .as_ref()
+                    .and_then(|o| o.table.as_ref().ok()?.as_ref())
+                    .map_or(0, |t| t.rows.len());
+                format!("{} of {total} rows", rows.len())
+            }
             Section::Config if self.showing_issues() => format!(
                 "{} of {} {} issue{}",
                 self.diag_prepared.rows.len(),
@@ -1101,7 +1118,7 @@ impl DiagnosticsPage {
         let set = match self.section {
             Section::Data => &mut self.collapsed_datasets,
             Section::Config => &mut self.collapsed_docs,
-            Section::Sources | Section::Log | Section::Perf => return,
+            Section::Sources | Section::Reference | Section::Log | Section::Perf => return,
         };
         let collapsed_now = set.contains(&key);
         let collapse = match expand {
@@ -1198,6 +1215,7 @@ impl DiagnosticsPage {
             "prev_section" => self.set_section(self.section.prev(), window, cx),
             "sources" => self.set_section(Section::Sources, window, cx),
             "data" => self.set_section(Section::Data, window, cx),
+            "reference" => self.set_section(Section::Reference, window, cx),
             "config" => self.set_section(Section::Config, window, cx),
             "log" => self.set_section(Section::Log, window, cx),
             "perf" => self.set_section(Section::Perf, window, cx),
@@ -1379,7 +1397,7 @@ impl DiagnosticsPage {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let weak: WeakEntity<Self> = cx.weak_entity();
         match self.section {
-            Section::Sources => h_flex()
+            Section::Sources | Section::Reference => h_flex()
                 .gap_2()
                 .px_3()
                 .py_2()
@@ -1522,7 +1540,7 @@ impl gpui::Render for DiagnosticsPage {
                 weak,
                 cx,
             ),
-            Section::Sources | Section::Data | Section::Log => v_flex()
+            Section::Sources | Section::Data | Section::Reference | Section::Log => v_flex()
                 .flex_1()
                 .min_h_0()
                 .min_w_0()
@@ -1724,6 +1742,30 @@ mod tests {
         let t = h.page.read_with(&vcx, |p, _| p.serialize());
         assert_eq!(t.get("section").and_then(|v| v.as_str()), Some("data"));
         assert!(t.get("filter").is_none(), "filters are transient");
+    }
+
+    /// `g r` dispatches `diagnostics::reference`; the section sits between
+    /// Data and Config in the rail and persists by name.
+    #[gpui::test]
+    fn the_reference_action_selects_the_reference_section(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        vcx.update(|window, cx| {
+            h.page.update(cx, |p, cx| {
+                assert!(p.dispatch(&ActionId("diagnostics::reference".into()), None, window, cx));
+            });
+        });
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p.section()),
+            Section::Reference
+        );
+        let t = h.page.read_with(&vcx, |p, _| p.serialize());
+        assert_eq!(t.get("section").and_then(|v| v.as_str()), Some("reference"));
+        let (h, vcx) = open_with(cx, Some(&t));
+        assert_eq!(
+            h.page.read_with(&vcx, |p, _| p.section()),
+            Section::Reference,
+            "a saved reference section restores"
+        );
     }
 
     #[gpui::test]

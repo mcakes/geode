@@ -45,6 +45,7 @@ fn rail_id(section: Section) -> &'static str {
     match section {
         Section::Sources => "diagnostics-rail-sources",
         Section::Data => "diagnostics-rail-data",
+        Section::Reference => "diagnostics-rail-reference",
         Section::Config => "diagnostics-rail-config",
         Section::Log => "diagnostics-rail-log",
         Section::Perf => "diagnostics-rail-perf",
@@ -52,11 +53,12 @@ fn rail_id(section: Section) -> &'static str {
 }
 
 /// The rail badge text per section, formatted once per badge refresh.
-pub(crate) fn rail_texts(badges: &Badges) -> [SharedString; 5] {
+pub(crate) fn rail_texts(badges: &Badges) -> [SharedString; 6] {
     let (errors, warnings) = badges.config;
     [
         SharedString::from(badges.sources.1.to_string()),
         SharedString::from(badges.datasets.to_string()),
+        SharedString::from(badges.reference.to_string()),
         if errors + warnings > 0 {
             SharedString::from(format!("{} issues", errors + warnings))
         } else {
@@ -128,7 +130,7 @@ pub(crate) fn header(
 pub(crate) fn rail(
     section: Section,
     badges: &Badges,
-    texts: &[SharedString; 5],
+    texts: &[SharedString; 6],
     weak: WeakEntity<DiagnosticsPage>,
     cx: &mut Context<DiagnosticsPage>,
 ) -> AnyElement {
@@ -155,6 +157,7 @@ pub(crate) fn rail(
                 .tooltip(match s {
                     Section::Sources => "Source health and activity (g s)",
                     Section::Data => "Stored datasets and generations (g d)",
+                    Section::Reference => "Reference data tables (g r)",
                     Section::Config => {
                         "Configuration and data issues, history, and effective values (g c)"
                     }
@@ -274,6 +277,9 @@ pub(crate) fn footer(
             }
             Section::Data => {
                 "`[` / `]` Sections   `/` Filter   `space` / `enter` Expand   `r` Refresh   `y` Copy   `escape` Back"
+            }
+            Section::Reference => {
+                "`[` / `]` Sections   `/` Filter   `up` / `down` Rows   `y` Copy   `escape` Back"
             }
             Section::Config if !config_values => {
                 "`[` / `]` Sections   `tab` / `shift+tab` Views   `/` Filter   `y` Copy   `escape` Back"

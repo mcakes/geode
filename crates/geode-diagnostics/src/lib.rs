@@ -1,4 +1,4 @@
-//! The diagnostics page: five sections over the shell-owned `Diagnostics`
+//! The diagnostics page: six sections over the shell-owned `Diagnostics`
 //! entity, the log ring, the loaded config, and the frame's requery stats.
 //! Registered by the app as a `PageFactory`; reached from the sidebar, the
 //! palette, the status-bar summary, and `mod+d`.
@@ -44,14 +44,18 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("diagnostics::blur", "Leave the filter"),
     ("diagnostics::sources", "Show sources"),
     ("diagnostics::data", "Show data"),
+    ("diagnostics::reference", "Show reference data"),
     ("diagnostics::config", "Show configuration"),
     ("diagnostics::log", "Show log"),
     ("diagnostics::perf", "Show performance"),
     ("diagnostics::copy", "Copy row details"),
-    ("diagnostics::next_view", "Next configuration view"),
-    ("diagnostics::prev_view", "Previous configuration view"),
+    ("diagnostics::next_view", "Next view"),
+    ("diagnostics::prev_view", "Previous view"),
     ("diagnostics::follow", "Toggle log following"),
-    ("diagnostics::refresh", "Refresh catalog"),
+    (
+        "diagnostics::refresh",
+        "Refresh catalog or poll reference source",
+    ),
     ("diagnostics::expand_all", "Expand all datasets"),
     ("diagnostics::collapse_all", "Collapse all datasets"),
     ("diagnostics::more_levels", "Show one more log level"),
@@ -109,6 +113,7 @@ context = "diagnostics && mode == normal"
 "alt+backspace" = "diagnostics::reset_filters"
 "g s" = "diagnostics::sources"
 "g d" = "diagnostics::data"
+"g r" = "diagnostics::reference"
 "g c" = "diagnostics::config"
 "g l" = "diagnostics::log"
 "g p" = "diagnostics::perf"

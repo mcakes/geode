@@ -1,11 +1,13 @@
 //! Prepared tables: what a section paints, built from its typed rows with
 //! expansion and filtering applied. Pure; `Rc`-shared with the delegate.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::time::SystemTime;
 
 use geode_core::config::Severity;
 use geode_core::log::Level;
+use geode_core::query::ReferenceTable;
 use gpui::SharedString;
 
 use crate::model::{
@@ -13,10 +15,12 @@ use crate::model::{
     health_title,
 };
 
-#[derive(Debug, Clone, Copy)]
+/// Key and name are static for the fixed sections and owned for the
+/// Reference section, whose columns are the dataset's declared names.
+#[derive(Debug, Clone)]
 pub struct ColumnSpec {
-    pub key: &'static str,
-    pub name: &'static str,
+    pub key: Cow<'static, str>,
+    pub name: Cow<'static, str>,
     /// Width in pixels at the design rem (`shell::scale`).
     pub width: f32,
     pub right: bool,
@@ -114,8 +118,8 @@ pub fn widest_column(columns: &[ColumnSpec]) -> usize {
 
 const fn col(key: &'static str, name: &'static str, width: f32) -> ColumnSpec {
     ColumnSpec {
-        key,
-        name,
+        key: Cow::Borrowed(key),
+        name: Cow::Borrowed(name),
         width,
         right: false,
     }
@@ -123,8 +127,8 @@ const fn col(key: &'static str, name: &'static str, width: f32) -> ColumnSpec {
 
 const fn num(key: &'static str, name: &'static str, width: f32) -> ColumnSpec {
     ColumnSpec {
-        key,
-        name,
+        key: Cow::Borrowed(key),
+        name: Cow::Borrowed(name),
         width,
         right: true,
     }
@@ -505,6 +509,58 @@ pub fn log_table(rows: &[LogRow], lost: u64) -> PreparedTable {
     }
 }
 
+/// A NULL reference cell; distinct from an empty string.
+const NULL_TEXT: &str = "—";
+/// Reference width per column at the design rem; the table resizes.
+const REFERENCE_WIDTH: f32 = 120.0;
+
+/// One row per reference row, columns as declared. The row key is the
+/// first column's text, so selection follows a row through refreshes; that
+/// identifies a row whenever the first key column is unique on its own,
+/// which holds for every declared reference dataset today. A composite key
+/// whose first column repeats would share selection between its rows. The
+/// filter matches any cell, case-insensitively.
+pub fn reference_table(table: Option<&ReferenceTable>, filter: &str) -> PreparedTable {
+    let Some(table) = table else {
+        return PreparedTable::empty();
+    };
+    let query = filter.to_lowercase();
+    let text = |c: &Option<String>| c.as_deref().unwrap_or(NULL_TEXT).to_string();
+    let columns = table
+        .columns
+        .iter()
+        .map(|c| ColumnSpec {
+            key: Cow::Owned(c.clone()),
+            name: Cow::Owned(c.clone()),
+            width: REFERENCE_WIDTH,
+            right: false,
+        })
+        .collect();
+    let rows = table
+        .rows
+        .iter()
+        .filter(|r| {
+            query.is_empty()
+                || r.iter()
+                    .flatten()
+                    .any(|c| c.to_lowercase().contains(&query))
+        })
+        .map(|r| PreparedRow {
+            key: r.first().map(text).unwrap_or_default(),
+            kind: RowKind::Plain,
+            cells: r.iter().map(|c| cell(text(c), Tone::Normal)).collect(),
+            detail: table
+                .columns
+                .iter()
+                .zip(r)
+                .map(|(name, c)| SharedString::from(format!("{name}: {}", text(c))))
+                .collect(),
+            tone: Tone::Normal,
+        })
+        .collect();
+    PreparedTable { columns, rows }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,5 +766,37 @@ mod tests {
         let (filtered, since_times) = sources_table(&rows, now, "zzz");
         assert!(filtered.rows.is_empty());
         assert!(since_times.is_empty(), "a filtered-out row has no since");
+    }
+
+    #[test]
+    fn reference_rows_follow_the_declared_columns() {
+        let t = reference_table(Some(&crate::model::tests::ref_table()), "");
+        let names: Vec<&str> = t.columns.iter().map(|c| c.name.as_ref()).collect();
+        assert_eq!(names, vec!["underlying_ref", "currency", "calendar"]);
+        assert_eq!(t.rows.len(), 2);
+        assert_eq!(t.rows[0].key, "SPX");
+        assert_eq!(
+            t.rows[1].cells[1].text.as_ref(),
+            "—",
+            "NULL reads as a dash"
+        );
+        assert_eq!(t.rows[1].detail[1].as_ref(), "currency: —");
+    }
+
+    #[test]
+    fn the_reference_filter_matches_any_cell_case_insensitively() {
+        let t = reference_table(Some(&crate::model::tests::ref_table()), "xeur");
+        assert_eq!(t.rows.len(), 1);
+        assert_eq!(t.rows[0].key, "SX5E");
+        assert!(
+            reference_table(Some(&crate::model::tests::ref_table()), "nothing")
+                .rows
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn no_reference_answer_is_an_empty_table() {
+        assert!(reference_table(None, "").rows.is_empty());
     }
 }

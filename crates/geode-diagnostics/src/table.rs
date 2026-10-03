@@ -3,6 +3,7 @@
 //! row selection through `TableEvent::SelectRow` on the `TableState`; the
 //! delegate only paints.
 
+use std::borrow::Cow;
 use std::rc::Rc;
 
 use geode_shell::fonts;
@@ -106,6 +107,15 @@ impl Default for SectionDelegate {
     }
 }
 
+/// A static column label stays borrowed; only a reference table's declared
+/// names, owned per answer, are copied.
+fn shared(text: Cow<'static, str>) -> SharedString {
+    match text {
+        Cow::Borrowed(s) => SharedString::new_static(s),
+        Cow::Owned(s) => SharedString::from(s),
+    }
+}
+
 impl TableDelegate for SectionDelegate {
     fn render_empty(
         &mut self,
@@ -137,10 +147,10 @@ impl TableDelegate for SectionDelegate {
     }
 
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
-        let spec = self.table.columns[col_ix];
+        let spec = &self.table.columns[col_ix];
         Column {
-            key: SharedString::new_static(spec.key),
-            name: SharedString::new_static(spec.name),
+            key: shared(spec.key.clone()),
+            name: shared(spec.name.clone()),
             align: if spec.right {
                 TextAlign::Right
             } else {

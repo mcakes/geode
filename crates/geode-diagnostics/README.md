@@ -1,6 +1,6 @@
 # geode-diagnostics
 
-The diagnostics page: five sections over the shell-owned `Diagnostics`
+The diagnostics page: six sections over the shell-owned `Diagnostics`
 entity, the log ring, the loaded configuration, and the frame's requery
 statistics, hosted through the shell's page seam. Open it with `mod+d`, the
 sidebar's diagnostics button, the palette's "Diagnostics: Open page" row, or
@@ -15,9 +15,9 @@ The seam it sits on: [pages](../../docs/current/shell.md#pages).
 | Module | Holds |
 |---|---|
 | [`lib`](src/lib.rs) | `DiagnosticsPageFactory`: kind, title, icon, action registration, the default keymap fragment (`diagnostics && mode == normal` for the bare keys, `diagnostics && mode == insert` for Escape), the `mod+d` toggle binding, and the `PageContent` adapter over the page entity. |
-| [`section`](src/section.rs) | The five sections in rail order: names, titles, and cycling. |
-| [`model`](src/model.rs) | Typed rows per section (`SourceRow`, `DatasetRow`, `DiagnosticRow`, `ConfigDoc`, `LogRow`, `PerfModel`), the badges, and the header chips. Pure: explicit `now` and clock inputs, no GPUI, no I/O. |
-| [`prepared`](src/prepared.rs) | `PreparedTable`: the column specs and rows a section paints, with expansion and filtering applied; `cell_at` places a notice row's one cell in the widest column. Pure; `Rc`-shared with the delegate. |
+| [`section`](src/section.rs) | The six sections in rail order (Sources, Data, Reference, Config, Log, Performance): names, titles, and cycling. |
+| [`model`](src/model.rs) | Typed rows per section (`SourceRow`, `DatasetRow`, `DiagnosticRow`, `ConfigDoc`, `LogRow`, `PerfModel`), the badges, the header chips, and `reference_status`, the Reference section's status line for a dataset at the frame's as-of (`Loading` while the stored answer is for another dataset or as-of; display only, it never asks for a read). Pure: explicit `now` and clock inputs, no GPUI, no I/O. |
+| [`prepared`](src/prepared.rs) | `PreparedTable`: the column specs and rows a section paints, with expansion and filtering applied; a `ColumnSpec` names its column with a `Cow`, static for the fixed sections and owned for `reference_table`, whose columns are the dataset's declared names; `cell_at` places a notice row's one cell in the widest column. Pure; `Rc`-shared with the delegate. |
 | [`table`](src/table.rs) | `SectionDelegate`, the one `TableDelegate` for every table section: paints a shared prepared table, scales column widths with the window rem, and formats nothing per paint but a parent row's expander. |
 | [`page`](src/page.rs) | `DiagnosticsPage`: the observers, the selected section, per-section cursors and filters, the expansion sets, the log tail and its filter, the target select, the Levels state, the cached badge and header strings, the ages timer, key dispatch, visibility, serialization, and the frame layout. |
 | [`page_chrome`](src/page_chrome.rs) | The breadcrumb header and Back control, native section buttons with counts, wrapped and scrollable row details with Copy, and the shell-style keyboard hints. |
@@ -45,7 +45,7 @@ paints no input, `/` is consumed and does nothing. Escape in normal mode reaches
 the header's back control through the shell-actions handle. The retired
 `diagnostics::` motion ids are registered as renames (`RENAMED_ACTIONS`).
 
-`g s`, `g d`, `g c`, `g l`, and `g p` jump directly to a section.
+`g s`, `g d`, `g r`, `g c`, `g l`, and `g p` jump directly to a section.
 `tab` / `shift+tab` (and `ctrl+tab` / `ctrl+shift+tab`) step the section's
 views, wrapping; only Config has views (Current issues, History, Effective
 values), and elsewhere the keys are consumed and do nothing. `y` copies the
@@ -60,6 +60,14 @@ Escape over an open popover closes it and keeps the page.
 return focus to navigation. In Log this also restores all levels and targets;
 other sections retain their filters. Toolbar tooltips name each control's
 key; the footer names the section's main keys.
+
+The Reference section sits between Data and Config. Its table builder,
+`reference_table`, lays out one row per stored reference row with the
+dataset's declared columns, NULL cells as `—`, the first column's text as
+the row key, and a case-insensitive filter over every cell. The section is
+not yet wired to reference reads: it shows its filter and the empty state
+"No reference data", and its rail count is the row count of the stored
+reference answer.
 
 Sources filters by name and health; Data by dataset name and generation
 fields (partition/book label, generation ID, source/load time, row count,
@@ -117,7 +125,7 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
 ## Rules this crate pins
 
 - Observers compare only the selected section's inputs: its `DiagVersions`
-  counter, plus the frame as-of for Data, the frame config version for
+  counter, plus the frame as-of for Data and Reference, the frame config version for
   Config, or new ring records for Log. Clock changes and local section,
   filter, or expansion changes also rebuild. A perf tick never walks the
   config documents. Badges and header chips refresh on any counter change
