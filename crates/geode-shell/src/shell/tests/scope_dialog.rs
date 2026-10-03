@@ -588,3 +588,55 @@ fn o_and_s_push_the_saved_chooser_and_the_save_prompt(cx: &mut gpui::TestAppCont
     let domain = shell.read_with(&vcx, |s, _| s.object_dialog.as_ref().map(|d| d.domain));
     assert_eq!(domain, Some(crate::shell::objectdialog::Domain::Scopes));
 }
+
+/// Cursor on term 1 (`delta < 5`), then the lane's expression swapped
+/// without letting the rows refresh, so the row's index now holds a
+/// different term (`desk = 'EQ'`).
+fn on_a_term_that_moved(
+    cx: &mut gpui::TestAppContext,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    vcx.simulate_keystrokes("j j");
+    frame_of(&shell, &vcx).update(&mut vcx, |f, _| {
+        let mut s = f.shared().scope().clone();
+        s.expression = Some(parse_expr("npv > 0 and desk = 'EQ'").unwrap());
+        f.shared_mut().set_scope(s);
+    });
+    (shell, vcx)
+}
+
+fn assert_term_gone_refusal(shell: &Entity<ShellView>, vcx: &mut gpui::VisualTestContext) {
+    assert_eq!(
+        shell.read_with(vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope),
+        "a stale term row must not open its neighbour"
+    );
+    let error = shell.read_with(vcx, |s, _| s.scope_dialog.as_ref().unwrap().error.clone());
+    assert_eq!(
+        error.as_deref(),
+        Some(crate::shell::scope_expr_view::TERM_GONE)
+    );
+    draw(vcx);
+    assert!(
+        vcx.debug_bounds("scope-dialog-error").is_some(),
+        "the refusal paints"
+    );
+}
+
+#[gpui::test]
+fn editing_a_term_that_moved_refuses(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = on_a_term_that_moved(cx);
+    vcx.simulate_keystrokes("enter");
+    assert_term_gone_refusal(&shell, &mut vcx);
+}
+
+#[gpui::test]
+fn naming_a_term_that_moved_refuses(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = on_a_term_that_moved(cx);
+    vcx.simulate_keystrokes("alt-s");
+    assert_term_gone_refusal(&shell, &mut vcx);
+    assert!(
+        shell.read_with(&vcx, |s, _| s.scope_expr_dialog.is_none()),
+        "no name entry opened for the neighbour"
+    );
+}

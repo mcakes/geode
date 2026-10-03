@@ -18338,6 +18338,22 @@ run_mutation "scope dialog: a row double-click acts as enter" \
   geode-shell \
   a_row_double_click_acts_as_enter
 
+# A term row opens its editor only while its index still holds its term.
+run_mutation "scope dialog: editing a moved term refuses" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        .expression_term_is(index, term)' \
+  '        .expression_term_is(index, term) && false' \
+  geode-shell \
+  editing_a_term_that_moved_refuses
+
+# mod+s goes through the same guard, so it never names a neighbour.
+run_mutation "scope dialog: naming a moved term refuses" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    if open_term_row(shell, index, &term, window, cx)' \
+  '    if { let _ = &term; crate::shell::scope_expr_view::open_term(shell, index, window, cx); true }' \
+  geode-shell \
+  naming_a_term_that_moved_refuses
+
 # A claimed key drops the last refusal, so the error names only the last action.
 run_mutation "scope dialog: a key clears the last refusal" \
   crates/geode-shell/src/shell/scopedialog/view.rs \

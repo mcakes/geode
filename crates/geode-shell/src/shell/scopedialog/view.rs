@@ -355,8 +355,8 @@ fn open_cursor_row(shell: &mut ShellView, window: &mut Window, cx: &mut Context<
         RowKind::Dimension { column, .. } => {
             crate::shell::picker::open(shell, Some(column), window, cx)
         }
-        RowKind::Term { index, .. } => {
-            crate::shell::scope_expr_view::open_term(shell, index, window, cx)
+        RowKind::Term { index, term, .. } => {
+            open_term_row(shell, index, &term, window, cx);
         }
         RowKind::Named { name, .. } => crate::shell::objectdialog::render::open_object(
             shell,
@@ -367,6 +367,36 @@ fn open_cursor_row(shell: &mut ShellView, window: &mut Window, cx: &mut Context<
         ),
         RowKind::Text { .. } => enter_text_step(shell, window, cx),
     }
+}
+
+/// Open the expression dialog on the cursor's term, only while term `index`
+/// is still the term the row was derived from. A row derived before the
+/// expression changed would otherwise seed the editor (or the name entry)
+/// with whichever neighbour now holds its index, so it refuses with
+/// `TERM_GONE` instead, as removal does. Returns whether it opened.
+fn open_term_row(
+    shell: &mut ShellView,
+    index: usize,
+    term: &geode_core::scope::Expr,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
+    if !shell
+        .target_frame()
+        .read(cx)
+        .expression_term_is(index, term)
+    {
+        if let Some(state) = shell.scope_dialog.as_mut() {
+            state.error = Some(crate::shell::scope_expr_view::TERM_GONE.into());
+        }
+        // The refusal stays on this screen: re-derive so the paint and the
+        // next key read the lane as it now is.
+        shell.refresh_dialog_rows(cx);
+        cx.notify();
+        return false;
+    }
+    crate::shell::scope_expr_view::open_term(shell, index, window, cx);
+    true
 }
 
 /// The text step; it has no screen yet, so the text row opens nothing.
@@ -380,17 +410,18 @@ fn name_cursor_term(shell: &mut ShellView, window: &mut Window, cx: &mut Context
         .scope_dialog
         .as_ref()
         .and_then(|s| s.cursor_row().cloned());
-    let Some(RowKind::Term { index, .. }) = row.map(|r| r.kind) else {
+    let Some(RowKind::Term { index, term, .. }) = row.map(|r| r.kind) else {
         if let Some(state) = shell.scope_dialog.as_mut() {
             state.error = Some(NAME_ONLY_TERMS.into());
         }
         cx.notify();
         return;
     };
-    crate::shell::scope_expr_view::open_term(shell, index, window, cx);
-    // `open_term` opens nothing when the term is gone; naming then would
-    // land on whatever dialog is on top.
-    if shell.top_kind() == Some(dialog::DialogKind::ScopeExpr) {
+    // A refusal or a term `open_term` could not find opens nothing; naming
+    // then would land on whatever dialog is on top.
+    if open_term_row(shell, index, &term, window, cx)
+        && shell.top_kind() == Some(dialog::DialogKind::ScopeExpr)
+    {
         crate::shell::scope_expr_view::begin_naming(shell, window, cx);
     }
 }
