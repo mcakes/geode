@@ -3032,6 +3032,19 @@ mod tests {
         let fourth = take_work(&mut q).unwrap();
         assert!(matches!(fourth, Work::File(_)));
         assert!(take_work(&mut q).is_none());
+
+        // With no snapshot queued, a series job still goes before a file:
+        // the series/file order holds on its own, not only behind a snapshot.
+        q.items.push(work_item(
+            "b.csv",
+            10,
+            ts("2026-08-30T07:00:00Z"),
+            Priority::Backfill,
+        ));
+        q.series
+            .push_back(series_job("SPX.close", SeriesRows::default()));
+        assert!(matches!(take_work(&mut q).unwrap(), Work::Series(_)));
+        assert!(matches!(take_work(&mut q).unwrap(), Work::File(_)));
     }
 
     // Reference snapshots.

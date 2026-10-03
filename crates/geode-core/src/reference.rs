@@ -346,14 +346,23 @@ mod tests {
     fn unequal_column_lengths_are_refused() {
         let mut t = rows();
         t.columns[2].1 = utf8(&[Some("EUR")]);
-        assert!(t.conform(&ds()).unwrap_err().contains("rows"));
+        let name = t.columns[2].0.clone();
+        assert_eq!(
+            t.conform(&ds()).unwrap_err(),
+            format!("column '{name}' has 1 rows; the first column has 2")
+        );
     }
 
     #[test]
     fn a_non_finite_number_is_refused() {
         let mut t = rows();
-        t.columns[0].1 = RefColumn::F64(vec![Some(f64::NAN), Some(1.0)]);
-        assert!(t.conform(&ds()).unwrap_err().contains("not finite"));
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            t.columns[0].1 = RefColumn::F64(vec![Some(bad), Some(1.0)]);
+            assert!(
+                t.conform(&ds()).unwrap_err().contains("not finite"),
+                "{bad} conformed"
+            );
+        }
     }
 
     #[test]

@@ -7918,6 +7918,55 @@ source_name = "NPV"
         ingest.shutdown();
     }
 
+    /// A poll reports on the discovery lane and a publish on the load lane
+    /// under the dataset. A clean poll after a failed publish leaves the
+    /// source degraded: were polls on the load lane, the clean poll would
+    /// overwrite the publish failure and the source would read healthy.
+    #[test]
+    fn a_clean_poll_leaves_a_failed_publish_degrading_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let (ingest, _rx) = IngestRunner::spawn_channel(store, SchemaSpec::default());
+        let ingest = Arc::new(ingest);
+        let sink: EventSink = Arc::new(|_| true);
+        let health_tracker = Arc::new(HealthTracker::default());
+        let spec = crate::source::SourceSpec {
+            adapter: "fake".to_string(),
+            table: Some("t".to_string()),
+            ..crate::source::SourceSpec::directory("refdb", "u", Vec::new())
+        };
+        let publish_failed = Health::Degraded {
+            reason: "publish failed".into(),
+        };
+        health_tracker.report_load(
+            "refdb",
+            "u",
+            publish_failed.clone(),
+            "u: publish failed".into(),
+        );
+        let outcome = snapshot_outcome_sink(&spec, &ingest, &sink, &health_tracker);
+        outcome(SnapshotOutcome::Failed {
+            reason: "db down".into(),
+        });
+        outcome(SnapshotOutcome::Rows {
+            rows: geode_core::reference::ConformedRows {
+                columns: Vec::new(),
+                rows: 0,
+                extra: Vec::new(),
+                missing: Vec::new(),
+            },
+            received_at: Utc::now(),
+            note: None,
+        });
+        let combined = health_tracker.sources.lock().unwrap()["refdb"].combined();
+        assert_eq!(
+            combined,
+            Some((publish_failed, "u: publish failed".to_string())),
+            "a clean poll must not clear a failed publish"
+        );
+        ingest.shutdown();
+    }
+
     /// A series dataset whose coverage row holds a timestamp past chrono's
     /// range: `from_micros` panics reading it, in the catalog and in a fetch.
     fn out_of_range_coverage_service(

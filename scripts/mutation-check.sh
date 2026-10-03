@@ -4267,6 +4267,7 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
   '    cx.spawn(async move |cx: &mut AsyncApp| {
         let diagnostics = diagnostics_for_drain;
         let catalog_refresh = catalog_refresh_for_drain;
+        let reference_refresh = reference_refresh_for_drain;
         let catalog_window = window;
         let mut last_dropped = 0u64;
         let mut last_refused = 0u64;
@@ -4277,6 +4278,7 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
     cx.spawn(async move |cx: &mut AsyncApp| {
         let diagnostics = diagnostics_for_drain;
         let catalog_refresh = catalog_refresh_for_drain;
+        let reference_refresh = reference_refresh_for_drain;
         let catalog_window = window;
         let mut last_dropped = 0u64;
         let mut last_refused = 0u64;
@@ -6549,16 +6551,21 @@ run_mutation "diagnostics: MIN-3 — request_level re-queues a persist when unch
 
 run_mutation "diagnostics: MIN-4 — unwatch never clears a pending catalog request" \
   crates/geode-shell/src/diagnostics.rs \
-  '    pub fn unwatch(&mut self) {
-        self.watchers = self.watchers.saturating_sub(1);
-        if self.watchers == 0 {
+  '        if self.watchers == 0 {
             self.pending_catalog_request = false;
-        }
-    }' \
-  '    pub fn unwatch(&mut self) {
-        self.watchers = self.watchers.saturating_sub(1);
-    }' \
+            self.pending_reference = None;' \
+  '        if self.watchers == 0 {
+            self.pending_reference = None;' \
   geode-shell unwatch_to_zero_clears_a_pending_catalog_request
+
+# The last unwatch drops a queued reference read too; kept, the bridge
+# still sends a read the closed page asked for.
+run_mutation "diagnostics: unwatch never clears a pending reference request" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            self.pending_catalog_request = false;
+            self.pending_reference = None;' \
+  '            self.pending_catalog_request = false;' \
+  geode-shell unwatching_drops_a_pending_reference_request
 
 run_mutation "diagnostics: MIN-5 — set_catalog keeps a dataset missing from a newer snapshot" \
   crates/geode-shell/src/diagnostics.rs \
@@ -10293,9 +10300,23 @@ run_mutation "catalog: attribute_conflicts ignores a document-level attribute" \
 
 run_mutation "schema/document: an empty key drops the dataset" \
   crates/geode-core/src/schema/mod.rs \
-  '    if ds.key.is_empty() {' \
-  '    if false {' \
+  '        keep = false;
+    }
+
+    if ds.key.is_empty() {' \
+  '        keep = false;
+    }
+
+    if false {' \
   geode-core a_document_dataset_needs_a_non_empty_key_and_axes
+
+run_mutation "schema/reference: an empty key drops the dataset" \
+  crates/geode-core/src/schema/mod.rs \
+  '    let mut keep = true;
+    if ds.key.is_empty() {' \
+  '    let mut keep = true;
+    if false {' \
+  geode-core a_reference_dataset_without_a_key_is_dropped
 
 run_mutation "schema/document: a key column must be a dimension" \
   crates/geode-core/src/schema/mod.rs \
@@ -10333,9 +10354,15 @@ run_mutation "schema/measures: document vocabulary is dropped per column" \
 
 run_mutation "schema/document: a refused dataset is not pushed" \
   crates/geode-core/src/schema/mod.rs \
-  '            if dataset.is_document() && dataset.columns.is_empty() {' \
-  '            if false {' \
+  '            if (dataset.is_document() || dataset.is_reference()) && dataset.columns.is_empty() {' \
+  '            if dataset.is_reference() && dataset.columns.is_empty() {' \
   geode-core a_document_dataset_declares_at_least_one_value
+
+run_mutation "schema/reference: a refused dataset is not pushed" \
+  crates/geode-core/src/schema/mod.rs \
+  '            if (dataset.is_document() || dataset.is_reference()) && dataset.columns.is_empty() {' \
+  '            if dataset.is_document() && dataset.columns.is_empty() {' \
+  geode-core a_reference_dataset_without_a_key_is_dropped
 
 # Document validation retains reserved-column diagnostics. Returning
 # `validate_document(ds)` directly drops earlier errors and lets names
@@ -10568,15 +10595,29 @@ run_mutation "service: poll-now reaches the dataset's snapshot workers" \
 # unreadable reference table behind its last good rows.
 run_mutation "service: a failed snapshot poll degrades its source" \
   crates/geode-data/src/service.rs \
-  '                                        Health::Degraded {
-                                            reason: reason.clone(),
-                                        },
-                                        reason,
-                                        None,' \
-  '                                        Health::Ok,
-                                        reason,
-                                        None,' \
+  '            SnapshotOutcome::Failed { reason } => (
+                Health::Degraded {
+                    reason: reason.clone(),
+                },' \
+  '            SnapshotOutcome::Failed { reason } => (
+                Health::Ok,' \
   geode-data a_failed_snapshot_degrades_the_source_and_keeps_live_rows
+
+# A poll reports on the discovery lane, a publish on the load lane under
+# the dataset. Moved to the load lane, a clean poll overwrites a failed
+# publish and the source reads healthy over a table that never landed.
+run_mutation "service: a snapshot poll reports on the discovery lane" \
+  crates/geode-data/src/service.rs \
+  '        health_tracker.report_discovery_and_emit(
+            &source,
+            health,
+            detail,' \
+  '        health_tracker.report_load_and_emit(
+            &source,
+            &dataset,
+            health,
+            detail,' \
+  geode-data a_clean_poll_leaves_a_failed_publish_degrading_its_source
 
 # ---- Document requests ------------------------------------------------
 #
@@ -11462,8 +11503,8 @@ run_mutation "sources/adapter: a subscribed source needs a document" \
 # source would otherwise sail through silently.
 run_mutation "sources/adapter: a subscribed source needs a document family dataset" \
   crates/geode-core/src/source_config.rs \
-  '            if subscribed && !fetch && !schema.dataset(&dataset).is_some_and(|d| d.is_document()) {' \
-  '            if subscribed && !fetch && schema.dataset(&dataset).is_some_and(|d| d.is_document()) {' \
+  '                && !schema.dataset(&dataset).is_some_and(|d| d.is_document())' \
+  '                && schema.dataset(&dataset).is_some_and(|d| d.is_document())' \
   geode-core a_subscribed_source_on_a_measure_dataset_is_an_error
 
 # `parse_duration`'s `ms` unit: a wrong-VALUE mutation (seconds instead
@@ -17590,30 +17631,15 @@ run_mutation "service: the fetch failure lane key differs from the success key" 
   geode-data \
   a_failed_fetch_is_a_load_lane_failure_keyed_by_the_pair_and_clears_on_success
 
-# `take_work`s order is documents, then series, then files: an
-# interactive fetch must not wait behind a backfill. Mutated to take
-# series only once the file queue has drained, a chart's own request
-# waits for every queued CSV.
+# `take_work`s order is documents, then series, then snapshots, then
+# files: an interactive fetch must not wait behind a backfill. Mutated to
+# take series only once the file queue has drained, a chart's own request
+# waits for every queued CSV. Only the series pop moves; the test's
+# snapshot-free phase catches it on the series/file order alone.
 run_mutation "runner: series jobs are taken after files" \
   crates/geode-data/src/ingest/runner.rs \
-  '    if let Some(job) = q.series.pop_front() {
-        return Some(Work::Series(job));
-    }
-    if let Some(job) = q.references.pop_front() {
-        return Some(Work::Reference(job));
-    }
-    if q.items.is_empty() {
-        return None;
-    }' \
-  '    if let Some(job) = q.references.pop_front() {
-        return Some(Work::Reference(job));
-    }
-    if q.items.is_empty() {
-        if let Some(job) = q.series.pop_front() {
-            return Some(Work::Series(job));
-        }
-        return None;
-    }' \
+  '    if let Some(job) = q.series.pop_front() {' \
+  '    if q.items.is_empty() && let Some(job) = q.series.pop_front() {' \
   geode-data \
   take_work_pops_documents_then_series_then_snapshots_then_files
 
@@ -17682,12 +17708,23 @@ run_mutation "core: a series dataset keeps a declared column" \
 # and no fetch worker exists to answer a chart at all.
 run_mutation "core: a fetch source is classified as subscribed" \
   crates/geode-core/src/source_config.rs \
-  '        } else if schema.dataset(&self.dataset).is_some_and(|d| d.is_series()) {
+  '        } else if family == Some(Family::Series) {
             SourceShape::Fetch' \
   '        } else if false {
             SourceShape::Fetch' \
   geode-core \
-  shape_names_all_three
+  shape_names_all_four
+
+# A source over a reference dataset is `Snapshot`. Mutated, it falls to
+# `Subscribed` and the service opens a subscription for a table query.
+run_mutation "core: a snapshot source is classified as subscribed" \
+  crates/geode-core/src/source_config.rs \
+  '        } else if family == Some(Family::Reference) {
+            SourceShape::Snapshot' \
+  '        } else if false {
+            SourceShape::Snapshot' \
+  geode-core \
+  shape_names_all_four
 
 # The empty-tree hint opens the tile picker independently of the placeholder
 # path, so a session with no tiles still has an add action.
@@ -20757,8 +20794,8 @@ run_mutation "catalog refresh: a matching completion releases the slot" \
 
 run_mutation "catalog refresh: a foreign recipient cannot release the slot" \
   crates/geode-app/src/bridge.rs \
-  'outcome.key != DIAGNOSTICS_KEY' \
-  'false' \
+  'outcome.key != DIAGNOSTICS_KEY || tag != outcome.tag' \
+  'false || tag != outcome.tag' \
   geode-app catalog_bursts_keep_one_read_and_one_follow_up
 
 run_mutation "catalog refresh: unchanged results release pending refreshes" \
@@ -33076,6 +33113,82 @@ run_mutation "reference refusal: an accepted poll clears nothing" \
   '                        Ok(()) => d.note_poll_submitted(&dataset),' \
   '                        Ok(()) => false,' \
   geode-app a_busy_handle_refuses_a_poll_on_the_page
+
+# ---- reference data
+#
+# Conform is the one gate between a source's rows and a published
+# generation; each refusal leaves the live table as it was.
+
+# Keys identify rows. Without the duplicate check two rows share a key and
+# the published table answers a lookup ambiguously.
+run_mutation "reference conform: a duplicate key is accepted" \
+  crates/geode-core/src/reference.rs \
+  '        if let Some(w) = order.windows(2).find(|w| keys[w[0]] == keys[w[1]]) {' \
+  '        if let Some(w) = None::<&[usize]> {' \
+  geode-core a_duplicate_key_is_refused
+
+# A missing optional column reads NULL; a missing key column cannot, since
+# NULL keys are refused and the rows would be unaddressable.
+run_mutation "reference conform: a missing key column reads NULL" \
+  crates/geode-core/src/reference.rs \
+  '                None if ds.key.contains(&spec.name) => {' \
+  '                None if false => {' \
+  geode-core a_missing_key_column_is_refused
+
+# An infinity is as unusable as a NaN downstream; checking NaN alone
+# publishes it.
+run_mutation "reference conform: an infinity is accepted" \
+  crates/geode-core/src/reference.rs \
+  '                        && let Some(i) = v.iter().position(|x| x.is_some_and(|x| !x.is_finite()))' \
+  '                        && let Some(i) = v.iter().position(|x| x.is_some_and(|x| x.is_nan()))' \
+  geode-core a_non_finite_number_is_refused
+
+# A zero interval would reread the whole table in a tight loop.
+run_mutation "snapshot config: a zero poll interval is kept" \
+  crates/geode-core/src/source_config.rs \
+  '                let poll = if poll.is_zero() {' \
+  '                let poll = if false {' \
+  geode-core a_zero_snapshot_poll_interval_warns_and_uses_the_default
+
+# Reference reads are demand: with no page watching, a queued read is a
+# query nobody will look at.
+run_mutation "reference request: a hidden page queues a read" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.watchers > 0 {
+            self.pending_reference = Some(dataset.to_string());' \
+  '        if true {
+            self.pending_reference = Some(dataset.to_string());' \
+  geode-shell a_reference_request_needs_a_watcher
+
+# The page asks for the table only while Reference is the shown section;
+# otherwise every reference publish reads a table no one is looking at.
+run_mutation "diagnostics reference: a read is asked off the Reference section" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if !self.visible || self.section != Section::Reference {
+            return;
+        }
+        let Some(dataset) = self.reference_dataset(cx) else {' \
+  '        if !self.visible {
+            return;
+        }
+        let Some(dataset) = self.reference_dataset(cx) else {' \
+  geode-diagnostics reference_requests_only_while_the_section_is_shown
+
+# A snapshot source watches no paths; its browse line names its table and
+# the snapshot priority default, not `0 paths · latest_risk`.
+run_mutation "sources: a snapshot source summary reads as a directory" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '    if is_snapshot(table, &schema_of(config)) {' \
+  '    if false {' \
+  geode-shell a_snapshot_source_summary_names_its_table_and_snapshot_priority
+
+# A snapshot source's edit starts from the object's own table, so a key
+# the dialog shows no row for (a hand-written `topics`) survives the save.
+run_mutation "sources: a snapshot source edit drops the keys it has no row for" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '    let mut table = super::toml_table_to_edit(&draft.source);' \
+  '    let mut table = toml_edit::Table::new();' \
+  geode-shell editing_the_table_row_writes_table
 
 
 run_mutation "keystroke parser: an uppercase letter parses as the lowercase key" \
