@@ -102,9 +102,14 @@ impl GridModel {
         self.seed = None;
     }
 
-    /// The cursor a session saves: a seed still waiting, else the cursor's.
+    /// The cursor a session saves: a seed still waiting, else a put
+    /// cursor's row the filter hides (the row the trader chose, not the
+    /// one the cursor rests on meanwhile), else the cursor's.
     pub fn saved_cursor(&self) -> Option<&str> {
-        self.seed.as_deref().or(self.cursor_source.as_deref())
+        self.seed
+            .as_deref()
+            .or(self.hidden.as_deref())
+            .or(self.cursor_source.as_deref())
     }
 
     /// Replace the rows. The cursor stays on its source value, else falls
@@ -114,6 +119,26 @@ impl GridModel {
         self.rows = rows;
         self.reorder();
         self.refilter();
+    }
+
+    /// Replace the rows after a label verb (an edit, clear, paste, undo or
+    /// redo) changed them. The cursor keeps its shown index rather than
+    /// follow its row: the row a verb labelled moves in the default order,
+    /// and the trader working down the unclassified rows wants the next one
+    /// under the cursor. The cursor is put on whatever row now holds that
+    /// index. A selection ends, as the verb consumed it, and a seed still
+    /// waiting is dropped: the trader has acted where the cursor is.
+    pub fn relabelled(&mut self, rows: Vec<ClassRow>) {
+        let at = self.cursor;
+        self.anchor = None;
+        self.seed = None;
+        self.hidden = None;
+        self.set_rows(rows);
+        if let Some(at) = at
+            && !self.visible.is_empty()
+        {
+            self.place(at.min(self.visible.len() - 1));
+        }
     }
 
     /// Narrow to rows whose source or label fuzzy-match `query`, in sort
@@ -307,10 +332,12 @@ impl GridModel {
                 self.marks.push(m);
             }
         }
-        if self
-            .anchor
-            .as_deref()
-            .is_some_and(|a| self.position(a).is_none())
+        // A selection whose anchor or cursor row is no longer shown ends:
+        // the cursor would fall to a neighbour, and the span re-resolved
+        // to it would cover rows the trader never chose.
+        let lost = |s: Option<&str>| s.is_none_or(|s| self.position(s).is_none());
+        if self.anchor.is_some()
+            && (lost(self.anchor.as_deref()) || lost(self.cursor_source.as_deref()))
         {
             self.anchor = None;
         }
@@ -656,6 +683,99 @@ mod tests {
         ]);
         g.set_filter("");
         assert_eq!(g.cursor_source(), Some("AC"));
+    }
+
+    /// After a label verb the cursor keeps its shown index, whatever put
+    /// it there: labelling the top unclassified row moves that row away
+    /// and leaves the cursor on the next one.
+    #[test]
+    fn a_relabel_rebuild_keeps_the_cursor_index_even_when_put() {
+        let mut g = GridModel::new();
+        g.set_rows(vec![
+            row("A", None, Some(3)),
+            row("B", None, Some(2)),
+            row("C", Some("X"), Some(1)),
+        ]);
+        g.move_cursor(down(1), false);
+        g.move_cursor(
+            Motion::Rows {
+                by: -1,
+                counted: false,
+            },
+            false,
+        );
+        assert_eq!(g.cursor_source(), Some("A"));
+        // A is labelled: the default order moves it below B.
+        g.relabelled(vec![
+            row("B", None, Some(2)),
+            row("A", Some("X"), Some(3)),
+            row("C", Some("X"), Some(1)),
+        ]);
+        assert_eq!(g.cursor(), Some(0));
+        assert_eq!(g.cursor_source(), Some("B"));
+        // And the cursor is put there: a later rebuild follows B.
+        g.set_rows(vec![
+            row("Z", None, Some(9)),
+            row("B", None, Some(2)),
+            row("A", Some("X"), Some(3)),
+        ]);
+        assert_eq!(g.cursor_source(), Some("B"));
+    }
+
+    /// A label verb over a selection ends it: the rows it labelled move,
+    /// and a span re-resolved across the reorder would cover others.
+    #[test]
+    fn a_relabel_rebuild_ends_a_selection_and_drops_a_waiting_seed() {
+        let mut g = GridModel::new();
+        g.seed_cursor("Q".into());
+        g.set_rows(vec![row("A", None, Some(2)), row("B", None, Some(1))]);
+        g.start_selection();
+        g.move_cursor(down(1), true);
+        g.relabelled(vec![
+            row("A", Some("X"), Some(2)),
+            row("B", Some("X"), Some(1)),
+        ]);
+        assert_eq!(g.selected(), None);
+        assert_eq!(g.cursor(), Some(1));
+        assert_eq!(g.saved_cursor(), Some("B"), "the seed is gone");
+    }
+
+    /// A rebuild that removes the cursor's row while a selection is live
+    /// ends the selection: the cursor falls to a neighbour, and the span
+    /// from the anchor to it would cover rows nobody chose.
+    #[test]
+    fn a_rebuild_removing_the_cursor_row_ends_a_selection() {
+        let mut g = GridModel::new();
+        g.set_rows(vec![
+            row("A", None, Some(3)),
+            row("B", None, Some(2)),
+            row("C", None, Some(1)),
+        ]);
+        g.start_selection();
+        g.move_cursor(down(1), true);
+        assert_eq!(g.targets(), ["A", "B"]);
+        g.set_rows(vec![row("A", None, Some(3)), row("C", None, Some(1))]);
+        assert_eq!(g.selected(), None);
+        assert_eq!(g.targets(), ["C"]);
+    }
+
+    /// The session saves a seed still waiting, then a put cursor's row the
+    /// filter hides, then the cursor's own row.
+    #[test]
+    fn the_saved_cursor_prefers_seed_then_hidden_then_cursor() {
+        let mut g = GridModel::new();
+        g.set_rows(vec![row("AB", None, Some(2)), row("XY", None, Some(1))]);
+        g.move_cursor(Motion::Bottom(None), false);
+        g.set_filter("a");
+        assert_eq!(g.cursor_source(), Some("AB"));
+        assert_eq!(g.saved_cursor(), Some("XY"), "the hidden row");
+        g.seed_cursor("Q".into());
+        assert_eq!(g.saved_cursor(), Some("Q"), "a waiting seed first");
+        g.forget_seed();
+        g.set_filter("");
+        assert_eq!(g.saved_cursor(), Some("XY"));
+        g.move_cursor(Motion::Top(None), false);
+        assert_eq!(g.saved_cursor(), Some("AB"));
     }
 
     #[test]

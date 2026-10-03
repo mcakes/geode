@@ -49,6 +49,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     // fragment binds them and the palette lists them.
     ("classifications::commit", "Commit"),
     ("classifications::cancel", "Cancel"),
+    ("classifications::choice_up", "Label: previous"),
+    ("classifications::choice_down", "Label: next"),
     (
         "classifications::visual_rows",
         "Classification: Select rows",
@@ -72,6 +74,10 @@ pub(crate) fn action_title(id: &str) -> &'static str {
 /// The visual block comes before the normal one: a menu or tooltip hint
 /// names an action's last live binding, and the menus open from normal
 /// mode.
+///
+/// While the label editor is open the tile is in `insert` mode: `up` and
+/// `down` move the typeahead's highlight, and no bare letter is bound, so
+/// typing reaches the field.
 ///
 /// While a menu is up the tile publishes `tilelist`, so the shell's shared
 /// `j`/`k` and arrows step its rows; only picking and closing are here.
@@ -106,6 +112,8 @@ context = "classifications && mode == insert"
 [bindings.keys]
 "enter" = "classifications::commit"
 "escape" = "classifications::cancel"
+"up" = "classifications::choice_up"
+"down" = "classifications::choice_down"
 
 [[bindings]]
 context = "classifications && mode == menu"
@@ -193,12 +201,17 @@ impl TileContent for ClassificationsContent {
         }
     }
 
+    /// The label editor's field, while it owns window focus.
+    fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+        self.tile.read(cx).holds_focus(window, cx)
+    }
+
     fn set_visible(&self, visible: bool, cx: &mut App) {
         self.tile.update(cx, |t, _| t.set_visible(visible))
     }
 
     fn closed(&self, cx: &mut App) {
-        self.tile.update(cx, |t, _| t.closed())
+        self.tile.update(cx, |t, cx| t.closed(cx))
     }
 
     fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App) {
@@ -338,7 +351,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 22);
+        assert_eq!(count, 24);
         // The config-level verbs are reached from the palette and the menu.
         for unbound in ["new", "rename", "delete", "revert"] {
             assert!(

@@ -15,34 +15,42 @@
 //! whenever the configuration, the values, the filter or the sort change,
 //! never in render.
 
+mod editor;
 mod header;
 mod table;
 
 use std::rc::Rc;
 use std::sync::Arc;
 
-use geode_core::classification;
+use geode_core::classification::{self, validate::validate_source};
+use geode_core::config::DIMENSIONS_DOC;
+use geode_core::dimensions::DerivedDimension;
 use geode_core::query::{AsOf, DistinctOutcome, DistinctParams, QueryKey};
 use geode_core::scope::Scope;
 use geode_core::sort::SortOrder;
 use geode_data::{DataHandle, Refusal};
 use geode_shell::actions::ActionId;
-use geode_shell::frame::FrameRef;
+use geode_shell::frame::{ConfigEdit, FrameRef, TileNotice};
 use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
+use geode_shell::vimnav::NavCommand;
+use geode_tile::edit::EditCaret;
 use geode_tile::header::{HEADER_HEIGHT, Mode, link_chips};
 use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, MenuPick, Row};
 use geode_tile::notice::Notice;
 use gpui::prelude::*;
-use gpui::{Context, Entity, SharedString, Window, div};
+use gpui::{AnyWindowHandle, App, Context, Entity, Focusable as _, SharedString, Window, div};
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, v_flex};
 
 use crate::content::{ClassificationsConfig, Shared, action_title};
-use crate::core::grid::GridModel;
+use crate::core::grid::{GridModel, label_text};
+use crate::core::history::History;
 use crate::core::session::{self, SortCol, State};
+use editor::{EditorPaint, LabelEditor};
 use header::HeaderModel;
 use table::{GridDelegate, Prepared, RowPressed, SortClicked};
 
@@ -75,6 +83,42 @@ impl MenuPick for Pick {
 
 const NEW_ACTION: &str = "classifications::new";
 const REFRESH_ACTION: &str = "classifications::refresh";
+
+/// The switcher's refusal while there is nothing to list.
+const NOTHING_TO_SWITCH: &str = "no classifications to switch to";
+
+/// The header's notices, by how long each lives. None stays for good: a
+/// notice that outlived its cause would read as a standing fault.
+#[derive(Default)]
+struct Notices {
+    /// What the session restore dropped. Cleared by the trader's first
+    /// action in the tile (a key or a press): by then it has been seen,
+    /// and the restore is over.
+    restore: Vec<String>,
+    /// The switcher refused with nothing to list. Cleared once a
+    /// configuration defines something to switch to.
+    nothing_to_switch: bool,
+    /// What the last label verb, or the shell about its write, said: a
+    /// fork, a refusal, rows skipped by undo, a disabled menu row. Cleared
+    /// when the next verb starts and when another classification is shown.
+    outcome: Vec<Notice>,
+}
+
+impl Notices {
+    fn outcome(&mut self, notice: Notice) {
+        if !self.outcome.contains(&notice) {
+            self.outcome.push(notice);
+        }
+    }
+}
+
+/// A label write: give these sources this label (`None` clears), or replay
+/// the history one step.
+enum Write {
+    Assign(Vec<String>, Option<String>),
+    Undo,
+    Redo,
+}
 
 /// Prepared paint input.
 #[derive(Default)]
@@ -121,8 +165,23 @@ pub struct ClassificationsTile {
     chords: Arc<Vec<Binding>>,
     stack: Option<StackHandle>,
     close: Option<CloseHandle>,
-    /// Restore and refusal notices, painted in the header's cluster.
-    notices: Vec<String>,
+    /// Painted in the header's cluster.
+    notices: Notices,
+    /// The shown classification's label history and its optimistic edit.
+    history: History,
+    /// The open label editor; the tile is in insert mode while it is.
+    editor: Option<LabelEditor>,
+    /// The window the editor opened in, to blur its field where no window
+    /// is at hand (a reload removing the classification, a close).
+    editor_window: Option<AnyWindowHandle>,
+    /// The label `y y` copied; `Some(None)` copied an unclassified row.
+    register: Option<Option<String>>,
+    /// Whether a configuration has been settled yet: the first one is
+    /// the tile's construction, as far as the switcher is concerned.
+    settled: bool,
+    /// Whether the last settle showed a classification, so the next can
+    /// tell a classification going away from one never shown.
+    was_shown: bool,
     chrome: Chrome,
     menu_selector: SharedString,
     menu_tip: SharedString,
@@ -142,7 +201,7 @@ impl ClassificationsTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> ClassificationsTile {
-        let (state, notices) = restored.map(session::from_table).unwrap_or_default();
+        let (state, restore) = restored.map(session::from_table).unwrap_or_default();
         let mut grid = GridModel::new();
         grid.set_sort(state.sort);
         // A restored cursor lands on its source once the rows arrive.
@@ -188,6 +247,10 @@ impl ClassificationsTile {
             }
         })
         .detach();
+        // The shell tells the tile about its config writes (a fork, a
+        // refusal) by posting on the frame and notifying it.
+        cx.observe(frame.entity(), |this, _, cx| this.frame_changed(cx))
+            .detach();
         let mut tile = ClassificationsTile {
             id,
             frame,
@@ -206,7 +269,16 @@ impl ClassificationsTile {
             chords: menu::live_bindings(cx),
             stack: None,
             close: None,
-            notices,
+            notices: Notices {
+                restore,
+                ..Notices::default()
+            },
+            history: History::default(),
+            editor: None,
+            editor_window: None,
+            register: None,
+            settled: false,
+            was_shown: false,
             chrome: Chrome::default(),
             menu_selector: format!("classifications-menu-button-{}", id.0).into(),
             menu_tip: format!("tip-classifications-menu-{}", id.0).into(),
@@ -218,25 +290,44 @@ impl ClassificationsTile {
         tile
     }
 
-    /// The factory stored a new configuration snapshot.
+    /// The factory stored a new configuration snapshot. It carries the
+    /// optimistic edit (or a revert, or someone else's change): the history
+    /// drops its pending copy and the rows are rebuilt from the
+    /// configuration's object.
     pub fn config_changed(&mut self, cx: &mut Context<Self>) {
+        self.history.reloaded();
         self.settle(cx);
         cx.notify();
     }
 
-    /// Bring the tile in line with the snapshot: a tile showing nothing
-    /// (new, or its classification gone) offers the switcher at once when
-    /// there is something to pick; an open switcher takes the new names.
-    /// The values are asked for again when the shown classification or its
-    /// source column changed, and the rows rebuilt from the map either way.
+    /// Bring the tile in line with the snapshot: the switcher opens on the
+    /// first snapshot when nothing is shown, and again when the shown
+    /// classification goes away, never on a reload that leaves a
+    /// nothing-shown tile as it was (the trader closed the switcher). An
+    /// open switcher takes the new names. The values are asked for again
+    /// when the shown classification or its source column changed, and the
+    /// rows rebuilt from the map either way.
     fn settle(&mut self, cx: &mut Context<Self>) {
-        self.settle_menu();
+        let shown = self.shown().is_some();
+        if !shown {
+            // Its history means nothing now, and its editor writes nowhere.
+            self.history.forget();
+            self.release_editor(cx);
+        }
+        self.settle_menu(shown);
+        if self.notices.nothing_to_switch && !self.switch_rows().is_empty() {
+            self.notices.nothing_to_switch = false;
+        }
         self.ask_values(false);
-        self.rebuild_rows(cx);
+        self.rebuild_rows(false, cx);
     }
 
-    fn settle_menu(&mut self) {
-        let shown = self.shown().is_some();
+    fn settle_menu(&mut self, shown: bool) {
+        let configured = self.shared.config.borrow().is_some();
+        let first = configured && !self.settled;
+        let gone = self.was_shown && !shown;
+        self.settled |= configured;
+        self.was_shown = shown;
         match self.menu.as_ref().map(|(k, _)| *k) {
             Some(MenuKind::Switch) => {
                 let rows = self.switch_rows();
@@ -246,7 +337,7 @@ impl ClassificationsTile {
                     m.replace_rows(rows, &self.chords);
                 }
             }
-            _ if !shown => {
+            _ if !shown && (first || gone) => {
                 let rows = self.switch_rows();
                 if !rows.is_empty() {
                     self.menu = Some((MenuKind::Switch, Menu::new(rows, &self.chords)));
@@ -254,6 +345,37 @@ impl ClassificationsTile {
             }
             _ => {}
         }
+    }
+
+    /// The frame notified: take what the shell said about this tile's
+    /// config writes. A fork is news; a refusal means the optimistic edit
+    /// never landed, so the rows go back to the configuration's object.
+    fn frame_changed(&mut self, cx: &mut Context<Self>) {
+        let id = self.id;
+        let told = self
+            .frame
+            .entity()
+            .update(cx, |f, _| f.take_tile_notices(id));
+        if told.is_empty() {
+            return;
+        }
+        let mut refused = false;
+        for notice in told {
+            match notice {
+                TileNotice::Forked(text) => self.notices.outcome(Notice::status(text)),
+                TileNotice::Refused(text) => {
+                    self.notices.outcome(Notice::danger(text));
+                    refused = true;
+                }
+            }
+        }
+        if refused {
+            self.history.reloaded();
+            self.rebuild_rows(false, cx);
+        } else {
+            self.rebuild_chrome();
+        }
+        cx.notify();
     }
 
     /// The shown classification's name and source column.
@@ -322,7 +444,7 @@ impl ClassificationsTile {
                 false
             }
         };
-        self.rebuild_rows(cx);
+        self.rebuild_rows(false, cx);
         // A restored cursor the values did not hold has nowhere left to
         // arrive from. A failed read is not that answer: `R` may still
         // bring its row.
@@ -332,9 +454,11 @@ impl ClassificationsTile {
         cx.notify();
     }
 
-    /// Rebuild the grid's rows from the shown classification's map and the
-    /// observed values, then everything painted from them.
-    fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
+    /// Rebuild the grid's rows from the shown classification's map (the
+    /// history's pending edit while one waits for its reload) and the
+    /// observed values, then everything painted from them. `relabelled`
+    /// after a label verb: the cursor keeps its shown index.
+    fn rebuild_rows(&mut self, relabelled: bool, cx: &mut Context<Self>) {
         let rows = {
             let config = self.shared.config.borrow();
             let dim = self
@@ -342,10 +466,14 @@ impl ClassificationsTile {
                 .name
                 .as_deref()
                 .and_then(|n| config.as_ref()?.dims.get(n));
-            dim.map(|d| classification::rows(d, &self.observed))
+            dim.map(|d| classification::rows(self.history.current(d), &self.observed))
                 .unwrap_or_default()
         };
-        self.grid.set_rows(rows);
+        if relabelled {
+            self.grid.relabelled(rows);
+        } else {
+            self.grid.set_rows(rows);
+        }
         self.rebuild_chrome();
         self.sync_table(true, cx);
     }
@@ -375,9 +503,11 @@ impl ClassificationsTile {
         let selected = self.grid.selected();
         let sort = self.grid.sort();
         let cursor = self.grid.cursor();
+        let editor = self.editor_paint(cx);
         let refreshed = self.table.update(cx, |t, cx| {
             let d = t.delegate_mut();
             d.set_selected(selected);
+            d.set_editor(editor);
             // The table reads headings and sort marks only on a refresh,
             // which also re-lays every column: refresh only when one of
             // them changed, never for a filter keystroke or new values.
@@ -403,6 +533,28 @@ impl ClassificationsTile {
         }
         #[cfg(not(test))]
         let _ = refreshed;
+    }
+
+    /// The open editor as the delegate paints it, on the cursor's row.
+    fn editor_paint(&self, cx: &Context<Self>) -> Option<EditorPaint> {
+        let e = self.editor.as_ref()?;
+        Some(EditorPaint {
+            row: self.grid.cursor()?,
+            input: e.input.clone(),
+            choice: Rc::new(editor::choice_paint(&e.list)),
+            tile: cx.weak_entity(),
+            tile_id: self.id.0,
+        })
+    }
+
+    /// Mirror the editor alone into the delegate: a keystroke in the field
+    /// re-ranks the list without touching the rows.
+    fn sync_editor(&mut self, cx: &mut Context<Self>) {
+        let editor = self.editor_paint(cx);
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().set_editor(editor);
+            cx.notify();
+        });
     }
 
     fn rebuild_chrome(&mut self) {
@@ -431,11 +583,17 @@ impl ClassificationsTile {
             }
             (None, None) => Some(SharedString::new_static("Pick a classification.")),
         };
-        self.chrome.notices = self
-            .notices
+        let n = &self.notices;
+        self.chrome.notices = n
+            .restore
             .iter()
             .cloned()
             .map(Notice::danger)
+            .chain(
+                n.nothing_to_switch
+                    .then(|| Notice::danger(NOTHING_TO_SWITCH)),
+            )
+            .chain(n.outcome.iter().cloned())
             .chain(self.values_notice.iter().cloned().map(Notice::warning))
             .collect();
     }
@@ -490,7 +648,8 @@ impl ClassificationsTile {
             };
             if rows.is_empty() {
                 self.menu = None;
-                self.notice("no classifications to switch to".into());
+                self.notices.nothing_to_switch = true;
+                self.rebuild_chrome();
             } else {
                 // The switcher opens on the row in force.
                 let at = rows
@@ -508,16 +667,9 @@ impl ClassificationsTile {
         }
     }
 
-    fn notice(&mut self, text: String) {
-        if !self.notices.contains(&text) {
-            self.notices.push(text);
-            self.rebuild_chrome();
-        }
-    }
-
-    /// Show `name`. The cursor, the filter and a selection belonged to the
-    /// previous classification's values, so they are dropped; the sort is
-    /// the tile's and stays.
+    /// Show `name`. The cursor, the filter, a selection and the label
+    /// history belonged to the previous classification, so they are
+    /// dropped; the sort is the tile's and stays.
     fn show(&mut self, name: &str, cx: &mut Context<Self>) {
         if self.state.name.as_deref() != Some(name) {
             self.state.name = Some(name.to_string());
@@ -525,16 +677,253 @@ impl ClassificationsTile {
             self.grid = GridModel::new();
             self.grid.set_sort(self.state.sort);
             self.find_entry = None;
+            self.history.forget();
+            self.notices.outcome.clear();
         }
+        self.was_shown = self.shown().is_some();
         self.ask_values(false);
-        self.rebuild_rows(cx);
+        self.rebuild_rows(false, cx);
         cx.notify();
+    }
+
+    /// The configuration's object for the shown classification.
+    fn config_dim(&self) -> Option<DerivedDimension> {
+        let name = self.state.name.as_deref()?;
+        let config = self.shared.config.borrow();
+        config.as_ref()?.dims.get(name).cloned()
+    }
+
+    /// The label of the cursor's row, trimmed; `None` when unclassified.
+    /// The outer `None`: no cursor.
+    fn cursor_label(&self) -> Option<Option<String>> {
+        let at = self.grid.cursor()?;
+        let row = self.grid.row(self.grid.visible()[at]);
+        Some(label_text(row).map(str::to_string))
+    }
+
+    /// Write one label change through the config door: validated, recorded
+    /// in the history, queued whole-object, and shown at once (the pending
+    /// edit) ahead of the reload that carries it. A classification whose
+    /// source column is not one a classification may map (a hand-written
+    /// definition) is never written: the door would write it even when the
+    /// reload then rejected it.
+    fn write(&mut self, write: Write, cx: &mut Context<Self>) {
+        self.notices.outcome.clear();
+        let Some(config_dim) = self.config_dim() else {
+            return;
+        };
+        let checked = {
+            let config = self.shared.config.borrow();
+            let config = config.as_ref().expect("config_dim found it");
+            validate_source(&config_dim.from, &config.schema, &config.dims)
+        };
+        if let Err(why) = checked {
+            self.notices
+                .outcome(Notice::danger(format!("not saved: {why}")));
+            self.rebuild_chrome();
+            cx.notify();
+            return;
+        }
+        let before = self.history.current(&config_dim).clone();
+        let done = match write {
+            Write::Assign(sources, label) => self
+                .history
+                .apply(&config_dim, &sources, label.as_deref())
+                .map(|next| (next, Vec::new())),
+            Write::Undo => self.history.undo(&config_dim).or_else(|| {
+                self.notices.outcome(Notice::status("nothing to undo"));
+                None
+            }),
+            Write::Redo => self.history.redo(&config_dim).or_else(|| {
+                self.notices.outcome(Notice::status("nothing to redo"));
+                None
+            }),
+        };
+        if let Some((next, skipped)) = done {
+            match skipped.len() {
+                0 => {}
+                1 => self
+                    .notices
+                    .outcome(Notice::warning("1 row changed elsewhere was left as it is")),
+                n => self.notices.outcome(Notice::warning(format!(
+                    "{n} rows changed elsewhere were left as they are"
+                ))),
+            }
+            // A replay that skipped every row changes nothing to write.
+            if next != before {
+                self.frame.queue_config_edits(
+                    vec![ConfigEdit {
+                        doc: DIMENSIONS_DOC,
+                        object: config_dim.name.clone(),
+                        value: Some(classification::to_toml(&next)),
+                        origin: None,
+                    }],
+                    cx,
+                );
+            }
+        }
+        self.rebuild_rows(true, cx);
+        cx.notify();
+    }
+
+    /// `enter`/`c`: open the label editor over the verb's targets,
+    /// prefilled with their label when they all share one, the text
+    /// selected so typing replaces it.
+    fn open_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.grid.targets();
+        if targets.is_empty() {
+            return;
+        }
+        let Some(config_dim) = self.config_dim() else {
+            return;
+        };
+        let dim = self.history.current(&config_dim);
+        let labels = classification::labels(dim);
+        let prefill = editor::prefill(targets.iter().map(|s| {
+            dim.values
+                .get(s)
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+        }))
+        .map(str::to_string);
+        let input = cx.new(|cx| InputState::new(window, cx));
+        input.update(cx, |s, cx| {
+            EditCaret::Select.seed(s, prefill.clone().unwrap_or_default(), window, cx)
+        });
+        // Every keystroke re-ranks; typing after a moved highlight makes
+        // it a guess again. The subscription dies with the field.
+        cx.subscribe_in(&input, window, |this, input, event: &InputEvent, _, cx| {
+            if let InputEvent::Change = event {
+                let query = input.read(cx).value().to_string();
+                let changed = match &mut this.editor {
+                    Some(e) if &e.input == input => {
+                        let changed = e.list.set_query(&query);
+                        if changed {
+                            e.moved = false;
+                        }
+                        changed
+                    }
+                    _ => false,
+                };
+                if changed {
+                    this.sync_editor(cx);
+                }
+            }
+        })
+        .detach();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        self.editor = Some(LabelEditor::new(input, labels, prefill.as_deref(), targets));
+        self.editor_window = Some(window.window_handle());
+        self.sync_editor(cx);
+        cx.notify();
+    }
+
+    /// `enter` in the editor: close it and write what the commit rule
+    /// picks (`editor::commit_value`). The text is re-read: `set_value`
+    /// emits no change event.
+    fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut e) = self.editor.take() else {
+            return;
+        };
+        let text = e.input.read(cx).value().to_string();
+        let label = e.commit(&text);
+        let targets = std::mem::take(&mut e.targets);
+        self.drop_editor(e, window, cx);
+        self.write(Write::Assign(targets, label), cx);
+    }
+
+    /// Close the editor with nothing written: `escape`, a press outside its
+    /// list, any other verb.
+    pub(crate) fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(e) = self.editor.take() {
+            self.drop_editor(e, window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Blur the field if it owns focus before it is dropped: otherwise the
+    /// shell cannot restore focus once the field is gone.
+    fn drop_editor(&mut self, e: LabelEditor, window: &mut Window, cx: &mut Context<Self>) {
+        if e.input.read(cx).focus_handle(cx).is_focused(window) {
+            window.blur(cx);
+        }
+        drop(e);
+        self.sync_editor(cx);
+    }
+
+    /// Drop the editor where no window is at hand, blurring it later
+    /// through the window it opened in if it still owns focus (a newer
+    /// field is never blurred).
+    fn release_editor(&mut self, cx: &mut App) {
+        let Some(e) = self.editor.take() else {
+            return;
+        };
+        let focus = e.input.read(cx).focus_handle(cx);
+        drop(e);
+        if let Some(handle) = self.editor_window {
+            App::defer(cx, move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    if focus.is_focused(window) {
+                        window.blur(cx);
+                    }
+                });
+            });
+        }
+    }
+
+    /// `up`/`down` in the editor move the highlight: a choice now, which
+    /// `enter` takes whatever is typed.
+    fn choice_step(&mut self, delta: i64, cx: &mut Context<Self>) {
+        if let Some(e) = self.editor.as_mut() {
+            e.list.nav(NavCommand::Move(delta));
+            e.moved = true;
+            self.sync_editor(cx);
+        }
+    }
+
+    /// Hover lights a list row without making it a choice: a pointer
+    /// passing over the list must not change what `enter` writes.
+    pub(crate) fn choice_hover(&mut self, row: usize, cx: &mut Context<Self>) {
+        let changed = self
+            .editor
+            .as_mut()
+            .is_some_and(|e| e.list.highlighted() != row && e.list.set_highlighted(row));
+        if changed {
+            self.sync_editor(cx);
+        }
+    }
+
+    /// A press on a list row: that label, written at once.
+    pub(crate) fn choice_pick(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = self.editor.as_mut().and_then(|e| {
+            e.list.set_highlighted(row).then(|| {
+                e.moved = true;
+                (
+                    e.input.clone(),
+                    e.list.highlighted_text().unwrap_or_default().to_string(),
+                )
+            })
+        });
+        if let Some((input, text)) = picked {
+            input.update(cx, |s, cx| s.set_value(text, window, cx));
+            self.commit_edit(window, cx);
+        }
+    }
+
+    /// Whether the editor's field owns window focus.
+    pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+        self.editor
+            .as_ref()
+            .is_some_and(|e| e.input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     /// A press on shown row `row`: a double-click opens the label editor
     /// on it, shift extends a row selection to it, a plain press moves the
     /// cursor there and ends a selection.
     fn row_pressed(&mut self, e: RowPressed, window: &mut Window, cx: &mut Context<Self>) {
+        self.user_acted(cx);
+        // A press on the grid leaves the editor unwritten, as escape would.
+        self.close_editor(window, cx);
         self.grid.click(e.row, e.shift);
         self.sync_table(false, cx);
         if e.clicks >= 2 && !e.shift {
@@ -640,10 +1029,13 @@ impl ClassificationsTile {
         cx.notify();
     }
 
-    /// `menu` while a menu is up, `visual` while a row selection is live,
-    /// `normal` otherwise.
+    /// `insert` while the label editor is open (the shell then routes bare
+    /// keys to its field), `menu` while a menu is up, `visual` while a row
+    /// selection is live, `normal` otherwise.
     fn mode(&self) -> &'static str {
-        if self.menu.is_some() {
+        if self.editor.is_some() {
+            "insert"
+        } else if self.menu.is_some() {
             "menu"
         } else if self.grid.selecting() {
             "visual"
@@ -677,6 +1069,29 @@ impl ClassificationsTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.user_acted(cx);
+        // The editor's own keys; any other verb closes it unwritten first.
+        if self.editor.is_some() {
+            match action.0.as_str() {
+                "classifications::commit" => {
+                    self.commit_edit(window, cx);
+                    return true;
+                }
+                "classifications::cancel" => {
+                    self.close_editor(window, cx);
+                    return true;
+                }
+                "classifications::choice_up" => {
+                    self.choice_step(-1, cx);
+                    return true;
+                }
+                "classifications::choice_down" => {
+                    self.choice_step(1, cx);
+                    return true;
+                }
+                _ => self.close_editor(window, cx),
+            }
+        }
         // The grid's motions, while no menu holds the keys. A column
         // motion has no column to move in this rows-only grid.
         if self.menu.is_none()
@@ -729,17 +1144,50 @@ impl ClassificationsTile {
                 self.rebuild_chrome();
                 cx.notify();
             }
+            // The label verbs act on the selection, else the cursor's row.
+            "classifications::edit" if self.menu.is_none() => self.open_editor(window, cx),
+            "classifications::clear" if self.menu.is_none() => {
+                self.write(Write::Assign(self.grid.targets(), None), cx)
+            }
+            "classifications::yank" if self.menu.is_none() => {
+                if let Some(label) = self.cursor_label() {
+                    self.register = Some(label);
+                }
+            }
+            "classifications::paste" if self.menu.is_none() => match self.register.clone() {
+                Some(label) => self.write(Write::Assign(self.grid.targets(), label), cx),
+                None => {
+                    self.notices.outcome.clear();
+                    self.notices
+                        .outcome(Notice::status("nothing copied: y y copies a label"));
+                    self.rebuild_chrome();
+                    cx.notify();
+                }
+            },
+            "classifications::undo" if self.menu.is_none() => self.write(Write::Undo, cx),
+            "classifications::redo" if self.menu.is_none() => self.write(Write::Redo, cx),
             _ => return false,
         }
         true
+    }
+
+    /// The trader acted in the tile (a key or a press): the session
+    /// restore's notices have been seen, and go.
+    fn user_acted(&mut self, cx: &mut Context<Self>) {
+        if !self.notices.restore.is_empty() {
+            self.notices.restore.clear();
+            self.rebuild_chrome();
+            cx.notify();
+        }
     }
 
     /// A values read answers whether the tile is shown or not, so being
     /// shown or hidden changes nothing.
     pub fn set_visible(&mut self, _visible: bool) {}
 
-    pub fn closed(&mut self) {
+    pub fn closed(&mut self, cx: &mut App) {
         self.menu = None;
+        self.release_editor(cx);
     }
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
@@ -793,6 +1241,22 @@ impl ClassificationsTile {
             .collect()
     }
 
+    /// The open editor's text, its labels in ranked order, and the
+    /// highlighted one.
+    #[cfg(test)]
+    fn editor_state(&self, cx: &App) -> Option<(String, Vec<String>, Option<String>)> {
+        let e = self.editor.as_ref()?;
+        Some((
+            e.input.read(cx).value().to_string(),
+            e.list
+                .ranked()
+                .iter()
+                .map(|r| e.list.options()[r.row].clone())
+                .collect(),
+            e.list.highlighted_text().map(str::to_string),
+        ))
+    }
+
     #[cfg(test)]
     fn title_text(&self) -> String {
         self.chrome.header.text()
@@ -828,7 +1292,8 @@ impl MenuHost for ClassificationsTile {
         };
         match picked {
             Err(why) => {
-                self.notice(why.to_string());
+                self.notices.outcome(Notice::danger(why.to_string()));
+                self.rebuild_chrome();
                 cx.notify();
             }
             Ok(Pick::Show(name)) => {

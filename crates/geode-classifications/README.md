@@ -30,7 +30,17 @@ the frame's config door.
   A cursor nobody moved keeps its index across a rebuild; a moved one (or
   one a selection starts from) follows its row. A filter hiding a moved
   cursor's row rests it on the nearest shown row and returns it when the
-  row shows again.
+  row shows again; the session saves that hidden row (a waiting restored
+  cursor first). After a label verb (`relabelled`) the cursor keeps its
+  shown index instead, so labelling the top unclassified row leaves the
+  cursor on the next one; the verb ends a selection. A rebuild that removes
+  the cursor's row while a selection is live ends the selection.
+- `core/history.rs`: `History`, the undo and redo stacks over the shown
+  classification and the optimistic object an edit produced. Every verb
+  works over `current` (the pending object, else the configuration's), so
+  two edits before a reload compose; undo and redo replay row by row over
+  it and report rows another surface changed since. A reload or a refusal
+  drops the pending object; showing another classification forgets all.
 - `tile/`: the hosted entity. `tile/header.rs` paints the header: the
   switch control (`Classification: <name> ▾`, also `g c`), the source
   column, `<n> values` and `<k> unclassified` from the grid, and the winning
@@ -47,7 +57,14 @@ the frame's config door.
   header sort control `SortClicked`. The wrapper keeps window focus out of
   the table. A dragged column width is recorded in the delegate, and the
   table is refreshed only when a heading, a sort mark or the rem changes,
-  so a filter or new values never re-lay the columns.
+  so a filter or new values never re-lay the columns. While the label
+  editor is open the cursor row's label cell paints its field, with the
+  ranked labels hung under it.
+- `tile/editor.rs`: `LabelEditor`, the free typeahead over the labels in
+  use, and its commit rule: the highlighted label when the highlight was
+  moved (`up`/`down`, a row press) or equals the typed text ignoring case;
+  else the typed text trimmed, never re-cased; blank clears. The prefill is
+  the targets' label only when they all share one.
 
 ## Values and grid
 
@@ -65,6 +82,29 @@ the rows; escape restores the filter in force when the search began.
 restores the default order: unclassified first, then by label); a header
 sort control cycles desc → asc → default (`SortOrder::click_cycle`, as
 every grid tile's header does). The sort is saved in the session.
+
+## Editing labels
+
+The verbs act on the row selection, else the cursor's row. `enter`/`c`
+(and a row double-click) open the editor, prefilled and selected; in it
+the tile is in `insert` mode, `up`/`down` move the highlight, `enter`
+writes, `escape` or a press elsewhere closes it unwritten. `x` clears,
+`y y` copies the cursor row's label (unclassified copies as a clear), `p`
+pastes it, `u` undoes and `ctrl+r` redoes. Each write first checks the
+classification's source column (`validate_source`): a hand-written one
+over a column no classification may map is never written, with a
+`not saved:` notice, since the config door writes even when the reload is
+then rejected. Otherwise the whole object goes through
+`FrameRef::queue_config_edits` and shows at once. Undo that skips rows
+changed elsewhere says how many.
+
+Notices: the shell's `TileNotice`s are taken on every frame notification;
+`Forked` shows as status, `Refused` as danger and drops the optimistic
+edit. A verb's notices last until the next verb or another classification
+is shown; session-restore notices until the trader's first key or press in
+the tile; the switcher's `no classifications to switch to` while that
+holds. The switcher opens by itself only on the first snapshot and when
+the shown classification goes away.
 
 ## Commands
 

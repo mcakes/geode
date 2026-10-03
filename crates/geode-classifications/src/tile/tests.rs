@@ -48,8 +48,48 @@ fn config(dims: &str) -> ClassificationsConfig {
     ClassificationsConfig {
         dims,
         layers,
+        schema: Rc::new(schema()),
         ..ClassificationsConfig::default()
     }
+}
+
+/// The dataset the fixtures' classifications map: `underlying_ref` and
+/// `book` are groupable text columns a classification may be made over
+/// (the position grain's measure carries them); `delta` is not.
+fn schema() -> geode_core::schema::SchemaSpec {
+    let text = r#"
+[risk.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk.columns.book]
+type = "utf8"
+role = "dimension"
+[risk.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk.columns.delta]
+type = "f64"
+role = "measure"
+grain = "position"
+[risk.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+    let (schema, diags) = geode_core::schema::SchemaSpec::from_doc(&merge_docs(
+        "datasets",
+        &[LayerDoc::builtin("datasets", text).unwrap()],
+    ));
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != geode_core::config::Severity::Error),
+        "{diags:?}"
+    );
+    schema
 }
 
 /// What the shell root is to a tile, for focus and for keys: a
@@ -123,6 +163,7 @@ struct Built {
     content: Rc<dyn TileContent>,
     tile: Entity<ClassificationsTile>,
     shell_focus: gpui::FocusHandle,
+    frame: Entity<Frame>,
 }
 
 struct Harness {
@@ -133,6 +174,9 @@ struct Harness {
     factory: Rc<ClassificationsFactory>,
     /// What the tile asked of the data tier: the test is the service.
     requests: Receiver<Request>,
+    /// The frame the tile queues its config writes on and hears back from.
+    frame: Entity<Frame>,
+    shell_focus: gpui::FocusHandle,
 }
 
 /// A tile built by the factory after `config` was pushed, with `restored`
@@ -174,7 +218,7 @@ fn open_over(
                 let occupant = factory.create(
                     TileId(TILE),
                     restored.as_ref(),
-                    FrameRef::new(frame, WorkspaceIx::FIRST),
+                    FrameRef::for_tile(frame.clone(), WorkspaceIx::FIRST, TileId(TILE)),
                     diagnostics,
                     window,
                     cx,
@@ -197,6 +241,7 @@ fn open_over(
                     content,
                     tile,
                     shell_focus,
+                    frame,
                 });
                 cx.new(|cx| gpui_component::Root::new(host, window, cx))
             })
@@ -214,6 +259,8 @@ fn open_over(
             content: built.content,
             factory,
             requests,
+            frame: built.frame,
+            shell_focus: built.shell_focus,
         },
         vcx,
     )
@@ -893,4 +940,483 @@ fn a_blank_label_counts_and_paints_as_unclassified(cx: &mut gpui::TestAppContext
         t.table.read(cx).delegate().prepared().rows[0].label.clone()
     });
     assert_eq!(label, None);
+}
+
+// ---- editing labels ----
+
+/// `region` with two labels in use.
+const EDIT: &str = r#"
+[region]
+from = "underlying_ref"
+[region.values]
+Americas = ["SPX"]
+Europe = ["SX5E", "DAX"]
+"#;
+
+/// Two unclassified values (NKY, HSI) beside the mapped three. The
+/// default order: NKY, HSI, SPX (Americas), DAX, SX5E (Europe).
+const EDIT_VALUES: [(&str, u64); 5] = [("DAX", 5), ("HSI", 2), ("NKY", 7), ("SPX", 9), ("SX5E", 3)];
+
+/// A tile restored on `dims`'s `name` whose values read answered `values`.
+fn shown_with(
+    cx: &mut gpui::TestAppContext,
+    dims: &str,
+    name: &str,
+    values: &[(&str, u64)],
+) -> (Harness, gpui::VisualTestContext) {
+    let (h, mut vcx) = open_with(cx, config(dims), restored(name));
+    let asked = h.distinct_requests();
+    let column = asked[0].column.clone();
+    h.deliver(&mut vcx, asked[0].tag, &column, Ok(values.to_vec()));
+    (h, vcx)
+}
+
+fn editing(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+    let (h, vcx) = shown_with(cx, EDIT, "region", &EDIT_VALUES);
+    assert_eq!(h.shown(&vcx), ["NKY", "HSI", "SPX", "DAX", "SX5E"]);
+    (h, vcx)
+}
+
+/// `region` as an object, for comparing what was written.
+fn region(pairs: &[(&str, &str)]) -> DerivedDimension {
+    DerivedDimension {
+        name: "region".into(),
+        from: "underlying_ref".into(),
+        values: pairs
+            .iter()
+            .map(|(s, l)| (s.to_string(), l.to_string()))
+            .collect(),
+    }
+}
+
+/// The edit the tile queues for `dim`: the whole object, from this tile.
+fn edit_of(dim: &DerivedDimension) -> ConfigEdit {
+    ConfigEdit {
+        doc: DIMENSIONS_DOC,
+        object: dim.name.clone(),
+        value: Some(classification::to_toml(dim)),
+        origin: Some(TileId(TILE)),
+    }
+}
+
+impl Harness {
+    /// Keys as the trader types them. A committed or cancelled editor
+    /// blurs its field, and the shell then puts the keyboard back on its
+    /// root; the stand-in has no such path, so the test does it.
+    fn press(&self, vcx: &mut gpui::VisualTestContext, keys: &str) {
+        vcx.update(|window, cx| {
+            if window.focused(cx).is_none() {
+                self.shell_focus.focus(window, cx);
+            }
+        });
+        vcx.simulate_keystrokes(keys);
+    }
+    /// What reached the frame's config door since the last call: the
+    /// shell's drain takes exactly this.
+    fn edits(&self, vcx: &mut gpui::VisualTestContext) -> Vec<ConfigEdit> {
+        self.frame.update(vcx, |f, _| f.take_pending_config_edits())
+    }
+    /// The label the grid paints for `source`.
+    fn label(&self, vcx: &gpui::VisualTestContext, source: &str) -> Option<String> {
+        self.tile.read_with(vcx, |t, cx| {
+            let p = t.table.read(cx).delegate().prepared().clone();
+            let row = p.rows.iter().find(|r| r.source == source);
+            row.expect("the row is shown")
+                .label
+                .as_ref()
+                .map(|l| l.to_string())
+        })
+    }
+    fn editor(
+        &self,
+        vcx: &gpui::VisualTestContext,
+    ) -> Option<(String, Vec<String>, Option<String>)> {
+        self.tile.read_with(vcx, |t, cx| t.editor_state(cx))
+    }
+    /// Put the cursor on `source` with the grid's own motions.
+    fn goto(&self, vcx: &mut gpui::VisualTestContext, source: &str) {
+        let at = self
+            .shown(vcx)
+            .iter()
+            .position(|s| s == source)
+            .expect("the row is shown");
+        self.press(vcx, &format!("g g{}", " j".repeat(at)));
+        assert_eq!(self.cursor(vcx).as_deref(), Some(source));
+    }
+    /// Post a notice for this tile the way the shell's drain does: on the
+    /// frame, then one notify.
+    fn shell_says(&self, vcx: &mut gpui::VisualTestContext, notice: TileNotice) {
+        self.frame.update(vcx, |f, cx| {
+            f.post_tile_notice_for_test(TileId(TILE), notice);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn enter_opens_the_editor_prefilled_and_enter_writes_the_whole_object(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    let (text, labels, lit) = h.editor(&vcx).expect("the editor is open");
+    assert_eq!(text, "Americas");
+    assert_eq!(labels, ["Americas", "Europe"]);
+    assert_eq!(lit.as_deref(), Some("Americas"));
+    assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    // Painted in the cursor row's label cell, its list hung under it.
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("classifications-editor-7").is_some());
+    assert!(vcx.debug_bounds("classifications-editor-list-7").is_some());
+    assert!(
+        vcx.debug_bounds("classifications-editor-row-Europe")
+            .is_some()
+    );
+    // The prefill is selected: typing replaces it.
+    vcx.simulate_input("Europe");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    let next = region(&[("SPX", "Europe"), ("SX5E", "Europe"), ("DAX", "Europe")]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&next)]);
+    assert_eq!(
+        h.label(&vcx, "SPX").as_deref(),
+        Some("Europe"),
+        "shown at once"
+    );
+    assert!(!vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    // The reload carrying it keeps it; a reload without it (a revert
+    // elsewhere) is what the grid then shows.
+    let carried = "[region]\nfrom = \"underlying_ref\"\n[region.values]\nEurope = [\"SPX\", \"SX5E\", \"DAX\"]\n";
+    vcx.update(|_, cx| h.factory.set_config(config(carried), cx));
+    assert_eq!(h.label(&vcx, "SPX").as_deref(), Some("Europe"));
+    vcx.update(|_, cx| h.factory.set_config(config(EDIT), cx));
+    assert_eq!(h.label(&vcx, "SPX").as_deref(), Some("Americas"));
+}
+
+#[gpui::test]
+fn typing_a_case_variant_of_an_existing_label_takes_the_existing_one_only_when_highlighted(
+    cx: &mut gpui::TestAppContext,
+) {
+    let tech = "[sector]\nfrom = \"underlying_ref\"\n[sector.values]\nTech = [\"AAPL\"]\n";
+    let (h, mut vcx) = shown_with(cx, tech, "sector", &[("AAPL", 1), ("MSFT", 2)]);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("MSFT"));
+    h.press(&mut vcx, "enter");
+    vcx.simulate_input("tech");
+    h.press(&mut vcx, "enter");
+    let edits = h.edits(&mut vcx);
+    assert_eq!(edits.len(), 1);
+    let written = edits[0].value.as_ref().unwrap().to_string();
+    assert!(written.contains("Tech = [\"AAPL\", \"MSFT\"]"), "{written}");
+    // Typed past every label: written as typed, never re-cased.
+    h.goto(&mut vcx, "AAPL");
+    h.press(&mut vcx, "enter");
+    vcx.simulate_input("techx");
+    h.press(&mut vcx, "enter");
+    let edits = h.edits(&mut vcx);
+    let written = edits[0].value.as_ref().unwrap().to_string();
+    assert!(written.contains("techx = [\"AAPL\"]"), "{written}");
+    assert_eq!(h.label(&vcx, "AAPL").as_deref(), Some("techx"));
+}
+
+#[gpui::test]
+fn an_empty_entry_clears_and_escape_cancels(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "enter backspace enter");
+    assert_eq!(
+        h.edits(&mut vcx),
+        [edit_of(&region(&[("SX5E", "Europe"), ("DAX", "Europe")]))]
+    );
+    assert_eq!(h.label(&vcx, "SPX"), None);
+    // Escape closes with nothing written, whatever was typed.
+    h.goto(&mut vcx, "DAX");
+    h.press(&mut vcx, "enter");
+    vcx.simulate_input("Asia");
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.editor(&vcx), None);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(h.label(&vcx, "DAX").as_deref(), Some("Europe"));
+}
+
+#[gpui::test]
+fn editing_a_selection_prefills_only_a_unanimous_label(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "shift-v j");
+    assert_eq!(h.targets(&vcx), ["SPX", "DAX"]);
+    h.press(&mut vcx, "enter");
+    assert_eq!(
+        h.editor(&vcx).unwrap().0,
+        "",
+        "Americas and Europe: no prefill"
+    );
+    h.press(&mut vcx, "escape");
+    // Escape left the editor, not the selection.
+    assert_eq!(h.targets(&vcx), ["SPX", "DAX"]);
+    h.press(&mut vcx, "j");
+    assert_eq!(h.targets(&vcx), ["SPX", "DAX", "SX5E"]);
+    h.press(&mut vcx, "k k");
+    h.press(&mut vcx, "escape");
+    h.goto(&mut vcx, "DAX");
+    h.press(&mut vcx, "shift-v j enter");
+    assert_eq!(h.editor(&vcx).unwrap().0, "Europe", "both Europe");
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "shift-v j enter");
+    vcx.simulate_input("X");
+    h.press(&mut vcx, "enter");
+    assert_eq!(
+        h.edits(&mut vcx),
+        [edit_of(&region(&[
+            ("SPX", "X"),
+            ("DAX", "X"),
+            ("SX5E", "Europe")
+        ]))],
+        "both rows in one write"
+    );
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"), "the verb ends it");
+}
+
+#[gpui::test]
+fn x_clears_and_yy_p_copies_a_label(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    // Nothing copied yet: `p` says so and writes nothing.
+    h.press(&mut vcx, "p");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(h.notices(&vcx), ["nothing copied: y y copies a label"]);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "y y");
+    h.goto(&mut vcx, "NKY");
+    h.press(&mut vcx, "p");
+    assert_eq!(h.notices(&vcx), Vec::<String>::new(), "a verb clears it");
+    let pasted = region(&[
+        ("SPX", "Americas"),
+        ("NKY", "Americas"),
+        ("SX5E", "Europe"),
+        ("DAX", "Europe"),
+    ]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&pasted)]);
+    assert_eq!(h.label(&vcx, "NKY").as_deref(), Some("Americas"));
+    h.goto(&mut vcx, "DAX");
+    h.press(&mut vcx, "x");
+    let cleared = region(&[("SPX", "Americas"), ("NKY", "Americas"), ("SX5E", "Europe")]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&cleared)]);
+    assert_eq!(h.label(&vcx, "DAX"), None);
+    // An unclassified row copies as unclassified: pasting it clears.
+    h.goto(&mut vcx, "HSI");
+    h.press(&mut vcx, "y y");
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "p");
+    assert_eq!(h.label(&vcx, "SPX"), None);
+}
+
+#[gpui::test]
+fn u_and_ctrl_r_undo_and_redo_through_the_door(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "x");
+    let cleared = region(&[("SX5E", "Europe"), ("DAX", "Europe")]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&cleared)]);
+    h.press(&mut vcx, "u");
+    let original = region(&[("SPX", "Americas"), ("SX5E", "Europe"), ("DAX", "Europe")]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&original)]);
+    assert_eq!(h.label(&vcx, "SPX").as_deref(), Some("Americas"));
+    h.press(&mut vcx, "ctrl-r");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&cleared)]);
+    assert_eq!(h.label(&vcx, "SPX"), None);
+    h.press(&mut vcx, "ctrl-r");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(h.notices(&vcx), ["nothing to redo"]);
+}
+
+/// Undo replays over the configuration as it is now: a row another
+/// surface changed since is left alone, and the notice says how many.
+#[gpui::test]
+fn undo_skips_a_row_changed_elsewhere_and_says_so(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "x");
+    h.edits(&mut vcx);
+    // Another tile labelled SPX since.
+    let foreign = "[region]\nfrom = \"underlying_ref\"\n[region.values]\nAsia = [\"SPX\"]\nEurope = [\"SX5E\", \"DAX\"]\n";
+    vcx.update(|_, cx| h.factory.set_config(config(foreign), cx));
+    h.press(&mut vcx, "u");
+    assert!(h.edits(&mut vcx).is_empty(), "nothing left to change");
+    assert_eq!(
+        h.notices(&vcx),
+        ["1 row changed elsewhere was left as it is"]
+    );
+    assert_eq!(h.label(&vcx, "SPX").as_deref(), Some("Asia"));
+}
+
+/// The ruling the label loop rests on: after a verb the cursor keeps its
+/// shown index, so labelling the top unclassified row leaves the cursor on
+/// the next one, even after the trader moved the cursor about.
+#[gpui::test]
+fn labelling_the_top_unclassified_row_leaves_the_cursor_on_the_next(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.press(&mut vcx, "j k");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    h.press(&mut vcx, "enter");
+    vcx.simulate_input("Asia");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.grid.cursor()), Some(0));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("HSI"));
+    // And again: the next unclassified row is labelled from the same place.
+    h.press(&mut vcx, "enter");
+    vcx.simulate_input("Asia");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.grid.cursor()), Some(0));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SPX"));
+}
+
+/// `down` moves the highlight, and a moved highlight is what enter takes,
+/// whatever was typed; a row press picks its label at once.
+#[gpui::test]
+fn a_moved_highlight_or_a_row_press_picks_the_label(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.editor(&vcx).unwrap().2.as_deref(), Some("Americas"));
+    h.press(&mut vcx, "down");
+    assert_eq!(h.editor(&vcx).unwrap().2.as_deref(), Some("Europe"));
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.label(&vcx, "NKY").as_deref(), Some("Europe"));
+    h.edits(&mut vcx);
+    // The pointer route: the row press writes its label.
+    h.goto(&mut vcx, "HSI");
+    h.press(&mut vcx, "enter");
+    h.draw(&mut vcx);
+    let americas = vcx
+        .debug_bounds("classifications-editor-row-Americas")
+        .expect("the list is painted");
+    vcx.simulate_mouse_down(
+        americas.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(h.editor(&vcx), None);
+    assert_eq!(h.label(&vcx, "HSI").as_deref(), Some("Americas"));
+    assert_eq!(h.edits(&mut vcx).len(), 1);
+}
+
+#[gpui::test]
+fn a_fork_notice_from_the_shell_shows_once(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.press(&mut vcx, "x");
+    h.edits(&mut vcx);
+    let text = "region copied to your layer: r reverts it";
+    h.shell_says(&mut vcx, TileNotice::Forked(text.into()));
+    assert_eq!(h.notices(&vcx), [text]);
+    // A later frame notification brings nothing new.
+    h.frame.update(&mut vcx, |_, cx| cx.notify());
+    vcx.run_until_parked();
+    assert_eq!(h.notices(&vcx), [text]);
+    // A notice for another tile is not this tile's.
+    h.frame.update(&mut vcx, |f, cx| {
+        f.post_tile_notice_for_test(TileId(TILE + 1), TileNotice::Forked("other".into()));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert_eq!(h.notices(&vcx), [text]);
+}
+
+#[gpui::test]
+fn a_refusal_notice_drops_the_optimistic_edit(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "x");
+    assert_eq!(h.label(&vcx, "SPX"), None, "optimistic");
+    let why = "dimensions not written: the user layer is read-only";
+    h.shell_says(&mut vcx, TileNotice::Refused(why.into()));
+    assert_eq!(h.notices(&vcx), [why]);
+    assert_eq!(
+        h.label(&vcx, "SPX").as_deref(),
+        Some("Americas"),
+        "back to the configuration's"
+    );
+}
+
+#[gpui::test]
+fn an_invalid_source_classification_is_never_written(cx: &mut gpui::TestAppContext) {
+    // Hand-written over a measure: no classification may map it.
+    let bad = "[bad]\nfrom = \"delta\"\n[bad.values]\nX = [\"1\"]\n";
+    let (h, mut vcx) = open_with(cx, config(bad), restored("bad"));
+    h.press(&mut vcx, "x");
+    assert!(h.edits(&mut vcx).is_empty());
+    let notices = h.notices(&vcx);
+    assert!(
+        notices
+            .iter()
+            .any(|n| n == "not saved: 'delta' is not a groupable text column"),
+        "{notices:?}"
+    );
+    assert_eq!(h.label(&vcx, "1").as_deref(), Some("X"));
+    h.press(&mut vcx, "enter");
+    vcx.simulate_input("Y");
+    h.press(&mut vcx, "enter");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(h.label(&vcx, "1").as_deref(), Some("X"));
+}
+
+// ---- notice and switcher lifecycle ----
+
+/// A restore notice is read once: the trader's first action clears it, and
+/// a reload before then does not.
+#[gpui::test]
+fn a_restore_notice_clears_on_the_first_action(cx: &mut gpui::TestAppContext) {
+    let mut record = restored("region").unwrap();
+    record.insert("sort".into(), toml::Value::Integer(3));
+    let (h, mut vcx) = open_with(cx, config(TWO), Some(record));
+    let restore = |vcx: &gpui::VisualTestContext| {
+        h.notices(vcx)
+            .iter()
+            .filter(|n| n.starts_with("session: dropped sort"))
+            .count()
+    };
+    assert_eq!(restore(&vcx), 1);
+    vcx.update(|_, cx| h.factory.set_config(config(TWO), cx));
+    assert_eq!(restore(&vcx), 1, "a reload is not the trader acting");
+    h.press(&mut vcx, "j");
+    assert_eq!(restore(&vcx), 0);
+}
+
+/// The switcher's refusal stands only while there is nothing to switch to.
+#[gpui::test]
+fn the_nothing_to_switch_to_refusal_clears_once_there_is(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(""), None);
+    h.press(&mut vcx, "g c");
+    assert_eq!(h.notices(&vcx), ["no classifications to switch to"]);
+    vcx.update(|_, cx| h.factory.set_config(config(""), cx));
+    assert_eq!(h.notices(&vcx), ["no classifications to switch to"]);
+    vcx.update(|_, cx| h.factory.set_config(config(TWO), cx));
+    assert!(h.notices(&vcx).is_empty());
+    assert_eq!(h.switcher(&vcx), None, "nothing shown went away");
+}
+
+/// The switcher opens on construction and when the shown classification
+/// goes away, not on a reload that finds the tile still showing nothing
+/// after the trader closed it.
+#[gpui::test]
+fn a_closed_switcher_stays_closed_across_an_unrelated_reload(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), None);
+    assert!(h.switcher(&vcx).is_some());
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.switcher(&vcx), None);
+    vcx.update(|_, cx| h.factory.set_config(config(TWO), cx));
+    assert_eq!(h.switcher(&vcx), None);
+    // Shown, then gone: it opens.
+    h.press(&mut vcx, "g c j enter");
+    assert_eq!(h.title(&mut vcx), "Classification: region");
+    vcx.update(|_, cx| {
+        h.factory
+            .set_config(config("[desk]\nfrom = \"book\"\n"), cx)
+    });
+    assert_eq!(h.switcher(&vcx), rows(&["desk"]));
 }

@@ -18,6 +18,7 @@ use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, h_flex, v_flex
 
 use crate::core::grid::{GridModel, LABEL_COL, SOURCE_COL, label_text};
 use crate::core::session::SortCol;
+use crate::tile::editor::{self, EditorPaint};
 
 /// What an unclassified label paints: the effective meaning, never the raw
 /// (absent or blank) text.
@@ -135,6 +136,8 @@ pub(crate) struct GridDelegate {
     empty_title: SharedString,
     empty_help: SharedString,
     accent: listrow::TableAccent,
+    /// The open label editor, painted in its row's label cell.
+    editor: Option<EditorPaint>,
 }
 
 impl GridDelegate {
@@ -148,7 +151,12 @@ impl GridDelegate {
             empty_title: SharedString::default(),
             empty_help: SharedString::default(),
             accent: listrow::TableAccent::default(),
+            editor: None,
         }
+    }
+
+    pub(crate) fn set_editor(&mut self, editor: Option<EditorPaint>) {
+        self.editor = editor;
     }
 
     /// Install new rows; `true` when a column heading changed, which the
@@ -358,6 +366,9 @@ impl TableDelegate for GridDelegate {
                 &row.source_marks,
                 theme,
             )),
+            SortCol::Label if let Some(e) = self.editor.as_ref().filter(|e| e.row == row_ix) => {
+                cell.child(editor::render_cell(e, cx))
+            }
             SortCol::Label => {
                 let label = match &row.label {
                     Some(l) => div().text_color(theme.foreground).child(self.highlighted(
