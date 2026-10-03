@@ -32059,15 +32059,8 @@ run_mutation "volslice: a refused show from the draw arrives deferred" \
 # A close from inside the shell's draw defers its arrival the same way.
 run_mutation "volslice: a close from the draw arrives deferred" \
   crates/geode-volslice/src/tile/data.rs \
-  '        self.following.close(
-            &mut DeferredDoor {
-                frame: &self.frame,
-                cx,
-            },
-            key,
-        );' \
-  '        self.following
-            .close(&mut FrameDoor::new(&self.frame, cx), key);' \
+  '            .close(&mut DeferredDoor::new(&self.frame, cx), key);' \
+  '            .close(&mut FrameDoor::new(&self.frame, cx), key);' \
   geode-volslice a_close_from_the_draw_releases_the_flip_to_frame_observers
 
 # An empty state is the muted status tone; a failure or refusal is danger.

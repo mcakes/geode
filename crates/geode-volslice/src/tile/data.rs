@@ -22,8 +22,8 @@ use geode_core::document::{DocumentRows, join_key};
 use geode_core::link::underlying_of;
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::vol::VolSliceOutcome;
-use geode_shell::frame::{FrameRef, FrameVersions};
-use geode_tile::following::{Barrier, Delivered, FrameDoor, Promotion, Unanswered};
+use geode_shell::frame::FrameVersions;
+use geode_tile::following::{Arrival, DeferredDoor, Delivered, FrameDoor, Promotion, Unanswered};
 use gpui::{App, Context};
 
 use super::VolsliceTile;
@@ -53,46 +53,6 @@ pub(super) enum Fetch {
         underlying: String,
         cvi: Result<Option<Arc<DocumentRows>>, String>,
     },
-}
-
-/// Where an arrival the tile makes without an outcome goes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Arrival {
-    /// Through the frame now, notifying it when the arrival releases the
-    /// barrier.
-    Now,
-    /// After the current effect cycle: `set_visible` runs while the shell
-    /// draws, and a notify to the frame sent during that draw is dropped,
-    /// so every other tile would wait for the barrier's deadline.
-    Deferred,
-}
-
-/// [`FrameDoor`] with its arrival deferred past the current draw. Reads
-/// answer now; `arrive` reports `false` since the arrival has not happened
-/// yet, which no caller here depends on.
-struct DeferredDoor<'a> {
-    frame: &'a FrameRef,
-    cx: &'a mut App,
-}
-
-impl Barrier for DeferredDoor<'_> {
-    fn current(&self) -> FrameVersions {
-        self.frame.read(self.cx).versions()
-    }
-    fn wants(&self, key: QueryKey, versions: FrameVersions) -> bool {
-        self.frame.read(self.cx).barrier_wants(key, versions)
-    }
-    fn arrive(&mut self, key: QueryKey, versions: FrameVersions) -> bool {
-        let frame = self.frame.clone();
-        self.cx.defer(move |cx| {
-            frame.update(cx, |f, cx| {
-                if f.arrived(key, versions) {
-                    cx.notify();
-                }
-            });
-        });
-        false
-    }
 }
 
 /// The counters the documents depend on. The as-of and the watched
@@ -148,21 +108,8 @@ impl VolsliceTile {
         cx: &mut Context<Self>,
     ) {
         let key = self.key();
-        match arrival {
-            Arrival::Now => {
-                self.following
-                    .submitted(ok, unanswered, &mut FrameDoor::new(&self.frame, cx), key)
-            }
-            Arrival::Deferred => self.following.submitted(
-                ok,
-                unanswered,
-                &mut DeferredDoor {
-                    frame: &self.frame,
-                    cx,
-                },
-                key,
-            ),
-        }
+        self.following
+            .submitted(ok, unanswered, &mut arrival.door(&self.frame, cx), key);
     }
 
     pub(crate) fn requery(&mut self, cx: &mut Context<Self>) {
@@ -619,12 +566,7 @@ impl VolsliceTile {
     pub fn closed(&mut self, cx: &mut Context<Self>) {
         let key = self.key();
         self.data.cancel(key);
-        self.following.close(
-            &mut DeferredDoor {
-                frame: &self.frame,
-                cx,
-            },
-            key,
-        );
+        self.following
+            .close(&mut DeferredDoor::new(&self.frame, cx), key);
     }
 }
