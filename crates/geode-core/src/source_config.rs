@@ -24,6 +24,14 @@ pub const DEFAULT_SNAPSHOT_POLL: Duration = Duration::from_secs(300);
 /// This limits submission rate, not publication timing on the ingest writer.
 /// A zero window releases every accepted, valid message without coalescing.
 pub const DEFAULT_COALESCE: Duration = Duration::from_millis(500);
+/// How long a subscription's recovery waits for replies; sent with each
+/// GET request, so the transport stops answering when the receiver stops
+/// listening.
+pub const DEFAULT_RECOVER_TIMEOUT: Duration = Duration::from_secs(10);
+/// Recorded topics not received for this long are pruned at open and never
+/// asked for: a retired instrument stops answering, and asking for it on
+/// every start would only add unanswered requests.
+pub const DEFAULT_RECOVER_MAX_AGE: Duration = Duration::from_secs(7 * 86_400);
 
 /// A directory source without usable paths is idle: warn and skip it while
 /// allowing its configuration to be saved and completed later.
@@ -106,6 +114,12 @@ pub struct SourceSpec {
     /// Minimum interval between coalescer releases for a document key. Defaults
     /// to 500 ms; zero disables coalescing. Already queued ingest jobs are unaffected.
     pub coalesce: Duration,
+    /// Subscriptions only: how long recovery at start and reconnect waits for
+    /// the transport's replies. Defaults to [`DEFAULT_RECOVER_TIMEOUT`].
+    pub recover_timeout: Duration,
+    /// Subscriptions only: recorded topics older than this are pruned and not
+    /// asked for in recovery. Defaults to [`DEFAULT_RECOVER_MAX_AGE`].
+    pub recover_max_age: Duration,
     /// Which timestamp a publish is stamped with. See [`SourceTime`].
     pub source_time: SourceTime,
     /// Snapshot only: the adapter-defined name of the table to read.
@@ -171,6 +185,8 @@ impl SourceSpec {
             document: None,
             topics: Vec::new(),
             coalesce: DEFAULT_COALESCE,
+            recover_timeout: DEFAULT_RECOVER_TIMEOUT,
+            recover_max_age: DEFAULT_RECOVER_MAX_AGE,
             source_time: SourceTime::Receive,
             table: None,
         }
@@ -496,8 +512,16 @@ impl SourceSpec {
                     ignored(key, &mut diags);
                 }
             }
-            // Only subscriptions use document kind, topics, coalescing, and source time.
-            for key in ["document", "topics", "coalesce", "source_time"] {
+            // Only subscriptions use document kind, topics, coalescing, recovery,
+            // and source time.
+            for key in [
+                "document",
+                "topics",
+                "coalesce",
+                "recover_timeout",
+                "recover_max_age",
+                "source_time",
+            ] {
                 if !subscribed || fetch || snapshot {
                     ignored(key, &mut diags);
                 }
@@ -664,7 +688,10 @@ impl SourceSpec {
                 None
             };
 
-            let (document, topics, coalesce, source_time) = if subscribed && !fetch && !snapshot {
+            let (document, topics, coalesce, recover, source_time) = if subscribed
+                && !fetch
+                && !snapshot
+            {
                 let document = match table.get("document").and_then(|v| v.as_str()) {
                     Some(d) => Some(d.to_string()),
                     None => {
@@ -705,6 +732,22 @@ impl SourceSpec {
                 }
                 let coalesce =
                     read_duration_or_warn(table, &mut diags, name, "coalesce", DEFAULT_COALESCE);
+                let recover = (
+                    read_duration_or_warn(
+                        table,
+                        &mut diags,
+                        name,
+                        "recover_timeout",
+                        DEFAULT_RECOVER_TIMEOUT,
+                    ),
+                    read_duration_or_warn(
+                        table,
+                        &mut diags,
+                        name,
+                        "recover_max_age",
+                        DEFAULT_RECOVER_MAX_AGE,
+                    ),
+                );
                 let source_time = match table.get("source_time").and_then(|v| v.as_str()) {
                     None | Some("receive") => SourceTime::Receive,
                     Some(s) => match s.strip_prefix("document:") {
@@ -771,9 +814,16 @@ impl SourceSpec {
                         }
                     },
                 };
-                (document, topics, coalesce, source_time)
+                (document, topics, coalesce, recover, source_time)
             } else {
-                (None, Vec::new(), DEFAULT_COALESCE, SourceTime::Receive)
+                let recover = (DEFAULT_RECOVER_TIMEOUT, DEFAULT_RECOVER_MAX_AGE);
+                (
+                    None,
+                    Vec::new(),
+                    DEFAULT_COALESCE,
+                    recover,
+                    SourceTime::Receive,
+                )
             };
 
             if snapshot {
@@ -792,6 +842,8 @@ impl SourceSpec {
                 document,
                 topics,
                 coalesce,
+                recover_timeout: recover.0,
+                recover_max_age: recover.1,
                 source_time,
                 table: table_name,
             });
@@ -1180,6 +1232,64 @@ priority = "latest_other"
         assert_eq!(s.coalesce, Duration::from_millis(250));
         assert_eq!(s.source_time, SourceTime::Receive);
         assert!(s.paths.is_empty());
+    }
+
+    #[test]
+    fn a_subscribed_source_reads_its_recovery_settings() {
+        let (sources, diags) = from(
+            r#"[cvi]
+adapter = "bus"
+dataset = "cvi_params"
+document = "cvi_params"
+topics = ["marketdata/cvi/*/NOTIFY"]
+recover_timeout = "3s"
+recover_max_age = "2d"
+"#,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let s = &sources[0];
+        assert_eq!(s.recover_timeout, Duration::from_secs(3));
+        assert_eq!(s.recover_max_age, Duration::from_secs(2 * 86_400));
+    }
+
+    #[test]
+    fn recovery_settings_default_when_absent() {
+        let (sources, diags) = from(
+            r#"[cvi]
+adapter = "bus"
+dataset = "cvi_params"
+document = "cvi_params"
+topics = ["marketdata/cvi/*/NOTIFY"]
+"#,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let s = &sources[0];
+        assert_eq!(s.recover_timeout, DEFAULT_RECOVER_TIMEOUT);
+        assert_eq!(s.recover_max_age, DEFAULT_RECOVER_MAX_AGE);
+    }
+
+    #[test]
+    fn recovery_settings_on_a_directory_source_warn_and_are_ignored() {
+        let (sources, diags) = from(
+            r#"[risk]
+dataset = "risk_snapshot"
+paths = ["/tmp/*.csv"]
+recover_timeout = "3s"
+recover_max_age = "2d"
+"#,
+        );
+        assert_eq!(sources.len(), 1, "{diags:?}");
+        for key in ["recover_timeout", "recover_max_age"] {
+            assert!(
+                diags.iter().any(
+                    |d| d.path.as_deref() == Some(&format!("sources.risk.{key}"))
+                        && d.severity == Severity::Warning
+                ),
+                "{key}: {diags:?}"
+            );
+        }
+        assert_eq!(sources[0].recover_timeout, DEFAULT_RECOVER_TIMEOUT);
+        assert_eq!(sources[0].recover_max_age, DEFAULT_RECOVER_MAX_AGE);
     }
 
     /// Ignored subscription paths must be removed from the typed configuration,
