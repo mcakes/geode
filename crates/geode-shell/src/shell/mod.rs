@@ -38,6 +38,9 @@ pub mod row_menu;
 mod rows;
 pub mod scale;
 pub mod scope_expr_view;
+// Read only by its tests until the dialog view is built on it.
+#[cfg_attr(not(test), allow(dead_code))]
+mod scopedialog;
 mod session_io;
 pub mod settings_view;
 pub mod sidebar;

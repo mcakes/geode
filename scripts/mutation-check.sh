@@ -18222,6 +18222,30 @@ run_mutation "scope dialog: the session writes the source" \
   geode-shell \
   provenance_round_trips
 
+# Two equal terms need two identities, or the cursor and d act on the wrong one.
+run_mutation "scope dialog: equal terms are distinct rows" \
+  crates/geode-shell/src/shell/scopedialog/rows.rs \
+  '                let occurrence = seen.iter().filter(|t| **t == text).count();' \
+  '                let occurrence = 0;' \
+  geode-shell \
+  identical_terms_get_distinct_identities
+
+# A deleted source must not read as "changed".
+run_mutation "scope dialog: a deleted source reads unsaved" \
+  crates/geode-shell/src/shell/scopedialog/rows.rs \
+  '        None => Provenance::Unsaved,' \
+  '        None => Provenance::Changed(loaded_from.unwrap_or_default().to_string()),' \
+  geode-shell \
+  provenance_reads_equal_changed_unsaved_or_nothing
+
+# The cursor follows its row by identity, not by index.
+run_mutation "scope dialog: the cursor keeps its row" \
+  crates/geode-shell/src/shell/scopedialog/rows.rs \
+  '            && let Some(i) = self.rows.iter().position(|r| &r.id == id)' \
+  '            && let Some(i) = self.rows.iter().position(|r| &r.id == id).filter(|_| false)' \
+  geode-shell \
+  the_cursor_keeps_its_row_by_identity_else_its_index_clamped
+
 # ---- Tile picker: placeholder double-click, tile::add and mod-n ----
 
 # Only a PLACEHOLDER's double-click is the door — a real tile's may
