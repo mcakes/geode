@@ -42,8 +42,10 @@ viewing context the *frame*. It has three ideas you will use often:
 
 Tiles follow the parts of the frame relevant to them. A blotter can also keep
 its own grouping, filter, or as-of setting. These exceptions appear in its
-header. Workspaces organize tiles; switching workspace does not give you a
-separate scope.
+header. Workspaces share scope, grouping, and as-of by default. Pinning a
+workspace gives it its own copy of all three; see
+[Keep a workspace's own context](#keep-a-workspaces-own-context). A tile can
+also follow a link group's scope instead of its workspace's.
 
 **Learn a few keys at a time.** Press `ctrl+k` to open the command palette,
 type words describing an action, and press Enter to choose it. The palette is
@@ -193,6 +195,13 @@ The new panel has taken the underlying from the row you opened it on. Moving
 the blotter cursor afterward does not retarget that panel. You can keep it
 beside your risk while investigating another row.
 
+Press `g .` on a blotter row to open its contextual menu. It offers related
+tiles and actions for the identifiers that row carries, including **Open in
+Nemo** and, for a single position or a suitable row selection, **Move LHU…**.
+Move LHU requires a configured position service and asks you to choose a
+destination and confirm. An accepted command changes the grid only when
+updated source data arrives.
+
 ### 6. Make room without losing your arrangement
 
 Focus a tile and press `mod+f` to make it fullscreen. Press it again to return
@@ -272,9 +281,11 @@ expiry` pins the pricer's own grouping and `:unpin` follows the frame
 again, as in a blotter. Unlike a blotter, a pricer takes `:group none`:
 it pins the flat sheet. The header lists the levels and strikes through
 any the sheet cannot group by. A grouping
-row is read-only: edit the lines under it. Lines only move (`shift+j`/`shift+k`) in the flat sheet, so clear
-the grouping first. To build a custom package from lines, use `g p` (or
-`:package [n]`); `g u` or `:unpackage` takes it apart.
+row is read-only: edit the lines under it. `shift+j`/`shift+k` moves a line
+within its parent and, when grouped, within its own group. A sort prevents
+manual moves; use `:sort clear` first. To build a custom package from lines,
+use `g p` (or `:package [n]`); `g u` or `:unpackage` takes it apart. To
+package consecutive rows by count, first use `:group none` and `:sort clear`.
 
 Sheets save automatically after an idle second following a change. Give one a
 recognizable name with `:name first-look`; later, `:e first-look` opens it.
@@ -299,7 +310,52 @@ different stages, and an **echo differs** notice means the returned document
 did not match the submitted one. Learn that workflow with your desk before
 using it on live market data.
 
+### Compare published and draft volatility
+
+Add a **Volslice** tile and choose SPX in the underlying picker that opens.
+Press `u` to reopen that picker later. The viewer shows the
+published CVI curves and option-chain marks for the selected expiries. Use
+`j`/`k` to move through expiries, Enter to show one, and Space to toggle it.
+The `1`, `2`, and `3` keys toggle published CVI, a linked CVI draft, and the
+chain; `d` chooses a difference to plot below them.
+
+To compare an edit before uploading it, focus the SPX CVI panel, press
+`mod+u`, and choose **emit · A**. In the vol-slice tile, press `mod+u` and
+choose **follow · A**. The viewer then takes its underlying and CVI draft from
+that group. Editing the CVI panel updates the draft curve; it does not
+upload the edit. The demo's curves use a stand-in evaluator, not a
+production financial model.
+
 ## Make it your workspace
+
+### Keep a workspace's own context
+
+Use **Toggle the frame pin for this workspace** in the palette, or the pin
+beside the as-of control, to give the current workspace its own scope,
+grouping, and as-of. It starts with the values you were viewing. Changes in
+other workspaces then leave those values alone. Unpinning discards this
+workspace's separate values and returns it to the shared context.
+
+### Link tiles around an underlying
+
+Press `mod+u` on a tile to choose what it **emits** or **follows** in one of
+four groups, A–D. For example, make a blotter emit A and a second blotter or
+vol-slice tile follow A. Moving the first blotter's cursor to a row naming
+one underlying updates the followers. A total or mixed row leaves the
+group's last underlying in place.
+
+A follower uses the group's scope in place of the workspace scope, while
+keeping its workspace's grouping and as-of. The scope bar still edits the
+workspace, so it does not filter a linked follower. Header chips show the
+group letter with an up arrow for emitting and a down arrow for following.
+Choose **follow · workspace** to return a tile to its workspace scope, or
+**emit · none** to stop changing a group.
+
+Blotters and pricers can follow and emit; market-data panels can emit their
+underlying and draft; vol-slice tiles can follow. Market-data panels keep
+their own underlying, and timeseries tiles use their own series list.
+
+### Restore and customize
 
 Geode remembers workspace layouts and supported tile settings between runs.
 It does not restore every transient detail: for example, a blotter's cursor,
@@ -326,17 +382,20 @@ ask your desk's configuration owner about adding it to the shared defaults.
 | Two blotters disagree | Compare their views and header markers for grouping pins, local filters, unscoped mode, and local as-of settings. |
 | A blotter ignores a grouping change | Run `:unpin` to resume following the shared grouping. |
 | A blotter ignores the shared scope | Check its unscoped marker. `:unscoped` toggles this mode; running it again restores scope following. |
+| A tile ignores the scope bar | Check its link-group chip: a follower uses that group's scope instead of the workspace scope. Use `mod+u` and **follow · workspace** to return to the workspace scope. |
+| Workspaces show different scope or time settings | Check the frame pin beside the as-of control. A pinned workspace keeps its own scope, grouping, and as-of. |
 | A pricer header shows **N hidden**, or a line you added disappeared | The shared scope hides those lines; they are still in the sheet and still pricing. `:unscoped` on the pricer shows every line. |
 | A value is blank or marked `mixed` | Blank does not mean zero. Some measures cannot be attributed at that grouping depth; `mixed` means an ungrouped dimension has several contributing values. |
 | A number remains visible after an error | It may be the last good result. Read the notice and timestamp. |
 | Letter keys type instead of moving | An input is active. Finish or cancel that input before using navigation keys. |
 | An action is hard to find | Search the palette by its purpose. While typing a `:` command, Tab completes arguments. |
 
-For source or configuration problems, add a **Diagnostics** tile. Its Sources
+For source or configuration problems, press `mod+d` to open **Diagnostics**,
+or choose **Diagnostics: Open page** in the palette. Its Sources
 section shows loading and health, Data shows stored publications, and Config
 shows configuration errors and where settings came from. Use `[` and `]` to
-switch sections. When reporting a problem, include the affected tile, its
-scope and time context, and the exact notice.
+switch sections; Escape returns to your tiles. When reporting a problem,
+include the affected tile, its scope and time context, and the exact notice.
 
 ## A small key reference
 
@@ -357,6 +416,8 @@ the rest as you need them.
 | `mod+/` | Edit shared scope text |
 | `mod+z` / `mod+shift+z` | Undo / redo shared scope changes |
 | `mod+t` | Choose the shared as-of time |
+| `mod+u` | Choose a tile's link group |
+| `mod+d` | Open / close Diagnostics |
 | `:` | Enter a command for the focused tile |
 | `/` | Find within a tile that supports it |
 | `j/k`, `h/l`, Space | In a blotter: move rows, move columns, expand/collapse |

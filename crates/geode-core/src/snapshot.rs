@@ -205,8 +205,9 @@ impl DictCodes<'_> {
 
     /// The code at `row`. `None` past the end **or for a NULL row**, so a
     /// caller that groups on the result cannot silently merge rolled-up
-    /// rows into a real dimension value. Use [`Self::raw`] for bulk work
-    /// that has already established there are no nulls.
+    /// rows into a real dimension value. For bulk work, match the enum's
+    /// variants to access their raw slices, checking the accompanying null
+    /// bitmap before interpreting a code.
     pub fn code(&self, row: usize) -> Option<usize> {
         if self.is_null(row) {
             return None;

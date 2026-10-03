@@ -4,9 +4,10 @@
 //! This calculation leaf depends on `geode-core` and exposes implementations
 //! through its `Pricer` and `VolModel` traits. [`MockPricer`] supplies
 //! deterministic demo and test results; [`DemoVolModel`] is the smooth
-//! stand-in vol-surface evaluator `[vol] model = "demo"` selects. `geode-app` registers available implementations in its
-//! `PricerRegistry`; an unknown `[pricing] adapter` produces per-line errors
-//! without preventing startup.
+//! stand-in vol-surface evaluator `[vol] model = "demo"` selects. `geode-app`
+//! registers them in `geode-data`'s `PricerRegistry` and `VolModelRegistry`,
+//! respectively. An unknown `[pricing] adapter` produces per-line errors
+//! without preventing startup; an unknown vol model refuses each vol batch.
 
 pub mod black;
 pub mod demo_vol;

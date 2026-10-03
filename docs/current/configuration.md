@@ -10,8 +10,9 @@ Configuration is loaded in three layers, from lowest to highest precedence:
 
 1. **Builtin** defaults compiled into the application.
 2. **Desk** configuration from `$GEODE_DESK_CONFIG`.
-3. **User** configuration from `%APPDATA%\geode` on Windows or
-   `$HOME/.config/geode` elsewhere.
+3. **User** configuration from `$APPDATA/geode` when `APPDATA` is set,
+   otherwise `$HOME/.config/geode`. This is environment precedence, not a
+   platform check; without either variable no user directory is resolved.
 
 Tables merge recursively. Scalars, arrays, and values of a different type
 replace the lower-layer value at the same path; unrelated values remain.
@@ -58,13 +59,14 @@ The main configuration documents have distinct owners:
 
 | Document | Defines |
 |---|---|
-| `app.toml` | Theme, primary modifier, UI settings, logging, time zone, pricing and timeseries settings |
+| `app.toml` | Theme, primary modifier, UI settings, logging, time zone, pricing, vol model, and timeseries settings |
 | `datasets.toml` | Dataset families, columns, roles, types, grains, retention, local publication, and `computed` |
 | `views.toml` | Queryable views, joins, columns, expressions, grouping, and sorting |
-| `sources.toml` | File, subscription, and fetch sources with readiness and adapter settings |
+| `sources.toml` | File, subscription, fetch, and reference snapshot sources with readiness and adapter settings |
 | `egress.toml` | Upload targets: adapter and a per-document address template |
 | `positions.toml` | The one position service: the adapter that takes position commands such as Move LHU |
 | `panels.toml` | Market-data panels: the dataset, document kind, layout, formats, and kind actions of each panel tile kind |
+| `pricer_templates.toml` | Named option-package templates used by the pricer's shorthand |
 | `dimensions.toml` | Derived dimensions used for grouping and scope |
 | `groupings.toml` | The nine shared grouping slots |
 | `scopes.toml` | Named scopes |
@@ -143,9 +145,11 @@ field still open rather than accepted and left to fail later at query time
 and [configuration-dialogs.md's Scope expression field](configuration-dialogs.md#scope-expression-field)).
 Source adapter names, document kinds, module keymap fragments, pricer
 names, and market-data panels depend on what the assembled application has
-registered, so `geode-app` performs those cross-crate checks. Panels are
-checked at startup only (they are
-[restart-required](#market-data-panels)); the rest at startup and reload.
+registered. The app and data service check provider capabilities and panel
+composition at startup. Source, document-kind, pricing-adapter, vol-model,
+and panel changes require restart; a reload does not rebuild those runtime
+registries or repeat their startup capability checks. Keymap compilation
+does run on reload, against the existing action registry.
 
 `expressions.toml` holds named scope expressions: an expression text saved
 under a name so a saved scope or the frame can refer to it instead of copying

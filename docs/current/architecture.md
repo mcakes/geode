@@ -30,8 +30,8 @@ wire formats: geode-documents ────────────────�
 A feature module depends on `geode-shell` directly (the `TileContent`
 contract, key chips, the rem scale) as well as through `geode-tile`, and may
 also name `geode-widgets`, `geode-chart` and `geode-core` directly.
-`geode-diagnostics` has no popover, menu, confirm or notice line; it depends
-on `geode-tile` only for the flip-barrier arrival.
+`geode-diagnostics` is a page rather than a tile. It uses `geode-tile::motion`
+for row navigation and does not participate in tile flip barriers.
 
 `geode-core` is shared vocabulary without window, database, or network
 ownership. Typed interpretation and merging are I/O-free; its configuration
@@ -52,17 +52,20 @@ painters), and the `following` flip-barrier state machine every following
 tile runs for its own query. It depends on `geode-shell` for its paint doors
 and the live keymap, never on `geode-data` or a feature module, and the shell
 never depends on it. A tile mechanism two modules would otherwise each write
-lives there.
+lives there. The menu and popover implementations live in `geode-shell`,
+which also uses them for its row menu; `geode-tile` re-exports them for tiles.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
-`geode-timeseries`, `geode-volslice`, `geode-diagnostics`, and
+`geode-timeseries`, `geode-volslice`, and
 `geode-pricer` implement the shell's module contract and may ask the data
 service through `DataHandle`. They do not depend on sibling features. `geode-app` constructs shared
 services, registers module factories (one market-data factory per accepted
 `panels` entry), adapters, document kinds, kind actions, and pricers, and
 opens the window. Market-data panels are configuration checked there against
 the registered document kinds and kind actions; a kind action's behavior is
-code in the module that dispatches it.
+code in the module that dispatches it. Diagnostics implements `PageFactory`
+and `PageContent`; `geode-nemo` and `geode-positions` implement row-menu
+`DimensionAction`s. The app registers these alongside the tile factories.
 
 Reusable presentation is kept below features. `geode-widgets` holds shared
 stateful controls; `geode-chart` holds chart preparation and painting. It is
@@ -107,8 +110,9 @@ prepares the model its renderer needs when data or settings change; a frame
 should mostly perform indexed reads and compose elements. Large collections
 use struct-of-arrays storage and virtualized presentation.
 
-Shared global frame state contains scope, grouping, and as-of. Each tile may
-follow or override parts of that state. Version counters let a module decide
+The frame holds a shared scope, grouping, and as-of, plus a separate copy for
+each pinned workspace. Tiles may override parts of their workspace's state
+or follow a link group's scope. Version counters let a module decide
 which changes require a query or rebuild without comparing whole documents.
 
 A module receives the frame as a `FrameRef`, not the bare frame entity. A

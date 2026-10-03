@@ -2,10 +2,10 @@
 //! its data handle and the catalog it picks underlyings from, answers the
 //! shell's door (`crate::content::VolsliceContent`) and paints the tile.
 //! The data flow (documents under the flip barrier, the followed group's
-//! board, the vol batch and the model swap) is [`data`]'s; the choosers
-//! are [`picker`]'s and the chart's pointer gestures [`pointer`]'s.
+//! board, the vol batch and the model swap) lives in `data`; the choosers
+//! are in `picker` and the chart's pointer gestures in `pointer`.
 //!
-//! What paint reads beside the model is prepared in [`Chrome`] whenever the
+//! What paint reads beside the model is prepared in `Chrome` whenever the
 //! tile is notified and an input it was built from changed, never in
 //! render: the header's text, the strip's rows, the footer's notice.
 

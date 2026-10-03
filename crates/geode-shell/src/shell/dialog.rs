@@ -52,9 +52,9 @@ pub type ModalKeyHandler =
     Rc<dyn Fn(&mut ShellView, &Keystroke, &mut Window, &mut Context<ShellView>) -> bool>;
 
 /// Which dialog a stack entry is. Each kind but `Plain` owns one `ShellView`
-/// state field, so a kind appears at most once in the stack (see [`can_open`]);
+/// state field, so a kind appears at most once in the stack (`can_open`);
 /// a second instance would overwrite the live one's state. `Object` is the
-/// exception: it appears once per domain (see [`can_open_object`]), and each
+/// exception: it appears once per domain (`can_open_object`), and each
 /// covered one's state is parked in its own entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialogKind {
@@ -270,13 +270,13 @@ pub struct ShellModal {
     /// Optional pointer route for the dialog's one-screen back step. See
     /// [`set_back`].
     pub back: Option<ModalBack>,
-    /// Set while another entry covers this one; restored by [`refocus_top`].
+    /// Set while another entry covers this one; restored when it becomes topmost.
     pub saved_input: Option<SavedInput>,
     /// The workspace active when this entry was pushed. The stack's base
     /// entry decides which lane every frame dialog reads and commits to.
     pub workspace: WorkspaceIx,
     /// Set while an object dialog of another domain covers this `Object` entry;
-    /// restored by [`unpark_object_dialog`].
+    /// restored when this object dialog becomes topmost.
     pub parked_object: Option<ParkedObject>,
 }
 

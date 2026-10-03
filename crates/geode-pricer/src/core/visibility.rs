@@ -79,7 +79,7 @@ fn scope_column(
 
 /// Apply `scope` (already the frame's effective scope, named expressions
 /// resolved) to `sheet`. Dimension selections on columns `pricer` lacks
-/// or may not scope by ([`NOT_SCOPEABLE`]) are dropped first; such a
+/// or may not scope by (`position_ref` and `instrument_ref`) are dropped first; such a
 /// column in the expression refuses with `scope refused: '<col>' is not
 /// a pricer column`; any evaluator error refuses with `scope refused:
 /// <message>`, a row-independent one even over an empty sheet. A refusal

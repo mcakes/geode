@@ -195,7 +195,7 @@ pub fn range_rows(current: &Range) -> Vec<Row<Pick>> {
 /// model's own point-cap check over the range in force, asked once per
 /// row when the menu is built. Frequencies rejected by that check are
 /// disabled and carry its refusal as their reason; the lane shows
-/// [`OVER_CAP`] in its place.
+/// `OVER_CAP` in its place.
 pub fn frequency_rows(
     current: Frequency,
     refusal: impl Fn(Frequency) -> Result<(), String>,

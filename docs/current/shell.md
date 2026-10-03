@@ -425,11 +425,11 @@ and [keybinding editing](keymaps.md#editing-unbinding-and-reset).
 
 ## The shared frame
 
-`Frame` is a pure value held in a GPUI entity. It combines the global scope,
-active grouping, as-of value, recent publications, saved scopes, named
-expressions, and version counters. Every mutation bumps only the counters
-affected by that change, so a tile can cheaply ignore dimensions it does not
-follow.
+`Frame` is a pure value held in a GPUI entity. It combines workspace scope,
+grouping, and as-of selections with link groups, recent publications, saved
+scopes, named expressions, and version counters. Every mutation bumps only
+the counters affected by that change, so a tile can cheaply ignore dimensions
+it does not follow.
 
 ### Workspace lanes
 
@@ -591,9 +591,10 @@ only for removal while the window lives; quitting the application calls it
 for no occupant. A tile with its own error and no query
 to send (a blotter whose view is no longer configured, or whose scope names an
 undefined expression) answers the barrier at once, as a failed query does.
-Tiles that submit no frame query (pricer, diagnostics) answer every barrier at
-once. The rules live once, in `geode_tile::following`, which reads the
-frame only through the tile's `FrameRef`: a tile in a pinned workspace
+The pricer submits no frame query and answers every barrier at once.
+Diagnostics is a page: opening it hides the tiles and leaves no visible tile
+keys for a barrier. The rules live once, in `geode_tile::following`, which
+reads the frame only through the tile's `FrameRef`: a tile in a pinned workspace
 answers the barrier with its own lane's versions, not the shared lane's, and
 a tile following a link group with that group's scope generation.
 
@@ -837,19 +838,11 @@ older than the last one the group held.
 - The 3:1 guarantee for a chip's fill is measured against the theme's
   background, which is the tile's. A chip painted on any other surface is not
   covered by the sweep.
-- A flip barrier released during render-time reconciliation notifies
-  nobody: GPUI drops a notification sent, while a window draws, to an entity
-  that window read in its last draw, and the shell's render reads the frame.
-  Two routes release one there: a tile that closes while it is the last key
-  an open flip awaits, and a tile made visible (`set_visible(true)`) whose
-  query submission is refused, which answers the barrier at once. Tiles
-  holding staged results then stay on their pre-flip data until the next
-  frame notification.
 - A `:unscoped` blotter or pricer that follows a group ignores the group's
   scope, as it ignores the workspace's, while its header still shows the
   chip and the status bar still names the group.
-- No tile reads a board. Emitting panels post their drafts and the watch
-  interface is exercised only by tests; nothing displays a posted draft.
+- The vol-slice viewer reads a group's `cvi_params` draft. Other document
+  kinds can be posted to the board but have no consumer in the shipped tiles.
 - A market-data panel cannot follow a group: it does not take its underlying
   from one.
 

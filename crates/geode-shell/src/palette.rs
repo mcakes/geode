@@ -89,7 +89,7 @@ impl PaletteItem {
 ///
 /// A query of several whitespace-separated words matches when every word
 /// matches in any order on characters of its own, so `scope clear` finds
-/// "Clear scope" and `scope scope` does not. [`ORDER_BONUS`] rewards the typed
+/// "Clear scope" and `scope scope` does not. An order bonus rewards the typed
 /// order: either the whole query, spaces included, matches as one subsequence,
 /// or the words' separate alignments fall one after another. Each word first
 /// takes its best alignment; when two of those share a character, the words
@@ -754,8 +754,9 @@ pub struct Viewport {
 }
 
 /// Render merged match spans in the supplied accent colour and bold weight.
-/// Other spans inherit ambient text style. [`highlight_runs`] supplies UTF-8 byte
-/// ranges and handles indices outside the original label's character count.
+/// Other spans inherit ambient text style. Match indices are character
+/// positions, converted to UTF-8 byte ranges; indices beyond the original
+/// label's character count are ignored.
 pub fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) -> StyledText {
     let runs = highlight_runs(title, indices);
     if runs.is_empty() {
