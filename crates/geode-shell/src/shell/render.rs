@@ -438,9 +438,8 @@ impl Render for ShellView {
                 objectdialog::render::open_save_scope(view, window, cx);
             });
         };
-        // The scope bar's load glyph — the mouse form of
-        // `frame::scope`/`mod+o`, through the same door `input.rs`'s
-        // dispatch arm uses.
+        // The scope bar's load glyph opens the saved-scope chooser;
+        // `frame::scope`/`mod+o` opens the Scope dialog instead.
         let load_chip_entity = cx.entity();
         let on_load = move |window: &mut Window, cx: &mut App| {
             load_chip_entity.update(cx, |view, cx| {

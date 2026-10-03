@@ -18211,7 +18211,7 @@ run_mutation "scope-picker: a pick loads through the undoable load_saved_scope" 
                 .is_none()
             {' \
   geode-shell \
-  mod_o_then_typing_and_enter_loads_the_scope_undoably
+  the_load_glyph_then_typing_and_enter_loads_the_scope_undoably
 
 # A name gone since the open loads nothing AND says so.
 run_mutation "scope-picker: a vanished scope is reported on the status bar" \
@@ -18234,15 +18234,31 @@ run_mutation "scope-picker: rows are the frame's live saved scopes" \
   geode-shell \
   a_scope_saved_after_startup_is_listed_and_loads
 
-# `mod+o` reaches the picker through the dispatch arm.
-run_mutation "scope-picker: frame::scope opens the picker" \
+# mod+o is the Scope dialog's door.
+run_mutation "scope dialog: frame::scope opens the dialog" \
   crates/geode-shell/src/shell/input.rs \
-  '            choicedialog::open_scopes(self, window, cx);' \
-  '            let _ = (window, cx);' \
+  '            super::scopedialog::view::open(self, window, cx);' \
+  '' \
   geode-shell \
-  mod_o_then_typing_and_enter_loads_the_scope_undoably
+  mod_o_opens_the_scope_dialog_on_current
 
-# The toolbar's load glyph goes through the same open door as `mod+o`.
+# The dialog re-derives when the frame changes under it.
+run_mutation "scope dialog: a frame change refreshes the rows" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            || self.scope_dialog.is_some()' \
+  '' \
+  geode-shell \
+  rows_follow_the_frame_while_open
+
+# The title reads the provenance.
+run_mutation "scope dialog: the title shows the provenance" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        self.title = super::rows::provenance(scope, loaded_from, saved)' \
+  '        self.title = super::rows::provenance(scope, None, saved)' \
+  geode-shell \
+  the_title_says_where_the_scope_came_from
+
+# The toolbar's load glyph opens the saved-scope picker.
 run_mutation "scope-picker: the load glyph click opens the picker" \
   crates/geode-shell/src/shell/render.rs \
   '                choicedialog::open_scopes(view, window, cx);' \

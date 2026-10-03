@@ -14,6 +14,7 @@
 
 use geode_core::scope::Expr;
 
+#[allow(dead_code)] // Pushed by the step doors, which the view does not route yet.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Step {
     /// Columns, or a known column's values.
@@ -39,6 +40,7 @@ pub(crate) enum Step {
     SaveScope,
 }
 
+#[allow(dead_code)] // Pushed by the step doors, which the view does not route yet.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Layer {
     Current,
@@ -46,6 +48,7 @@ pub(crate) enum Layer {
     Step(Step),
 }
 
+#[allow(dead_code)] // Returned by escape and commits, which the view does not route yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum After {
     Show,
@@ -69,14 +72,17 @@ impl Layers {
         self.layers.last().expect("an open dialog has a layer")
     }
 
+    #[allow(dead_code)] // Called by the step and Saved routes, which the view lacks yet.
     pub(crate) fn depth(&self) -> usize {
         self.layers.len()
     }
 
+    #[allow(dead_code)] // Called by the step and Saved routes, which the view lacks yet.
     pub(crate) fn push(&mut self, layer: Layer) {
         self.layers.push(layer);
     }
 
+    #[allow(dead_code)] // Called by the step and Saved routes, which the view lacks yet.
     /// Swap the top layer without changing where its commit leads: a new
     /// expression's text step becomes its naming step and still returns to
     /// the screen beneath.
@@ -86,16 +92,19 @@ impl Layers {
         }
     }
 
+    #[allow(dead_code)] // Called by the step and Saved routes, which the view lacks yet.
     pub(crate) fn escape(&mut self) -> After {
         self.pop()
     }
 
+    #[allow(dead_code)] // Called by the step and Saved routes, which the view lacks yet.
     /// A step committed: it leaves, and whatever opened it shows again.
     pub(crate) fn commit_step(&mut self) -> After {
         debug_assert!(matches!(self.top(), Layer::Step(_)), "{:?}", self.top());
         self.pop()
     }
 
+    #[allow(dead_code)] // Called by the step and Saved routes, which the view lacks yet.
     /// A Saved row committed (a scope loaded, an expression toggled): the
     /// Saved screen leaves with it, back to Current when Saved was entered
     /// from there, else the dialog closes.

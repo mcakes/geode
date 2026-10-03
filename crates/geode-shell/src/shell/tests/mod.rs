@@ -680,6 +680,7 @@ mod picker;
 mod pin;
 mod reload;
 mod row_menu;
+mod scope_dialog;
 mod scope_expr;
 mod scope_provenance;
 mod scopebar;

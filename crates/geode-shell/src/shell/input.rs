@@ -503,9 +503,8 @@ impl ShellView {
             // An unknown name (hand-bound, or removed since startup) is a no-op.
             let _ = self.load_saved_scope(name, cx);
         } else if action.0 == "frame::scope" {
-            // Open the scope picker over the frame's live saved scopes; its
-            // pick loads through the same `load_saved_scope` as above.
-            choicedialog::open_scopes(self, window, cx);
+            // The Scope dialog on Current: the lane's scope by ingredient.
+            super::scopedialog::view::open(self, window, cx);
         } else if action.0 == "frame::as_of" {
             // Open the as-of selector.
             asof_view::open(self, window, cx);

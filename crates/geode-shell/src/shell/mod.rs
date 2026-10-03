@@ -38,8 +38,6 @@ pub mod row_menu;
 mod rows;
 pub mod scale;
 pub mod scope_expr_view;
-// Read only by its tests until the dialog view is built on it.
-#[allow(dead_code)]
 mod scopedialog;
 mod session_io;
 pub mod settings_view;
@@ -821,6 +819,8 @@ pub struct ShellView {
     /// State for the open scope expression dialog. Created by
     /// [`scope_expr_view::open`] and cleared when its kind pops.
     scope_expr_dialog: Option<scope_expr_view::ScopeExprState>,
+    /// The Scope dialog's state while it is in the stack.
+    pub(crate) scope_dialog: Option<scopedialog::view::ScopeDialogState>,
     /// State for the open choice dialog: the scope, tile-kind, column,
     /// log-level, action-value or link-group picker. Created by one of
     /// `choicedialog`'s `open_*` doors, and cleared when its kind pops.
@@ -1050,6 +1050,12 @@ impl ShellView {
                         // The field IS the value; typing clears the last
                         // failed commit's message.
                         scope_expr_view::on_query_changed(state);
+                    }
+                }
+                Some(dialog::DialogKind::Scope) => {
+                    if let Some(state) = view.scope_dialog.as_mut() {
+                        // Only the text step types; Current ignores the field.
+                        scopedialog::view::on_query_changed(state, &query);
                     }
                 }
                 Some(dialog::DialogKind::Plain) | None => {}
@@ -1591,6 +1597,7 @@ impl ShellView {
             as_of_scroll: ScrollHandle::new(),
             as_of_data_version: 0,
             scope_expr_dialog: None,
+            scope_dialog: None,
             choice_dialog: None,
             choice_dialog_scroll: ScrollHandle::new(),
             expr_scroll: ScrollHandle::new(),
@@ -1642,6 +1649,7 @@ impl ShellView {
             DialogKind::Picker => self.picker = None,
             DialogKind::AsOf => self.as_of_dialog = None,
             DialogKind::ScopeExpr => self.scope_expr_dialog = None,
+            DialogKind::Scope => self.scope_dialog = None,
             DialogKind::Choice => self.choice_dialog = None,
             DialogKind::Object => {
                 self.object_dialog = None;
@@ -1846,12 +1854,14 @@ impl ShellView {
         }
         // A dialog whose list reads the frame (the Groupings list's leading
         // rows) re-derives when the frame changes under it; a stale `*` row
-        // would offer a chain that no longer exists. Last, after every
-        // `frame.update` above, so the key carries the final generation.
+        // would offer a chain that no longer exists, and the Scope dialog,
+        // whose rows are the lane's scope. Last, after every `frame.update`
+        // above, so the key carries the final generation.
         if self
             .object_dialog
             .as_ref()
             .is_some_and(|state| state.domain.applies_from_browse())
+            || self.scope_dialog.is_some()
         {
             self.refresh_dialog_rows(cx);
         }

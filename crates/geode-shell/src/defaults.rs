@@ -469,9 +469,8 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "frame::pick", "Pick a dimension…", "Frame");
     // The Grouping dialog: apply, edit, type an ad hoc chain, save to a slot.
     action(reg, "frame::grouping", "Pick a grouping…", "Frame");
-    // The scope picker lists the frame's live saved scopes with typeahead;
-    // a pick loads one undoably, like the `scope::<name>` actions.
-    action(reg, "frame::scope", "Pick a scope…", "Frame");
+    // The Scope dialog: the lane's scope by ingredient.
+    action(reg, "frame::scope", "Scope…", "Frame");
     // Focus the scope text field; its Input handles typing once focused.
     action(
         reg,
