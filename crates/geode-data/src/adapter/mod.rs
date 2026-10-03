@@ -14,6 +14,7 @@ pub use channel::{ChannelAdapter, ChannelFeed};
 pub use topic::topic_matches;
 
 use chrono::{DateTime, Utc};
+use geode_core::reference::TableRows;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -251,6 +252,13 @@ pub trait Fetch: Send {
     fn catalogue(&mut self) -> Option<Vec<String>>;
 }
 
+/// Blocking whole-table read owned by one snapshot worker. Implementations
+/// bound `query` with their own timeout: the worker has no deadline, and a
+/// call that never returns stops polling for that source and can block shutdown.
+pub trait SnapshotQuery: Send {
+    fn query(&mut self, table: &str) -> Result<TableRows, AdapterError>;
+}
+
 /// Named transport shared through Arc. Optional capabilities are independent:
 /// None means unavailable, while a returned capability may still refuse an
 /// operation. Availability can change; for example, a closed ChannelAdapter
@@ -281,6 +289,12 @@ pub trait Adapter: Send + Sync {
     /// `positions::resolve` probes one and discards it, then
     /// `PositionWorker::spawn` takes another for its worker thread.
     fn positions(&self) -> Option<Box<dyn PositionCommands>> {
+        None
+    }
+
+    /// A FRESH handle per call, like `fetch`. `None` (the default) when the
+    /// adapter cannot read tables.
+    fn snapshot(&self) -> Option<Box<dyn SnapshotQuery>> {
         None
     }
 }

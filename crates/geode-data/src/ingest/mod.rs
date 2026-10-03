@@ -7,6 +7,7 @@ pub mod load;
 pub mod plan;
 pub mod runner;
 pub mod scheduler;
+pub mod snapshot;
 pub mod split;
 pub mod subscribe;
 
