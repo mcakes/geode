@@ -12406,10 +12406,10 @@ run_mutation "cvi: a second <term> inside one slice wins silently instead of bei
 # A colour with both hue and token is dropped, not merged.
 run_mutation "colour: both hue and token is refused" \
   crates/geode-core/src/colour/mod.rs \
-  '                    refuse_both(&mut diags, &at, name);
-                    continue;' \
-  '                    let _ = &at;
-                    Base::Token(Token::Danger)' \
+  '                refuse_both(&mut diags, path, subject);
+                return (None, diags);' \
+  '                let _ = (path, subject);
+                Base::Token(Token::Danger)' \
   geode-core \
   reads_hue_tone_and_token_and_refuses_both_or_neither
 
@@ -12750,8 +12750,8 @@ run_mutation "tint: a tinted triad is floored" \
 # tint_sign: the key is read beside either base, not only under hue.
 run_mutation "colour: tint_sign is read from the doc" \
   crates/geode-core/src/colour/mod.rs \
-  '            let tint_sign = match table.get("tint_sign") {' \
-  '            let tint_sign = match None::<&toml::Value> {' \
+  '        let tint_sign = match table.get("tint_sign") {' \
+  '        let tint_sign = match None::<&toml::Value> {' \
   geode-core \
   reads_tint_sign_beside_a_hue_or_a_token_and_warns_on_a_non_bool
 
@@ -35075,14 +35075,23 @@ run_mutation "close: the vol slice content forwards its handle" \
   '        let _ = (close, cx);' \
   geode-volslice the_header_paints_the_close_button
 
-# value_colors merges per value: listing it as atomic would make a user
-# override of one value drop the desk's others.
-run_mutation "value colors: the document merges per value" \
+# value_colors replaces one value's entry whole (depth 2). At depth 1 a user
+# entry would drop the desk's other values of the dimension.
+run_mutation "value colors: a dimension merges per value" \
   crates/geode-core/src/config/merge.rs \
-  '        "colors" => Some(1),' \
-  '        "colors" | "value_colors" => Some(1),' \
+  '        "value_colors" => Some(2),' \
+  '        "value_colors" => Some(1),' \
   geode-core \
-  value_colors_merge_per_value_not_per_dimension
+  value_colors_replace_an_entry_whole_and_merge_a_dimension_per_value
+
+# With no atomic depth a user hue deep-merges into a desk token and the
+# entry is refused as both.
+run_mutation "value colors: an entry is replaced whole" \
+  crates/geode-core/src/config/merge.rs \
+  '        "value_colors" => Some(2),' \
+  '        "value_colors" => None,' \
+  geode-core \
+  value_colors_replace_an_entry_whole_and_merge_a_dimension_per_value
 
 # `none` clears: it must not be stored as a color named "none".
 run_mutation "value colors: none reads as unmapped" \
@@ -35103,7 +35112,7 @@ run_mutation "value colors: sign is refused" \
 # The check prunes an unknown color: a pruned value must not reach paint.
 run_mutation "value colors: an unknown color is pruned" \
   crates/geode-core/src/colour/values.rs \
-  '            if named.get(color).is_none() {' \
+  '            if values.inline_definition(color).is_none() && named.get(color).is_none() {' \
   '            if false {' \
   geode-core \
   the_check_prunes_what_cannot_paint_and_says_why
@@ -35560,6 +35569,57 @@ run_mutation "events: text-file outcomes key by tile and tag" \
   '        DataEvent::TextFile(o) => Key::TextFile(o.key, 0),' \
   geode-app \
   two_text_file_outcomes_for_the_same_tile_are_both_delivered
+
+# ---- Value color choices ----
+
+# An inline entry names no colors.toml color: the unknown-name check must
+# not prune it.
+run_mutation "value colors: the check keeps an inline entry" \
+  crates/geode-core/src/colour/values.rs \
+  '            if values.inline_definition(color).is_none() && named.get(color).is_none() {' \
+  '            if named.get(color).is_none() {' \
+  geode-core \
+  the_check_keeps_an_inline_entry_and_prunes_its_dimension_by_kind
+
+# A value has no sign: tint_sign in an inline entry is refused.
+run_mutation "value colors: an inline tint_sign is refused" \
+  crates/geode-core/src/colour/values.rs \
+  '    if table.contains_key("tint_sign") {' \
+  '    if false {' \
+  geode-core \
+  inline_entries_parse_and_refuse_at_their_path
+
+# The inline key must contain what check_object_name refuses.
+run_mutation "value colors: the inline key is never a color name" \
+  crates/geode-core/src/colour/values.rs \
+  '    format!("inline {dimension}.{value}")' \
+  '    format!("{dimension}{value}")' \
+  geode-core \
+  the_inline_key_can_never_be_a_color_name
+
+# Inline keys are hidden from every listing of names.
+run_mutation "value colors: inline keys are not names" \
+  crates/geode-core/src/colour/mod.rs \
+  '        self.by_name.keys().map(String::as_str)' \
+  '        self.by_name.keys().chain(self.inline.keys()).map(String::as_str)' \
+  geode-core \
+  inline_keys_resolve_through_get_and_never_list
+
+# Paint resolves an inline key through get.
+run_mutation "value colors: get resolves an inline key" \
+  crates/geode-core/src/colour/mod.rs \
+  '        self.by_name.get(name).or_else(|| self.inline.get(name))' \
+  '        self.by_name.get(name)' \
+  geode-core \
+  inline_keys_resolve_through_get_and_never_list
+
+# tone is written only when light.
+run_mutation "colour: to_table writes tone only when light" \
+  crates/geode-core/src/colour/mod.rs \
+  '                if *tone == Tone::Light {' \
+  '                if true {' \
+  geode-core \
+  to_table_round_trips_through_from_table
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

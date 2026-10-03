@@ -1,10 +1,11 @@
 //! Value colors: a text dimension's value mapped to a named color, so the
 //! cell showing `SPX` paints in SPX's color wherever it appears. The
-//! document is `value_colors.toml`; a color is a `colors.toml` name.
+//! document is `value_colors.toml`; a color is a `colors.toml` name or an
+//! inline `{ hue }` / `{ token }` table.
 //! Everything here is pure: the reader, the check against the schema and
 //! the color definitions, and the layer arithmetic behind the pick list.
 
-use crate::colour::{NamedColours, RESERVED_PREFIX};
+use crate::colour::{Definition, NamedColours, RESERVED_PREFIX};
 use crate::config::{Diagnostic, Layer, LayerDoc, MergedDoc, Severity, VALUE_COLORS_DOC};
 use crate::dimensions::DerivedDimensions;
 use crate::schema::{ColumnRole, ColumnType, SchemaSpec};
@@ -14,6 +15,50 @@ use std::sync::Arc;
 /// The entry that means "no color": how a higher layer clears a lower
 /// layer's color. It reads as an unmapped value.
 pub const NO_COLOR: &str = "none";
+
+/// The internal color key of an inline entry. It contains whitespace,
+/// which `config::check_object_name` refuses, so no `colors.toml` name can
+/// ever equal it.
+pub fn inline_key(dimension: &str, value: &str) -> String {
+    format!("inline {dimension}.{value}")
+}
+
+/// Read one inline entry: [`Definition::from_table`]'s rules, minus
+/// `tint_sign`, which is refused because a value has no sign.
+pub fn read_inline(
+    table: &toml::Table,
+    path: &str,
+    dimension: &str,
+    value: &str,
+) -> (Option<Definition>, Vec<Diagnostic>) {
+    if table.contains_key("tint_sign") {
+        return (
+            None,
+            vec![refusal(
+                path.to_string(),
+                format!(
+                    "value colors '{dimension}': '{value}': tint_sign is refused, a value has no sign; dropped"
+                ),
+            )],
+        );
+    }
+    Definition::from_table(
+        table,
+        path,
+        &format!("value colors '{dimension}': '{value}'"),
+    )
+}
+
+/// An error that drops the entry at `path`.
+fn refusal(path: String, message: String) -> Diagnostic {
+    Diagnostic {
+        severity: Severity::Error,
+        layer: None,
+        file: None,
+        message,
+        path: Some(path),
+    }
+}
 
 /// One dimension's colored values. A color name is an `Arc<str>` so a
 /// prepared grid cell shares it rather than copying it.
@@ -38,6 +83,9 @@ impl DimensionColors {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ValueColors {
     by_dimension: BTreeMap<String, DimensionColors>,
+    /// Inline entries' definitions by internal key ([`inline_key`]); the
+    /// key is what `by_dimension` stores for such a value.
+    inline: BTreeMap<String, Definition>,
 }
 
 impl ValueColors {
@@ -46,62 +94,59 @@ impl ValueColors {
     pub fn from_doc(doc: &MergedDoc) -> (ValueColors, Vec<Diagnostic>) {
         let mut out = ValueColors::default();
         let mut diags = Vec::new();
-        let mut refuse = |path: String, message: String| {
-            diags.push(Diagnostic {
-                severity: Severity::Error,
-                layer: None,
-                file: None,
-                message,
-                path: Some(path),
-            })
-        };
         for (dimension, entry) in &doc.value {
             if dimension == "config_version" {
                 continue;
             }
             let Some(table) = entry.as_table() else {
-                refuse(
+                diags.push(refusal(
                     format!("{VALUE_COLORS_DOC}.{dimension}"),
-                    format!(
-                        "value colors '{dimension}': not a table of value = \"color\" entries; dropped"
-                    ),
-                );
+                    format!("value colors '{dimension}': not a table of value entries; dropped"),
+                ));
                 continue;
             };
             for (value, color) in table {
                 let path = format!("{VALUE_COLORS_DOC}.{dimension}.{value}");
+                if value.is_empty() {
+                    diags.push(refusal(
+                        path,
+                        format!("value colors '{dimension}': an empty value; dropped"),
+                    ));
+                    continue;
+                }
+                if let Some(inline) = color.as_table() {
+                    let (definition, inline_diags) = read_inline(inline, &path, dimension, value);
+                    diags.extend(inline_diags);
+                    if let Some(definition) = definition {
+                        out.insert_inline(dimension, value, definition);
+                    }
+                    continue;
+                }
                 let Some(name) = color.as_str() else {
-                    refuse(
+                    diags.push(refusal(
                         path,
                         format!(
-                            "value colors '{dimension}': '{value}' must name a color (got {color}); dropped"
+                            "value colors '{dimension}': '{value}' must name a color or be an inline {{ hue }} or {{ token }} table (got {color}); dropped"
                         ),
-                    );
+                    ));
                     continue;
                 };
                 if name == "sign" {
-                    refuse(
+                    diags.push(refusal(
                         path,
                         format!(
                             "value colors '{dimension}': '{value}': sign is a column color mode, not a color; dropped"
                         ),
-                    );
+                    ));
                     continue;
                 }
                 if name.starts_with(RESERVED_PREFIX) {
-                    refuse(
+                    diags.push(refusal(
                         path,
                         format!(
-                            "value colors '{dimension}': '{value}': absolute colors are not accepted here, name a color from colors.toml; dropped"
+                            "value colors '{dimension}': '{value}': absolute colors are not accepted here, name a color or give an inline hue; dropped"
                         ),
-                    );
-                    continue;
-                }
-                if value.is_empty() {
-                    refuse(
-                        path,
-                        format!("value colors '{dimension}': an empty value; dropped"),
-                    );
+                    ));
                     continue;
                 }
                 if name == NO_COLOR {
@@ -132,11 +177,36 @@ impl ValueColors {
     }
 
     pub fn insert(&mut self, dimension: &str, value: &str, color: &str) {
+        self.inline.remove(&inline_key(dimension, value));
         self.by_dimension
             .entry(dimension.to_string())
             .or_default()
             .by_value
             .insert(value.to_string(), color.into());
+    }
+
+    /// Color `value` of `dimension` with an inline definition: the value
+    /// maps to its [`inline_key`], whose definition is kept here.
+    pub fn insert_inline(&mut self, dimension: &str, value: &str, definition: Definition) {
+        let key = inline_key(dimension, value);
+        self.by_dimension
+            .entry(dimension.to_string())
+            .or_default()
+            .by_value
+            .insert(value.to_string(), key.as_str().into());
+        self.inline.insert(key, definition);
+    }
+
+    /// The definition behind an inline key; `None` for a `colors.toml` name.
+    pub fn inline_definition(&self, key: &str) -> Option<&Definition> {
+        self.inline.get(key)
+    }
+
+    /// Every inline entry's key and definition.
+    pub fn inline(&self) -> impl Iterator<Item = (&str, &Definition)> {
+        self.inline
+            .iter()
+            .map(|(key, definition)| (key.as_str(), definition))
     }
 }
 
@@ -197,7 +267,7 @@ pub fn text_dimensions(schema: &SchemaSpec, dims: &DerivedDimensions) -> BTreeSe
 
 /// Remove what cannot paint, warning once per removal: a dimension nothing
 /// declares, a dimension that is not text, and a value naming a color
-/// `named` does not define. What is returned is exactly what a tile may
+/// `named` does not define (an inline entry names none and is kept). What is returned is exactly what a tile may
 /// look up, so paint needs no second validity check.
 pub fn check_value_colors(
     values: ValueColors,
@@ -238,7 +308,7 @@ pub fn check_value_colors(
             }
         }
         for (value, color) in colors.iter() {
-            if named.get(color).is_none() {
+            if values.inline_definition(color).is_none() && named.get(color).is_none() {
                 warn(
                     format!("{VALUE_COLORS_DOC}.{dimension}.{value}"),
                     format!(
@@ -247,7 +317,10 @@ pub fn check_value_colors(
                 );
                 continue;
             }
-            out.insert(dimension, value, color);
+            match values.inline_definition(color) {
+                Some(definition) => out.insert_inline(dimension, value, definition.clone()),
+                None => out.insert(dimension, value, color),
+            }
         }
     }
     (out, diags)
@@ -443,6 +516,178 @@ mod tests {
         let (values, _) = ValueColors::from_doc(&doc("[underlying_ref]\nSPX = \"none\"\n"));
         assert!(values.is_empty());
         assert!(values.dimension("underlying_ref").is_none());
+    }
+
+    #[test]
+    fn inline_entries_parse_and_refuse_at_their_path() {
+        let (values, diags) = ValueColors::from_doc(&doc("[underlying_ref]\n\
+             NDX = { hue = 210 }\n\
+             RUT = { hue = 30, tone = \"light\" }\n\
+             DAX = { token = \"warning\" }\n\
+             WRAP = { hue = 360 }\n\
+             ODD = { hue = 90, tone = \"pale\" }\n\
+             BOTH = { hue = 1, token = \"danger\" }\n\
+             NEITHER = { tone = \"light\" }\n\
+             FAR = { hue = 400 }\n\
+             SIGNED = { hue = 10, tint_sign = true }\n\
+             TOK = { token = \"nope\" }\n"));
+        let def = |value: &str| {
+            values
+                .get("underlying_ref", value)
+                .and_then(|key| values.inline_definition(key))
+                .cloned()
+        };
+        assert_eq!(def("NDX"), Some(Definition::hue(210.0, Tone::Normal)));
+        assert_eq!(def("RUT"), Some(Definition::hue(30.0, Tone::Light)));
+        assert_eq!(
+            def("DAX"),
+            Some(Definition::token(crate::colour::Token::Warning))
+        );
+        assert_eq!(
+            def("WRAP"),
+            Some(Definition::hue(0.0, Tone::Normal)),
+            "360 is 0"
+        );
+        assert_eq!(
+            def("ODD"),
+            Some(Definition::hue(90.0, Tone::Normal)),
+            "a bad tone warns and falls back"
+        );
+        assert_eq!(
+            values.get("underlying_ref", "NDX").map(|k| &**k),
+            Some("inline underlying_ref.NDX")
+        );
+        for dropped in ["BOTH", "NEITHER", "FAR", "SIGNED", "TOK"] {
+            assert_eq!(values.get("underlying_ref", dropped), None, "{dropped}");
+        }
+        let errors: Vec<&str> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .filter_map(|d| d.path.as_deref())
+            .collect();
+        assert_eq!(
+            errors,
+            [
+                "value_colors.underlying_ref.BOTH",
+                "value_colors.underlying_ref.NEITHER",
+                "value_colors.underlying_ref.FAR.hue",
+                "value_colors.underlying_ref.SIGNED",
+                "value_colors.underlying_ref.TOK.token",
+            ]
+        );
+        let warnings: Vec<&str> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .filter_map(|d| d.path.as_deref())
+            .collect();
+        assert_eq!(warnings, ["value_colors.underlying_ref.ODD.tone"]);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("tint_sign is refused")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn the_inline_key_can_never_be_a_color_name() {
+        let key = inline_key("underlying_ref", "SPX");
+        assert_eq!(key, "inline underlying_ref.SPX");
+        assert!(crate::config::check_object_name(&key).is_err());
+        let (colors, diags) = NamedColours::from_doc(&merge_docs(
+            "colors",
+            &[LayerDoc::builtin("colors", "[\"inline underlying_ref.SPX\"]\nhue = 1\n").unwrap()],
+        ));
+        assert!(colors.get(&key).is_none());
+        assert_eq!(diags.len(), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn the_check_keeps_an_inline_entry_and_prunes_its_dimension_by_kind() {
+        let mut values = ValueColors::default();
+        values.insert_inline(
+            "underlying_ref",
+            "NDX",
+            Definition::hue(210.0, Tone::Normal),
+        );
+        values.insert_inline("strike", "5000", Definition::hue(30.0, Tone::Normal));
+        let kind_of = |name: &str| match name {
+            "underlying_ref" => DimensionKind::Text,
+            _ => DimensionKind::NotText,
+        };
+        let (checked, diags) = check_value_colors(values, &NamedColours::default(), kind_of);
+        let key = checked
+            .get("underlying_ref", "NDX")
+            .expect("an inline entry names no colors.toml color and is kept");
+        assert_eq!(&**key, "inline underlying_ref.NDX");
+        assert_eq!(
+            checked.inline_definition(key),
+            Some(&Definition::hue(210.0, Tone::Normal))
+        );
+        assert!(checked.dimension("strike").is_none());
+        assert_eq!(
+            checked.inline_definition("inline strike.5000"),
+            None,
+            "a pruned dimension takes its definitions with it"
+        );
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(
+            diags[0]
+                .message
+                .contains("value colors apply to text dimensions")
+        );
+    }
+
+    #[test]
+    fn inline_keys_resolve_through_get_and_never_list() {
+        let config = crate::config::Config::from_docs(vec![
+            LayerDoc::builtin("datasets", DEMO_DATASETS).unwrap(),
+            LayerDoc::builtin("colors", "[blue]\nhue = 240\n").unwrap(),
+            LayerDoc::builtin(
+                "value_colors",
+                "[underlying_ref]\nSPX = \"blue\"\nNDX = { hue = 210 }\n",
+            )
+            .unwrap(),
+        ]);
+        let (colors, diags) = NamedColours::from_config(&config);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            colors.names().collect::<Vec<_>>(),
+            ["blue"],
+            "inline keys are not names"
+        );
+        let key = colors
+            .values()
+            .get("underlying_ref", "NDX")
+            .expect("NDX is colored");
+        assert_eq!(colors.get(key), Some(&Definition::hue(210.0, Tone::Normal)));
+        assert_eq!(
+            colors.values().get("underlying_ref", "SPX").map(|c| &**c),
+            Some("blue")
+        );
+    }
+
+    #[test]
+    fn a_user_inline_hue_over_a_desk_inline_token_replaces_it_whole() {
+        let config = crate::config::Config::from_docs(vec![
+            LayerDoc::builtin("datasets", DEMO_DATASETS).unwrap(),
+            layer(
+                Layer::Desk,
+                "[underlying_ref]\nNDX = { token = \"warning\" }\n",
+            ),
+            layer(Layer::User, "[underlying_ref]\nNDX = { hue = 30 }\n"),
+        ]);
+        let (colors, diags) = NamedColours::from_config(&config);
+        assert!(diags.is_empty(), "{diags:?}");
+        let key = colors
+            .values()
+            .get("underlying_ref", "NDX")
+            .expect("NDX stays colored");
+        assert_eq!(
+            colors.get(key),
+            Some(&Definition::hue(30.0, Tone::Normal)),
+            "the user's hue, not a hue-and-token table refused as both"
+        );
     }
 
     fn demo() -> (SchemaSpec, DerivedDimensions) {

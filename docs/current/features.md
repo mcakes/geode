@@ -368,8 +368,8 @@ columns](data-path.md#ungrouped-dimension-columns). A numeric dimension such as
 `strike` sorts by number and paints its exact value, never rounded by the text
 format.
 
-A dimension value that `value_colors` maps paints in that value's named
-color. A tree label is a value of the grouping dimension at its depth, so
+A dimension value that `value_colors` maps paints in that value's color (a
+named color, or an inline hue or token). A tree label is a value of the grouping dimension at its depth, so
 `L1` under `lhu` takes `lhu`'s mapping for `L1`, never another level's; the
 gutter number, indent and chevron keep their own paint. A `dimension`
 column's unanimous value takes its color too. `mixed`, blanks, the grand
@@ -1533,8 +1533,8 @@ in the theme's bearish color and a positive one bullish, a named color from
 `colors.toml` tints the column and its header; a stale cell stays muted and a
 failed one danger whatever the column's color. Measures default to `sign`;
 a column says `color = "none"` to opt out.
-A dimension value that `value_colors` maps paints in that value's named
-color: a text dimension's cell showing an own value (`underlying_ref` on a
+A dimension value that `value_colors` maps paints in that value's color (a
+named color, or an inline hue or token): a text dimension's cell showing an own value (`underlying_ref` on a
 line or leg, and a package or group row's agreed value), and a group row's
 label when the sheet is grouped by that dimension. Label and cell both match
 the raw value grouping and scope read, not the painted spelling: an `expiry`
