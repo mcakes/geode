@@ -64,9 +64,10 @@ job. A catalog check immediately before loading skips work that has already
 been published, without starting progress. Within a file priority, newer
 source times run first. The runner finishes each operation before selecting
 another, in the order documents, series, reference snapshots, files; sustained
-traffic in one queue can starve every queue after it. Coalescing reduces repeated documents but
-does not bound the writer backlog or the number of distinct document keys.
-Fixed staging-table names also require serialized file loads on a store.
+traffic in one queue can starve every queue after it. Coalescing reduces
+repeated documents but does not bound the writer backlog or the number of
+distinct document keys. Fixed staging-table names also require serialized file
+loads on a store.
 
 Subscription release deadlines drive the receiver's wait, capped at 250 ms
 while idle. They are not a hard latency guarantee: parsing and thread
@@ -77,25 +78,26 @@ growing at 256 paths per source; further unremembered paths can warn repeatedly.
 Shutdown stops producers before the ingest writer. Fetch workers drain their
 accepted requests and join. Snapshot workers finish a poll in flight, which
 has no deadline, deliver its outcome, and join without polling again; they are
-stopped on the service thread, never by a drop on the UI thread. Subscription workers unsubscribe, set a stop flag,
-and join without flushing documents still held by their coalescers. Discovery
-stops polling; the ingest runner finishes its current operation, then runs
-the queued local writes (`local`-source publishes and forgets) in queue order,
-each answering its writer as usual, and exits. Every other queued job — feed
-documents, series, reference snapshots, files — is dropped; its source resends it after a restart.
-The local writes are the user's last edits (the pricer saves every unsaved
-sheet at quit, before the data service is told to stop), which nothing would
-resend. Submission to the runner itself has no shutdown refusal, so producer
-ordering is required. Egress workers close their queue
-first (refusing further submissions), then join; jobs already queued still
-run and answer, so shutdown can wait on a slow or stuck transport — see
-[egress and uploads](#egress-and-uploads) below. The position worker stops
-next, the same way. Shutdown is not a flush
-guarantee: the app's quit hook runs the shutdown on the background executor,
-and gpui waits for quit hooks only up to its `SHUTDOWN_TIMEOUT` (200 ms). A
-local write still running or queued when the process exits is lost; DuckDB's
-write-ahead log keeps the database consistent, at the previous generation. Blocking adapter, parser, or filesystem calls can delay joins;
-panic containment does not cancel them. See
+stopped on the service thread, never by a drop on the UI thread. Subscription
+workers unsubscribe, set a stop flag, and join without flushing documents
+still held by their coalescers. Discovery stops polling; the ingest runner
+finishes its current operation, then runs the queued local writes
+(`local`-source publishes and forgets) in queue order, each answering its
+writer as usual, and exits. Every other queued job — feed documents, series,
+reference snapshots, files — is dropped; its source resends it after a
+restart. The local writes are the user's last edits (the pricer saves every
+unsaved sheet at quit, before the data service is told to stop), which nothing
+would resend. Submission to the runner itself has no shutdown refusal, so
+producer ordering is required. Egress workers close their queue first
+(refusing further submissions), then join; jobs already queued still run and
+answer, so shutdown can wait on a slow or stuck transport — see [egress and
+uploads](#egress-and-uploads) below. The position worker stops next, the same
+way. Shutdown is not a flush guarantee: the app's quit hook runs the shutdown
+on the background executor, and gpui waits for quit hooks only up to its
+`SHUTDOWN_TIMEOUT` (200 ms). A local write still running or queued when the
+process exits is lost; DuckDB's write-ahead log keeps the database consistent,
+at the previous generation. Blocking adapter, parser, or filesystem calls can
+delay joins; panic containment does not cancel them. See
 [`runner.rs`](../../crates/geode-data/src/ingest/runner.rs),
 [`subscribe.rs`](../../crates/geode-data/src/ingest/subscribe.rs), and
 [`fetch.rs`](../../crates/geode-data/src/ingest/fetch.rs).
@@ -301,12 +303,23 @@ with that generation and stays readable as of an earlier instant.
 [`publish_reference`](../../crates/geode-data/src/store/reference.rs) stages
 the conformed rows, then compares them with the live partition in SQL,
 `EXCEPT ALL` in both directions. When a live generation exists and neither
-direction differs, the snapshot is `Unchanged`: nothing is written and no
-identifier is spent. Set operations compare NULLs as equal, so a NULL cell is
-not a change. Comparing against stored rows rather than a remembered content
-hash survives restarts without a catalog column and cannot report unchanged
-after a failed publish. An empty snapshot is a real generation: it publishes
-once, then repeats as unchanged.
+direction differs, the snapshot is `Unchanged`: nothing is published and no
+identifier is spent, though the shared staging table is still rewritten,
+since the comparison reads the staged rows. Set operations compare NULLs as
+equal, so a NULL cell is not a change. Comparing against stored rows rather
+than a remembered content hash survives restarts without a catalog column
+and cannot report unchanged after a failed publish. An empty snapshot is a
+real generation in storage: it publishes once, then repeats as unchanged. A
+poll never produces one, because conforming refuses a query that returns no
+rows and keeps the live table.
+
+The comparison is with live, not with the newest stored generation. A
+snapshot whose source time is not newer than live's publishes archived-only
+and leaves live as it was, so the next poll differs from live again and
+archives another copy, once per poll. Snapshot sources stamp the time a
+poll started, which moves forward, so this needs a clock that went
+backwards; a source time taken from the source's own data would break that
+assumption.
 
 `read_reference` takes the generation from the `generations` summary (newest
 by source time, then generation ID, live; `resolve_generations` as of an
@@ -348,12 +361,23 @@ columns read as NULL raise one warning per distinct combination, addressed
 next due time, so the Sources section shows Last poll and Next poll.
 
 Polls stay quiet. A snapshot job announces no `Loading`, so the status bar's
-progress strip does not flash every interval, and an unchanged snapshot sends
-no `LoadEnded` either. A failed poll is not logged per poll: the discovery
-lane's transition to `Degraded` logs one warning naming the source and the
-reason, and a database that stays down logs nothing more until the reason
-changes or the source recovers. A failed publish, an operation on the load
-lane, still logs its own error.
+progress strip does not flash every interval. An unchanged snapshot sends no
+`LoadEnded` of its own; the only one an unchanged poll causes is the runner's
+drain announcement once its queues empty, which ends nothing because no load
+started. A published or failed snapshot sends the `LoadEnded` every load
+outcome sends, equally a no-op. A failed poll is not logged per poll: the
+warning is the health log, written when the discovery lane's report changes
+the source's displayed health, naming the source and the reason. A database
+that stays down logs nothing more until the reason changes or the source
+recovers. A degraded poll whose source is already worse on the load lane,
+such as a failed publish, changes nothing displayed and logs nothing. A
+failed publish, an operation on the load lane, still logs its own error.
+
+Limits. A poll is one adapter call with no deadline: a `query` that never
+returns stops that source's polling, while other sources keep theirs, and
+shutdown waits for it, so it can delay exit. Reference columns carry codes,
+not schedules: the demo `calendar` column is an exchange calendar code, and
+holiday dates are not modelled.
 
 `DataHandle::poll(dataset)` asks every snapshot source filling that dataset
 to poll now. It is keyed by dataset because the asking page shows datasets,

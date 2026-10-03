@@ -61,8 +61,8 @@ own either, and are created without an event sink. See
 
 The bounded request and adapter channels do not bound the ingest queues.
 Documents precede series, which precede reference snapshots, which precede
-files, with no preemption of running work. Sustained higher-priority traffic can starve lower-priority jobs.
-See [queues and shutdown](../../docs/current/data-path.md#queues-and-shutdown)
+files, with no preemption of running work. Sustained higher-priority traffic
+can starve lower-priority jobs. See [queues and shutdown](../../docs/current/data-path.md#queues-and-shutdown)
 for capacity, coalescing, and worker shutdown behavior.
 
 ## What lives here
@@ -75,7 +75,7 @@ for capacity, coalescing, and worker shutdown behavior.
 | `source` | Directory discovery, sentinel parsing, and readiness classification. Configuration types are shared with `geode-core`; stable-mtime readiness is accepted by configuration but unsupported at runtime. |
 | `adapter` | Subscription, upload, fetch, snapshot (`SnapshotQuery`, through `Adapter::snapshot`), and position-command (`PositionCommands`, through `Adapter::positions`, `None` by default) capabilities; a registry, bounded message sink, and topic matching. Includes the in-process `ChannelAdapter`; the app can register additional implementations such as its demo series adapter. |
 | `ingest` | The discovery scheduler, the cold-start priority ladder, the per-file load pipeline, the grain split and conflict detector, the ingest runner (one thread, one writer connection, four queues), the subscribed-source receiver, the `Coalescer`, the fetch worker, and the snapshot worker (one per snapshot source: poll at start, every interval and on poll-now; read and conform only, publishing through the runner; query failures on the discovery lane, publish outcomes on the load lane). |
-| `store` | The DuckDB store: DDL generated from the schema, the per-file publish transaction and backfill guard, document publish, reference snapshot publish (an unchanged snapshot is skipped) and read, the series family's bitemporal append (`append_series`, the one door series rows enter by), retention, the freshness catalog in source time, and the payload-table drift check made at open. |
+| `store` | The DuckDB store: DDL generated from the schema, the per-file publish transaction and backfill guard, document publish, reference snapshot publish (a snapshot equal to the live partition publishes nothing) and read, the series family's bitemporal append (`append_series`, the one door series rows enter by), retention, the freshness catalog in source time, and the payload-table drift check made at open. |
 | `query` | Scope lowering, grain-aware view compilation, distinct values, document and series queries, catalog reads, and the read pool. View/document planning, provenance, and execution share a worker transaction; superseded results are dropped. |
 | `pricing` | App-supplied pricer registry and a separate bounded worker queue. Queued batches coalesce by key; cancellation stops a running batch at the next line boundary. |
 | `vol` | App-supplied vol model registry and a bounded worker queue shaped like `pricing`'s: batches coalesce by key, cancellation stops a running batch at the next job boundary, a panicking job fails alone. A `Grid::Job(j)` slice is resolved to the strikes earlier job `j` evaluated at, or fails naming why; `evaluate` runs a batch in place under the same rules. |

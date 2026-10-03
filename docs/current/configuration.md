@@ -85,6 +85,9 @@ and save guarantees.
 The schema declares meaning rather than storage details. Measure columns name
 their aggregation grain. Document columns distinguish keys, attributes, and
 typed values. Series datasets describe identities and time/value columns.
+Reference datasets (`family = "reference"`) declare a utf8 `key` and plain
+attributes for a whole table a snapshot source replaces on each poll; their
+rules are in [dataset families](typed-documents.md#dataset-families-and-validation).
 Views refer to those declarations and may narrow presentation without changing
 the underlying dataset.
 
@@ -228,6 +231,7 @@ dataset family select its runtime path:
 | Directory | `adapter = "csv_dir"` (the default), with `paths` globs. A series dataset is rejected. |
 | Subscription | Another adapter over a document dataset, with a `document` kind and nonempty `topics`. |
 | Fetch | Another adapter over a series dataset. No document kind or topic list is needed. |
+| Snapshot | Another adapter over a reference dataset, with a nonempty `table` the adapter reads whole on each poll. A directory source over a reference dataset is rejected. |
 
 The shared reader returns usable sources plus diagnostics addressed to
 `sources.<name>.<field>`. Missing/unknown datasets, local datasets, incompatible
@@ -254,12 +258,17 @@ publication. `source_time = "document:<field>"` requires a document-level
 string must parse as RFC 3339 with its offset. Schema validation cannot ensure
 that a particular message supplies a valid value.
 
+Snapshot defaults are `poll_interval = "5m"` and `latest_other` priority, since
+reference data is not current risk. A zero interval warns and uses `5m`, because
+it would reread the whole table in a tight loop. A missing or empty `table`
+rejects the source. `table` warns and is ignored on every other shape.
+
 Topic patterns use `/`-separated levels. A whole `*` matches one level; a
 final `>` matches one or more trailing levels. Empty patterns, empty pattern
 levels, and a non-final `>` level reject the source. Other text is literal.
-Directory-only settings warn and are ignored on adapter-backed sources;
-subscription-only settings warn and are ignored on directory and fetch
-sources. Parsed directory paths are cleared on adapter-backed sources.
+Directory-only settings warn and are ignored on adapter-backed sources, except
+`poll_interval` on a snapshot source; subscription-only settings warn and are
+ignored on directory, fetch and snapshot sources. Parsed directory paths are cleared on adapter-backed sources.
 
 Duration strings accept nonnegative integers with `ms`, `s`, `m`, `h`, `d`,
 or `y`, plus bare `"0"`; a day is 24 hours and a year is 365 days. Invalid

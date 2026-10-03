@@ -50,7 +50,8 @@ deleted. A move to another book's LHU leaves the position's `Book` unchanged.
 `demo_refdb` answers the `refdb` snapshot source every 30 s with the ten demo
 underlyings. Every third poll renames one row, so two in three polls are
 skipped as unchanged and the third publishes a new generation. The poll count
-lives in the process, so each launch starts again from revision 0.
+lives in the process, so each launch starts again from revision 0. Its
+`calendar` column is an exchange calendar code; no holiday dates are modelled.
 
 ## What lives here
 
