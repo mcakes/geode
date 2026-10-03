@@ -370,8 +370,13 @@ a dimension the row carries (a click beside the cells counts as the
 cursor's column). Blank space below the data opens nothing. A right-click
 inside a `V` row selection keeps the cursor and the selection; anywhere
 else it clears any selection and moves the cursor to the clicked row first.
-A row with nothing to offer (an `lhu` subtotal, say) shows `no actions for
-this row` instead.
+A row with nothing to offer shows `no actions for
+this row` instead. The menu's [`Color…`](shell.md#color) row sets the
+color a value paints in: the clicked column's value when that column is a
+text dimension (a `utf8` dimension or key column, or a derived dimension),
+else the row's own value, the grouping column's at the row's depth (`L1`
+on an `lhu` subtotal, `lhu` being a `utf8` dimension). The grand total
+stands for no value of its own.
 
 A row carrying a single `position_ref` or `instrument_ref` (from the grouping
 path, a shown column, or the hidden context column) gets an "Open in Nemo" row in that column's section.
@@ -1653,7 +1658,10 @@ selection, closing an open editor (a bulk edit's live steps roll back);
 anywhere else it clears any selection, closes an open editor or entry bar,
 and moves the cursor to the clicked row, keeping its column. A
 right-click inside the open editor's own cell is the editor's and opens no
-row menu; blank space below the lines opens nothing.
+row menu; blank space below the lines opens nothing. The menu's
+[`Color…`](shell.md#color) row is for `underlying_ref` on line, leg and
+package rows (a package's when its legs share one); a grouping row's context
+is empty, so it offers none.
 
 Emitting into a [link group](#link-groups), the pricer posts the same
 underlying `g m` opens on, as the group's scope, so the two never name

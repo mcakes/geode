@@ -136,6 +136,7 @@ groups changed fields and renders whole named objects for those destinations.
 | Sources | `sources.toml`; source definition, requiring restart for ingestion changes. The rows follow the source's shape when the edit opens: a directory source shows dataset, paths, readiness, stable polls, priority, poll interval, pending timeout, batch pattern and adapter; another adapter adds read-only document, topics, coalesce and source time; a snapshot source (another adapter over a reference dataset) shows only dataset, poll interval (default `5m`), an editable table and the adapter; it has no priority, since snapshots are taken ahead of every file, and its browse line names only its table. The shape is not rederived when the dataset choice changes; a mismatch is reported by validation and the rows follow on the next open. |
 | Colors | `colors.toml`; hue/tone or semantic token, with optional sign tinting |
 | Expressions | `expressions.toml`; one named scope expression, referenced by name from a saved scope or the frame |
+| Row menu: Color… | `value_colors.toml`; one value's entry in the user layer (set, `none`, or removed) |
 
 Editing an inherited definition copies the entire object to the user layer.
 The dialog announces this fork and the revert operation. Future lower-layer

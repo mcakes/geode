@@ -36,6 +36,16 @@
 //! title names the groups it is in. A pick changes one of the two through
 //! the shell's link doors. With no tile focused, a placeholder, or a tile
 //! whose module does neither, nothing opens and the status bar says so.
+//!
+//! The row menu's `Color…` lists, for one value of a text dimension, each
+//! named color (alphabetical, with its swatch), then `None`, then `Follow
+//! desk ({name})` when the user layer overrides a different, colored lower
+//! entry. It opens on the color in force (on `None` without one), so enter
+//! on an untouched list changes nothing; rows stand for their pick by
+//! position, so a color named `None` is still that color. A pick goes to
+//! `ShellView::set_value_color`, which writes the user layer's
+//! `value_colors` entry off the UI thread. With no named color the list
+//! holds `None` and a muted line naming the Colors dialog.
 
 use std::rc::Rc;
 
@@ -43,6 +53,8 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Focusable as _, SharedString, Window, div};
 use gpui_component::{ActiveTheme as _, v_flex};
 
+use geode_core::colour::{Definition, NamedColours, ValueColorState, ValuePick, value_color_state};
+use geode_core::config::VALUE_COLORS_DOC;
 use geode_core::context::DimensionContext;
 use geode_core::groupings::GroupingSlots;
 use geode_core::link::{Group, Membership};
@@ -138,6 +150,17 @@ pub enum Target {
         title: SharedString,
         empty: &'static str,
         window: gpui::AnyWindowHandle,
+    },
+    /// The row menu's `Color…`: what `value` of `dimension` may be colored
+    /// with. `picks[i]` is what declared option `i` does (a row stands for
+    /// its pick by position: a color may be named like another row), and
+    /// `swatches[i]` the definition its row paints a swatch of. Captured
+    /// at open.
+    ValueColor {
+        dimension: String,
+        value: String,
+        picks: Vec<ValuePick>,
+        swatches: Vec<Option<Definition>>,
     },
 }
 
@@ -410,6 +433,9 @@ impl ChoiceDialogState {
             | Target::TileKind { .. }
             | Target::Scope { .. }
             | Target::LogLevel { .. } => chrome(&self.target).0.into(),
+            Target::ValueColor {
+                dimension, value, ..
+            } => format!("Color \u{b7} {dimension} {value}").into(),
         }
     }
 
@@ -479,7 +505,8 @@ impl ChoiceDialogState {
             | Target::Column { .. }
             | Target::Scope { .. }
             | Target::LogLevel { .. }
-            | Target::ActionValue { .. } => self.list.set_query(query),
+            | Target::ActionValue { .. }
+            | Target::ValueColor { .. } => self.list.set_query(query),
         }
     }
 
@@ -527,6 +554,16 @@ impl ChoiceDialogState {
                 context: context.clone(),
                 value: self.list.options()[declared].clone(),
             },
+            Target::ValueColor {
+                dimension,
+                value,
+                picks,
+                ..
+            } => Pick::ValueColor {
+                dimension: dimension.clone(),
+                value: value.clone(),
+                pick: picks[declared].clone(),
+            },
         }
     }
 
@@ -555,7 +592,8 @@ impl ChoiceDialogState {
             | Pick::LogTarget(_)
             | Pick::LogLevel(..)
             | Pick::Link { .. }
-            | Pick::ActionValue { .. } => None,
+            | Pick::ActionValue { .. }
+            | Pick::ValueColor { .. } => None,
         }
     }
 }
@@ -592,6 +630,67 @@ pub enum Pick {
         context: DimensionContext,
         value: String,
     },
+    /// `ShellView::set_value_color` of `pick` for `value` of `dimension`.
+    ValueColor {
+        dimension: String,
+        value: String,
+        pick: ValuePick,
+    },
+}
+
+/// The value-color list's no-color row.
+pub const NO_COLOR_ROW: &str = "None";
+
+impl ChoiceDialogState {
+    /// One row per named color (alphabetical), then [`NO_COLOR_ROW`], then
+    /// `Follow desk ({name})` when the user layer overrides a different
+    /// lower entry. Opens on the color in force, or on the no-color row
+    /// when there is none or it is no longer defined, so `enter` on an
+    /// untouched list changes nothing. The opening row is found by
+    /// position, never by text: a color may be named `None`.
+    pub fn value_colors(
+        dimension: String,
+        value: String,
+        named: &NamedColours,
+        state: &ValueColorState,
+    ) -> Self {
+        let mut options: Vec<String> = named.names().map(str::to_string).collect();
+        let mut picks: Vec<ValuePick> = options.iter().cloned().map(ValuePick::Color).collect();
+        let mut swatches: Vec<Option<Definition>> = options
+            .iter()
+            .map(|name| named.get(name).cloned())
+            .collect();
+        let no_color = options.len();
+        options.push(NO_COLOR_ROW.to_string());
+        picks.push(ValuePick::None);
+        swatches.push(None);
+        if let Some(lower) = state.follow_desk() {
+            options.push(format!("Follow desk ({lower})"));
+            picks.push(ValuePick::FollowDesk);
+            swatches.push(None);
+        }
+        let opening = state
+            .effective
+            .as_deref()
+            .and_then(|name| {
+                picks
+                    .iter()
+                    .position(|p| matches!(p, ValuePick::Color(n) if n == name))
+            })
+            .unwrap_or(no_color);
+        let mut list = ChoiceList::new(options, choice::DEFAULT_CAP);
+        // Unfiltered, ranked order is declared order.
+        list.set_ranked_highlighted(opening);
+        Self {
+            list,
+            target: Target::ValueColor {
+                dimension,
+                value,
+                picks,
+                swatches,
+            },
+        }
+    }
 }
 
 /// The grouping option texts and their slots, in row order: the view
@@ -738,6 +837,8 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
         Target::LinkGroup { .. } => ("Link group", "link", "link-hints", LINK_HINTS),
         // Fallback only: `title()` is the action's own.
         Target::ActionValue { .. } => ("Choose a value", "action", "action-hints", ACTION_HINTS),
+        // Fallback only: `title()` names the dimension and the value.
+        Target::ValueColor { .. } => ("Color", "valuecolor", "valuecolor-hints", ACTION_HINTS),
     }
 }
 
@@ -894,7 +995,14 @@ pub(crate) fn open_value_color(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let _ = (view, dimension, value, window, cx);
+    let (named, _) = NamedColours::from_config(&view.services.config);
+    let state = value_color_state(
+        view.services.config.layered_docs(VALUE_COLORS_DOC),
+        &dimension,
+        &value,
+    );
+    let state = ChoiceDialogState::value_colors(dimension, value, &named, &state);
+    open(view, state, window, cx);
 }
 
 /// Open the loading value choice for `ActionCx::choose_value`: `column`'s
@@ -1221,6 +1329,14 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
             shell.close_modal(window, cx);
             shell.run_action_chosen(action, &context, &value, window, cx);
         }
+        Pick::ValueColor {
+            dimension,
+            value,
+            pick,
+        } => {
+            shell.close_modal(window, cx);
+            shell.set_value_color(dimension, value, pick, cx);
+        }
     }
 }
 
@@ -1337,14 +1453,20 @@ fn build(
     } else {
         (hints_selector, hints)
     };
+    let leads = value_color_leads(&state.target, cx);
+    let no_colors = matches!(
+        &state.target,
+        Target::ValueColor { picks, .. } if !picks.iter().any(|p| matches!(p, ValuePick::Color(_)))
+    );
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let click_entity = entity.clone();
-    let rows = dialog::choice_rows(
+    let rows = dialog::choice_rows_led(
         &state.list,
         prefix,
         &shell.choice_dialog_scroll,
         theme,
+        leads,
         move |ranked, window, cx| {
             click_entity.update(cx, |shell, cx| {
                 let pick = shell
@@ -1376,8 +1498,53 @@ fn build(
         .w(scale::design(WIDTH))
         .child(dialog::filter_row(&shell.dialog_input, None, cx))
         .child(body)
+        .children(no_colors.then(|| {
+            div()
+                .px_3()
+                .text_sm()
+                .text_color(muted)
+                .debug_selector(|| "valuecolor-empty".to_string())
+                .child("no named colors: define one in the Colors dialog")
+        }))
         .child(hint_row(hints, hints_selector, WIDTH, muted, theme.border))
         .into_any_element()
+}
+
+/// The value-color list's leading elements, by declared row: a swatch for
+/// each color, resolved now from the definition captured at open so a theme
+/// change while the list is open repaints it, and a swatch-wide space for
+/// the rows without one so every name starts on the same spine. Empty for
+/// every other target, and when no row has a swatch. Bounded by the row
+/// count.
+fn value_color_leads(target: &Target, cx: &App) -> Vec<Option<AnyElement>> {
+    let Target::ValueColor {
+        picks, swatches, ..
+    } = target
+    else {
+        return Vec::new();
+    };
+    if swatches.iter().all(Option::is_none) {
+        return Vec::new();
+    }
+    let theme = cx.theme();
+    let (anchors, tokens) = (
+        super::colours::anchors_from_theme(theme),
+        super::colours::tokens_from_theme(theme),
+    );
+    swatches
+        .iter()
+        .zip(picks)
+        .map(|(definition, pick)| {
+            Some(match (definition, pick) {
+                (Some(d), ValuePick::Color(name)) => dialog::swatch(
+                    super::colours::to_hsla(geode_core::colour::resolve(d, &anchors, &tokens)),
+                    format!("valuecolor-swatch-{name}"),
+                    cx,
+                ),
+                _ => dialog::swatch_space(),
+            })
+        })
+        .collect()
 }
 
 /// The scope picker's empty state: how to save the first scope. Names the
@@ -2065,5 +2232,136 @@ mod tests {
             "Link group \u{00b7} following A \u{00b7} emitting B"
         );
         assert_eq!(link(true, None, None).jump("1"), None, "digits type here");
+    }
+
+    use geode_core::colour::{Definition, NamedColours, Tone, ValueColorState, ValuePick};
+
+    fn named(names: &[&str]) -> NamedColours {
+        let mut out = NamedColours::default();
+        for n in names {
+            out.insert(n.to_string(), Definition::hue(240.0, Tone::Normal));
+        }
+        out
+    }
+
+    fn value_state(desk: Option<&str>, user: Option<&str>) -> ValueColorState {
+        let lower = desk.map(str::to_string);
+        let user = user.map(str::to_string);
+        ValueColorState {
+            effective: user
+                .clone()
+                .or_else(|| lower.clone())
+                .filter(|c| c != "none"),
+            user,
+            lower,
+        }
+    }
+
+    fn value_list(names: &[&str], state: &ValueColorState) -> ChoiceDialogState {
+        ChoiceDialogState::value_colors("underlying_ref".into(), "SPX".into(), &named(names), state)
+    }
+
+    #[test]
+    fn the_color_list_holds_the_names_then_none_and_opens_on_the_current() {
+        let state = value_list(&["blue", "amber"], &value_state(None, Some("blue")));
+        assert_eq!(
+            state.list.options(),
+            ["amber", "blue", "None"],
+            "alphabetical, then None"
+        );
+        assert_eq!(state.title().as_ref(), "Color \u{b7} underlying_ref SPX");
+        assert_eq!(
+            state.highlighted_pick(),
+            Some(Pick::ValueColor {
+                dimension: "underlying_ref".into(),
+                value: "SPX".into(),
+                pick: ValuePick::Color("blue".into()),
+            }),
+            "enter on an untouched list changes nothing"
+        );
+        // No color in force: it opens on None.
+        let state = value_list(&["blue"], &value_state(None, None));
+        assert!(matches!(
+            state.highlighted_pick(),
+            Some(Pick::ValueColor {
+                pick: ValuePick::None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn follow_desk_is_offered_only_over_a_different_desk_entry() {
+        let state = value_list(&["blue", "teal"], &value_state(Some("blue"), Some("teal")));
+        assert_eq!(
+            state.list.options(),
+            ["blue", "teal", "None", "Follow desk (blue)"]
+        );
+        assert!(matches!(
+            state.pick_at_ranked(3),
+            Some(Pick::ValueColor {
+                pick: ValuePick::FollowDesk,
+                ..
+            })
+        ));
+        for (desk, user) in [
+            (Some("blue"), None),
+            (None, Some("teal")),
+            (Some("teal"), Some("teal")),
+            // A desk with no color: following it is what None does.
+            (Some("none"), Some("teal")),
+        ] {
+            let state = value_list(&["blue", "teal"], &value_state(desk, user));
+            assert_eq!(
+                state.list.options(),
+                ["blue", "teal", "None"],
+                "{desk:?} {user:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_color_named_none_is_still_picked_by_position() {
+        let state = value_list(&["None", "blue"], &value_state(None, None));
+        assert_eq!(state.list.options(), ["None", "blue", "None"]);
+        assert!(matches!(
+            state.pick_at_ranked(0),
+            Some(Pick::ValueColor { pick: ValuePick::Color(name), .. }) if name == "None"
+        ));
+        assert!(matches!(
+            state.pick_at_ranked(2),
+            Some(Pick::ValueColor {
+                pick: ValuePick::None,
+                ..
+            })
+        ));
+        // It opens on the no-color row by position, not on the first row
+        // spelled like it, so enter on the untouched list still changes
+        // nothing.
+        assert!(matches!(
+            state.highlighted_pick(),
+            Some(Pick::ValueColor {
+                pick: ValuePick::None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_color_no_longer_defined_opens_the_list_on_none() {
+        let state = value_list(&["blue"], &value_state(None, Some("gone")));
+        assert!(matches!(
+            state.highlighted_pick(),
+            Some(Pick::ValueColor {
+                pick: ValuePick::None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn with_no_named_colors_the_list_holds_only_none() {
+        let state = value_list(&[], &value_state(None, None));
+        assert_eq!(state.list.options(), ["None"]);
     }
 }

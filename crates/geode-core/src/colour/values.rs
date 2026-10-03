@@ -266,10 +266,12 @@ pub struct ValueColorState {
 
 impl ValueColorState {
     /// The lower layer's entry the user layer overrides with a different
-    /// one: what `Follow desk` would return to.
+    /// one: what `Follow desk` would return to. A lower entry of
+    /// [`NO_COLOR`] is none: following it writes what `None` writes (the
+    /// user key removed), so a second row for it would only duplicate that.
     pub fn follow_desk(&self) -> Option<&str> {
         match (&self.user, &self.lower) {
-            (Some(user), Some(lower)) if user != lower => Some(lower),
+            (Some(user), Some(lower)) if user != lower && lower != NO_COLOR => Some(lower),
             _ => None,
         }
     }
@@ -596,6 +598,12 @@ mod tests {
         assert_eq!(s.follow_desk(), None, "no lower entry");
         let s = state(Some("teal"), Some("teal"));
         assert_eq!(s.follow_desk(), None, "the same as the desk");
+        let s = state(Some("none"), Some("teal"));
+        assert_eq!(
+            s.follow_desk(),
+            None,
+            "a desk with no color is the None row's own write, not a second row"
+        );
         assert_eq!(state(None, None), ValueColorState::default());
     }
 

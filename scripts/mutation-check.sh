@@ -31049,8 +31049,8 @@ run_mutation "link: a moved highlight is kept until the query changes" \
 # change.
 run_mutation "link: other dialogs keep the highlight by text" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '            | Target::ActionValue { .. } => self.list.set_query(query),' \
-  '            | Target::ActionValue { .. } => self.list.set_query_placing(query, None),' \
+  '            | Target::ValueColor { .. } => self.list.set_query(query),' \
+  '            | Target::ValueColor { .. } => self.list.set_query_placing(query, None),' \
   geode-shell other_targets_keep_the_highlight_by_text
 
 run_mutation "link: the title names the current groups" \
@@ -34299,6 +34299,94 @@ run_mutation "pricer: a line's context owns its underlying" \
   '                ctx.own = None;' \
   geode-pricer \
   a_lines_context_owns_its_underlying
+
+# A dimension entry that is not a table refuses the write.
+run_mutation "value colors: a non-table dimension refuses the write" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '                let entry = doc.entry(dimension).or_insert(toml_edit::table());' \
+  '                doc.remove(dimension); let entry = doc.entry(dimension).or_insert(toml_edit::table());' \
+  geode-shell \
+  a_write_into_a_non_table_dimension_is_refused_and_leaves_the_file
+
+# Removing the last value removes the emptied dimension table.
+run_mutation "value colors: an emptied dimension table is removed" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '                if emptied {' \
+  '                if false {' \
+  geode-shell \
+  a_remove_drops_the_key_and_an_emptied_dimension
+
+# A value is one key, never split on a dot into nested tables.
+run_mutation "value colors: a dotted value is one key" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '                table.insert(value, toml_edit::value(name.as_str()));' \
+  '                table.insert(value.split(".").next().unwrap_or(value), toml_edit::value(name.as_str()));' \
+  geode-shell \
+  a_dotted_value_is_written_as_one_quoted_key
+
+# A pick that changes nothing writes nothing.
+run_mutation "value colors: an unchanged pick writes nothing" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '        if write == ValueWrite::Nothing {' \
+  '        if false {' \
+  geode-shell \
+  enter_on_the_untouched_list_writes_nothing
+
+# No user directory says so instead of saving nothing silently.
+run_mutation "value colors: no user directory says so" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '            self.notice = Some(NO_USER_DIR.into());' \
+  '            self.notice = None;' \
+  geode-shell \
+  a_pick_with_no_user_directory_says_so
+
+# A failed write shows the writer's error, not the success notice.
+run_mutation "value colors: a failed write shows the writer's error" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '                    Err(e) => e.into(),' \
+  '                    Err(_) => done.into(),' \
+  geode-shell \
+  a_failed_write_shows_the_writers_error
+
+# The list opens on the color in force.
+run_mutation "value colors: the list opens on the current color" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        list.set_ranked_highlighted(opening);' \
+  '        let _ = opening;' \
+  geode-shell \
+  the_color_list_holds_the_names_then_none_and_opens_on_the_current
+
+# A row stands for its pick by position: a color may be named None.
+run_mutation "value colors: a pick goes by position, not by text" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                pick: picks[declared].clone(),' \
+  '                pick: if self.list.options()[declared] == NO_COLOR_ROW { ValuePick::None } else { picks[declared].clone() },' \
+  geode-shell \
+  a_color_named_none_is_still_picked_by_position
+
+# Each color row paints its swatch.
+run_mutation "value colors: the color rows paint swatches" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    if swatches.iter().all(Option::is_none) {' \
+  '    if true {' \
+  geode-shell \
+  color_opens_the_pick_list_with_swatches
+
+# With no named colors the list says where to define one.
+run_mutation "value colors: no named colors shows the muted line" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        .children(no_colors.then(|| {' \
+  '        .children(false.then(|| {' \
+  geode-shell \
+  with_no_named_colors_the_list_holds_none_and_says_where_to_define_one
+
+# A desk entry of none offers no Follow desk row beside None.
+run_mutation "value colors: a desk none is nothing to follow" \
+  crates/geode-core/src/colour/values.rs \
+  '            (Some(user), Some(lower)) if user != lower && lower != NO_COLOR => Some(lower),' \
+  '            (Some(user), Some(lower)) if user != lower => Some(lower),' \
+  geode-core \
+  the_state_separates_the_user_entry_from_the_layers_below
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

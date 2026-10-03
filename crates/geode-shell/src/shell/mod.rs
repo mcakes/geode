@@ -44,6 +44,7 @@ pub mod sidebar;
 pub mod stacklist;
 pub mod status;
 pub mod toolbar;
+mod value_color;
 pub mod whichkey;
 
 pub use keys::convert_keystroke;

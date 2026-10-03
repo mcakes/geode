@@ -213,6 +213,47 @@ separators part the rest. A context with no rows at all opens nothing: the
 status notice reads "no actions for this row" (`NO_ROW_ACTIONS`). That is
 also the answer with no tile focused or a tile that answers no context.
 
+#### Color…
+
+One section may end in a `Color…` row, which sets the color one dimension
+value paints in. It is for the clicked column (`DimensionContext::first`)
+when that is a text dimension with a value at the row, else for the row's
+own column (`DimensionContext::own`, the column the row stands for) under
+the same test. A text dimension is a column some dataset declares as a
+`utf8` dimension or key, or a derived dimension
+(`geode_core::colour::text_dimensions`); the shell caches the names and
+rebuilds them on a configuration reload. A row standing for no single value
+(a grand total) offers none.
+
+Picking it opens a choice list titled `Color · {column} {value}` (see
+[choice lists](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices)):
+one row per named color in `colors.toml`, alphabetical, each with its
+swatch, then `None`, then `Follow desk ({name})` only when the user layer
+holds an entry for this value and a lower layer holds a different, colored
+one. It opens on the value's current color, or on `None` when it has none or
+its color is no longer defined, so `enter` on an untouched list changes
+nothing. A row stands for its pick by position, so a color named `None` is
+still that color. With no named color the list holds only `None` and a muted
+line, `no named colors: define one in the Colors dialog`.
+
+A pick writes only the user layer's `value_colors.toml`, through
+`config_write`, off the UI thread, keeping the rest of the file:
+
+| Pick | User-layer write |
+|---|---|
+| A color | `{dimension}.{value} = "{name}"`, the value one quoted key whatever its text (`"BRK.B"`) |
+| `None`, a lower layer colors the value | `{dimension}.{value} = "none"` |
+| `None`, no lower entry | the key removed, and the dimension table with it when that empties it |
+| `Follow desk` | the key removed, and an emptied dimension table |
+
+A pick equal to the color already in force writes nothing and says nothing.
+After a write the status bar reads `SPX colored blue`, `SPX color cleared`
+or `SPX follows the desk`; the ordinary reload repaints. A failed write (a
+dimension entry that is not a table, an unreadable file) shows the writer's
+error as the notice and leaves the file untouched. With no user
+configuration directory the notice reads `no user configuration directory:
+the color was not saved`.
+
 While open, the menu owns the keys: `j`/`down` and `k`/`up` step over
 enabled rows, `enter` picks the highlighted row, and `escape` closes it.
 Any other bare key is consumed. A chord passes to the matcher, and its
