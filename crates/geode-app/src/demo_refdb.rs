@@ -305,9 +305,13 @@ mod tests {
     fn fail_next_fails_exactly_one_query() {
         let db = DemoRefDb::new(Duration::ZERO);
         let mut q = db.snapshot().unwrap();
+        q.query("underlyings").unwrap();
+        q.query("underlyings").unwrap();
         db.fail_next("db down");
         assert_eq!(q.query("underlyings").unwrap_err().message, "db down");
-        assert!(q.query("underlyings").is_ok());
+        // The failure is not a poll: the next success is the third poll, still
+        // revision 0, not the fourth's first revision.
+        assert_eq!(q.query("underlyings").unwrap(), table(2));
     }
 
     #[test]

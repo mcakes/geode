@@ -33190,6 +33190,23 @@ run_mutation "sources: a snapshot source edit drops the keys it has no row for" 
   '    let mut table = toml_edit::Table::new();' \
   geode-shell editing_the_table_row_writes_table
 
+# demo_refdb revises its table every third poll, so the demo shows both
+# skipped-unchanged polls and new generations. Revising every poll hides
+# the unchanged path entirely.
+run_mutation "demo refdb: every poll revises the table" \
+  crates/geode-app/src/demo_refdb.rs \
+  '    let revision = poll / 3;' \
+  '    let revision = poll;' \
+  geode-app the_table_changes_only_every_third_poll
+
+# A failed query is not a poll; counted, the next success skips a revision.
+run_mutation "demo refdb: a failed query counts as a poll" \
+  crates/geode-app/src/demo_refdb.rs \
+  '            return Err(AdapterError { message });' \
+  '            self.polls.fetch_add(1, Ordering::Relaxed);
+            return Err(AdapterError { message });' \
+  geode-app fail_next_fails_exactly_one_query
+
 
 run_mutation "keystroke parser: an uppercase letter parses as the lowercase key" \
   crates/geode-shell/src/keymap/keystroke.rs \
