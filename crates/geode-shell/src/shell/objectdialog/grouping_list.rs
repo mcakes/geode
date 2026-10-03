@@ -84,6 +84,12 @@ pub(super) fn handle_key(
 
 /// A row click is `enter` on that row. The click handler syncs the dialog
 /// text afterwards, as the key path does.
+///
+/// A click that opened a stage instead of closing the dialog (an empty
+/// slot's chain field) marks it `click_opened_stage`: the field's
+/// completion rows paint where the list was, and a double-click's second
+/// half would otherwise complete whichever dimension now sits under the
+/// pointer.
 pub(super) fn click(
     shell: &mut ShellView,
     name: &str,
@@ -92,6 +98,15 @@ pub(super) fn click(
 ) {
     if let Some(kind) = kind_of(name) {
         apply(shell, kind, window, cx);
+    }
+    // Only this dialog's own stage: a click that applied and closed may
+    // have revealed another domain's parked dialog, which this click never
+    // touched.
+    if let Some(state) = shell.object_dialog.as_mut()
+        && state.domain.applies_from_browse()
+        && matches!(&state.stage, super::Stage::Edit { object } if object == name)
+    {
+        state.click_opened_stage = true;
     }
 }
 

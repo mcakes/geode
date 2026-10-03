@@ -470,3 +470,74 @@ fn a_digit_typed_into_the_filter_is_text_not_a_pick(cx: &mut gpui::TestAppContex
     assert_eq!(choice(&shell, &cx), GroupingChoice::ViewDefault);
     assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "3");
 }
+
+/// The first click on an empty slot opens its chain field, whose completion
+/// rows paint where the list was: slot 2's row lies under the `book`
+/// completion. The double-click's second half must not complete it.
+#[gpui::test]
+fn a_double_click_on_an_empty_slot_opens_its_field_and_inserts_nothing(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    let row = cx
+        .debug_bounds("objectdialog-row-2")
+        .expect("slot 2 paints");
+    let at = gpui::point(row.origin.x + gpui::px(40.0), row.origin.y + gpui::px(4.0));
+    double_click(&mut cx, at, gpui::Modifiers::none());
+    cx.run_until_parked();
+
+    let book = cx
+        .debug_bounds("objectdialog-item-book")
+        .expect("the field offers book");
+    assert!(
+        book.contains(&at),
+        "the second click landed on a completion row: {book:?} vs {at:?}"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "2".to_string()
+        }
+    );
+    assert!(
+        edit_draft(&shell, &cx, |d| d.chain_entry()),
+        "the field is open"
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.query.clone()),
+        "",
+        "the second click completed nothing into the field"
+    );
+    assert_eq!(choice(&shell, &cx), GroupingChoice::ViewDefault);
+}
+
+/// A click opens an empty slot's field as a digit does, and the field owns
+/// the keys typed after it.
+#[gpui::test]
+fn a_click_on_an_empty_slot_then_typing_defines_and_activates_it(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, dir) = open_dialog(cx);
+    let row = cx
+        .debug_bounds("objectdialog-row-6")
+        .expect("slot 6 paints");
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(40.0), row.origin.y + gpui::px(4.0)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
+
+    cx.simulate_input("lhu book");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert!(!is_open(&shell, &cx));
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(6));
+    assert_eq!(in_force(&shell, &cx), Some(chain(&["lhu", "book"])));
+    flush_config_write(&mut cx);
+    assert!(
+        written(&dir).contains("6 = [\"lhu\", \"book\"]"),
+        "{}",
+        written(&dir)
+    );
+}

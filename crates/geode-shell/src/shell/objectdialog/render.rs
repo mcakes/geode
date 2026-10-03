@@ -907,8 +907,9 @@ fn on_row_clicked(
             .as_ref()
             .is_some_and(|s| s.domain.applies_from_browse())
     {
-        // A click is `enter` on that row: it applies, and nothing is opened
-        // for a second click to land in.
+        // A click is `enter` on that row: a filled row applies and closes;
+        // an empty slot opens its chain field, which `click` marks as
+        // click-opened so a double-click's second half completes nothing.
         super::grouping_list::click(shell, &name, window, cx);
     } else if opens {
         enter_edit_stage(shell, &name, None, cx);
@@ -4151,7 +4152,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                     entity_for_row.update(cx, |shell, cx| match open {
                         Some(Completions::Chain) => {
-                            on_completion_clicked(shell, clicked, window, cx)
+                            on_completion_clicked(shell, clicked, event.click_count, window, cx)
                         }
                         Some(_) => {}
                         None => on_edit_row_clicked(shell, clicked, event.click_count, window, cx),
@@ -5227,9 +5228,15 @@ fn on_tick_clicked(
 /// Filter mode and synchronize the focused input. A failed completion leaves selection
 /// on the clicked row. Completion and confirmation cannot coexist: opening a field
 /// hides the action bar, and confirmation blocks field entry.
+///
+/// The second half of a double-click whose first half opened this field (an
+/// empty slot clicked in the Groupings list) is dropped: it lands on
+/// whichever completion now sits where the list row was, a dimension the
+/// trader never aimed at. See `ObjectDialogState::click_opened_stage`.
 fn on_completion_clicked(
     shell: &mut ShellView,
     position: usize,
+    click_count: usize,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
@@ -5237,6 +5244,14 @@ fn on_completion_clicked(
         && state.notice.take().is_some()
     {
         cx.notify();
+    }
+    if let Some(state) = shell.object_dialog.as_mut() {
+        if click_count <= 1 {
+            // A fresh click sequence forgets what the last one opened.
+            state.click_opened_stage = false;
+        } else if state.click_opened_stage {
+            return;
+        }
     }
     let completed = draft_mut(shell).is_some_and(|draft| {
         if position >= draft.visible_rows().len() {
