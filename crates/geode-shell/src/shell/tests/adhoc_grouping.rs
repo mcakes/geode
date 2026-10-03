@@ -263,3 +263,93 @@ fn the_ad_hoc_action_is_in_the_palette_under_frame(cx: &mut gpui::TestAppContext
         Some(("Ad hoc grouping".to_string(), "Frame".to_string()))
     );
 }
+
+/// One frame table from a written session: `[frame]` for `None`, else
+/// `workspaces.N.frame`.
+fn written_frame(text: &str, ws: Option<u8>) -> Option<toml::Table> {
+    let root: toml::Table = text.parse().unwrap();
+    let table = match ws {
+        None => root.get("frame"),
+        Some(n) => root
+            .get("workspaces")
+            .and_then(|w| w.get(n.to_string()))
+            .and_then(|w| w.get("frame")),
+    };
+    table.and_then(|t| t.as_table()).cloned()
+}
+
+fn written_chain(table: &toml::Table) -> Option<Vec<String>> {
+    table.get("ad_hoc").and_then(|v| v.as_array()).map(|items| {
+        items
+            .iter()
+            .map(|i| i.as_str().unwrap().to_string())
+            .collect()
+    })
+}
+
+/// The session writer captures each lane's chain and whether it is active:
+/// without it a chain the user built would vanish on restart. Forgetting
+/// an inactive chain must reach the next write too, though nothing requeries.
+#[gpui::test]
+fn the_session_writer_saves_each_lanes_ad_hoc_chain(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut services = services();
+    services.session_path = Some(dir.path().join("session.toml"));
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    let ws2 = crate::tiling::WorkspaceIx::new(2).unwrap();
+    dispatch_action(&shell, "workspace::switch_2", &mut vcx);
+    vcx.run_until_parked();
+    // Baseline: whatever startup left dirty is written first.
+    let _ = shell.update(&mut vcx, |s, cx| s.take_dirty_session_write(cx));
+
+    frame.update(&mut vcx, |f, cx| {
+        assert!(f.shared_mut().set_ad_hoc(chain(&["lhu", "book"])));
+        assert!(f.pin(ws2));
+        assert!(f.view_mut(ws2).set_ad_hoc(chain(&["book"])));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+
+    let (_, text) = shell
+        .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+        .expect("an ad hoc chain and a pin dirty the session");
+    let shared = written_frame(&text, None).expect("[frame] is written");
+    assert_eq!(written_chain(&shared), Some(chain(&["lhu", "book"])));
+    assert_eq!(
+        shared.get("grouping").and_then(|v| v.as_str()),
+        Some("ad_hoc")
+    );
+    assert!(!shared.contains_key("slot"), "{shared:?}");
+    let pinned = written_frame(&text, Some(2)).expect("workspaces.2.frame is written");
+    assert_eq!(
+        written_chain(&pinned),
+        Some(chain(&["book"])),
+        "the pinned lane writes its own chain"
+    );
+    assert_eq!(
+        pinned.get("grouping").and_then(|v| v.as_str()),
+        Some("ad_hoc")
+    );
+    assert!(!pinned.contains_key("slot"), "{pinned:?}");
+
+    frame.update(&mut vcx, |f, cx| {
+        assert!(f.shared_mut().set_active_slot(Some(1)));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let _ = shell.update(&mut vcx, |s, cx| s.take_dirty_session_write(cx));
+    frame.update(&mut vcx, |f, cx| {
+        assert!(f.shared_mut().forget_ad_hoc());
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let (_, text) = shell
+        .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+        .expect("forgetting an inactive chain dirties the session");
+    let shared = written_frame(&text, None).expect("[frame] is written");
+    assert!(!shared.contains_key("ad_hoc"), "{shared:?}");
+    assert!(!shared.contains_key("grouping"), "{shared:?}");
+    assert_eq!(shared.get("slot").and_then(|v| v.as_integer()), Some(1));
+}

@@ -3457,6 +3457,14 @@ mod tests {
             !f.shared_mut().activate_ad_hoc(),
             "already active: nothing changes"
         );
+
+        assert!(f.shared_mut().set_active_slot(None));
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::ViewDefault);
+        assert_eq!(
+            f.shared().ad_hoc(),
+            Some(chain(&["lhu", "book"]).as_slice()),
+            "leaving ad hoc for view default keeps the stored chain"
+        );
     }
 
     #[test]
