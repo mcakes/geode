@@ -34502,6 +34502,153 @@ run_mutation "close: the vol slice content forwards its handle" \
   '        let _ = (close, cx);' \
   geode-volslice the_header_paints_the_close_button
 
+# ---- Classifications: seams ----
+#
+# A classification is a derived dimension a person edits. Its edits, import
+# and naming are pure geode-core; the shell door, the file worker and the
+# derived projection are the seams that carry them to config and to queries.
+
+# Undo replays over the current object; a row changed since must be skipped,
+# not overwritten.
+run_mutation "classification: undo skips a row changed since" \
+  crates/geode-core/src/classification/mod.rs \
+  '        if next.values.get(&change.source) != expect.as_ref() {' \
+  '        if false {' \
+  geode-core \
+  undo_reverts_over_the_current_object_and_skips_rows_changed_since
+
+# A blank label clears rather than writing an empty label.
+run_mutation "classification: blank label clears" \
+  crates/geode-core/src/classification/mod.rs \
+  '        .filter(|l| !l.is_empty())' \
+  '        .filter(|_| true)' \
+  geode-core \
+  assigning_a_blank_label_clears
+
+# The header check is what stops a region file loading into sector.
+run_mutation "classification: import header must match" \
+  crates/geode-core/src/classification/import.rs \
+  '    if got != [dim.from.as_str(), dim.name.as_str()] {' \
+  '    if false {' \
+  geode-core \
+  a_header_for_another_classification_is_refused
+
+# A source given two labels must not apply either.
+run_mutation "classification: conflicting duplicates are rejected" \
+  crates/geode-core/src/classification/import.rs \
+  '        if conflicted.contains_key(&source) {' \
+  '        if false {' \
+  geode-core \
+  a_source_given_two_labels_rejects_both_rows_and_keeps_its_label
+
+# Excel leaves a cleared row as bare commas; it says nothing and must not
+# read as a rejected "empty source".
+run_mutation "classification: blank rows are skipped" \
+  crates/geode-core/src/classification/import.rs \
+  '        if record.fields.iter().all(|f| f.trim().is_empty()) {' \
+  '        if false {' \
+  geode-core \
+  an_all_blank_row_is_skipped_like_a_blank_line
+
+# Unquoted names resolve case-insensitively in scope expressions, so `Book`
+# beside the column `book` would be ambiguous there.
+run_mutation "classification: name clash ignores case" \
+  crates/geode-core/src/classification/validate.rs \
+  '        .find(|c| c.name.eq_ignore_ascii_case(name))' \
+  '        .find(|c| c.name == name)' \
+  geode-core \
+  shadowing_is_case_insensitive
+
+# A classification named `not` could never be named bare in an expression.
+run_mutation "classification: expression keywords are reserved" \
+  crates/geode-core/src/classification/validate.rs \
+  '    if KEYWORDS.iter().any(|k| k.eq_ignore_ascii_case(name)) {' \
+  '    if false {' \
+  geode-core \
+  a_name_may_not_be_a_scope_expression_keyword
+
+# Classifications never chain: a derived name is never offered as a source.
+run_mutation "classification: a derived source is refused" \
+  crates/geode-core/src/classification/validate.rs \
+  '            if out.iter().any(|c| c == name) || dims.get(name).is_some() {' \
+  '            if out.iter().any(|c| c == name) {' \
+  geode-core \
+  source_columns_are_groupable_utf8_and_never_derived
+
+# ...and never accepted as one when named directly.
+run_mutation "classification: a derived source is refused by name" \
+  crates/geode-core/src/classification/validate.rs \
+  '    if dims.get(from).is_some() {' \
+  '    if false {' \
+  geode-core \
+  source_columns_are_groupable_utf8_and_never_derived
+
+# Over a non-text source the text-keyed projection and the column-typed
+# narrowing disagree on which rows a label covers: plausible wrong totals.
+run_mutation "derived: a non-text source is refused" \
+  crates/geode-core/src/view.rs \
+  '            if src.ty == ColumnType::Utf8 {' \
+  '            if true {' \
+  geode-core \
+  a_derived_dimension_over_a_non_text_source_is_refused
+
+# An unmapped or NULL source must group under NULL, not under a label.
+run_mutation "derived: unmapped values group under NULL" \
+  crates/geode-data/src/query/compile.rs \
+  '        "map_extract_value(MAP([{}], [{}]), \"{from}\"::varchar)",' \
+  '        "coalesce(map_extract_value(MAP([{}], [{}]), \"{from}\"::varchar), {from:?})",' \
+  geode-data \
+  an_unmapped_or_null_source_groups_under_null_and_no_row_is_lost_or_multiplied
+
+# Only the picker's key may feed the picker.
+run_mutation "distinct: shell keys stay with the shell" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        PICKER_KEY,' \
+  '        DIAGNOSTICS_KEY,' \
+  geode-shell \
+  shell_keys_are_recognised_and_tile_keys_are_not
+
+# A module edit must reach the batch.
+run_mutation "config door: drained edits are queued" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, None, cx);' \
+  '    let _ = (edits, user_dir);' \
+  geode-shell \
+  queued_config_edits_reach_the_user_layer_through_the_batch
+
+# The read limit is checked before reading.
+run_mutation "files: oversized reads are refused" \
+  crates/geode-data/src/files.rs \
+  '    if len > max_bytes {' \
+  '    if false {' \
+  geode-data \
+  refuses_a_file_over_the_limit_without_reading_it
+
+# A failed write leaves neither a partial file nor a stray temporary.
+run_mutation "files: a failed write removes its temporary" \
+  crates/geode-data/src/files.rs \
+  '        let _ = std::fs::remove_file(&tmp);' \
+  '        let _ = &tmp;' \
+  geode-data \
+  a_failed_rename_removes_the_temporary
+
+# A tile waiting on its tag must hear back even after shutdown.
+run_mutation "files: a stopped worker answers with an error" \
+  crates/geode-data/src/files.rs \
+  '            return answer(&self.sink, &params, refused(&params, "file worker stopped"));' \
+  '            return;' \
+  geode-data \
+  a_stopped_worker_answers_a_submission_with_an_error
+
+# Keyed by tile alone, a failed export would be coalesced away behind a
+# later import's answer from the same tile.
+run_mutation "events: text-file outcomes key by tile and tag" \
+  crates/geode-app/src/events.rs \
+  '        DataEvent::TextFile(o) => Key::TextFile(o.key, o.tag),' \
+  '        DataEvent::TextFile(o) => Key::TextFile(o.key, 0),' \
+  geode-app \
+  two_text_file_outcomes_for_the_same_tile_are_both_delivered
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
