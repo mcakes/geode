@@ -5,6 +5,7 @@ pub mod coalesce;
 pub mod fetch;
 pub mod load;
 pub mod plan;
+pub(crate) mod recover;
 pub mod runner;
 pub mod scheduler;
 pub mod snapshot;

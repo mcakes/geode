@@ -12356,11 +12356,9 @@ run_mutation "subscribe: a topic-keyed parse failure is never cleared by a later
 
 run_mutation "subscribe: the worker keeps a sender alive, so unsubscribe never disconnects" \
   crates/geode-data/src/ingest/subscribe.rs \
-  '        let refused = sink.refused_counter();
-        subscription.subscribe(&spec.topics, sink, on_connection)?;' \
-  '        let refused = sink.refused_counter();
-        let kept_sender = sink.clone();
-        subscription.subscribe(&spec.topics, sink, on_connection)?;
+  '        subscription.subscribe(&spec.topics, sink, reconnect.watch(on_connection))?;' \
+  '        let kept_sender = sink.clone();
+        subscription.subscribe(&spec.topics, sink, reconnect.watch(on_connection))?;
         std::mem::forget(kept_sender);' \
   geode-data shutting_down_an_idle_worker_does_not_wait_out_max_wait
 
@@ -34606,6 +34604,70 @@ run_mutation "channel: recovery answers only the asking subscription" \
   '                .find(|r| r.id == self.id)' \
   '                .find(|r| r.id != self.id)' \
   geode-data recovery_replies_reach_only_the_subscription_that_asked
+
+# ---- receiver recovery
+# Rule 1 of recovery: a NOTIFY since the window's start beats a reply.
+# Without it a stale reply on receive time replaces a newer live document.
+run_mutation "recovery: a notified key drops its reply" \
+  crates/geode-data/src/ingest/recover.rs \
+  '        } else if last_notify.is_some_and(|t| t >= self.started_at) {' \
+  '        } else if false {' \
+  geode-data a_reply_for_a_key_notified_since_subscribe_is_dropped
+
+# A reply after the window cannot be judged by rule 1 any more.
+run_mutation "recovery: a late reply is dropped" \
+  crates/geode-data/src/ingest/recover.rs \
+  '        if now >= self.deadline {' \
+  '        if false {' \
+  geode-data a_reply_after_the_window_is_dropped
+
+# The reconnect window starts when the connection went down; starting it
+# at the receiver's notice lets an already-processed NOTIFY lose.
+run_mutation "recovery: the reconnect window starts at the disconnect" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            let started_at = micros_to_utc(down);' \
+  '            let started_at = Utc::now();' \
+  geode-data a_notify_processed_before_the_reconnect_is_noticed_still_beats_the_reply
+
+# Every topic unanswered degrades the recovery key; reading it as partial
+# leaves a source that recovered nothing looking healthy.
+run_mutation "recovery: no replies is not read as a partial answer" \
+  crates/geode-data/src/ingest/recover.rs \
+  '        } else if unanswered.len() == asked.len() {' \
+  '        } else if false {' \
+  geode-data no_replies_degrades_but_a_partial_answer_stays_ok
+
+# A surviving reply reaches the runner marked recovered, so an equal one
+# publishes nothing; unmarked, every start republishes each known topic.
+run_mutation "recovery: a reply's job is marked recovered" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            recovered: pending.recovered,' \
+  '            recovered: false,' \
+  geode-data a_reply_equal_to_live_publishes_nothing
+
+# The mark is per message: a NOTIFY replacing a pending reply is unmarked.
+# Marked, a NOTIFY repeating live is compared away instead of published.
+run_mutation "recovery: a NOTIFY's pending document is not marked recovered" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            recovered: message.recovered,' \
+  '            recovered: true,' \
+  geode-data a_notify_replacing_a_pending_reply_publishes_without_comparison
+
+# A topic seen this run joins the recovery set; without it a reconnect
+# asks only for the topics read at open.
+run_mutation "recovery: a submitted topic joins the known set" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            self.known.insert(topic.clone());' \
+  '            let _ = &topic;' \
+  geode-data a_notify_processed_before_the_reconnect_is_noticed_still_beats_the_reply
+
+# A recorded topic is not carried again inside RERECORD_AFTER; carried on
+# every document, the hot path pays a store write per message.
+run_mutation "recovery: a topic is recorded once per run" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        if fresh {' \
+  '        if false {' \
+  geode-data a_topics_first_document_per_run_is_recorded_once
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

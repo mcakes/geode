@@ -19,22 +19,53 @@
 //! (disconnect or stop) it clears an open episode with `Ok`: no receiver, no
 //! drops.
 //!
+//! Recovery. A transport that can answer a GET is asked for the latest
+//! document on every concrete topic the receiver knows: the topics the
+//! service read from the store at open, plus each topic a document arrived
+//! on this run. It is asked once at start and again after each reconnect
+//! (a `Connected` report following a non-`Connected` one). Replies arrive on
+//! the same sink marked `recovered` and take the ordinary parse, source-time
+//! and coalescer path, judged by a [`RecoveryWindow`] under two rules:
+//! - Rule 1: a NOTIFY for a key received at or after the window's start
+//!   beats a reply for that key, which is dropped. The window starts just
+//!   before `subscribe` at start, and at the disconnect on a reconnect, so a
+//!   NOTIFY handled before the receiver noticed the reconnect still counts.
+//!   `last_notify` holds one entry per key, like the coalescer's release
+//!   times, with no fixed cap.
+//! - Rule 2: a reply that survives is submitted marked recovered, and the
+//!   store publishes it only if it differs from live. A NOTIFY replacing a
+//!   pending reply in the coalescer is unmarked and publishes as usual.
+//!
+//! A reply after its window, or with none open, is dropped and counted in
+//! the next window's end line (or the end-of-subscription line). Each window
+//! reports on the load lane under `<source>:recovery`: `Degraded` when the
+//! request failed or no topic answered, `Ok` otherwise. An open window at
+//! stop reports nothing. Only one window is open at a time: a reconnect
+//! during recovery finishes and reports the open one first.
+//!
+//! A topic is carried to the runner for recording on its first document per
+//! run, and again once its record here is `RERECORD_AFTER` old.
+//!
 //! Parsed columns move into DocumentJob without per-row copies. Shutdown
 //! unsubscribes, sets the stop flag, and joins; pending coalesced documents are
 //! not flushed. Blocking adapter/parser code can delay shutdown.
 
-use crate::adapter::{AdapterError, HealthSink, MESSAGE_BOUND, Message, MessageSink, Subscription};
+use crate::adapter::{
+    AdapterError, ConnectionState, HealthSink, MESSAGE_BOUND, Message, MessageSink, Recovery,
+    Subscription,
+};
 use crate::health::Health;
 use crate::ingest::coalesce::Coalescer;
+use crate::ingest::recover::{RERECORD_AFTER, RecoveryReport, RecoveryWindow, ReplyVerdict};
 use crate::ingest::runner::{DocumentJob, IngestHandle, panic_payload_message};
 use chrono::{DateTime, NaiveTime, Utc};
 use geode_core::clock::Clock;
 use geode_core::document::{DocumentKind, DocumentRows, Value, join_key};
 use geode_core::schema::{ColumnType, DatasetSpec};
 use geode_core::source_config::{SourceSpec, SourceTime};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -183,6 +214,63 @@ struct Pending {
     received: DateTime<Utc>,
     source_time: DateTime<Utc>,
     bytes: u64,
+    /// The concrete topic it arrived on, for recording and later recovery.
+    topic: String,
+    /// A recovery reply. Per message, not per key: a NOTIFY that replaces a
+    /// pending reply carries `false` and publishes without comparison.
+    recovered: bool,
+}
+
+/// Epoch microseconds as a time; the reconnect atomics hold these, with 0
+/// meaning unset.
+fn micros_to_utc(us: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp_micros(us).unwrap_or_default()
+}
+
+/// What the receiver needs from connection reports, which arrive on the
+/// transport's thread: when the connection went down, and once it is back,
+/// that a recovery is due from that instant. Epoch micros; 0 is unset.
+#[derive(Clone, Default)]
+struct Reconnect {
+    down_at: Arc<AtomicI64>,
+    reconnected_at: Arc<AtomicI64>,
+}
+
+impl Reconnect {
+    /// Wrap the service's connection sink: observe, then forward.
+    fn watch(&self, forward: HealthSink) -> HealthSink {
+        let this = self.clone();
+        Arc::new(move |state: ConnectionState| {
+            this.observe(&state);
+            forward(state)
+        })
+    }
+
+    /// The first non-`Connected` report of an outage marks its start; the
+    /// `Connected` that ends it hands that start to the receiver. A second
+    /// outage before the receiver noticed the first keeps the earlier start,
+    /// which drops more replies under rule 1, never fewer.
+    fn observe(&self, state: &ConnectionState) {
+        match state {
+            ConnectionState::Connected => {
+                let down = self.down_at.swap(0, Ordering::AcqRel);
+                if down != 0 {
+                    let _ = self.reconnected_at.compare_exchange(
+                        0,
+                        down,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+            ConnectionState::Reconnecting | ConnectionState::Lost { .. } => {
+                let now = Utc::now().timestamp_micros();
+                let _ = self
+                    .down_at
+                    .compare_exchange(0, now, Ordering::AcqRel, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 /// Owns a source's subscription and receiver thread. Keeping the subscription
@@ -212,6 +300,10 @@ impl SubscriptionWorker {
     /// against it on its own thread, and a `DatasetSpec` is cloned once
     /// per source here rather than shared behind a lock that a validate
     /// would then take per message.
+    ///
+    /// `known_topics` are the concrete topics the receiver asks the
+    /// transport to recover at start; it adds every topic a document
+    /// arrives on, for recoveries after a reconnect.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         spec: &SourceSpec,
@@ -223,13 +315,20 @@ impl SubscriptionWorker {
         on_connection: HealthSink,
         clock: Clock,
         stopped: crate::service::EventSink,
+        known_topics: Vec<String>,
     ) -> Result<SubscriptionWorker, AdapterError> {
         let (sink, rx) = MessageSink::bounded(MESSAGE_BOUND);
         // The counter first, then the sink MOVED into the adapter: after
         // this line nothing on this side holds a sender (see the `refused`
         // field), which is what makes `unsubscribe` disconnect.
         let refused = sink.refused_counter();
-        subscription.subscribe(&spec.topics, sink, on_connection)?;
+        let reconnect = Reconnect::default();
+        // Before subscribing: every NOTIFY the subscription delivers is
+        // received after this, so each one beats the start's replies for
+        // its key under rule 1.
+        let subscribed_at = Utc::now();
+        subscription.subscribe(&spec.topics, sink, reconnect.watch(on_connection))?;
+        let recovery = subscription.recovery();
         let stop = Arc::new(AtomicBool::new(false));
         let mut receiving = Receiving {
             source: spec.name.clone(),
@@ -245,12 +344,23 @@ impl SubscriptionWorker {
             drops: DropEpisode::default(),
             queue_key: crate::health::condition_key(&spec.name, crate::health::QUEUE),
             clock,
+            recovery,
+            recover_timeout: spec.recover_timeout,
+            recovery_key: crate::health::condition_key(&spec.name, crate::health::RECOVERY),
+            window: None,
+            asked: Vec::new(),
+            late_replies: 0,
+            unsupported_logged: false,
+            last_notify: HashMap::new(),
+            recorded: HashMap::new(),
+            known: known_topics.into_iter().collect(),
+            reconnected_at: Arc::clone(&reconnect.reconnected_at),
         };
         let window = spec.coalesce;
         let thread = crate::supervise::spawn_supervised(
             format!("geode-subscribe-{}", spec.name),
             stopped,
-            move || receiving.run(rx, window),
+            move || receiving.run(rx, window, subscribed_at),
         );
         match thread {
             Ok(thread) => Ok(SubscriptionWorker {
@@ -385,17 +495,44 @@ struct Receiving {
     /// `<source>:queue`, computed once.
     queue_key: String,
     clock: Clock,
+    /// The transport's GET side; `None` when it cannot recover.
+    recovery: Option<Box<dyn Recovery>>,
+    recover_timeout: Duration,
+    /// `<source>:recovery`, computed once.
+    recovery_key: String,
+    /// The open recovery window and the topics it asked for.
+    window: Option<RecoveryWindow>,
+    asked: Vec<String>,
+    /// Replies no window could judge, since the last window's end line.
+    late_replies: u64,
+    /// "Cannot recover" is logged once per subscription.
+    unsupported_logged: bool,
+    /// Key → `received` of its newest NOTIFY: rule 1's evidence. One entry
+    /// per key, no fixed cap.
+    last_notify: HashMap<String, DateTime<Utc>>,
+    /// Topic → when this run last carried it to the runner for recording.
+    recorded: HashMap<String, Instant>,
+    /// Every topic a recovery asks for; sorted and unique.
+    known: BTreeSet<String>,
+    /// A reconnect's disconnect instant in epoch micros, set by the
+    /// connection callback and taken here; 0 when none is waiting.
+    reconnected_at: Arc<AtomicI64>,
 }
 
 impl Receiving {
     /// The thread's whole life.
-    fn run(&mut self, rx: Receiver<Message>, window: Duration) {
+    fn run(&mut self, rx: Receiver<Message>, window: Duration, subscribed_at: DateTime<Utc>) {
         let mut coalescer: Coalescer<Pending> = Coalescer::new(window);
+        self.start_recovery(subscribed_at);
         while !self.stop.load(Ordering::Relaxed) {
+            self.notice_reconnect();
             let now = Instant::now();
-            let wait = coalescer.next_deadline().map_or(MAX_WAIT, |due| {
+            let mut wait = coalescer.next_deadline().map_or(MAX_WAIT, |due| {
                 due.saturating_duration_since(now).min(MAX_WAIT)
             });
+            if let Some(open) = &self.window {
+                wait = wait.min(open.deadline().saturating_duration_since(now));
+            }
             match rx.recv_timeout(wait) {
                 Ok(message) => self.handle_message(&message, &mut coalescer),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -411,9 +548,112 @@ impl Receiving {
             for (_key, pending) in coalescer.due(Instant::now()) {
                 self.submit(pending);
             }
+            if self.window.as_ref().is_some_and(|w| w.done(Instant::now())) {
+                self.finish_recovery();
+            }
             self.watch_drops();
         }
+        if self.late_replies > 0 {
+            tracing::info!(
+                target: "geode::ingest",
+                "source {}: {} recovery replies arrived with no window open and were dropped",
+                self.source,
+                self.late_replies,
+            );
+        }
         self.end_drops();
+    }
+
+    /// Start a recovery if the connection came back since the last turn.
+    fn notice_reconnect(&mut self) {
+        let down = self.reconnected_at.swap(0, Ordering::AcqRel);
+        if down != 0 {
+            let started_at = micros_to_utc(down);
+            self.start_recovery(started_at);
+        }
+    }
+
+    /// Ask for every known topic under a window opened at `started_at`,
+    /// before the request goes out so no reply arrives unjudged. An open
+    /// window is finished and reported first.
+    fn start_recovery(&mut self, started_at: DateTime<Utc>) {
+        if self.window.is_some() {
+            self.finish_recovery();
+        }
+        if self.known.is_empty() {
+            return;
+        }
+        let Some(recovery) = self.recovery.as_mut() else {
+            if !self.unsupported_logged {
+                self.unsupported_logged = true;
+                tracing::info!(
+                    target: "geode::ingest",
+                    "source {}: the transport cannot recover; {} known topics wait for their next update",
+                    self.source,
+                    self.known.len(),
+                );
+            }
+            return;
+        };
+        self.asked = self.known.iter().cloned().collect();
+        self.window = Some(RecoveryWindow::start(
+            Instant::now(),
+            started_at,
+            self.recover_timeout,
+            &self.asked,
+        ));
+        if let Err(e) = recovery.recover(&self.asked, self.recover_timeout) {
+            self.window = None;
+            let reason = format!("recovery failed: {e}");
+            self.report_recovery(
+                Health::Degraded {
+                    reason: reason.clone(),
+                },
+                reason,
+            );
+        }
+    }
+
+    /// Close the open window and report its outcome under
+    /// `<source>:recovery`, with one log line naming what went unanswered
+    /// and how many replies came too late.
+    fn finish_recovery(&mut self) {
+        let Some(window) = self.window.take() else {
+            return;
+        };
+        let late = std::mem::take(&mut self.late_replies);
+        let asked = self.asked.len();
+        let (health, summary) = match window.report(&self.asked) {
+            RecoveryReport::AllAnswered => (Health::Ok, format!("all {asked} topics answered")),
+            RecoveryReport::Partial { unanswered, sample } => (
+                Health::Ok,
+                format!(
+                    "{unanswered} of {asked} topics unanswered ({})",
+                    sample.join(", ")
+                ),
+            ),
+            RecoveryReport::NoReplies { asked } => (
+                Health::Degraded {
+                    reason: format!("recovery: no replies for {asked} topics"),
+                },
+                format!("no replies for {asked} topics"),
+            ),
+        };
+        tracing::info!(
+            target: "geode::ingest",
+            "source {}: recovery: {summary}; {late} late replies dropped",
+            self.source,
+        );
+        let what = match &health {
+            Health::Degraded { reason } => reason.clone(),
+            _ => format!("recovery: {summary}"),
+        };
+        self.report_recovery(health, what);
+    }
+
+    fn report_recovery(&self, health: Health, what: String) {
+        let detail = format!("{}: {what}", self.recovery_key);
+        (self.report_load)(&self.recovery_key, health, detail);
     }
 
     /// The subscription ended (disconnect or stop): with no receiver there
@@ -506,11 +746,37 @@ impl Receiving {
         // than after: a coalesced message may not release for another
         // window, and the recovery is news now.
         self.clear_topic(&message.topic);
+        if message.recovered {
+            // Judged by the window, never by the reply's own receive time:
+            // a reply snapshotted before a newer NOTIFY can arrive after it.
+            let verdict = match self.window.as_mut() {
+                Some(w) => w.on_reply(
+                    Instant::now(),
+                    &message.topic,
+                    self.last_notify.get(&key).copied(),
+                ),
+                None => ReplyVerdict::DropLate,
+            };
+            match verdict {
+                ReplyVerdict::Publish => {}
+                ReplyVerdict::DropNotified => return,
+                ReplyVerdict::DropLate => {
+                    self.late_replies += 1;
+                    return;
+                }
+            }
+        } else if let Some(at) = self.last_notify.get_mut(&key) {
+            *at = message.received;
+        } else {
+            self.last_notify.insert(key.clone(), message.received);
+        }
         let pending = Pending {
             rows,
             received: message.received,
             source_time,
             bytes: message.bytes.len() as u64,
+            topic: message.topic.clone(),
+            recovered: message.recovered,
         };
         if let Some((_key, released)) = coalescer.offer(Instant::now(), key, pending) {
             self.submit(released);
@@ -554,7 +820,8 @@ impl Receiving {
 
     /// Queue a released document under the runner's mutex and notify it.
     /// This does not wait for publication or refuse on queue capacity.
-    fn submit(&self, pending: Pending) {
+    fn submit(&mut self, pending: Pending) {
+        let topic = self.topic_to_record(pending.topic);
         self.ingest.submit_document(DocumentJob {
             source: self.source.clone(),
             dataset: self.dataset.name.clone(),
@@ -562,9 +829,30 @@ impl Receiving {
             source_time: pending.source_time,
             received_at: pending.received,
             bytes: pending.bytes,
-            recovered: false,
-            topic: None,
+            recovered: pending.recovered,
+            topic,
         });
+    }
+
+    /// The topic to record with this document: on its first document this
+    /// run, or once its record here is `RERECORD_AFTER` old so a long run
+    /// keeps the store's receive time current and the topic is not pruned.
+    /// Every other document carries `None` and costs the publish nothing.
+    /// The topic also joins the set later recoveries ask for.
+    fn topic_to_record(&mut self, topic: String) -> Option<String> {
+        if !self.known.contains(&topic) {
+            self.known.insert(topic.clone());
+        }
+        let now = Instant::now();
+        let fresh = self
+            .recorded
+            .get(&topic)
+            .is_some_and(|at| now.saturating_duration_since(*at) < RERECORD_AFTER);
+        if fresh {
+            return None;
+        }
+        self.recorded.insert(topic.clone(), now);
+        Some(topic)
     }
 }
 
@@ -909,67 +1197,165 @@ mod tests {
         states: Arc<Mutex<Vec<ConnectionState>>>,
     }
 
+    /// What a receiver test varies. `Setup::new()` is the plain harness;
+    /// `spawn` builds the store, runner, bus and worker.
+    struct Setup {
+        coalesce: Duration,
+        kind: Arc<dyn DocumentKind>,
+        source_time: SourceTime,
+        /// The topics the worker is handed at spawn, as the service reads
+        /// them from the store.
+        known_topics: Vec<String>,
+        recover_timeout: Duration,
+        /// Wraps the channel subscription so the test scripts recovery.
+        script: Option<Arc<Script>>,
+        /// A bus the test prepared, e.g. holding a last value already.
+        bus: Option<(Arc<ChannelAdapter>, ChannelFeed)>,
+        /// Documents published live (as `Published`) before the worker
+        /// starts.
+        seed: Vec<DocumentRows>,
+    }
+
+    impl Setup {
+        fn new() -> Self {
+            Setup {
+                coalesce: Duration::ZERO,
+                kind: Arc::new(FakeKind::new()),
+                source_time: SourceTime::Receive,
+                known_topics: Vec::new(),
+                recover_timeout: Duration::from_secs(10),
+                script: None,
+                bus: None,
+                seed: Vec::new(),
+            }
+        }
+
+        fn spawn(self) -> Harness {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+            let ds = cvi_dataset();
+            store.apply_schema(&ds).unwrap();
+            Catalog::new(store.writer()).ensure_tables().unwrap();
+            let conn = store.reader().unwrap();
+            let mut schema = SchemaSpec::default();
+            schema.datasets.push(ds.clone());
+            let (handle, events) = IngestRunner::spawn_channel(store, schema);
+            let ingest = Arc::new(handle);
+            for rows in self.seed {
+                let batch = join_key(&rows.key);
+                let now = Utc::now();
+                ingest.submit_document(DocumentJob {
+                    source: "cvi".into(),
+                    dataset: ds.name.clone(),
+                    rows,
+                    source_time: now,
+                    received_at: now,
+                    bytes: 0,
+                    recovered: false,
+                    topic: None,
+                });
+                assert_eq!(published(&events).0, batch, "the seed publishes");
+            }
+
+            let (bus, feed) = self.bus.unwrap_or_else(|| ChannelAdapter::new("test_bus"));
+            let spec = SourceSpec {
+                adapter: "test_bus".into(),
+                document: Some("fake_cvi".into()),
+                topics: vec!["cvi/>".into()],
+                coalesce: self.coalesce,
+                source_time: self.source_time,
+                recover_timeout: self.recover_timeout,
+                ..SourceSpec::directory("cvi", "cvi_params", Vec::new())
+            };
+            let mut subscription = bus.subscription().expect("the channel adapter subscribes");
+            if let Some(script) = &self.script {
+                subscription = Box::new(ScriptedSubscription {
+                    inner: subscription,
+                    script: Arc::clone(script),
+                });
+            }
+            Harness::spawn(
+                dir,
+                conn,
+                events,
+                ingest,
+                feed,
+                &spec,
+                ds,
+                self.kind,
+                subscription,
+                self.known_topics,
+            )
+        }
+    }
+
     fn harness(
         coalesce: Duration,
         kind: Arc<dyn DocumentKind>,
         source_time: SourceTime,
     ) -> Harness {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
-        let ds = cvi_dataset();
-        store.apply_schema(&ds).unwrap();
-        Catalog::new(store.writer()).ensure_tables().unwrap();
-        let conn = store.reader().unwrap();
-        let mut schema = SchemaSpec::default();
-        schema.datasets.push(ds.clone());
-        let (handle, events) = IngestRunner::spawn_channel(store, schema);
-        let ingest = Arc::new(handle);
-
-        let (bus, feed) = ChannelAdapter::new("test_bus");
-        let spec = SourceSpec {
-            adapter: "test_bus".into(),
-            document: Some("fake_cvi".into()),
-            topics: vec!["cvi/>".into()],
+        Setup {
             coalesce,
-            source_time,
-            ..SourceSpec::directory("cvi", "cvi_params", Vec::new())
-        };
-        let reports: Arc<Mutex<Vec<(String, Health, String)>>> = Arc::new(Mutex::new(Vec::new()));
-        let states: Arc<Mutex<Vec<ConnectionState>>> = Arc::new(Mutex::new(Vec::new()));
-        let report_load: LoadReportSink = {
-            let reports = Arc::clone(&reports);
-            Arc::new(move |batch: &str, health: Health, detail: String| {
-                reports
-                    .lock()
-                    .unwrap()
-                    .push((batch.to_string(), health, detail));
-            })
-        };
-        let on_connection: HealthSink = {
-            let states = Arc::clone(&states);
-            Arc::new(move |state: ConnectionState| states.lock().unwrap().push(state))
-        };
-        let worker = SubscriptionWorker::spawn(
-            &spec,
-            ds,
             kind,
-            bus.subscription().expect("the channel adapter subscribes"),
-            Arc::clone(&ingest),
-            report_load,
-            on_connection,
-            geode_core::clock::Clock::utc(),
-            crate::supervise::unwatched(),
-        )
-        .expect("the bus is open");
-        Harness {
-            _dir: dir,
-            conn,
-            events,
-            _ingest: ingest,
-            feed,
-            worker,
-            reports,
-            states,
+            source_time,
+            ..Setup::new()
+        }
+        .spawn()
+    }
+
+    impl Harness {
+        #[allow(clippy::too_many_arguments)]
+        fn spawn(
+            dir: tempfile::TempDir,
+            conn: duckdb::Connection,
+            events: Receiver<IngestEvent>,
+            ingest: Arc<IngestHandle>,
+            feed: ChannelFeed,
+            spec: &SourceSpec,
+            ds: DatasetSpec,
+            kind: Arc<dyn DocumentKind>,
+            subscription: Box<dyn Subscription>,
+            known_topics: Vec<String>,
+        ) -> Harness {
+            let reports: Arc<Mutex<Vec<(String, Health, String)>>> =
+                Arc::new(Mutex::new(Vec::new()));
+            let states: Arc<Mutex<Vec<ConnectionState>>> = Arc::new(Mutex::new(Vec::new()));
+            let report_load: LoadReportSink = {
+                let reports = Arc::clone(&reports);
+                Arc::new(move |batch: &str, health: Health, detail: String| {
+                    reports
+                        .lock()
+                        .unwrap()
+                        .push((batch.to_string(), health, detail));
+                })
+            };
+            let on_connection: HealthSink = {
+                let states = Arc::clone(&states);
+                Arc::new(move |state: ConnectionState| states.lock().unwrap().push(state))
+            };
+            let worker = SubscriptionWorker::spawn(
+                spec,
+                ds,
+                kind,
+                subscription,
+                Arc::clone(&ingest),
+                report_load,
+                on_connection,
+                geode_core::clock::Clock::utc(),
+                crate::supervise::unwatched(),
+                known_topics,
+            )
+            .expect("the bus is open");
+            Harness {
+                _dir: dir,
+                conn,
+                events,
+                _ingest: ingest,
+                feed,
+                worker,
+                reports,
+                states,
+            }
         }
     }
 
@@ -1431,6 +1817,7 @@ mod tests {
             Arc::new(|_: ConnectionState| {}),
             geode_core::clock::Clock::utc(),
             stop,
+            Vec::new(),
         )
         .expect("the bus is open");
         feed.publish("cvi/SPX.Z", b"anything".to_vec());
@@ -1438,5 +1825,385 @@ mod tests {
         assert_eq!(thread, "geode-subscribe-cvi");
         assert!(reason.contains("the load report fell over"), "{reason}");
         worker.shutdown();
+    }
+
+    // ---- recovery, over a real ChannelAdapter ---------------------------
+
+    /// A test transport's GET side: records each request, fails the next
+    /// ones the test queued, and sends a reply only when the test calls
+    /// `reply` — so a test decides exactly when, and with what, each topic
+    /// answers.
+    #[derive(Default)]
+    struct Script {
+        /// The worker's own sink, captured at subscribe and released at
+        /// unsubscribe so the receiver can still see its queue disconnect.
+        sink: Mutex<Option<MessageSink>>,
+        calls: Mutex<Vec<Vec<String>>>,
+        failures: Mutex<std::collections::VecDeque<String>>,
+    }
+
+    impl Script {
+        fn reply(&self, topic: &str, bytes: Vec<u8>) {
+            let sink = self.sink.lock().unwrap().clone().expect("subscribed");
+            assert!(sink.push(Message {
+                topic: topic.to_string(),
+                received: Utc::now(),
+                bytes,
+                recovered: true,
+            }));
+        }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    struct ScriptedSubscription {
+        inner: Box<dyn Subscription>,
+        script: Arc<Script>,
+    }
+
+    impl Subscription for ScriptedSubscription {
+        fn subscribe(
+            &mut self,
+            topics: &[String],
+            sink: MessageSink,
+            health: HealthSink,
+        ) -> Result<(), AdapterError> {
+            *self.script.sink.lock().unwrap() = Some(sink.clone());
+            self.inner.subscribe(topics, sink, health)
+        }
+
+        fn unsubscribe(&mut self) {
+            self.script.sink.lock().unwrap().take();
+            self.inner.unsubscribe();
+        }
+
+        fn recovery(&mut self) -> Option<Box<dyn Recovery>> {
+            Some(Box::new(ScriptedRecovery(Arc::clone(&self.script))))
+        }
+    }
+
+    struct ScriptedRecovery(Arc<Script>);
+
+    impl Recovery for ScriptedRecovery {
+        fn recover(&mut self, topics: &[String], _timeout: Duration) -> Result<(), AdapterError> {
+            self.0.calls.lock().unwrap().push(topics.to_vec());
+            match self.0.failures.lock().unwrap().pop_front() {
+                Some(message) => Err(AdapterError { message }),
+                None => Ok(()),
+            }
+        }
+    }
+
+    fn scripted() -> (Setup, Arc<Script>) {
+        let script = Arc::new(Script::default());
+        let setup = Setup {
+            script: Some(Arc::clone(&script)),
+            ..Setup::new()
+        };
+        (setup, script)
+    }
+
+    /// Puts `bytes` on the bus as `topic`'s last value before the worker
+    /// exists. A throwaway subscriber starts the dispatcher (which records
+    /// last values) and its receipt proves the value is recorded.
+    fn publish_before_subscribers(
+        bus: &Arc<ChannelAdapter>,
+        feed: &ChannelFeed,
+        topic: &str,
+        bytes: Vec<u8>,
+    ) {
+        let mut sub = bus.subscription().unwrap();
+        let (sink, rx) = MessageSink::bounded(4);
+        sub.subscribe(&["cvi/>".into()], sink, Arc::new(|_: ConnectionState| {}))
+            .unwrap();
+        assert!(feed.publish(topic, bytes));
+        rx.recv_timeout(Duration::from_secs(30))
+            .expect("the throwaway subscriber hears it");
+        sub.unsubscribe();
+    }
+
+    /// The next ingest outcome, skipping run announcements.
+    fn outcome(rx: &Receiver<IngestEvent>) -> IngestEvent {
+        loop {
+            match rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(IngestEvent::PlanComplete) | Ok(IngestEvent::Started { .. }) => continue,
+                Ok(other) => return other,
+                Err(e) => panic!("no outcome: {e}"),
+            }
+        }
+    }
+
+    fn recovery_reports(h: &Harness) -> Vec<(Health, String)> {
+        h.reports
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(batch, _, _)| batch == "cvi:recovery")
+            .map(|(_, health, detail)| (health.clone(), detail.clone()))
+            .collect()
+    }
+
+    fn fake_rows(key: &str, params: [f64; 6]) -> DocumentRows {
+        FakeKind::new()
+            .parse(&FakeKind::message(key, params))
+            .unwrap()
+            .rows
+    }
+
+    /// Drop the connection and bring it back, as a transport reports it.
+    fn reconnect(h: &Harness) {
+        h.feed.set_state(ConnectionState::Lost {
+            reason: "broker gone".into(),
+        });
+        h.feed.set_state(ConnectionState::Connected);
+    }
+
+    #[test]
+    fn recovery_publishes_the_last_document_of_a_known_topic_at_start() {
+        let (bus, feed) = ChannelAdapter::new("test_bus");
+        publish_before_subscribers(
+            &bus,
+            &feed,
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [0.5; 6]),
+        );
+        let mut h = Setup {
+            bus: Some((bus, feed)),
+            known_topics: vec!["cvi/SPX.Z".into()],
+            ..Setup::new()
+        }
+        .spawn();
+        assert_eq!(published(&h.events), ("SPX.Z".to_string(), 6));
+        assert_eq!(live_params(&h.conn, "SPX.Z"), vec![0.5; 6]);
+        wait_until("the recovery's Ok", || {
+            recovery_reports(&h)
+                .iter()
+                .any(|(health, _)| *health == Health::Ok)
+        });
+        h.worker.shutdown();
+    }
+
+    #[test]
+    fn a_reply_equal_to_live_publishes_nothing() {
+        let (bus, feed) = ChannelAdapter::new("test_bus");
+        publish_before_subscribers(
+            &bus,
+            &feed,
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [0.5; 6]),
+        );
+        let mut h = Setup {
+            bus: Some((bus, feed)),
+            known_topics: vec!["cvi/SPX.Z".into()],
+            seed: vec![fake_rows("SPX.Z", [0.5; 6])],
+            ..Setup::new()
+        }
+        .spawn();
+        match outcome(&h.events) {
+            IngestEvent::Unchanged { source, batch, .. } => {
+                assert_eq!((source.as_str(), batch.as_str()), ("cvi", "SPX.Z"));
+            }
+            other => panic!("expected Unchanged, got {other:?}"),
+        }
+        nothing_more(&h.events, Duration::from_millis(200));
+        assert_eq!(live_params(&h.conn, "SPX.Z"), vec![0.5; 6]);
+        h.worker.shutdown();
+    }
+
+    /// The NOTIFY for SPX.Z arrives after the connection went down and is
+    /// handled before the receiver learns of the reconnect. The window
+    /// starts at the disconnect, so that NOTIFY counts against the older
+    /// reply; a window started when the receiver noticed would let the
+    /// reply replace it.
+    #[test]
+    fn a_notify_processed_before_the_reconnect_is_noticed_still_beats_the_reply() {
+        let (setup, script) = scripted();
+        let mut h = setup.spawn();
+        assert!(
+            script.calls().is_empty(),
+            "no known topics, no recovery at start"
+        );
+        h.feed
+            .publish("cvi/NDX.Z", FakeKind::message("NDX.Z", [1.0; 6]));
+        assert_eq!(published(&h.events).0, "NDX.Z");
+
+        h.feed.set_state(ConnectionState::Lost {
+            reason: "broker gone".into(),
+        });
+        h.feed
+            .publish("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.9; 6]));
+        assert_eq!(published(&h.events).0, "SPX.Z");
+        h.feed.set_state(ConnectionState::Connected);
+
+        wait_until("the reconnect's recovery", || script.calls().len() == 1);
+        assert_eq!(
+            script.calls()[0],
+            vec!["cvi/NDX.Z".to_string(), "cvi/SPX.Z".to_string()],
+            "every topic seen this run, sorted"
+        );
+        // The older SPX.Z state, then an NDX.Z reply whose publish proves
+        // the SPX.Z one was handled first.
+        script.reply("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.1; 6]));
+        script.reply("cvi/NDX.Z", FakeKind::message("NDX.Z", [2.0; 6]));
+        assert_eq!(
+            published(&h.events).0,
+            "NDX.Z",
+            "NDX.Z was last notified before the disconnect, so its reply publishes; SPX.Z's does not"
+        );
+        assert_eq!(live_params(&h.conn, "SPX.Z"), vec![0.9; 6]);
+        assert_eq!(live_params(&h.conn, "NDX.Z"), vec![2.0; 6]);
+        nothing_more(&h.events, Duration::from_millis(200));
+        h.worker.shutdown();
+    }
+
+    /// The replacing NOTIFY repeats the live document. Published without
+    /// comparison it is a `Published`; had it inherited the reply's
+    /// recovered mark it would compare equal and report `Unchanged`.
+    #[test]
+    fn a_notify_replacing_a_pending_reply_publishes_without_comparison() {
+        let (mut setup, script) = scripted();
+        setup.coalesce = Duration::from_secs(1);
+        let mut h = setup.spawn();
+        h.feed
+            .publish("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.1; 6]));
+        assert_eq!(published(&h.events).0, "SPX.Z");
+
+        reconnect(&h);
+        wait_until("the reconnect's recovery", || script.calls().len() == 1);
+        // Inside SPX.Z's spacing window: the reply goes pending, and the
+        // NOTIFY replaces it before the release.
+        script.reply("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.2; 6]));
+        h.feed
+            .publish("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.1; 6]));
+        assert_eq!(published(&h.events), ("SPX.Z".to_string(), 6));
+        assert_eq!(live_params(&h.conn, "SPX.Z"), vec![0.1; 6]);
+        nothing_more(&h.events, Duration::from_millis(200));
+        h.worker.shutdown();
+    }
+
+    #[test]
+    fn a_failed_recovery_degrades_the_recovery_key_and_the_next_success_clears_it() {
+        let (mut setup, script) = scripted();
+        setup.known_topics = vec!["cvi/SPX.Z".into()];
+        script
+            .failures
+            .lock()
+            .unwrap()
+            .push_back("broker said no".into());
+        let mut h = setup.spawn();
+        wait_until("the failed recovery's report", || {
+            !recovery_reports(&h).is_empty()
+        });
+        assert_eq!(
+            recovery_reports(&h),
+            vec![(
+                Health::Degraded {
+                    reason: "recovery failed: broker said no".into()
+                },
+                "cvi:recovery: recovery failed: broker said no".into()
+            )]
+        );
+
+        reconnect(&h);
+        wait_until("the second recovery", || script.calls().len() == 2);
+        script.reply("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.3; 6]));
+        assert_eq!(published(&h.events).0, "SPX.Z");
+        wait_until("the clearing report", || recovery_reports(&h).len() == 2);
+        assert_eq!(recovery_reports(&h)[1].0, Health::Ok);
+        h.worker.shutdown();
+    }
+
+    #[test]
+    fn no_replies_degrades_but_a_partial_answer_stays_ok() {
+        let (mut setup, script) = scripted();
+        setup.known_topics = vec!["cvi/NDX.Z".into(), "cvi/SPX.Z".into()];
+        // A zero timeout leaves the grace second as the whole window.
+        setup.recover_timeout = Duration::ZERO;
+        let mut h = setup.spawn();
+        wait_until("the unanswered window's report", || {
+            !recovery_reports(&h).is_empty()
+        });
+        assert_eq!(
+            recovery_reports(&h)[0].0,
+            Health::Degraded {
+                reason: "recovery: no replies for 2 topics".into()
+            }
+        );
+
+        reconnect(&h);
+        wait_until("the second recovery", || script.calls().len() == 2);
+        script.reply("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.3; 6]));
+        assert_eq!(published(&h.events).0, "SPX.Z");
+        wait_until("the partial window's report", || {
+            recovery_reports(&h).len() == 2
+        });
+        assert_eq!(
+            recovery_reports(&h)[1].0,
+            Health::Ok,
+            "one of two topics answered: retired instruments must not hold a source degraded"
+        );
+        h.worker.shutdown();
+    }
+
+    #[test]
+    fn shutdown_during_a_recovery_window_reports_nothing() {
+        let (mut setup, script) = scripted();
+        setup.known_topics = vec!["cvi/SPX.Z".into()];
+        setup.recover_timeout = Duration::from_secs(60);
+        let mut h = setup.spawn();
+        wait_until("the recovery request", || script.calls().len() == 1);
+        let asked = Instant::now();
+        h.worker.shutdown();
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "an open window does not hold shutdown: {:?}",
+            asked.elapsed()
+        );
+        assert!(
+            recovery_reports(&h).is_empty(),
+            "{:?}",
+            recovery_reports(&h)
+        );
+    }
+
+    #[test]
+    fn a_topics_first_document_per_run_is_recorded_once() {
+        let mut h = plain_harness();
+        h.feed
+            .publish("cvi/SPX.Z", FakeKind::message("SPX.Z", [1.0; 6]));
+        assert_eq!(published(&h.events).0, "SPX.Z");
+        h.feed
+            .publish("cvi/NDX.Z", FakeKind::message("NDX.Z", [1.0; 6]));
+        assert_eq!(published(&h.events).0, "NDX.Z");
+        // Later by at least a publish round trip, so a second record would
+        // move SPX.Z's last receive time past its first sighting.
+        std::thread::sleep(Duration::from_millis(5));
+        h.feed
+            .publish("cvi/SPX.Z", FakeKind::message("SPX.Z", [2.0; 6]));
+        assert_eq!(published(&h.events).0, "SPX.Z");
+        let rows: Vec<(String, i64, i64)> = h
+            .conn
+            .prepare(
+                "select topic, first_seen_us, last_received_us from subscription_topics \
+                 where source = 'cvi' order by topic",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            vec!["cvi/NDX.Z", "cvi/SPX.Z"]
+        );
+        for (topic, first, last) in &rows {
+            assert_eq!(
+                first, last,
+                "{topic} was recorded by its first document only"
+            );
+        }
+        h.worker.shutdown();
     }
 }

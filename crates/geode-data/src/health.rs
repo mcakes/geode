@@ -28,3 +28,6 @@ pub fn condition_key(source: &str, condition: &str) -> String {
 pub const QUEUE: &str = "queue";
 /// A source's documents and series queued past `BACKLOG_DEPTH` (`ingest::runner`).
 pub const BACKLOG: &str = "backlog";
+/// A subscription's recovery at start or reconnect failing, or no topic
+/// answering (`ingest::subscribe`).
+pub const RECOVERY: &str = "recovery";

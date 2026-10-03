@@ -116,6 +116,7 @@ pub struct SourceSpec {
     pub coalesce: Duration,
     /// Subscriptions only: how long recovery at start and reconnect waits for
     /// the transport's replies. Defaults to [`DEFAULT_RECOVER_TIMEOUT`].
+    /// Zero leaves only the receiver's one-second grace for replies.
     pub recover_timeout: Duration,
     /// Subscriptions only: recorded topics older than this are pruned and not
     /// asked for in recovery. Defaults to [`DEFAULT_RECOVER_MAX_AGE`].

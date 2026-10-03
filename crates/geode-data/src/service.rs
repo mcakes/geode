@@ -1745,6 +1745,7 @@ impl DataService {
                 on_connection,
                 config.clock,
                 Arc::clone(&sink),
+                Vec::new(),
             ) {
                 Ok(worker) => subscriptions.push(worker),
                 Err(e) => report_unservable(e.message),
