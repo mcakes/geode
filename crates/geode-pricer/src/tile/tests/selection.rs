@@ -619,8 +619,7 @@ fn i_over_rows_writes_the_cursor_column_on_every_target_line_in_one_undo(
     let strikes = line_texts(&h, &vcx);
     assert_eq!(strikes.len(), 4);
     assert!(strikes.iter().all(|s| s.contains("4500")), "{strikes:?}");
-    assert_eq!(h.mode(&mut vcx), "visual", "a commit keeps the selection");
-    h.dispatch(&mut vcx, "escape", None);
+    assert_eq!(h.mode(&mut vcx), "normal", "a commit ends visual mode");
     h.dispatch(&mut vcx, "undo", None);
     assert_eq!(
         h.cell(&vcx, 0, "strike"),
@@ -786,7 +785,7 @@ fn an_unchanged_value_over_a_selection_is_no_undo_entry(cx: &mut gpui::TestAppCo
     // nothing): the same value in another spelling.
     set_editor(&h, &mut vcx, "01");
     h.dispatch(&mut vcx, "commit", None);
-    assert_eq!(h.mode(&mut vcx), "visual", "the editor closed");
+    assert_eq!(h.mode(&mut vcx), "normal", "the editor closed");
     assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
     assert_eq!(notice(&h, &vcx).as_deref(), Some("set 2 cells"));
 }
@@ -802,7 +801,6 @@ fn a_picked_type_commits_to_every_selected_line(cx: &mut gpui::TestAppContext) {
     h.dispatch(&mut vcx, "commit", None);
     let lines = line_texts(&h, &vcx);
     assert!(lines.iter().all(|s| s.ends_with(" P")), "{lines:?}");
-    h.dispatch(&mut vcx, "escape", None);
     h.dispatch(&mut vcx, "undo", None);
     assert_eq!(h.cell(&vcx, 0, "option_type"), "C");
 }
@@ -818,11 +816,10 @@ fn a_date_commits_to_every_selected_line(cx: &mut gpui::TestAppContext) {
     h.draw(&mut vcx);
     keys(&h, &mut vcx, "up");
     keys(&h, &mut vcx, "enter");
-    assert_eq!(h.mode(&mut vcx), "visual", "the field closed");
+    assert_eq!(h.mode(&mut vcx), "normal", "the field closed");
     let want = Expiry::Date(ymd(2026, 12, 19));
     assert_eq!(expiry_of(&h, &vcx, 0), want);
     assert_eq!(expiry_of(&h, &vcx, 1), want, "the tenor line took the date");
-    h.dispatch(&mut vcx, "escape", None);
     h.dispatch(&mut vcx, "undo", None);
     assert_eq!(expiry_of(&h, &vcx, 0), Expiry::Date(ymd(2026, 12, 18)));
     assert_ne!(expiry_of(&h, &vcx, 1), want, "one undo took both back");
@@ -856,8 +853,9 @@ fn an_untouched_choice_enter_over_a_selection_writes_nothing(cx: &mut gpui::Test
     assert_eq!(notice(&h, &vcx), None, "no notice");
     assert!(!can_undo(&h, &vcx), "no undo entry");
     assert!(h.prices().is_empty(), "nothing repriced");
-    assert_eq!(h.mode(&mut vcx), "visual", "the selection stays");
+    assert_eq!(h.mode(&mut vcx), "normal", "the commit ends visual mode");
     // The opening option typed out is no pick either.
+    select_up_to_the_c_line(&h, &mut vcx, "option_type");
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "c");
     h.dispatch(&mut vcx, "commit", None);
@@ -879,7 +877,6 @@ fn a_moved_choice_over_a_selection_writes_every_line_in_one_undo(cx: &mut gpui::
     let lines = line_texts(&h, &vcx);
     assert!(lines.iter().all(|s| s.ends_with(" P")), "{lines:?}");
     assert_eq!(notice(&h, &vcx).as_deref(), Some("set 4 cells"));
-    h.dispatch(&mut vcx, "escape", None);
     h.dispatch(&mut vcx, "undo", None);
     assert_eq!(
         h.cell(&vcx, 0, "option_type"),
@@ -905,7 +902,7 @@ fn an_unchanged_untyped_date_over_a_selection_writes_nothing(cx: &mut gpui::Test
     h.dispatch(&mut vcx, "edit", None);
     h.draw(&mut vcx);
     keys(&h, &mut vcx, "enter");
-    assert_eq!(h.mode(&mut vcx), "visual", "the field closed");
+    assert_eq!(h.mode(&mut vcx), "normal", "the field closed");
     assert_eq!(
         expiry_of(&h, &vcx, 1),
         tenor,
@@ -913,6 +910,7 @@ fn an_unchanged_untyped_date_over_a_selection_writes_nothing(cx: &mut gpui::Test
     );
     assert_eq!(notice(&h, &vcx), None);
     assert!(!can_undo(&h, &vcx));
+    reselect_from_the_tenor(&h, &mut vcx);
     h.dispatch(&mut vcx, "edit", None);
     h.draw(&mut vcx);
     keys(&h, &mut vcx, "up");
@@ -920,12 +918,21 @@ fn an_unchanged_untyped_date_over_a_selection_writes_nothing(cx: &mut gpui::Test
     keys(&h, &mut vcx, "enter");
     assert_eq!(expiry_of(&h, &vcx, 1), tenor, "stepped back is unchanged");
     assert!(!can_undo(&h, &vcx));
+    reselect_from_the_tenor(&h, &mut vcx);
     h.dispatch(&mut vcx, "edit", None);
     h.draw(&mut vcx);
     keys(&h, &mut vcx, "1 8 enter");
     let want = Expiry::Date(ymd(2026, 12, 18));
     assert_eq!(expiry_of(&h, &vcx, 1), want, "a typed day is a date");
     assert!(can_undo(&h, &vcx));
+}
+
+/// A commit ended visual mode on the dated line: select both lines again
+/// from the tenor up, the cursor back on the dated line.
+fn reselect_from_the_tenor(h: &Harness, vcx: &mut VisualTestContext) {
+    h.motion(vcx, "down", None);
+    h.dispatch(vcx, "visual_rows", None);
+    h.motion(vcx, "up", None);
 }
 
 /// A package's type cell opens as text, with no live step: an untouched

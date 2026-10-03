@@ -701,8 +701,9 @@ so a no-op gesture never copies one cell's value across the selection:
 text still equal to what the editor opened on, a date field no digit was
 typed into whose date is unchanged, or `enter` on the option the cell
 already holds. Stepping a date or moving the choice highlight is a change;
-a click on a choice row is always a pick. The selection stays after a
-commit.
+a click on a choice row is always a pick. A commit that settles (written,
+or an untouched `enter`) ends the selection, as `escape` would; a refused
+commit keeps it with the editor open.
 
 **Live steps.** On a number cursor cell with its text untouched, the editor's
 arrows (`up`/`down`, `shift+` for ten) step every selected number in the
@@ -716,7 +717,7 @@ any cell refuses (an overflow), nothing is written. A step refuses while the
 draft is Behind with its base gone or its upload echo differs, as every edit
 does.
 
-- `enter` on the untouched text keeps the steps and the selection.
+- `enter` on the untouched text keeps the steps and ends the selection.
 - `escape` restores the draft exactly as `i` found it, provided the steps are
   still its last change and the painted document has not moved; a delivery
   held Behind meanwhile stays reported, and a draft that was Sent comes back
@@ -2282,8 +2283,9 @@ changes nothing records no entry. The header notices `set 5 cells, skipped 3
 (2 read-only, 1 n/a)`, counting read-only cells, barrier cells on a vanilla
 line (`n/a`), and refused values.
 When no selected cell accepts the value, nothing is written and the editor
-stays open with `no selected cell accepts '<text>'` in the footer. The
-selection stays after a commit. Because the cursor's column is what a commit
+stays open with `no selected cell accepts '<text>'` in the footer and the
+selection kept. A commit that settles (written, or an untouched `enter`)
+ends the selection, as `escape` would. Because the cursor's column is what a commit
 writes, `enter` re-checks that the cursor still sits on the editor's cell;
 if it does not, nothing is written and the editor closes with `the cell
 moved; edit refused`.

@@ -2166,9 +2166,7 @@ impl PricerTile {
                 if let Some(bulk) = self.take_bulk() {
                     self.settle_bulk(bulk, true, cx);
                 }
-                self.close_editor(window, cx);
-                self.rebuild_chrome();
-                cx.notify();
+                self.close_ending_selection(window, cx);
                 return;
             }
             if let Some(bulk) = self.take_bulk() {
@@ -2232,9 +2230,7 @@ impl PricerTile {
         // filled across every target would be a plausible wrong block
         // from a no-op gesture. No edit, no notice, no undo entry.
         if unchanged && self.selection.is_some() {
-            self.close_editor(window, cx);
-            self.rebuild_chrome();
-            cx.notify();
+            self.close_ending_selection(window, cx);
             return;
         }
         let value = match value {
@@ -2262,7 +2258,7 @@ impl PricerTile {
             if !self.cursor_on_editor(line, kind) {
                 self.refuse_moved(window, cx);
             } else if self.commit_selection(&value, None, cx) {
-                self.close_editor(window, cx);
+                self.close_ending_selection(window, cx);
             }
             return;
         }
@@ -2362,6 +2358,20 @@ impl PricerTile {
 
     /// Close the editor with `MOVED`: its commit no longer means what the
     /// trader saw when it opened.
+    /// A commit over a selection settled — written, or a no-op left as
+    /// it was: the editor closes and visual mode ends with it, as `escape`
+    /// would. A refusal never comes here, so the selection survives for
+    /// the trader to retype or adjust.
+    fn close_ending_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_editor(window, cx);
+        self.clear_selection();
+        // The table's highlight goes, and an order the selection held
+        // under a sort re-ranks now.
+        self.sync_cursor(cx);
+        self.rebuild_chrome();
+        cx.notify();
+    }
+
     fn refuse_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_editor(window, cx);
         self.footer = Some(MOVED.into());
@@ -2407,16 +2417,14 @@ impl PricerTile {
         // from a no-op gesture.
         if self.selection.is_some() {
             if date == initial && !typed {
-                self.close_editor(window, cx);
-                self.rebuild_chrome();
-                cx.notify();
+                self.close_ending_selection(window, cx);
                 return;
             }
             let text = date.format("%Y-%m-%d").to_string();
             if !self.cursor_on_editor(line, kind) {
                 self.refuse_moved(window, cx);
             } else if self.commit_selection(&text, Some(date), cx) {
-                self.close_editor(window, cx);
+                self.close_ending_selection(window, cx);
             }
             return;
         }

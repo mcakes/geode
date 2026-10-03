@@ -1249,10 +1249,10 @@ fn an_edit_of_the_grouped_value_keeps_the_cursor_on_its_line(cx: &mut gpui::Test
     assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 4000 C"));
 }
 
-/// A `V` edit of the grouped column keeps the selection: its anchor line
-/// paints once, in its new group.
+/// A `V` edit of the grouped column ends visual mode with the cursor on
+/// the edited line, in its new group.
 #[gpui::test]
-fn a_selection_edit_of_the_grouped_value_keeps_the_selection(cx: &mut gpui::TestAppContext) {
+fn a_selection_edit_of_the_grouped_value_follows_the_line(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &STRIKES);
     h.command(&mut vcx, "group strike").unwrap();
     h.dispatch(&mut vcx, "expand_all", None);
@@ -1263,13 +1263,9 @@ fn a_selection_edit_of_the_grouped_value_keeps_the_selection(cx: &mut gpui::Test
     set_editor(&h, &mut vcx, "4000");
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(h.footer(&vcx), None, "no lost anchor");
-    assert_eq!(h.mode(&mut vcx), "visual");
-    let row = h.cursor(&vcx).unwrap().0;
+    assert_eq!(h.mode(&mut vcx), "normal");
     assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 4000 C"));
-    let rows = h
-        .tile
-        .read_with(&vcx, |t, _| t.resolved().map(|r| r.rows.clone()));
-    assert_eq!(rows, Some(row..row + 1));
+    assert!(h.tile.read_with(&vcx, |t, _| t.resolved().is_none()));
 }
 
 fn find(h: &Harness, vcx: &mut VisualTestContext, e: FindEvent) {

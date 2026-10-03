@@ -73,6 +73,15 @@ impl MarketDataTile {
         self.selection_extent = None;
     }
 
+    /// A commit over the selection settled — written, or a no-op left as
+    /// it was: visual mode ends with the editor, as `escape` would. A
+    /// refusal never comes here, so the selection survives for the trader
+    /// to retype or adjust.
+    pub(super) fn end_selection_on_commit(&mut self, cx: &mut Context<Self>) {
+        self.clear_selection();
+        self.sync_cursor(cx);
+    }
+
     /// Re-resolve against the current model and cursor, preparing the
     /// footer extent. Answers whether the anchor was lost (the selection
     /// is then cleared and the notice set), so the caller re-prepares
@@ -655,6 +664,7 @@ impl MarketDataTile {
         self.close_editor(window, cx);
         self.close_popup_with_window(window, cx);
         self.rebuild_model(cx);
+        self.end_selection_on_commit(cx);
         let set = bulk::set_notice(n, &skips);
         self.notice = Some(
             if kept {

@@ -28004,7 +28004,7 @@ run_mutation "pricer grouping: a V edit of the grouped value loses its anchor" \
   crates/geode-pricer/src/tile.rs \
   '            } => self.exact_row(*id, within).or_else(|| self.only_row(*id)),' \
   '            } => self.exact_row(*id, within),' \
-  geode-pricer a_selection_edit_of_the_grouped_value_keeps_the_selection
+  geode-pricer a_selection_edit_of_the_grouped_value_follows_the_line
 
 run_mutation "pricer grouping: a split package counts as painted once" \
   crates/geode-pricer/src/tile.rs \
@@ -28979,6 +28979,53 @@ run_mutation "edit caret: pricer visual binds I to end placement" \
 [bindings.keys]
 "shift+i" = "pricer::edit"' \
   geode-pricer edit_keys_select_the_text_or_place_the_caret_at_the_end
+
+# A commit over a selection that settles ends visual mode; a refusal keeps it.
+run_mutation "visual commit: pricer close keeps the selection" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.close_editor(window, cx);
+        self.clear_selection();
+        // The table'"'"'s highlight goes' \
+  '        self.close_editor(window, cx);
+        // The table'"'"'s highlight goes' \
+  geode-pricer i_over_rows_writes_the_cursor_column_on_every_target_line_in_one_undo
+
+run_mutation "visual commit: pricer written commit only closes the editor" \
+  crates/geode-pricer/src/tile.rs \
+  '            } else if self.commit_selection(&value, None, cx) {
+                self.close_ending_selection(window, cx);' \
+  '            } else if self.commit_selection(&value, None, cx) {
+                self.close_editor(window, cx);' \
+  geode-pricer i_over_rows_writes_the_cursor_column_on_every_target_line_in_one_undo
+
+run_mutation "visual commit: pricer untouched date only closes the editor" \
+  crates/geode-pricer/src/tile.rs \
+  '            if date == initial && !typed {
+                self.close_ending_selection(window, cx);' \
+  '            if date == initial && !typed {
+                self.close_editor(window, cx);' \
+  geode-pricer an_unchanged_untyped_date_over_a_selection_writes_nothing
+
+run_mutation "visual commit: marketdata end keeps the selection" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '        self.clear_selection();
+        self.sync_cursor(cx);' \
+  '        self.sync_cursor(cx);' \
+  geode-marketdata i_over_a_block_writes_one_value_to_every_accepting_cell
+
+run_mutation "visual commit: marketdata bulk write keeps the selection" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '        self.rebuild_model(cx);
+        self.end_selection_on_commit(cx);' \
+  '        self.rebuild_model(cx);' \
+  geode-marketdata i_over_a_block_writes_one_value_to_every_accepting_cell
+
+run_mutation "visual commit: marketdata untouched choice keeps the selection" \
+  crates/geode-marketdata/src/tile.rs \
+  '            self.close_popup_with_window(window, cx);
+            self.end_selection_on_commit(cx);' \
+  '            self.close_popup_with_window(window, cx);' \
+  geode-marketdata an_untouched_choice_commit_over_a_selection_writes_nothing
 
 run_mutation "nemo: ids are not encoded" \
   crates/geode-nemo/src/lib.rs \

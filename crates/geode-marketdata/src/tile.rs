@@ -2917,11 +2917,13 @@ impl MarketDataTile {
                     // before the close, which would otherwise undo them.
                     editing.bulk = None;
                     self.close_editor(window, cx);
+                    self.end_selection_on_commit(cx);
                     return true;
                 }
                 if self.selection.is_some() && text == editing.opened {
                     // Untouched over a selection: nothing to write.
                     self.close_editor(window, cx);
+                    self.end_selection_on_commit(cx);
                     return true;
                 }
                 self.commit_cell_edit(cell, labels, &text, window, cx)
@@ -2959,6 +2961,7 @@ impl MarketDataTile {
                     if !editing.typed && text == editing.opened {
                         // Untouched over a selection: nothing to write.
                         self.close_editor(window, cx);
+                        self.end_selection_on_commit(cx);
                         return true;
                     }
                     return self.commit_bulk(&text, window, cx);
@@ -3762,6 +3765,7 @@ impl MarketDataTile {
             // `enter` on the value the cell already holds, over a
             // selection: nothing to write. A row click stays a pick.
             self.close_popup_with_window(window, cx);
+            self.end_selection_on_commit(cx);
             return true;
         }
         self.pick_option(option, window, cx)
