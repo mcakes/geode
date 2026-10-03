@@ -1300,6 +1300,9 @@ impl ShellView {
                 let mut s = f.shared_mut();
                 s.set_scope(record.scope);
                 s.set_active_slot(record.active_slot);
+                if let Some(chain) = record.ad_hoc {
+                    s.restore_ad_hoc(chain, record.ad_hoc_active);
+                }
                 s.set_as_of(record.as_of);
                 s.clear_history();
             });
@@ -1325,15 +1328,35 @@ impl ShellView {
                 f.pin(ws);
                 let mut lane = f.view_mut(ws);
                 lane.set_scope(record.scope);
-                // Pinning copied the shared slot. Clear it first so a
-                // recorded slot that is now empty (refused below) leaves
-                // no slot rather than the shared lane's.
+                // Pinning copied the shared slot and ad hoc chain. Clear
+                // both first so a recorded slot that is now empty (refused
+                // below) leaves no slot rather than the shared lane's, and a
+                // record without a chain does not keep the shared lane's
+                // chain, which the session writer would then save as this
+                // workspace's own.
                 lane.set_active_slot(None);
+                lane.forget_ad_hoc();
                 lane.set_active_slot(record.active_slot);
+                // After the slot, so an active chain wins over it; before
+                // `clear_history`, like every other restored value.
+                if let Some(chain) = record.ad_hoc {
+                    lane.restore_ad_hoc(chain, record.ad_hoc_active);
+                }
                 lane.set_as_of(record.as_of);
                 lane.clear_history();
             });
         }
+        // A session written under another configuration can name columns
+        // this one cannot group by. Checked once for every restored lane.
+        let groupable = hot_reload::groupable_names(&services.config);
+        frame.update(cx, |f, _| {
+            for column in f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column)) {
+                tracing::warn!(
+                    target: "geode::session",
+                    "restored ad hoc grouping dropped: '{column}' is not a groupable column"
+                );
+            }
+        });
         // A group keeps its last scope across a restart. Restored before any
         // membership is applied and before the flip baselines below are
         // seeded, and nothing is notified: a restored follower's first
