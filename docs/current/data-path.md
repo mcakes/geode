@@ -314,7 +314,7 @@ poll never produces one, because conforming refuses a query that returns no
 rows and keeps the live table.
 
 The comparison is with live, not with the newest stored generation. A
-snapshot whose source time is not newer than live's publishes archived-only
+snapshot whose source time is older than live's publishes archived-only
 and leaves live as it was, so the next poll differs from live again and
 archives another copy, once per poll. Snapshot sources stamp the time a
 poll started, which moves forward, so this needs a clock that went

@@ -268,7 +268,8 @@ final `>` matches one or more trailing levels. Empty patterns, empty pattern
 levels, and a non-final `>` level reject the source. Other text is literal.
 Directory-only settings warn and are ignored on adapter-backed sources, except
 `poll_interval` on a snapshot source; subscription-only settings warn and are
-ignored on directory, fetch and snapshot sources. Parsed directory paths are cleared on adapter-backed sources.
+ignored on directory, fetch and snapshot sources. Parsed directory paths are
+cleared on adapter-backed sources.
 
 Duration strings accept nonnegative integers with `ms`, `s`, `m`, `h`, `d`,
 or `y`, plus bare `"0"`; a day is 24 hours and a year is 365 days. Invalid
