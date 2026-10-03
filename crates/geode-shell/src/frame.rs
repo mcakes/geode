@@ -179,6 +179,20 @@ fn fresh(counter: &mut u64) -> u64 {
     *counter
 }
 
+/// What a lane groups by. `Slot` is a reference into the frame's slots, so a
+/// slot edit regroups every lane naming it. `AdHoc` reads the lane's own
+/// stored chain, which is why `Lane::ad_hoc` must be `Some` whenever this is
+/// the choice: an ad hoc choice with nothing behind it would regroup tiles to
+/// their view default while the readout claimed otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GroupingChoice {
+    /// Each following tile uses its view's own grouping.
+    #[default]
+    ViewDefault,
+    Slot(u8),
+    AdHoc,
+}
+
 /// The selection one workspace sees: the shared lane, or a pinned
 /// workspace's own. Definitions (slots, saved scopes, named expressions)
 /// and publications stay on `Frame`.
@@ -192,7 +206,10 @@ struct Lane {
     scope_redo: Vec<Scope>,
     /// An explicitly opened scope-editing session, usually owned by the text field.
     scope_session: Option<ScopeSession>,
-    active_slot: Option<u8>,
+    grouping: GroupingChoice,
+    /// The lane's ad hoc chain, kept while a slot or the view default is the
+    /// choice so it can be returned to. Never empty when present.
+    ad_hoc: Option<Vec<String>>,
     as_of: AsOf,
     /// The remembered as-of value. Repeated undo swaps between two values.
     previous_as_of: Option<AsOf>,
@@ -208,7 +225,8 @@ impl Lane {
     fn pinned_copy(&self) -> Lane {
         Lane {
             scope: self.scope.clone(),
-            active_slot: self.active_slot,
+            grouping: self.grouping,
+            ad_hoc: self.ad_hoc.clone(),
             as_of: self.as_of.clone(),
             scope_gen: self.scope_gen,
             grouping_gen: self.grouping_gen,
@@ -575,8 +593,10 @@ impl Frame {
             ..
         } = self;
         for lane in std::iter::once(shared).chain(pinned.values_mut()) {
-            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {
-                lane.active_slot = None;
+            if let GroupingChoice::Slot(n) = lane.grouping
+                && slots.get(n).is_none()
+            {
+                lane.grouping = GroupingChoice::ViewDefault;
             }
             lane.grouping_gen = fresh(generation);
         }
@@ -601,7 +621,7 @@ impl Frame {
             ..
         } = self;
         for lane in std::iter::once(shared).chain(pinned.values_mut()) {
-            if lane.active_slot == Some(slot) {
+            if lane.grouping == GroupingChoice::Slot(slot) {
                 lane.grouping_gen = fresh(generation);
             }
         }
@@ -922,12 +942,32 @@ impl<'a> FrameView<'a> {
         self.group.map_or(&self.lane.scope, |(_, g)| &g.scope)
     }
 
-    pub fn active_slot(&self) -> Option<u8> {
-        self.lane.active_slot
+    pub fn grouping_choice(&self) -> GroupingChoice {
+        self.lane.grouping
     }
 
+    /// `Some(n)` only while slot `n` is the choice: `None` for the view
+    /// default and for an ad hoc chain.
+    pub fn active_slot(&self) -> Option<u8> {
+        match self.lane.grouping {
+            GroupingChoice::Slot(n) => Some(n),
+            GroupingChoice::ViewDefault | GroupingChoice::AdHoc => None,
+        }
+    }
+
+    /// The lane's stored ad hoc chain, whether or not it is the choice.
+    pub fn ad_hoc(&self) -> Option<&'a [String]> {
+        self.lane.ad_hoc.as_deref()
+    }
+
+    /// The chain in force for this lane, or `None` for each view's own
+    /// grouping. The one grouping read a tile makes.
     pub fn active_grouping(&self) -> Option<&'a [String]> {
-        self.frame.slots.get(self.lane.active_slot?)
+        match self.lane.grouping {
+            GroupingChoice::ViewDefault => None,
+            GroupingChoice::Slot(n) => self.frame.slots.get(n),
+            GroupingChoice::AdHoc => self.lane.ad_hoc.as_deref(),
+        }
     }
 
     pub fn as_of(&self) -> &'a AsOf {
@@ -1044,8 +1084,16 @@ impl<'a> FrameViewMut<'a> {
         self.view().scope()
     }
 
+    pub fn grouping_choice(&self) -> GroupingChoice {
+        self.view().grouping_choice()
+    }
+
     pub fn active_slot(&self) -> Option<u8> {
-        self.frame.lane(self.ws).active_slot
+        self.view().active_slot()
+    }
+
+    pub fn ad_hoc(&self) -> Option<&[String]> {
+        self.view().ad_hoc()
     }
 
     pub fn active_grouping(&self) -> Option<&[String]> {
@@ -1342,19 +1390,81 @@ impl<'a> FrameViewMut<'a> {
 
     /// `Some(n)` activates a filled slot; `None` returns following tiles
     /// to their views' own grouping. `false` when nothing changed or the
-    /// slot is empty.
+    /// slot is empty. The stored ad hoc chain is untouched either way.
     pub fn set_active_slot(&mut self, slot: Option<u8>) -> bool {
         if let Some(n) = slot
             && self.frame.slots.get(n).is_none()
         {
             return false;
         }
-        if self.lane().active_slot == slot {
+        let choice = slot.map_or(GroupingChoice::ViewDefault, GroupingChoice::Slot);
+        if self.lane().grouping == choice {
             return false;
         }
-        self.lane().active_slot = slot;
+        self.lane().grouping = choice;
         self.bump_grouping();
         true
+    }
+
+    /// Store `chain` as the lane's ad hoc chain and make it the choice.
+    /// `false` for an empty chain, and when it is already the active chain.
+    pub fn set_ad_hoc(&mut self, chain: Vec<String>) -> bool {
+        if chain.is_empty() {
+            return false;
+        }
+        let lane = self.lane();
+        if lane.grouping == GroupingChoice::AdHoc && lane.ad_hoc.as_deref() == Some(&chain[..]) {
+            return false;
+        }
+        lane.ad_hoc = Some(chain);
+        lane.grouping = GroupingChoice::AdHoc;
+        self.bump_grouping();
+        true
+    }
+
+    /// Return to the stored ad hoc chain. `false` with none stored or when
+    /// it is already the choice.
+    pub fn activate_ad_hoc(&mut self) -> bool {
+        let lane = self.lane();
+        if lane.ad_hoc.is_none() || lane.grouping == GroupingChoice::AdHoc {
+            return false;
+        }
+        lane.grouping = GroupingChoice::AdHoc;
+        self.bump_grouping();
+        true
+    }
+
+    /// Drop the stored ad hoc chain. A lane it was active in falls to the
+    /// view default. `false` with none stored.
+    pub fn forget_ad_hoc(&mut self) -> bool {
+        let lane = self.lane();
+        if lane.ad_hoc.take().is_none() {
+            return false;
+        }
+        if lane.grouping == GroupingChoice::AdHoc {
+            lane.grouping = GroupingChoice::ViewDefault;
+            self.bump_grouping();
+        } else {
+            // The chain in force is unchanged, so no tile requeries; the
+            // stored chain is still session state, and the session writer's
+            // dirty check reads the frame generation.
+            fresh(&mut self.frame.generation);
+        }
+        true
+    }
+
+    /// Session restore's door: store `chain` and make it the choice only
+    /// when the record says it was. Ignores an empty chain.
+    pub fn restore_ad_hoc(&mut self, chain: Vec<String>, active: bool) {
+        if chain.is_empty() {
+            return;
+        }
+        let lane = self.lane();
+        lane.ad_hoc = Some(chain);
+        if active {
+            lane.grouping = GroupingChoice::AdHoc;
+        }
+        self.bump_grouping();
     }
 
     /// Replace as-of and remember its outgoing value for `undo_as_of`.
@@ -3275,5 +3385,156 @@ mod tests {
             &model,
             &f.view_mut_for(ws(1), tile).bar_model(clock, today)
         ));
+    }
+
+    fn chain(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn an_ad_hoc_chain_is_the_grouping_in_force_and_survives_a_slot_switch() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let v0 = f.shared().versions();
+        assert!(f.shared_mut().set_ad_hoc(chain(&["lhu", "book"])));
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::AdHoc);
+        assert_eq!(f.shared().active_slot(), None, "ad hoc is not a slot");
+        assert_eq!(
+            f.shared().active_grouping(),
+            Some(chain(&["lhu", "book"]).as_slice()),
+            "tiles read the ad hoc chain through the one door they already use"
+        );
+        let v1 = f.shared().versions();
+        assert_ne!(v1.grouping, v0.grouping, "followers must requery");
+
+        assert!(f.shared_mut().set_active_slot(Some(1)));
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::Slot(1));
+        assert_eq!(
+            f.shared().ad_hoc(),
+            Some(chain(&["lhu", "book"]).as_slice()),
+            "switching to a slot keeps the stored chain"
+        );
+        assert!(f.shared_mut().activate_ad_hoc());
+        assert_eq!(
+            f.shared().active_grouping(),
+            Some(chain(&["lhu", "book"]).as_slice())
+        );
+        assert!(
+            !f.shared_mut().activate_ad_hoc(),
+            "already active: nothing changes"
+        );
+    }
+
+    #[test]
+    fn set_ad_hoc_refuses_an_empty_chain_and_ignores_an_equal_active_one() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        assert!(!f.shared_mut().set_ad_hoc(Vec::new()));
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::ViewDefault);
+        assert_eq!(f.shared().ad_hoc(), None);
+
+        assert!(f.shared_mut().set_ad_hoc(chain(&["book"])));
+        let v = f.shared().versions();
+        assert!(!f.shared_mut().set_ad_hoc(chain(&["book"])));
+        assert_eq!(
+            f.shared().versions(),
+            v,
+            "an equal active chain bumps nothing"
+        );
+
+        // Equal chain, but a slot is active: storing it again must apply it.
+        assert!(f.shared_mut().set_active_slot(Some(1)));
+        assert!(f.shared_mut().set_ad_hoc(chain(&["book"])));
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::AdHoc);
+    }
+
+    #[test]
+    fn activate_ad_hoc_with_nothing_stored_changes_nothing() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let v = f.shared().versions();
+        assert!(!f.shared_mut().activate_ad_hoc());
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::ViewDefault);
+        assert_eq!(f.shared().versions(), v);
+    }
+
+    #[test]
+    fn forgetting_the_active_chain_falls_to_view_default() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_ad_hoc(chain(&["book"]));
+        let v = f.shared().versions();
+        assert!(f.shared_mut().forget_ad_hoc());
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::ViewDefault);
+        assert_eq!(f.shared().ad_hoc(), None);
+        assert_eq!(f.shared().active_grouping(), None);
+        assert_ne!(f.shared().versions().grouping, v.grouping);
+        assert!(!f.shared_mut().forget_ad_hoc(), "nothing left to forget");
+    }
+
+    #[test]
+    fn forgetting_an_inactive_chain_requeries_nothing_but_dirties_the_session() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_ad_hoc(chain(&["book"]));
+        f.shared_mut().set_active_slot(Some(1));
+        let v = f.shared().versions();
+        let generation = f.generation();
+        assert!(f.shared_mut().forget_ad_hoc());
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::Slot(1));
+        assert_eq!(
+            f.shared().versions().grouping,
+            v.grouping,
+            "the chain in force did not change"
+        );
+        assert_ne!(
+            f.generation(),
+            generation,
+            "the session writer compares this number; the stored chain is session state"
+        );
+    }
+
+    #[test]
+    fn pinning_copies_the_ad_hoc_chain_and_the_lanes_then_diverge() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_ad_hoc(chain(&["book"]));
+        f.pin(ws(2));
+        assert_eq!(f.view(ws(2)).grouping_choice(), GroupingChoice::AdHoc);
+        assert_eq!(f.view(ws(2)).ad_hoc(), Some(chain(&["book"]).as_slice()));
+        assert_eq!(
+            f.view(ws(2)).versions().grouping,
+            f.shared().versions().grouping,
+            "equal content under equal numbers, so the pin requeries nothing"
+        );
+        f.view_mut(ws(2)).set_ad_hoc(chain(&["lhu"]));
+        assert_eq!(f.shared().ad_hoc(), Some(chain(&["book"]).as_slice()));
+        assert_eq!(f.view(ws(2)).ad_hoc(), Some(chain(&["lhu"]).as_slice()));
+    }
+
+    #[test]
+    fn restore_ad_hoc_stores_the_chain_and_activates_only_when_asked() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_active_slot(Some(1));
+        f.shared_mut().restore_ad_hoc(chain(&["lhu"]), false);
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::Slot(1));
+        assert_eq!(f.shared().ad_hoc(), Some(chain(&["lhu"]).as_slice()));
+
+        f.shared_mut().restore_ad_hoc(chain(&["book"]), true);
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::AdHoc);
+        assert_eq!(
+            f.shared().active_grouping(),
+            Some(chain(&["book"]).as_slice())
+        );
+
+        // An empty chain is the state the lane cannot hold.
+        f.shared_mut().restore_ad_hoc(Vec::new(), true);
+        assert_eq!(f.shared().ad_hoc(), Some(chain(&["book"]).as_slice()));
+    }
+
+    #[test]
+    fn a_vanished_slot_leaves_an_ad_hoc_lane_alone() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_ad_hoc(chain(&["book"]));
+        assert!(f.replace_slots(GroupingSlots::default()));
+        assert_eq!(f.shared().grouping_choice(), GroupingChoice::AdHoc);
+        assert_eq!(
+            f.shared().active_grouping(),
+            Some(chain(&["book"]).as_slice())
+        );
     }
 }
