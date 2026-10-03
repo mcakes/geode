@@ -102,6 +102,17 @@ CREATE TABLE IF NOT EXISTS generations (
   gen_id BIGINT,
   source_time TIMESTAMP WITH TIME ZONE
 );
+-- Concrete NOTIFY topics each subscribed source has published from, so a
+-- recovery can ask for them: a request is a publish, and a publish cannot
+-- carry a wildcard. Times are epoch micros, as series timestamps are, so
+-- no session time zone shifts them.
+CREATE TABLE IF NOT EXISTS subscription_topics (
+  source VARCHAR NOT NULL,
+  topic VARCHAR NOT NULL,
+  first_seen_us BIGINT NOT NULL,
+  last_received_us BIGINT NOT NULL,
+  PRIMARY KEY (source, topic)
+);
 ";
 
 impl<'a> Catalog<'a> {

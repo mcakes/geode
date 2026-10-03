@@ -11,6 +11,7 @@ pub mod publish;
 pub mod reference;
 pub mod retention;
 pub mod series;
+pub mod topics;
 
 pub use catalog::{AttributeConflict, Catalog, FileGeneration, FileId};
 pub use publish::{Partition, PublishOutcome, PublishRequest, publish_file};
