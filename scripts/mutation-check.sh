@@ -32218,6 +32218,19 @@ run_mutation "keystroke parser: named keys lose a gpui name" \
     "page_down",' \
   geode-shell every_gpui_named_key_and_single_characters_parse
 
+
+run_mutation "keybinding capture: an unreadable key is written anyway" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '                    match capture_refusal(&keystrokes) {' \
+  '                    match None::<String> {' \
+  geode-shell capturing_a_key_the_parser_cannot_read_writes_nothing_and_says_so
+
+run_mutation "keybinding capture: the round-trip check accepts everything" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        (!reads_back).then(' \
+  '        false.then(' \
+  geode-shell a_capture_the_parser_cannot_read_back_is_refused
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

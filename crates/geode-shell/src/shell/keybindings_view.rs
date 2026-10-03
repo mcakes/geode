@@ -371,6 +371,23 @@ pub fn searchable_text(row: &KeybindingRow) -> String {
     format!("{} {}", row.title, row.category)
 }
 
+/// Why a captured binding cannot be saved, or `None` when it can. The user
+/// file stores [`palette::render_binding`]'s spelling and the next load
+/// parses it, so a captured key the parser refuses (a platform key name
+/// outside its vocabulary, or `+`, which is the separator) would be
+/// written and then skipped with an error. Each keystroke must render to
+/// a spelling that parses back to the same keystroke.
+pub fn capture_refusal(new_keystrokes: &[Keystroke]) -> Option<String> {
+    new_keystrokes.iter().find_map(|ks| {
+        let spelled = palette::render_keystroke(ks);
+        let reads_back = crate::keymap::parse_keystroke(&spelled, Modifiers::NONE)
+            .ok()
+            .as_ref()
+            == Some(ks);
+        (!reads_back).then(|| format!("{spelled} can't be bound: not a key Geode reads"))
+    })
+}
+
 /// Detect a capture equal to the displayed binding. The caller skips persistence and
 /// its reload cycle for this no-op. Any sequence on an unbound row is new. A
 /// Motion row with an override outside its shared context is never a no-op:
@@ -624,7 +641,10 @@ fn handle_key(
                 if let Some(row) = state.rows.at(state.selected)
                     && !is_same_key_recapture(row, &keystrokes)
                 {
-                    spawn_rebind(row, keystrokes, user_dir, cx);
+                    match capture_refusal(&keystrokes) {
+                        Some(refusal) => state.notice = Some(refusal),
+                        None => spawn_rebind(row, keystrokes, user_dir, cx),
+                    }
                 }
             }
         }
@@ -1383,6 +1403,68 @@ mod tests {
     use super::*;
     use crate::keymap::build_keymap;
     use geode_core::config::LayerDoc;
+
+    fn ks(mods: Modifiers, key: &str) -> Keystroke {
+        Keystroke {
+            mods,
+            key: key.to_string(),
+        }
+    }
+
+    /// Every key the parser accepts, alone and under modifiers, renders to a
+    /// spelling that parses back to the same keystroke, so a capture of it
+    /// is saved as captured.
+    #[test]
+    fn every_accepted_key_renders_and_parses_back_to_itself() {
+        let shift_ctrl = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::NONE
+        };
+        let all = Modifiers {
+            ctrl: true,
+            alt: true,
+            shift: true,
+            cmd: true,
+        };
+        let singles = ["a", "z", "1", "-", "=", "[", "/", ".", "é"];
+        let keys = crate::keymap::NAMED_KEYS.iter().copied().chain(singles);
+        for key in keys {
+            for mods in [
+                Modifiers::NONE,
+                Modifiers::CTRL,
+                Modifiers::ALT,
+                Modifiers::CMD,
+                shift_ctrl,
+                all,
+            ] {
+                let captured = ks(mods, key);
+                let spelled = palette::render_keystroke(&captured);
+                assert_eq!(
+                    crate::keymap::parse_keystroke(&spelled, Modifiers::NONE),
+                    Ok(captured.clone()),
+                    "{spelled}"
+                );
+                assert_eq!(capture_refusal(std::slice::from_ref(&captured)), None);
+            }
+        }
+    }
+
+    /// A captured key the parser would refuse on the next load is refused
+    /// at capture, naming the key; a sequence is refused for any such part.
+    #[test]
+    fn a_capture_the_parser_cannot_read_back_is_refused() {
+        let refusal = capture_refusal(&[ks(Modifiers::NONE, "capslock")]).unwrap();
+        assert!(refusal.starts_with("capslock can't be bound"), "{refusal}");
+        assert!(capture_refusal(&[ks(Modifiers::CTRL, "+")]).is_some());
+        assert!(
+            capture_refusal(&[ks(Modifiers::NONE, "g"), ks(Modifiers::NONE, "numlock")]).is_some()
+        );
+        assert_eq!(
+            capture_refusal(&[ks(Modifiers::NONE, "g"), ks(Modifiers::NONE, "g")]),
+            None
+        );
+    }
 
     fn registry_with(actions: &[(&str, &str, &str)]) -> ActionRegistry {
         let mut reg = ActionRegistry::default();
