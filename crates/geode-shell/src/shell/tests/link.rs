@@ -2791,6 +2791,17 @@ fn a_click_on_the_segment_opens_the_chooser(cx: &mut gpui::TestAppContext) {
     vcx.simulate_click(seg.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
     assert_eq!(chooser_tile(&shell, &vcx), Some(tile));
+    // The segment does not occlude, so the opening mouse-down bubbles on to
+    // the shell root's focus tracking; the chooser's field must keep focus.
+    let field_focused = vcx.update(|window, cx| {
+        shell
+            .read(cx)
+            .dialog_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+    });
+    assert!(field_focused, "the chooser's field keeps the keys");
 }
 
 /// The tooltip names the chooser's key, so the segment teaches the

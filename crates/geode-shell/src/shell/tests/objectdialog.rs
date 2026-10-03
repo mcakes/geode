@@ -8218,15 +8218,24 @@ fn a_double_click_on_a_browse_row_opens_the_edit_stage_and_nothing_more(
     let row = cx
         .debug_bounds("objectdialog-row-wide")
         .expect("the wide view's browse row is painted");
-    let at = gpui::point(row.origin.x + gpui::px(40.0), row.origin.y + gpui::px(4.0));
+    // Low in the row: the edit stage paints its Dataset row there, so the
+    // second click lands on a row a double-click would open.
+    let at = gpui::point(row.origin.x + gpui::px(40.0), row.origin.y + gpui::px(30.0));
     double_click(&mut cx, at, gpui::Modifiers::none());
     cx.run_until_parked();
     assert!(matches!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
         objectdialog::Stage::Edit { .. }
     ));
+    let dataset = cx
+        .debug_bounds("objectdialog-field-dataset")
+        .expect("the edit stage paints its Dataset row");
     assert!(
-        !edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        dataset.contains(&at),
+        "fixture: the second click lands on the Dataset row"
+    );
+    assert!(
+        !edit_draft(&shell, &cx, |d| d.text_entry.is_some() || d.choice_entry()),
         "the second click opened no field in the freshly opened stage"
     );
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);

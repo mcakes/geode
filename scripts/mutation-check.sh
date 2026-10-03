@@ -5486,15 +5486,15 @@ run_mutation "objectdialog: the dialog opens in filter mode" \
   geode-shell \
   config_views_opens_in_normal_mode_and_lists_the_views
 
-# The displayed query must drive ranking. Mode and stored-query assertions
-# cannot detect a rank call using an empty query; the test checks that
-# nonmatching rows stop painting.
+# The displayed query must drive ranking. `visible_rows` is the fresh
+# ranking the prepared browse list must equal; ranked against an empty
+# query it disagrees with the list a typed query ranked.
 run_mutation "objectdialog: the browse list ignores the query it displays" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
   '    crate::listfilter::rank(&texts, &state.query)' \
   '    crate::listfilter::rank(&texts, "")' \
   geode-shell \
-  slash_filters_and_escape_walks_the_ladder
+  typing_reranks_browse_rows_without_re_deriving
 
 # Closing an object dialog must remove its state. The test opens another
 # dialog afterward so leftover object state cannot silently survive an
@@ -10198,9 +10198,10 @@ run_mutation "objectdialog: a tick click is claimed and dropped while a confirm 
     if position >= draft.visible_rows().len() {' \
   geode-shell a_tick_click_does_nothing_while_a_confirm_is_armed
 
-# The tick's mouse-down stops propagation to the row handler. Without
-# it, confirmation still blocks the value change but the same click moves
-# the draft cursor. This entry checks that independent selection effect.
+# The tick's mouse-down stops propagation to the row handler. Without it
+# the row handler also runs on the same press. Under an armed confirm both
+# handlers return early, so the effect shows only on an ordinary tick
+# click: the row handler moves the cursor off the row the tick parked it on.
 run_mutation "objectdialog: the tick's click does not stop propagation" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
@@ -10208,7 +10209,7 @@ run_mutation "objectdialog: the tick's click does not stop propagation" \
                                 entity_for_tick.update(cx, |shell, cx| {' \
   '.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                                 entity_for_tick.update(cx, |shell, cx| {' \
-  geode-shell a_tick_click_does_nothing_while_a_confirm_is_armed
+  geode-shell clicking_a_tick_hides_the_column_and_parks_the_cursor_there
 
 # ---- Row dragging -----------------------------------------------------
 
@@ -17906,16 +17907,18 @@ run_mutation "grouping dialog: any object dialog presses the readout" \
 
 # ---- Scope picker: frame::scope, mod-o and the toolbar load glyph ----
 
-# open_shell_dialog_with_key prevents the shell's bubble-phase focus grab
-# from taking focus back after a chip click. The expression-term chip tests
-# this path; plus-menu rows stop propagation independently.
+# open_shell_dialog_with_key prevents the shell root's bubble-phase focus
+# grab from taking focus back after an opening mouse-down. Title-bar chips
+# occlude (the root is not hovered under them) and plus-menu rows stop
+# propagation, so only a non-occluding opener sees it: the status bar's
+# link-group segment.
 run_mutation "dialog: a dialog opened from a mouse-down keeps its field's focus" \
   crates/geode-shell/src/shell/dialog.rs \
   '    window.prevent_default();
     // The new dialog'"'"'s state is installed: derive its rows before anything reads them.' \
   '    // The new dialog'"'"'s state is installed: derive its rows before anything reads them.' \
   geode-shell \
-  a_terms_body_edits_that_term_alone
+  a_click_on_the_segment_opens_the_chooser
 
 # `enter` re-feeds the field's live text before trusting the highlight
 # (`set_value` emits no `Change`).
