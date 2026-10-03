@@ -1751,6 +1751,7 @@ fn a_plain_press_beside_the_cells_clears_the_selection(cx: &mut gpui::TestAppCon
             geode_core::colour::NamedColours::default(),
             None,
             std::time::Duration::from_secs(60),
+            None,
             cx,
         )
     });
@@ -2025,6 +2026,7 @@ fn a_right_press_beside_the_cells_names_that_row(cx: &mut gpui::TestAppContext) 
             geode_core::colour::NamedColours::default(),
             None,
             std::time::Duration::from_secs(60),
+            None,
             cx,
         )
     });
@@ -2149,6 +2151,7 @@ fn a_right_press_inside_a_rows_selection_drops_the_row_outline(cx: &mut gpui::Te
             geode_core::colour::NamedColours::default(),
             None,
             std::time::Duration::from_secs(60),
+            None,
             cx,
         )
     });

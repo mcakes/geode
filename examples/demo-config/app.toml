@@ -13,3 +13,5 @@ default_source = "demo_kdb"
 # vocabulary, so `--demo` completes the names its risk and market data use.
 [pricing]
 underlyings = ["SPX", "SX5E", "NKY", "UKX", "NDX", "RTY", "DAX", "SMI", "HSI", "KOSPI2"]
+# A new line's payout currency: the underlying's `currency` in the reference table.
+payout_currency = "underlyings.currency"

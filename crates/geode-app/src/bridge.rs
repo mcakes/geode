@@ -22,7 +22,7 @@ use geode_data::{
     Refusal, VolConfig, VolModelRegistry,
 };
 use geode_marketdata::MarketDataFactory;
-use geode_pricer::content::{PricerFactory, PricerSettings, UnderlyingList};
+use geode_pricer::content::{PayoutSource, PricerFactory, PricerSettings, UnderlyingList};
 use geode_pricer::core::{
     PRICER_DATASET, PRICER_DATASET_DECLARATION, PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION,
     PRICER_TEMPLATES_DOC, PRICER_VIEWS_DOC, TemplateSet, Views,
@@ -232,11 +232,14 @@ pub fn data_setup(
     let (pricer_underlyings, underlying_diags) = pricing_underlyings_from_config(config);
     let pricer_underlyings = pricer_underlyings.unwrap_or_default();
     diagnostics.extend(underlying_diags);
+    let (payout, payout_diags) = pricing_payout_currency_from_config(config, &schema);
+    diagnostics.extend(payout_diags);
     let pricer_settings = PricerSettings {
         pricer: pricer_name.clone(),
         pricer_missing: pricer.pricer.is_none(),
         refresh,
         stale_after: Duration::default(),
+        payout,
     };
     // One set of document kinds: the panels are checked against exactly
     // the kinds the service registers.
@@ -475,6 +478,62 @@ pub fn pricing_underlyings_from_config(config: &Config) -> (Option<Vec<String>>,
     (Some(names), diags)
 }
 
+/// The `[pricing] payout_currency` a key-absent config falls back to.
+const DEFAULT_PAYOUT_CURRENCY: (&str, &str) = ("underlyings", "currency");
+
+/// `[pricing] payout_currency = "<dataset>.<column>"`: the reference column
+/// a new line's payout currency defaults from. `schema` is the startup
+/// schema: datasets are restart-required, so it is the one the service
+/// serves on reload too. An absent key means `underlyings.currency` when
+/// that column exists, and quietly nothing when it does not (a desk without
+/// that dataset has not asked for it). A value naming anything but a
+/// non-key column of a declared reference dataset is an error and resolves
+/// to nothing rather than to a guessed column: new lines get no currency
+/// and say so, where a wrong column would price in a plausible wrong one.
+pub fn pricing_payout_currency_from_config(
+    config: &Config,
+    schema: &SchemaSpec,
+) -> (Option<PayoutSource>, Vec<Diagnostic>) {
+    let resolve = |dataset: &str, column: &str| {
+        schema
+            .datasets
+            .iter()
+            .find(|d| d.name == dataset && d.is_reference())
+            .filter(|d| d.column(column).is_some() && !d.key.iter().any(|k| k == column))
+            .map(|_| PayoutSource {
+                dataset: dataset.to_string(),
+                column: column.to_string(),
+            })
+    };
+    let Some(value) = config.get("app", "pricing.payout_currency") else {
+        let (dataset, column) = DEFAULT_PAYOUT_CURRENCY;
+        return (resolve(dataset, column), Vec::new());
+    };
+    let resolved = value
+        .as_str()
+        .and_then(|v| v.split_once('.'))
+        .filter(|(_, column)| !column.contains('.'))
+        .and_then(|(dataset, column)| resolve(dataset, column));
+    if resolved.is_some() {
+        return (resolved, Vec::new());
+    }
+    let shown = value
+        .as_str()
+        .map_or_else(|| value.to_string(), str::to_string);
+    (
+        None,
+        vec![Diagnostic {
+            severity: Severity::Error,
+            layer: config.explain("app", "pricing.payout_currency"),
+            file: None,
+            message: format!(
+                "[pricing] payout_currency = \"{shown}\" must name a reference dataset column, e.g. \"underlyings.currency\"; new lines get no currency"
+            ),
+            path: Some("app.pricing.payout_currency".to_string()),
+        }],
+    )
+}
+
 /// The pricer's views out of `specs`, the `load_views` result for `config`
 /// (the caller has already collected `load_views`'s own diagnostics, so
 /// only the pricer's are returned here). A `pricer_views` document is no
@@ -519,7 +578,8 @@ pub fn pricer_templates_from_config(
 /// retirement diagnostic without a restart), merged `pricer_templates`, the
 /// `dimensions` doc (a frame scope over the pricer may name a derived
 /// dimension, so an edit to it must re-apply open tiles' scopes), raw
-/// `app.pricing.refresh` and `app.pricing.underlyings`, and the resolved
+/// `app.pricing.refresh`, `app.pricing.underlyings` and
+/// `app.pricing.payout_currency`, and the resolved
 /// stale threshold. Equal keys leave factory views, templates, suggestions,
 /// and timers alone and avoid repeating invalid-value warnings. The selected
 /// pricing adapter is fixed at service startup and excluded here.
@@ -535,6 +595,7 @@ pub struct PricerConfigKey {
     dimensions: Option<toml::Table>,
     refresh: Option<toml::Value>,
     underlyings: Option<toml::Value>,
+    payout_currency: Option<toml::Value>,
     stale_after: Duration,
 }
 
@@ -551,6 +612,7 @@ pub fn pricer_config_key(config: &Config) -> PricerConfigKey {
         dimensions: config.doc("dimensions").map(|d| d.value.clone()),
         refresh: config.get("app", "pricing.refresh").cloned(),
         underlyings: config.get("app", "pricing.underlyings").cloned(),
+        payout_currency: config.get("app", "pricing.payout_currency").cloned(),
         stale_after: stale_after_from_config(config),
     }
 }
@@ -604,6 +666,11 @@ pub struct Bridge {
     /// reference cache at attach. Fixed for the run like `sources`: the
     /// service serves the schema it started with.
     reference_datasets: Vec<(String, usize)>,
+    /// The startup schema, fixed for the run like `reference_datasets`:
+    /// the pricer reload resolves `[pricing] payout_currency` against the
+    /// reference datasets the service actually serves, not an edited
+    /// `datasets` doc awaiting restart.
+    schema: Rc<SchemaSpec>,
     /// Local dataset names used to exclude autosave from frame publication updates.
     pub local_datasets: Rc<HashSet<String>>,
     /// The config key the pricer factory was built from; seeds the reload
@@ -676,6 +743,7 @@ pub fn start(
         .filter(|ds| ds.is_reference())
         .map(|ds| (ds.name.clone(), ds.key.len()))
         .collect();
+    let startup_schema = Rc::new(schema.clone());
     let local_datasets = Rc::new(setup.local_datasets);
     let panels = setup.panels;
     // Target names and accepted documents in `egress.toml` order. Every panel
@@ -750,6 +818,7 @@ pub fn start(
         dropped,
         sources,
         reference_datasets,
+        schema: startup_schema,
         local_datasets,
         pricer_key: Some(pricer_key),
         positions_configured,
@@ -1263,6 +1332,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     {
         let pricer = bridge.pricer.clone();
         let underlyings = bridge.underlyings.clone();
+        let schema = bridge.schema.clone();
         let diagnostics = diagnostics.clone();
         let shell = shell.clone();
         let frame = shell.read(cx).frame().clone();
@@ -1278,7 +1348,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             last.set(now);
             // Read everything out of the config before the factory takes
             // `cx` mutably.
-            let (views, templates, colours, dims, mut diags, refresh, stale_after) = {
+            let (views, templates, colours, dims, mut diags, refresh, stale_after, payout) = {
                 let config = shell.read(cx).config();
                 let key = pricer_config_key(config);
                 if last_key.borrow().as_ref() == Some(&key) {
@@ -1308,10 +1378,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 if let Some(names) = names {
                     underlyings.set(&names);
                 }
+                let (payout, payout_diags) = pricing_payout_currency_from_config(config, &schema);
                 let mut diags = diags;
                 diags.extend(template_diags);
                 diags.extend(refresh_diag);
                 diags.extend(underlying_diags);
+                diags.extend(payout_diags);
                 (
                     views,
                     templates,
@@ -1320,12 +1392,13 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     diags,
                     refresh,
                     stale_after_from_config(config),
+                    payout,
                 )
             };
             // Before `reload`: its rebuild re-applies every tile's scope
             // against the new dimensions.
             pricer.set_dims(dims);
-            pricer.reload(views, templates, colours, refresh, stale_after, cx);
+            pricer.reload(views, templates, colours, refresh, stale_after, payout, cx);
             for d in &diags {
                 tracing::warn!(target: "geode::pricing", "{d}");
             }
@@ -2049,6 +2122,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings,
         }
     }
@@ -2114,6 +2188,151 @@ role = "key"
             pricing_underlyings_from_config(&config("[pricing]\nrefresh = \"10s\"\n"));
         assert_eq!(names, Some(Vec::new()), "absent: an empty list");
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    /// An `app` doc alone, for the `[pricing]` readers.
+    fn app_config(text: &str) -> Config {
+        Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", text).unwrap()],
+            desk: None,
+            user: None,
+        })
+    }
+
+    /// A schema whose `underlyings` reference dataset is keyed by
+    /// `underlying_ref` and carries `currency` and `name`.
+    fn underlyings_schema() -> SchemaSpec {
+        let (schema, diags) = SchemaSpec::from_doc(&geode_core::config::merge_docs(
+            "datasets",
+            &[LayerDoc::builtin(
+                "datasets",
+                r#"
+[underlyings]
+family = "reference"
+key = ["underlying_ref"]
+[underlyings.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[underlyings.columns.name]
+type = "utf8"
+role = "attribute"
+[underlyings.columns.currency]
+type = "utf8"
+role = "attribute"
+"#,
+            )
+            .unwrap()],
+        ));
+        assert!(diags.is_empty(), "fixture: {diags:?}");
+        schema
+    }
+
+    fn payout(dataset: &str, column: &str) -> PayoutSource {
+        PayoutSource {
+            dataset: dataset.into(),
+            column: column.into(),
+        }
+    }
+
+    #[test]
+    fn payout_currency_defaults_to_underlyings_currency() {
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\nrefresh = \"10s\"\n"),
+            &underlyings_schema(),
+        );
+        assert_eq!(source, Some(payout("underlyings", "currency")));
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn payout_currency_without_the_default_dataset_is_none_quietly() {
+        let config = app_config("[pricing]\nrefresh = \"10s\"\n");
+        let (source, diags) = pricing_payout_currency_from_config(&config, &SchemaSpec::default());
+        assert_eq!(source, None, "no underlyings dataset");
+        assert!(diags.is_empty(), "{diags:?}");
+
+        let mut schema = underlyings_schema();
+        schema.datasets[0].columns.retain(|c| c.name != "currency");
+        let (source, diags) = pricing_payout_currency_from_config(&config, &schema);
+        assert_eq!(source, None, "underlyings without a currency column");
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn an_explicit_payout_currency_resolves() {
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\npayout_currency = \"underlyings.name\"\n"),
+            &underlyings_schema(),
+        );
+        assert_eq!(source, Some(payout("underlyings", "name")));
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    fn assert_payout_error(text: &str, shown: &str) {
+        let (source, diags) =
+            pricing_payout_currency_from_config(&app_config(text), &underlyings_schema());
+        assert_eq!(source, None, "{text}");
+        assert_eq!(diags.len(), 1, "{text}: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("app.pricing.payout_currency")
+        );
+        assert!(diags[0].layer.is_some(), "names its layer: {diags:?}");
+        assert_eq!(
+            diags[0].message,
+            format!(
+                "[pricing] payout_currency = \"{shown}\" must name a reference dataset column, \
+                 e.g. \"underlyings.currency\"; new lines get no currency"
+            )
+        );
+    }
+
+    #[test]
+    fn a_payout_currency_naming_a_missing_column_is_an_error() {
+        assert_payout_error(
+            "[pricing]\npayout_currency = \"underlyings.ccy\"\n",
+            "underlyings.ccy",
+        );
+        assert_payout_error(
+            "[pricing]\npayout_currency = \"listings.currency\"\n",
+            "listings.currency",
+        );
+        assert_payout_error("[pricing]\npayout_currency = \"currency\"\n", "currency");
+        assert_payout_error(
+            "[pricing]\npayout_currency = \"underlyings.currency.code\"\n",
+            "underlyings.currency.code",
+        );
+        assert_payout_error("[pricing]\npayout_currency = 3\n", "3");
+
+        // A dataset of another family is not looked up by underlying.
+        let mut schema = underlyings_schema();
+        schema.datasets[0].family = geode_core::schema::Family::Measures;
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\npayout_currency = \"underlyings.currency\"\n"),
+            &schema,
+        );
+        assert_eq!(source, None);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn a_payout_currency_naming_the_key_column_is_an_error() {
+        assert_payout_error(
+            "[pricing]\npayout_currency = \"underlyings.underlying_ref\"\n",
+            "underlyings.underlying_ref",
+        );
+    }
+
+    #[test]
+    fn a_payout_currency_change_alone_passes_the_reload_gate() {
+        let base = pricer_config_key(&app_config("[pricing]\nrefresh = \"10s\"\n"));
+        assert_ne!(
+            pricer_config_key(&app_config(
+                "[pricing]\nrefresh = \"10s\"\npayout_currency = \"underlyings.name\"\n"
+            )),
+            base
+        );
     }
 
     /// The reload key changes with live pricer settings; unrelated application
@@ -2576,6 +2795,96 @@ role = "key"
         });
     }
 
+    /// A reload resolves `[pricing] payout_currency` against the bridge's
+    /// startup schema and hands the result to the factory's settings.
+    #[gpui::test]
+    fn a_config_reload_hands_the_pricer_factory_its_payout_source(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+                LayerDoc::builtin("app", "[pricing]\npayout_currency = \"underlyings.name\"\n")
+                    .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let mut bridge = test_bridge(handle);
+        bridge.schema = Rc::new(underlyings_schema());
+        assert_eq!(bridge.pricer.settings().payout, None, "fixture");
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            let frame = shell.read(cx).frame().clone();
+            frame.update(cx, |f, cx| {
+                f.note_config_reloaded();
+                cx.notify();
+            });
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            bridge.pricer.settings().payout,
+            Some(payout("underlyings", "name"))
+        );
+    }
+
+    /// At startup `[pricing] payout_currency` reaches the factory's
+    /// settings, and an unresolvable one is reported with the other
+    /// startup diagnostics.
+    #[gpui::test]
+    fn startup_hands_the_pricer_factory_its_payout_source(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let datasets = "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                        [underlyings]\nfamily = \"reference\"\nkey = [\"underlying_ref\"]\n\
+                        [underlyings.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                        [underlyings.columns.currency]\ntype = \"utf8\"\nrole = \"attribute\"\n";
+        let setup_with = |app: &str, dir: &std::path::Path| {
+            let config = Config::load(&ConfigSources {
+                builtin: vec![
+                    LayerDoc::builtin("datasets", datasets).unwrap(),
+                    LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n")
+                        .unwrap(),
+                    LayerDoc::builtin("app", app).unwrap(),
+                ],
+                ..ConfigSources::default()
+            });
+            data_setup(
+                &config,
+                dir.join("t.duckdb"),
+                AdapterRegistry::default(),
+                geode_data::PricerRegistry::default(),
+                geode_data::VolModelRegistry::default(),
+            )
+            .unwrap()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let bad = setup_with(
+            "[pricing]\npayout_currency = \"underlyings.ccy\"\n",
+            dir.path(),
+        );
+        assert_eq!(bad.pricer_settings.payout, None);
+        assert!(
+            bad.diagnostics
+                .iter()
+                .any(|d| d.path.as_deref() == Some("app.pricing.payout_currency")),
+            "{:?}",
+            bad.diagnostics
+        );
+        let setup = setup_with("[pricing]\nrefresh = \"10s\"\n", dir.path());
+        let bridge =
+            cx.update(|cx| start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let payout_source = bridge.pricer.settings().payout;
+        bridge.handle.shutdown();
+        assert_eq!(payout_source, Some(payout("underlyings", "currency")));
+    }
+
     /// A reload whose `[pricing] underlyings` is not an array keeps the
     /// list the bar had (hot reload keeps the last valid state) rather
     /// than emptying it.
@@ -2722,6 +3031,7 @@ role = "key"
                 NamedColours::default(),
                 None,
                 Duration::from_secs(1),
+                None,
                 cx,
             )
         });
@@ -5416,6 +5726,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5524,6 +5835,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5624,6 +5936,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
 
@@ -5743,6 +6056,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5804,6 +6118,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5865,6 +6180,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
             handle,
             factory,
@@ -5931,6 +6247,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
 
@@ -6024,6 +6341,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6096,6 +6414,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6171,6 +6490,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6248,6 +6568,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6348,6 +6669,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6444,6 +6766,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6507,6 +6830,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6655,6 +6979,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6720,6 +7045,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -7433,6 +7759,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: reference_datasets.into_iter().map(|n| (n, 1)).collect(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));

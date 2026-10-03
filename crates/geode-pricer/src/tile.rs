@@ -7153,6 +7153,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -7197,6 +7198,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -7375,6 +7377,7 @@ pub(crate) mod tests {
                 colours,
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -9662,6 +9665,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 settings.refresh,
                 settings.stale_after,
+                None,
                 cx,
             )
         });
@@ -9720,6 +9724,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 settings.refresh,
                 settings.stale_after,
+                None,
                 cx,
             )
         });
@@ -10211,6 +10216,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 settings.refresh,
                 settings.stale_after,
+                None,
                 cx,
             )
         });
@@ -10509,6 +10515,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 settings.refresh,
                 settings.stale_after,
+                None,
                 cx,
             )
         });
@@ -10753,6 +10760,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -10787,6 +10795,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -11151,6 +11160,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -11183,6 +11193,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -11489,6 +11500,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });

@@ -130,6 +130,10 @@ cargo check -p geode-app --features profiling
 - `[pricing] underlyings` backs the pricer's `UnderlyingSource` through the
   one `UnderlyingList` on `Bridge`; `start` hands it to the factory and the
   reload observer sets it, so the pricer only ever reads it.
+- `[pricing] payout_currency` resolves to a `PayoutSource` in
+  `PricerSettings` at startup and on each pricer reload, both against the
+  startup schema `Bridge` keeps: datasets are restart-required, so an edited
+  `datasets` doc awaiting restart must not decide which column is read.
 
 Upload targets resolve against registered adapters at startup. The bridge passes
 target/document lists to market-data factories and routes outcomes to the

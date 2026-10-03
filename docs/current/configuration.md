@@ -691,6 +691,19 @@ timer. An absent `underlyings` clears the list, including on reload; a
 non-array value at startup leaves it empty. With an empty list the bar says
 no underlyings are configured.
 
+`payout_currency = "<dataset>.<column>"` names the reference column a new
+pricer line's payout currency defaults from, looked up by the line's
+underlying. When the key is absent it is `underlyings.currency` if the
+`underlyings` reference dataset declares a `currency` column, and otherwise
+nothing, without a diagnostic. An explicit value must split on one `.` into
+a declared reference dataset and one of its non-key columns; anything else,
+including a non-string value, is an error at `app.pricing.payout_currency`
+and resolves to nothing, so new lines get no currency rather than one read
+from a guessed column. The value is checked against the startup schema, the
+one the running service serves, because datasets are restart-required. A
+reload applies the setting without a restart, and a change to it alone
+passes the pricer's reload gate.
+
 The pricer's views are ordinary `views.toml` views whose `dataset` is
 `pricer`. The builtin layer carries `vanilla` and `barrier`; a desk or user
 entry replaces a whole view by name, and `view_presentation.toml` and

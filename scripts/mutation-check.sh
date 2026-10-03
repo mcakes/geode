@@ -18564,10 +18564,10 @@ run_mutation "pricer templates: a reload leaves the open bar's history stale" \
 run_mutation "pricer app: a reload hands the factory the builtin templates" \
   crates/geode-app/src/bridge.rs \
   '            pricer.set_dims(dims);
-            pricer.reload(views, templates, colours, refresh, stale_after, cx);' \
+            pricer.reload(views, templates, colours, refresh, stale_after, payout, cx);' \
   '            pricer.set_dims(dims);
             let _ = templates;
-            pricer.reload(views, TemplateSet::builtin(), colours, refresh, stale_after, cx);' \
+            pricer.reload(views, TemplateSet::builtin(), colours, refresh, stale_after, payout, cx);' \
   geode-app a_config_reload_hands_the_pricer_factory_its_templates
 
 # On a reload, "previous" is the running set, not an empty one.
@@ -22304,8 +22304,8 @@ run_mutation "pricer cell: an empty shift commits zero" \
 
 run_mutation "pricer app: a config reload never reaches the pricer" \
   crates/geode-app/src/bridge.rs \
-  '            pricer.reload(views, templates, colours, refresh, stale_after, cx);' \
-  '            let _ = (views, templates, colours, refresh, stale_after);' \
+  '            pricer.reload(views, templates, colours, refresh, stale_after, payout, cx);' \
+  '            let _ = (views, templates, colours, refresh, stale_after, payout);' \
   geode-app a_config_reload_hands_the_pricer_factory_its_views
 
 # The free underlying typeahead: ranking is a subsequence match, so an
@@ -23435,6 +23435,44 @@ run_mutation "pricer app: a malformed underlyings reload empties the list" \
                 }' \
   '                underlyings.set(&names.unwrap_or_default());' \
   geode-app a_malformed_underlyings_reload_keeps_the_last_list
+
+# The reload key must see [pricing] payout_currency, or an edit to it
+# alone never reaches the pricer.
+run_mutation "pricer config key: payout_currency is not part of the key" \
+  crates/geode-app/src/bridge.rs \
+  '        payout_currency: config.get("app", "pricing.payout_currency").cloned(),' \
+  '        payout_currency: None,' \
+  geode-app a_payout_currency_change_alone_passes_the_reload_gate
+
+# A key column is the row identity, never a payout currency.
+run_mutation "pricer payout currency: a key column resolves" \
+  crates/geode-app/src/bridge.rs \
+  '            .filter(|d| d.column(column).is_some() && !d.key.iter().any(|k| k == column))' \
+  '            .filter(|d| d.column(column).is_some())' \
+  geode-app a_payout_currency_naming_the_key_column_is_an_error
+
+# Only a reference dataset answers lookups by underlying.
+run_mutation "pricer payout currency: any dataset family resolves" \
+  crates/geode-app/src/bridge.rs \
+  '            .find(|d| d.name == dataset && d.is_reference())' \
+  '            .find(|d| d.name == dataset)' \
+  geode-app a_payout_currency_naming_a_missing_column_is_an_error
+
+# Startup must hand the factory the resolved payout source.
+run_mutation "pricer app: startup drops the payout source" \
+  crates/geode-app/src/bridge.rs \
+  '        stale_after: Duration::default(),
+        payout,' \
+  '        stale_after: Duration::default(),
+        payout: None,' \
+  geode-app startup_hands_the_pricer_factory_its_payout_source
+
+# A reload must hand the factory the resolved payout source.
+run_mutation "pricer app: a reload drops the payout source" \
+  crates/geode-app/src/bridge.rs \
+  '            pricer.reload(views, templates, colours, refresh, stale_after, payout, cx);' \
+  '            pricer.reload(views, templates, colours, refresh, stale_after, None, cx);' \
+  geode-app a_config_reload_hands_the_pricer_factory_its_payout_source
 
 run_mutation "pricer retiring: a restore opens a sheet being removed" \
   crates/geode-pricer/src/tile.rs \
