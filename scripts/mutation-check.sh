@@ -4325,6 +4325,97 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
   geode-app \
   the_drain_task_ends_on_the_first_event_after_the_window_closes
 
+# ---- live reference tables (ReferenceGlobal)
+
+# Every reference dataset is read live at attach; without it the global
+# stays empty until the dataset's next publish.
+run_mutation "reference global: attach reads each reference dataset" \
+  crates/geode-app/src/bridge.rs \
+  '        reference_cache.refresh(dataset, cx);' \
+  '        let _ = dataset;' \
+  geode-app attach_reads_each_reference_dataset_live
+
+# The global is live only: a read at the frame's as-of would hand modules
+# a historical table.
+run_mutation "reference global: the cache reads at Live" \
+  crates/geode-app/src/bridge.rs \
+  '            dataset: dataset.to_string(),
+            as_of: AsOf::Live,' \
+  '            dataset: dataset.to_string(),
+            as_of: AsOf::At(chrono::Utc::now()),' \
+  geode-app attach_reads_each_reference_dataset_live
+
+run_mutation "reference global: a reference publish rereads the dataset" \
+  crates/geode-app/src/bridge.rs \
+  '                        if reference_cache.is_reference(&dataset) {' \
+  '                        if false && reference_cache.is_reference(&dataset) {' \
+  geode-app a_publish_of_a_reference_dataset_rereads_it
+
+run_mutation "reference global: a non-reference publish reads nothing" \
+  crates/geode-app/src/bridge.rs \
+  '        self.key_columns.contains_key(dataset)' \
+  '        !dataset.is_empty()' \
+  geode-app a_publish_of_a_reference_dataset_rereads_it
+
+run_mutation "reference global: a superseded tag is dropped" \
+  crates/geode-app/src/bridge.rs \
+  '            || self.tags.borrow().get(&outcome.dataset) != Some(&outcome.tag)' \
+  '            || false' \
+  geode-app a_stale_tag_answer_is_ignored
+
+# Republishing an unchanged table wakes every observing module for nothing.
+run_mutation "reference global: an unchanged table is not republished" \
+  crates/geode-app/src/bridge.rs \
+  '                current.with_table(&dataset, &table, key_columns)' \
+  '                current
+                    .with_table(&dataset, &table, key_columns)
+                    .or_else(|| Some((*current).clone()))' \
+  geode-app an_answer_publishes_the_global_and_a_repeat_does_not_notify
+
+run_mutation "reference global: no generation removes the table" \
+  crates/geode-app/src/bridge.rs \
+  '                current.without(&dataset)' \
+  '                None' \
+  geode-app an_empty_answer_removes_the_table
+
+# A failed read emptying the table would turn every lookup into a missing
+# value on a transient error.
+run_mutation "reference global: a failed read keeps the last table" \
+  crates/geode-app/src/bridge.rs \
+  '                        "reference '"'"'{dataset}'"'"' read failed: {e}"
+                    );
+                }
+                None' \
+  '                        "reference '"'"'{dataset}'"'"' read failed: {e}"
+                    );
+                }
+                Some(geode_core::reference::ReferenceData::default())' \
+  geode-app a_failed_read_keeps_the_last_table
+
+run_mutation "reference global: a busy refusal arms a retry" \
+  crates/geode-app/src/bridge.rs \
+  '            Err(Refusal::Busy) => self.retry(dataset, cx),' \
+  '            Err(Refusal::Busy) => {}' \
+  geode-app a_busy_refusal_retries_and_keeps_the_cache
+
+run_mutation "reference global: one retry timer per dataset" \
+  crates/geode-app/src/bridge.rs \
+  '        if !self.retry.borrow_mut().insert(dataset.to_string()) {' \
+  '        if false && !self.retry.borrow_mut().insert(dataset.to_string()) {' \
+  geode-app a_busy_refusal_retries_and_keeps_the_cache
+
+run_mutation "reference global: a run of failures warns once" \
+  crates/geode-app/src/bridge.rs \
+  '        self.failing.borrow_mut().insert(dataset.to_string())' \
+  '        { self.failing.borrow_mut().insert(dataset.to_string()); true }' \
+  geode-app a_failure_warns_once_until_a_read_succeeds
+
+run_mutation "reference global: the shell installs an empty global" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        cx.set_global(crate::reference::ReferenceGlobal::default());' \
+  '' \
+  geode-shell the_reference_global_starts_empty
+
 # ---- carried dimensions
 
 run_mutation "carried: a carried dimension is a payload column of its grain and finer" \

@@ -29,12 +29,24 @@ State with a narrower owner stays outside `ShellView`:
   presentation.
 - GPUI component state, such as `InputState` and `TableState`, owns reusable
   control behavior.
-- Four GPUI globals carry settings that are genuinely app wide and visible to
-  modules: `UiSettings`, `Chords`, `AppClock`, and `SeriesSettings`.
+- Five GPUI globals carry state that is genuinely app wide and visible to
+  modules: `UiSettings`, `Chords`, `AppClock`, `SeriesSettings`, and
+  `ReferenceGlobal` (live reference tables).
 
 New state belongs in the narrowest owner that can keep it correct. A global is
 appropriate only when independently hosted modules must observe the same
 application setting.
+
+The shell writes the first four. It installs `ReferenceGlobal` empty, and the
+app's bridge replaces it: at attach it reads every reference dataset of the
+startup schema at `AsOf::Live` under the reserved `REFERENCE_KEY`, and it reads
+a dataset again on each of its publishes. Only a dataset's latest-tagged answer
+is applied, and the global is set only when a table changed, so an observer
+wakes for a real change and never for a republish of the same rows. A dataset
+with nothing published is removed. A failed read keeps the last table and logs
+one warning on `geode::reference` per run of failures; a `Busy` refusal rereads
+after one second, with at most one timer per dataset; `Stopped` drops the
+demand. The tables are always live, never at the frame's as-of.
 
 ## Tiles, workspaces, and stacks
 

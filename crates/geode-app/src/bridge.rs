@@ -10,7 +10,7 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::DocumentKind;
 use geode_core::egress_config;
 use geode_core::panel::{KindActionRegistry, PANELS_DOC, PanelSpec, load_panels, refusal};
-use geode_core::query::{CatalogParams, DistinctOutcome, ReferenceParams};
+use geode_core::query::{AsOf, CatalogParams, DistinctOutcome, ReferenceOutcome, ReferenceParams};
 use geode_core::schema::SchemaSpec;
 use geode_core::source_config::{SourceShape, parse_duration};
 use geode_core::view::ViewSpec;
@@ -31,12 +31,13 @@ use geode_pricer::store::DuckSheetStore;
 use geode_shell::diagnostics::{CatalogRequest, Diagnostics, ReferenceLane, SourceSummary};
 use geode_shell::module::placeholder::PLACEHOLDER_KIND;
 use geode_shell::module::{Delivery, UploadDelivery};
-use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
+use geode_shell::reference::ReferenceGlobal;
+use geode_shell::shell::{DIAGNOSTICS_KEY, REFERENCE_KEY, ShellEvent, ShellView};
 use geode_shell::vimfind::FindStyle;
 use gpui::{App, AsyncApp, Entity, WindowHandle};
 use gpui_component::Root;
-use std::cell::Cell;
-use std::collections::HashSet;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -599,9 +600,10 @@ pub struct Bridge {
     /// awaits restart.
     sources: Vec<(SourceSpec, SourceShape)>,
     /// Reference-family dataset names in startup-schema declaration order,
-    /// handed to diagnostics at attach. Fixed for the run like `sources`:
-    /// the service serves the schema it started with.
-    reference_datasets: Vec<String>,
+    /// each with its key's column count, handed to diagnostics and the live
+    /// reference cache at attach. Fixed for the run like `sources`: the
+    /// service serves the schema it started with.
+    reference_datasets: Vec<(String, usize)>,
     /// Local dataset names used to exclude autosave from frame publication updates.
     pub local_datasets: Rc<HashSet<String>>,
     /// The config key the pricer factory was built from; seeds the reload
@@ -672,7 +674,7 @@ pub fn start(
         .datasets
         .iter()
         .filter(|ds| ds.is_reference())
-        .map(|ds| ds.name.clone())
+        .map(|ds| (ds.name.clone(), ds.key.len()))
         .collect();
     let local_datasets = Rc::new(setup.local_datasets);
     let panels = setup.panels;
@@ -847,6 +849,128 @@ fn reference_refusal_reason(refusal: Refusal) -> &'static str {
     }
 }
 
+/// The live reference tables behind `ReferenceGlobal`, one lane per
+/// reference dataset under `REFERENCE_KEY`. Only a dataset's latest tag is
+/// applied, so a slow answer cannot replace a newer one. A refused read keeps
+/// its demand on a timer; a failed read keeps the last table, since an empty
+/// one would turn every lookup into a missing value.
+struct ReferenceCache {
+    handle: DataHandle,
+    tags: RefCell<HashMap<String, u64>>,
+    /// Datasets with a retry timer armed: at most one each.
+    retry: RefCell<HashSet<String>>,
+    /// Datasets whose last answer was an error, so a run of failures warns once.
+    failing: RefCell<HashSet<String>>,
+    /// Each reference dataset's key column count, from the startup schema.
+    key_columns: HashMap<String, usize>,
+}
+
+const REFERENCE_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+impl ReferenceCache {
+    fn new(handle: DataHandle, datasets: &[(String, usize)]) -> ReferenceCache {
+        ReferenceCache {
+            handle,
+            tags: RefCell::default(),
+            retry: RefCell::default(),
+            failing: RefCell::default(),
+            key_columns: datasets.iter().cloned().collect(),
+        }
+    }
+
+    fn is_reference(&self, dataset: &str) -> bool {
+        self.key_columns.contains_key(dataset)
+    }
+
+    /// Read `dataset`'s live table under a new tag, superseding any read in
+    /// flight. `Busy` arms a retry; `Stopped` drops the demand, since nothing
+    /// would ever serve it.
+    fn refresh(self: &Rc<Self>, dataset: &str, cx: &mut App) {
+        let tag = {
+            let mut tags = self.tags.borrow_mut();
+            let tag = tags.entry(dataset.to_string()).or_default();
+            *tag += 1;
+            *tag
+        };
+        match self.handle.reference(ReferenceParams {
+            key: REFERENCE_KEY,
+            tag,
+            dataset: dataset.to_string(),
+            as_of: AsOf::Live,
+        }) {
+            Ok(()) => {}
+            Err(Refusal::Busy) => self.retry(dataset, cx),
+            Err(Refusal::Stopped) => {}
+        }
+    }
+
+    /// Reread after the delay. A dataset already waiting keeps its one timer,
+    /// so a burst of refused publishes cannot pile up reads. The timer holds
+    /// the cache weakly: a closed window ends the lane.
+    fn retry(self: &Rc<Self>, dataset: &str, cx: &mut App) {
+        if !self.retry.borrow_mut().insert(dataset.to_string()) {
+            return;
+        }
+        let cache = Rc::downgrade(self);
+        let dataset = dataset.to_string();
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            cx.background_executor().timer(REFERENCE_RETRY_DELAY).await;
+            cx.update(|cx| {
+                if let Some(cache) = cache.upgrade() {
+                    cache.retry.borrow_mut().remove(&dataset);
+                    cache.refresh(&dataset, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Apply a live answer, republishing the global only when a table
+    /// changed. Answers under another key or a superseded tag are dropped.
+    fn answer(&self, outcome: ReferenceOutcome, cx: &mut App) {
+        if outcome.key != REFERENCE_KEY
+            || self.tags.borrow().get(&outcome.dataset) != Some(&outcome.tag)
+        {
+            return;
+        }
+        let dataset = outcome.dataset;
+        let current = cx.global::<ReferenceGlobal>().0.clone();
+        let next = match outcome.table {
+            Ok(Some(table)) => {
+                self.note_succeeded(&dataset);
+                let key_columns = self.key_columns.get(&dataset).copied().unwrap_or(1);
+                current.with_table(&dataset, &table, key_columns)
+            }
+            Ok(None) => {
+                self.note_succeeded(&dataset);
+                current.without(&dataset)
+            }
+            Err(e) => {
+                if self.note_failed(&dataset) {
+                    tracing::warn!(
+                        target: "geode::reference",
+                        "reference '{dataset}' read failed: {e}"
+                    );
+                }
+                None
+            }
+        };
+        if let Some(next) = next {
+            cx.set_global(ReferenceGlobal(Arc::new(next)));
+        }
+    }
+
+    /// Record a failed read; true only when the dataset was not already
+    /// failing, the one transition worth a warning.
+    fn note_failed(&self, dataset: &str) -> bool {
+        self.failing.borrow_mut().insert(dataset.to_string())
+    }
+
+    fn note_succeeded(&self, dataset: &str) {
+        self.failing.borrow_mut().remove(dataset);
+    }
+}
+
 /// Route mailbox events through the window and forward reloads. Awaiting the
 /// receiver wakes the foreground task on arrival; scheduling and UI work still
 /// determine delivery latency. The task checks window liveness on each event.
@@ -894,7 +1018,13 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             );
         }
         // Fixed for the run: the service serves its startup schema.
-        d.set_reference_datasets(bridge.reference_datasets.clone());
+        d.set_reference_datasets(
+            bridge
+                .reference_datasets
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect(),
+        );
         cx.notify();
     });
 
@@ -990,6 +1120,16 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         }
     })
     .detach();
+
+    // Live reference tables for `ReferenceGlobal`: read every reference
+    // dataset now, then again on each of its publishes.
+    let reference_cache = Rc::new(ReferenceCache::new(
+        handle.clone(),
+        &bridge.reference_datasets,
+    ));
+    for (dataset, _) in &bridge.reference_datasets {
+        reference_cache.refresh(dataset, cx);
+    }
 
     // Reloads: new views to the data thread and to the factory.
     cx.subscribe(&shell, {
@@ -1280,6 +1420,9 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         books,
                         ..
                     } => {
+                        if reference_cache.is_reference(&dataset) {
+                            reference_cache.refresh(&dataset, cx);
+                        }
                         // Record publication in diagnostics and request catalog refresh when watched.
                         // The service owns the detailed publication log; do not duplicate it here.
                         diagnostics.update(cx, |d, cx| {
@@ -1486,6 +1629,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::VolSlices(outcome), window, cx)
                         });
                     }
+                    // The live lane keeps `ReferenceGlobal`; see `ReferenceCache`.
+                    DataEvent::Reference(outcome) if outcome.key == REFERENCE_KEY => {
+                        reference_cache.answer(outcome, cx);
+                    }
                     // Only the latest submission's answer counts. The page
                     // compares its as-of with the frame and re-asks itself;
                     // the bridge does not.
@@ -1537,9 +1684,7 @@ mod tests {
     use super::*;
     use geode_core::config::{ConfigSources, LayerDoc};
     use geode_core::log::Ring;
-    use geode_core::query::{
-        AsOf, CatalogOutcome, CatalogSnapshot, QueryKey, ReferenceOutcome, ReferenceParams,
-    };
+    use geode_core::query::{CatalogOutcome, CatalogSnapshot, QueryKey, ReferenceTable};
     use geode_data::source::SourceSpec;
     use geode_diagnostics::DiagnosticsPageFactory;
     use geode_marketdata::core::builtin_panel;
@@ -7284,7 +7429,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
-            reference_datasets,
+            reference_datasets: reference_datasets.into_iter().map(|n| (n, 1)).collect(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -7318,11 +7463,12 @@ role = "key"
             .unwrap();
     }
 
-    /// The next reference read on the wire, skipping the catalog reads a
-    /// watch also queues.
+    /// The page's next reference read on the wire, skipping the catalog
+    /// reads a watch also queues and the live cache's reads at attach.
     fn next_reference(f: &CatalogFixture) -> ReferenceParams {
         loop {
             match f.requests.try_recv().expect("reference request") {
+                geode_data::Request::Reference(params) if params.key == REFERENCE_KEY => continue,
                 geode_data::Request::Reference(params) => return params,
                 geode_data::Request::Catalog(_) => continue,
                 other => panic!("expected reference, got {other:?}"),
@@ -7488,10 +7634,271 @@ role = "key"
             cx.notify();
         });
         vcx.run_until_parked();
+        // Skip the live cache's read at attach.
+        assert!(next_live_reference(&f).is_some());
         match f.requests.try_recv() {
             Ok(geode_data::Request::Poll { dataset }) => assert_eq!(dataset, "underlyings"),
             other => panic!("expected a poll, got {other:?}"),
         }
+    }
+
+    /// The next live read the reference cache put on the wire, skipping
+    /// catalog reads; `None` when the queue holds no such read.
+    fn next_live_reference(f: &CatalogFixture) -> Option<ReferenceParams> {
+        while let Ok(request) = f.requests.try_recv() {
+            match request {
+                geode_data::Request::Reference(params) if params.key == REFERENCE_KEY => {
+                    return Some(params);
+                }
+                geode_data::Request::Catalog(_) => continue,
+                other => panic!("expected a live reference read, got {other:?}"),
+            }
+        }
+        None
+    }
+
+    /// An `underlyings` table keyed by its first column.
+    fn underlyings_table(currency: &str) -> ReferenceTable {
+        ReferenceTable {
+            columns: vec!["name".into(), "currency".into()],
+            rows: vec![vec![Some("SPX".into()), Some(currency.into())]],
+            gen_id: 1,
+            source_time: chrono::Utc::now(),
+        }
+    }
+
+    fn live_answer(
+        params: &ReferenceParams,
+        table: Result<Option<ReferenceTable>, String>,
+    ) -> DataEvent {
+        DataEvent::Reference(ReferenceOutcome {
+            key: params.key,
+            tag: params.tag,
+            dataset: params.dataset.clone(),
+            as_of: params.as_of.clone(),
+            table,
+        })
+    }
+
+    fn published(dataset: &str) -> DataEvent {
+        DataEvent::Published {
+            dataset: dataset.into(),
+            batch: "b".into(),
+            gen_id: 2,
+            books: vec![None],
+        }
+    }
+
+    fn live_currency(vcx: &mut gpui::VisualTestContext) -> Option<String> {
+        vcx.update(|_, cx| {
+            cx.global::<ReferenceGlobal>()
+                .0
+                .lookup("underlyings", "SPX", "currency")
+                .map(str::to_string)
+        })
+    }
+
+    /// Counts every republish of the global an observing module would see.
+    fn count_publishes(vcx: &mut gpui::VisualTestContext) -> Rc<Cell<usize>> {
+        let count = Rc::new(Cell::new(0));
+        let counter = count.clone();
+        vcx.update(|_, cx| {
+            cx.observe_global::<ReferenceGlobal>(move |_| counter.set(counter.get() + 1))
+                .detach()
+        });
+        count
+    }
+
+    #[gpui::test]
+    fn attach_reads_each_reference_dataset_live(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let read = next_live_reference(&f).expect("attach reads the dataset");
+        assert_eq!(read.key, REFERENCE_KEY);
+        assert_eq!(read.dataset, "underlyings");
+        assert_eq!(read.as_of, AsOf::Live, "the global is live only");
+        assert!(next_live_reference(&f).is_none(), "one read per dataset");
+    }
+
+    #[gpui::test]
+    fn an_answer_publishes_the_global_and_a_repeat_does_not_notify(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let count = count_publishes(&mut vcx);
+        let first = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&first, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("USD"));
+        assert_eq!(count.get(), 1);
+
+        // A republish of the same rows is read again but changes nothing.
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        let second = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&second, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(count.get(), 1, "an unchanged table wakes no observer");
+
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        let third = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&third, Ok(Some(underlyings_table("EUR")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("EUR"));
+        assert_eq!(count.get(), 2);
+    }
+
+    #[gpui::test]
+    fn a_publish_of_a_reference_dataset_rereads_it(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let first = next_live_reference(&f).unwrap();
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        let second = next_live_reference(&f).expect("a publish rereads");
+        assert_eq!(second.dataset, "underlyings");
+        assert_eq!(second.as_of, AsOf::Live);
+        assert!(second.tag > first.tag);
+
+        f.events.try_send(published("risk_snapshot")).unwrap();
+        vcx.run_until_parked();
+        assert!(
+            next_live_reference(&f).is_none(),
+            "a non-reference publish reads nothing"
+        );
+    }
+
+    #[gpui::test]
+    fn a_stale_tag_answer_is_ignored(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let count = count_publishes(&mut vcx);
+        let first = next_live_reference(&f).unwrap();
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        let second = next_live_reference(&f).unwrap();
+
+        f.events
+            .try_send(live_answer(&first, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            live_currency(&mut vcx),
+            None,
+            "a superseded answer is dropped"
+        );
+        assert_eq!(count.get(), 0);
+
+        f.events
+            .try_send(live_answer(&second, Ok(Some(underlyings_table("EUR")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("EUR"));
+    }
+
+    /// A refused reread keeps the last table and retries once, after the
+    /// delay, however many refusals arrived meanwhile.
+    #[gpui::test]
+    fn a_busy_refusal_retries_and_keeps_the_cache(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let first = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&first, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+
+        // Two refused rereads: distinct batches, since the mailbox coalesces
+        // a repeated (dataset, batch) publish into one event.
+        f.bridge.handle.fill_for_tests();
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        f.events
+            .try_send(DataEvent::Published {
+                dataset: "underlyings".into(),
+                batch: "c".into(),
+                gen_id: 3,
+                books: vec![None],
+            })
+            .unwrap();
+        vcx.run_until_parked();
+        while f.requests.try_recv().is_ok() {}
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("USD"));
+        assert!(
+            next_live_reference(&f).is_none(),
+            "no retry before the delay"
+        );
+
+        vcx.executor().advance_clock(REFERENCE_RETRY_DELAY);
+        vcx.run_until_parked();
+        let retried = next_live_reference(&f).expect("the retry reads again");
+        assert!(retried.tag > first.tag);
+        assert!(next_live_reference(&f).is_none(), "one retry per dataset");
+        f.events
+            .try_send(live_answer(&retried, Ok(Some(underlyings_table("EUR")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("EUR"));
+    }
+
+    #[gpui::test]
+    fn a_failed_read_keeps_the_last_table(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let count = count_publishes(&mut vcx);
+        let first = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&first, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        let second = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&second, Err("disk I/O error".into())))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("USD"));
+        assert_eq!(count.get(), 1, "a failure republishes nothing");
+    }
+
+    /// No generation at all removes the dataset's table; a second empty
+    /// answer changes nothing and wakes no observer.
+    #[gpui::test]
+    fn an_empty_answer_removes_the_table(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let count = count_publishes(&mut vcx);
+        let first = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&first, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+        for _ in 0..2 {
+            f.events.try_send(published("underlyings")).unwrap();
+            vcx.run_until_parked();
+            let read = next_live_reference(&f).unwrap();
+            f.events.try_send(live_answer(&read, Ok(None))).unwrap();
+            vcx.run_until_parked();
+            assert_eq!(live_currency(&mut vcx), None);
+            assert_eq!(count.get(), 2, "set once on removal, never again");
+        }
+    }
+
+    /// A failing dataset warns on entering failure only; a good read rearms it.
+    #[test]
+    fn a_failure_warns_once_until_a_read_succeeds() {
+        let (handle, _requests) = DataHandle::for_tests();
+        let cache = ReferenceCache::new(handle, &[("underlyings".into(), 1)]);
+        assert!(cache.note_failed("underlyings"));
+        assert!(!cache.note_failed("underlyings"));
+        cache.note_succeeded("underlyings");
+        assert!(cache.note_failed("underlyings"));
     }
 
     #[gpui::test]
