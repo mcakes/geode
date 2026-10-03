@@ -18359,9 +18359,68 @@ run_mutation "pricer core: a failed leg still sums" \
 # fold marks the package MIXED, and a local cell or total paints a gap.
 run_mutation "pricer core: a package over differing currencies keeps the first leg's" \
   crates/geode-pricer/src/core/sheet.rs \
-  '                    if acc.currency != r.currency {' \
-  '                    if false {' \
+  '                    if acc.currency != r.currency || self.currency[leg] != Some(r.currency) {' \
+  '                    if self.currency[leg] != Some(r.currency) {' \
   geode-pricer a_package_over_differing_currencies_folds_to_a_mixed_currency
+
+# A leg still holding an answer in a currency it no longer asks for mixes
+# the fold, or a package whose legs all moved paints the old sum under the
+# new code.
+run_mutation "pricer core: a fold over legs moved off their priced currency keeps it" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '                    if acc.currency != r.currency || self.currency[leg] != Some(r.currency) {' \
+  '                    if acc.currency != r.currency {' \
+  geode-pricer a_package_whose_legs_moved_currency_gaps_its_local_figures
+
+# A line's local figures never sit under a currency they were not priced in.
+run_mutation "pricer core: a line moved off its priced currency shows its old figures" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '        if self.is_line(row) && self.currency[row] != Some(r.currency) {' \
+  '        if false {' \
+  geode-pricer a_line_moved_off_its_priced_currency_gaps_its_local_figures
+
+run_mutation "pricer cells: a line's measure reads its raw result" \
+  crates/geode-pricer/src/core/columns.rs \
+  '            sheet.shown_result(row).as_ref(),' \
+  '            sheet.result(row),' \
+  geode-pricer a_line_moved_off_its_priced_currency_gaps_its_local_figures
+
+run_mutation "pricer totals: a blank-currency line still totals" \
+  crates/geode-pricer/src/core/select.rs \
+  '            _ if blank => None,
+' \
+  '' \
+  geode-pricer risk_totals_refuse_a_line_whose_currency_was_cleared
+
+run_mutation "pricer totals: a line moved off its priced currency totals locally" \
+  crates/geode-pricer/src/core/select.rs \
+  '            None => (sheet.state(r), sheet.shown_result(r)),' \
+  '            None => (sheet.state(r), sheet.result(r).copied()),' \
+  geode-pricer risk_totals_gap_locally_over_a_line_moved_off_its_priced_currency
+
+run_mutation "pricer sort: a blank-currency line sorts as pricing" \
+  crates/geode-pricer/src/core/sort.rs \
+  '    if kind == ColumnKind::Status && sheet.is_line(row) && sheet.currency(row).is_none() {' \
+  '    if false {' \
+  geode-pricer a_line_without_a_currency_sorts_by_status_as_it_reads
+
+run_mutation "pricer sort: a line's measure keys on its raw result" \
+  crates/geode-pricer/src/core/sort.rs \
+  '            sheet.shown_result(row).as_ref(),' \
+  '            sheet.result(row),' \
+  geode-pricer a_line_moved_off_its_priced_currency_sorts_its_local_figure_as_a_gap
+
+run_mutation "pricer sort: currency keys on the last answer's currency" \
+  crates/geode-pricer/src/core/sort.rs \
+  '        ColumnKind::Currency => sheet.currency(row).map(|c| Part::Text(c.as_str().into())),' \
+  '        ColumnKind::Currency => sheet.result(row).map(|r| Part::Text(r.currency.as_str().into())),' \
+  geode-pricer a_line_sorts_by_the_currency_its_cell_shows
+
+run_mutation "pricer filter: a line moved off its priced currency filters locally" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '                    (_, Some(r)) if !usd && r.currency.is_mixed() => None,' \
+  '' \
+  geode-pricer a_line_moved_off_its_priced_currency_has_no_local_measure
 
 run_mutation "pricer totals: a mixed-currency local total is a gap" \
   crates/geode-pricer/src/core/select.rs \

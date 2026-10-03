@@ -1467,7 +1467,10 @@ on a line with no payout currency, so no state is shown by color alone. The
 `currency` column is the line's payout currency, the one it asks the
 pricer to report in: it edits (three letters, any case; empty clears) and
 reprices the line, and a blank line is never priced. A result reported in
-another currency fails the line (`priced in EUR, asked for USD`). Column 0 is a connector tree. A package row shows its
+another currency fails the line (`priced in EUR, asked for USD`). Until a
+line moved to another currency reprices, or while its currency is blank, its
+local measures paint `—` (its old answer is in another currency) and its
+`_usd` columns still read; a selection total counts a blank line as failed. Column 0 is a connector tree. A package row shows its
 chevron, its template (`CS`, `CUSTOM`) as a neutral chip, a summary of its
 legs' distinct expiries and strikes (`Z26 4800/5200`) and a muted leg count
 (`· 2 legs`). Each leg hangs from a drawn connector under the package's

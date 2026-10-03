@@ -734,7 +734,9 @@ fn number(
         state => match result {
             None => blank(),
             // A package whose legs priced in unlike currencies has no
-            // local figure: the folded sum would read as a real one. The
+            // local figure: the folded sum would read as a real one. Nor
+            // has a line (or package) still holding an answer in a
+            // currency it no longer asks for (`Sheet::shown_result`). The
             // `_usd` twin is converted per leg and still sums. Painted as
             // a stale cell is (muted `—`): no state names "no such
             // figure", and muted is the reading a gap needs.
@@ -831,9 +833,13 @@ pub fn cell_text(
             sheet.sheet_shift().vol_pts,
             format,
         ),
-        ColumnKind::Measure { measure, usd } => {
-            number(sheet.state(row), sheet.result(row), measure, usd, format)
-        }
+        ColumnKind::Measure { measure, usd } => number(
+            sheet.state(row),
+            sheet.shown_result(row).as_ref(),
+            measure,
+            usd,
+            format,
+        ),
         ColumnKind::PricedAt => priced_at(sheet.priced_at(row), clock),
         // Ahead of the state: a line without a currency is never
         // requested, so its `Stale` would read `pricing…` for good.
@@ -1384,6 +1390,64 @@ mod tests {
                 sign: None
             }
         );
+    }
+
+    #[test]
+    fn a_line_moved_off_its_priced_currency_gaps_its_local_figures() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
+        s.deliver(s.id(0), 1, Ok(result(100.0)), at(0));
+        assert_eq!(cell(&s, 0, "npv").text, "100.00", "precondition");
+        s.apply(Edit::SetCurrency {
+            row: 0,
+            currency: Some(crate::core::sheet::tests::eur()),
+        })
+        .unwrap();
+        // Still holding its USD answer: a USD figure beside `EUR` would
+        // read as a plausible EUR one.
+        assert_eq!(cell(&s, 0, "currency").text, "EUR");
+        assert_eq!(
+            cell(&s, 0, "npv"),
+            CellText {
+                text: "—".into(),
+                state: CellState::Stale,
+                sign: None
+            }
+        );
+        assert_eq!(cell(&s, 0, "delta01").text, "—");
+        assert_eq!(cell(&s, 0, "npv_usd").text, "108.00", "usd either way");
+        // Cleared: no currency names the figure either.
+        s.apply(Edit::SetCurrency {
+            row: 0,
+            currency: None,
+        })
+        .unwrap();
+        assert_eq!(cell(&s, 0, "npv").text, "—");
+        assert_eq!(cell(&s, 0, "npv_usd").text, "108.00");
+        // Priced in what it asks for, it reads again.
+        crate::core::sheet::tests::deliver_in_eur(&mut s, 0, result(90.0), at(1));
+        assert_eq!(cell(&s, 0, "npv").text, "90.00");
+    }
+
+    #[test]
+    fn a_package_whose_legs_moved_currency_gaps_its_local_figures() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![callspread(-5)]);
+        s.deliver(s.id(1), 1, Ok(result(100.0)), at(0));
+        s.deliver(s.id(2), 1, Ok(result(40.0)), at(0));
+        assert_eq!(cell(&s, 0, "npv").text, "-300.00", "precondition");
+        for leg in [1, 2] {
+            s.apply(Edit::SetCurrency {
+                row: leg,
+                currency: Some(crate::core::sheet::tests::eur()),
+            })
+            .unwrap();
+        }
+        // Both legs ask for EUR and both still hold USD answers: the fold
+        // agrees with itself, but not with the legs' `EUR`.
+        assert_eq!(cell(&s, 0, "currency").text, "EUR");
+        assert_eq!(cell(&s, 0, "npv").text, "—");
+        assert_eq!(cell(&s, 0, "npv_usd").text, "-324.00");
     }
 
     #[test]

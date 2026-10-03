@@ -218,6 +218,12 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   dropped. Yank copies the currency. `pricer_sheets` stores it in
   `currency`, its last value column (`""` when blank; a value that is not a
   code loads blank), so a sheet saved before a line had one reloads it blank.
+  `Sheet::shown_result` is the result cells, sort keys, filters and totals
+  read: a line still holding an answer in a currency other than its payout
+  currency (after a currency edit, or once cleared) reads `Currency::MIXED`,
+  so its local measures paint `—` and its `_usd` twins still read; a
+  fold over such a leg is mixed too. Totals count a blank line as failed,
+  and `status` sorts it as `needs currency`, as it paints.
 - Package rows derive from their legs; they are not independent instruments.
   Their pricing timestamp is the oldest present leg-attempt timestamp,
   including failed attempts. The fold keeps the legs' currency when they

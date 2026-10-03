@@ -297,6 +297,21 @@ impl Sheet {
         self.result[row].as_ref()
     }
 
+    /// [`Sheet::result`] as a line's cells, sort keys and totals read it.
+    /// A line whose result was priced in a currency other than its payout
+    /// currency (an answer kept across a currency edit, or a currency
+    /// since cleared) reads [`Currency::MIXED`], so its local figures are
+    /// a gap rather than old-currency numbers under the new code; the
+    /// `_usd` twins are USD either way and still read. A package's result
+    /// is its fold, which [`Sheet::fold_legs`] already marks.
+    pub fn shown_result(&self, row: usize) -> Option<PriceResult> {
+        let mut r = self.result[row]?;
+        if self.is_line(row) && self.currency[row] != Some(r.currency) {
+            r.currency = Currency::MIXED;
+        }
+        Some(r)
+    }
+
     pub fn state(&self, row: usize) -> &LineState {
         &self.state[row]
     }
@@ -501,8 +516,8 @@ impl Sheet {
     /// leg, a leg without a currency counting as failed with
     /// [`NEEDS_CURRENCY`]; otherwise any stale leg makes the fold stale. A result exists
     /// only for a nonempty set whose legs all have results and none has
-    /// failed. Its currency is the legs' when they agree and
-    /// [`Currency::MIXED`] when they differ: the local arrays are then sums
+    /// failed. Its currency is the legs' when they agree, each in its own
+    /// payout currency, and [`Currency::MIXED`] otherwise: the local arrays are then sums
     /// of unlike units, and a local cell or total over them paints a gap
     /// rather than a plausible number. `priced_at` is the oldest present
     /// leg timestamp, including failed attempts.
@@ -552,7 +567,10 @@ impl Sheet {
                     // The first leg names the currency; a leg in another
                     // makes the local sum one of unlike units. Once mixed
                     // it stays mixed: no leg's currency equals the marker.
-                    if acc.currency != r.currency {
+                    // A leg holding an answer in a currency it no longer
+                    // asks for mixes it too, or a package whose legs all
+                    // moved would paint the old sum under the new code.
+                    if acc.currency != r.currency || self.currency[leg] != Some(r.currency) {
                         acc.currency = Currency::MIXED;
                     }
                 }

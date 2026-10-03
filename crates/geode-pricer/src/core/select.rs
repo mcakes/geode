@@ -173,10 +173,15 @@ fn totals(
             .filter(|v| sheet.is_package(r) && v.is_partial(sheet, r))
             .map(|v| sheet.fold_legs(v.shown_legs(sheet, r)));
         let (state, result) = match &subset {
-            Some(f) => (&f.state, f.result.as_ref()),
-            None => (sheet.state(r), sheet.result(r)),
+            Some(f) => (&f.state, f.result),
+            None => (sheet.state(r), sheet.shown_result(r)),
         };
+        // A line without a currency counts as failed, as `fold_legs`
+        // counts such a leg: it is never requested, so the result it
+        // keeps answers a question it no longer asks.
+        let blank = sheet.is_line(r) && sheet.currency(r).is_none();
         let picked = match (state, result) {
+            _ if blank => None,
             (LineState::Failed(_), _) | (_, None) => None,
             (_, Some(v)) => Some(v),
         };
@@ -492,6 +497,40 @@ mod tests {
         s.deliver(s.id(0), s.revision(0), Err("boom".into()), at(1));
         assert!(s.result(0).is_some(), "a failure retains the old result");
         assert_eq!(risk_totals(&s, &[0], &NPV_DELTA), vec![None; 2]);
+    }
+
+    #[test]
+    fn risk_totals_refuse_a_line_whose_currency_was_cleared() {
+        let mut s = sheet(vec![call(5000.0, 1), call(5100.0, 1)]);
+        price(&mut s, 0, 1.0);
+        price(&mut s, 1, 2.0);
+        s.apply(crate::core::edit::Edit::SetCurrency {
+            row: 1,
+            currency: None,
+        })
+        .unwrap();
+        assert!(s.result(1).is_some(), "the old result is retained");
+        assert_eq!(risk_totals(&s, &[0, 1], &NPV_DELTA), vec![None; 2]);
+        assert_eq!(
+            risk_totals(&s, &[0, 1], &[(Measure::Npv, true)]),
+            vec![None],
+            "never priced in anything it asks for"
+        );
+    }
+
+    #[test]
+    fn risk_totals_gap_locally_over_a_line_moved_off_its_priced_currency() {
+        let mut s = sheet(vec![call(5000.0, 1)]);
+        price(&mut s, 0, 1.0);
+        s.apply(crate::core::edit::Edit::SetCurrency {
+            row: 0,
+            currency: Some(crate::core::sheet::tests::eur()),
+        })
+        .unwrap();
+        assert_eq!(
+            risk_totals(&s, &[0], &[(Measure::Npv, false), (Measure::Npv, true)]),
+            vec![None, Some(1.08)]
+        );
     }
 
     #[test]

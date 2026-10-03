@@ -184,12 +184,17 @@ impl RowValues for SheetRow<'_> {
                 own.or(sheet.sheet_shift().vol_pts).map(Value::F64)
             }),
             // A failed line keeps its last result but shows none, as its
-            // cells and the selection totals do.
-            ColumnKind::Measure { measure, usd } => match (sheet.state(row), sheet.result(row)) {
-                (LineState::Failed(_), _) | (_, None) => None,
-                (_, Some(_)) if sheet.is_package(row) => None,
-                (_, Some(r)) => Some(Value::F64(r.get(measure, usd) * sheet.qty(row) as f64)),
-            },
+            // cells and the selection totals do; a local figure priced in a
+            // currency the line no longer asks for is a gap, as its cell
+            // paints it (`Sheet::shown_result`).
+            ColumnKind::Measure { measure, usd } => {
+                match (sheet.state(row), sheet.shown_result(row)) {
+                    (LineState::Failed(_), _) | (_, None) => None,
+                    (_, Some(_)) if sheet.is_package(row) => None,
+                    (_, Some(r)) if !usd && r.currency.is_mixed() => None,
+                    (_, Some(r)) => Some(Value::F64(r.get(measure, usd) * sheet.qty(row) as f64)),
+                }
+            }
             ColumnKind::Expiry => instrument.map(|i| {
                 Value::Utf8(match i.expiry() {
                     Expiry::Date(d) => d.format("%Y-%m-%d").to_string(),
@@ -365,6 +370,28 @@ mod tests {
         );
         let v = apply(&s, &expr("npv < 0")).unwrap();
         assert!(v.is_shown(0));
+    }
+
+    #[test]
+    fn a_line_moved_off_its_priced_currency_has_no_local_measure() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![in_usd(parse_builtin("SPX Z26 4000 P").unwrap())],
+        );
+        price_all(&mut s, 3.0);
+        s.apply(crate::core::edit::Edit::SetCurrency {
+            row: 0,
+            currency: Some(geode_core::pricing::Currency::parse("EUR").unwrap()),
+        })
+        .unwrap();
+        let row = SheetRow {
+            sheet: &s,
+            row: 0,
+            clock: Clock::utc(),
+        };
+        assert_eq!(row.value("npv"), None, "a USD figure is not an EUR one");
+        assert_eq!(row.value("npv_usd"), Some(Value::F64(3.0 * 1.08)));
     }
 
     #[test]
