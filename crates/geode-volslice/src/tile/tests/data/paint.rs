@@ -116,9 +116,13 @@ fn row(expiry: &str) -> String {
 }
 
 /// A press that only focuses the tile changes nothing; focused, a plain
-/// press solos the row and a ctrl press toggles it.
+/// press solos the row, and a ctrl or a shift press adds the row or takes
+/// it out. A press holding alt or cmd (the shell's tile-drag `mod`) is the
+/// shell's and leaves the set alone.
 #[gpui::test]
-fn a_click_on_a_strip_row_solos_and_ctrl_click_toggles_when_focused(cx: &mut gpui::TestAppContext) {
+fn a_click_on_a_strip_row_solos_and_ctrl_or_shift_click_adds_when_focused(
+    cx: &mut gpui::TestAppContext,
+) {
     let (h, mut vcx) = loaded(cx);
     click(&mut vcx, &row("2026-12-18"), Modifiers::default());
     assert_eq!(h.active(&vcx), ["2026-10-16"], "unfocused: it only focuses");
@@ -136,6 +140,37 @@ fn a_click_on_a_strip_row_solos_and_ctrl_click_toggles_when_focused(cx: &mut gpu
     click(&mut vcx, &row("2026-10-16"), ctrl);
     assert_eq!(h.active(&vcx), ["2026-10-16", "2026-12-18"]);
     assert!(h.answer_last(&mut vcx).is_some());
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    click(&mut vcx, &row("2026-11-20"), shift);
+    assert_eq!(h.active(&vcx), ["2026-10-16", "2026-11-20", "2026-12-18"]);
+    assert!(h.answer_last(&mut vcx).is_some());
+    click(&mut vcx, &row("2026-10-16"), shift);
+    assert_eq!(
+        h.active(&vcx),
+        ["2026-11-20", "2026-12-18"],
+        "shift takes an active row out"
+    );
+    assert!(h.answer_last(&mut vcx).is_some());
+    for held in [
+        Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        },
+        Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        },
+    ] {
+        click(&mut vcx, &row("2027-03-19"), held);
+        assert_eq!(h.active(&vcx), ["2026-11-20", "2026-12-18"], "{held:?}");
+        assert!(h.requests().is_empty(), "{held:?} asks nothing");
+    }
+    // A plain press on an active row in a set of two solos it.
+    click(&mut vcx, &row("2026-11-20"), Modifiers::default());
+    assert_eq!(h.active(&vcx), ["2026-11-20"]);
 }
 
 #[gpui::test]
@@ -159,6 +194,46 @@ fn a_kind_chip_click_toggles_the_kind(cx: &mut gpui::TestAppContext) {
     );
     assert_eq!(h.dispatched(&vcx)[1], "volslice::diff");
     assert!(h.tile.read_with(&vcx, |t, _| t.chooser_rows().is_some()));
+}
+
+/// The chooser by pointer: a row click ticks the row as `space` does (and
+/// a second click unticks it), and the Apply row applies as `enter` does.
+#[gpui::test]
+fn a_chooser_row_click_ticks_and_apply_applies(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = loaded(cx);
+    h.focus(&mut vcx);
+    vcx.simulate_keystrokes("d");
+    h.draw(&mut vcx);
+    let pair_row = |p: Pair| format!("volslice-diff-row-{TILE}-{}", p.label());
+    let cvi_chain = Pair::new(Kind::Cvi, Kind::Chain).unwrap();
+    click(
+        &mut vcx,
+        &pair_row(cvi_chain.reverse()),
+        Modifiers::default(),
+    );
+    click(&mut vcx, &pair_row(cvi_chain), Modifiers::default());
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.chooser_ticks()),
+        Some(vec![cvi_chain]),
+        "the second tick turned its reverse off"
+    );
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.state().diffs.clone()), []);
+    h.draw(&mut vcx);
+    click(
+        &mut vcx,
+        &format!("volslice-diff-apply-{TILE}"),
+        Modifiers::default(),
+    );
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.chooser_rows()), None);
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.state().diffs.clone()),
+        [cvi_chain]
+    );
+    assert_eq!(
+        h.active(&vcx),
+        ["2026-10-16"],
+        "the strip beneath is untouched"
+    );
 }
 
 /// On the reversed delta axis a wheel zoom keeps the value under the
@@ -471,11 +546,18 @@ fn the_done_state_in_one_frame(cx: &mut gpui::TestAppContext) {
         SlotKind::Points { .. }
     ));
 
-    // `d`, then the chooser's fifth row: none, cvi - cvi draft,
-    // cvi - chain, cvi draft - cvi, cvi draft - chain.
-    vcx.simulate_keystrokes("d j j j j enter");
-    assert_eq!(h.state(&vcx).diff, Pair::new(Kind::Draft, Kind::Chain));
+    // `d`, then the chooser's fourth row: cvi - cvi draft, cvi - chain,
+    // cvi draft - cvi, cvi draft - chain. Nothing ticked, `enter` shows
+    // the highlighted pair.
+    vcx.simulate_keystrokes("d j j j enter");
+    let draft_chain = Pair::new(Kind::Draft, Kind::Chain).unwrap();
+    let cvi_chain = Pair::new(Kind::Cvi, Kind::Chain).unwrap();
+    assert_eq!(h.state(&vcx).diffs, [draft_chain]);
     h.answer_last(&mut vcx).expect("the pair resubmits");
+    // Reopened on the pair shown; `k k space` ticks cvi - chain beside it.
+    vcx.simulate_keystrokes("d k k space enter");
+    assert_eq!(h.state(&vcx).diffs, [draft_chain, cvi_chain]);
+    h.answer_last(&mut vcx).expect("the second pair resubmits");
 
     h.focus(&mut vcx);
     let ctrl = Modifiers {
@@ -501,9 +583,39 @@ fn the_done_state_in_one_frame(cx: &mut gpui::TestAppContext) {
         slot(&h, &vcx, "chain 2026-10-16").kind,
         SlotKind::Points { .. }
     ));
-    let label = Pair::new(Kind::Draft, Kind::Chain).unwrap().label();
-    let lower = slot(&h, &vcx, &format!("{label} 2026-10-16"));
+    let lower = slot(&h, &vcx, &format!("{} 2026-10-16", draft_chain.label()));
     assert_eq!(lower.axis, Axis::BottomLeft, "the difference's own pane");
+    let beside = slot(&h, &vcx, &format!("{} 2026-10-16", cvi_chain.label()));
+    assert_eq!(beside.axis, Axis::BottomLeft);
+    for s in [&lower, &beside] {
+        let SlotKind::Points { mid, lo, hi, .. } = &s.kind else {
+            panic!("{} is points", s.label)
+        };
+        assert!(
+            (0..mid.len()).any(|i| lo[i] < mid[i] && mid[i] < hi[i]),
+            "{} has whiskers: {lo:?} {hi:?}",
+            s.label
+        );
+    }
+    assert_ne!(
+        lower.color, beside.color,
+        "the draft's pair takes the companion"
+    );
+    assert_eq!(
+        beside.color,
+        slot(&h, &vcx, "cvi 2026-10-16").color,
+        "the cvi's pair takes the expiry's color"
+    );
+    assert_eq!(
+        lower.color,
+        slot(&h, &vcx, "chain 2026-10-16").color,
+        "the draft's pair takes the chain's companion"
+    );
+    assert_ne!(
+        slot(&h, &vcx, "chain 2026-10-16").color,
+        slot(&h, &vcx, "cvi 2026-10-16").color,
+        "the chain and the cvi are told apart"
+    );
     assert!(painted(&mut vcx, &format!("volslice-divider-{TILE}")));
     let colors: Vec<_> = ["2026-10-16", "2026-11-20", "2026-12-18"]
         .iter()

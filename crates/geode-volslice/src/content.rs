@@ -24,7 +24,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("volslice::strip_down", "Next expiry"),
     ("volslice::strip_up", "Previous expiry"),
     ("volslice::solo", "Show only this expiry"),
-    ("volslice::toggle_expiry", "Show/hide this expiry"),
+    ("volslice::toggle_expiry", "Add/remove this expiry"),
     ("volslice::kind_1", "Show/hide trace kind 1"),
     ("volslice::kind_2", "Show/hide trace kind 2"),
     ("volslice::kind_3", "Show/hide trace kind 3"),
@@ -49,6 +49,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     // them and the palette lists them.
     ("volslice::commit", "Commit"),
     ("volslice::cancel", "Cancel"),
+    // The diff chooser's tick: `space` while it is up.
+    ("volslice::tick", "Tick/untick this difference"),
     // The underlying picker's row steps. Its field types every bare key,
     // so the shared `j`/`k` list steps cannot reach it; the arrows can.
     ("volslice::list_down", "Next row"),
@@ -72,8 +74,13 @@ context = "volslice && mode == normal"
 "down" = "volslice::strip_down"
 "k" = "volslice::strip_up"
 "up" = "volslice::strip_up"
+# `space` solos the cursor's expiry, as `enter` does (the later binding
+# is the one the footer names); `ctrl+space` and `shift+space` add it to
+# the shown set or take it out. The workspace binds neither.
 "enter" = "volslice::solo"
-"space" = "volslice::toggle_expiry"
+"space" = "volslice::solo"
+"ctrl+space" = "volslice::toggle_expiry"
+"shift+space" = "volslice::toggle_expiry"
 "1" = "volslice::kind_1"
 "2" = "volslice::kind_2"
 "3" = "volslice::kind_3"
@@ -113,12 +120,13 @@ context = "volslice && mode == insert"
 "down" = "volslice::list_down"
 "up" = "volslice::list_up"
 
-# The diff chooser: a fieldless list. The tile publishes `tilelist` while
-# it is up, so the shell's shared `j`/`k` and arrows step its rows; the
-# strip's own `j`/`k` are normal-mode bindings and stay out.
+# The diff chooser: a fieldless, ticked list. The tile publishes `tilelist`
+# while it is up, so the shell's shared `j`/`k` and arrows step its rows;
+# the strip's own `j`/`k` and `space` are normal-mode bindings and stay out.
 [[bindings]]
 context = "volslice && mode == menu"
 [bindings.keys]
+"space" = "volslice::tick"
 "enter" = "volslice::commit"
 "escape" = "volslice::cancel"
 "#;
@@ -321,7 +329,7 @@ mod tests {
                 bound += 1;
             }
         }
-        assert_eq!(bound, 32);
+        assert_eq!(bound, 35);
         // And the registry the app builds accepts every binding.
         let (data, _rx) = DataHandle::for_tests();
         let mut registry = ActionRegistry::default();

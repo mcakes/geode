@@ -2695,3 +2695,15 @@ formats the needs-currency failure for each one with a blank leg.
 99.8 µs (96.7 to 103.1) with each curve and density at 1,000 points, twelve
 expiries, both CVI kinds with densities, the chain and a difference; the
 batch is answered outside the timed loop.
+
+## Vol slice: several differences and hue colors (2026-10-03)
+
+`cargo bench -p geode-volslice --bench model_build -- --warm-up-time 1
+--measurement-time 3`, load average 50 to 62 from other sessions' builds:
+`model_twelve_expiries_three_kinds` 205 µs (188 to 226), against 99.8 µs
+before. The bench now carries two differences (`cvi draft − chain` with
+whiskers and `cvi − cvi draft`) instead of one, and every slot's color comes
+from `HuePalette` (a gamut-clipped OKLCH color and a `readable_on` bisection
+per call) rather than an indexed array. The load was several times the
+earlier run's; the split between the second pair and the color cost was not
+measured. Still well under the 1 ms target.

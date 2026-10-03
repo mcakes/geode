@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use chrono::{Months, NaiveDate};
 use criterion::{Criterion, criterion_group, criterion_main};
-use geode_chart::core::palette::Palette;
+use geode_chart::core::palette::HuePalette;
 use geode_core::document::{Column, DocumentRows, Value};
 use geode_core::link::DraftMark;
 use geode_core::query::QueryKey;
@@ -96,7 +96,10 @@ fn model_build(c: &mut Criterion) {
     let mut state = State {
         active: Some(terms.iter().copied().collect()),
         density: true,
-        diff: Pair::new(Kind::Draft, Kind::Chain),
+        diffs: vec![
+            Pair::new(Kind::Draft, Kind::Chain).unwrap(),
+            Pair::new(Kind::Cvi, Kind::Draft).unwrap(),
+        ],
         ..State::default()
     };
     state.reconcile(&rows);
@@ -114,7 +117,7 @@ fn model_build(c: &mut Criterion) {
         "the bench measures a whole answer"
     );
     let shade = |l| gpui::hsla(0.0, 0.0, l, 1.0);
-    let palette = Palette::from_theme(
+    let palette = HuePalette::from_theme(
         [shade(0.1), shade(0.2), shade(0.3), shade(0.4), shade(0.5)],
         shade(1.0),
         shade(0.0),

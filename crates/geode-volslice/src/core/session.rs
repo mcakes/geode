@@ -39,14 +39,18 @@ pub fn to_table(state: &State) -> Table {
         .map(|k| Value::String(k.label().into()))
         .collect();
     t.insert("hidden".into(), Value::Array(hidden));
-    if let Some(p) = state.diff {
-        t.insert(
-            "diff".into(),
-            Value::Array(vec![
-                Value::String(p.minuend.label().into()),
-                Value::String(p.subtrahend.label().into()),
-            ]),
-        );
+    if !state.diffs.is_empty() {
+        let pairs = state
+            .diffs
+            .iter()
+            .map(|p| {
+                Value::Array(vec![
+                    Value::String(p.minuend.label().into()),
+                    Value::String(p.subtrahend.label().into()),
+                ])
+            })
+            .collect();
+        t.insert("diffs".into(), Value::Array(pairs));
     }
     t.insert("density".into(), Value::Boolean(state.density));
     t.insert("split".into(), Value::Float(state.split as f64));
@@ -96,11 +100,32 @@ fn read_expiries(v: &Value) -> Result<BTreeSet<NaiveDate>, String> {
         .collect()
 }
 
-fn read_diff(v: &Value) -> Result<Pair, String> {
+fn read_pair(v: &Value) -> Result<Pair, String> {
     let [a, b] = kinds(v)?[..] else {
         return Err("a difference names two kinds".into());
     };
     Pair::new(a, b).ok_or_else(|| "a difference needs two different kinds".into())
+}
+
+/// The pairs in their saved order. A list naming a pair twice, or a pair
+/// and its reverse, is not one the tile writes and is dropped whole.
+fn read_diffs(v: &Value) -> Result<Vec<Pair>, String> {
+    let list = v.as_array().ok_or("not a list of differences")?;
+    let mut pairs: Vec<Pair> = Vec::new();
+    for item in list {
+        let p = read_pair(item)?;
+        if pairs.iter().any(|q| *q == p || *q == p.reverse()) {
+            return Err(format!("{} is named twice", p.label()));
+        }
+        pairs.push(p);
+    }
+    Ok(pairs)
+}
+
+/// The single pair a version-1 session saved as `diff` before several
+/// could be shown.
+fn read_legacy_diff(v: &Value) -> Result<Vec<Pair>, String> {
+    read_pair(v).map(|p| vec![p])
 }
 
 fn read_density(v: &Value) -> Result<bool, String> {
@@ -149,7 +174,13 @@ pub fn from_table(table: &Table) -> (State, Vec<String>) {
     if let Some(h) = read(table, "hidden", &mut notices, kinds) {
         state.hidden = h.into_iter().collect();
     }
-    state.diff = read(table, "diff", &mut notices, read_diff);
+    // `diffs` when present; else the single `diff` an older session saved.
+    state.diffs = if table.contains_key("diffs") {
+        read(table, "diffs", &mut notices, read_diffs)
+    } else {
+        read(table, "diff", &mut notices, read_legacy_diff)
+    }
+    .unwrap_or_default();
     if let Some(dn) = read(table, "density", &mut notices, read_density) {
         state.density = dn;
     }
@@ -186,15 +217,25 @@ mod tests {
             active: Some([d("2026-10-16"), d("2026-12-18")].into()),
             cursor: 0,
             density: true,
-            diff: Pair::new(Kind::Draft, Kind::Cvi),
+            diffs: vec![
+                Pair::new(Kind::Draft, Kind::Cvi).unwrap(),
+                Pair::new(Kind::Chain, Kind::Cvi).unwrap(),
+            ],
             split: 0.55,
             view: Some((0.85, 1.15)),
         };
         let t = to_table(&st);
         assert_eq!(t.get("version").and_then(|v| v.as_integer()), Some(1));
         assert_eq!(
-            t.get("diff").unwrap().as_array().unwrap()[0].as_str(),
+            t.get("diffs").unwrap().as_array().unwrap()[0]
+                .as_array()
+                .unwrap()[0]
+                .as_str(),
             Some("cvi draft")
+        );
+        assert!(
+            !t.contains_key("diff"),
+            "the single-pair key is read, not written"
         );
         // Through text, as the session file holds it.
         let text = toml::to_string(&t).unwrap();
@@ -206,7 +247,7 @@ mod tests {
     #[test]
     fn unset_values_are_absent_and_restore_unset() {
         let t = to_table(&State::default());
-        for key in ["underlying", "expiries", "diff", "view"] {
+        for key in ["underlying", "expiries", "diffs", "view"] {
             assert!(!t.contains_key(key), "{key} is absent while unset");
         }
         assert_eq!(from_table(&t), (State::default(), Vec::new()));
@@ -235,6 +276,11 @@ mod tests {
             ("diff", r#"diff = ["cvi", "cvi"]"#),
             ("diff", r#"diff = ["cvi", "bids"]"#),
             ("diff", r#"diff = ["cvi"]"#),
+            ("diffs", r#"diffs = [["cvi", "chain"], ["cvi"]]"#),
+            ("diffs", r#"diffs = ["cvi", "chain"]"#),
+            ("diffs", r#"diffs = [["cvi", "chain"], ["chain", "cvi"]]"#),
+            ("diffs", r#"diffs = [["cvi", "chain"], ["cvi", "chain"]]"#),
+            ("diffs", "diffs = 3"),
             ("view", "view = [nan, 1.1]"),
             ("view", "view = [0.9, inf]"),
             ("view", "view = [1.1, 0.9]"),
@@ -260,6 +306,21 @@ mod tests {
             );
             assert_eq!(st, want, "{text}: the key takes its default");
         }
+    }
+
+    /// A session saved before several pairs could be shown holds one pair
+    /// under `diff`: it restores as the one pair shown. Beside `diffs`,
+    /// `diffs` wins.
+    #[test]
+    fn an_older_sessions_single_diff_restores_as_one_pair() {
+        let (st, notices) = from_table(&table(r#"diff = ["cvi draft", "chain"]"#));
+        assert_eq!(st.diffs, vec![Pair::new(Kind::Draft, Kind::Chain).unwrap()]);
+        assert!(notices.is_empty(), "{notices:?}");
+        let (st, notices) = from_table(&table(
+            "diff = [\"cvi\", \"chain\"]\ndiffs = [[\"chain\", \"cvi draft\"]]",
+        ));
+        assert_eq!(st.diffs, vec![Pair::new(Kind::Chain, Kind::Draft).unwrap()]);
+        assert!(notices.is_empty(), "{notices:?}");
     }
 
     #[test]

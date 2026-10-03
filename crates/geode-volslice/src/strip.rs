@@ -6,9 +6,11 @@
 //!
 //! [`prepare`] formats the dates and resolves the colors when the strip,
 //! the active set or the palette change; paint clones prepared handles.
+//! A row's color is its expiry's [`HuePalette`] color, the hue its curves
+//! paint in.
 
 use chrono::{Datelike as _, NaiveDate};
-use geode_chart::core::palette::Palette;
+use geode_chart::core::palette::HuePalette;
 use geode_shell::shell::scale;
 use gpui::prelude::*;
 use gpui::{Div, Entity, Hsla, MouseButton, MouseDownEvent, SharedString, Stateful, div, rems};
@@ -38,14 +40,14 @@ pub(crate) struct StripPaint {
     pub marks: [Option<&'static str>; 3],
 }
 
-pub(crate) fn prepare(strip: &[StripRow], state: &State, palette: &Palette) -> Vec<StripPaint> {
+pub(crate) fn prepare(strip: &[StripRow], state: &State, palette: &HuePalette) -> Vec<StripPaint> {
     strip
         .iter()
         .enumerate()
         .map(|(i, r)| StripPaint {
             expiry: r.expiry,
             date: r.expiry.to_string().into(),
-            color: palette.colour(i),
+            color: palette.color(i),
             active: state.active.as_ref().is_some_and(|a| a.contains(&r.expiry)),
             marks: Kind::ALL.map(|k| r.has[k.index()].then_some(MARKS[k.index()])),
         })
@@ -118,16 +120,14 @@ pub(crate) fn render_strip(
                     .children(mark),
             );
         }
-        // A press on the row: solo, or toggle with ctrl. The shell's own
-        // tile handler runs after this one and focuses the tile; the tile
-        // acts only when it was already focused, so the press that focuses
-        // it does nothing else.
+        // A press on the row: solo, or add/remove with ctrl or shift. The
+        // shell's own tile handler runs after this one and focuses the
+        // tile; the tile acts only when it was already focused, so the
+        // press that focuses it does nothing else.
         el = el.on_mouse_down(MouseButton::Left, {
             let tile = tile.clone();
             move |event: &MouseDownEvent, _window, cx| {
-                tile.update(cx, |t, cx| {
-                    t.strip_pressed(expiry, event.modifiers.control, cx)
-                });
+                tile.update(cx, |t, cx| t.strip_pressed(expiry, event.modifiers, cx));
             }
         });
         column = column.child(el);
@@ -146,7 +146,7 @@ mod tests {
         let s = strip(&fixture(), d(TODAY));
         let mut st = State::default();
         st.reconcile(&s);
-        let palette = Palette::from_theme(
+        let palette = HuePalette::from_theme(
             [
                 gpui::red(),
                 gpui::green(),
@@ -162,7 +162,7 @@ mod tests {
         assert!(rows[0].active && !rows[1].active);
         assert_eq!(rows[0].marks, [Some("1"), Some("2"), None]);
         assert_eq!(rows[1].marks, [None, None, Some("3")]);
-        assert_eq!(rows[1].color, palette.colour(1));
+        assert_eq!(rows[1].color, palette.color(1));
         assert_ne!(row_id(rows[0].expiry), row_id(rows[1].expiry));
     }
 }
