@@ -677,6 +677,12 @@ impl Frame {
     /// changes nothing; a failed write reloads the earlier documents, which
     /// removes the slot again. Queues no write of its own. `false` for a
     /// slot outside 1–9 or an empty chain.
+    ///
+    /// A changed chain bumps config as `replace_slots` does, besides the
+    /// grouping of lanes on that slot: a tile pinned to the slot follows
+    /// config, not grouping, and the promotion's reload finds equal slots and
+    /// bumps nothing, so without this it would keep the old chain. An equal
+    /// chain bumps nothing.
     pub fn stage_slot(&mut self, slot: u8, grouping: Vec<String>) -> bool {
         if self.slots.get(slot) == Some(&grouping[..]) {
             return true;
@@ -684,6 +690,7 @@ impl Frame {
         if !self.slots.set(slot, grouping) {
             return false;
         }
+        self.versions.config += 1;
         self.bump_lanes_on_slot(slot);
         true
     }
@@ -1979,14 +1986,31 @@ mod tests {
         let v = f.shared().versions();
         assert!(f.stage_slot(1, chain(&["book", "lhu"])));
         assert_eq!(f.shared().versions(), v);
+        assert_eq!(f.config_version(), v.config);
+    }
+
+    #[test]
+    fn a_changed_staged_slot_moves_config_for_tiles_pinned_to_it() {
+        // No lane has slot 2 as its choice; a tile pinned to slot 2 follows
+        // config, so config is the only signal it gets.
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let v = f.shared().versions();
+        assert!(f.stage_slot(2, chain(&["lhu"])));
+        let after = f.shared().versions();
+        assert_ne!(after.config, v.config, "a slot-pinned tile must requery");
+        assert_eq!(after.grouping, v.grouping, "not the lane's choice");
     }
 
     #[test]
     fn staging_refuses_an_empty_chain_and_a_slot_outside_one_to_nine() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let before = f.slots().clone();
+        let v = f.shared().versions();
         assert!(!f.stage_slot(3, Vec::new()));
         assert!(!f.stage_slot(0, chain(&["book"])));
         assert!(!f.stage_slot(10, chain(&["book"])));
+        assert_eq!(f.slots(), &before);
+        assert_eq!(f.shared().versions(), v);
     }
 
     #[test]
