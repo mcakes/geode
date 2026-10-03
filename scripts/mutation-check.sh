@@ -2555,8 +2555,8 @@ run_mutation "frame: set_scope bumps only the scope counter" \
 
 run_mutation "frame: a vanished active slot is cleared on reload" \
   crates/geode-shell/src/frame.rs \
-  '            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {' \
-  '            if false {' \
+  '                && slots.get(n).is_none()' \
+  '                && false' \
   geode-shell \
   replacing_slots_bumps_config_and_grouping_and_drops_a_vanished_active_slot
 
@@ -2578,9 +2578,11 @@ run_mutation "frame: lane generations come from the shared counter" \
 run_mutation "frame: a slot reload regroups hidden pinned lanes" \
   crates/geode-shell/src/frame.rs \
   '        for lane in std::iter::once(shared).chain(pinned.values_mut()) {
-            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {' \
+            if let GroupingChoice::Slot(n) = lane.grouping
+                && slots.get(n).is_none()' \
   '        for lane in std::iter::once(shared) {
-            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {' \
+            if let GroupingChoice::Slot(n) = lane.grouping
+                && slots.get(n).is_none()' \
   geode-shell \
   a_slot_reload_regroups_every_lane_and_clears_a_vanished_slot_in_a_hidden_lane
 
@@ -3502,8 +3504,20 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
             }
             if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
+                // The same inputs decide what an ad hoc chain may name. A
+                // chain left naming a removed column would be refused by
+                // every following tile'"'"'s query with no way to see why.
+                let groupable = groupable_names(&self.services.config);
                 self.frame.update(cx, |f, cx| {
-                    if f.replace_slots(slots) {
+                    let replaced = f.replace_slots(slots);
+                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));
+                    for column in &dropped {
+                        tracing::warn!(
+                            target: "geode::config",
+                            "ad hoc grouping dropped: '"'"'{column}'"'"' is no longer a groupable column"
+                        );
+                    }
+                    if replaced || !dropped.is_empty() {
                         cx.notify();
                     }
                 });
@@ -3514,8 +3528,20 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
             }
             if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
+                // The same inputs decide what an ad hoc chain may name. A
+                // chain left naming a removed column would be refused by
+                // every following tile'"'"'s query with no way to see why.
+                let groupable = groupable_names(&self.services.config);
                 self.frame.update(cx, |f, cx| {
-                    if f.replace_slots(slots) {
+                    let replaced = f.replace_slots(slots);
+                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));
+                    for column in &dropped {
+                        tracing::warn!(
+                            target: "geode::config",
+                            "ad hoc grouping dropped: '"'"'{column}'"'"' is no longer a groupable column"
+                        );
+                    }
+                    if replaced || !dropped.is_empty() {
                         cx.notify();
                     }
                 });
@@ -17041,6 +17067,141 @@ run_mutation "stacks: the marker is gated on len > 1" \
   geode-blotter \
   the_stack_marker_paints_only_while_a_member
 
+# ---- Ad hoc grouping: the lane's own chain ----
+
+# Tiles read one door. If it does not resolve the ad hoc chain, every
+# following tile silently groups by its view default.
+run_mutation "ad hoc: the stored chain is the grouping in force" \
+  crates/geode-shell/src/frame.rs \
+  '            GroupingChoice::AdHoc => self.lane.ad_hoc.as_deref(),' \
+  '            GroupingChoice::AdHoc => None,' \
+  geode-shell \
+  an_ad_hoc_chain_is_the_grouping_in_force_and_survives_a_slot_switch
+
+# A pinned workspace starts from the shared lane's chain.
+run_mutation "ad hoc: pinning copies the chain" \
+  crates/geode-shell/src/frame.rs \
+  '            ad_hoc: self.ad_hoc.clone(),' \
+  '            ad_hoc: None,' \
+  geode-shell \
+  pinning_copies_the_ad_hoc_chain_and_the_lanes_then_diverge
+
+# Forgetting the active chain must leave the lane on a choice that exists.
+run_mutation "ad hoc: forgetting the active chain falls to view default" \
+  crates/geode-shell/src/frame.rs \
+  '            lane.grouping = GroupingChoice::ViewDefault;
+            self.bump_grouping();
+        } else {' \
+  '            self.bump_grouping();
+        } else {' \
+  geode-shell \
+  forgetting_the_active_chain_falls_to_view_default
+
+# The stored chain is session state even when nothing requeries.
+run_mutation "ad hoc: forgetting an inactive chain dirties the session" \
+  crates/geode-shell/src/frame.rs \
+  '            fresh(&mut self.frame.generation);
+        }
+        true' \
+  '        }
+        true' \
+  geode-shell \
+  forgetting_an_inactive_chain_requeries_nothing_but_dirties_the_session
+
+# Kept whole or dropped whole: the drop must clear the chain, not skip it.
+run_mutation "ad hoc: a stale chain is dropped" \
+  crates/geode-shell/src/frame.rs \
+  '                .and_then(|chain| chain.iter().find(|column| !known(column)).cloned())' \
+  '                .and_then(|chain| chain.iter().find(|_| false).cloned())' \
+  geode-shell \
+  a_stale_ad_hoc_chain_is_dropped_whole_and_an_active_lane_falls_to_view_default
+
+# An active chain is written without a slot beside it and read back active.
+run_mutation "ad hoc: the session writes the active marker" \
+  crates/geode-shell/src/session.rs \
+  '            if self.ad_hoc_active {' \
+  '            if false {' \
+  geode-shell \
+  an_active_ad_hoc_chain_round_trips_and_writes_no_slot
+
+# `grouping = "ad_hoc"` with no chain must not leave an ad hoc choice.
+run_mutation "ad hoc: an active marker needs a chain" \
+  crates/geode-shell/src/session.rs \
+  '                Some("ad_hoc") if ad_hoc.is_some() => true,' \
+  '                Some("ad_hoc") => true,' \
+  geode-shell \
+  ad_hoc_active_without_a_chain_warns_and_falls_back_to_the_slot
+
+# A hand-edited record holding both a slot and an active chain must read
+# as the chain alone; a slot beside it would be restored over the chain.
+run_mutation "ad hoc: an active chain hides the record's slot" \
+  crates/geode-shell/src/session.rs \
+  '        let active_slot = if ad_hoc_active { None } else { active_slot };' \
+  '        let active_slot = if false { None } else { active_slot };' \
+  geode-shell \
+  an_active_ad_hoc_marker_beside_a_slot_reads_without_the_slot
+
+# A chain naming a column twice is refused whole, never deduplicated.
+run_mutation "ad hoc: a chain with a repeated name is refused" \
+  crates/geode-shell/src/session.rs \
+  '                                .all(|(i, n)| !names[..i].contains(n)) =>' \
+  '                                .all(|_| true) =>' \
+  geode-shell \
+  a_malformed_ad_hoc_chain_warns_and_is_ignored
+
+# Restore applies the chain to the lane.
+run_mutation "ad hoc: the session restore reaches the lane" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                if let Some(chain) = record.ad_hoc {
+                    s.restore_ad_hoc(chain, record.ad_hoc_active);
+                }' \
+  '                let _ = (&record.ad_hoc, record.ad_hoc_active);' \
+  geode-shell \
+  a_restored_active_ad_hoc_chain_is_the_grouping_in_force
+
+# Pinning at restore copies the shared lane's chain; a pinned record
+# without one must not keep it, or the writer saves it as the pin's own.
+run_mutation "ad hoc: a pinned restore clears the copied chain" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                lane.set_active_slot(None);
+                lane.forget_ad_hoc();' \
+  '                lane.set_active_slot(None);' \
+  geode-shell \
+  a_pinned_lane_without_a_chain_does_not_inherit_the_shared_one
+
+# A session written under another configuration can name a column this
+# one cannot group by; startup must drop that chain whole.
+run_mutation "ad hoc: startup checks the restored chain" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            for column in f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column)) {' \
+  '            for column in f.retain_ad_hoc(|_| true) {' \
+  geode-shell \
+  a_restored_chain_naming_an_unknown_column_is_dropped
+
+# A reload that removes a column drops the chain naming it.
+run_mutation "ad hoc: a reload checks the chain" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));' \
+  '                    let dropped = f.retain_ad_hoc(|_| true);' \
+  geode-shell \
+  a_reload_that_removes_a_column_drops_the_chain_naming_it
+
+# The readout must not call an ad hoc chain the view default.
+run_mutation "ad hoc: the readout names the chain" \
+  crates/geode-shell/src/scopebar.rs \
+  '        (GroupingChoice::AdHoc, _) => format!(' \
+  '        (GroupingChoice::AdHoc, _) if false => format!(' \
+  geode-shell \
+  an_ad_hoc_chain_reads_with_a_star_where_the_slot_number_goes
+
+# With nothing stored the action reports instead of appearing inert.
+run_mutation "ad hoc: the action with nothing stored says so" \
+  crates/geode-shell/src/shell/input.rs \
+  '                self.notice = Some(NO_AD_HOC.into());' \
+  '                let _ = NO_AD_HOC;' \
+  geode-shell \
+  the_ad_hoc_action_with_nothing_stored_says_so
+
 # ---- Grouping picker: toolbar click, frame::grouping and mod-g ----
 
 # Only FILLED slots are rows: an empty slot listed would be a row that
@@ -25899,8 +26060,10 @@ run_mutation "shell: a restored pinned lane has no undo back to empty" \
 run_mutation "shell: a restored pinned lane drops an empty recorded slot" \
   crates/geode-shell/src/shell/mod.rs \
   '                lane.set_active_slot(None);
+                lane.forget_ad_hoc();
                 lane.set_active_slot(record.active_slot);' \
-  '                lane.set_active_slot(record.active_slot);' \
+  '                lane.forget_ad_hoc();
+                lane.set_active_slot(record.active_slot);' \
   geode-shell a_restored_pin_with_an_empty_slot_drops_the_slot
 
 # A pin restored onto a workspace the layout lacks would surface as an
