@@ -128,11 +128,14 @@ pub struct Shifts {
 
 /// What one line asks. `PartialEq` is load-bearing: the sheet compares
 /// a line's request before and after an edit to decide whether to
-/// reprice it.
+/// reprice it, so a changed payout currency reprices the line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PriceRequest {
     pub instrument: Instrument,
     pub shifts: Shifts,
+    /// The payout currency the line's local values are asked in. A
+    /// pricer answers in it or refuses; it never substitutes another.
+    pub currency: Currency,
 }
 
 /// ISO 4217 code: three uppercase ASCII letters. `Copy` so a
@@ -413,14 +416,16 @@ mod tests {
     }
 
     #[test]
-    fn a_request_is_equal_when_every_field_is_and_differs_on_a_shift() {
+    fn a_request_is_equal_when_every_field_is_and_differs_on_a_shift_or_currency() {
         let a = PriceRequest {
             instrument: spx_call(),
             shifts: Shifts::default(),
+            currency: Currency::USD,
         };
         let b = PriceRequest {
             instrument: spx_call(),
             shifts: Shifts::default(),
+            currency: Currency::USD,
         };
         assert_eq!(a, b);
         let c = PriceRequest {
@@ -429,8 +434,14 @@ mod tests {
                 spot_pct: 1.0,
                 vol_pts: 0.0,
             },
+            currency: Currency::USD,
         };
         assert_ne!(a, c);
+        let d = PriceRequest {
+            currency: Currency::parse("EUR").unwrap(),
+            ..a.clone()
+        };
+        assert_ne!(a, d, "a request differing only in currency reprices");
     }
 
     #[test]

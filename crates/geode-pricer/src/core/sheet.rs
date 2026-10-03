@@ -329,6 +329,8 @@ impl Sheet {
             .map(|instrument| PriceRequest {
                 instrument: instrument.clone(),
                 shifts: self.effective_shifts(row),
+                // Every line prices in USD until lines carry a payout currency.
+                currency: Currency::USD,
             })
     }
 
