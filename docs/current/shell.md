@@ -38,9 +38,10 @@ appropriate only when independently hosted modules must observe the same
 application setting.
 
 The shell writes the first four. It installs `ReferenceGlobal` empty, and the
-app's bridge replaces it: at attach it reads every reference dataset of the
-startup schema at `AsOf::Live` under the reserved `REFERENCE_KEY`, and it reads
-a dataset again on each of its publishes. Only a dataset's latest-tagged answer
+app's bridge alone replaces it; modules only read and observe it. At attach
+the bridge reads every reference dataset of the startup schema at
+`AsOf::Live` under the reserved `REFERENCE_KEY`, and it reads a dataset again
+on each of its publishes. Only a dataset's latest-tagged answer
 is applied, and the global is set only when a table changed, so an observer
 wakes for a real change and never for a republish of the same rows. A dataset
 with nothing published is removed. A failed read keeps the last table and logs

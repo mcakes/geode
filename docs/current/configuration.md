@@ -702,7 +702,11 @@ and resolves to nothing, so new lines get no currency rather than one read
 from a guessed column. The value is checked against the startup schema, the
 one the running service serves, because datasets are restart-required. A
 reload applies the setting without a restart, and a change to it alone
-passes the pricer's reload gate.
+passes the pricer's reload gate. Unlike `underlyings`, an invalid value on a
+reload does not keep the last good setting: it drops the running payout
+source, so newly typed lines read `needs currency` until the value is
+fixed. Lines that already have a currency keep it, and blank lines refill
+when a reload names a different valid source.
 
 The pricer's views are ordinary `views.toml` views whose `dataset` is
 `pricer`. The builtin layer carries `vanilla` and `barrier`; a desk or user

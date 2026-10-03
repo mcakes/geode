@@ -232,7 +232,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   result that lands after a currency edit answers an older revision and is
   dropped. Yank copies the currency. `pricer_sheets` stores it in
   `currency`, its last value column (`""` when blank; a value that is not a
-  code loads blank), so a sheet saved before a line had one reloads it blank.
+  code loads blank), and a load fills a blank line from reference data like
+  any other: the stored `""` cannot tell a cleared currency from one never
+  set, so a cleared currency does not survive a reopen.
   `Sheet::shown_result` is the result cells, sort keys, filters and totals
   read: a line still holding an answer in a currency other than its payout
   currency (after a currency edit, or once cleared) reads `Currency::MIXED`,
@@ -621,6 +623,13 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 
 ## Known limitations
 
+- An undo across a reference refresh can pair an old underlying with the
+  refreshed currency. A refresh fill is not an undo step, so after an edit
+  moves a blank line to an underlying the table does not list, a refresh
+  that then fills it, and `u`, the line has its old underlying under the
+  currency looked up for the new one, and prices in it.
+- The mock pricer applies no quanto adjustment: a line moved to another
+  currency keeps its local figures and only its `_usd` twins change.
 - The idle stale tone waits for a repaint. The last priced time's `stale`
   is decided when the tile renders, and the pricer does not use
   `geode_tile::stale::StaleTimer`: its timer is a reprice interval whose

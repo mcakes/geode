@@ -1400,7 +1400,10 @@ module map and the observer, notification, and allocation contracts.
 `geode_core::pricing` defines the request, instrument, override, result, and
 `Pricer` vocabulary. `geode-pricing` contains implementations of that trait.
 The current `MockPricer` is deterministic test and demo behavior, not a
-financial model. The pricing worker applies one override set per batch,
+financial model. It prices in the request's payout currency with no quanto
+adjustment, so a line moved from USD to EUR keeps its local figures and its
+`_usd` columns scale by the EUR rate (1.08); it refuses a currency outside its
+rate table with `no USD rate for <code>`. The pricing worker applies one override set per batch,
 contains panics, and returns values or an error for each completed line.
 Cancellation can drop a queued batch or stop a running batch between lines,
 so cancelled requests need not return an outcome for every submitted line.
@@ -1479,13 +1482,20 @@ the table does not list, a cell that is not a code (read trimmed and in any
 case, so ` usd ` is USD), or no payout source leaves the line blank, reading
 `needs currency`, rather than pricing it in a guessed currency. Blank lines
 fill again whenever the reference table changes, a sheet loads, or a reload
-names a different payout source (a reload of anything else refills nothing,
-so a cleared currency stays cleared); such a fill never overwrites a
-currency already set, and it is not an undo step (`u` does not unfill), but
-the sheet saves it. Editing a blank line's underlying looks the new one up
-as part of that edit: `u` restores the old underlying and the blank
-currency together, and redo replays both. A line whose currency is set
-keeps it when its underlying changes. Column 0 is a connector tree. A package row shows its
+names a different payout source; a reload of anything else refills nothing.
+A cleared currency therefore stays cleared only until the next of those or
+an edit moving that line to another underlying: the store keeps a blank as
+`""`, which cannot tell a cleared currency from one never set, so a load
+refills both. A refresh, load or reload fill never overwrites a currency
+already set, and it is not an undo step (`u` does not unfill), but the sheet
+saves it. Editing a blank line's underlying looks the new one up as part of
+that edit: `u` restores the old underlying and the blank currency together,
+and redo replays both. Because a refresh fill is not an undo step, an undo
+across one can pair an old underlying with the refreshed currency: a line
+moved to an underlying the table does not list stays blank, and when a
+refresh then lists it and fills the line, `u` restores the old underlying
+under that currency (known limitation). A line whose currency is set keeps it when its underlying
+changes. Column 0 is a connector tree. A package row shows its
 chevron, its template (`CS`, `CUSTOM`) as a neutral chip, a summary of its
 legs' distinct expiries and strikes (`Z26 4800/5200`) and a muted leg count
 (`· 2 legs`). Each leg hangs from a drawn connector under the package's
@@ -2480,9 +2490,10 @@ values into the wrong columns of an existing database. A layer redeclaring it
 differently is ignored with an error diagnostic (see
 [configuration](configuration.md)); changing it needs a migration, which does
 not exist. Each line's payout currency is stored in `currency`, the last value
-column (`""` when blank; an unreadable code loads blank). It was appended on
-2026-10-03, so a database created before then is refused by the drift check
-and must be cleared (delete its `pricer_sheets` tables, or the database).
+column (`""` when blank; an unreadable code loads blank). A database whose
+`pricer_sheets` tables lack that column is refused by the drift check, with
+no migration: clear it (delete its `pricer_sheets` tables, or the database;
+for the demo, `$TMPDIR/geode-demo/<rows>-42/`).
 
 Every save is a new generation. A sheet keeps its live generation and the 200
 before it; older ones are swept on the writer after a save that crosses the

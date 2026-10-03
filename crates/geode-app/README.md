@@ -134,6 +134,9 @@ cargo check -p geode-app --features profiling
   `PricerSettings` at startup and on each pricer reload, both against the
   startup schema `Bridge` keeps: datasets are restart-required, so an edited
   `datasets` doc awaiting restart must not decide which column is read.
+  An invalid value resolves to `None` on a reload too, so it drops the
+  running source rather than keeping the last good one (`underlyings`
+  keeps its list); the error diagnostic names it.
 
 Upload targets resolve against registered adapters at startup. The bridge passes
 target/document lists to market-data factories and routes outcomes to the
