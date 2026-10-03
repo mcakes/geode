@@ -534,10 +534,6 @@ impl ShellView {
         self.scratch_active_tiles = active;
     }
 
-    /// Focus `tile` for a press on its own header chrome, wherever it sits
-    /// in the active workspace. `false` when the workspace has no such tile.
-    /// Only a change of focused tile dirties the session: the focus methods
-    /// report success even when the requested tile was already focused.
     /// Close `tile` for a press on its own ×: the same gates and
     /// bookkeeping as `workspace::close_tile`, aimed at the pressed tile
     /// rather than the focused one. A tile already gone is a no-op.
@@ -562,6 +558,10 @@ impl ShellView {
         cx.notify();
     }
 
+    /// Focus `tile` for a press on its own header chrome, wherever it sits
+    /// in the active workspace. `false` when the workspace has no such tile.
+    /// Only a change of focused tile dirties the session: the focus methods
+    /// report success even when the requested tile was already focused.
     fn focus_pressed_tile(&mut self, tile: TileId) -> bool {
         let ws = self.services.workspaces.active_mut();
         let was_focused = ws.focused_tile();

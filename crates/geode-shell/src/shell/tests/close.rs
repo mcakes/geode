@@ -250,3 +250,55 @@ fn the_placeholder_paints_the_close_button(cx: &mut gpui::TestAppContext) {
         );
     }
 }
+
+/// Press at `at` with `click_count`, as the platform reports each press
+/// of a double-click.
+fn press_counted(cx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>, count: usize) {
+    cx.update(|window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseDown(MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: count,
+                first_mouse: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            gpui::PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: count,
+            }),
+            cx,
+        );
+    });
+    draw(cx);
+}
+
+/// A double-click on the right tile's × closes that tile only: its
+/// neighbour grows under the pointer, and the second press neither
+/// closes it nor reaches its double-click gestures (fullscreen, picker).
+#[gpui::test]
+fn a_double_click_on_the_close_button_closes_one_tile(cx: &mut gpui::TestAppContext) {
+    let (services, a, b) = two_placeholders();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let at = cx.debug_bounds(sel(b)).expect("× painted").center();
+    press_counted(&mut cx, at, 1);
+    press_counted(&mut cx, at, 2);
+    shell.read_with(&cx, |s, _| {
+        let tree = s.services.workspaces.active().tree();
+        assert_eq!(tree.tiles(), vec![a], "exactly one tile closed");
+        assert_eq!(tree.fullscreen(), None, "the survivor is not fullscreen");
+        assert!(
+            !matches!(
+                s.choice_dialog.as_ref().map(|d| &d.target),
+                Some(crate::shell::choicedialog::Target::TileKind { .. })
+            ),
+            "no tile picker opened"
+        );
+    });
+}

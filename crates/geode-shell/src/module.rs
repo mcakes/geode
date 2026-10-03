@@ -248,9 +248,17 @@ impl CloseHandle {
                 Some(CLOSE_ACTION),
                 None,
             ))
-            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+            .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
                 cx.stop_propagation();
                 window.prevent_default();
+                // Only a first press closes. Closing one tile slides its
+                // neighbour (and its ×) under the pointer, so the second
+                // press of a double-click would otherwise close that tile
+                // too; swallowed, it reaches no tile's double-click gesture
+                // (fullscreen, picker) either.
+                if event.click_count > 1 {
+                    return;
+                }
                 handle.close(window, cx);
             })
     }
