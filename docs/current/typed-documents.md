@@ -262,6 +262,31 @@ available lightness path never reaches that contrast, its endpoint is
 returned. Untinted semantic tokens retain their exact theme color. Sign
 tinting applies contrast adjustment to all three variants, including zero.
 
+[`ValueColors::from_doc`](../../crates/geode-core/src/colour/values.rs) reads
+`value_colors.toml`: one table per dimension, each mapping a value's text to a
+`colors.toml` name. Values match exactly, so `spx` is not `SPX`. Five shapes
+are refused with an error that drops the entry: a dimension that is not a
+table, an entry that is not a string, `sign` (a column color mode, not a
+color), a name starting with `#` (an absolute color), and an empty value. An
+entry of `none` reads as unmapped without a diagnostic; it is how a higher
+layer clears a lower layer's color. A dimension whose entries are all cleared
+or refused is absent. The reader does not consult the schema or the color
+definitions.
+
+[`check_value_colors`](../../crates/geode-core/src/colour/values.rs) then
+prunes what cannot paint. A dimension is text, per `dimension_kind`, when some
+dataset declares it as a utf8 `dimension` or `key` column, or when it is a
+derived dimension (its values are labels); `text_dimensions` lists exactly
+those names. Three warnings each remove their entry: a dimension no dataset or
+derived dimension declares, a declared dimension that is never text (a numeric
+`strike` is not colored by its printed number), and a value naming a color
+`colors.toml` does not define, which paints without a color. What survives is
+exactly what a tile may look up, so paint performs no second validity check.
+`NamedColours::from_config` returns the color definitions together with the
+checked mapping (`NamedColours::values`), so one `Arc<NamedColours>` never
+pairs a mapping from one reload with definitions from another; its
+diagnostics are the colors reader's, the value reader's, then the check's.
+
 [`format_number`](../../crates/geode-core/src/format.rs) scales, rounds, then
 applies grouping and negative notation. Its returned sign follows the
 rounded result, so a small negative rounded to zero receives zero styling.

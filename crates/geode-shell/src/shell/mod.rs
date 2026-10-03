@@ -44,6 +44,7 @@ pub mod sidebar;
 pub mod stacklist;
 pub mod status;
 pub mod toolbar;
+mod value_color;
 pub mod whichkey;
 
 pub use keys::convert_keystroke;
@@ -275,6 +276,21 @@ pub struct Pickable {
     pub column: String,
     pub role: &'static str,
     pub datasets: Vec<String>,
+}
+
+/// The names `Color…` may be offered for: `geode_core::colour::text_dimensions`
+/// over the current datasets and derived dimensions. Cached on the shell
+/// and rebuilt with [`pickable_columns`].
+pub fn text_dimension_names(config: &Config) -> std::collections::BTreeSet<String> {
+    let (schema, _) = config
+        .doc("datasets")
+        .map(SchemaSpec::from_doc)
+        .unwrap_or_default();
+    let (dims, _) = config
+        .doc("dimensions")
+        .map(DerivedDimensions::from_doc)
+        .unwrap_or_default();
+    geode_core::colour::text_dimensions(&schema, &dims)
 }
 
 /// Collect categorical dataset columns in schema order, merging repeated
@@ -760,6 +776,8 @@ pub struct ShellView {
     /// Columns added later remain reachable through the two-stage `frame::pick`
     /// flow even though they have no new per-column palette action.
     pickable: Vec<Pickable>,
+    /// Cached [`text_dimension_names`]; rebuilt when `pickable` is.
+    pub(crate) text_dims: std::collections::BTreeSet<String>,
     /// Cached [`expr_vocab`] for the current datasets and dimensions: the
     /// scope expression suggestions' columns. Reload rebuilds it beside
     /// `pickable` and re-ranks an open expression field against it.
@@ -1451,6 +1469,7 @@ impl ShellView {
         // The dimension pickers' column list — see
         // `pickable`'s field doc.
         let pickable = pickable_columns(&services.config);
+        let text_dims = text_dimension_names(&services.config);
         let expr_vocab = std::rc::Rc::new(expr_vocab(&services.config));
         let page_entries: Vec<crate::module::PageEntry> = services.pages.entries().collect();
 
@@ -1531,6 +1550,7 @@ impl ShellView {
             pricing_baseline,
             vol_baseline,
             pickable,
+            text_dims,
             expr_vocab,
             picker: None,
             next_picker_tag: 0,

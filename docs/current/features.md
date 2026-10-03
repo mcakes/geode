@@ -329,6 +329,20 @@ columns](data-path.md#ungrouped-dimension-columns). A numeric dimension such as
 `strike` sorts by number and paints its exact value, never rounded by the text
 format.
 
+A dimension value that `value_colors` maps paints in that value's named
+color. A tree label is a value of the grouping dimension at its depth, so
+`L1` under `lhu` takes `lhu`'s mapping for `L1`, never another level's; the
+gutter number, indent and chevron keep their own paint. A `dimension`
+column's unanimous value takes its color too. `mixed`, blanks, the grand
+total, measures, headers and the selection footer are never value-colored.
+Muted states (`mixed`, non-attributable, determined non-additive, the `/`
+table's context rows) win; otherwise the value's color wins over the column's
+own `color` (`sign` or named), which wins over the foreground. A value has no
+sign, so a `tint_sign` color paints its base. The name is looked up when the
+visible window is prepared, not in render; a mapping or definitions reload
+re-prepares the window, and the `/` table drops its held cells when it is
+installed under a different mapping.
+
 `g m` opens a panel on the cursor row's `underlying_ref`, the column every
 panel kind accepts. The blotter reads it from the grouping path, a shown
 column, or the hidden context column the data service adds; a row above the
@@ -359,8 +373,13 @@ a dimension the row carries (a click beside the cells counts as the
 cursor's column). Blank space below the data opens nothing. A right-click
 inside a `V` row selection keeps the cursor and the selection; anywhere
 else it clears any selection and moves the cursor to the clicked row first.
-A row with nothing to offer (an `lhu` subtotal, say) shows `no actions for
-this row` instead.
+A row with nothing to offer shows `no actions for
+this row` instead. The menu's [`Color…`](shell.md#color) row sets the
+color a value paints in: the clicked column's value when that column is a
+text dimension (a `utf8` dimension or key column, or a derived dimension),
+else the row's own value, the grouping column's at the row's depth (`L1`
+on an `lhu` subtotal, `lhu` being a `utf8` dimension). The grand total
+stands for no value of its own.
 
 A row carrying a single `position_ref` or `instrument_ref` (from the grouping
 path, a shown column, or the hidden context column) gets an "Open in Nemo" row in that column's section.
@@ -1475,6 +1494,21 @@ in the theme's bearish color and a positive one bullish, a named color from
 `colors.toml` tints the column and its header; a stale cell stays muted and a
 failed one danger whatever the column's color. Measures default to `sign`;
 a column says `color = "none"` to opt out.
+A dimension value that `value_colors` maps paints in that value's named
+color: a text dimension's cell showing an own value (`underlying_ref` on a
+line or leg, and a package or group row's agreed value), and a group row's
+label when the sheet is grouped by that dimension. Label and cell both match
+the raw value grouping and scope read, not the painted spelling: an `expiry`
+mapping names `2026-12-18`, which paints `Z26`, and a package or group cell
+matches only the value every leg beneath it shares. Stale, failed,
+inherited, `mixed` and blank cells keep their state paint; otherwise the
+value's color wins over the column's own `color`, which wins over the
+foreground. A value has no sign, so a `tint_sign` color paints its base; on
+a leg's or a group row's ground it is floored as a named column color is.
+Measures, the line shorthand in column 0, headers and the selection footer
+are never value-colored. The name is looked up when the index is built and
+the window filled, not in render; a mapping or definitions reload rebuilds
+the index and refills the window under the new mapping.
 Result columns
 carry risk_snapshot's names — `npv`, `delta01`, `gamma01`, `vega01`,
 `rho010`, `clean_theta_business_day` and the rest — each with a `_usd` twin
@@ -1677,7 +1711,10 @@ selection, closing an open editor (a bulk edit's live steps roll back);
 anywhere else it clears any selection, closes an open editor or entry bar,
 and moves the cursor to the clicked row, keeping its column. A
 right-click inside the open editor's own cell is the editor's and opens no
-row menu; blank space below the lines opens nothing.
+row menu; blank space below the lines opens nothing. The menu's
+[`Color…`](shell.md#color) row is for `underlying_ref` on line, leg and
+package rows (a package's when its legs share one); a grouping row's context
+is empty, so it offers none.
 
 Emitting into a [link group](#link-groups), the pricer posts the same
 underlying `g m` opens on, as the group's scope, so the two never name

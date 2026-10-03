@@ -4096,7 +4096,7 @@ run_mutation "delegate: any_determined reflects the whole cached window" \
   '        self.cache
             .set_window(window.clone(), cols, |shown_row, col| {
                 let row = *shown.get(shown_row)? as usize;
-                cell(snapshot, plan, row, col)
+                cell(snapshot, plan, values, row, col)
             });
         // Scanned over the *whole* current window, not just the rows
         // this call'"'"'s `fill` closure actually ran for: `set_window`
@@ -4116,7 +4116,7 @@ run_mutation "delegate: any_determined reflects the whole cached window" \
         self.cache
             .set_window(window.clone(), cols, |shown_row, col| {
                 let row = *shown.get(shown_row)? as usize;
-                let c = cell(snapshot, plan, row, col)?;
+                let c = cell(snapshot, plan, values, row, col)?;
                 if c.attribution == Attribution::DeterminedNonAdditive {
                     any_determined = true;
                 }
@@ -12561,8 +12561,8 @@ run_mutation "colours: the browse swatch resolves the row's own definition" \
 # A colours change reaches the tiles like a views change.
 run_mutation "hot_reload: a colours change fires ConfigReloaded" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                || changed(geode_core::config::COLORS_DOC);' \
-  '                || changed("views");' \
+  '                || changed(geode_core::config::COLORS_DOC)' \
+  '                || changed("views")' \
   geode-shell \
   a_colours_change_fires_config_reloaded
 
@@ -31778,8 +31778,8 @@ run_mutation "link: a moved highlight is kept until the query changes" \
 # change.
 run_mutation "link: other dialogs keep the highlight by text" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '            | Target::ActionValue { .. } => self.list.set_query(query),' \
-  '            | Target::ActionValue { .. } => self.list.set_query_placing(query, None),' \
+  '            | Target::ValueColor { .. } => self.list.set_query(query),' \
+  '            | Target::ValueColor { .. } => self.list.set_query_placing(query, None),' \
   geode-shell other_targets_keep_the_highlight_by_text
 
 run_mutation "link: the title names the current groups" \
@@ -33388,7 +33388,7 @@ run_mutation "blotter find: the arriving index re-formats the opened rows" \
 
 run_mutation "blotter find: the row report formats nothing" \
   crates/geode-blotter/src/delegate.rs \
-  '            cell(&p.snapshot, &p.plan, row, c)' \
+  '            cell(&p.snapshot, &p.plan, colours.values(), row, c)' \
   '            { let _ = (p, row, c); None }' \
   geode-blotter \
   fzf_formats_only_the_rows_it_paints
@@ -34850,6 +34850,344 @@ run_mutation "close: the vol slice content forwards its handle" \
   '        self.tile.update(cx, |t, cx| t.set_close(close, cx))' \
   '        let _ = (close, cx);' \
   geode-volslice the_header_paints_the_close_button
+
+# value_colors merges per value: listing it as atomic would make a user
+# override of one value drop the desk's others.
+run_mutation "value colors: the document merges per value" \
+  crates/geode-core/src/config/merge.rs \
+  '        "colors" => Some(1),' \
+  '        "colors" | "value_colors" => Some(1),' \
+  geode-core \
+  value_colors_merge_per_value_not_per_dimension
+
+# `none` clears: it must not be stored as a color named "none".
+run_mutation "value colors: none reads as unmapped" \
+  crates/geode-core/src/colour/values.rs \
+  '                if name == NO_COLOR {' \
+  '                if name == "\u{0}" {' \
+  geode-core \
+  none_reads_as_unmapped_without_a_diagnostic
+
+# `sign` is a column mode, not a color.
+run_mutation "value colors: sign is refused" \
+  crates/geode-core/src/colour/values.rs \
+  '                if name == "sign" {' \
+  '                if name == "\u{0}" {' \
+  geode-core \
+  refused_entries_are_dropped_with_an_error_at_their_path
+
+# The check prunes an unknown color: a pruned value must not reach paint.
+run_mutation "value colors: an unknown color is pruned" \
+  crates/geode-core/src/colour/values.rs \
+  '            if named.get(color).is_none() {' \
+  '            if false {' \
+  geode-core \
+  the_check_prunes_what_cannot_paint_and_says_why
+
+# A non-text dimension is ignored, not colored by its printed number.
+run_mutation "value colors: a non-text dimension is ignored" \
+  crates/geode-core/src/colour/values.rs \
+  '        if column.ty == ColumnType::Utf8 {' \
+  '        if true {' \
+  geode-core \
+  a_dimension_is_text_not_text_or_undeclared
+
+# None over a desk color must write `none`: removing the user key alone
+# would let the desk's color show again.
+run_mutation "value colors: None over a desk color writes none" \
+  crates/geode-core/src/colour/values.rs \
+  '            } else if state.lower.as_deref().is_some_and(|c| c != NO_COLOR) {' \
+  '            } else if false {' \
+  geode-core \
+  a_pick_becomes_the_smallest_user_layer_write
+
+# A user `none` over a desk color is no color, not the desk's.
+run_mutation "value colors: a user none clears the effective color" \
+  crates/geode-core/src/colour/values.rs \
+  '        .filter(|c| c != NO_COLOR);' \
+  '        ;' \
+  geode-core \
+  the_state_separates_the_user_entry_from_the_layers_below
+
+# A value_colors edit alone reaches the app's reload handler.
+run_mutation "value colors: a change alone emits ConfigReloaded" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                || changed(geode_core::config::VALUE_COLORS_DOC);' \
+  '                ;' \
+  geode-shell \
+  a_value_colors_change_alone_emits_config_reloaded
+
+# A value_colors edit alone must re-run the pricer's reload.
+run_mutation "value colors: the pricer reload key covers value_colors" \
+  crates/geode-app/src/bridge.rs \
+  '            .doc(geode_core::config::VALUE_COLORS_DOC)' \
+  '            .doc(geode_core::config::COLORS_DOC)' \
+  geode-app \
+  the_pricer_reload_key_changes_with_value_colors
+
+# The reload handler's colors carry the value mapping, not the definitions alone.
+run_mutation "value colors: the reload hands the blotter the mapping" \
+  crates/geode-app/src/bridge.rs \
+  '                let (colours, colour_diags) = NamedColours::from_config(config);' \
+  '                let (colours, colour_diags) = config.doc(geode_core::config::COLORS_DOC).map(NamedColours::from_doc).unwrap_or_default();' \
+  geode-app \
+  a_config_reload_hands_the_blotter_factory_the_value_colors
+
+# A value's color wins over the column's own color.
+run_mutation "blotter: a value color wins over the column color" \
+  crates/geode-blotter/src/delegate.rs \
+  '    if value {
+        return TextPaint::Value;
+    }' \
+  '    if false {
+        return TextPaint::Value;
+    }' \
+  geode-blotter \
+  a_values_color_wins_over_the_columns_color_and_nothing_else_changes
+
+# A label is a value of the grouping column at ITS depth, not the first.
+run_mutation "blotter: a tree label is colored by its own level's dimension" \
+  crates/geode-blotter/src/core/cache.rs \
+  '                .and_then(|level| plan.grouping.get(level))' \
+  '                .and_then(|_| plan.grouping.first())' \
+  geode-blotter \
+  a_tree_label_carries_the_color_of_its_levels_value
+
+# A reloaded mapping re-reads the prepared window.
+run_mutation "blotter: a reloaded mapping invalidates the prepared cells" \
+  crates/geode-blotter/src/delegate.rs \
+  '            self.invalidate_cells();
+        }
+    }
+
+    /// Named colour of column' \
+  '        }
+    }
+
+    /// Named colour of column' \
+  geode-blotter \
+  a_reloaded_mapping_reaches_the_prepared_window
+
+# The / table's held cells carry names from one mapping.
+run_mutation "blotter: a find display under a new mapping drops its cells" \
+  crates/geode-blotter/src/delegate.rs \
+  '            && Arc::ptr_eq(&self.colours, &colours)' \
+  '            && true' \
+  geode-blotter \
+  a_find_display_under_a_new_mapping_drops_its_held_cells
+
+# A failed or stale cell keeps its state paint even when its value is colored.
+run_mutation "pricer: a state paint wins over a value color" \
+  crates/geode-pricer/src/paint.rs \
+  '    if !matches!(state, CellState::Own) {
+        return CellColour::State;
+    }
+    if value {' \
+  '    if value {' \
+  geode-pricer \
+  a_values_color_sits_between_the_state_paint_and_the_columns_color
+
+# Only an own value is looked up: a stale, `mixed` or blank cell is no value.
+run_mutation "pricer: only an own cell carries a value color" \
+  crates/geode-pricer/src/grid.rs \
+  '        let value_color = (t.state == CellState::Own' \
+  '        let value_color = (true' \
+  geode-pricer \
+  a_stale_cell_carries_no_value_color
+
+# A cell is looked up by the raw value its group label uses, not by its
+# painted text: an `expiry` mapping on `2026-12-18` colors `Z26` cells.
+run_mutation "pricer: a cell matches its raw value, not its painted text" \
+  crates/geode-pricer/src/grid.rs \
+  '        .and_then(|key| self.src.values.get(c.def.name, &key))' \
+  '        .and_then(|_| self.src.values.get(c.def.name, &t.text))' \
+  geode-pricer \
+  an_expiry_mapping_colors_group_labels_and_cells_by_one_raw_value
+
+# A package's aggregating cell matches the value its legs share; the
+# package row itself reads no expiry.
+run_mutation "pricer: a package cell matches its legs' sole raw value" \
+  crates/geode-pricer/src/grid.rs \
+  '                    sole_raw(sheet, sheet.children(r), def.name, clock)' \
+  '                    sole_raw(sheet, [r], def.name, clock)' \
+  geode-pricer \
+  an_expiry_mapping_colors_group_labels_and_cells_by_one_raw_value
+
+# The Color list's swatches resolve once per theme, not on every paint.
+run_mutation "value colors: swatches are cached per theme signature" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            Some((k, rows)) if *k == key => rows.clone(),' \
+  '            Some((k, rows)) if false && *k == key => rows.clone(),' \
+  geode-shell \
+  value_color_swatches_resolve_once_per_theme
+
+# A group row's label is its value: the index carries its color.
+run_mutation "pricer: a group row carries its value color" \
+  crates/geode-pricer/src/grid.rs \
+  '                    .and_then(|_| self.values.get(column, label))' \
+  '                    .and_then(|_| None::<&Arc<str>>)' \
+  geode-pricer \
+  a_group_label_and_a_dimension_cell_carry_their_values_color
+
+# A reload's rebuild reads the factory's new mapping before building.
+run_mutation "pricer: a reloaded mapping reaches the prepared rows" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.colors = self.shared.colours.borrow().clone();' \
+  '' \
+  geode-pricer \
+  a_reloaded_mapping_reaches_the_prepared_rows
+
+# A value color on a group row's ground is floored like a named column color.
+run_mutation "pricer: a group label's value color is floored on its ground" \
+  crates/geode-pricer/src/delegate.rs \
+  '            (Some(c), Some(palette)) => self.on_ground(palette, c.base),' \
+  '            (Some(c), Some(_)) => c.base,' \
+  geode-pricer \
+  a_reloaded_mapping_reaches_the_prepared_rows
+
+# Color… is offered for text dimensions only.
+run_mutation "row menu: Color is offered for text dimensions only" \
+  crates/geode-shell/src/dimension.rs \
+  '        .filter(|column| text_dims.contains(*column))' \
+  '        .filter(|_| true)' \
+  geode-shell \
+  no_color_row_without_a_text_dimension_value_at_the_row
+
+# A clicked text dimension leads the row's own.
+run_mutation "row menu: the clicked text dimension takes Color" \
+  crates/geode-shell/src/dimension.rs \
+  '    [ctx.first.as_ref(), ctx.own.as_ref()]' \
+  '    [ctx.own.as_ref(), ctx.first.as_ref()]' \
+  geode-shell \
+  a_clicked_text_dimension_takes_color_from_the_rows_own
+
+# The shell's open path hands the menu its cached text dimensions.
+run_mutation "row menu: the open path offers Color from the shell's text dimensions" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '        let rows = menu_rows(&context, &self.services.roster, &self.text_dims);' \
+  '        let rows = menu_rows(&context, &self.services.roster, &Default::default());' \
+  geode-shell \
+  g_dot_offers_color_for_the_rows_own_text_dimension
+
+# A reload that changes the datasets rebuilds the text dimensions.
+run_mutation "row menu: a reload rebuilds the text dimensions" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                self.text_dims = text_dimension_names(&self.services.config);' \
+  '                let _ = text_dimension_names(&self.services.config);' \
+  geode-shell \
+  a_reload_that_removes_a_column_rebuilds_the_text_dimensions
+
+# A blotter row owns the grouping column at its depth; the grand total none.
+run_mutation "blotter: a row owns the grouping column at its depth" \
+  crates/geode-blotter/src/delegate.rs \
+  '                .checked_sub(1)' \
+  '                .checked_sub(0)' \
+  geode-blotter \
+  the_rows_context_names_the_grouping_column_at_its_depth
+
+# A pricer row naming an underlying owns underlying_ref.
+run_mutation "pricer: a line's context owns its underlying" \
+  crates/geode-pricer/src/tile.rs \
+  '                ctx.own = Some("underlying_ref".into());' \
+  '                ctx.own = None;' \
+  geode-pricer \
+  a_lines_context_owns_its_underlying
+
+# A dimension entry that is not a table refuses the write.
+run_mutation "value colors: a non-table dimension refuses the write" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '                let entry = doc.entry(dimension).or_insert(toml_edit::table());' \
+  '                doc.remove(dimension); let entry = doc.entry(dimension).or_insert(toml_edit::table());' \
+  geode-shell \
+  a_write_into_a_non_table_dimension_is_refused_and_leaves_the_file
+
+# Removing the last value removes the emptied dimension table.
+run_mutation "value colors: an emptied dimension table is removed" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '                if emptied {' \
+  '                if false {' \
+  geode-shell \
+  a_remove_drops_the_key_and_an_emptied_dimension
+
+# A value is one key, never split on a dot into nested tables.
+run_mutation "value colors: a dotted value is one key" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '                table.insert(value, toml_edit::value(name.as_str()));' \
+  '                table.insert(value.split(".").next().unwrap_or(value), toml_edit::value(name.as_str()));' \
+  geode-shell \
+  a_dotted_value_is_written_as_one_quoted_key
+
+# A pick that changes nothing writes nothing.
+run_mutation "value colors: an unchanged pick writes nothing" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '        if write == ValueWrite::Nothing {' \
+  '        if false {' \
+  geode-shell \
+  enter_on_the_untouched_list_writes_nothing
+
+# The write is decided against the color as painted: an undefined name is none.
+run_mutation "value colors: an undefined color in force is no color to clear" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '        state.effective = state.effective.filter(|name| named.get(name).is_some());' \
+  '        let _ = &named;' \
+  geode-shell \
+  enter_over_an_undefined_desk_color_writes_nothing
+
+# No user directory says so instead of saving nothing silently.
+run_mutation "value colors: no user directory says so" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '            self.notice = Some(NO_USER_DIR.into());' \
+  '            self.notice = None;' \
+  geode-shell \
+  a_pick_with_no_user_directory_says_so
+
+# A failed write shows the writer's error, not the success notice.
+run_mutation "value colors: a failed write shows the writer's error" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '                    Err(e) => e.into(),' \
+  '                    Err(_) => done.into(),' \
+  geode-shell \
+  a_failed_write_shows_the_writers_error
+
+# The list opens on the color in force.
+run_mutation "value colors: the list opens on the current color" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        list.set_ranked_highlighted(opening);' \
+  '        let _ = opening;' \
+  geode-shell \
+  the_color_list_holds_the_names_then_none_and_opens_on_the_current
+
+# A row stands for its pick by position: a color may be named None.
+run_mutation "value colors: a pick goes by position, not by text" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                pick: picks[declared].clone(),' \
+  '                pick: if self.list.options()[declared] == NO_COLOR_ROW { ValuePick::None } else { picks[declared].clone() },' \
+  geode-shell \
+  a_color_named_none_is_still_picked_by_position
+
+# Each color row paints its swatch.
+run_mutation "value colors: the color rows paint swatches" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    if swatches.iter().all(Option::is_none) {' \
+  '    if true {' \
+  geode-shell \
+  color_opens_the_pick_list_with_swatches
+
+# With no named colors the list says where to define one.
+run_mutation "value colors: no named colors shows the muted line" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        .children(no_colors.then(|| {' \
+  '        .children(false.then(|| {' \
+  geode-shell \
+  with_no_named_colors_the_list_holds_none_and_says_where_to_define_one
+
+# A desk entry of none offers no Follow desk row beside None.
+run_mutation "value colors: a desk none is nothing to follow" \
+  crates/geode-core/src/colour/values.rs \
+  '            (Some(user), Some(lower)) if user != lower && lower != NO_COLOR => Some(lower),' \
+  '            (Some(user), Some(lower)) if user != lower => Some(lower),' \
+  geode-core \
+  the_state_separates_the_user_entry_from_the_layers_below
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

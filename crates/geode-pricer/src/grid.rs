@@ -9,19 +9,24 @@
 //! all prepared here. A row's shorthand is also its search key.
 
 use crate::core::columns::{
-    CellState, CellText, ColumnKind, cell_text, group_cell_text, leg_reading, subset_cell_text,
+    CellState, CellText, ColumnDef, ColumnKind, cell_text, group_cell_text, leg_reading,
+    subset_cell_text,
 };
-use crate::core::rollup::{NULL_LABEL, NodeKind, Rollup, legs_under};
+use crate::core::rollup::{self, NULL_LABEL, NodeKind, Rollup, legs_under};
 use crate::core::sheet::{Folded, LineId, RowKind, Sheet};
 use crate::core::shorthand::{render_expiry, render_strike};
 use crate::core::tree::Expansion;
 use crate::core::views::ColumnPlan;
+use crate::core::visibility::SheetRow;
 use geode_core::clock::Clock;
-use geode_core::colour::Sign;
+use geode_core::colour::{Sign, ValueColors};
+use geode_core::document::Value;
 use geode_core::expansion::{Expansion as GroupExpansion, Path};
+use geode_core::scope::RowValues;
 use geode_core::view::Colour;
 use gpui::SharedString;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct GridColumn {
@@ -71,6 +76,9 @@ pub struct GridCell {
     pub state: CellState,
     /// A measure's sign as formatted; `None` on a text cell.
     pub sign: Option<Sign>,
+    /// The color `value_colors` maps this cell's dimension value to,
+    /// looked up when the window is filled.
+    pub value_color: Option<Arc<str>>,
 }
 
 /// One painted row's tree-column facts, as [`Flatten`] pushes them.
@@ -102,6 +110,9 @@ struct TreeRow {
     search: SharedString,
     /// The enclosing group row, for a group row's grouped-column cells.
     parent: Option<u32>,
+    /// A group row's value color (its label is the group's value); `None`
+    /// on every other row.
+    value_color: Option<Arc<str>>,
 }
 
 /// Every painted row's tree-column facts, in parallel arrays, and where
@@ -121,6 +132,7 @@ pub struct GridIndex {
     note: Vec<SharedString>,
     search: Vec<SharedString>,
     parent: Vec<Option<u32>>,
+    value_color: Vec<Option<Arc<str>>>,
     /// Line → (first painted row, how many rows paint it).
     row_of: HashMap<LineId, (u32, u32)>,
 }
@@ -141,6 +153,8 @@ pub struct TreeRef<'a> {
     pub text: &'a SharedString,
     pub note: &'a SharedString,
     pub search: &'a SharedString,
+    /// A group row's value color; `None` on every other row.
+    pub value_color: Option<&'a Arc<str>>,
 }
 
 #[cfg(test)]
@@ -289,6 +303,7 @@ impl GridIndex {
         self.note.push(r.note);
         self.search.push(r.search);
         self.parent.push(r.parent);
+        self.value_color.push(r.value_color);
     }
 
     pub fn len(&self) -> usize {
@@ -312,6 +327,7 @@ impl GridIndex {
             text: &self.text[g],
             note: &self.note[g],
             search: &self.search[g],
+            value_color: self.value_color[g].as_ref(),
         })
     }
 
@@ -388,6 +404,7 @@ impl GridIndex {
         packages: &Expansion,
         plan: &ColumnPlan,
         clock: Clock,
+        values: &ValueColors,
     ) -> GridIndex {
         #[cfg(test)]
         BUILDS.with(|b| b.set(b.get() + 1));
@@ -411,6 +428,7 @@ impl GridIndex {
             packages,
             plan,
             clock,
+            values,
             out: GridIndex::default(),
             enclosing: Vec::new(),
         };
@@ -505,6 +523,8 @@ struct Flatten<'a> {
     packages: &'a Expansion,
     plan: &'a ColumnPlan,
     clock: Clock,
+    /// The value → color mapping a group row's label is looked up in.
+    values: &'a ValueColors,
     out: GridIndex,
     /// The enclosing group rows, root first: each pushed row's `parent`.
     enclosing: Vec<u32>,
@@ -527,6 +547,12 @@ impl<'a> Flatten<'a> {
                     None => SharedString::new_static(NULL_LABEL),
                     Some(_) => self.label(column, legs.first().copied(), label),
                 };
+                // The rollup's `label` is the value's own text; the painted
+                // label may be the column's formatted spelling of it.
+                let value_color = value
+                    .as_ref()
+                    .and_then(|_| self.values.get(column, label))
+                    .cloned();
                 self.out.push(TreeRow {
                     kind: GridRowKind::Group {
                         open,
@@ -542,6 +568,7 @@ impl<'a> Flatten<'a> {
                     text,
                     note: SharedString::default(),
                     parent: self.enclosing.last().copied(),
+                    value_color,
                 });
                 self.enclosing.push((self.out.len() - 1) as u32);
                 if open {
@@ -610,6 +637,7 @@ impl<'a> Flatten<'a> {
             note: leg_note(if partial { legs.len() } else { total }, total).into(),
             search: package_search(sheet, r, partial.then_some(legs)).into(),
             parent: self.enclosing.last().copied(),
+            value_color: None,
         });
     }
 
@@ -629,18 +657,20 @@ impl<'a> Flatten<'a> {
             note: SharedString::default(),
             search: s,
             parent: self.enclosing.last().copied(),
+            value_color: None,
         });
     }
 }
 
 /// What a window fill reads: the sheet, the rollup the index was built
-/// from, the plan, the clock.
+/// from, the plan, the clock, and the value → color mapping.
 #[derive(Clone, Copy)]
 pub struct FillSource<'a> {
     pub sheet: &'a Sheet,
     pub rollup: &'a Rollup,
     pub plan: &'a ColumnPlan,
     pub clock: Clock,
+    pub values: &'a ValueColors,
 }
 
 /// A row's fold, prepared once for every cell of the row.
@@ -651,6 +681,26 @@ enum RowFold {
     Subset { folded: Folded },
     /// Every other row reads its own cells.
     Own,
+}
+
+/// The raw value every one of `rows` reads for column `name`, as
+/// `rollup::text` spells it; `None` when one reads none or two differ.
+fn sole_raw(
+    sheet: &Sheet,
+    rows: impl IntoIterator<Item = usize>,
+    name: &str,
+    clock: Clock,
+) -> Option<String> {
+    let mut sole: Option<String> = None;
+    for row in rows {
+        let v = rollup::text(&SheetRow { sheet, row, clock }.value(name)?);
+        match &sole {
+            None => sole = Some(v),
+            Some(s) if *s != v => return None,
+            Some(_) => {}
+        }
+    }
+    sole
 }
 
 /// One fill pass over some rows. A group row folds its legs only when it is
@@ -723,35 +773,80 @@ impl<'a> CellPass<'a> {
         self.memo = Some((g, fold));
     }
 
-    /// The cells a group row shows for its own and enclosing groups' columns:
-    /// the group's value, not a unanimity its legs agree on by construction.
-    fn grouped_shown(&self, g: usize, name: &str) -> Option<CellText> {
+    /// The grid row of `g` or its nearest enclosing group row grouping
+    /// column `name`, and that group's value.
+    fn grouped_at(&self, g: usize, name: &str) -> Option<(usize, &'a Option<Value>)> {
         let mut at = Some(g);
         while let Some(a) = at {
             if let Some(NodeKind::Group { column, value, .. }) =
                 self.index.node(a).map(|n| &self.src.rollup.nodes[n].kind)
                 && column == name
             {
-                return Some(match value {
-                    None => CellText {
-                        text: String::new(),
-                        state: CellState::Blank,
-                        sign: None,
-                    },
-                    Some(_) => CellText {
-                        text: self
-                            .index
-                            .text(a)
-                            .map(|t| t.to_string())
-                            .unwrap_or_default(),
-                        state: CellState::Own,
-                        sign: None,
-                    },
-                });
+                return Some((a, value));
             }
             at = self.index.parent(a);
         }
         None
+    }
+
+    /// The raw value row `g` stands for in column `def`, spelled as a group
+    /// label spells it (`rollup::text` of the `SheetRow` value), so a
+    /// mapping colors a cell and a group label by one key even where the
+    /// cell paints another spelling (`expiry`: `2026-12-18` paints `Z26`).
+    /// A group row's grouped column is the group's value; a group row's
+    /// other columns, and a package's aggregating columns, the value every
+    /// leg beneath it shares, or `None` where they differ or one has none.
+    fn value_key(&self, g: usize, def: &ColumnDef) -> Option<String> {
+        let (sheet, clock) = (self.src.sheet, self.src.clock);
+        match &self.memo {
+            Some((_, RowFold::Group { legs, .. })) => match self.grouped_at(g, def.name) {
+                Some((_, value)) => value.as_ref().map(rollup::text),
+                None => sole_raw(sheet, legs.iter().copied(), def.name, clock),
+            },
+            Some((_, RowFold::Subset { .. })) => {
+                let r = self.index.sheet_row(g)?;
+                let node = self.index.node(g)?;
+                let NodeKind::Package { legs: shown, .. } = &self.src.rollup.nodes[node].kind
+                else {
+                    return None;
+                };
+                if crate::core::package::aggregates(def.kind) {
+                    sole_raw(sheet, shown.iter().copied(), def.name, clock)
+                } else {
+                    sole_raw(sheet, [r], def.name, clock)
+                }
+            }
+            _ => {
+                let r = self.index.sheet_row(g)?;
+                if sheet.is_package(r) && crate::core::package::aggregates(def.kind) {
+                    sole_raw(sheet, sheet.children(r), def.name, clock)
+                } else {
+                    sole_raw(sheet, [r], def.name, clock)
+                }
+            }
+        }
+    }
+
+    /// The cells a group row shows for its own and enclosing groups' columns:
+    /// the group's value, not a unanimity its legs agree on by construction.
+    fn grouped_shown(&self, g: usize, name: &str) -> Option<CellText> {
+        let (a, value) = self.grouped_at(g, name)?;
+        Some(match value {
+            None => CellText {
+                text: String::new(),
+                state: CellState::Blank,
+                sign: None,
+            },
+            Some(_) => CellText {
+                text: self
+                    .index
+                    .text(a)
+                    .map(|t| t.to_string())
+                    .unwrap_or_default(),
+                state: CellState::Own,
+                sign: None,
+            },
+        })
     }
 
     /// Row `g`'s cell in plan column `col`, formatted through the column
@@ -788,10 +883,20 @@ impl<'a> CellPass<'a> {
             }
             _ => cell_text(sheet, self.index.sheet_row(g)?, c.def, &c.format, clock),
         };
+        // A mapping holds text dimensions only, so a measure column finds
+        // nothing; `mixed` and blank are not values. The lookup key is the
+        // raw value a group label is looked up by, not the painted text.
+        let value_color = (t.state == CellState::Own
+            && self.src.values.dimension(c.def.name).is_some())
+        .then(|| self.value_key(g, c.def))
+        .flatten()
+        .and_then(|key| self.src.values.get(c.def.name, &key))
+        .cloned();
         Some(GridCell {
             text: t.text.into(),
             state: t.state,
             sign: t.sign,
+            value_color,
         })
     }
 }
@@ -821,12 +926,16 @@ mod tests {
         ColumnPlan::build(Views::builtin().get("vanilla").unwrap())
     }
 
+    static NO_VALUES: std::sync::LazyLock<ValueColors> =
+        std::sync::LazyLock::new(ValueColors::default);
+
     fn src<'a>(s: &'a Sheet, r: &'a Rollup, plan: &'a ColumnPlan) -> FillSource<'a> {
         FillSource {
             sheet: s,
             rollup: r,
             plan,
             clock: Clock::utc(),
+            values: &NO_VALUES,
         }
     }
 
@@ -859,7 +968,15 @@ mod tests {
     fn build_vis(s: &Sheet, e: &Expansion, v: &Visibility) -> (Rollup, GridIndex) {
         let dims = DerivedDimensions::default();
         let r = rollup::build(s, v, &EffectiveChain::default(), &dims, Clock::utc());
-        let m = GridIndex::build(s, &r, &GroupExpansion::default(), e, &plan(), Clock::utc());
+        let m = GridIndex::build(
+            s,
+            &r,
+            &GroupExpansion::default(),
+            e,
+            &plan(),
+            Clock::utc(),
+            &ValueColors::default(),
+        );
         (r, m)
     }
 
@@ -1268,7 +1385,15 @@ mod tests {
         let levels: Vec<String> = levels.iter().map(|l| l.to_string()).collect();
         let chain = effective_chain(&levels, dims);
         let r = rollup::build(s, &Visibility::all(s), &chain, dims, Clock::utc());
-        let m = GridIndex::build(s, &r, groups, packages, plan, Clock::utc());
+        let m = GridIndex::build(
+            s,
+            &r,
+            groups,
+            packages,
+            plan,
+            Clock::utc(),
+            &ValueColors::default(),
+        );
         (r, m)
     }
 
@@ -1372,7 +1497,15 @@ mod tests {
     #[test]
     fn the_window_paints_what_the_formatter_formats() {
         let (s, tree, plan, groups, packages) = grouped_fixture();
-        let index = GridIndex::build(&s, &tree, &groups, &packages, &plan, Clock::utc());
+        let index = GridIndex::build(
+            &s,
+            &tree,
+            &groups,
+            &packages,
+            &plan,
+            Clock::utc(),
+            &ValueColors::default(),
+        );
         let mut window = WindowCache::default();
         let mut pass = CellPass::new(src(&s, &tree, &plan), &index);
         window.set_window(0..index.len(), index.columns.len(), |g, c| pass.cell(g, c));
@@ -1384,11 +1517,159 @@ mod tests {
         }
     }
 
+    /// Only an own cell carries a value color: an unpriced line's status
+    /// reads `pricing…` as its raw value too, but its cell is stale.
+    #[test]
+    fn a_stale_cell_carries_no_value_color() {
+        let s = fixture();
+        let (r, m) = build(&s, &Expansion::default());
+        let plan = plan_of(&["status"]);
+        let mut values = ValueColors::default();
+        values.insert("status", "pricing\u{2026}", "blue");
+        let src = FillSource {
+            sheet: &s,
+            rollup: &r,
+            plan: &plan,
+            clock: Clock::utc(),
+            values: &values,
+        };
+        let line = (0..m.len())
+            .find(|&g| m.sheet_row(g).is_some_and(|row| s.is_line(row)))
+            .expect("a line");
+        let cell = CellPass::new(src, &m).cell(line, 0).expect("a status cell");
+        assert_eq!(
+            (&*cell.text, cell.state),
+            ("pricing\u{2026}", CellState::Stale),
+            "fixture: an unpriced line is pricing"
+        );
+        assert_eq!(cell.value_color, None);
+    }
+
+    /// A group's label takes its raw value's color, and a leg's dimension
+    /// cell its value's; a measure cell, a line's shorthand and a `mixed`
+    /// cell (whose text is no value) never do.
+    #[test]
+    fn a_group_label_and_a_dimension_cell_carry_their_values_color() {
+        let (s, rollup, plan, groups, packages) = grouped_fixture();
+        let mut values = ValueColors::default();
+        values.insert("underlying_ref", "SPX", "blue");
+        // `option_type` reads `mixed` on the SPX group row (puts and calls).
+        values.insert("option_type", "mixed", "blue");
+        let m = GridIndex::build(
+            &s,
+            &rollup,
+            &groups,
+            &packages,
+            &plan,
+            Clock::utc(),
+            &values,
+        );
+        let spx = group_row(&m, "SPX");
+        assert_eq!(
+            m.tree(spx).unwrap().value_color.map(|c| &**c),
+            Some("blue"),
+            "the group's label is its value"
+        );
+        assert_eq!(
+            m.tree(group_row(&m, "NDX")).unwrap().value_color,
+            None,
+            "an unmapped group"
+        );
+        let src = FillSource {
+            sheet: &s,
+            rollup: &rollup,
+            plan: &plan,
+            clock: Clock::utc(),
+            values: &values,
+        };
+        let mut pass = CellPass::new(src, &m);
+        let under = col("underlying_ref");
+        // The first leg row under the SPX group shows SPX in its
+        // underlying cell.
+        let leg = (spx + 1..m.len())
+            .find(|&g| m.sheet_row(g).is_some())
+            .expect("a line under the group");
+        let cell = pass.cell(leg, under).expect("an underlying cell");
+        assert_eq!(&*cell.text, "SPX");
+        assert_eq!(cell.value_color.as_deref(), Some("blue"));
+        // A measure cell and a line's shorthand never do.
+        assert_eq!(pass.cell(leg, col("qty")).and_then(|c| c.value_color), None);
+        assert_eq!(m.tree(leg).unwrap().value_color, None);
+        let mixed = pass.cell(spx, col("option_type")).expect("an option cell");
+        assert_eq!(
+            (mixed.text.as_ref(), mixed.state),
+            ("mixed", CellState::Mixed),
+            "fixture: the SPX group's option type is mixed"
+        );
+        assert_eq!(mixed.value_color, None, "`mixed` is not a value");
+    }
+
+    /// `expiry` paints `Z26` while its raw value (what grouping and scope
+    /// read) is `2026-12-18`: a mapping keyed by the raw value colors the
+    /// group label, the group row's own expiry cell, a package's sole
+    /// expiry and a leg's cell alike; one keyed by the painted spelling
+    /// colors none of them.
+    #[test]
+    fn an_expiry_mapping_colors_group_labels_and_cells_by_one_raw_value() {
+        let (s, rollup, plan, groups, packages) = grouped_fixture();
+        for (key, want) in [("2026-12-18", Some("blue")), ("Z26", None)] {
+            let mut values = ValueColors::default();
+            values.insert("expiry", key, "blue");
+            let m = GridIndex::build(
+                &s,
+                &rollup,
+                &groups,
+                &packages,
+                &plan,
+                Clock::utc(),
+                &values,
+            );
+            let z26 = group_row(&m, "Z26");
+            assert_eq!(
+                m.tree(z26).unwrap().value_color.map(|c| &**c),
+                want,
+                "{key}: label"
+            );
+            let src = FillSource {
+                sheet: &s,
+                rollup: &rollup,
+                plan: &plan,
+                clock: Clock::utc(),
+                values: &values,
+            };
+            let mut pass = CellPass::new(src, &m);
+            let exp = col("expiry");
+            let own = pass.cell(z26, exp).expect("the group row's expiry");
+            assert_eq!(&*own.text, "Z26");
+            assert_eq!(own.value_color.as_deref(), want, "{key}: group row cell");
+            let package = (z26 + 1..m.len())
+                .find(|&g| m.sheet_row(g).is_some_and(|r| s.is_package(r)))
+                .expect("the call spread under SPX Z26");
+            let pc = pass.cell(package, exp).expect("the package's expiry");
+            assert_eq!((&*pc.text, pc.state), ("Z26", CellState::Own));
+            assert_eq!(pc.value_color.as_deref(), want, "{key}: package cell");
+            let leg = (z26 + 1..m.len())
+                .find(|&g| m.sheet_row(g).is_some_and(|r| s.is_line(r)))
+                .expect("a line under SPX Z26");
+            let lc = pass.cell(leg, exp).expect("a leg's expiry");
+            assert_eq!(&*lc.text, "Z26");
+            assert_eq!(lc.value_color.as_deref(), want, "{key}: leg cell");
+        }
+    }
+
     /// `row_of` names a line's first painted row; a split package paints twice.
     #[test]
     fn row_of_is_the_first_painted_row_of_a_line() {
         let (s, tree, plan, groups, packages) = grouped_fixture();
-        let index = GridIndex::build(&s, &tree, &groups, &packages, &plan, Clock::utc());
+        let index = GridIndex::build(
+            &s,
+            &tree,
+            &groups,
+            &packages,
+            &plan,
+            Clock::utc(),
+            &ValueColors::default(),
+        );
         let cal = s.id(5);
         assert_eq!(index.paints(cal), 2, "the calendar splits by expiry");
         for g in 0..index.len() {
@@ -1410,7 +1691,15 @@ mod tests {
     #[test]
     fn a_group_row_shows_its_ancestors_grouped_values() {
         let (s, tree, plan, groups, packages) = grouped_fixture();
-        let index = GridIndex::build(&s, &tree, &groups, &packages, &plan, Clock::utc());
+        let index = GridIndex::build(
+            &s,
+            &tree,
+            &groups,
+            &packages,
+            &plan,
+            Clock::utc(),
+            &ValueColors::default(),
+        );
         let und = index
             .columns
             .iter()
