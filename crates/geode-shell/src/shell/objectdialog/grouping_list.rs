@@ -5,9 +5,13 @@
 //! handlers call in through `Domain::applies_from_browse`.
 
 use geode_core::groupings::GroupingSlots;
+use gpui::{Context, Window};
 
-use super::ObjectRow;
+use super::{ObjectRow, render};
+use crate::footer::{Hint, HintRow};
 use crate::frame::{FrameView, GroupingChoice};
+use crate::keymap::{Keystroke, Modifiers};
+use crate::shell::ShellView;
 
 /// The view-default row's name. `0` is also its key, as `ctrl+0` is its chord.
 pub const VIEW_DEFAULT: &str = "0";
@@ -17,6 +21,9 @@ pub const VIEW_DEFAULT_TEXT: &str = "view default";
 pub const NO_AD_HOC_TEXT: &str = "no ad hoc chain";
 /// The view-default row's right-hand note: what choosing it means.
 pub const VIEW_DEFAULT_NOTE: &str = "each view's own grouping";
+pub const NOTHING_TO_EDIT: &str = "view default has nothing to edit";
+pub const NO_ROW: &str = "no row is selected";
+pub const NO_AD_HOC_CHAIN: &str = "no ad hoc chain yet";
 
 /// Which row of the list a name is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +43,204 @@ pub fn kind_of(name: &str) -> Option<RowKind> {
             .filter(|n| (1..=9).contains(n))
             .map(RowKind::Slot),
     }
+}
+
+/// The kind of the row under the list cursor.
+fn cursor_kind(shell: &ShellView) -> Option<RowKind> {
+    let state = shell.object_dialog.as_ref()?;
+    kind_of(&state.rows.at(state.selected)?.name)
+}
+
+/// The list's own keys in normal mode. `None` hands the key to the shared
+/// browse handler: motion, `/`, and `d`/`r` on a slot row. The caller's
+/// key path syncs the dialog text on return, so a chain field opened here
+/// takes the input.
+pub(super) fn handle_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> Option<bool> {
+    if ks.mods != Modifiers::NONE {
+        return None;
+    }
+    let kind = cursor_kind(shell);
+    match ks.key.as_str() {
+        "enter" => match kind {
+            Some(kind) => apply(shell, kind, window, cx),
+            None => render::set_notice(shell, NO_ROW.to_string()),
+        },
+        "0" => apply(shell, RowKind::ViewDefault, window, cx),
+        "a" => apply(shell, RowKind::AdHoc, window, cx),
+        key if key.len() == 1 && (b'1'..=b'9').contains(&key.as_bytes()[0]) => {
+            apply(shell, RowKind::Slot(key.as_bytes()[0] - b'0'), window, cx)
+        }
+        "e" => edit(shell, kind, cx),
+        _ => return None,
+    }
+    cx.notify();
+    Some(true)
+}
+
+/// A row click is `enter` on that row. The click handler syncs the dialog
+/// text afterwards, as the key path does.
+pub(super) fn click(
+    shell: &mut ShellView,
+    name: &str,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if let Some(kind) = kind_of(name) {
+        apply(shell, kind, window, cx);
+    }
+}
+
+/// Apply a row to the lane the dialog targets and close. A slot the frame
+/// holds no chain for has nothing to apply, so its chain field opens
+/// instead. Emptiness is the frame's answer, not the row's layer: a slot
+/// the configuration defines but the reader dropped is one
+/// `set_active_slot` would refuse, and its field is where it gets fixed.
+fn apply(shell: &mut ShellView, kind: RowKind, window: &mut Window, cx: &mut Context<ShellView>) {
+    // Resolved before the modal closes: the target lane is the one the
+    // modal stack was opened from.
+    let frame = shell.target_frame();
+    match kind {
+        RowKind::ViewDefault => {
+            frame.update(cx, |f, cx| {
+                if f.set_active_slot(None) {
+                    cx.notify();
+                }
+            });
+        }
+        RowKind::Slot(n) => {
+            if frame.read(cx).slots().get(n).is_none() {
+                open_slot_chain(shell, n, cx);
+                return;
+            }
+            frame.update(cx, |f, cx| {
+                if f.set_active_slot(Some(n)) {
+                    cx.notify();
+                }
+            });
+        }
+        RowKind::AdHoc => {
+            if frame.read(cx).ad_hoc().is_none() {
+                render::set_notice(shell, NO_AD_HOC_CHAIN.to_string());
+                return;
+            }
+            frame.update(cx, |f, cx| {
+                if f.activate_ad_hoc() {
+                    cx.notify();
+                }
+            });
+        }
+    }
+    shell.close_modal(window, cx);
+}
+
+/// `e`: the row's tick-list editor, for an empty slot too, so ticking stays
+/// a way to define one.
+fn edit(shell: &mut ShellView, kind: Option<RowKind>, cx: &mut Context<ShellView>) {
+    match kind {
+        Some(RowKind::Slot(n)) => render::enter_edit_stage(shell, &n.to_string(), None, cx),
+        Some(RowKind::AdHoc) => render::set_notice(shell, NO_AD_HOC_CHAIN.to_string()),
+        Some(RowKind::ViewDefault) => render::set_notice(shell, NOTHING_TO_EDIT.to_string()),
+        None => render::set_notice(shell, NO_ROW.to_string()),
+    }
+}
+
+/// Open slot `n`'s edit stage straight in its chain field, marked as opened
+/// from the list.
+fn open_slot_chain(shell: &mut ShellView, n: u8, cx: &mut Context<ShellView>) {
+    render::enter_edit_stage(shell, &n.to_string(), None, cx);
+    render::open_field(shell);
+    mark_chain_from_list(shell);
+}
+
+/// Record that the field just opened came from the list. Only when a field
+/// actually opened: the flag on a stage with no field would turn that
+/// stage's next `i`/`enter` into a close.
+fn mark_chain_from_list(shell: &mut ShellView) {
+    if let Some(state) = shell.object_dialog.as_mut() {
+        state.chain_from_list = state
+            .draft
+            .as_ref()
+            .is_some_and(|draft| draft.text_entry.is_some());
+    }
+}
+
+/// `enter` in a chain field opened from the list, after the draft took the
+/// typed chain: carry it out and close. The slot is written through the
+/// pending batch, staged in the frame so it can be activated on this
+/// keystroke rather than after the debounced write, and activated. A
+/// refused write leaves the stage open with the refusal as its notice and
+/// the frame untouched: a chain staged without a queued write would be in
+/// force while persisted nowhere.
+pub(super) fn finish_list_chain(
+    shell: &mut ShellView,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let Some((name, chain, dirty)) = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .map(|draft| {
+            (
+                draft.name.clone(),
+                super::groupings::ticked(draft),
+                draft.is_dirty(),
+            )
+        })
+    else {
+        return;
+    };
+    if let Some(state) = shell.object_dialog.as_mut() {
+        state.chain_from_list = false;
+    }
+    let Some(RowKind::Slot(n)) = kind_of(&name) else {
+        return;
+    };
+    render::revalidate(shell);
+    if let Some(refusal) = super::apply::blocking_diagnostic(shell) {
+        render::set_notice(shell, refusal);
+        return;
+    }
+    if dirty && let Some(refusal) = super::apply::commit_edit(shell, cx) {
+        render::set_notice(shell, refusal);
+        return;
+    }
+    let frame = shell.target_frame();
+    frame.update(cx, |f, cx| {
+        f.stage_slot(n, chain);
+        f.set_active_slot(Some(n));
+        cx.notify();
+    });
+    shell.close_modal(window, cx);
+}
+
+/// The list's normal-mode footer.
+pub(super) fn list_hints(query_is_empty: bool) -> Vec<Hint> {
+    vec![
+        Hint::new(HintRow::Move, &["j", "k"], "row"),
+        Hint::range(HintRow::Move, "1", "9", "slot"),
+        Hint::new(HintRow::Move, &["0"], "view default"),
+        Hint::new(HintRow::Move, &["a"], "ad hoc"),
+        Hint::new(HintRow::Edit, &["e"], "edit row"),
+        Hint::new(HintRow::Edit, &["d"], "clear"),
+        Hint::new(HintRow::Edit, &["r"], "revert"),
+        Hint::new(HintRow::Go, &["enter"], "apply").selector("objectdialog-hint-enter"),
+        Hint::new(HintRow::Go, &["/"], "filter"),
+        Hint::new(
+            HintRow::Go,
+            &["escape"],
+            if query_is_empty {
+                "close"
+            } else {
+                "clear the filter"
+            },
+        ),
+    ]
 }
 
 /// Whether `name` is one of the two rows the frame supplies rather than the config.

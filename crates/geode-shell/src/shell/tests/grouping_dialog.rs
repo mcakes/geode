@@ -2,8 +2,9 @@
 //! ad hoc chain and saves a chain to a slot. The fixture's default modifier
 //! is Alt, so `mod+g` is `alt-g` and `mod+s` is `alt-s`.
 
-use super::objectdialog::dialog_state;
+use super::objectdialog::{dialog_state, edit_draft, flush_config_write};
 use super::*;
+use crate::frame::GroupingChoice;
 use crate::shell::objectdialog;
 
 /// The action that opens the dialog. One place, so the door can change.
@@ -188,4 +189,284 @@ fn the_dialog_is_titled_grouping(cx: &mut gpui::TestAppContext) {
     let (shell, cx, _dir) = open_dialog(cx);
     let title = shell.read_with(&cx, |s, _| s.modals.last().map(|m| m.title.to_string()));
     assert_eq!(title.as_deref(), Some("Grouping"));
+}
+
+fn written(dir: &tempfile::TempDir) -> String {
+    std::fs::read_to_string(dir.path().join("groupings.toml")).unwrap_or_default()
+}
+
+fn choice(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> GroupingChoice {
+    frame_of(shell, cx).read_with(cx, |f, _| f.shared().grouping_choice())
+}
+
+fn in_force(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<Vec<String>> {
+    frame_of(shell, cx).read_with(cx, |f, _| {
+        f.shared().active_grouping().map(<[String]>::to_vec)
+    })
+}
+
+fn is_open(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> bool {
+    shell.read_with(cx, |s, _| s.modal_open())
+}
+
+fn notice(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> String {
+    dialog_state(shell, cx, |s| s.notice.clone()).unwrap_or_default()
+}
+
+#[gpui::test]
+fn a_digit_applies_a_filled_slot_and_closes(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    cx.simulate_keystrokes("3");
+    cx.run_until_parked();
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(3));
+    assert!(!is_open(&shell, &cx));
+}
+
+#[gpui::test]
+fn enter_applies_the_cursor_row_and_closes(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    cx.simulate_keystrokes("j j enter"); // row 2 is slot 1
+    cx.run_until_parked();
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(1));
+    assert!(!is_open(&shell, &cx));
+}
+
+#[gpui::test]
+fn zero_returns_to_the_view_default_from_any_row(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_active_slot(Some(3));
+    });
+    cx.simulate_keystrokes("0");
+    cx.run_until_parked();
+    assert_eq!(choice(&shell, &cx), GroupingChoice::ViewDefault);
+    assert!(!is_open(&shell, &cx));
+}
+
+#[gpui::test]
+fn enter_on_the_choice_already_in_force_closes_without_a_requery(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_active_slot(Some(3));
+    });
+    let before = frame_of(&shell, &cx).read_with(&cx, |f, _| f.shared().versions());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!is_open(&shell, &cx));
+    assert_eq!(
+        frame_of(&shell, &cx).read_with(&cx, |f, _| f.shared().versions()),
+        before
+    );
+}
+
+#[gpui::test]
+fn a_row_click_applies_the_slot(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    let row = cx
+        .debug_bounds("objectdialog-row-3")
+        .expect("slot 3 paints");
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(40.0), row.origin.y + gpui::px(4.0)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(3));
+    assert!(!is_open(&shell, &cx));
+}
+
+#[gpui::test]
+fn e_opens_the_tick_list_editor_and_escape_returns_to_the_list(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    cx.simulate_keystrokes("j j j j e"); // row 4 is slot 3
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "3".to_string()
+        }
+    );
+    assert!(
+        !edit_draft(&shell, &cx, |d| d.chain_entry()),
+        "the tick list, not the field"
+    );
+    assert_eq!(
+        choice(&shell, &cx),
+        GroupingChoice::ViewDefault,
+        "editing applies nothing"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert_eq!(cursor_name(&shell, &cx).as_deref(), Some("3"));
+}
+
+#[gpui::test]
+fn e_opens_the_tick_list_for_an_empty_slot_too(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    cx.simulate_keystrokes("j j j e"); // row 3 is slot 2, empty
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "2".to_string()
+        }
+    );
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
+}
+
+#[gpui::test]
+fn e_on_the_view_default_is_refused_with_a_notice(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    cx.simulate_keystrokes("e");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert_eq!(
+        notice(&shell, &cx),
+        objectdialog::grouping_list::NOTHING_TO_EDIT
+    );
+}
+
+#[gpui::test]
+fn a_digit_on_an_empty_slot_defines_it_activates_it_and_closes(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, dir) = open_dialog(cx);
+    cx.simulate_keystrokes("6");
+    cx.run_until_parked();
+    assert!(is_open(&shell, &cx), "an empty slot has nothing to apply");
+    assert!(
+        edit_draft(&shell, &cx, |d| d.chain_entry()),
+        "its chain field is open"
+    );
+    assert_eq!(choice(&shell, &cx), GroupingChoice::ViewDefault);
+
+    cx.simulate_input("lhu book");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert!(!is_open(&shell, &cx));
+    assert_eq!(
+        choice(&shell, &cx),
+        GroupingChoice::Slot(6),
+        "activated on the keystroke that defined it, ahead of the debounced write"
+    );
+    assert_eq!(in_force(&shell, &cx), Some(chain(&["lhu", "book"])));
+
+    flush_config_write(&mut cx);
+    assert!(
+        written(&dir).contains("6 = [\"lhu\", \"book\"]"),
+        "{}",
+        written(&dir)
+    );
+    assert_eq!(
+        choice(&shell, &cx),
+        GroupingChoice::Slot(6),
+        "the write's reload keeps it"
+    );
+}
+
+#[gpui::test]
+fn escape_from_a_list_opened_chain_field_returns_to_the_list(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, dir) = open_dialog(cx);
+    cx.simulate_keystrokes("6");
+    cx.run_until_parked();
+    cx.simulate_input("lhu");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert_eq!(cursor_name(&shell, &cx).as_deref(), Some("6"));
+    flush_config_write(&mut cx);
+    assert_eq!(written(&dir), "", "nothing was written");
+    assert_eq!(choice(&shell, &cx), GroupingChoice::ViewDefault);
+}
+
+#[gpui::test]
+fn a_refused_chain_keeps_the_list_opened_field_open(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    cx.simulate_keystrokes("6");
+    cx.run_until_parked();
+    cx.simulate_input("lhu nope");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(is_open(&shell, &cx));
+    assert!(
+        edit_draft(&shell, &cx, |d| d.chain_entry()),
+        "a typo is fixed, not retyped"
+    );
+    assert!(
+        notice(&shell, &cx).contains("nope"),
+        "{}",
+        notice(&shell, &cx)
+    );
+    assert_eq!(choice(&shell, &cx), GroupingChoice::ViewDefault);
+}
+
+#[gpui::test]
+fn a_failed_slot_write_takes_the_staged_slot_back_out(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, dir) = open_dialog(cx);
+    // Unparseable and never loaded by this shell: memory accepts the edit,
+    // and only the write discovers the problem.
+    std::fs::write(dir.path().join("groupings.toml"), "6 = [\n").unwrap();
+    cx.simulate_keystrokes("6");
+    cx.run_until_parked();
+    cx.simulate_input("lhu");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(6));
+
+    flush_config_write(&mut cx);
+
+    assert_eq!(
+        choice(&shell, &cx),
+        GroupingChoice::ViewDefault,
+        "a chain persisted nowhere must not stay in force"
+    );
+    assert_eq!(
+        frame_of(&shell, &cx).read_with(&cx, |f, _| f.slots().get(6).map(<[String]>::to_vec)),
+        None
+    );
+}
+
+#[gpui::test]
+fn enter_in_filter_mode_keeps_the_filter_and_applies_nothing(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    cx.simulate_input("book");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        is_open(&shell, &cx),
+        "filter-mode enter keeps the query, nothing more"
+    );
+    assert_eq!(choice(&shell, &cx), GroupingChoice::ViewDefault);
+    assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "book");
+    assert_eq!(
+        cursor_name(&shell, &cx).as_deref(),
+        Some("1"),
+        "book / lhu is the match"
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(1));
+    assert!(!is_open(&shell, &cx));
+}
+
+#[gpui::test]
+fn a_digit_typed_into_the_filter_is_text_not_a_pick(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    cx.simulate_input("3");
+    cx.run_until_parked();
+    assert!(is_open(&shell, &cx));
+    assert_eq!(choice(&shell, &cx), GroupingChoice::ViewDefault);
+    assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "3");
 }

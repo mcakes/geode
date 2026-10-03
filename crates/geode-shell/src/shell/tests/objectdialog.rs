@@ -438,7 +438,7 @@ pub(super) fn open_slot_editor(cx: &mut gpui::VisualTestContext, n: u8) {
     for _ in 0..=n {
         cx.simulate_keystrokes("j");
     }
-    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("e");
     cx.run_until_parked();
 }
 
@@ -4141,45 +4141,9 @@ fn n_is_inert_on_groupings_and_says_why(cx: &mut gpui::TestAppContext) {
 
 // Groupings: digit navigation and chain editing.
 
-/// A bare digit in the Groupings browse list opens that slot's edit
-/// stage in one keystroke — the slots are numbered, and the number is
-/// the fastest way to name one. On every other domain the digit is
-/// claimed and dropped like any other key browse has no verb for, so a
-/// `3` typed at the Views list neither opens anything nor leaks to the
-/// shell as `ctrl+3`'s bare cousin.
-#[gpui::test]
-fn a_digit_in_browse_opens_that_slot_on_groupings_only(cx: &mut gpui::TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_slot_3(&["book"]),
-        dir.path(),
-        "config::groupings",
-    );
-    cx.simulate_keystrokes("3");
-    cx.run_until_parked();
-    assert_eq!(
-        dialog_state(&shell, &cx, |s| s.stage.clone()),
-        objectdialog::Stage::Edit {
-            object: "3".to_string()
-        }
-    );
-    assert_eq!(
-        edit_draft(&shell, &cx, |d| d
-            .list_items("dimensions")
-            .unwrap()
-            .iter()
-            .filter(|i| i.included)
-            .map(|i| i.name.clone())
-            .collect::<Vec<_>>()),
-        vec!["book".to_string()],
-        "the slot opened is the one the digit named"
-    );
-    let crumb = shell.read_with(&cx, |shell, _| objectdialog::render::crumb_text(shell));
-    assert_eq!(crumb, "ctrl+3");
-}
-
-/// The same digit typed at the Views list does nothing at all.
+/// A bare digit names a slot only on Groupings, whose objects are numbered.
+/// Typed at the Views list it is claimed and dropped like any other key
+/// browse has no verb for: it opens nothing and does not leak to the shell.
 #[gpui::test]
 fn a_digit_in_browse_is_dropped_on_a_domain_without_numbered_objects(
     cx: &mut gpui::TestAppContext,
@@ -4258,7 +4222,8 @@ fn jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick(cx: &mut gpui
     );
     // Slot 1 is empty, so ticking book queues a user-layer write without fork
     // confirmation. Opening selects its first dimension candidate, ready for space.
-    cx.simulate_keystrokes("1 space");
+    open_slot_editor(&mut cx, 1);
+    cx.simulate_keystrokes("space");
     cx.run_until_parked();
     assert!(shell.read_with(&cx, |s, _| s.pending_config_write.is_some()));
 
@@ -4302,7 +4267,7 @@ fn jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick(cx: &mut gpui
     );
 }
 
-/// Opening a grouping slot by digit, Enter, or click lands in its normal-mode chooser.
+/// Opening a grouping slot's editor with `e` lands in its normal-mode chooser.
 /// `i` opens a seeded chain field with completions; Escape returns through chooser and
 /// browse one step at a time.
 #[gpui::test]
@@ -4314,9 +4279,7 @@ fn opening_a_slot_lands_in_the_chooser_and_i_opens_the_chain_field(cx: &mut gpui
         dir.path(),
         "config::groupings",
     );
-    // By digit.
-    cx.simulate_keystrokes("3");
-    cx.run_until_parked();
+    open_slot_editor(&mut cx, 3);
     assert!(
         !edit_draft(&shell, &cx, |d| d.chain_entry()),
         "the chooser, not the chain field"
@@ -4382,8 +4345,8 @@ fn opening_a_slot_lands_in_the_chooser_and_i_opens_the_chain_field(cx: &mut gpui
         objectdialog::Stage::Browse
     );
 
-    // By `enter` from the list, the same landing.
-    cx.simulate_keystrokes("enter");
+    // By `e` again from the list, back on slot 3's row: the same landing.
+    cx.simulate_keystrokes("e");
     cx.run_until_parked();
     assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
@@ -4409,7 +4372,8 @@ fn i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain(cx: &mut gpu
         dir.path(),
         "config::groupings",
     );
-    cx.simulate_keystrokes("3 i");
+    open_slot_editor(&mut cx, 3);
+    cx.simulate_keystrokes("i");
     cx.run_until_parked();
     assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert!(
@@ -4509,7 +4473,8 @@ fn a_refused_chain_keeps_the_field_open_and_escape_cancels_it(cx: &mut gpui::Tes
         dir.path(),
         "config::groupings",
     );
-    cx.simulate_keystrokes("3 i");
+    open_slot_editor(&mut cx, 3);
+    cx.simulate_keystrokes("i");
     cx.simulate_input(" npv");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -5494,37 +5459,6 @@ fn clicking_a_browse_row_opens_its_edit_stage(cx: &mut gpui::TestAppContext) {
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
 }
 
-/// Clicking a grouping row opens its chooser without opening the chain field.
-#[gpui::test]
-fn clicking_a_groupings_row_opens_the_chooser(cx: &mut gpui::TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_slot_3(&["book", "lhu"]),
-        dir.path(),
-        "config::groupings",
-    );
-    let row = cx
-        .debug_bounds("objectdialog-row-3")
-        .expect("slot 3 paints");
-    cx.simulate_mouse_down(
-        gpui::point(row.origin.x + gpui::px(8.0), row.origin.y + gpui::px(4.0)),
-        MouseButton::Left,
-        gpui::Modifiers::none(),
-    );
-    cx.run_until_parked();
-    assert_eq!(
-        dialog_state(&shell, &cx, |s| s.stage.clone()),
-        objectdialog::Stage::Edit {
-            object: "3".to_string()
-        },
-        "the click opened slot 3"
-    );
-    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
-    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "");
-    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
-}
-
 /// While naming, clicking a browse row selects without discarding the typed name or
 /// opening an edit stage. The list remains ranked by the naming text so near-collisions
 /// stay visible.
@@ -5831,7 +5765,8 @@ fn clicking_a_completion_row_completes_the_chain(cx: &mut gpui::TestAppContext) 
         dir.path(),
         "config::groupings",
     );
-    cx.simulate_keystrokes("3 i");
+    open_slot_editor(&mut cx, 3);
+    cx.simulate_keystrokes("i");
     cx.run_until_parked();
     assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     // Open a fresh segment so `lhu` is offered.
@@ -8178,22 +8113,17 @@ fn a_double_click_on_a_door_row_opens_the_stage_and_nothing_more(cx: &mut gpui::
 }
 
 /// A browse-row double-click opens its edit stage once. Its second click must not
-/// activate a control newly painted under the pointer, such as the grouping chain-field
-/// row.
+/// activate a control newly painted under the pointer, such as a Views column row.
 #[gpui::test]
 fn a_double_click_on_a_browse_row_opens_the_edit_stage_and_nothing_more(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_slot_3(&["book"]),
-        dir.path(),
-        "config::groupings",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_views(), dir.path(), "config::views");
     let row = cx
-        .debug_bounds("objectdialog-row-3")
-        .expect("slot 3's browse row is painted");
+        .debug_bounds("objectdialog-row-wide")
+        .expect("the wide view's browse row is painted");
     let at = gpui::point(row.origin.x + gpui::px(40.0), row.origin.y + gpui::px(4.0));
     double_click(&mut cx, at, gpui::Modifiers::none());
     cx.run_until_parked();
@@ -8836,8 +8766,7 @@ fn the_i_button_opens_the_chain_field_on_groupings_and_n_is_withheld(
         cx.debug_bounds("objectdialog-action-n").is_none(),
         "the slots are fixed — no button for a verb that only ever refuses"
     );
-    cx.simulate_keystrokes("3");
-    cx.run_until_parked();
+    open_slot_editor(&mut cx, 3);
     assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
     let i = cx
         .debug_bounds("objectdialog-action-i")
@@ -9958,7 +9887,7 @@ fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
             "config::groupings",
             || services_with_slot_3(&["book"]),
             "dimensions",
-            "j j j j enter",
+            "j j j j e",
         ),
         (
             "config::scopes",

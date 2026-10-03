@@ -247,7 +247,7 @@ fn handle_key(
             handle_edit_key(shell, ks, window, cx)
         }
         Some(Stage::Naming) => handle_naming_key(shell, ks, cx),
-        _ => handle_browse_key(shell, ks, cx),
+        _ => handle_browse_key(shell, ks, window, cx),
     }
 }
 
@@ -257,7 +257,12 @@ fn handle_key(
 /// Normal-mode Enter opens the selected object. Tab is consumed so it cannot insert
 /// a literal tab into the filter. The ladder's close rung remains unclaimed for the
 /// shell's modal handler.
-fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
+fn handle_browse_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
     // read before `state` takes its `&mut` borrow of `shell.object_dialog` below, whose
     // lifetime spans the rest of this function — `seed_dataset_under_cursor` needs a
     // plain `&ShellView`, which a live sibling `&mut` borrow would refuse. `None` on
@@ -297,6 +302,19 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
         cx.notify();
         return true;
     }
+
+    // Groupings' list owns `enter`, the digits and its letters in normal
+    // mode. Whatever it declines falls through to the shared vocabulary.
+    if state.mode == DialogMode::Normal
+        && state.domain.applies_from_browse()
+        && ks.key != "escape"
+        && let Some(claimed) = super::grouping_list::handle_key(shell, ks, window, cx)
+    {
+        return claimed;
+    }
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return false;
+    };
 
     if state.mode == DialogMode::Normal {
         // Modifier-agnostic on `escape`, exactly as `handle_key_down`'s
@@ -402,12 +420,6 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
                     arm_revert(shell);
                 }
                 cx.notify();
-                return true;
-            }
-            // a bare digit names a slot on the one domain whose objects are numbered;
-            // elsewhere it is dropped below.
-            NormalCommand::Digit(n) if state.domain == Domain::Groupings => {
-                jump_to_slot(shell, n, cx);
                 return true;
             }
             // `Toggle`, `EditText`, `MoveItem` and the rest of the letter
@@ -889,7 +901,16 @@ fn on_row_clicked(
     let opens = state.stage != Stage::Naming;
     let name = clicked.to_string();
     shell.object_dialog_scroll.scroll_to_item(ix);
-    if opens {
+    if opens
+        && shell
+            .object_dialog
+            .as_ref()
+            .is_some_and(|s| s.domain.applies_from_browse())
+    {
+        // A click is `enter` on that row: it applies, and nothing is opened
+        // for a second click to land in.
+        super::grouping_list::click(shell, &name, window, cx);
+    } else if opens {
         enter_edit_stage(shell, &name, None, cx);
         // The browse list is a door too (`ObjectDialogState::
         // click_opened_stage`): a double-click's second half lands on
@@ -936,7 +957,7 @@ fn open_selected(shell: &mut ShellView, cx: &mut Context<ShellView>) {
 /// already-built draft until the queued creation reaches active configuration. Reset
 /// the viewport and request repaint. Input text and focus are synchronized by the
 /// caller's keyboard or pointer path after the pure state transition.
-fn enter_edit_stage(
+pub(super) fn enter_edit_stage(
     shell: &mut ShellView,
     name: &str,
     new: Option<Draft>,
@@ -1826,7 +1847,7 @@ pub(crate) fn scroll_to_choice(shell: &ShellView) {
 
 /// Shared `i` route for keyboard and action buttons. Groupings opens its whole chain
 /// field; other domains open the selected row's permitted value editor.
-fn open_field(shell: &mut ShellView) {
+pub(super) fn open_field(shell: &mut ShellView) {
     let groupings = shell
         .object_dialog
         .as_ref()
@@ -1997,11 +2018,20 @@ fn handle_text_key(
     // cursor. Plain entry retains its unfiltered row list and edited-row selection;
     // follow that cursor instead of jumping to the first row.
     if ks.key == "escape" {
+        let from_list = shell
+            .object_dialog
+            .as_ref()
+            .is_some_and(|state| state.chain_from_list);
         if let Some(state) = shell.object_dialog.as_mut()
             && let Some(draft) = state.draft.as_mut()
         {
             draft.cancel_text_entry();
             state.mode = DialogMode::Normal;
+        }
+        if from_list {
+            // The field was the whole visit: back to the list, on the row it came from.
+            leave_edit(shell, cx);
+            return true;
         }
         if completions {
             shell.object_dialog_scroll.scroll_to_item(0);
@@ -2015,6 +2045,10 @@ fn handle_text_key(
     if bare && ks.key == "enter" {
         let domain = shell.object_dialog.as_ref().map(|state| state.domain);
         let vocab = shell.expr_vocab.clone();
+        let from_list = shell
+            .object_dialog
+            .as_ref()
+            .is_some_and(|state| state.chain_from_list);
         let step = draft_mut(shell).map(|draft| {
             if completions {
                 draft.apply_chain()
@@ -2039,6 +2073,12 @@ fn handle_text_key(
             }
         });
         match step {
+            Some(Step::Changed | Step::Inert) if from_list => {
+                if let Some(state) = shell.object_dialog.as_mut() {
+                    state.mode = DialogMode::Normal;
+                }
+                super::grouping_list::finish_list_chain(shell, window, cx);
+            }
             Some(Step::Changed) => {
                 if let Some(state) = shell.object_dialog.as_mut() {
                     state.mode = DialogMode::Normal;
@@ -2334,7 +2374,7 @@ fn not_a_values_verb(shell: &mut ShellView) {
 }
 
 /// Set the footer notice, if a dialog is open at all.
-fn set_notice(shell: &mut ShellView, notice: String) {
+pub(super) fn set_notice(shell: &mut ShellView, notice: String) {
     if let Some(state) = shell.object_dialog.as_mut() {
         state.notice = Some(notice);
     }
@@ -2431,7 +2471,7 @@ fn scroll_to_cursor(shell: &mut ShellView) {
 /// tick click all call it, and none of them knows or should know that a
 /// projection is open. A fold anywhere else would be a fold each of those
 /// call sites had to remember.
-fn revalidate(shell: &mut ShellView) {
+pub(super) fn revalidate(shell: &mut ShellView) {
     let Some(state) = shell.object_dialog.as_mut() else {
         return;
     };
@@ -2527,7 +2567,7 @@ fn landing_rows(shell: &ShellView) -> Vec<ObjectRow> {
     }
 }
 
-fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+pub(super) fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
         Some(Stage::Edit { object } | Stage::Column { object, .. }) => object.clone(),
         _ => String::new(),
@@ -3364,6 +3404,9 @@ fn build(
         ]
     } else {
         match state.mode {
+            DialogMode::Normal if state.domain.applies_from_browse() => {
+                super::grouping_list::list_hints(state.query.is_empty())
+            }
             DialogMode::Normal => {
                 let mut hints = vec![
                     Hint::new(HintRow::Move, &["j", "k"], "move"),
@@ -3378,11 +3421,6 @@ fn build(
                 // `c`: Scopes alone, beside `n`.
                 if state.domain.duplicable() {
                     hints.push(Hint::new(HintRow::Edit, &["c"], "copy"));
-                }
-                // a digit opens that slot — Groupings only, the one domain whose
-                // objects are numbered.
-                if state.domain == Domain::Groupings {
-                    hints.push(Hint::range(HintRow::Go, "1", "9", "open slot"));
                 }
                 hints.push(
                     Hint::new(HintRow::Go, &["enter"], "open").selector("objectdialog-hint-enter"),

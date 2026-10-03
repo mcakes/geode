@@ -141,6 +141,17 @@ pub fn parse_chain(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// The draft's chain: its ticked dimensions, in list order.
+pub fn ticked(draft: &Draft) -> Vec<String> {
+    draft
+        .list_items(DIMENSIONS)
+        .unwrap_or_default()
+        .iter()
+        .filter(|item| item.included)
+        .map(|item| item.name.clone())
+        .collect()
+}
+
 /// The segment being typed — whatever follows the last separator, or the
 /// whole text when there is none. What the completion list ranks by.
 pub fn trailing_segment(text: &str) -> &str {
