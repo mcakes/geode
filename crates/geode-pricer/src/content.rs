@@ -68,6 +68,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::rename_sheet", "Rename sheet…"),
     ("pricer::new_sheet", "New sheet"),
     ("pricer::remove_sheet", "Remove sheet…"),
+    ("pricer::view_menu", "Pick a view…"),
     ("pricer::commit", "Commit edit"),
     ("pricer::cancel", "Cancel edit"),
     ("pricer::insert_up", "Insert: up"),
@@ -108,13 +109,16 @@ pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
 
 /// Registered but deliberately unbound: `:price` and the menu reach
 /// repricing; the sheet verbs are the `:e`/`:name`/`:new`/`:rm` commands'
-/// pointer and palette forms (the header's sheet name, the menu).
+/// pointer and palette forms (the header's sheet name, the menu); the view
+/// menu is the header's view name and the palette's (`:view <name>` and the
+/// `.` menu's View rows pick one by keys).
 pub const NO_DEFAULT_KEY: &[&str] = &[
     "pricer::price",
     "pricer::open_sheet",
     "pricer::rename_sheet",
     "pricer::new_sheet",
     "pricer::remove_sheet",
+    "pricer::view_menu",
 ];
 
 /// The module's keymap fragment. Every predicate is a

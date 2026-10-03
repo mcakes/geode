@@ -142,6 +142,15 @@ pub enum PendingSheet {
     Take { sheet: String },
 }
 
+/// Which menu the tile has open: the `.` action menu, hung from the
+/// header's right edge, or the view menu, hung under the header's view
+/// name. Both share menu mode, its keys, and its pick door.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MenuKind {
+    Actions,
+    Views,
+}
+
 /// Why this tile's sheet cannot be renamed now, whatever the new name:
 /// known before a rename is tried, so the menu's "Rename sheet…" row is
 /// greyed with [`RenameBlock::reason`] and the rename field never opens.
@@ -691,8 +700,11 @@ pub struct PricerTile {
     /// The window the editor last opened in: a rebuild that must close it
     /// has no `Window` of its own to blur through (`drop_orphaned_editor`).
     editor_window: Option<AnyWindowHandle>,
-    /// The `.` action menu: `None` outside menu mode.
+    /// The open menu — the `.` action menu or the header's view menu, as
+    /// `menu_kind` says: `None` outside menu mode.
     pub(crate) menu: Option<Menu<PricerPick>>,
+    /// Which menu `menu` holds; read only while it is open.
+    pub(crate) menu_kind: MenuKind,
     /// The keymap as last published, for the menu's key hints: read at
     /// construction and on every `Chords` publish, so a chrome rebuild (which
     /// has no `App`) resolves hints against the live keymap.
@@ -707,6 +719,8 @@ pub struct PricerTile {
     pub(crate) rename_field: Option<Entity<InputState>>,
     /// The tooltip selector of the header's sheet name, built once.
     name_tip: SharedString,
+    /// The view name's tooltip selector, built once with the tile.
+    view_tip: SharedString,
     /// Whether the latest pointer press in the window landed on the sheet
     /// name (unmodified). The name's own listener sets it; its
     /// outside-press listener clears it for every other press, including
@@ -1127,10 +1141,12 @@ impl PricerTile {
             editor: None,
             editor_window: None,
             menu: None,
+            menu_kind: MenuKind::Actions,
             chords: menu::live_bindings(cx),
             sheet_picker: None,
             rename_field: None,
             name_tip: format!("tip-pricer-sheet-name-{}", id.0).into(),
+            view_tip: format!("tip-pricer-view-{}", id.0).into(),
             last_press_on_name: false,
             click_anchor: None,
             pressed: None,
@@ -3225,7 +3241,7 @@ impl PricerTile {
         // Any verb but the menu's own closes an open menu (a palette
         // dispatch, or a verb picked from the menu itself, can arrive
         // while one is open).
-        if self.menu.is_some() && !verb.starts_with("menu") {
+        if self.menu.is_some() && !verb.starts_with("menu") && verb != "view_menu" {
             self.menu = None;
         }
         match verb {
@@ -3416,7 +3432,11 @@ impl PricerTile {
                 }
             }
             "menu" => {
-                self.toggle_menu(cx);
+                self.toggle_menu(MenuKind::Actions, cx);
+                return true;
+            }
+            "view_menu" => {
+                self.toggle_menu(MenuKind::Views, cx);
                 return true;
             }
             "open_sheet" => self.open_sheet_picker(PickerPurpose::Open, window, cx),
@@ -3690,10 +3710,35 @@ impl PricerTile {
         }
     }
 
+    /// The open menu's rows, by kind.
+    fn menu_items(&self) -> Vec<Row<PricerPick>> {
+        match self.menu_kind {
+            MenuKind::Actions => self.action_menu_items(),
+            MenuKind::Views => self.view_rows().collect(),
+        }
+    }
+
+    /// One row per loaded view, in the views document's order, the
+    /// sheet's own view ticked.
+    fn view_rows(&self) -> impl Iterator<Item = Row<PricerPick>> + '_ {
+        let names: Vec<String> = self
+            .shared
+            .views
+            .borrow()
+            .names()
+            .map(str::to_string)
+            .collect();
+        names.into_iter().map(|name| {
+            let checked = name == self.sheet.view;
+            let label: SharedString = name.into();
+            Row::Action(ActionRow::new(PricerPick::View(label.clone()), label).checked(checked))
+        })
+    }
+
     /// Action groups, then the available views. Titles are the palette's
     /// (`content::action_title`); hints are the actions' live chords (a
     /// `:price` verb when unbound); a disabled action carries its reason.
-    fn menu_items(&self) -> Vec<Row<PricerPick>> {
+    fn action_menu_items(&self) -> Vec<Row<PricerPick>> {
         let row = self.cursor_sheet_row();
         let root_line =
             row.is_some_and(|r| self.sheet.is_line(r) && self.sheet.parent(r).is_none());
@@ -3791,26 +3836,28 @@ impl PricerTile {
                 Ok(()),
             ),
         ];
-        let views = self.shared.views.borrow();
-        if !views.is_empty() {
+        if !self.shared.views.borrow().is_empty() {
             items.push(Row::Separator);
             items.push(Row::Section(SharedString::new_static("View")));
-            items.extend(views.names().map(|name| {
-                let label: SharedString = name.to_string().into();
-                Row::Action(
-                    ActionRow::new(PricerPick::View(label.clone()), label)
-                        .checked(name == self.sheet.view),
-                )
-            }));
+            items.extend(self.view_rows());
         }
         items
     }
 
-    fn toggle_menu(&mut self, cx: &mut Context<Self>) {
-        self.menu = match self.menu {
-            Some(_) => None,
-            None => Some(Menu::new(self.menu_items(), &self.chords)),
-        };
+    /// Open the `kind` menu, or close it when it is the one open. The
+    /// other kind's open menu is replaced, not stacked. A view menu with no
+    /// view loaded refuses into the footer rather than paint an empty list.
+    fn toggle_menu(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
+        if self.menu.is_some() && self.menu_kind == kind {
+            self.menu = None;
+        } else if kind == MenuKind::Views && self.shared.views.borrow().is_empty() {
+            self.menu = None;
+            self.footer = Some(SharedString::new_static("no views loaded"));
+            self.rebuild_chrome();
+        } else {
+            self.menu_kind = kind;
+            self.menu = Some(Menu::new(self.menu_items(), &self.chords));
+        }
         cx.notify();
     }
 
@@ -6004,6 +6051,32 @@ impl gpui::Render for PricerTile {
             .sheet_picker
             .as_ref()
             .map(|p| render_sheet_picker(p, &tile, cx).into_any_element());
+        let menu_ids = MenuIds::new("pricer-menu", "pricer-menu-row");
+        // Each menu's outside press closes only that menu: a press on the
+        // other menu's trigger has already swapped it in (the triggers act
+        // in the capture phase), and must not see it closed again.
+        let close = |kind: MenuKind| {
+            move |t: &mut PricerTile, _: &mut Window, cx: &mut Context<PricerTile>| {
+                if t.menu_kind == kind {
+                    t.close_menu(cx);
+                }
+            }
+        };
+        let view_menu = self
+            .menu
+            .as_ref()
+            .filter(|_| self.menu_kind == MenuKind::Views)
+            .map(|m| {
+                menu::render_menu(
+                    m,
+                    &menu_ids,
+                    gpui::Anchor::TopLeft,
+                    &tile,
+                    close(MenuKind::Views),
+                    cx,
+                )
+                .into_any_element()
+            });
         let theme = cx.theme();
         let header = header::render(
             &self.header,
@@ -6012,7 +6085,9 @@ impl gpui::Render for PricerTile {
                 stack: self.stack.as_ref(),
                 tile_id: self.id,
                 tile: &tile,
-                menu_open: self.menu.is_some(),
+                menu_open: self.menu.is_some() && self.menu_kind == MenuKind::Actions,
+                view_menu,
+                view_tip: self.view_tip.clone(),
                 menu_tip: self.menu_tip.clone(),
                 menu_selector: self.menu_selector.clone(),
                 health: self.health.chip(),
@@ -6028,27 +6103,27 @@ impl gpui::Render for PricerTile {
         );
         // Anchor the menu at the header's right edge. The relative wrapper
         // makes absolute positioning resolve against the header, not the window.
-        let header =
-            div()
-                .relative()
-                .w_full()
-                .child(header)
-                .when_some(self.menu.as_ref(), |el, m| {
-                    el.child(
-                        div()
-                            .absolute()
-                            .right_0()
-                            .top(scale::design(geode_tile::header::HEADER_HEIGHT))
-                            .child(menu::render_menu(
-                                m,
-                                &MenuIds::new("pricer-menu", "pricer-menu-row"),
-                                gpui::Anchor::TopRight,
-                                &tile,
-                                |t: &mut PricerTile, _, cx| t.close_menu(cx),
-                                cx,
-                            )),
-                    )
-                });
+        let header = div().relative().w_full().child(header).when_some(
+            self.menu
+                .as_ref()
+                .filter(|_| self.menu_kind == MenuKind::Actions),
+            |el, m| {
+                el.child(
+                    div()
+                        .absolute()
+                        .right_0()
+                        .top(scale::design(geode_tile::header::HEADER_HEIGHT))
+                        .child(menu::render_menu(
+                            m,
+                            &menu_ids,
+                            gpui::Anchor::TopRight,
+                            &tile,
+                            close(MenuKind::Actions),
+                            cx,
+                        )),
+                )
+            },
+        );
         let search = self
             .fuzzy_find
             .as_ref()
@@ -12693,6 +12768,95 @@ pub(crate) mod tests {
         click_at(&mut vcx, at, 1);
         h.draw(&mut vcx);
         assert_eq!(h.mode(&mut vcx), "normal", "a second click closes it");
+    }
+
+    /// The header's view name is the pointer's view picker: a click opens
+    /// a menu of the loaded views alone, the sheet's own ticked, hung under
+    /// the name; a row click switches to that view and closes it.
+    #[gpui::test]
+    fn a_click_on_the_view_name_opens_the_view_menu_and_a_row_click_switches_view(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        assert!(!h.columns(&vcx).contains(&"barrier".to_string()));
+        let at = centre_of(&mut vcx, "pricer-view");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "menu");
+        assert_eq!(menu_rows(&h, &vcx), vec!["  barrier", "✓ vanilla"]);
+        let name = vcx.debug_bounds("pricer-view").expect("the view name");
+        let menu = vcx.debug_bounds("pricer-menu").expect("the view menu");
+        assert!(
+            (menu.left() - name.left()).abs() < gpui::px(1.)
+                && menu.top() >= name.bottom() - gpui::px(1.),
+            "hung under the view name: {name:?} {menu:?}"
+        );
+        let at = centre_of(&mut vcx, "pricer-menu-row-0");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal", "a pick closes the menu");
+        assert!(h.columns(&vcx).contains(&"barrier".to_string()));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.sheet.view.clone()),
+            "barrier"
+        );
+    }
+
+    /// A second click on the view name closes the menu the first opened
+    /// (the capture-phase toggle runs ahead of the menu's outside-press
+    /// close); the `⋯` trigger swaps it for the action menu rather than
+    /// closing it, and the view action does the reverse.
+    #[gpui::test]
+    fn the_view_name_toggles_its_menu_and_the_action_menu_replaces_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let at = centre_of(&mut vcx, "pricer-view");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "menu");
+        let at = centre_of(&mut vcx, "pricer-view");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal", "a second click closes it");
+        h.dispatch(&mut vcx, "view_menu", None);
+        assert_eq!(menu_rows(&h, &vcx).len(), 2, "the views alone");
+        let at = centre_of(&mut vcx, "pricer-menu-button");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "menu");
+        assert!(
+            menu_rows(&h, &vcx).contains(&"[View]".to_string()),
+            "the action menu replaced the view menu"
+        );
+        let at = centre_of(&mut vcx, "pricer-view");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(menu_rows(&h, &vcx).len(), 2, "and the view name swaps back");
+        click(&mut vcx, "pricer-footer", 1);
+        assert_eq!(h.mode(&mut vcx), "normal", "a press elsewhere closes it");
+    }
+
+    /// The palette's view action toggles the menu as a click does, and the
+    /// menu takes menu mode's keys: a step and `enter` pick the highlighted
+    /// view through the pointer's door.
+    #[gpui::test]
+    fn the_view_menu_steps_and_picks_by_keys(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "view_menu", None);
+        h.dispatch(&mut vcx, "view_menu", None);
+        assert_eq!(h.mode(&mut vcx), "normal", "the action toggles too");
+        h.dispatch(&mut vcx, "view_menu", None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted())),
+            Some(0)
+        );
+        h.motion(&mut vcx, "menu_down", Some(1));
+        h.motion(&mut vcx, "menu_up", Some(1));
+        h.dispatch(&mut vcx, "menu_pick", None);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert!(h.columns(&vcx).contains(&"barrier".to_string()));
     }
 
     /// A pointer-highlighted disabled action paints no fill. Picking it reports its

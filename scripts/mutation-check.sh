@@ -21893,6 +21893,57 @@ run_mutation "pricer tile: a rebuild-closed editor blurs before it drops" \
             });' \
   geode-pricer a_view_reload_without_the_edited_column_closes_the_editor
 
+# The header's view menu lists the loaded views alone, the sheet's own
+# ticked. Mutated, it opens the whole action menu.
+run_mutation "pricer view menu: the view menu holds the views alone" \
+  crates/geode-pricer/src/tile.rs \
+  '            MenuKind::Views => self.view_rows().collect(),' \
+  '            MenuKind::Views => self.action_menu_items(),' \
+  geode-pricer the_view_name_toggles_its_menu_and_the_action_menu_replaces_it
+
+run_mutation "pricer view menu: the sheet's view is ticked" \
+  crates/geode-pricer/src/tile.rs \
+  '            let checked = name == self.sheet.view;' \
+  '            let checked = false;' \
+  geode-pricer a_click_on_the_view_name_opens_the_view_menu_and_a_row_click_switches_view
+
+# A trigger closes only its own menu: the other kind's open menu is
+# swapped. Mutated, `⋯` over an open view menu just closes it.
+run_mutation "pricer view menu: the other trigger swaps rather than closes" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.menu.is_some() && self.menu_kind == kind {' \
+  '        if self.menu.is_some() {' \
+  geode-pricer the_view_name_toggles_its_menu_and_the_action_menu_replaces_it
+
+run_mutation "pricer view menu: the toggle records which menu is open" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.menu_kind = kind;' \
+  '            let _ = kind;' \
+  geode-pricer the_view_menu_steps_and_picks_by_keys
+
+# Each menu's outside press closes only its own kind: the other trigger
+# has already swapped in its menu in the capture phase. Mutated, the
+# old menu's closer shuts the menu just opened.
+run_mutation "pricer view menu: an outside press closes only its own menu" \
+  crates/geode-pricer/src/tile.rs \
+  '                if t.menu_kind == kind {' \
+  '                if true {' \
+  geode-pricer the_view_name_toggles_its_menu_and_the_action_menu_replaces_it
+
+# The view menu's own verb keeps the open menu for its toggle to read.
+# Mutated, a second `pricer::view_menu` closes then reopens it.
+run_mutation "pricer view menu: its verb survives the menu-closing prologue" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.menu.is_some() && !verb.starts_with("menu") && verb != "view_menu" {' \
+  '        if self.menu.is_some() && !verb.starts_with("menu") {' \
+  geode-pricer the_view_menu_steps_and_picks_by_keys
+
+run_mutation "pricer view menu: the menu hangs under the view name" \
+  crates/geode-pricer/src/header.rs \
+  '            el.child(div().absolute().left_0().bottom_0().child(m))' \
+  '            el.child(div().absolute().left_0().top_0().child(m))' \
+  geode-pricer a_click_on_the_view_name_opens_the_view_menu_and_a_row_click_switches_view
+
 # An open menu's rows are re-checked on every chrome rebuild: a load
 # answer or reload changes them with no verb to close the menu.
 run_mutation "pricer tile: an open menu re-checks its rows on a rebuild" \

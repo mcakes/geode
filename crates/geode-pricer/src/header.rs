@@ -223,12 +223,74 @@ impl HeaderModel {
     }
 }
 
-/// Render a muted label beside its value, such as the active view name.
+/// Render a muted label beside its value, such as the active pricer name.
 fn pair(label: &'static str, value: SharedString, muted: Hsla, text: Hsla) -> impl IntoElement {
     h_flex()
         .gap_1()
         .child(div().text_color(muted).child(label))
         .child(div().text_color(text).child(value))
+}
+
+/// The muted `view` label and the active view's name, one control: a
+/// press toggles the view menu (`pricer::view_menu`, the palette's route
+/// too), which hangs from the control's bottom-left edge. The press is
+/// taken in the capture phase, ahead of the open menu's outside-press
+/// closer: in the bubble phase the closing press would find the menu
+/// already closed and reopen it.
+fn view_control(
+    value: SharedString,
+    c: &mut HeaderChrome,
+    tile_id: u64,
+    theme: &Theme,
+) -> AnyElement {
+    let muted = theme.muted_foreground;
+    let menu = c.view_menu.take();
+    let open = menu.is_some();
+    let control = h_flex()
+        .id(ElementId::NamedInteger(
+            SharedString::new_static("pricer-view"),
+            tile_id,
+        ))
+        .gap_1()
+        .px_1()
+        .rounded(theme.radius_tokens().sm)
+        .debug_selector(|| "pricer-view".into())
+        // Open keeps a selected fill, as the `⋯` trigger does.
+        .when(open, |el| el.bg(theme.secondary))
+        .when(!open, |el| {
+            el.pointer_states(control::paint(
+                theme,
+                control::Rest::Bare,
+                theme.background,
+                theme.foreground,
+            ))
+        })
+        .capture_any_mouse_down({
+            let tile = c.tile.clone();
+            move |event, window, cx| {
+                if event.button != gpui::MouseButton::Left {
+                    return;
+                }
+                tile.update(cx, |t, cx| {
+                    t.dispatch(&ActionId("pricer::view_menu".to_string()), None, window, cx);
+                });
+            }
+        })
+        .tooltip(tips::tip_with(
+            c.view_tip.clone(),
+            SharedString::new_static("Views"),
+            Some("pricer::view_menu"),
+            None,
+        ))
+        .child(div().text_color(muted).child(VIEW_LABEL))
+        .child(div().text_color(theme.foreground).child(value));
+    div()
+        .relative()
+        .child(control)
+        .when_some(menu, |el, m| {
+            el.child(div().absolute().left_0().bottom_0().child(m))
+        })
+        .into_any_element()
 }
 
 /// Live rendering inputs: freshness, stack marker, menu trigger, and confirmation
@@ -263,6 +325,10 @@ pub(crate) struct HeaderChrome<'a> {
     pub picker: Option<AnyElement>,
     /// The `unscoped` chip's tooltip selector, built once with the tile.
     pub unscoped_tip: SharedString,
+    /// The open view menu, rendered by the tile, hung from the view name.
+    pub view_menu: Option<AnyElement>,
+    /// The view name's tooltip selector, built once with the tile.
+    pub view_tip: SharedString,
 }
 
 /// The rename field's key context: `lib::init` reclaims `tab`/`shift-tab`
@@ -358,17 +424,13 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
     let unscoped_tip = c.unscoped_tip.clone();
     let tile_id = c.tile_id.0;
     let name = sheet_name(h.name.clone(), &mut c, tile_id, theme);
+    let view = view_control(h.view.clone(), &mut c, tile_id, theme);
     // The sheet's identity: its name and the view it is shown through, one
     // group (closer than the groups around it), then the shift chips.
     let left = h_flex()
         .items_center()
         .gap_3()
-        .child(h_flex().gap_1p5().child(name).child(pair(
-            VIEW_LABEL,
-            h.view.clone(),
-            muted,
-            theme.foreground,
-        )))
+        .child(h_flex().gap_1p5().child(name).child(view))
         .children(h.shifts.iter().map(|s| {
             div()
                 .px_1()

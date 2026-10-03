@@ -1361,7 +1361,11 @@ the application roster.
 ### The tile
 
 The tile (titled `Pricer · <sheet>`) shows one named sheet under a single
-dense header: the sheet name (a control: see [sheets by pointer](#sheets-by-pointer)) with `view <name>`, any sheet-wide shift chips
+dense header: the sheet name (a control: see [sheets by pointer](#sheets-by-pointer)) with `view <name>` (a control: a
+click, or the unbound palette action `Pick a view…` (`pricer::view_menu`), toggles a menu of the loaded views
+hung under it, the sheet's own ticked; a pick takes `:view`'s route, and the
+menu shares menu mode's keys with the `.` action menu, which replaces it and
+which it replaces), any sheet-wide shift chips
 (`spot +2.0%`, `vol -1.0`, spelled as the shift cells spell them), `N pricing…`
 while lines are stale, `N failed` in danger text while any line's last answer
 was a failure, `pricer <name>`, the last priced time, which reads `stale` once
