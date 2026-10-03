@@ -31135,8 +31135,8 @@ run_mutation "link: set_scope on a follower writes the group" \
 # lane's own fields and have no group route to take.
 run_mutation "link: loading a saved scope edits the lane through a follower's view" \
   crates/geode-shell/src/frame.rs \
-  '        Ok(self.set_lane_scope(scope))' \
-  '        Ok(self.set_scope(scope))' \
+  '        let changed = self.set_lane_scope(scope);' \
+  '        let changed = self.set_scope(scope);' \
   geode-shell the_scope_bars_other_verbs_edit_the_lane_through_a_followers_view
 
 run_mutation "link: dropping a dimension edits the lane through a follower's view" \

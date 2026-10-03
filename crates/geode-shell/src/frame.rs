@@ -1411,7 +1411,7 @@ impl<'a> FrameViewMut<'a> {
         if applied {
             s.named.retain(|n| n != name);
         } else {
-            s.named.push(name.to_string());
+            s.named.push(name.into());
         }
         self.set_lane_scope(s)
     }
@@ -1435,7 +1435,8 @@ impl<'a> FrameViewMut<'a> {
         };
         s.named.retain(|n| n != name);
         s.expression = Some(and_join(s.expression.take(), expr));
-        Ok(self.set_lane_scope(s))
+        let changed = self.set_lane_scope(s);
+        Ok(changed)
     }
 
     /// Remove top-level expression term `i` (`Expr::conjuncts` order)
