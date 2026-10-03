@@ -17159,6 +17159,33 @@ run_mutation "ad hoc: the session restore reaches the lane" \
   geode-shell \
   a_restored_active_ad_hoc_chain_is_the_grouping_in_force
 
+# A pinned workspace's record restores into its own lane, not the shared one.
+run_mutation "ad hoc: a pinned restore applies its own chain" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                if let Some(chain) = record.ad_hoc {
+                    lane.restore_ad_hoc(chain, record.ad_hoc_active);
+                }' \
+  '                let _ = (&record.ad_hoc, record.ad_hoc_active);' \
+  geode-shell \
+  a_pinned_lane_restores_its_own_ad_hoc_chain
+
+# The session writer must capture the shared lane's chain, or a chain the
+# user built vanishes on restart.
+run_mutation "ad hoc: the session writer captures the shared chain" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '            ad_hoc: frame.ad_hoc().map(<[String]>::to_vec),' \
+  '            ad_hoc: None,' \
+  geode-shell \
+  the_session_writer_saves_each_lanes_ad_hoc_chain
+
+# Each pinned lane's chain is captured into its own workspace record.
+run_mutation "ad hoc: the session writer captures a pinned chain" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '                        ad_hoc: lane.ad_hoc().map(<[String]>::to_vec),' \
+  '                        ad_hoc: None,' \
+  geode-shell \
+  the_session_writer_saves_each_lanes_ad_hoc_chain
+
 # Pinning at restore copies the shared lane's chain; a pinned record
 # without one must not keep it, or the writer saves it as the pin's own.
 run_mutation "ad hoc: a pinned restore clears the copied chain" \
