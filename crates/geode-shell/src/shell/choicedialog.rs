@@ -37,17 +37,25 @@
 //!
 //! The row menu's `Color…` lists, for one value of a text dimension, each
 //! named color (alphabetical, with its swatch), then the twelve presets
-//! (`preset · {name}`), then `Custom…`, then `None`, then
-//! `Follow desk ({name})` when the user layer overrides a different, colored
-//! lower entry. While the query is a whole number 0–360 a typed `Hue {n}`
-//! row is pinned on top, lit. It opens on the color in force (an inline
-//! preset on its row, any other inline entry on `Custom…`, `None` without
-//! one), so enter on an untouched list changes nothing; rows stand for their
-//! pick by position, so a color named `None` or `Custom…` is still that
-//! color. A pick goes to `ShellView::set_value_color`, which writes the user
-//! layer's `value_colors` entry off the UI thread. With no named color the
-//! list holds the presets, `Custom…`, `None` and a muted line naming the
-//! Colors dialog.
+//! (`preset · {name}`), then `Custom…` (the hue stage), then
+//! `New named color…`, then `None`, then `Follow desk ({name})` when the
+//! user layer overrides a different, colored lower entry. While the query is
+//! a whole number 0–360 a typed `Hue {n}` row is pinned on top, lit. It
+//! opens on the color in force (an inline preset on its row, any other
+//! inline entry on `Custom…`, `None` without one), and a query cleared back
+//! to blank lights that row again, so enter on an untouched list changes
+//! nothing; rows stand for their pick by position, so a color named `None`
+//! or `Custom…` is still that color. A pick goes to
+//! `ShellView::set_value_color`, which writes the user layer's
+//! `value_colors` entry off the UI thread. With no named color the list
+//! begins with the presets.
+//!
+//! `New named color…` pushes the Colors dialog over the list at its naming
+//! stage, the value's sanitized name prefilled and the draft seeded from
+//! [`ChoiceDialogState::new_color_seed`]. Creating the color removes the
+//! covered list ([`drop_covered_value_color`]) and, once the color's write
+//! lands, colors the value with it; escape or `‹` at naming returns to the
+//! list intact.
 //!
 //! `Custom…` opens the hue stage, a second stage of the same modal: the
 //! pure [`HueStage`] on the target, a gpui-component slider whose state
@@ -178,6 +186,9 @@ pub enum Target {
         stage: Option<Box<HueStage>>,
         /// The hue the query spells, while it spells one: row 0 is then `Hue {n}`.
         typed: Option<u16>,
+        /// The declared row the list opened on, without a typed row: a query
+        /// cleared back to blank lights it again, so enter is still no change.
+        opening: usize,
     },
 }
 
@@ -261,6 +272,7 @@ fn swatch_selector(row: &ColorRow) -> Option<String> {
             preset: None,
         } => Some("valuecolor-swatch-hue".to_string()),
         ColorRow::Custom => Some("valuecolor-swatch-custom".to_string()),
+        ColorRow::NewNamed => None,
         ColorRow::Set { .. } => None,
     }
 }
@@ -574,7 +586,8 @@ impl ChoiceDialogState {
     /// The value-color list pins a `Hue {n}` row on top while the query is
     /// a whole number 0–360 ([`parse_hue`]), lit, with the other rows
     /// filtering beneath it; an unchanged query moves nothing, so enter's
-    /// re-feed keeps a moved highlight.
+    /// re-feed keeps a moved highlight. A query cleared back to blank lights
+    /// the row the list opened on, so enter on it still changes nothing.
     pub fn set_query(&mut self, query: &str) -> bool {
         match &mut self.target {
             Target::LinkGroup { current, .. } => {
@@ -592,6 +605,7 @@ impl ChoiceDialogState {
                 picks,
                 swatches,
                 resolved,
+                opening,
                 ..
             } => {
                 if query == self.list.query() {
@@ -618,6 +632,12 @@ impl ChoiceDialogState {
                 self.list.set_query(query);
                 if typed.is_some() {
                     self.list.pin_top(0);
+                } else if query.trim().is_empty()
+                    && let Some(at) = self.list.ranked().iter().position(|r| r.row == *opening)
+                {
+                    // Blank again: the opening row, not whatever row the
+                    // dropped typed row's highlight fell back to.
+                    self.list.set_ranked_highlighted(at);
                 }
                 true
             }
@@ -731,6 +751,9 @@ pub const NO_COLOR_ROW: &str = "None";
 /// The value-color list's row that opens the hue stage.
 pub const CUSTOM_ROW: &str = "Custom\u{2026}";
 
+/// The value-color list's row that opens the Colors dialog to name a new color.
+pub const NEW_NAMED_ROW: &str = "New named color\u{2026}";
+
 /// The hue a stage opens on when the color in force has none (a token
 /// color, or no color).
 const DEFAULT_HUE: u16 = 240;
@@ -745,6 +768,8 @@ pub enum ColorRow {
     },
     /// `Custom…`: open the hue stage.
     Custom,
+    /// `New named color…`: open the Colors dialog at its naming stage.
+    NewNamed,
 }
 
 impl ColorRow {
@@ -756,7 +781,7 @@ impl ColorRow {
     pub fn preset(&self) -> Option<&'static str> {
         match self {
             ColorRow::Set { preset, .. } => *preset,
-            ColorRow::Custom => None,
+            ColorRow::Custom | ColorRow::NewNamed => None,
         }
     }
 }
@@ -1043,6 +1068,9 @@ impl ChoiceDialogState {
         options.push(CUSTOM_ROW.to_string());
         picks.push(ColorRow::Custom);
         swatches.push(in_force.clone());
+        options.push(NEW_NAMED_ROW.to_string());
+        picks.push(ColorRow::NewNamed);
+        swatches.push(None);
         let no_color = options.len();
         options.push(NO_COLOR_ROW.to_string());
         picks.push(ColorRow::set(ValuePick::None));
@@ -1076,7 +1104,23 @@ impl ChoiceDialogState {
                 in_force,
                 stage: None,
                 typed: None,
+                opening,
             },
+        }
+    }
+
+    /// What `New named color…` seeds the new color with: the typed `Hue {n}` while
+    /// the query shows one, else the color in force (inline or named), else hue 240.
+    pub fn new_color_seed(&self) -> Definition {
+        match &self.target {
+            Target::ValueColor { typed: Some(n), .. } => {
+                Definition::hue(f32::from(*n), Tone::Normal)
+            }
+            Target::ValueColor {
+                in_force: Some(definition),
+                ..
+            } => definition.clone(),
+            _ => Definition::hue(f32::from(DEFAULT_HUE), Tone::Normal),
         }
     }
 }
@@ -1492,6 +1536,28 @@ pub(crate) fn deliver_action_values(
         });
     });
     cx.notify();
+}
+
+/// Remove the value-color list from beneath the dialog covering it: `New named
+/// color…`'s Colors dialog, once its color is created. The entries above keep their
+/// saved input. Nothing happens when the list is on top or absent.
+pub(crate) fn drop_covered_value_color(shell: &mut ShellView) {
+    let covered = shell
+        .modals
+        .iter()
+        .position(|m| m.kind == dialog::DialogKind::Choice)
+        .filter(|&at| at + 1 < shell.modals.len());
+    let is_value_color = matches!(
+        shell.choice_dialog.as_ref().map(|s| &s.target),
+        Some(Target::ValueColor { .. })
+    );
+    if let Some(at) = covered
+        && is_value_color
+    {
+        shell.modals.remove(at);
+        shell.choice_dialog = None;
+        shell.hue_slider = None;
+    }
 }
 
 fn open(
@@ -2098,6 +2164,17 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
             }
             // The list stays open beneath its own second stage.
             ColorRow::Custom => enter_hue_stage(shell, window, cx),
+            // Colors pushes over the list; the list goes once the color is created.
+            ColorRow::NewNamed => {
+                let seed = shell
+                    .choice_dialog
+                    .as_ref()
+                    .map(ChoiceDialogState::new_color_seed)
+                    .unwrap_or_else(|| Definition::hue(f32::from(DEFAULT_HUE), Tone::Normal));
+                let name = super::value_color::color_name_for(&value);
+                let hook = objectdialog::ColorForValue { dimension, value };
+                objectdialog::render::open_new_color(shell, name, seed, hook, window, cx);
+            }
         },
     }
 }
@@ -2201,10 +2278,6 @@ fn build(
         (hints_selector, hints)
     };
     let leads = value_color_leads(&state.target, cx);
-    let no_colors = matches!(
-        &state.target,
-        Target::ValueColor { picks, .. } if !picks.iter().any(|p| matches!(p, ColorRow::Set { pick: ValuePick::Color(_), .. }))
-    );
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let click_entity = entity.clone();
@@ -2245,14 +2318,6 @@ fn build(
         .w(scale::design(WIDTH))
         .child(dialog::filter_row(&shell.dialog_input, None, cx))
         .child(body)
-        .children(no_colors.then(|| {
-            div()
-                .px_3()
-                .text_sm()
-                .text_color(muted)
-                .debug_selector(|| "valuecolor-empty".to_string())
-                .child("no named colors: define one in the Colors dialog")
-        }))
         .child(hint_row(hints, hints_selector, WIDTH, muted, theme.border))
         .into_any_element()
 }
@@ -3281,7 +3346,7 @@ mod tests {
     }
 
     #[test]
-    fn with_no_named_colors_the_list_holds_no_named_rows() {
+    fn with_no_named_colors_the_list_begins_with_the_presets() {
         let state = value_list(&[], &value_state(None, None));
         let Target::ValueColor { picks, .. } = &state.target else {
             panic!("a value-color list");
@@ -3293,10 +3358,85 @@ mod tests {
                 ..
             }
         )));
+        let options = state.list.options();
+        assert_eq!(options[0], "preset \u{b7} red");
+        assert_eq!(&options[12..], [CUSTOM_ROW, NEW_NAMED_ROW, NO_COLOR_ROW]);
+    }
+
+    #[test]
+    fn new_named_color_sits_between_custom_and_none() {
+        let state = value_list(&["blue"], &value_state(None, None));
+        let at = position_of(&state, NEW_NAMED_ROW);
+        assert_eq!(state.list.options()[at - 1], CUSTOM_ROW);
+        assert_eq!(state.list.options()[at + 1], NO_COLOR_ROW);
+        assert_eq!(value_pick(&state, at), Some(ColorRow::NewNamed));
+    }
+
+    #[test]
+    fn the_new_color_seed_is_the_typed_hue_then_the_color_in_force() {
+        let none = value_list(&["blue"], &value_state(None, None));
+        assert_eq!(none.new_color_seed(), Definition::hue(240.0, Tone::Normal));
+        let mut state = value_state(None, None);
+        state.user = Some(ValueEntry::Inline(Definition::hue(210.0, Tone::Light)));
+        state.effective = state.user.clone();
+        let mut inline = value_list(&["blue"], &state);
+        assert_eq!(inline.new_color_seed(), Definition::hue(210.0, Tone::Light));
+        inline.set_query("90");
         assert_eq!(
-            state.list.options().last().map(String::as_str),
-            Some(NO_COLOR_ROW)
+            inline.new_color_seed(),
+            Definition::hue(90.0, Tone::Normal),
+            "the typed hue wins"
         );
+        let named = value_list(&["blue"], &value_state(None, Some("blue")));
+        assert_eq!(
+            named.new_color_seed(),
+            Definition::hue(240.0, Tone::Normal),
+            "a named color seeds its definition (the fixture's hue 240)"
+        );
+    }
+
+    /// A query cleared after a typed hue lights the row the list opened on
+    /// again, so enter on the cleared list is still no change.
+    #[test]
+    fn a_cleared_query_lights_the_opening_row_again() {
+        let mut state = value_state(None, None);
+        state.user = Some(ValueEntry::Inline(Definition::hue(0.0, Tone::Normal)));
+        state.effective = state.user.clone();
+        let mut preset = value_list(&["blue"], &state);
+        let opening = preset.list.highlighted_text().map(str::to_string);
+        assert_eq!(opening.as_deref(), Some("preset \u{b7} red"));
+        assert!(preset.set_query("2"));
+        assert_eq!(preset.list.highlighted_text(), Some("Hue 2"));
+        assert!(preset.set_query(""));
+        assert_eq!(preset.list.highlighted_text().map(str::to_string), opening);
+        assert!(preset.set_query("2"));
+        assert!(preset.set_query(" "), "a blank query is cleared too");
+        assert_eq!(preset.list.highlighted_text().map(str::to_string), opening);
+
+        let mut none = value_list(&["blue"], &value_state(None, None));
+        assert!(none.set_query("bl"));
+        assert_eq!(none.list.highlighted_text(), Some("blue"));
+        assert!(none.set_query(""));
+        assert_eq!(none.list.highlighted_text(), Some(NO_COLOR_ROW));
+    }
+
+    /// Dropping the typed row drops its pick and swatch with it: the rows
+    /// still stand for their picks by position.
+    #[test]
+    fn a_dropped_typed_row_keeps_the_picks_aligned() {
+        let mut state = value_list(&["blue"], &value_state(None, None));
+        assert!(state.set_query("210"));
+        assert!(state.set_query("blue"));
+        let Target::ValueColor {
+            picks, swatches, ..
+        } = &state.target
+        else {
+            panic!("a value-color list");
+        };
+        assert_eq!(picks[0], ColorRow::set(ValuePick::Color("blue".into())));
+        assert_eq!(picks.len(), state.list.options().len());
+        assert_eq!(swatches.len(), state.list.options().len());
+        assert_eq!(swatches[0], Some(Definition::hue(240.0, Tone::Normal)));
     }
 
     #[test]

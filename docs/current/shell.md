@@ -245,7 +245,8 @@ swatch, then the twelve presets, each with its swatch and labelled
 `preset · {name}`: `red` 0, `orange` 30, `yellow` 60, `lime` 90, `green`
 120, `teal` 150, `cyan` 180, `azure` 210, `blue` 240, `violet` 270,
 `magenta` 300 and `rose` 330, all tone normal. Then `Custom…` (with the
-swatch of the color in force), then `None`, then `Follow desk ({label})`
+swatch of the color in force), then `New named color…`, then `None`, then
+`Follow desk ({label})`
 only when the user layer holds an entry for this value and a lower layer
 holds a different, colored one. The label is the lower entry's color name,
 or for an inline entry `hue 210`, `hue 30 light`, or the token's name. It
@@ -254,16 +255,31 @@ equal to a preset (same hue, tone normal) is in force; on `Custom…` when
 any other inline entry is in force; or on `None` when the value has no
 color or its color is no longer defined, so `enter` on an untouched list
 changes nothing (on `Custom…` it opens the hue stage on the color in force,
-whose Apply writes nothing). A row stands for its pick by position, so a
-color named `None` or `Custom…` is still that color. With no named color
-the list holds the presets, `Custom…`, `None` and a muted line, `no named
-colors: define one in the Colors dialog`.
+whose Apply writes nothing). A query typed and then cleared back to blank
+lights that opening row again, so `enter` on it is still no change. A row
+stands for its pick by position, so a color named `None` or `Custom…` is
+still that color. With no named color the list begins with the presets.
 
 While the query is a whole number 0–360 (360 reads as 0; `07` is 7, while
 `-5`, `1e2` or `21a` are no hue), a pinned top row `Hue {n}` with its
 swatch appears, lit, and the other rows still filter beneath it. Enter on
 it writes `{ hue = n }`. Moving the highlight off it keeps the move: enter
 does not re-pin an unchanged query.
+
+`New named color…` pushes the Colors dialog over the list at its naming
+stage, the name field prefilled with the value lowercased, whitespace, `.`
+and `"` replaced by `_` (`SX5E Index` offers `sx5e_index`). The new color's
+draft is seeded from the typed `Hue {n}` while the query shows one, else
+the color in force (inline or named), else hue 240, normal. Enter creates
+the color as the dialog's own `n` does: the pick list is removed at once,
+and once the color's write to `colors.toml` succeeds the value is set to
+it (`SPX colored spx`). The Colors dialog continues to its edit stage,
+where hue and tone edits repaint the value through the named color.
+`escape` or `‹` at naming returns to the list intact, writing nothing. A
+refused name (taken, reserved or invalid) stays on naming with the
+dialog's notice. A failed color write colors nothing; the value is written
+only after the color is, so it never names a color the file lacks. A
+failed value write shows its error, and the color remains.
 
 `Custom…` opens the hue stage: a second stage of the same modal, under the
 same title, with the title row's `‹` back button. The preview shows the

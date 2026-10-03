@@ -97,6 +97,24 @@ pub(crate) fn notice(value: &str, pick: &ValuePick, preset: Option<&str>) -> Str
     }
 }
 
+/// The name `New named color…` prefills for `value`: lowercased, with every character
+/// a configuration object name refuses (whitespace, `.`, `"`) replaced by `_`, so
+/// `SX5E Index` offers `sx5e_index`. A name that is taken or reserved stays prefilled;
+/// the Colors dialog's own refusal shows on enter.
+pub(crate) fn color_name_for(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_whitespace() || c == '.' || c == '"' {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .to_lowercase()
+}
+
 impl ShellView {
     /// Make `pick` the color of `value` of `dimension` in the user layer.
     /// The write is decided against the layers as loaded, queued in UI
@@ -165,6 +183,23 @@ mod tests {
 
     fn read(dir: &std::path::Path) -> String {
         std::fs::read_to_string(dir.join("value_colors.toml")).unwrap()
+    }
+
+    #[test]
+    fn color_names_for_a_value_are_lowercased_and_sanitized() {
+        for (value, name) in [
+            ("SPX", "spx"),
+            ("SX5E Index", "sx5e_index"),
+            ("BRK.B", "brk_b"),
+            ("a\"b", "a_b"),
+            ("   ", "___"),
+        ] {
+            assert_eq!(color_name_for(value), name, "{value:?}");
+            assert!(
+                geode_core::config::check_object_name(name).is_ok(),
+                "{name}"
+            );
+        }
     }
 
     fn colors(text: &str) -> ValueColors {

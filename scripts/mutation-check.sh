@@ -35406,14 +35406,6 @@ run_mutation "value colors: the color rows paint swatches" \
   geode-shell \
   color_opens_the_pick_list_with_swatches
 
-# With no named colors the list says where to define one.
-run_mutation "value colors: no named colors shows the muted line" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '        .children(no_colors.then(|| {' \
-  '        .children(false.then(|| {' \
-  geode-shell \
-  with_no_named_colors_the_list_holds_none_and_says_where_to_define_one
-
 # A desk entry of none offers no Follow desk row beside None.
 run_mutation "value colors: a desk none is nothing to follow" \
   crates/geode-core/src/colour/values.rs \
@@ -35806,6 +35798,103 @@ run_mutation "value colors: the stage compares hue and tone with the color in fo
   '        self.in_force.is_some()' \
   geode-shell \
   the_stage_knows_when_it_holds_the_color_in_force
+
+# The hook is one-shot: a later create in the same dialog leaves the value.
+run_mutation "value colors: the new color hook fires once" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            .and_then(|s| s.on_created.take());' \
+  '            .and_then(|s| s.on_created.clone());' \
+  geode-shell \
+  the_hook_colors_the_value_once_and_a_later_create_leaves_it
+
+# The Colors dialog's own n never arms the hook.
+run_mutation "value colors: naming begins without the hook" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        self.on_created = None;' \
+  '        let _ = &self.on_created;' \
+  geode-shell \
+  begin_naming_drops_the_value_hook
+
+# The value is colored once the create is written.
+run_mutation "value colors: a written create colors the value" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '                shell.set_value_color(hook.dimension, hook.value, ValuePick::Color(name), None, cx);' \
+  '                let _ = (hook, name);' \
+  geode-shell \
+  new_named_color_creates_the_color_and_colors_the_value
+
+# The created color removes the covered pick list.
+run_mutation "value colors: a created color drops the covered list" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                    crate::shell::choicedialog::drop_covered_value_color(shell);' \
+  '                    let _ = &shell;' \
+  geode-shell \
+  new_named_color_creates_the_color_and_colors_the_value
+
+# Escape at naming from the list pops back to it.
+run_mutation "value colors: escape at naming returns to the list" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            .is_some_and(|s| s.on_created.is_some())' \
+  '            .is_some_and(|_| false)' \
+  geode-shell \
+  escape_at_naming_pops_only_when_opened_from_the_pick_list
+
+# Back at naming from the list pops back to it, as escape does.
+run_mutation "value colors: back at naming returns to the list" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let pops = state.stage == Stage::Naming && state.on_created.is_some();' \
+  '    let pops = false;' \
+  geode-shell \
+  back_at_naming_returns_to_the_pick_list
+
+# The prefill replaces what a name refuses.
+run_mutation "value colors: the new color name is sanitized" \
+  crates/geode-shell/src/shell/value_color.rs \
+  "            if c.is_whitespace() || c == '.' || c == '\"' {" \
+  '            if false {' \
+  geode-shell \
+  color_names_for_a_value_are_lowercased_and_sanitized
+
+# The seed reaches the Colors draft: its fields read the seeded table.
+run_mutation "value colors: a seeded Colors draft reads its definition" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            Domain::Colors => colours::fields_from_table(Some(table)),' \
+  '            Domain::Colors => self.fields(config, None),' \
+  geode-shell \
+  colors_fields_from_a_source_table_read_its_definition
+
+# The typed hue seeds a new named color over the color in force.
+run_mutation "value colors: the typed hue seeds the new color" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            Target::ValueColor { typed: Some(n), .. } => {' \
+  '            Target::ValueColor { typed: Some(n), in_force: None, .. } => {' \
+  geode-shell \
+  the_new_color_seed_is_the_typed_hue_then_the_color_in_force
+
+# A query cleared back to blank lights the opening row, so enter writes
+# nothing.
+run_mutation "value colors: a cleared query lights the opening row" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                    self.list.set_ranked_highlighted(at);' \
+  '                    let _ = at;' \
+  geode-shell \
+  a_cleared_query_lights_the_opening_row_again
+
+# The same, through the keys: type a hue, backspace, enter writes nothing.
+run_mutation "value colors: a cleared hue query then enter writes nothing" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                    self.list.set_ranked_highlighted(at);' \
+  '                    let _ = at;' \
+  geode-shell \
+  a_cleared_hue_query_then_enter_writes_nothing
+
+# Dropping the typed row drops its pick, so rows keep their picks.
+run_mutation "value colors: a dropped typed row drops its pick" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                        picks.remove(0);' \
+  '                        // the typed pick kept' \
+  geode-shell \
+  a_dropped_typed_row_keeps_the_picks_aligned
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

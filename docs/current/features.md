@@ -414,7 +414,8 @@ inside a `V` row selection keeps the cursor and the selection; anywhere
 else it clears any selection and moves the cursor to the clicked row first.
 A row with nothing to offer shows `no actions for
 this row` instead. The menu's [`Color…`](shell.md#color) row sets the
-color a value paints in: the clicked column's value when that column is a
+color a value paints in (named colors, presets, a custom hue, or a new named
+color): the clicked column's value when that column is a
 text dimension (a `utf8` dimension or key column, or a derived dimension),
 else the row's own value, the grouping column's at the row's depth (`L1`
 on an `lhu` subtotal, `lhu` being a `utf8` dimension). The grand total
@@ -1751,7 +1752,8 @@ anywhere else it clears any selection, closes an open editor or entry bar,
 and moves the cursor to the clicked row, keeping its column. A
 right-click inside the open editor's own cell is the editor's and opens no
 row menu; blank space below the lines opens nothing. The menu's
-[`Color…`](shell.md#color) row is for `underlying_ref` on line, leg and
+[`Color…`](shell.md#color) row (named colors, presets, a custom hue, or a
+new named color) is for `underlying_ref` on line, leg and
 package rows (a package's when its legs share one); a grouping row's context
 is empty, so it offers none.
 
