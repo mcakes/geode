@@ -453,7 +453,7 @@ impl Render for ShellView {
         let grouping_entity = cx.entity();
         let on_grouping = move |window: &mut Window, cx: &mut App| {
             grouping_entity.update(cx, |view, cx| {
-                choicedialog::open_grouping(view, window, cx);
+                objectdialog::render::open(view, objectdialog::Domain::Groupings, window, cx);
             });
         };
         // The AS OF chip's click — the mouse
@@ -509,14 +509,19 @@ impl Render for ShellView {
                 });
             });
         };
-        // Whether the grouping picker is up: the readout holds its pressed
-        // fill for exactly as long as it is (design guide: a control that
-        // owns a popup stays visibly pressed until the popup closes). The
-        // tile picker shares the choice dialog and must not light it.
-        let grouping_open = matches!(
-            self.choice_dialog.as_ref().map(|d| &d.target),
-            Some(choicedialog::Target::Grouping { .. })
-        );
+        // Whether the Grouping dialog is up, live or covered: the readout
+        // holds its pressed fill for exactly as long as it is (design guide:
+        // a control that owns a popup stays visibly pressed until the popup
+        // closes). Another object dialog must not light it.
+        let grouping_open =
+            self.object_dialog
+                .as_ref()
+                .is_some_and(|state| state.domain == objectdialog::Domain::Groupings)
+                || self.modals.iter().any(|modal| {
+                    modal.parked_object.as_ref().is_some_and(|parked| {
+                        parked.state.domain == objectdialog::Domain::Groupings
+                    })
+                });
         // The load glyph holds its pressed fill while the scope picker is up.
         let scope_open = matches!(
             self.choice_dialog.as_ref().map(|d| &d.target),

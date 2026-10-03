@@ -54,7 +54,7 @@ pub fn cell_text(value: &Value, kind: &CellKind) -> String {
 }
 
 /// One header attribute as painted: prepared text, and whether the draft
-/// has overridden it — `true` exactly when [`header_of`] found a
+/// has overridden it — `true` exactly when header preparation found a
 /// [`Draft`] entry for this column's own attribute edit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderCell {
@@ -203,7 +203,7 @@ pub struct MatrixIndex {
 
 /// The pivot's (grid row, ladder column) → snapshot row map, plus the
 /// snapshot columns the ladder and each slice column are read from —
-/// everything [`pivot`] had in hand when it indexed the grid, kept so every
+/// everything the pivot builder had in hand when it indexed the grid, kept so every
 /// on-demand read finds the cell the build checked. Indices into the
 /// snapshot the index was built from; meaningless against any other.
 #[derive(Debug, Clone, Default, PartialEq)]

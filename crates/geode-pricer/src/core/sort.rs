@@ -22,7 +22,7 @@
 use crate::core::columns::{ColumnKind, column};
 use crate::core::package::{aggregates, groups_over, package_qty};
 use crate::core::rollup::{NodeKind, Rollup, legs_under};
-use crate::core::sheet::{LineId, LineState, RowKind, Sheet};
+use crate::core::sheet::{LineId, LineState, NEEDS_CURRENCY, RowKind, Sheet};
 use crate::core::shorthand::render_barrier_kind;
 use crate::core::views::ColumnPlan;
 use chrono::NaiveDate;
@@ -223,9 +223,9 @@ fn line_part(sheet: &Sheet, row: usize, kind: ColumnKind) -> Option<Part> {
                 .into(),
             )
         }),
-        ColumnKind::Currency => sheet
-            .result(row)
-            .map(|r| Part::Text(r.currency.as_str().into())),
+        // The payout currency the cell paints, not the one the last
+        // answer came in: they differ until a currency edit reprices.
+        ColumnKind::Currency => sheet.currency(row).map(|c| Part::Text(c.as_str().into())),
         ColumnKind::Barrier => barrier.and_then(|b| number(b.level)),
         ColumnKind::BarrierType => {
             barrier.map(|b| Part::Text(render_barrier_kind(b.barrier).into()))
@@ -253,11 +253,16 @@ fn priced(kind: ColumnKind) -> bool {
 
 /// A bare line's or a leg's own cell.
 fn leaf_key(sheet: &Sheet, row: usize, kind: ColumnKind) -> Key {
+    // As its cell reads, ahead of the state: a line without a currency
+    // is never requested, so its `Stale` would rank as `pricing…`.
+    if kind == ColumnKind::Status && sheet.is_line(row) && sheet.currency(row).is_none() {
+        return Key::one(Some(Part::Text(NEEDS_CURRENCY.into())));
+    }
     if priced(kind) {
         return priced_key(
             kind,
             sheet.state(row),
-            sheet.result(row),
+            sheet.shown_result(row).as_ref(),
             sheet.priced_at(row),
         );
     }
@@ -497,17 +502,16 @@ pub fn hold(rollup: &mut Rollup, sheet: &Sheet, held: &Held) {
 mod tests {
     use super::*;
     use crate::core::rollup::{self, effective_chain};
-    use crate::core::sheet::tests::{at, push, result};
+    use crate::core::sheet::tests::{at, in_usd, push, result};
     use crate::core::shorthand::parse_builtin;
     use crate::core::visibility::Visibility;
     use geode_core::clock::Clock;
     use geode_core::dimensions::DerivedDimensions;
-    use geode_core::pricing::Currency;
 
     fn sheet(lines: &[&str]) -> Sheet {
         let mut s = Sheet::new("t");
         for l in lines {
-            push(&mut s, vec![parse_builtin(l).unwrap()]);
+            push(&mut s, vec![in_usd(parse_builtin(l).unwrap())]);
         }
         s
     }
@@ -638,12 +642,7 @@ mod tests {
         let mut s = sheet(&["SPX Z26 5000 C", "SPX Z26 4800/5200 CS", "SPX Z26 4000 C"]);
         price(&mut s, &[(0, 1.0), (3, 9.0), (4, 2.0)]);
         // Price the long leg (row 2) in EUR: the package's local npv is a gap.
-        let id = s.id(2);
-        let rev = s.revision(2);
-        let mut eur = result(100.0);
-        eur.currency = Currency::parse("EUR").unwrap();
-        s.deliver(id, rev, Ok(eur), at(0));
-        s.fold_packages();
+        crate::core::sheet::tests::deliver_in_eur(&mut s, 2, result(100.0), at(0));
         assert!(s.result(1).unwrap().currency.is_mixed(), "precondition");
         let local = ranked(&s, &[], spec("npv", SortOrder::Desc));
         assert_eq!(local.first().unwrap(), "SPX Z26 4000 C");
@@ -655,6 +654,55 @@ mod tests {
         assert_eq!(
             usd[0], "SPX Z26 4800/5200 CS",
             "the usd twin sums: 100·1.08 − 9·1.08"
+        );
+    }
+
+    #[test]
+    fn a_line_without_a_currency_sorts_by_status_as_it_reads() {
+        // Row 0 stale, priced in USD; row 1 has no currency. Its cell
+        // reads `needs currency`, which sorts before `pricing…`.
+        let mut s = sheet(&["SPX Z26 5000 C"]);
+        push(&mut s, vec![parse_builtin("SPX Z26 4000 C").unwrap()]);
+        assert_eq!(
+            ranked(&s, &[], spec("status", SortOrder::Asc)),
+            vec!["SPX Z26 4000 C", "SPX Z26 5000 C"]
+        );
+    }
+
+    #[test]
+    fn a_line_sorts_by_the_currency_its_cell_shows() {
+        let mut s = sheet(&["SPX Z26 5000 C", "SPX Z26 4000 C"]);
+        price(&mut s, &[(0, 1.0), (1, 2.0)]);
+        // Row 1 asks for EUR, still holding its USD answer.
+        s.apply(crate::core::edit::Edit::SetCurrency {
+            row: 1,
+            currency: Some(crate::core::sheet::tests::eur()),
+        })
+        .unwrap();
+        assert_eq!(
+            ranked(&s, &[], spec("currency", SortOrder::Asc)),
+            vec!["SPX Z26 4000 C", "SPX Z26 5000 C"]
+        );
+    }
+
+    #[test]
+    fn a_line_moved_off_its_priced_currency_sorts_its_local_figure_as_a_gap() {
+        let mut s = sheet(&["SPX Z26 5000 C", "SPX Z26 4000 C"]);
+        price(&mut s, &[(0, 1.0), (1, 2.0)]);
+        s.apply(crate::core::edit::Edit::SetCurrency {
+            row: 1,
+            currency: Some(crate::core::sheet::tests::eur()),
+        })
+        .unwrap();
+        // Desc: as a value 2.0 would rank first; as a gap it ranks last.
+        assert_eq!(
+            ranked(&s, &[], spec("npv", SortOrder::Desc)),
+            vec!["SPX Z26 5000 C", "SPX Z26 4000 C"]
+        );
+        assert_eq!(
+            ranked(&s, &[], spec("npv_usd", SortOrder::Desc)),
+            vec!["SPX Z26 4000 C", "SPX Z26 5000 C"],
+            "the usd twin is a value either way"
         );
     }
 

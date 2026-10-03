@@ -880,7 +880,7 @@ impl Draft {
     }
 
     /// Restore a session draft, skipping malformed entries individually.
-    /// Cell edits wait at [`UNRESOLVED_COLUMN`] until rebase resolves their
+    /// Cell edits wait at the `UNRESOLVED_COLUMN` sentinel until rebase resolves their
     /// labels. Restored content determines `Clean` versus `Editing`; sent
     /// status is not restored.
     ///

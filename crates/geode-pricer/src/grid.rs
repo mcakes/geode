@@ -834,7 +834,7 @@ impl<'a> CellPass<'a> {
 mod tests {
     use super::*;
     use crate::core::rollup::{self, EffectiveChain, effective_chain};
-    use crate::core::sheet::tests::{at, callspread, line, push, result, spx};
+    use crate::core::sheet::tests::{at, callspread, in_usd, line, push, result, spx};
     use crate::core::visibility::Visibility;
     use crate::core::{Expansion, Sheet, Views};
     use geode_core::clock::Clock;
@@ -1285,7 +1285,7 @@ mod tests {
                 "SPX H27 4000 P",
             ]
             .iter()
-            .map(|l| crate::core::shorthand::parse_builtin(l).unwrap())
+            .map(|l| in_usd(crate::core::shorthand::parse_builtin(l).unwrap()))
             .collect(),
         );
         assert_eq!(s.len(), 9);
@@ -1795,7 +1795,9 @@ mod tests {
         let mut s = fixture();
         push(
             &mut s,
-            vec![crate::core::shorthand::parse_builtin("SPX Z26 4000 P DO 3500").unwrap()],
+            vec![in_usd(
+                crate::core::shorthand::parse_builtin("SPX Z26 4000 P DO 3500").unwrap(),
+            )],
         );
         let plan = plan_of(&["barrier"]);
         let dims = DerivedDimensions::default();
@@ -1823,9 +1825,7 @@ mod tests {
     #[test]
     fn a_mixed_currency_group_paints_no_local_sum() {
         let mut s = priced();
-        let mut eur = result(1.0);
-        eur.currency = geode_core::pricing::Currency::parse("EUR").unwrap();
-        s.deliver_all(vec![(s.id(0), s.revision(0), Ok(eur))], at(1));
+        crate::core::sheet::tests::deliver_in_eur(&mut s, 0, result(1.0), at(1));
         let plan = plan_of(&["npv", "npv_usd", "currency"]);
         let dims = DerivedDimensions::default();
         let (r, m) = grouped_with(

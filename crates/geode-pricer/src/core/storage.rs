@@ -12,7 +12,8 @@ use chrono::NaiveDate;
 use geode_core::config::{LayerDoc, merge_docs};
 use geode_core::document::{Column, DocumentRows, Value};
 use geode_core::pricing::{
-    Barrier, BarrierKind, Expiry, Instrument, MarketOverrides, OptionKind, Strike, Vanilla,
+    Barrier, BarrierKind, Currency, Expiry, Instrument, MarketOverrides, OptionKind, Strike,
+    Vanilla,
 };
 use geode_core::schema::{ColumnRole, ColumnType, DatasetSpec, SchemaSpec};
 use geode_core::snapshot::Snapshot;
@@ -32,6 +33,11 @@ pub const LINE_AXIS: &str = "line";
 /// migration, which does not exist: a changed declaration would write
 /// values into the wrong columns of an existing database. Add, remove or
 /// reorder a column only together with a migration.
+///
+/// `currency` was appended on 2026-10-03; databases created before then
+/// are refused by the drift check and must be cleared. It is the last
+/// value column, so values keep their positions ahead of it. `""` is a
+/// line without a payout currency, and every package.
 ///
 /// `sheet` is `categorical = false`: a text dimension is categorical by
 /// default, which would offer sheet names in the frame picker and the
@@ -102,6 +108,9 @@ type = "i64"
 role = "value"
 [pricer_sheets.columns.vol_shift]
 type = "f64"
+role = "value"
+[pricer_sheets.columns.currency]
+type = "utf8"
 role = "value"
 
 [pricer_sheets.columns.view]
@@ -232,6 +241,7 @@ pub fn to_rows(sheet: &Sheet) -> Option<DocumentRows> {
     let mut spot = Vec::with_capacity(n);
     let mut vol_own = Vec::with_capacity(n);
     let mut vol = Vec::with_capacity(n);
+    let mut currency = Vec::with_capacity(n);
     for row in 0..n {
         line.push(sheet.id(row).0 as i64);
         order.push(row as i64);
@@ -293,6 +303,11 @@ pub fn to_rows(sheet: &Sheet) -> Option<DocumentRows> {
         spot.push(s);
         vol_own.push(vo);
         vol.push(v);
+        currency.push(
+            sheet
+                .currency(row)
+                .map_or_else(String::new, |c| c.as_str().to_string()),
+        );
     }
     let (sso, ss) = own_pair(sheet.sheet_shift().spot_pct);
     let (svo, sv) = own_pair(sheet.sheet_shift().vol_pts);
@@ -329,6 +344,7 @@ pub fn to_rows(sheet: &Sheet) -> Option<DocumentRows> {
             ("spot_shift".into(), Column::F64(spot)),
             ("vol_shift_own".into(), Column::I64(vol_own)),
             ("vol_shift".into(), Column::F64(vol)),
+            ("currency".into(), Column::Utf8(currency)),
         ],
     })
 }
@@ -414,6 +430,7 @@ pub fn from_rows(name: &str, rows: &DocumentRows) -> Result<Sheet, String> {
     let spot = f64s(rows, "spot_shift")?;
     let vol_own = i64s(rows, "vol_shift_own")?;
     let vol = f64s(rows, "vol_shift")?;
+    let currency = utf8(rows, "currency")?;
     let n = rows.rows();
     for (label, len) in [
         ("order", order.len()),
@@ -433,6 +450,7 @@ pub fn from_rows(name: &str, rows: &DocumentRows) -> Result<Sheet, String> {
         ("spot_shift", spot.len()),
         ("vol_shift_own", vol_own.len()),
         ("vol_shift", vol.len()),
+        ("currency", currency.len()),
     ] {
         if len != n {
             return Err(format!("value '{label}' has {len} rows, the axis has {n}"));
@@ -536,6 +554,13 @@ pub fn from_rows(name: &str, rows: &DocumentRows) -> Result<Sheet, String> {
             shift: OwnShifts {
                 spot_pct: own(spot_own[i], spot[i]),
                 vol_pts: own(vol_own[i], vol[i]),
+            },
+            // `""` or a value that is not a code loads blank: the line
+            // then waits for a currency rather than pricing in a guess.
+            currency: if row_kind == RowKind::Line {
+                Currency::parse(&currency[i])
+            } else {
+                None
             },
             revision: 1,
             result: None,
@@ -882,6 +907,7 @@ pub(crate) mod tests {
         Option<geode_core::pricing::Instrument>,
         i64,
         OwnShifts,
+        Option<geode_core::pricing::Currency>,
     )> {
         (0..s.len())
             .map(|r| {
@@ -892,6 +918,7 @@ pub(crate) mod tests {
                     s.instrument(r).cloned(),
                     s.qty(r),
                     s.shift(r),
+                    s.currency(r),
                 )
             })
             .collect()
@@ -936,6 +963,80 @@ pub(crate) mod tests {
         assert!(back.id(n).0 > s.id(s.len() - 1).0);
         // And a second round trip is stable.
         assert_eq!(to_rows(&back).unwrap().rows(), n + 1);
+    }
+
+    #[test]
+    fn a_sheet_round_trips_its_currencies() {
+        use crate::core::sheet::tests::{eur, line_in};
+        let mut s = Sheet::new("ccy");
+        push(
+            &mut s,
+            vec![
+                line(spx(5000.0, OptionKind::Call), 1),
+                line_in(spx(5100.0, OptionKind::Put), 2, None),
+                line_in(spx(5200.0, OptionKind::Call), 3, Some(eur())),
+            ],
+        );
+        let rows = to_rows(&s).unwrap();
+        match rows.values.iter().find(|(n, _)| n == "currency") {
+            Some((_, Column::Utf8(v))) => assert_eq!(v, &["USD", "", "EUR"]),
+            other => panic!("{other:?}"),
+        }
+        let back = from_rows("ccy", &rows).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(back.currency(0), Some(geode_core::pricing::Currency::USD));
+        assert_eq!(back.currency(1), None);
+        assert_eq!(back.currency(2), Some(eur()));
+        // A stored value that is not a code reads blank, never a guess.
+        let mut rows = rows;
+        if let Some((_, Column::Utf8(v))) = rows.values.iter_mut().find(|(n, _)| n == "currency") {
+            v[0] = "dollars".into();
+        }
+        assert_eq!(from_rows("ccy", &rows).unwrap().currency(0), None);
+    }
+
+    #[test]
+    fn a_sheet_saved_without_currencies_loads_blank_then_fills() {
+        let mut rows = to_rows(&full_sheet()).unwrap();
+        if let Some((_, Column::Utf8(v))) = rows.values.iter_mut().find(|(n, _)| n == "currency") {
+            v.iter_mut().for_each(|c| c.clear());
+        } else {
+            panic!("no currency column");
+        }
+        let mut back = from_rows("book-1", &rows).unwrap_or_else(|e| panic!("{e}"));
+        let lines: Vec<usize> = (0..back.len()).filter(|r| back.is_line(*r)).collect();
+        assert!(!lines.is_empty());
+        assert!(lines.iter().all(|r| back.currency(*r).is_none()));
+        assert_eq!(back.lines_needing_currency().collect::<Vec<_>>(), lines);
+        for r in &lines {
+            assert!(back.fill_currency(*r, geode_core::pricing::Currency::USD));
+        }
+        assert_eq!(back.lines_needing_currency().count(), 0);
+    }
+
+    #[test]
+    fn currency_is_the_last_value_column_before_the_attributes() {
+        // The store inserts positionally in this order; an appended
+        // value column must land after every earlier value and before
+        // the attributes, or old databases would take values misplaced.
+        let ds = dataset();
+        let names: Vec<&str> = ds
+            .document_columns()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        let at = names
+            .iter()
+            .position(|n| *n == "currency")
+            .expect("declared");
+        assert_eq!(names[at - 1], "vol_shift", "{names:?}");
+        assert_eq!(names[at + 1], "view", "{names:?}");
+        let values: Vec<&str> = ds
+            .columns
+            .iter()
+            .filter(|c| c.role == ColumnRole::Value)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(values.last(), Some(&"currency"));
     }
 
     #[test]
@@ -1177,7 +1278,7 @@ pub(crate) mod tests {
                 .expect_err("refused, never a half-sheet")
         };
         // Missing, in each role.
-        for name in ["qty", "line", "spot_overrides", "kind"] {
+        for name in ["qty", "line", "spot_overrides", "kind", "currency"] {
             let e = refused(&|c| c.retain(|(m, _)| m.name != name));
             assert!(e.contains(&format!("'{name}' is missing")), "{name}: {e}");
         }

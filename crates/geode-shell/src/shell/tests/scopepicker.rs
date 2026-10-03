@@ -248,3 +248,54 @@ fn hovering_the_load_glyph_names_the_chord(cx: &mut gpui::TestAppContext) {
                 .is_some()
     );
 }
+
+/// A query that matches nothing leaves nothing lit: `enter` keeps the
+/// picker open and the scope unchanged; `escape` closes it.
+#[gpui::test]
+fn enter_with_no_match_does_nothing_and_escape_closes(cx: &mut gpui::TestAppContext) {
+    let (mut vcx, shell, frame) = open_with_scopes(cx);
+    vcx.simulate_keystrokes("alt-o");
+    vcx.simulate_input("zzz");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
+    assert_eq!(scope_text(&frame, &vcx), None);
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+}
+
+/// `enter` picks from the field's LIVE text, not the last `Change` the
+/// list saw: a write through `set_value` emits no `Change`, so without the
+/// re-feed the list would still be ranked against an empty query and load
+/// the first row.
+#[gpui::test]
+fn enter_re_feeds_the_fields_live_text_before_picking(cx: &mut gpui::TestAppContext) {
+    let (mut vcx, shell, frame) = open_with_scopes(cx);
+    vcx.simulate_keystrokes("alt-o");
+    vcx.run_until_parked();
+    vcx.update(|window, cx| {
+        let input = shell.read(cx).dialog_input.clone();
+        input.update(cx, |i, cx| i.set_value("eu", window, cx));
+    });
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        scope_text(&frame, &vcx).as_deref(),
+        Some("eu"),
+        "an unranked list would have loaded asia, its first row"
+    );
+}
+
+/// `tab` completes the field to the highlighted row and keeps typing there.
+#[gpui::test]
+fn tab_completes_the_field_to_the_highlighted_row(cx: &mut gpui::TestAppContext) {
+    let (mut vcx, shell, _frame) = open_with_scopes(cx);
+    vcx.simulate_keystrokes("alt-o");
+    vcx.simulate_input("e");
+    vcx.simulate_keystrokes("tab");
+    vcx.run_until_parked();
+    let field = shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(field, "eu");
+    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
+}

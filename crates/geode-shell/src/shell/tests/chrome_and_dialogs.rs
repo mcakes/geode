@@ -2682,3 +2682,14 @@ fn chrome_and_dialog_rows_follow_the_font_size(cx: &mut gpui::TestAppContext) {
         tile_bottom
     );
 }
+
+/// The shell installs an empty `ReferenceGlobal` with the others, so a module
+/// can read it before the bridge's first answer arrives.
+#[gpui::test]
+fn the_reference_global_starts_empty(cx: &mut gpui::TestAppContext) {
+    let (_window, mut cx) = open_shell(cx, test_services());
+    assert_eq!(
+        cx.update(|_, cx| (*cx.global::<crate::reference::ReferenceGlobal>().0).clone()),
+        geode_core::reference::ReferenceData::default()
+    );
+}

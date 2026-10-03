@@ -5,7 +5,7 @@
 //! undo; deliveries use deliver and refresh ticks use tick. These paths rebuild and
 //! install the index on change, and refill the delegate's window, outside rendering.
 
-use crate::content::{PricerSettings, Shared};
+use crate::content::{PayoutSource, PricerSettings, Shared};
 use crate::core::cell::{self, CellEditor};
 use crate::core::clip::{put_place, spec_of};
 use crate::core::columns::ColumnKind;
@@ -42,7 +42,7 @@ use geode_core::colour::NamedColours;
 use geode_core::document::DocumentRows;
 use geode_core::expansion::{Expansion as GroupExpansion, Path};
 use geode_core::grid::selection::{Resolved, SelectKind, Selection};
-use geode_core::pricing::{PriceLine, PriceOutcome, PriceParams};
+use geode_core::pricing::{Currency, PriceLine, PriceOutcome, PriceParams};
 use geode_core::query::{QueryKey, QueryOutcome};
 use geode_core::scope::Scope;
 use geode_core::sort::SortOrder;
@@ -55,6 +55,7 @@ use geode_shell::frame::FrameRef;
 use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
+use geode_shell::reference::ReferenceGlobal;
 use geode_shell::shell::aggregates::AggregateCell;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -761,6 +762,11 @@ pub struct PricerTile {
     /// read). Re-read only when the revision moves.
     underlyings: Rc<[SharedString]>,
     underlyings_rev: Option<u64>,
+    /// The payout source the blank lines were last filled under. A reload
+    /// refills only when it names another one: a reload of views,
+    /// templates, colors or refresh alone would otherwise refill a
+    /// currency the trader cleared.
+    payout_seen: Option<PayoutSource>,
     /// The live `V`/`v` selection, anchored by line and plan column name
     /// so a rebuild re-finds the same cells. `None` outside visual mode.
     pub(crate) selection: Option<Selection<At, &'static str>>,
@@ -1018,6 +1024,10 @@ impl PricerTile {
             this.rebuild(cx);
         })
         .detach();
+        // A reference table that changed fills the lines still without a
+        // payout currency; the bridge republishes only on a change.
+        cx.observe_global::<ReferenceGlobal>(|this, cx| this.fill_from_reference(cx))
+            .detach();
         // A keymap reload re-resolves an open menu's hints at once.
         cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
             this.chords = menu::live_bindings(cx);
@@ -1066,6 +1076,7 @@ impl PricerTile {
         })
         .detach();
 
+        let payout_seen = shared.settings.borrow().payout.clone();
         let cursor = Cursor {
             at: record.cursor.map(|id| At::Line { id, within: None }),
             col: 0,
@@ -1166,6 +1177,7 @@ impl PricerTile {
             row_drag: None,
             underlyings: Rc::from([]),
             underlyings_rev: None,
+            payout_seen,
             selection: None,
             resolved: None,
             selection_extent: None,
@@ -1178,7 +1190,13 @@ impl PricerTile {
         };
         this.adopt_templates();
         this.resolve_plan();
+        // A sheet read at open fills its blank lines before its first
+        // paint; a pending one fills in `loaded`.
+        let filled = this.fill_blank_lines(cx);
         this.rebuild(cx);
+        if filled {
+            this.arm_save(cx);
+        }
         this
     }
 
@@ -1653,7 +1671,9 @@ impl PricerTile {
         if std::mem::take(&mut self.refuse_next_edit) {
             return Err(EditError::EmptyInsert);
         }
-        let undo = self.sheet.apply(edit)?;
+        let moved = self.underlying_moves(std::slice::from_ref(&edit));
+        let mut undo = self.sheet.apply(edit)?;
+        self.fill_moved(moved, &mut undo, cx);
         self.undo.record(undo);
         self.after_edit(cx);
         Ok(())
@@ -1667,18 +1687,136 @@ impl PricerTile {
         edits: Vec<Edit>,
         cx: &mut Context<Self>,
     ) -> Result<(), EditError> {
+        let moved = self.underlying_moves(&edits);
         match self.apply_batch(edits) {
             Err(e) => {
                 self.after_edit(cx);
                 Err(e)
             }
             Ok(undo) => {
-                if let Some(undo) = undo {
+                if let Some(mut undo) = undo {
+                    self.fill_moved(moved, &mut undo, cx);
                     self.undo.record(undo);
                     self.after_edit(cx);
                 }
                 Ok(())
             }
+        }
+    }
+
+    // ---- payout currency ----------------------------------------------
+
+    /// The payout currency the reference data names for `underlying`,
+    /// through `[pricing] payout_currency`. `None` without a payout
+    /// source, for an underlying the table does not list, and for a cell
+    /// that is not a code: the line stays blank and reads `needs
+    /// currency` rather than pricing in a guess.
+    fn reference_currency(&self, underlying: &str, cx: &App) -> Option<Currency> {
+        let settings = self.shared.settings.borrow();
+        let payout = settings.payout.as_ref()?;
+        let reference = cx.try_global::<ReferenceGlobal>()?;
+        let cell = reference
+            .0
+            .lookup(&payout.dataset, underlying, &payout.column)?;
+        // Read as the currency cell reads typed text: ` usd ` is USD.
+        Currency::parse(&cell.trim().to_ascii_uppercase())
+    }
+
+    /// Give each blank line or leg of `specs` its own underlying's
+    /// reference currency, so a typed or put line prices at once. A set
+    /// currency (a yanked line's) is kept. Applied to the specs before
+    /// the insert, so the currency is part of that undo entry.
+    fn default_currencies(&self, specs: &mut [RowSpec], cx: &App) {
+        for spec in specs {
+            let lines = match spec {
+                RowSpec::Line(line) => std::slice::from_mut(line),
+                RowSpec::Package { legs, .. } => legs.as_mut_slice(),
+            };
+            for line in lines.iter_mut().filter(|l| l.currency.is_none()) {
+                line.currency = self.reference_currency(line.instrument.underlying(), cx);
+            }
+        }
+    }
+
+    /// The rows `edits` move to another underlying, read before they
+    /// apply. Only instrument edits name rows here, and those move no
+    /// row, so the indices still hold after the edits land.
+    fn underlying_moves(&self, edits: &[Edit]) -> Vec<usize> {
+        edits
+            .iter()
+            .filter_map(|e| match e {
+                Edit::SetInstrument { row, instrument } => self
+                    .sheet
+                    .instrument(*row)
+                    .is_some_and(|i| i.underlying() != instrument.underlying())
+                    .then_some(*row),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The reference currency of each blank line among `rows`, from its
+    /// own underlying.
+    fn blank_lookups(&self, rows: Vec<usize>, cx: &App) -> Vec<(usize, Currency)> {
+        rows.into_iter()
+            .filter(|&r| {
+                r < self.sheet.len() && self.sheet.is_line(r) && self.sheet.currency(r).is_none()
+            })
+            .filter_map(|r| {
+                let underlying = self.sheet.instrument(r)?.underlying();
+                Some((r, self.reference_currency(underlying, cx)?))
+            })
+            .collect()
+    }
+
+    /// Fill each blank line among `rows` from its own underlying. A
+    /// refresh fill is reference data arriving, not a trader's edit: it
+    /// records no undo step, so `u` never takes it back, and it never
+    /// overwrites a set currency. Answers whether anything filled; the
+    /// caller rebuilds, reprices and saves.
+    fn fill_blank(&mut self, rows: Vec<usize>, cx: &App) -> bool {
+        let fills = self.blank_lookups(rows, cx);
+        self.sheet.fill_currencies(fills) > 0
+    }
+
+    /// Look up each blank line an underlying edit `moved` from its new
+    /// underlying, as `SetCurrency` edits joined to that edit's `undo`:
+    /// the lookup is part of the trader's edit, so `u` takes back the
+    /// underlying and its currency together and redo replays both. Kept
+    /// apart, undo would restore the old underlying under a currency
+    /// looked up for the new one, and the line would price in it.
+    fn fill_moved(&mut self, moved: Vec<usize>, undo: &mut Undo, cx: &App) {
+        let mut fills: Vec<Undo> = Vec::new();
+        for (row, c) in self.blank_lookups(moved, cx) {
+            let set = Edit::SetCurrency {
+                row,
+                currency: Some(c),
+            };
+            // `blank_lookups` names only existing lines, the one refusal
+            // `SetCurrency` has; a refusal would leave the line blank.
+            if let Ok(u) = self.sheet.apply(set) {
+                fills.push(u);
+            }
+        }
+        // The fills landed last, so their inverses run first.
+        let mut inverse: Vec<Edit> = fills.into_iter().rev().flat_map(|u| u.inverse).collect();
+        inverse.append(&mut undo.inverse);
+        undo.inverse = inverse;
+    }
+
+    /// [`Self::fill_blank`] over every line still without a currency.
+    fn fill_blank_lines(&mut self, cx: &App) -> bool {
+        let blank: Vec<usize> = self.sheet.lines_needing_currency().collect();
+        self.fill_blank(blank, cx)
+    }
+
+    /// A reference refresh: fill the blank lines it now resolves, then
+    /// rebuild, reprice and save. Nothing filled wakes nothing.
+    fn fill_from_reference(&mut self, cx: &mut Context<Self>) {
+        if self.fill_blank_lines(cx) {
+            self.rebuild(cx);
+            self.submit(cx);
+            self.arm_save(cx);
         }
     }
 
@@ -1916,13 +2054,9 @@ impl PricerTile {
         // Advance the place first so the edit's own rebuild labels what
         // comes next; put it back on a refusal.
         entry.place = next_place(at, &spec);
-        match self.apply_edit(
-            Edit::Insert {
-                place: at,
-                rows: vec![spec.clone()],
-            },
-            cx,
-        ) {
+        let mut rows = vec![spec.clone()];
+        self.default_currencies(&mut rows, cx);
+        match self.apply_edit(Edit::Insert { place: at, rows }, cx) {
             Ok(()) => {
                 let first = landed_row(at);
                 let id = self.sheet.id(first);
@@ -3173,8 +3307,13 @@ impl PricerTile {
         }
         self.expansion.retain_packages(&self.sheet);
         self.resolve_plan();
+        let filled = self.fill_blank_lines(cx);
         self.rebuild(cx);
         self.submit(cx);
+        // After `loading` clears: the fill saves the loaded sheet.
+        if filled {
+            self.arm_save(cx);
+        }
         // The loaded sheet's own `refresh` sets the interval.
         self.restart_timer(cx);
     }
@@ -3208,6 +3347,13 @@ impl PricerTile {
         self.refresh_entry_completion(cx);
         self.resolve_plan();
         self.rebuild(cx);
+        // A new payout source can resolve lines the old one left blank;
+        // the same one has nothing new to fill.
+        let payout = self.shared.settings.borrow().payout.clone();
+        if payout != self.payout_seen {
+            self.payout_seen = payout;
+            self.fill_from_reference(cx);
+        }
         self.restart_timer(cx);
     }
 
@@ -3600,14 +3746,10 @@ impl PricerTile {
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }
-        self.apply_edit(
-            Edit::Insert {
-                place,
-                rows: specs.clone(),
-            },
-            cx,
-        )
-        .map_err(|e| e.to_string())?;
+        let mut rows = specs.clone();
+        self.default_currencies(&mut rows, cx);
+        self.apply_edit(Edit::Insert { place, rows }, cx)
+            .map_err(|e| e.to_string())?;
         // Landed rows are contiguous: a package occupies itself and its legs.
         let first = landed_row(place);
         let mut at = first;
@@ -3972,7 +4114,7 @@ impl PricerTile {
     }
 
     /// Find's targets, as rollup nodes and their keys: every row the grid
-    /// would paint with every group open ([`grid::find_targets`]), so a
+    /// would paint with every group open ([`crate::grid::find_targets`]), so a
     /// line inside a closed group is found; packages keep their own
     /// expansion (a closed package's key already covers its legs).
     fn find_targets(&self) -> (Vec<usize>, Vec<String>) {
@@ -6385,14 +6527,29 @@ pub(crate) mod tests {
         pub host_presses: Rc<std::cell::Cell<u32>>,
     }
 
-    /// A sheet named `book` in a fresh store, built from shorthand lines,
-    /// and the session record that restores it.
+    /// One shorthand line as a stored line: each line or leg carries its
+    /// [`TEST_CURRENCIES`] currency, as a sheet saved since currencies
+    /// were stored does, so opening it fills nothing and saves nothing.
+    pub(crate) fn seed_spec(line: &str) -> RowSpec {
+        let currency = |l: &mut crate::core::LineSpec| {
+            l.currency = TEST_CURRENCIES
+                .iter()
+                .find(|(u, _)| *u == l.instrument.underlying())
+                .and_then(|(_, c)| Currency::parse(c));
+        };
+        let mut spec = crate::core::shorthand::parse_builtin(line).unwrap();
+        match &mut spec {
+            RowSpec::Line(l) => currency(l),
+            RowSpec::Package { legs, .. } => legs.iter_mut().for_each(currency),
+        }
+        spec
+    }
+
+    /// A sheet named `book` in a fresh store, built from shorthand lines
+    /// ([`seed_spec`]), and the session record that restores it.
     pub(crate) fn seeded(lines: &[&str]) -> (MemorySheetStore, toml::Table) {
         let mut s = Sheet::new("book");
-        let rows: Vec<RowSpec> = lines
-            .iter()
-            .map(|l| crate::core::shorthand::parse_builtin(l).unwrap())
-            .collect();
+        let rows: Vec<RowSpec> = lines.iter().map(|l| seed_spec(l)).collect();
         s.apply(Edit::Insert {
             place: Place::Root { at: 0 },
             rows,
@@ -6405,13 +6562,58 @@ pub(crate) mod tests {
         (store, t)
     }
 
+    /// Every underlying the tile tests type, in USD: lines get their
+    /// currency through the production route (the reference global and
+    /// the payout source), and the USD answers of [`result`] match it.
+    /// `AAPL` is left out on purpose: an unmapped underlying.
+    pub(crate) const TEST_CURRENCIES: [(&str, &str); 7] = [
+        ("SPX", "USD"),
+        ("NDX", "USD"),
+        ("NKY", "USD"),
+        ("SP", "USD"),
+        ("SX5E", "USD"),
+        ("HSI", "USD"),
+        ("HSCEI", "USD"),
+    ];
+
+    /// The reference data an `underlyings` table of `rows` publishes,
+    /// keyed by `underlying_ref` with a `currency` column.
+    pub(crate) fn reference(rows: &[(&str, &str)]) -> geode_shell::reference::ReferenceGlobal {
+        let table = geode_core::query::ReferenceTable {
+            columns: vec!["underlying_ref".into(), "currency".into()],
+            rows: rows
+                .iter()
+                .map(|(u, c)| vec![Some(u.to_string()), Some(c.to_string())])
+                .collect(),
+            gen_id: 1,
+            source_time: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+        };
+        let data = geode_core::reference::ReferenceData::default()
+            .with_table("underlyings", &table, 1)
+            .expect("a new table");
+        geode_shell::reference::ReferenceGlobal(std::sync::Arc::new(data))
+    }
+
+    /// Default settings with the app's default payout source,
+    /// `underlyings.currency`.
+    pub(crate) fn test_settings() -> PricerSettings {
+        PricerSettings {
+            payout: Some(crate::content::PayoutSource {
+                dataset: "underlyings".into(),
+                column: "currency".into(),
+            }),
+            ..PricerSettings::default()
+        }
+    }
+
+    /// Replace the reference global, as the app's bridge does on a change.
+    pub(crate) fn publish_reference(vcx: &mut VisualTestContext, rows: &[(&str, &str)]) {
+        let global = reference(rows);
+        vcx.update(|_, cx| cx.set_global(global));
+    }
+
     pub(crate) fn open(cx: &mut gpui::TestAppContext) -> (Harness, VisualTestContext) {
-        open_full(
-            cx,
-            None,
-            MemorySheetStore::default(),
-            PricerSettings::default(),
-        )
+        open_full(cx, None, MemorySheetStore::default(), test_settings())
     }
 
     pub(crate) fn open_seeded(
@@ -6419,7 +6621,7 @@ pub(crate) mod tests {
         lines: &[&str],
     ) -> (Harness, VisualTestContext) {
         let (store, record) = seeded(lines);
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.visible(&mut vcx, true);
         (h, vcx)
     }
@@ -6443,7 +6645,7 @@ pub(crate) mod tests {
             cx,
             None,
             MemorySheetStore::default(),
-            PricerSettings::default(),
+            test_settings(),
             templates,
         )
     }
@@ -6486,7 +6688,7 @@ pub(crate) mod tests {
             cx,
             None,
             MemorySheetStore::default(),
-            PricerSettings::default(),
+            test_settings(),
             TemplateSet::builtin(),
             None,
             |frame| FrameRef::for_tile(frame, WorkspaceIx::FIRST, TileId(TILE)),
@@ -6507,6 +6709,8 @@ pub(crate) mod tests {
         cx.update(gpui_component::init);
         cx.update(geode_shell::shell::dialog::init_reclaimed_keybindings);
         cx.update(crate::init);
+        // The shell installs the global before any tile opens.
+        cx.update(|cx| cx.set_global(reference(&TEST_CURRENCIES)));
         let (data, rx) = DataHandle::for_tests();
         let mut factory = PricerFactory::new(
             data.clone(),
@@ -6860,7 +7064,7 @@ pub(crate) mod tests {
             toml::Value::Array(vec![toml::Value::Integer(2)]),
         );
         record.insert("view".into(), "barrier".into());
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         assert_eq!(h.title(&mut vcx), "Pricer · book");
         assert_eq!(
             h.tree(&vcx).len(),
@@ -6888,7 +7092,7 @@ pub(crate) mod tests {
             cx,
             Some(record),
             MemorySheetStore::default(),
-            PricerSettings::default(),
+            test_settings(),
         );
         assert_eq!(h.title(&mut vcx), "Pricer · gone");
         assert_eq!(
@@ -6906,7 +7110,7 @@ pub(crate) mod tests {
         let (store, record) = seeded(&["SPX Z26 5000 C"]);
         let rows = store.get("book").unwrap();
         store.set_pending(true);
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         assert_eq!(h.notice(&vcx).as_deref(), Some("loading…"));
         assert_eq!(h.sheet_len(&vcx), 0);
         // `query_answered` passes decoded query results to `loaded`.
@@ -6933,7 +7137,7 @@ pub(crate) mod tests {
         );
         let rows = store.get("book").unwrap();
         store.set_pending(true);
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         let saved = crate::session::Record::from_table(&h.serialize(&mut vcx));
         assert_eq!(saved.cursor, Some(crate::core::LineId(5)));
         assert_eq!(saved.expanded, vec![crate::core::LineId(2)]);
@@ -6958,7 +7162,7 @@ pub(crate) mod tests {
     fn the_session_record_round_trips_the_tile(cx: &mut gpui::TestAppContext) {
         let (store, mut record) = seeded(&["SPX Z26 5000 C", "SPX Z26 4000 P"]);
         record.insert("cursor".into(), toml::Value::Integer(2));
-        let (h, mut vcx) = open_full(cx, Some(record), store.clone(), PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store.clone(), test_settings());
         h.command(&mut vcx, "view barrier").unwrap();
         let saved = h.serialize(&mut vcx);
         let r = crate::session::Record::from_table(&saved);
@@ -6973,7 +7177,7 @@ pub(crate) mod tests {
     fn the_cursor_row_records_its_anchor(cx: &mut gpui::TestAppContext) {
         let (store, mut record) = seeded(&["SPX Z26 5000 C", "NDX Z26 20000 C"]);
         record.insert("cursor".into(), toml::Value::Integer(2));
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.visible(&mut vcx, true);
         h.draw(&mut vcx);
         let row = vcx
@@ -7002,7 +7206,7 @@ pub(crate) mod tests {
     fn the_dimension_context_is_the_cursor_lines_underlying(cx: &mut gpui::TestAppContext) {
         let (store, mut record) = seeded(&["SPX Z26 5000 C", "NDX Z26 20000 C"]);
         record.insert("cursor".into(), toml::Value::Integer(2));
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.visible(&mut vcx, true);
         let ctx = vcx
             .update(|_, cx| h.content.dimension_context(cx))
@@ -7197,6 +7401,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -7241,6 +7446,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -7419,6 +7625,7 @@ pub(crate) mod tests {
                 colours,
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -9515,7 +9722,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_refused_submission_notices_and_retries_after_a_second(cx: &mut gpui::TestAppContext) {
         let (store, record) = seeded(&BOOK);
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.fill_queue();
         h.visible(&mut vcx, true);
         assert_eq!(h.notice(&vcx).as_deref(), Some(REFUSED));
@@ -9587,7 +9794,7 @@ pub(crate) mod tests {
         let settings = PricerSettings {
             pricer: "vendor".into(),
             pricer_missing: true,
-            ..PricerSettings::default()
+            ..test_settings()
         };
         let (h, vcx) = open_full(cx, None, MemorySheetStore::default(), settings);
         assert_eq!(
@@ -9744,13 +9951,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_config_template_still_parses_after_switching_sheets(cx: &mut gpui::TestAppContext) {
         let (store, record) = seeded(&["SPX Z26 5000 C"]);
-        let (h, mut vcx) = open_configured(
-            cx,
-            Some(record),
-            store,
-            PricerSettings::default(),
-            condor_set(),
-        );
+        let (h, mut vcx) = open_configured(cx, Some(record), store, test_settings(), condor_set());
         h.visible(&mut vcx, true);
         for (sheet, len) in [("other", 5), ("book", 6)] {
             assert_eq!(h.command(&mut vcx, &format!("e {sheet}")), Ok(()));
@@ -9797,6 +9998,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 settings.refresh,
                 settings.stale_after,
+                None,
                 cx,
             )
         });
@@ -9855,6 +10057,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 settings.refresh,
                 settings.stale_after,
+                None,
                 cx,
             )
         });
@@ -10187,7 +10390,7 @@ pub(crate) mod tests {
             cx,
             Some(record),
             store,
-            PricerSettings::default(),
+            test_settings(),
             TemplateSet::builtin(),
             Some(list.clone()),
         );
@@ -10346,6 +10549,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 settings.refresh,
                 settings.stale_after,
+                None,
                 cx,
             )
         });
@@ -10644,6 +10848,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 settings.refresh,
                 settings.stale_after,
+                None,
                 cx,
             )
         });
@@ -10888,6 +11093,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -10922,6 +11128,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -11286,6 +11493,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -11318,6 +11526,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -11584,7 +11793,7 @@ pub(crate) mod tests {
         let (store, record) = seeded(&["SPX Z26 5000 C"]);
         let rows = store.get("book").unwrap();
         store.set_pending(true);
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.dispatch(&mut vcx, "menu", None);
         // Delete row is greyed while loading, so `j` would step over it:
         // the pointer puts the highlight there.
@@ -11624,6 +11833,7 @@ pub(crate) mod tests {
                 NamedColours::default(),
                 None,
                 std::time::Duration::from_secs(60),
+                None,
                 cx,
             )
         });
@@ -11759,7 +11969,7 @@ pub(crate) mod tests {
             geode_shell::colfit::SESSION_KEY.into(),
             toml::Value::Table(widths),
         );
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         assert!(
             h.tile.read_with(&vcx, |t, _| t.is_loading()),
             "not loaded yet"
@@ -11808,7 +12018,7 @@ pub(crate) mod tests {
             geode_shell::colfit::SESSION_KEY.into(),
             toml::Value::Table(widths),
         );
-        let (h2, mut vcx2) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h2, mut vcx2) = open_full(cx, Some(record), store, test_settings());
         h2.visible(&mut vcx2, true);
         assert_eq!(width_of_column(&h2, &vcx2, "qty"), fitted);
         assert_eq!(width_of_column(&h2, &vcx2, crate::delegate::TREE_KEY), tree);
@@ -11818,7 +12028,7 @@ pub(crate) mod tests {
             geode_shell::colfit::SESSION_KEY.into(),
             toml::Value::String("wide".into()),
         );
-        let (h3, mut vcx3) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h3, mut vcx3) = open_full(cx, Some(record), store, test_settings());
         let saved = h3.serialize(&mut vcx3);
         assert!(!saved.contains_key(geode_shell::colfit::SESSION_KEY));
     }
@@ -11835,7 +12045,7 @@ pub(crate) mod tests {
         let (store, record) = seeded(&["SPX Z26 5000 C"]);
         let rows = store.get("book").unwrap();
         store.set_pending(true);
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         let loading = Err("the sheet is still loading".to_string());
         assert_eq!(h.command(&mut vcx, "shift spot 2"), loading);
         assert_eq!(h.command(&mut vcx, "spot spx 5100"), loading);
@@ -12165,7 +12375,7 @@ pub(crate) mod tests {
         broken.axes.clear();
         assert!(store.save("book", broken.clone()).is_ok());
         let base = store.save_count();
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.visible(&mut vcx, true);
         let blocked = h.save_notice(&vcx).expect("a failed load says so");
         assert!(
@@ -12198,7 +12408,7 @@ pub(crate) mod tests {
         let (store, record) = seeded(&BOOK);
         let good = store.get("book").unwrap();
         store.set_pending(true);
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.tile
             .update(&mut vcx, |t, cx| t.loaded(Err("boom".into()), cx));
         assert_eq!(
@@ -12216,7 +12426,7 @@ pub(crate) mod tests {
             store.set_pending(true);
             let mut record = toml::Table::new();
             record.insert("sheet".into(), "gone".into());
-            open_full(cx, Some(record), store, PricerSettings::default())
+            open_full(cx, Some(record), store, test_settings())
         };
         h2.tile.update(&mut vcx2, |t, cx| t.loaded(Ok(None), cx));
         assert_eq!(h2.save_notice(&vcx2), None);
@@ -12368,7 +12578,7 @@ pub(crate) mod tests {
         let (store, record) = seeded(&["SPX Z26 5000 C"]);
         let rows = store.get("book").unwrap();
         store.set_pending(true);
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         assert_eq!(h.notice(&vcx).as_deref(), Some(LOADING));
         h.dispatch(&mut vcx, "escape", None);
         assert_eq!(h.notice(&vcx).as_deref(), Some(LOADING));
@@ -12382,7 +12592,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_refusal_with_nothing_left_to_price_clears(cx: &mut gpui::TestAppContext) {
         let (store, record) = seeded(&["SPX Z26 5000 C"]);
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.fill_queue();
         h.visible(&mut vcx, true);
         assert_eq!(h.notice(&vcx).as_deref(), Some(REFUSED));
@@ -12401,7 +12611,7 @@ pub(crate) mod tests {
             cx,
             Some(record),
             MemorySheetStore::default(),
-            PricerSettings::default(),
+            test_settings(),
         );
         h.visible(&mut vcx, true);
         let gone = Some("sheet 'gone' was not found; opened empty".to_string());
@@ -12422,7 +12632,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn consecutive_refusals_back_off(cx: &mut gpui::TestAppContext) {
         let (store, record) = seeded(&BOOK);
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.fill_queue();
         h.visible(&mut vcx, true);
         let tag = |vcx: &VisualTestContext| h.tile.read_with(vcx, |t, _| t.tag);
@@ -12441,7 +12651,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_stopped_service_stops_the_pricing_backoff(cx: &mut gpui::TestAppContext) {
         let (store, record) = seeded(&BOOK);
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.close_channel();
         h.visible(&mut vcx, true);
         assert_eq!(h.notice(&vcx).as_deref(), Some(STOPPED));
@@ -12508,7 +12718,7 @@ pub(crate) mod tests {
     fn a_stopped_load_names_the_stopped_service(cx: &mut gpui::TestAppContext) {
         let (store, record) = seeded(&BOOK);
         store.set_load_refusal(Some(Refusal::Stopped));
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.visible(&mut vcx, true);
         assert_eq!(
             h.save_notice(&vcx).as_deref(),
@@ -12722,7 +12932,7 @@ pub(crate) mod tests {
         let (store, record) = seeded(&["SPX Z26 5000 C"]);
         let rows = store.get("book").unwrap();
         store.set_pending(true);
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         assert_eq!(empty_text(&h, &vcx), "Loading sheet…");
         assert!(painted(&mut vcx, "pricer-empty"));
         h.tile
@@ -13152,7 +13362,7 @@ pub(crate) mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (store, record, rows) = pending_book();
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.visible(&mut vcx, true);
         assert_eq!(
             h.store.loads(),
@@ -13185,7 +13395,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_failed_or_undecodable_load_answer_blocks_saves(cx: &mut gpui::TestAppContext) {
         let (store, record, rows) = pending_book();
-        let (h, mut vcx) = open_full(cx, Some(record.clone()), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record.clone()), store, test_settings());
         answer_load(&h, &mut vcx, 1, Err("boom".into()));
         assert_eq!(
             h.save_notice(&vcx).as_deref(),
@@ -13194,7 +13404,7 @@ pub(crate) mod tests {
 
         let store = MemorySheetStore::default();
         store.set_pending(true);
-        let (h2, mut vcx2) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h2, mut vcx2) = open_full(cx, Some(record), store, test_settings());
         let bad = crate::core::storage::tests::snapshot_of(&rows, |cols| {
             cols.retain(|(m, _)| m.name != "strike")
         });
@@ -13215,7 +13425,7 @@ pub(crate) mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (store, record, rows) = pending_book();
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.visible(&mut vcx, true);
         h.visible(&mut vcx, false);
         assert!(
@@ -13270,7 +13480,7 @@ pub(crate) mod tests {
         let good = store.get("book").unwrap();
         store.set_load_refused(true);
         let base = store.save_count();
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.visible(&mut vcx, true);
         assert_eq!(
             h.save_notice(&vcx).as_deref(),
@@ -13473,7 +13683,7 @@ pub(crate) mod tests {
             store.clone(),
             Views::builtin(),
             TemplateSet::builtin(),
-            PricerSettings::default(),
+            test_settings(),
         );
         cx.update(|cx| {
             factory.save_answered("a", Err("no".into()), cx);
@@ -13514,10 +13724,7 @@ pub(crate) mod tests {
         let mut s = Sheet::new(name);
         s.apply(Edit::Insert {
             place: Place::Root { at: 0 },
-            rows: lines
-                .iter()
-                .map(|l| crate::core::shorthand::parse_builtin(l).unwrap())
-                .collect(),
+            rows: lines.iter().map(|l| seed_spec(l)).collect(),
         })
         .unwrap();
         to_rows(&s).unwrap()
@@ -13629,7 +13836,7 @@ pub(crate) mod tests {
             Rc::new(store.clone()),
             Views::builtin(),
             TemplateSet::builtin(),
-            PricerSettings::default(),
+            test_settings(),
         ));
         let notified = Rc::new(std::cell::Cell::new(0));
         let asked = Rc::new(std::cell::Cell::new(0));
@@ -13836,7 +14043,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_switch_starts_the_save_state_over(cx: &mut gpui::TestAppContext) {
         let (store, record, _) = pending_book();
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.visible(&mut vcx, true);
         answer_load(&h, &mut vcx, 1, Err("boom".into()));
         assert!(h.tile.read_with(&vcx, |t, _| t.save_blocked));
@@ -13974,7 +14181,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn colon_name_refuses_a_sheet_that_did_not_load(cx: &mut gpui::TestAppContext) {
         let (store, record, _) = pending_book();
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         assert_eq!(
             h.command(&mut vcx, "name fresh"),
             Err("the sheet is still loading".into())
@@ -15069,7 +15276,7 @@ pub(crate) mod tests {
     fn a_blocked_rename_says_why_and_greys_its_menu_row(cx: &mut gpui::TestAppContext) {
         let (store, record) = seeded(&["SPX Z26 5000 C"]);
         store.set_pending(true);
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
         h.dispatch(&mut vcx, "rename_sheet", None);
         assert_eq!(rename_text(&h, &vcx), None);
         assert_eq!(
@@ -15310,6 +15517,7 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal");
     }
 
+    mod currency;
     mod grouping;
     mod reorder;
     mod scope;

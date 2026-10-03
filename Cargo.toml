@@ -61,10 +61,8 @@ tracing-appender = "0.2"
 # read. The `=` pins make this manifest and the committed Cargo.lock agree;
 # a bump is a deliberate change on a branch, both families together.
 #
-# There is no git dependency on zed or on gpui-kit any more, so the old
-# two-copies hazard (a git dep keyed on URL+reference, which a `rev` pin on
-# our side used to split from gpui-component's unpinned copy) cannot recur:
-# we and gpui-component both name the same registry crate.
+# Geode and gpui-component name the same registry GPUI crate, keeping the
+# types they exchange on one dependency identity.
 #
 # `gpui-pre-macros` rewrites `gpui::` paths inside macro output to
 # `gpui_kit::` only when the calling crate depends on the `gpui-kit`
@@ -76,14 +74,10 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.5", features = 
 gpui-component = "=0.6.2"
 # Renamed upstream from `gpui-component-assets` with the gpui-kit rebrand.
 gpui-kit-assets = "=0.6.2"
-# gpui-component names these two siblings with a CARET (`gpui-base =
-# "0.6.2"`), so without a direct `=` pin on our side a `cargo update` can
-# float them to a newer release than the gpui-component they were built
-# with — which is exactly what happened on 2026-09-18 (a 0.6.1 component
-# over a 0.6.2 base failed to compile inside gpui-component itself).
-# `geode-app` depends on both for that reason alone (the shell's one
-# former use, `CalendarView` in the as-of dialog, went with the calendar
-# on 2026-09-20).
+# gpui-component names these siblings with caret requirements. geode-app
+# depends on both solely to activate these exact pins: cargo update must
+# not pair the component with a newer base or macro release whose API may
+# be incompatible.
 gpui-base = "=0.6.2"
 gpui-component-macros = "=0.6.2"
 

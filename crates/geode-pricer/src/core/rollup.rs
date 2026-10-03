@@ -467,7 +467,7 @@ pub fn legs_under(rollup: &Rollup, node: usize) -> Vec<usize> {
 mod tests {
     use super::*;
     use crate::core::edit::Edit;
-    use crate::core::sheet::tests::{at, push, result};
+    use crate::core::sheet::tests::{at, in_usd, push, result};
     use crate::core::shorthand::parse_builtin;
     use crate::core::visibility::apply_scope;
     use geode_core::config::{LayerDoc, merge_docs};
@@ -489,7 +489,7 @@ mod tests {
                 "SPX H27 4000 P",
             ]
             .iter()
-            .map(|l| parse_builtin(l).unwrap())
+            .map(|l| in_usd(parse_builtin(l).unwrap()))
             .collect(),
         );
         assert_eq!(s.len(), 9);
@@ -634,7 +634,7 @@ mod tests {
         let mut s = sheet();
         push(
             &mut s,
-            vec![parse_builtin("SPX Z26 5000 C UO 5500").unwrap()],
+            vec![in_usd(parse_builtin("SPX Z26 5000 C UO 5500").unwrap())],
         );
         let r = roll(&s, &["barrier"]);
         let values: Vec<_> = r
@@ -668,7 +668,10 @@ mod tests {
     #[test]
     fn numbers_order_by_number_not_by_text() {
         let mut s = sheet();
-        push(&mut s, vec![parse_builtin("SPX Z26 10000 C").unwrap()]);
+        push(
+            &mut s,
+            vec![in_usd(parse_builtin("SPX Z26 10000 C").unwrap())],
+        );
         let r = roll(&s, &["strike"]);
         assert_eq!(
             root_labels(&r),

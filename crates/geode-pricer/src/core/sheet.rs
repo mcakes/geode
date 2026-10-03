@@ -3,8 +3,10 @@
 //! structural edits rebuild parent indices in one pass.
 //!
 //! Row edits go through [`Sheet::apply`]. Result delivery, repricing ticks, and package
-//! folding update pricing state without changing row identity or requests. Sheet name,
-//! view, and refresh policy are independent metadata.
+//! folding update pricing state without changing row identity or requests. The one
+//! request change outside `apply` is `Sheet::fill_currencies`, which gives blank lines
+//! a default payout currency without an undo step. Sheet name, view, and refresh policy
+//! are independent metadata.
 
 use crate::core::shorthand::{identify, render_line, render_package};
 use crate::core::template::{Template, TemplateSet};
@@ -15,6 +17,9 @@ use geode_core::pricing::{
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// The status of a line with no payout currency, which has no request.
+pub const NEEDS_CURRENCY: &str = "needs currency";
 
 /// Per-sheet identity, allocated monotonically and never reused for a new row. Pricing
 /// requests carry the `u64` value; document storage encodes it on an `i64` line axis.
@@ -63,6 +68,9 @@ pub struct LineSpec {
     /// Signed; a sell is negative; never zero.
     pub qty: i64,
     pub shift: OwnShifts,
+    /// The payout currency the line prices in; `None` until one is set,
+    /// and a line without one has no request.
+    pub currency: Option<Currency>,
 }
 
 /// What one shorthand line means: a line, or a package with its legs.
@@ -87,6 +95,8 @@ pub struct RowRecord {
     pub instrument: Option<Instrument>,
     pub qty: i64,
     pub shift: OwnShifts,
+    /// `None` on a package and on a line not yet given one.
+    pub currency: Option<Currency>,
     pub revision: u64,
     pub result: Option<PriceResult>,
     pub state: LineState,
@@ -130,6 +140,17 @@ pub struct Folded {
     pub priced_at: Option<DateTime<Utc>>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Package folds on this thread, for tests that prove a batch folds once.
+#[cfg(test)]
+pub(crate) fn folds() -> usize {
+    FOLDS.with(|f| f.get())
+}
+
 #[derive(Debug)]
 pub struct Sheet {
     pub name: String,
@@ -150,6 +171,7 @@ pub struct Sheet {
     instrument: Vec<Option<Instrument>>,
     qty: Vec<i64>,
     shift: Vec<OwnShifts>,
+    currency: Vec<Option<Currency>>,
     revision: Vec<u64>,
     result: Vec<Option<PriceResult>>,
     state: Vec<LineState>,
@@ -182,6 +204,7 @@ impl Sheet {
             instrument: Vec::new(),
             qty: Vec::new(),
             shift: Vec::new(),
+            currency: Vec::new(),
             revision: Vec::new(),
             result: Vec::new(),
             state: Vec::new(),
@@ -259,6 +282,12 @@ impl Sheet {
         self.shift[row]
     }
 
+    /// The line's payout currency; `None` on a package and on a line
+    /// that needs one.
+    pub fn currency(&self, row: usize) -> Option<Currency> {
+        self.currency[row]
+    }
+
     /// The sheet-wide shifts every line without its own inherits; set
     /// through `Edit::SetSheetShift` alone (the one mutation door).
     pub fn sheet_shift(&self) -> OwnShifts {
@@ -277,6 +306,21 @@ impl Sheet {
 
     pub fn result(&self, row: usize) -> Option<&PriceResult> {
         self.result[row].as_ref()
+    }
+
+    /// [`Sheet::result`] as a line's cells, sort keys and totals read it.
+    /// A line whose result was priced in a currency other than its payout
+    /// currency (an answer kept across a currency edit, or a currency
+    /// since cleared) reads [`Currency::MIXED`], so its local figures are
+    /// a gap rather than old-currency numbers under the new code; the
+    /// `_usd` twins are USD either way and still read. A package's result
+    /// is its fold, which [`Sheet::fold_legs`] already marks.
+    pub fn shown_result(&self, row: usize) -> Option<PriceResult> {
+        let mut r = self.result[row]?;
+        if self.is_line(row) && self.currency[row] != Some(r.currency) {
+            r.currency = Currency::MIXED;
+        }
+        Some(r)
     }
 
     pub fn state(&self, row: usize) -> &LineState {
@@ -321,20 +365,32 @@ impl Sheet {
         }
     }
 
-    /// The one place a line's request is assembled. `None`
-    /// on a package.
+    /// The one place a line's request is assembled. `None` on a package
+    /// and on a line without a payout currency: a request never guesses
+    /// the currency a figure is reported in.
     pub fn request(&self, row: usize) -> Option<PriceRequest> {
+        let currency = self.currency[row]?;
         self.instrument[row]
             .as_ref()
             .map(|instrument| PriceRequest {
                 instrument: instrument.clone(),
                 shifts: self.effective_shifts(row),
+                currency,
             })
     }
 
-    /// Lines (never packages) that are `Stale`: what the tile submits.
+    /// Lines (never packages) that are `Stale` and have a request: what
+    /// the tile submits. A line without a currency stays `Stale` but is
+    /// not counted as pricing, since nothing can be asked for it.
     pub fn stale_lines(&self) -> impl Iterator<Item = usize> + '_ {
-        (0..self.len()).filter(|r| self.is_line(*r) && self.state[*r] == LineState::Stale)
+        (0..self.len()).filter(|r| {
+            self.is_line(*r) && self.state[*r] == LineState::Stale && self.currency[*r].is_some()
+        })
+    }
+
+    /// Lines (never packages) whose payout currency is blank.
+    pub fn lines_needing_currency(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.len()).filter(|r| self.is_line(*r) && self.currency[*r].is_none())
     }
 
     pub fn record(&self, row: usize) -> RowRecord {
@@ -345,6 +401,7 @@ impl Sheet {
             instrument: self.instrument[row].clone(),
             qty: self.qty[row],
             shift: self.shift[row],
+            currency: self.currency[row],
             revision: self.revision[row],
             result: self.result[row],
             state: self.state[row].clone(),
@@ -420,10 +477,23 @@ impl Sheet {
             return Delivered::FutureRevision { current };
         }
         match result {
-            Ok(r) => {
-                self.result[row] = Some(r);
-                self.state[row] = LineState::Fresh;
-            }
+            // At a matching revision the line's currency is the one it was
+            // requested in. A pricer answering in another must not install
+            // figures in units the row does not claim: it fails like a
+            // refusal, keeping the last good result.
+            Ok(r) => match self.currency[row] {
+                Some(want) if r.currency != want => {
+                    self.state[row] = LineState::Failed(format!(
+                        "priced in {}, asked for {}",
+                        r.currency.as_str(),
+                        want.as_str()
+                    ));
+                }
+                _ => {
+                    self.result[row] = Some(r);
+                    self.state[row] = LineState::Fresh;
+                }
+            },
             Err(message) => self.state[row] = LineState::Failed(message),
         }
         self.priced_at[row] = Some(at);
@@ -433,6 +503,8 @@ impl Sheet {
     /// Fold every package's result from all of its legs with
     /// [`Sheet::fold_legs`].
     pub fn fold_packages(&mut self) {
+        #[cfg(test)]
+        FOLDS.with(|f| f.set(f.get() + 1));
         for p in 0..self.len() {
             if !self.is_package(p) {
                 continue;
@@ -454,10 +526,11 @@ impl Sheet {
     /// sum over a subset of legs is computed exactly as the full one.
     ///
     /// Failure takes precedence over staleness and names the first failed
-    /// leg; otherwise any stale leg makes the fold stale. A result exists
+    /// leg, a leg without a currency counting as failed with
+    /// [`NEEDS_CURRENCY`]; otherwise any stale leg makes the fold stale. A result exists
     /// only for a nonempty set whose legs all have results and none has
-    /// failed. Its currency is the legs' when they agree and
-    /// [`Currency::MIXED`] when they differ: the local arrays are then sums
+    /// failed. Its currency is the legs' when they agree, each in its own
+    /// payout currency, and [`Currency::MIXED`] otherwise: the local arrays are then sums
     /// of unlike units, and a local cell or total over them paints a gap
     /// rather than a plausible number. `priced_at` is the oldest present
     /// leg timestamp, including failed attempts.
@@ -472,6 +545,20 @@ impl Sheet {
         for leg in legs {
             any = true;
             match &self.state[leg] {
+                // A leg without a currency is never requested, so its
+                // `Stale` would leave the package reading `pricing…` for
+                // good: it fails the fold, naming the leg, instead.
+                _ if self.currency[leg].is_none() => {
+                    if failed.is_none() {
+                        failed = Some(format!(
+                            "{}: {NEEDS_CURRENCY}",
+                            render_line(
+                                self.qty[leg],
+                                self.instrument[leg].as_ref().expect("a leg is a line")
+                            )
+                        ));
+                    }
+                }
                 LineState::Failed(m) if failed.is_none() => {
                     failed = Some(format!(
                         "{}: {m}",
@@ -493,7 +580,10 @@ impl Sheet {
                     // The first leg names the currency; a leg in another
                     // makes the local sum one of unlike units. Once mixed
                     // it stays mixed: no leg's currency equals the marker.
-                    if acc.currency != r.currency {
+                    // A leg holding an answer in a currency it no longer
+                    // asks for mixes it too, or a package whose legs all
+                    // moved would paint the old sum under the new code.
+                    if acc.currency != r.currency || self.currency[leg] != Some(r.currency) {
                         acc.currency = Currency::MIXED;
                     }
                 }
@@ -587,6 +677,7 @@ impl Sheet {
         self.instrument.insert(at, rec.instrument);
         self.qty.insert(at, rec.qty);
         self.shift.insert(at, rec.shift);
+        self.currency.insert(at, rec.currency);
         self.revision.insert(at, rec.revision);
         self.result.insert(at, rec.result);
         self.state.insert(at, rec.state);
@@ -604,6 +695,7 @@ impl Sheet {
         self.instrument.remove(at);
         self.qty.remove(at);
         self.shift.remove(at);
+        self.currency.remove(at);
         self.revision.remove(at);
         self.result.remove(at);
         self.state.remove(at);
@@ -650,6 +742,40 @@ impl Sheet {
         self.shift[row] = shift;
     }
 
+    pub(crate) fn set_currency(&mut self, row: usize, currency: Option<Currency>) {
+        self.currency[row] = currency;
+    }
+
+    /// [`Sheet::fill_currencies`] for one line: true when it filled.
+    #[cfg(test)]
+    pub(crate) fn fill_currency(&mut self, row: usize, currency: Currency) -> bool {
+        self.fill_currencies([(row, currency)]) == 1
+    }
+
+    /// Give each blank line among `fills` its `currency` and reprice it,
+    /// answering how many filled; a package or a line that already has one
+    /// is skipped, so a fill never overwrites a currency the user chose.
+    /// Not an undo step: the fill supplies a default, and undoing past it
+    /// would only leave the line blank for the next fill. The packages fold
+    /// once after the whole batch, not per line: a fold walks every
+    /// package, so folding per fill made a reference refresh over many
+    /// blank lines quadratic in sheet size.
+    pub fn fill_currencies(&mut self, fills: impl IntoIterator<Item = (usize, Currency)>) -> usize {
+        let mut filled = 0;
+        for (row, currency) in fills {
+            if !self.is_line(row) || self.currency[row].is_some() {
+                continue;
+            }
+            self.currency[row] = Some(currency);
+            self.touch(row);
+            filled += 1;
+        }
+        if filled > 0 {
+            self.fold_packages();
+        }
+        filled
+    }
+
     /// Bump the revision and mark stale: the line's request changed.
     pub(crate) fn touch(&mut self, row: usize) {
         self.revision[row] += 1;
@@ -669,6 +795,7 @@ impl Sheet {
         self.instrument[whole.clone()].rotate_left(by);
         self.qty[whole.clone()].rotate_left(by);
         self.shift[whole.clone()].rotate_left(by);
+        self.currency[whole.clone()].rotate_left(by);
         self.revision[whole.clone()].rotate_left(by);
         self.result[whole.clone()].rotate_left(by);
         self.state[whole.clone()].rotate_left(by);
@@ -684,6 +811,7 @@ impl Sheet {
             instrument: Some(spec.instrument.clone()),
             qty: spec.qty,
             shift: spec.shift,
+            currency: spec.currency,
             revision: 1,
             result: None,
             state: LineState::Stale,
@@ -703,6 +831,7 @@ impl Sheet {
             instrument: None,
             qty: 1,
             shift: OwnShifts::default(),
+            currency: None,
             revision: 1,
             result: None,
             state: LineState::Fresh,
@@ -727,16 +856,61 @@ pub(crate) mod tests {
         })
     }
 
+    /// A line in USD, as most fixtures price.
     pub(crate) fn line(instrument: Instrument, qty: i64) -> RowSpec {
+        line_in(instrument, qty, Some(Currency::USD))
+    }
+
+    pub(crate) fn line_in(instrument: Instrument, qty: i64, currency: Option<Currency>) -> RowSpec {
         RowSpec::Line(LineSpec {
             instrument,
             qty,
             shift: OwnShifts::default(),
+            currency,
         })
     }
 
+    /// `spec` with every line in USD: the shorthand leaves a line's
+    /// currency blank, and a blank line never prices.
+    pub(crate) fn in_usd(mut spec: RowSpec) -> RowSpec {
+        match &mut spec {
+            RowSpec::Line(l) => l.currency = Some(Currency::USD),
+            RowSpec::Package { legs, .. } => {
+                for l in legs {
+                    l.currency = Some(Currency::USD);
+                }
+            }
+        }
+        spec
+    }
+
+    /// A call spread whose legs price in USD.
     pub(crate) fn callspread(qty: i64) -> RowSpec {
-        crate::core::shorthand::parse_builtin(&format!("{qty} SPX Z26 4800/5200 CS")).unwrap()
+        in_usd(
+            crate::core::shorthand::parse_builtin(&format!("{qty} SPX Z26 4800/5200 CS")).unwrap(),
+        )
+    }
+
+    pub(crate) fn eur() -> Currency {
+        Currency::parse("EUR").unwrap()
+    }
+
+    /// Move `row` to EUR and answer it with `r` in EUR, as a pricer asked
+    /// in EUR does. The move is a new request, so the answer carries the
+    /// line's new revision.
+    pub(crate) fn deliver_in_eur(
+        s: &mut Sheet,
+        row: usize,
+        mut r: PriceResult,
+        t: DateTime<Utc>,
+    ) -> Delivered {
+        s.apply(Edit::SetCurrency {
+            row,
+            currency: Some(eur()),
+        })
+        .unwrap();
+        r.currency = eur();
+        s.deliver(s.id(row), s.revision(row), Ok(r), t)
     }
 
     pub(crate) fn result(price: f64) -> PriceResult {
@@ -776,8 +950,8 @@ pub(crate) mod tests {
         push(
             &mut s,
             vec![
-                crate::core::shorthand::parse_builtin("SPX Z26 100/105 CS").unwrap(),
-                crate::core::shorthand::parse_builtin("NDX H27 95 P").unwrap(),
+                in_usd(crate::core::shorthand::parse_builtin("SPX Z26 100/105 CS").unwrap()),
+                in_usd(crate::core::shorthand::parse_builtin("NDX H27 95 P").unwrap()),
             ],
         );
         assert_eq!(s.len(), 4, "a package, two legs, a line");
@@ -1164,10 +1338,8 @@ pub(crate) mod tests {
         let mut s = Sheet::new("t");
         push(&mut s, vec![callspread(-5)]);
         let (long, short) = (s.id(1), s.id(2));
-        let mut eur = result(40.0);
-        eur.currency = Currency::parse("EUR").unwrap();
         s.deliver(long, 1, Ok(result(100.0)), at(0));
-        s.deliver(short, 1, Ok(eur), at(1));
+        deliver_in_eur(&mut s, 2, result(40.0), at(1));
         let sum = s.result(0).unwrap();
         assert!(
             sum.currency.is_mixed(),
@@ -1177,7 +1349,12 @@ pub(crate) mod tests {
         assert_eq!(sum.get(Measure::Npv, true), -324.0, "usd still folds");
         assert_eq!(s.state(0), &LineState::Fresh);
         // Repricing the EUR leg in USD makes the package USD again.
-        s.deliver(short, 1, Ok(result(40.0)), at(2));
+        s.apply(Edit::SetCurrency {
+            row: 2,
+            currency: Some(Currency::USD),
+        })
+        .unwrap();
+        s.deliver(short, s.revision(2), Ok(result(40.0)), at(2));
         assert_eq!(s.result(0).unwrap().currency, Currency::USD);
     }
 
@@ -1299,5 +1476,198 @@ pub(crate) mod tests {
             Delivered::Installed
         );
         assert_eq!(s.state(leg), &LineState::Fresh);
+    }
+
+    #[test]
+    fn a_line_without_a_currency_has_no_request_and_needs_currency() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![line_in(spx(5000.0, OptionKind::Call), 1, None)],
+        );
+        assert_eq!(s.currency(0), None);
+        assert_eq!(s.request(0), None, "nothing to price in");
+        assert_eq!(
+            s.stale_lines().count(),
+            0,
+            "a line that cannot be requested is not submitted"
+        );
+        assert_eq!(s.lines_needing_currency().collect::<Vec<_>>(), vec![0]);
+        let status = crate::core::columns::column("status").unwrap();
+        let cell = crate::core::columns::cell_text(
+            &s,
+            0,
+            status,
+            &status.default_format,
+            geode_core::clock::Clock::utc(),
+        );
+        assert_eq!(cell.text, "needs currency");
+    }
+
+    /// A blank leg is never requested: the package names it as failing
+    /// rather than reading `pricing…` for good.
+    #[test]
+    fn a_package_with_a_blank_leg_fails_naming_it() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![crate::core::shorthand::parse_builtin("-5 SPX Z26 4800/5200 CS").unwrap()],
+        );
+        assert_eq!(s.lines_needing_currency().collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(
+            s.state(0),
+            &LineState::Failed("-5 SPX Z26 4800 C: needs currency".into())
+        );
+        assert!(s.fill_currency(1, Currency::USD));
+        assert_eq!(
+            s.state(0),
+            &LineState::Failed("5 SPX Z26 5200 C: needs currency".into()),
+            "the fill refolds"
+        );
+        assert!(s.fill_currency(2, Currency::USD));
+        assert_eq!(s.state(0), &LineState::Stale, "both legs now price");
+    }
+
+    #[test]
+    fn a_line_with_a_currency_requests_in_it() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![line_in(spx(5000.0, OptionKind::Call), 1, Some(eur()))],
+        );
+        assert_eq!(s.currency(0), Some(eur()));
+        assert_eq!(s.request(0).unwrap().currency, eur());
+        assert_eq!(s.lines_needing_currency().count(), 0);
+    }
+
+    #[test]
+    fn a_result_in_another_currency_fails_the_line() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
+        let mut r = result(10.0);
+        r.currency = eur();
+        assert_eq!(s.deliver(s.id(0), 1, Ok(r), at(0)), Delivered::Installed);
+        assert_eq!(
+            s.state(0),
+            &LineState::Failed("priced in EUR, asked for USD".into())
+        );
+        assert_eq!(s.result(0), None, "the mismatched result is not installed");
+        assert_eq!(s.priced_at(0), Some(at(0)), "the attempt is recorded");
+    }
+
+    /// The revision is the request's identity: a result asked in USD that
+    /// lands after the line moved to EUR answers an older request.
+    #[test]
+    fn a_result_after_a_currency_edit_is_discarded() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
+        let asked = s.revision(0);
+        s.apply(Edit::SetCurrency {
+            row: 0,
+            currency: Some(eur()),
+        })
+        .unwrap();
+        assert_eq!(
+            s.deliver(s.id(0), asked, Ok(result(10.0)), at(0)),
+            Delivered::OldRevision { current: asked + 1 }
+        );
+        assert_eq!(s.result(0), None);
+        assert_eq!(s.state(0), &LineState::Stale);
+    }
+
+    #[test]
+    fn undoing_a_remove_restores_the_currency() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![line_in(spx(5000.0, OptionKind::Call), 1, None)],
+        );
+        assert!(s.fill_currency(0, eur()));
+        let undo = s.apply(Edit::Remove { at: 0 }).unwrap();
+        s.undo(&undo).unwrap();
+        assert_eq!(s.currency(0), Some(eur()));
+        assert_eq!(s.request(0).unwrap().currency, eur());
+    }
+
+    #[test]
+    fn fill_currency_touches_only_blank_lines() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![
+                line_in(spx(5000.0, OptionKind::Call), 1, None),
+                line(spx(5100.0, OptionKind::Call), 1),
+                callspread(1),
+            ],
+        );
+        let before = s.revision(0);
+        assert!(s.fill_currency(0, eur()), "a blank line fills");
+        assert_eq!(s.currency(0), Some(eur()));
+        assert_eq!(s.revision(0), before + 1, "the fill reprices the line");
+        assert_eq!(s.state(0), &LineState::Stale);
+        assert!(
+            !s.fill_currency(0, Currency::USD),
+            "a set line keeps its own"
+        );
+        assert_eq!(s.currency(0), Some(eur()));
+        let usd_rev = s.revision(1);
+        assert!(!s.fill_currency(1, eur()));
+        assert_eq!(
+            (s.currency(1), s.revision(1)),
+            (Some(Currency::USD), usd_rev)
+        );
+        assert!(!s.fill_currency(2, eur()), "a package carries no currency");
+        assert_eq!(s.currency(2), None);
+    }
+
+    /// A batch of fills folds the packages once, however many lines it
+    /// fills, and leaves the sheet as filling each line alone would.
+    #[test]
+    fn fill_currencies_folds_once_per_batch() {
+        let blank_package = || {
+            let mut cs = callspread(1);
+            if let RowSpec::Package { legs, .. } = &mut cs {
+                for l in legs {
+                    l.currency = None;
+                }
+            }
+            cs
+        };
+        let build = || {
+            let mut s = Sheet::new("t");
+            push(
+                &mut s,
+                vec![
+                    line_in(spx(5000.0, OptionKind::Call), 1, None),
+                    blank_package(),
+                    line_in(spx(5100.0, OptionKind::Put), 2, None),
+                    line(spx(5200.0, OptionKind::Call), 1),
+                    blank_package(),
+                ],
+            );
+            s
+        };
+        let mut batch = build();
+        let mut single = build();
+        let fills: Vec<(usize, Currency)> =
+            batch.lines_needing_currency().map(|r| (r, eur())).collect();
+        assert_eq!(fills.len(), 6, "two lines and four legs are blank");
+        let before = folds();
+        assert_eq!(batch.fill_currencies(fills.clone()), 6);
+        assert_eq!(folds() - before, 1, "one fold for the whole batch");
+        for (r, c) in fills {
+            assert!(single.fill_currency(r, c));
+        }
+        for r in 0..batch.len() {
+            assert_eq!(batch.record(r), single.record(r), "row {r}");
+            assert_eq!(batch.state(r), single.state(r), "row {r}");
+        }
+        let before = folds();
+        assert_eq!(
+            batch.fill_currencies([(0, Currency::USD)]),
+            0,
+            "a set line keeps its own"
+        );
+        assert_eq!(folds(), before, "a batch that fills nothing folds nothing");
     }
 }

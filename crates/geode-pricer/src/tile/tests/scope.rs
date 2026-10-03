@@ -582,6 +582,7 @@ fn a_scope_refusal_does_not_mask_the_view_notice(cx: &mut gpui::TestAppContext) 
             NamedColours::default(),
             None,
             std::time::Duration::from_secs(60),
+            None,
             cx,
         )
     });

@@ -10,8 +10,8 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::DocumentKind;
 use geode_core::egress_config;
 use geode_core::panel::{KindActionRegistry, PANELS_DOC, PanelSpec, load_panels, refusal};
-use geode_core::query::{CatalogParams, DistinctOutcome, ReferenceParams};
-use geode_core::schema::SchemaSpec;
+use geode_core::query::{AsOf, CatalogParams, DistinctOutcome, ReferenceOutcome, ReferenceParams};
+use geode_core::schema::{ColumnType, SchemaSpec};
 use geode_core::source_config::{SourceShape, parse_duration};
 use geode_core::view::ViewSpec;
 use geode_data::adapter::AdapterRegistry;
@@ -22,7 +22,7 @@ use geode_data::{
     Refusal, VolConfig, VolModelRegistry,
 };
 use geode_marketdata::MarketDataFactory;
-use geode_pricer::content::{PricerFactory, PricerSettings, UnderlyingList};
+use geode_pricer::content::{PayoutSource, PricerFactory, PricerSettings, UnderlyingList};
 use geode_pricer::core::{
     PRICER_DATASET, PRICER_DATASET_DECLARATION, PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION,
     PRICER_TEMPLATES_DOC, PRICER_VIEWS_DOC, TemplateSet, Views,
@@ -31,12 +31,13 @@ use geode_pricer::store::DuckSheetStore;
 use geode_shell::diagnostics::{CatalogRequest, Diagnostics, ReferenceLane, SourceSummary};
 use geode_shell::module::placeholder::PLACEHOLDER_KIND;
 use geode_shell::module::{Delivery, UploadDelivery};
-use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
+use geode_shell::reference::ReferenceGlobal;
+use geode_shell::shell::{DIAGNOSTICS_KEY, REFERENCE_KEY, ShellEvent, ShellView};
 use geode_shell::vimfind::FindStyle;
 use gpui::{App, AsyncApp, Entity, WindowHandle};
 use gpui_component::Root;
-use std::cell::Cell;
-use std::collections::HashSet;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -229,11 +230,14 @@ pub fn data_setup(
     let (pricer_underlyings, underlying_diags) = pricing_underlyings_from_config(config);
     let pricer_underlyings = pricer_underlyings.unwrap_or_default();
     diagnostics.extend(underlying_diags);
+    let (payout, payout_diags) = pricing_payout_currency_from_config(config, &schema);
+    diagnostics.extend(payout_diags);
     let pricer_settings = PricerSettings {
         pricer: pricer_name.clone(),
         pricer_missing: pricer.pricer.is_none(),
         refresh,
         stale_after: Duration::default(),
+        payout,
     };
     // One set of document kinds: the panels are checked against exactly
     // the kinds the service registers.
@@ -472,6 +476,69 @@ pub fn pricing_underlyings_from_config(config: &Config) -> (Option<Vec<String>>,
     (Some(names), diags)
 }
 
+/// The `[pricing] payout_currency` a key-absent config falls back to.
+const DEFAULT_PAYOUT_CURRENCY: (&str, &str) = ("underlyings", "currency");
+
+/// `[pricing] payout_currency = "<dataset>.<column>"`: the reference column
+/// a new line's payout currency defaults from. `schema` is the startup
+/// schema: datasets are restart-required, so it is the one the service
+/// serves on reload too. An absent key means `underlyings.currency` when
+/// that column exists, and quietly nothing when it does not (a desk without
+/// that dataset has not asked for it, nor when it is not a text column of
+/// a single-key dataset). A value naming anything but a non-key text column
+/// of a declared reference dataset keyed by one column is an error and
+/// resolves to nothing rather than to a guessed column: new lines get no
+/// currency and say so, where a wrong column would price in a plausible
+/// wrong one.
+pub fn pricing_payout_currency_from_config(
+    config: &Config,
+    schema: &SchemaSpec,
+) -> (Option<PayoutSource>, Vec<Diagnostic>) {
+    let resolve = |dataset: &str, column: &str| {
+        schema
+            .datasets
+            .iter()
+            .find(|d| d.name == dataset && d.is_reference())
+            // A lookup joins a multi-column key with `/` and the pricer
+            // looks up by underlying alone, so only a single-key dataset
+            // ever matches; a column that is not text never parses as a
+            // code. Either would leave every line blank without saying why.
+            .filter(|d| d.key.len() == 1 && d.key[0] != column)
+            .filter(|d| d.column(column).is_some_and(|c| c.ty == ColumnType::Utf8))
+            .map(|_| PayoutSource {
+                dataset: dataset.to_string(),
+                column: column.to_string(),
+            })
+    };
+    let Some(value) = config.get("app", "pricing.payout_currency") else {
+        let (dataset, column) = DEFAULT_PAYOUT_CURRENCY;
+        return (resolve(dataset, column), Vec::new());
+    };
+    let resolved = value
+        .as_str()
+        .and_then(|v| v.split_once('.'))
+        .filter(|(_, column)| !column.contains('.'))
+        .and_then(|(dataset, column)| resolve(dataset, column));
+    if resolved.is_some() {
+        return (resolved, Vec::new());
+    }
+    let shown = value
+        .as_str()
+        .map_or_else(|| value.to_string(), str::to_string);
+    (
+        None,
+        vec![Diagnostic {
+            severity: Severity::Error,
+            layer: config.explain("app", "pricing.payout_currency"),
+            file: None,
+            message: format!(
+                "[pricing] payout_currency = \"{shown}\" must name a text column of a single-key reference dataset, e.g. \"underlyings.currency\"; new lines get no currency"
+            ),
+            path: Some("app.pricing.payout_currency".to_string()),
+        }],
+    )
+}
+
 /// The pricer's views out of `specs`, the `load_views` result for `config`
 /// (the caller has already collected `load_views`'s own diagnostics, so
 /// only the pricer's are returned here). A `pricer_views` document is no
@@ -517,7 +584,8 @@ pub fn pricer_templates_from_config(
 /// diagnostic without a restart), merged `pricer_templates`, the
 /// `dimensions` doc (a frame scope over the pricer may name a derived
 /// dimension, so an edit to it must re-apply open tiles' scopes), raw
-/// `app.pricing.refresh` and `app.pricing.underlyings`, and the resolved
+/// `app.pricing.refresh`, `app.pricing.underlyings` and
+/// `app.pricing.payout_currency`, and the resolved
 /// stale threshold. Equal keys leave factory views, templates, suggestions,
 /// and timers alone and avoid repeating invalid-value warnings. The selected
 /// pricing adapter is fixed at service startup and excluded here.
@@ -535,6 +603,7 @@ pub struct PricerConfigKey {
     dimensions: Option<toml::Table>,
     refresh: Option<toml::Value>,
     underlyings: Option<toml::Value>,
+    payout_currency: Option<toml::Value>,
     stale_after: Duration,
 }
 
@@ -554,6 +623,7 @@ pub fn pricer_config_key(config: &Config) -> PricerConfigKey {
         dimensions: config.doc("dimensions").map(|d| d.value.clone()),
         refresh: config.get("app", "pricing.refresh").cloned(),
         underlyings: config.get("app", "pricing.underlyings").cloned(),
+        payout_currency: config.get("app", "pricing.payout_currency").cloned(),
         stale_after: stale_after_from_config(config),
     }
 }
@@ -603,9 +673,15 @@ pub struct Bridge {
     /// awaits restart.
     sources: Vec<(SourceSpec, SourceShape)>,
     /// Reference-family dataset names in startup-schema declaration order,
-    /// handed to diagnostics at attach. Fixed for the run like `sources`:
-    /// the service serves the schema it started with.
-    reference_datasets: Vec<String>,
+    /// each with its key's column count, handed to diagnostics and the live
+    /// reference cache at attach. Fixed for the run like `sources`: the
+    /// service serves the schema it started with.
+    reference_datasets: Vec<(String, usize)>,
+    /// The startup schema, fixed for the run like `reference_datasets`:
+    /// the pricer reload resolves `[pricing] payout_currency` against the
+    /// reference datasets the service actually serves, not an edited
+    /// `datasets` doc awaiting restart.
+    schema: Rc<SchemaSpec>,
     /// Local dataset names used to exclude autosave from frame publication updates.
     pub local_datasets: Rc<HashSet<String>>,
     /// The config key the pricer factory was built from; seeds the reload
@@ -676,8 +752,9 @@ pub fn start(
         .datasets
         .iter()
         .filter(|ds| ds.is_reference())
-        .map(|ds| ds.name.clone())
+        .map(|ds| (ds.name.clone(), ds.key.len()))
         .collect();
+    let startup_schema = Rc::new(schema.clone());
     let local_datasets = Rc::new(setup.local_datasets);
     let panels = setup.panels;
     // Target names and accepted documents in `egress.toml` order. Every panel
@@ -752,6 +829,7 @@ pub fn start(
         dropped,
         sources,
         reference_datasets,
+        schema: startup_schema,
         local_datasets,
         pricer_key: Some(pricer_key),
         positions_configured,
@@ -851,6 +929,131 @@ fn reference_refusal_reason(refusal: Refusal) -> &'static str {
     }
 }
 
+/// The live reference tables behind `ReferenceGlobal`, one lane per
+/// reference dataset under `REFERENCE_KEY`. Only a dataset's latest tag is
+/// applied, so a slow answer cannot replace a newer one. A refused read keeps
+/// its demand on a timer; a failed read keeps the last table, since an empty
+/// one would turn every lookup into a missing value.
+struct ReferenceCache {
+    handle: DataHandle,
+    tags: RefCell<HashMap<String, u64>>,
+    /// Datasets with a retry timer armed: at most one each.
+    retry: RefCell<HashSet<String>>,
+    /// Datasets whose last answer was an error, so a run of failures warns once.
+    failing: RefCell<HashSet<String>>,
+    /// Each reference dataset's key column count, from the startup schema.
+    key_columns: HashMap<String, usize>,
+}
+
+const REFERENCE_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+impl ReferenceCache {
+    fn new(handle: DataHandle, datasets: &[(String, usize)]) -> ReferenceCache {
+        ReferenceCache {
+            handle,
+            tags: RefCell::default(),
+            retry: RefCell::default(),
+            failing: RefCell::default(),
+            key_columns: datasets.iter().cloned().collect(),
+        }
+    }
+
+    fn is_reference(&self, dataset: &str) -> bool {
+        self.key_columns.contains_key(dataset)
+    }
+
+    /// Read `dataset`'s live table under a new tag, superseding any read in
+    /// flight. `Busy` arms a retry; `Stopped` drops the demand, since nothing
+    /// would ever serve it.
+    fn refresh(self: &Rc<Self>, dataset: &str, cx: &mut App) {
+        // The tag becomes the latest only once submitted: a refused read
+        // sends nothing, and advancing the tag anyway would drop the answer
+        // to the read still in flight.
+        let tag = self.tags.borrow().get(dataset).copied().unwrap_or(0) + 1;
+        match self.handle.reference(ReferenceParams {
+            key: REFERENCE_KEY,
+            tag,
+            dataset: dataset.to_string(),
+            as_of: AsOf::Live,
+        }) {
+            Ok(()) => {
+                self.tags.borrow_mut().insert(dataset.to_string(), tag);
+            }
+            Err(Refusal::Busy) => self.retry(dataset, cx),
+            Err(Refusal::Stopped) => {}
+        }
+    }
+
+    /// Reread after the delay. A dataset already waiting keeps its one timer,
+    /// so a burst of refused publishes cannot pile up reads. The timer holds
+    /// the cache weakly: a closed window ends the lane.
+    fn retry(self: &Rc<Self>, dataset: &str, cx: &mut App) {
+        if !self.retry.borrow_mut().insert(dataset.to_string()) {
+            return;
+        }
+        let cache = Rc::downgrade(self);
+        let dataset = dataset.to_string();
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            cx.background_executor().timer(REFERENCE_RETRY_DELAY).await;
+            cx.update(|cx| {
+                if let Some(cache) = cache.upgrade() {
+                    cache.retry.borrow_mut().remove(&dataset);
+                    cache.refresh(&dataset, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Apply a live answer, republishing the global only when a table
+    /// changed. Answers under another key or a superseded tag are dropped.
+    fn answer(&self, outcome: ReferenceOutcome, cx: &mut App) {
+        if outcome.key != REFERENCE_KEY
+            || self.tags.borrow().get(&outcome.dataset) != Some(&outcome.tag)
+        {
+            return;
+        }
+        let dataset = outcome.dataset;
+        // Unreachable in practice: only a refreshed dataset has a tag.
+        let Some(&key_columns) = self.key_columns.get(&dataset) else {
+            return;
+        };
+        let current = cx.global::<ReferenceGlobal>().0.clone();
+        let next = match outcome.table {
+            Ok(Some(table)) => {
+                self.note_succeeded(&dataset);
+                current.with_table(&dataset, &table, key_columns)
+            }
+            Ok(None) => {
+                self.note_succeeded(&dataset);
+                current.without(&dataset)
+            }
+            Err(e) => {
+                if self.note_failed(&dataset) {
+                    tracing::warn!(
+                        target: "geode::reference",
+                        "reference '{dataset}' read failed: {e}"
+                    );
+                }
+                None
+            }
+        };
+        if let Some(next) = next {
+            cx.set_global(ReferenceGlobal(Arc::new(next)));
+        }
+    }
+
+    /// Record a failed read; true only when the dataset was not already
+    /// failing, the one transition worth a warning.
+    fn note_failed(&self, dataset: &str) -> bool {
+        self.failing.borrow_mut().insert(dataset.to_string())
+    }
+
+    fn note_succeeded(&self, dataset: &str) {
+        self.failing.borrow_mut().remove(dataset);
+    }
+}
+
 /// Route mailbox events through the window and forward reloads. Awaiting the
 /// receiver wakes the foreground task on arrival; scheduling and UI work still
 /// determine delivery latency. The task checks window liveness on each event.
@@ -898,7 +1101,13 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             );
         }
         // Fixed for the run: the service serves its startup schema.
-        d.set_reference_datasets(bridge.reference_datasets.clone());
+        d.set_reference_datasets(
+            bridge
+                .reference_datasets
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect(),
+        );
         cx.notify();
     });
 
@@ -994,6 +1203,16 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         }
     })
     .detach();
+
+    // Live reference tables for `ReferenceGlobal`: read every reference
+    // dataset now, then again on each of its publishes.
+    let reference_cache = Rc::new(ReferenceCache::new(
+        handle.clone(),
+        &bridge.reference_datasets,
+    ));
+    for (dataset, _) in &bridge.reference_datasets {
+        reference_cache.refresh(dataset, cx);
+    }
 
     // Reloads: new views to the data thread and to the factory.
     cx.subscribe(&shell, {
@@ -1122,6 +1341,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     {
         let pricer = bridge.pricer.clone();
         let underlyings = bridge.underlyings.clone();
+        let schema = bridge.schema.clone();
         let diagnostics = diagnostics.clone();
         let shell = shell.clone();
         let frame = shell.read(cx).frame().clone();
@@ -1137,7 +1357,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             last.set(now);
             // Read everything out of the config before the factory takes
             // `cx` mutably.
-            let (views, templates, colours, dims, mut diags, refresh, stale_after) = {
+            let (views, templates, colours, dims, mut diags, refresh, stale_after, payout) = {
                 let config = shell.read(cx).config();
                 let key = pricer_config_key(config);
                 if last_key.borrow().as_ref() == Some(&key) {
@@ -1165,10 +1385,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 if let Some(names) = names {
                     underlyings.set(&names);
                 }
+                let (payout, payout_diags) = pricing_payout_currency_from_config(config, &schema);
                 let mut diags = diags;
                 diags.extend(template_diags);
                 diags.extend(refresh_diag);
                 diags.extend(underlying_diags);
+                diags.extend(payout_diags);
                 (
                     views,
                     templates,
@@ -1177,12 +1399,13 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     diags,
                     refresh,
                     stale_after_from_config(config),
+                    payout,
                 )
             };
             // Before `reload`: its rebuild re-applies every tile's scope
             // against the new dimensions.
             pricer.set_dims(dims);
-            pricer.reload(views, templates, colours, refresh, stale_after, cx);
+            pricer.reload(views, templates, colours, refresh, stale_after, payout, cx);
             for d in &diags {
                 tracing::warn!(target: "geode::pricing", "{d}");
             }
@@ -1280,6 +1503,9 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         books,
                         ..
                     } => {
+                        if reference_cache.is_reference(&dataset) {
+                            reference_cache.refresh(&dataset, cx);
+                        }
                         // Record publication in diagnostics and request catalog refresh when watched.
                         // The service owns the detailed publication log; do not duplicate it here.
                         diagnostics.update(cx, |d, cx| {
@@ -1486,6 +1712,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::VolSlices(outcome), window, cx)
                         });
                     }
+                    // The live lane keeps `ReferenceGlobal`; see `ReferenceCache`.
+                    DataEvent::Reference(outcome) if outcome.key == REFERENCE_KEY => {
+                        reference_cache.answer(outcome, cx);
+                    }
                     // Only the latest submission's answer counts. The page
                     // compares its as-of with the frame and re-asks itself;
                     // the bridge does not.
@@ -1537,9 +1767,7 @@ mod tests {
     use super::*;
     use geode_core::config::{ConfigSources, LayerDoc};
     use geode_core::log::Ring;
-    use geode_core::query::{
-        AsOf, CatalogOutcome, CatalogSnapshot, QueryKey, ReferenceOutcome, ReferenceParams,
-    };
+    use geode_core::query::{CatalogOutcome, CatalogSnapshot, QueryKey, ReferenceTable};
     use geode_data::source::SourceSpec;
     use geode_diagnostics::DiagnosticsPageFactory;
     use geode_marketdata::core::builtin_panel;
@@ -1901,6 +2129,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings,
         }
     }
@@ -1966,6 +2195,208 @@ role = "key"
             pricing_underlyings_from_config(&config("[pricing]\nrefresh = \"10s\"\n"));
         assert_eq!(names, Some(Vec::new()), "absent: an empty list");
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    /// An `app` doc alone, for the `[pricing]` readers.
+    fn app_config(text: &str) -> Config {
+        Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", text).unwrap()],
+            desk: None,
+            user: None,
+        })
+    }
+
+    /// A schema whose `underlyings` reference dataset is keyed by
+    /// `underlying_ref` and carries `currency` and `name`.
+    fn underlyings_schema() -> SchemaSpec {
+        let (schema, diags) = SchemaSpec::from_doc(&geode_core::config::merge_docs(
+            "datasets",
+            &[LayerDoc::builtin(
+                "datasets",
+                r#"
+[underlyings]
+family = "reference"
+key = ["underlying_ref"]
+[underlyings.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[underlyings.columns.name]
+type = "utf8"
+role = "attribute"
+[underlyings.columns.currency]
+type = "utf8"
+role = "attribute"
+"#,
+            )
+            .unwrap()],
+        ));
+        assert!(diags.is_empty(), "fixture: {diags:?}");
+        schema
+    }
+
+    fn payout(dataset: &str, column: &str) -> PayoutSource {
+        PayoutSource {
+            dataset: dataset.into(),
+            column: column.into(),
+        }
+    }
+
+    #[test]
+    fn payout_currency_defaults_to_underlyings_currency() {
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\nrefresh = \"10s\"\n"),
+            &underlyings_schema(),
+        );
+        assert_eq!(source, Some(payout("underlyings", "currency")));
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn payout_currency_without_the_default_dataset_is_none_quietly() {
+        let config = app_config("[pricing]\nrefresh = \"10s\"\n");
+        let (source, diags) = pricing_payout_currency_from_config(&config, &SchemaSpec::default());
+        assert_eq!(source, None, "no underlyings dataset");
+        assert!(diags.is_empty(), "{diags:?}");
+
+        let mut schema = underlyings_schema();
+        schema.datasets[0].columns.retain(|c| c.name != "currency");
+        let (source, diags) = pricing_payout_currency_from_config(&config, &schema);
+        assert_eq!(source, None, "underlyings without a currency column");
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn an_explicit_payout_currency_resolves() {
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\npayout_currency = \"underlyings.name\"\n"),
+            &underlyings_schema(),
+        );
+        assert_eq!(source, Some(payout("underlyings", "name")));
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    fn assert_payout_error(text: &str, shown: &str) {
+        let (source, diags) =
+            pricing_payout_currency_from_config(&app_config(text), &underlyings_schema());
+        assert_eq!(source, None, "{text}");
+        assert_eq!(diags.len(), 1, "{text}: {diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("app.pricing.payout_currency")
+        );
+        assert!(diags[0].layer.is_some(), "names its layer: {diags:?}");
+        assert_eq!(
+            diags[0].message,
+            format!(
+                "[pricing] payout_currency = \"{shown}\" must name a text column of a \
+                 single-key reference dataset, e.g. \"underlyings.currency\"; new lines get no currency"
+            )
+        );
+    }
+
+    #[test]
+    fn a_payout_currency_naming_a_missing_column_is_an_error() {
+        assert_payout_error(
+            "[pricing]\npayout_currency = \"underlyings.ccy\"\n",
+            "underlyings.ccy",
+        );
+        assert_payout_error(
+            "[pricing]\npayout_currency = \"listings.currency\"\n",
+            "listings.currency",
+        );
+        assert_payout_error("[pricing]\npayout_currency = \"currency\"\n", "currency");
+        assert_payout_error(
+            "[pricing]\npayout_currency = \"underlyings.currency.code\"\n",
+            "underlyings.currency.code",
+        );
+        assert_payout_error("[pricing]\npayout_currency = 3\n", "3");
+
+        // A dataset of another family is not looked up by underlying.
+        let mut schema = underlyings_schema();
+        schema.datasets[0].family = geode_core::schema::Family::Measures;
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\npayout_currency = \"underlyings.currency\"\n"),
+            &schema,
+        );
+        assert_eq!(source, None);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn a_payout_currency_naming_the_key_column_is_an_error() {
+        assert_payout_error(
+            "[pricing]\npayout_currency = \"underlyings.underlying_ref\"\n",
+            "underlyings.underlying_ref",
+        );
+    }
+
+    /// A lookup joins a multi-column key with `/` and the pricer looks up
+    /// by `underlying_ref` alone, so a column of a two-key dataset never
+    /// matches a line: refused, and quietly nothing for the absent key.
+    #[test]
+    fn a_payout_currency_in_a_multi_key_dataset_is_an_error() {
+        let mut schema = underlyings_schema();
+        schema.datasets[0].key.push("name".into());
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\npayout_currency = \"underlyings.currency\"\n"),
+            &schema,
+        );
+        assert_eq!(source, None);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("app.pricing.payout_currency")
+        );
+
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\nrefresh = \"10s\"\n"),
+            &schema,
+        );
+        assert_eq!(source, None, "the default needs a single key too");
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    /// A column that is not text never parses as a currency code: refused,
+    /// and quietly nothing for the absent key.
+    #[test]
+    fn a_payout_currency_naming_a_non_text_column_is_an_error() {
+        let mut schema = underlyings_schema();
+        for c in &mut schema.datasets[0].columns {
+            if c.name == "currency" {
+                c.ty = geode_core::schema::ColumnType::I64;
+            }
+        }
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\npayout_currency = \"underlyings.currency\"\n"),
+            &schema,
+        );
+        assert_eq!(source, None);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("app.pricing.payout_currency")
+        );
+
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\nrefresh = \"10s\"\n"),
+            &schema,
+        );
+        assert_eq!(source, None, "the default needs a text column too");
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn a_payout_currency_change_alone_passes_the_reload_gate() {
+        let base = pricer_config_key(&app_config("[pricing]\nrefresh = \"10s\"\n"));
+        assert_ne!(
+            pricer_config_key(&app_config(
+                "[pricing]\nrefresh = \"10s\"\npayout_currency = \"underlyings.name\"\n"
+            )),
+            base
+        );
     }
 
     /// The reload key changes with live pricer settings; unrelated application
@@ -2497,6 +2928,96 @@ role = "key"
         });
     }
 
+    /// A reload resolves `[pricing] payout_currency` against the bridge's
+    /// startup schema and hands the result to the factory's settings.
+    #[gpui::test]
+    fn a_config_reload_hands_the_pricer_factory_its_payout_source(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+                LayerDoc::builtin("app", "[pricing]\npayout_currency = \"underlyings.name\"\n")
+                    .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let mut bridge = test_bridge(handle);
+        bridge.schema = Rc::new(underlyings_schema());
+        assert_eq!(bridge.pricer.settings().payout, None, "fixture");
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            let frame = shell.read(cx).frame().clone();
+            frame.update(cx, |f, cx| {
+                f.note_config_reloaded();
+                cx.notify();
+            });
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            bridge.pricer.settings().payout,
+            Some(payout("underlyings", "name"))
+        );
+    }
+
+    /// At startup `[pricing] payout_currency` reaches the factory's
+    /// settings, and an unresolvable one is reported with the other
+    /// startup diagnostics.
+    #[gpui::test]
+    fn startup_hands_the_pricer_factory_its_payout_source(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let datasets = "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                        [underlyings]\nfamily = \"reference\"\nkey = [\"underlying_ref\"]\n\
+                        [underlyings.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                        [underlyings.columns.currency]\ntype = \"utf8\"\nrole = \"attribute\"\n";
+        let setup_with = |app: &str, dir: &std::path::Path| {
+            let config = Config::load(&ConfigSources {
+                builtin: vec![
+                    LayerDoc::builtin("datasets", datasets).unwrap(),
+                    LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n")
+                        .unwrap(),
+                    LayerDoc::builtin("app", app).unwrap(),
+                ],
+                ..ConfigSources::default()
+            });
+            data_setup(
+                &config,
+                dir.join("t.duckdb"),
+                AdapterRegistry::default(),
+                geode_data::PricerRegistry::default(),
+                geode_data::VolModelRegistry::default(),
+            )
+            .unwrap()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let bad = setup_with(
+            "[pricing]\npayout_currency = \"underlyings.ccy\"\n",
+            dir.path(),
+        );
+        assert_eq!(bad.pricer_settings.payout, None);
+        assert!(
+            bad.diagnostics
+                .iter()
+                .any(|d| d.path.as_deref() == Some("app.pricing.payout_currency")),
+            "{:?}",
+            bad.diagnostics
+        );
+        let setup = setup_with("[pricing]\nrefresh = \"10s\"\n", dir.path());
+        let bridge =
+            cx.update(|cx| start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let payout_source = bridge.pricer.settings().payout;
+        bridge.handle.shutdown();
+        assert_eq!(payout_source, Some(payout("underlyings", "currency")));
+    }
+
     /// A reload whose `[pricing] underlyings` is not an array keeps the
     /// list the bar had (hot reload keeps the last valid state) rather
     /// than emptying it.
@@ -2643,6 +3164,7 @@ role = "key"
                 NamedColours::default(),
                 None,
                 Duration::from_secs(1),
+                None,
                 cx,
             )
         });
@@ -2942,6 +3464,11 @@ role = "key"
         // `open_page`'s `prevent_default` does nothing on this route (the
         // chip's own mouse-down already ran), so focus is the fact to pin.
         assert!(log.borrow().contains(&PageRecorded::Visible(true)));
+        assert!(
+            log.borrow()
+                .contains(&PageRecorded::Reveal("sheets_src".into())),
+            "the page reveals the chip's source"
+        );
         assert_eq!(
             shell.read_with(&vcx, |s, _| s.open_page_kind_for_test()),
             Some("diagnostics"),
@@ -5337,6 +5864,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5445,6 +5973,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5545,6 +6074,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
 
@@ -5664,6 +6194,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5725,6 +6256,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5786,6 +6318,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
             handle,
             factory,
@@ -5852,6 +6385,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
 
@@ -5945,6 +6479,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6017,6 +6552,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6092,6 +6628,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6169,6 +6706,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6269,6 +6807,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6365,6 +6904,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6428,6 +6968,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6576,6 +7117,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6641,6 +7183,7 @@ role = "key"
             pricer_key: None,
             positions_configured: false,
             reference_datasets: Vec::new(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -7353,7 +7896,8 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
-            reference_datasets,
+            reference_datasets: reference_datasets.into_iter().map(|n| (n, 1)).collect(),
+            schema: Default::default(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -7387,11 +7931,12 @@ role = "key"
             .unwrap();
     }
 
-    /// The next reference read on the wire, skipping the catalog reads a
-    /// watch also queues.
+    /// The page's next reference read on the wire, skipping the catalog
+    /// reads a watch also queues and the live cache's reads at attach.
     fn next_reference(f: &CatalogFixture) -> ReferenceParams {
         loop {
             match f.requests.try_recv().expect("reference request") {
+                geode_data::Request::Reference(params) if params.key == REFERENCE_KEY => continue,
                 geode_data::Request::Reference(params) => return params,
                 geode_data::Request::Catalog(_) => continue,
                 other => panic!("expected reference, got {other:?}"),
@@ -7557,10 +8102,288 @@ role = "key"
             cx.notify();
         });
         vcx.run_until_parked();
+        // Skip the live cache's read at attach.
+        assert!(next_live_reference(&f).is_some());
         match f.requests.try_recv() {
             Ok(geode_data::Request::Poll { dataset }) => assert_eq!(dataset, "underlyings"),
             other => panic!("expected a poll, got {other:?}"),
         }
+    }
+
+    /// The next live read the reference cache put on the wire, skipping
+    /// catalog reads; `None` when the queue holds no such read.
+    fn next_live_reference(f: &CatalogFixture) -> Option<ReferenceParams> {
+        while let Ok(request) = f.requests.try_recv() {
+            match request {
+                geode_data::Request::Reference(params) if params.key == REFERENCE_KEY => {
+                    return Some(params);
+                }
+                geode_data::Request::Catalog(_) => continue,
+                other => panic!("expected a live reference read, got {other:?}"),
+            }
+        }
+        None
+    }
+
+    /// An `underlyings` table keyed by its first column.
+    fn underlyings_table(currency: &str) -> ReferenceTable {
+        ReferenceTable {
+            columns: vec!["name".into(), "currency".into()],
+            rows: vec![vec![Some("SPX".into()), Some(currency.into())]],
+            gen_id: 1,
+            source_time: chrono::Utc::now(),
+        }
+    }
+
+    fn live_answer(
+        params: &ReferenceParams,
+        table: Result<Option<ReferenceTable>, String>,
+    ) -> DataEvent {
+        DataEvent::Reference(ReferenceOutcome {
+            key: params.key,
+            tag: params.tag,
+            dataset: params.dataset.clone(),
+            as_of: params.as_of.clone(),
+            table,
+        })
+    }
+
+    fn published(dataset: &str) -> DataEvent {
+        DataEvent::Published {
+            dataset: dataset.into(),
+            batch: "b".into(),
+            gen_id: 2,
+            books: vec![None],
+        }
+    }
+
+    fn live_currency(vcx: &mut gpui::VisualTestContext) -> Option<String> {
+        vcx.update(|_, cx| {
+            cx.global::<ReferenceGlobal>()
+                .0
+                .lookup("underlyings", "SPX", "currency")
+                .map(str::to_string)
+        })
+    }
+
+    /// Counts every republish of the global an observing module would see.
+    fn count_publishes(vcx: &mut gpui::VisualTestContext) -> Rc<Cell<usize>> {
+        let count = Rc::new(Cell::new(0));
+        let counter = count.clone();
+        vcx.update(|_, cx| {
+            cx.observe_global::<ReferenceGlobal>(move |_| counter.set(counter.get() + 1))
+                .detach()
+        });
+        count
+    }
+
+    #[gpui::test]
+    fn attach_reads_each_reference_dataset_live(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let read = next_live_reference(&f).expect("attach reads the dataset");
+        assert_eq!(read.key, REFERENCE_KEY);
+        assert_eq!(read.dataset, "underlyings");
+        assert_eq!(read.as_of, AsOf::Live, "the global is live only");
+        assert!(next_live_reference(&f).is_none(), "one read per dataset");
+    }
+
+    #[gpui::test]
+    fn an_answer_publishes_the_global_and_a_repeat_does_not_notify(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let count = count_publishes(&mut vcx);
+        let first = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&first, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("USD"));
+        assert_eq!(count.get(), 1);
+
+        // A republish of the same rows is read again but changes nothing.
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        let second = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&second, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(count.get(), 1, "an unchanged table wakes no observer");
+
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        let third = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&third, Ok(Some(underlyings_table("EUR")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("EUR"));
+        assert_eq!(count.get(), 2);
+    }
+
+    #[gpui::test]
+    fn a_publish_of_a_reference_dataset_rereads_it(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let first = next_live_reference(&f).unwrap();
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        let second = next_live_reference(&f).expect("a publish rereads");
+        assert_eq!(second.dataset, "underlyings");
+        assert_eq!(second.as_of, AsOf::Live);
+        assert!(second.tag > first.tag);
+
+        f.events.try_send(published("risk_snapshot")).unwrap();
+        vcx.run_until_parked();
+        assert!(
+            next_live_reference(&f).is_none(),
+            "a non-reference publish reads nothing"
+        );
+    }
+
+    #[gpui::test]
+    fn a_stale_tag_answer_is_ignored(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let count = count_publishes(&mut vcx);
+        let first = next_live_reference(&f).unwrap();
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        let second = next_live_reference(&f).unwrap();
+
+        f.events
+            .try_send(live_answer(&first, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            live_currency(&mut vcx),
+            None,
+            "a superseded answer is dropped"
+        );
+        assert_eq!(count.get(), 0);
+
+        f.events
+            .try_send(live_answer(&second, Ok(Some(underlyings_table("EUR")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("EUR"));
+    }
+
+    /// A refused reread keeps the last table and retries once, after the
+    /// delay, however many refusals arrived meanwhile.
+    #[gpui::test]
+    fn a_busy_refusal_retries_and_keeps_the_cache(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let first = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&first, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+
+        // Two refused rereads: distinct batches, since the mailbox coalesces
+        // a repeated (dataset, batch) publish into one event.
+        f.bridge.handle.fill_for_tests();
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        f.events
+            .try_send(DataEvent::Published {
+                dataset: "underlyings".into(),
+                batch: "c".into(),
+                gen_id: 3,
+                books: vec![None],
+            })
+            .unwrap();
+        vcx.run_until_parked();
+        while f.requests.try_recv().is_ok() {}
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("USD"));
+        assert!(
+            next_live_reference(&f).is_none(),
+            "no retry before the delay"
+        );
+
+        vcx.executor().advance_clock(REFERENCE_RETRY_DELAY);
+        vcx.run_until_parked();
+        let retried = next_live_reference(&f).expect("the retry reads again");
+        assert!(retried.tag > first.tag);
+        assert!(next_live_reference(&f).is_none(), "one retry per dataset");
+        f.events
+            .try_send(live_answer(&retried, Ok(Some(underlyings_table("EUR")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("EUR"));
+    }
+
+    /// A refused reread sends nothing, so the read already in flight stays
+    /// the latest and its answer applies at once, without waiting for the retry.
+    #[gpui::test]
+    fn a_refused_reread_keeps_the_in_flight_answer_current(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let first = next_live_reference(&f).unwrap();
+        f.bridge.handle.fill_for_tests();
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        f.events
+            .try_send(live_answer(&first, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("USD"));
+    }
+
+    #[gpui::test]
+    fn a_failed_read_keeps_the_last_table(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let count = count_publishes(&mut vcx);
+        let first = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&first, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        let second = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&second, Err("disk I/O error".into())))
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(live_currency(&mut vcx).as_deref(), Some("USD"));
+        assert_eq!(count.get(), 1, "a failure republishes nothing");
+    }
+
+    /// No generation at all removes the dataset's table; a second empty
+    /// answer changes nothing and wakes no observer.
+    #[gpui::test]
+    fn an_empty_answer_removes_the_table(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let count = count_publishes(&mut vcx);
+        let first = next_live_reference(&f).unwrap();
+        f.events
+            .try_send(live_answer(&first, Ok(Some(underlyings_table("USD")))))
+            .unwrap();
+        vcx.run_until_parked();
+        for _ in 0..2 {
+            f.events.try_send(published("underlyings")).unwrap();
+            vcx.run_until_parked();
+            let read = next_live_reference(&f).unwrap();
+            f.events.try_send(live_answer(&read, Ok(None))).unwrap();
+            vcx.run_until_parked();
+            assert_eq!(live_currency(&mut vcx), None);
+            assert_eq!(count.get(), 2, "set once on removal, never again");
+        }
+    }
+
+    /// A failing dataset warns on entering failure only; a good read rearms it.
+    #[test]
+    fn a_failure_warns_once_until_a_read_succeeds() {
+        let (handle, _requests) = DataHandle::for_tests();
+        let cache = ReferenceCache::new(handle, &[("underlyings".into(), 1)]);
+        assert!(cache.note_failed("underlyings"));
+        assert!(!cache.note_failed("underlyings"));
+        cache.note_succeeded("underlyings");
+        assert!(cache.note_failed("underlyings"));
     }
 
     #[gpui::test]

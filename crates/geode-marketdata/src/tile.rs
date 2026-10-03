@@ -152,7 +152,7 @@ impl FlooredTones {
         ]
     }
 
-    /// Re-derive only when one of the six inputs moved.
+    /// Re-derive only when a cached theme input changed.
     pub(crate) fn refresh(&mut self, theme: &Theme) {
         if self.key != Self::key(theme) {
             *self = Self::derive(theme);
@@ -165,7 +165,7 @@ impl FlooredTones {
 const NO_DOCUMENT: &str = "no document to edit";
 
 /// What a commit answers when the grid moved under the open editor — see
-/// [`Editing::labels`] for how that happens and why it is refused.
+/// [`EditTarget::Cell`] for the captured identity checked at commit.
 const CELL_MOVED: &str = "the document changed under the edit — nothing was written";
 
 /// Refusal for a Behind draft whose base is not painted. The grid on screen is not the

@@ -310,6 +310,8 @@ pub fn parse(text: &str, templates: &TemplateSet) -> Result<RowSpec, ParseError>
             instrument,
             qty,
             shift: OwnShifts::default(),
+            // The grammar names no currency: a parsed line is blank until given one.
+            currency: None,
         }));
     }
 
@@ -379,6 +381,7 @@ pub fn parse(text: &str, templates: &TemplateSet) -> Result<RowSpec, ParseError>
                     .checked_mul(l.weight)
                     .ok_or_else(|| err(qty_offset, "quantity out of range"))?,
                 shift: OwnShifts::default(),
+                currency: None,
             })
         })
         .collect::<Result<Vec<LineSpec>, ParseError>>()?;

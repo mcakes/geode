@@ -1,11 +1,14 @@
 # Feature modules
 
-Feature modules turn data and domain state into tiles. Each feature owns its
-model, commands, prepared presentation, module factory, and tests. Features do
-not depend on one another; they meet through shared vocabulary, the shell
-contract, and the data service.
+Features expose tiles, pages, or row-menu actions. Each owns its domain state,
+commands, presentation, and tests. Features do not depend on one another;
+they meet through shared vocabulary, the shell contract, and the data service.
 
 ## Common lifecycle
+
+This lifecycle applies to tiles. Diagnostics uses the shell's
+[page lifecycle](shell.md#pages); Nemo and Move LHU use its
+[row-menu action contract](shell.md#row-menu).
 
 `geode-app` registers a `ModuleFactory` for each available tile kind. The shell
 creates an occupant for a `TileId`, sends its initial visibility and stack
@@ -1249,7 +1252,9 @@ frame's requery statistics supply the state. `page::toggle_diagnostics`,
 bound to `mod+d` by default, opens and closes it from the keymap, the
 sidebar button, the palette row "Diagnostics: Open page", or the status
 bar's diagnostics summary; Escape with nothing above the page closes it, as
-does any workspace switch. The page is retained while the window lives, so
+does any workspace switch. A tile's health chip only opens it, and lands on
+Sources with the cursor on the chip's source (the tile's worst), whichever
+section was last shown; a Sources filter hiding that row is cleared. The page is retained while the window lives, so
 filters, cursors, expansion, and the log tail survive a close and reopen;
 the session saves only the selected section. The toolbar stays above the
 page with every frame control live, so the as-of the Data section's
@@ -1419,7 +1424,10 @@ module map and the observer, notification, and allocation contracts.
 `geode_core::pricing` defines the request, instrument, override, result, and
 `Pricer` vocabulary. `geode-pricing` contains implementations of that trait.
 The current `MockPricer` is deterministic test and demo behavior, not a
-financial model. The pricing worker applies one override set per batch,
+financial model. It prices in the request's payout currency with no quanto
+adjustment, so a line moved from USD to EUR keeps its local figures and its
+`_usd` columns scale by the EUR rate (1.08); it refuses a currency outside its
+rate table with `no USD rate for <code>`. The pricing worker applies one override set per batch,
 contains panics, and returns values or an error for each completed line.
 Cancellation can drop a queued batch or stop a running batch between lines,
 so cancelled requests need not return an outcome for every submitted line.
@@ -1494,47 +1502,77 @@ pricer sheet. A package whose legs priced in different currencies, or a
 selection total over such lines, paints `—` in its local-currency measure
 columns; the `_usd` columns still sum, and are the comparable ones across
 currencies. Both bundled views end in a `status` column, which says
-`pricing…` on a stale line and a failed line's reason, so neither state is
-shown by color alone. Column 0 is a connector tree. A package row shows its
+`pricing…` on a stale line, a failed line's reason, and `needs currency`
+on a line with no payout currency, so no state is shown by color alone. The
+`currency` column is the line's payout currency, the one it asks the
+pricer to report in: it edits (three letters, any case; empty clears) and
+reprices the line, and a blank line is never priced. A result reported in
+another currency fails the line (`priced in EUR, asked for USD`). Until a
+line moved to another currency reprices, or while its currency is blank, its
+local measures paint `—` (its old answer is in another currency) and its
+`_usd` columns still read; a selection total counts a blank line as failed.
+A line takes its currency from reference data: a typed or put line whose
+currency is blank looks up its own underlying (each leg of a package its
+own) in the `[pricing] payout_currency` column, `underlyings.currency` by
+default, and a put line keeps the currency it was yanked with. An underlying
+the table does not list, a cell that is not a code (read trimmed and in any
+case, so ` usd ` is USD), or no payout source leaves the line blank, reading
+`needs currency`, rather than pricing it in a guessed currency. Blank lines
+fill again whenever any reference dataset's live data changes (not only the
+payout source's), a sheet loads, or a reload names a different payout source;
+a reload of anything else refills nothing. A cleared currency therefore stays
+cleared only until the next of those or an edit moving that line to another
+underlying. In the demo, `demo_refdb` revises a row about every 90 seconds, so
+a cleared currency comes back within about 90 seconds. The store keeps a blank
+as `""`, which cannot tell a cleared currency from one never set, so a load
+refills both. A refresh, load or reload fill never overwrites a currency
+already set, and it is not an undo step (`u` does not unfill), but the sheet
+saves it. Editing a blank line's underlying looks the new one up as part of
+that edit: `u` restores the old underlying and the blank currency together,
+and redo replays both. Because a refresh fill is not an undo step, an undo
+across one can pair an old underlying with the refreshed currency: a line
+moved to an underlying the table does not list stays blank, and when a refresh
+then lists it and fills the line, `u` restores the old underlying under that
+currency (known limitation). A line whose currency is set keeps it when its
+underlying changes. Column 0 is a connector tree. A package row shows its
 chevron, its template (`CS`, `CUSTOM`) as a neutral chip, a summary of its
 legs' distinct expiries and strikes (`Z26 4800/5200`) and a muted leg count
 (`· 2 legs`). Each leg hangs from a drawn connector under the package's
 chevron: a hairline through the full row height, joining the next leg's
-without a gap, and a stub at mid-height toward its text. A package's legs
-read as one block: a leg that is not its package's last drops the row
-separator below it, so there is no separator between sibling legs, while the
-last leg, the package row, bare lines and group rows keep theirs; on the
-package's last leg the line stops at its stub. The lines take the `border`
-token floored to 3:1 non-text contrast on the leg's own, hover and selected
-grounds. The leg's full shorthand paints in muted text; a bare line shows
-its full shorthand. Every row reserves the slot, so roots share one
-leading edge. A leg's connector sits one and a half depth steps right of its
-package's chevron, under the chip's leading glyph, and its text starts as far
-right of the chip, so the legs read as nested inside the package. Every
-leg of a package, the last included, sits on a faint tint that marks it as
-inside its package; bare lines and package rows keep the table's ground. The
-tint is the theme's stripe token (`table_even`) where it reads at least 1.04:1
-from the table ground, from hover, from the selected-row ground and from the
-grouping row's ground while staying fainter than hover; otherwise it is the
-faintest blend of the table ground, toward the foreground or away from it,
-that does. A leg's text, state colors, `sign` colors, named colors and
-gutter are floored on the tint as well as on hover and selected. On Aurora
-Light, Default Light and Modus Operandi the selected-row and hover grounds
-sit too near the table ground for any such tint, so the tint is held apart
-from hover and the group ground only, and selecting a leg changes its ground
-only slightly; the cursor cell's border still marks the cursor row, as does
-the gutter's own paint when line numbers are on. A grouping row (see
-[grouping](#grouping)) carries a ground of its own too; the table's hover
-and selected-row fills replace either ground. Column 0 is fixed at a width
-that fits a two-leg call spread's package row (`▾ CS Z26 4800/5200 · 2 legs`) at the largest
-font; a longer summary ends in `…` and the leg count stays whole. Find (`/`,
-`n`, `N`) matches the shorthand column 0 paints on a line or leg; a
-package's find key is still its template form (`SPX Z26 4800/5200 CS`), and
-a custom package's is its template token, underlyings and the summary it
-paints (`CUSTOM SPX Z26 5000/4000`). A long text cell ends in `…`; a number
-never truncates. Cell text is floored to the readable ratio on its row's own
-ground (the table's base, a leg's tint or a group row's) and the hover and
-selected-row grounds.
+without a gap, and a stub at mid-height toward its text. A package's legs read
+as one block: a leg that is not its package's last drops the row separator
+below it, so there is no separator between sibling legs, while the last leg,
+the package row, bare lines and group rows keep theirs; on the package's last
+leg the line stops at its stub. The lines take the `border` token floored to
+3:1 non-text contrast on the leg's own, hover and selected grounds. The leg's
+full shorthand paints in muted text; a bare line shows its full shorthand.
+Every row reserves the slot, so roots share one leading edge. A leg's
+connector sits one and a half depth steps right of its package's chevron,
+under the chip's leading glyph, and its text starts as far right of the chip,
+so the legs read as nested inside the package. Every leg of a package, the
+last included, sits on a faint tint that marks it as inside its package; bare
+lines and package rows keep the table's ground. The tint is the theme's stripe
+token (`table_even`) where it reads at least 1.04:1 from the table ground,
+from hover, from the selected-row ground and from the grouping row's ground
+while staying fainter than hover; otherwise it is the faintest blend of the
+table ground, toward the foreground or away from it, that does. A leg's text,
+state colors, `sign` colors, named colors and gutter are floored on the tint
+as well as on hover and selected. On Aurora Light, Default Light and Modus
+Operandi the selected-row and hover grounds sit too near the table ground for
+any such tint, so the tint is held apart from hover and the group ground only,
+and selecting a leg changes its ground only slightly; the cursor cell's border
+still marks the cursor row, as does the gutter's own paint when line numbers
+are on. A grouping row (see [grouping](#grouping)) carries a ground of its own
+too; the table's hover and selected-row fills replace either ground. Column 0
+is fixed at a width that fits a two-leg call spread's package row (`▾ CS Z26
+4800/5200 · 2 legs`) at the largest font; a longer summary ends in `…` and the
+leg count stays whole. Find (`/`, `n`, `N`) matches the shorthand column 0
+paints on a line or leg; a package's find key is still its template form (`SPX
+Z26 4800/5200 CS`), and a custom package's is its template token, underlyings
+and the summary it paints (`CUSTOM SPX Z26 5000/4000`). A long text cell ends
+in `…`; a number never truncates. Cell text is floored to the readable ratio
+on its row's own ground (the table's base, a leg's tint or a group row's) and
+the hover and selected-row grounds.
 
 The entry bar sits between the header and the column headers. A muted label
 names where `enter` lands (`after <row>`, `into <TEMPLATE>`, `at top`,
@@ -1953,9 +1991,9 @@ line's cell paints the per-unit result: `npv < 0` keeps a short line whose
 per-unit npv is positive. A leg's `template` is its package's token, because
 `template` is a position-grain column and a leg's position is its package; a
 bare line has none. A blank cell, a measure on an unpriced or failed line,
-and the currency of an unpriced line are NULL. NULL follows SQL: only TRUE
-keeps a line, so `npv > 0` hides an unpriced line and so does
-`not (currency = 'USD')`. The text filter searches the nine textual
+and a blank currency are NULL. NULL follows SQL: only TRUE keeps a line,
+so `npv > 0` hides an unpriced line and `not (currency = 'USD')` hides a
+line with no currency. The text filter searches the nine textual
 dimensions (see [configuration](configuration.md)).
 
 The scope is re-applied on every model rebuild: an edit, a price delivery, a
@@ -2492,7 +2530,13 @@ are created once and written positionally, so a changed column list would put
 values into the wrong columns of an existing database. A layer redeclaring it
 differently is ignored with an error diagnostic (see
 [configuration](configuration.md)); changing it needs a migration, which does
-not exist.
+not exist. Each line's payout currency is stored in `currency`, the last value
+column (`""` when blank; an unreadable code loads blank). A database whose
+`pricer_sheets` tables lack that column is refused by the drift check, with
+no migration. Every database created before the column existed is refused,
+whether or not it holds a saved sheet, because every startup creates the
+`pricer_sheets` tables, empty, in a database that lacks them. Clear it (delete its `pricer_sheets` tables,
+or the database; for the demo, delete `$TMPDIR/geode-demo/<rows>-42/`).
 
 Every save is a new generation. A sheet keeps its live generation and the 200
 before it; older ones are swept on the writer after a save that crosses the

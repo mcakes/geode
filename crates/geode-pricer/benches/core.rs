@@ -83,9 +83,22 @@ fn sheet(n: usize) -> Sheet {
 fn sheet_of(texts: &[String]) -> Sheet {
     let mut s = Sheet::new("bench");
     let templates = TemplateSet::builtin();
+    // Every line in USD, as the answers are: a blank line has no request,
+    // and a package over one would fold to a failure.
     let rows: Vec<RowSpec> = texts
         .iter()
-        .map(|t| parse(t, &templates).expect("bench text parses"))
+        .map(|t| {
+            let mut row = parse(t, &templates).expect("bench text parses");
+            match &mut row {
+                RowSpec::Line(l) => l.currency = Some(Currency::USD),
+                RowSpec::Package { legs, .. } => {
+                    for l in legs {
+                        l.currency = Some(Currency::USD);
+                    }
+                }
+            }
+            row
+        })
         .collect();
     s.apply(Edit::Insert {
         place: Place::Root { at: 0 },
@@ -179,6 +192,38 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || batch.clone(),
             |batch| black_box(s.deliver_all(batch, now)),
+            BatchSize::SmallInput,
+        )
+    });
+
+    // A reference refresh over a sheet whose every line is blank: one
+    // batch fills all of them, and the packages fold once at its end.
+    let blank = {
+        let mut s = sheet(1_000);
+        let rows: Vec<usize> = (0..s.len()).filter(|r| s.is_line(*r)).collect();
+        for r in rows {
+            s.apply(Edit::SetCurrency {
+                row: r,
+                currency: None,
+            })
+            .expect("blank");
+        }
+        s
+    };
+    let blank_rows = to_rows(&blank).expect("rows");
+    let fills: Vec<(usize, Currency)> = blank
+        .lines_needing_currency()
+        .map(|r| (r, Currency::USD))
+        .collect();
+    g.bench_function("fill_currencies_1000", |b| {
+        b.iter_batched(
+            || {
+                (
+                    from_rows("bench", &blank_rows).expect("loads"),
+                    fills.clone(),
+                )
+            },
+            |(mut s, fills)| black_box(s.fill_currencies(fills)),
             BatchSize::SmallInput,
         )
     });

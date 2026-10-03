@@ -10,8 +10,9 @@ Configuration is loaded in three layers, from lowest to highest precedence:
 
 1. **Builtin** defaults compiled into the application.
 2. **Desk** configuration from `$GEODE_DESK_CONFIG`.
-3. **User** configuration from `%APPDATA%\geode` on Windows or
-   `$HOME/.config/geode` elsewhere.
+3. **User** configuration from `$APPDATA/geode` when `APPDATA` is set,
+   otherwise `$HOME/.config/geode`. This is environment precedence, not a
+   platform check; without either variable no user directory is resolved.
 
 Tables merge recursively. Scalars, arrays, and values of a different type
 replace the lower-layer value at the same path; unrelated values remain.
@@ -62,13 +63,14 @@ The main configuration documents have distinct owners:
 
 | Document | Defines |
 |---|---|
-| `app.toml` | Theme, primary modifier, UI settings, logging, time zone, pricing and timeseries settings |
+| `app.toml` | Theme, primary modifier, UI settings, logging, time zone, pricing, vol model, and timeseries settings |
 | `datasets.toml` | Dataset families, columns, roles, types, grains, retention, local publication, and `computed` |
 | `views.toml` | Queryable views, joins, columns, expressions, grouping, and sorting |
-| `sources.toml` | File, subscription, and fetch sources with readiness and adapter settings |
+| `sources.toml` | File, subscription, fetch, and reference snapshot sources with readiness and adapter settings |
 | `egress.toml` | Upload targets: adapter and a per-document address template |
 | `positions.toml` | The one position service: the adapter that takes position commands such as Move LHU |
 | `panels.toml` | Market-data panels: the dataset, document kind, layout, formats, and kind actions of each panel tile kind |
+| `pricer_templates.toml` | Named option-package templates used by the pricer's shorthand |
 | `dimensions.toml` | Derived dimensions used for grouping and scope |
 | `groupings.toml` | The nine shared grouping slots |
 | `scopes.toml` | Named scopes |
@@ -148,9 +150,11 @@ field still open rather than accepted and left to fail later at query time
 and [configuration-dialogs.md's Scope expression field](configuration-dialogs.md#scope-expression-field)).
 Source adapter names, document kinds, module keymap fragments, pricer
 names, and market-data panels depend on what the assembled application has
-registered, so `geode-app` performs those cross-crate checks. Panels are
-checked at startup only (they are
-[restart-required](#market-data-panels)); the rest at startup and reload.
+registered. The app and data service check provider capabilities and panel
+composition at startup. Source, document-kind, pricing-adapter, vol-model,
+and panel changes require restart; a reload does not rebuild those runtime
+registries or repeat their startup capability checks. Keymap compilation
+does run on reload, against the existing action registry.
 
 `expressions.toml` holds named scope expressions: an expression text saved
 under a name so a saved scope or the frame can refer to it instead of copying
@@ -700,6 +704,27 @@ still runs the pricer's full reload, which restarts every open tile's refresh
 timer. An absent `underlyings` clears the list, including on reload; a
 non-array value at startup leaves it empty. With an empty list the bar says
 no underlyings are configured.
+
+`payout_currency = "<dataset>.<column>"` names the reference column a new
+pricer line's payout currency defaults from, looked up by the line's
+underlying. When the key is absent it is `underlyings.currency` if the
+`underlyings` reference dataset is keyed by one column and declares a
+`currency` column of type `utf8`, and otherwise nothing, without a
+diagnostic. An explicit value must split on one `.` into a declared
+reference dataset keyed by exactly one column and one of its non-key `utf8`
+columns. A multi-column key never matches: a lookup joins its parts with
+`/`, and the pricer looks up by the underlying alone. A column of another
+type never parses as a currency code. Anything else, including a
+non-string value, is an error at `app.pricing.payout_currency`
+and resolves to nothing, so new lines get no currency rather than one read
+from a guessed column. The value is checked against the startup schema, the
+one the running service serves, because datasets are restart-required. A
+reload applies the setting without a restart, and a change to it alone
+passes the pricer's reload gate. Unlike `underlyings`, an invalid value on a
+reload does not keep the last good setting: it drops the running payout
+source, so newly typed lines read `needs currency` until the value is
+fixed. Lines that already have a currency keep it, and blank lines refill
+when a reload names a different valid source.
 
 The pricer's views are ordinary `views.toml` views whose `dataset` is
 `pricer`. The builtin layer carries `vanilla` and `barrier`; a desk or user

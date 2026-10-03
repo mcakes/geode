@@ -35,11 +35,14 @@ cancellation can suppress query outcomes, and UI delivery may coalesce them.
 | Series query | `Series`, addressed by key and tag, including cap/compile errors. |
 | Distinct values | `Distinct`, with key, tag, and requested column. |
 | Catalog | `Catalog`, read on the service thread and addressed by key/tag. |
+| Reference table | `Reference`, read on the service thread and addressed by key/tag, with the dataset and as-of. |
+| Snapshot poll-now | No dedicated reply. The source reports ordinary poll, health, and publication events; an unchanged snapshot has no publication. |
 | Pricing | `Price`, addressed by key/tag; downstream queue refusal produces per-line errors. |
 | Vol slices | `VolSlices`, addressed by key/tag, one result per job in job order; a full vol queue answers every job `the vol queue is full; resubmit`. |
 | Local publish | Storage produces `Published` then `LocalPublished`. Any refusal or failure — the service refusing a dataset that is not local, the writer's validation or store error, a contained panic — produces an error diagnostic and `LocalPublishFailed`. Every admitted local publish answers exactly once. |
 | Local forget | `Forgotten` (including a key that held nothing) or `ForgetFailed`. The service refuses a dataset that is not local or a key of the wrong arity with an error diagnostic and `ForgetFailed`; nothing is queued. |
 | Document upload | `Upload`, addressed by tile key and upload tag; target validation and target-queue refusal (from the service thread), and encoding and transport results (from the target's worker) use the same outcome. |
+| Move LHU | `Command`, addressed by command tag. Service/worker-queue refusal and the position adapter's answer use the same outcome. Acceptance by the position system does not update the grid; a later source snapshot carries the move. |
 | History fetch | `SeriesFetched` identifies the source/identity pair, including zero-row completion. |
 | Identity refresh | Updates a cache read by a later catalog request; worker refusal is logged, with no dedicated completion event. |
 
@@ -55,8 +58,8 @@ a stopped one (see [the line pricer](features.md#pricing-and-the-line-pricer)).
 Cancellation is itself an ordinary queued request and can be refused. It
 targets query-pool, pricing and vol work by key (a running pricing or vol
 batch stops at its next line or job boundary), does not cancel uploads,
-fetch, or ingest work, and cannot retract a result already emitted. It has
-no acknowledgement.
+fetch, position commands, or ingest work, and cannot retract a result already
+emitted. It has no acknowledgement.
 Receivers still need stale-result checks. See
 [`handle.rs`](../../crates/geode-data/src/handle.rs).
 
@@ -106,12 +109,14 @@ from waiting forever, but does not interrupt service open or running I/O.
 The service then stops its workers in dependency order, the ingest writer
 last. The writer runs its queued local writes (the app's own publishes and
 forgets) in order, each answering as usual, and drops every other queued job:
-feed documents, series and files are resent by their sources after a restart.
-It is not a flush beyond that. Egress workers drain already queued uploads
-before joining, with no transport timeout. Fetch calls, discovery,
-publication, and uploads can therefore delay joining. Final-handle drop also
-joins on whichever thread releases it, so the app's quit hook runs explicit shutdown on the
-background executor. See [worker shutdown](data-path.md#queues-and-shutdown).
+feed documents, series, reference snapshots and files are resent by their
+sources after a restart. It is not a flush beyond that. Egress workers drain already queued uploads
+before joining, with no transport timeout. The position worker also drains
+accepted commands. Fetch calls, snapshot polls, discovery, publication,
+uploads, and position commands can therefore delay joining. Final-handle drop
+also joins on whichever thread releases it, so the app's quit hook runs
+explicit shutdown on the background executor. See
+[worker shutdown](data-path.md#queues-and-shutdown).
 
 ## The event mailbox
 
@@ -127,6 +132,8 @@ delivery, not applied to a window.
 | Upload outcome | One entry per tile key and upload tag. Different uploads from one tile remain distinct; duplicate outcomes for the same pair replace. |
 | Publication | One entry per dataset/batch; union affected books and retain the greatest generation ID. |
 | Local-write outcome (saved, save failed, forgotten, forget failed) | Never coalesced: each is keyed by its arrival sequence and every one is delivered, in the writer's order. A writer may be waiting on one exact outcome (a pricer load deferred behind a queued save), so a later outcome for the same document must not replace it. The count is bounded by the writes the app queued, not by a feed's rate. |
+| Position-command outcome | Never coalesced: each answer has its own arrival-sequence key. One command's success cannot hide another's refusal. |
+| Reference-table outcome | Never coalesced. The bridge checks the request key and latest submitted tag before storing the answer in Diagnostics. |
 | Fetch completion | Success clears an earlier failure for the pair. A later failure retains the earlier success as well, preserving its requery signal. |
 | Loading / load ended | One shared progress entry; later state replaces earlier state. |
 | Health / poll result | Latest entry per event kind and source. |
@@ -205,3 +212,12 @@ in the retained data lane; they do not replace the shell's current config
 diagnostics. Publication and health logging belong to the data service, so
 the bridge avoids duplicate logs. See
 [`bridge.rs`](../../crates/geode-app/src/bridge.rs).
+
+Reference-table reads and poll-now requests have an independent lane from the
+catalog. The bridge reads at the active workspace's as-of and stores only the
+latest submitted reference tag; the page checks whether that answer matches
+its selected dataset and as-of. Submission refusals are displayed separately
+for reads and polls and are not automatically retried. Poll-now has no direct
+answer, so its submission refusal clears on the next accepted submission.
+Position-command outcomes go to `ShellView::note_command`, which replaces
+the matching command's pending status notice; they are not tile deliveries.

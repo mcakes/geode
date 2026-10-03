@@ -12,12 +12,15 @@ use crate::core::shorthand::{
 };
 use chrono::NaiveDate;
 use geode_core::nudge::nudge_text;
-use geode_core::pricing::{Expiry, Instrument, OptionKind, Vanilla};
+use geode_core::pricing::{Currency, Expiry, Instrument, OptionKind, Vanilla};
 use geode_core::schema::ColumnType;
 use geode_core::view::ColumnFormat;
 
 /// The footer's word for a cell that does not edit.
 pub const READ_ONLY: &str = "read-only";
+
+/// The footer's refusal for a currency that is not three letters.
+pub const CURRENCY_REFUSAL: &str = "a currency is three letters, e.g. USD";
 
 const TYPES: [&str; 2] = ["C", "P"];
 const BARRIER_TYPES: [&str; 4] = ["UI", "UO", "DI", "DO"];
@@ -94,6 +97,12 @@ pub fn editor_for(
         ColumnKind::SpotShift => {
             CellEditor::Text(sheet.shift(row).spot_pct.map(plain).unwrap_or_default())
         }
+        ColumnKind::Currency => CellEditor::Text(
+            sheet
+                .currency(row)
+                .map(|c| c.as_str().to_string())
+                .unwrap_or_default(),
+        ),
         ColumnKind::VolShift => {
             CellEditor::Text(sheet.shift(row).vol_pts.map(plain).unwrap_or_default())
         }
@@ -123,7 +132,6 @@ pub fn editor_for(
         | ColumnKind::PositionRef
         | ColumnKind::InstrumentRef
         | ColumnKind::Template
-        | ColumnKind::Currency
         | ColumnKind::Measure { .. }
         | ColumnKind::PricedAt
         | ColumnKind::Status => {
@@ -156,6 +164,18 @@ fn shift(text: &str, what: &str) -> Result<Option<f64>, String> {
         .filter(|v| v.is_finite())
         .map(Some)
         .ok_or_else(|| format!("{what} '{t}' is not a number"))
+}
+
+/// A typed payout currency: exactly three ASCII letters in any case, as
+/// the code in upper case; empty text clears it. Anything else is refused
+/// rather than guessed, since a line prices in whatever this names.
+fn currency(text: &str) -> Result<Option<Currency>, String> {
+    if text.is_empty() {
+        return Ok(None);
+    }
+    Currency::parse(&text.to_ascii_uppercase())
+        .map(Some)
+        .ok_or_else(|| CURRENCY_REFUSAL.into())
 }
 
 /// Validate a committed cell and return its edit, `Ok(None)` when the parsed
@@ -197,6 +217,7 @@ pub(crate) fn changed(sheet: &Sheet, row: usize, edit: Edit) -> Option<Edit> {
         Edit::SetQty { qty, .. } => *qty == sheet.qty(row),
         Edit::SetShift { shift, .. } => *shift == sheet.shift(row),
         Edit::SetInstrument { instrument, .. } => sheet.instrument(row) == Some(instrument),
+        Edit::SetCurrency { currency, .. } => *currency == sheet.currency(row),
         _ => false,
     };
     (!same).then_some(edit)
@@ -300,11 +321,14 @@ pub(crate) fn edit_on(
                 ..own
             },
         }),
+        ColumnKind::Currency => Ok(Edit::SetCurrency {
+            row,
+            currency: currency(t)?,
+        }),
         ColumnKind::SheetName
         | ColumnKind::PositionRef
         | ColumnKind::InstrumentRef
         | ColumnKind::Template
-        | ColumnKind::Currency
         | ColumnKind::Measure { .. }
         | ColumnKind::PricedAt
         | ColumnKind::Status => Err(READ_ONLY.into()),
@@ -521,6 +545,56 @@ mod tests {
                 "package {kind:?}"
             );
         }
+    }
+
+    #[test]
+    fn typing_a_currency_is_checked_and_uppercased() {
+        use geode_core::pricing::Currency;
+        let s = one_line();
+        let eur = Currency::parse("EUR").unwrap();
+        let cur = ColumnKind::Currency;
+        assert_eq!(
+            editor_for(&s, 0, cur, fmt(cur)),
+            Ok(CellEditor::Text("USD".into())),
+            "the editor opens on the code"
+        );
+        assert_eq!(
+            commit(&s, 0, cur, " eur "),
+            Ok(Some(Edit::SetCurrency {
+                row: 0,
+                currency: Some(eur)
+            }))
+        );
+        for bad in ["EU", "EURO", "E1R"] {
+            assert_eq!(
+                commit(&s, 0, cur, bad),
+                Err(CURRENCY_REFUSAL.to_string()),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(CURRENCY_REFUSAL, "a currency is three letters, e.g. USD");
+        assert_eq!(
+            commit(&s, 0, cur, ""),
+            Ok(Some(Edit::SetCurrency {
+                row: 0,
+                currency: None
+            })),
+            "empty text clears"
+        );
+        assert_eq!(commit(&s, 0, cur, "usd"), Ok(None), "unchanged is no edit");
+        let mut blank = s;
+        blank
+            .apply(Edit::SetCurrency {
+                row: 0,
+                currency: None,
+            })
+            .unwrap();
+        assert_eq!(
+            editor_for(&blank, 0, cur, fmt(cur)),
+            Ok(CellEditor::Text(String::new())),
+            "a blank currency opens empty"
+        );
+        assert_eq!(commit(&blank, 0, cur, ""), Ok(None));
     }
 
     #[test]

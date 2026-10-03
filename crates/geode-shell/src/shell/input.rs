@@ -520,8 +520,8 @@ impl ShellView {
                 }
             });
         } else if action.0 == "frame::grouping" {
-            // Open the same grouping picker as the toolbar readout.
-            choicedialog::open_grouping(self, window, cx);
+            // The Grouping dialog: the same one `config::groupings` opens.
+            objectdialog::render::open(self, objectdialog::Domain::Groupings, window, cx);
         } else if action.0 == "tile::link_group" {
             // Open the link chooser on the focused tile.
             choicedialog::open_link_group(self, window, cx);

@@ -255,6 +255,13 @@ pub const EXPR_KEY: QueryKey = QueryKey(u64::MAX - 4);
 /// open choice dialog, which drops a reply whose tag is not its own.
 pub const ACTION_KEY: QueryKey = QueryKey(u64::MAX - 5);
 
+/// The bridge's live reference reads (`Request::Reference` at `AsOf::Live`)
+/// submit under this key — one lower than `ACTION_KEY`, same reservation
+/// reasoning. Their answers never reach the shell's delivery routes: the
+/// bridge keeps them in [`crate::reference::ReferenceGlobal`], dropping any
+/// whose tag is not its dataset's latest.
+pub const REFERENCE_KEY: QueryKey = QueryKey(u64::MAX - 6);
+
 /// One column a dimension picker can open: every categorical
 /// column of every dataset, plus every derived dimension. `role` is
 /// `"dimension"` for a real `ColumnRole::Dimension` column, `"attribute"`
@@ -798,9 +805,9 @@ pub struct ShellView {
     /// State for the open scope expression dialog. Created by
     /// [`scope_expr_view::open`] and cleared when its kind pops.
     scope_expr_dialog: Option<scope_expr_view::ScopeExprState>,
-    /// State for the open grouping or tile-kind picker. Created by
-    /// `choicedialog::open_grouping` or `open_tile_kinds`, and cleared when its
-    /// kind pops.
+    /// State for the open choice dialog: the scope, tile-kind, column,
+    /// log-level, action-value or link-group picker. Created by one of
+    /// `choicedialog`'s `open_*` doors, and cleared when its kind pops.
     choice_dialog: Option<choicedialog::ChoiceDialogState>,
     /// Scroll state for the choice dialog's row list
     /// (`dialog::choice_rows`'s viewport) — the `settings_scroll` split,
@@ -1083,7 +1090,7 @@ impl ShellView {
                     }
                 });
 
-                // Refresh the diagnostics histogram only while a tile watches it.
+                // Refresh the diagnostics histogram only while a consumer watches it.
                 // The source clone is gated as well; the destination compares before
                 // copying and notifying.
                 let Ok((diagnostics, watched)) = this.update(cx, |view, cx| {
@@ -1231,16 +1238,19 @@ impl ShellView {
         cx.set_global(crate::linenumbers::UiSettings { line_numbers });
 
         // `[timeseries] default_source` plus the fetch sources it names,
-        // one of the workspace's four globals (see `series`'s module doc). Set
+        // one of the workspace's five globals (see `series`'s module doc). Set
         // here and re-derived on reload; the settings row writes both
         // through `set_default_source`.
         let series = crate::series::SeriesSettings::from_config(&services.config);
         let default_source = series.default_source.clone();
         cx.set_global(series);
         // The app-wide clock (`crate::clock::AppClock`, another of the workspace's
-        // four globals — see its own doc comment).
+        // five globals — see its own doc comment).
         let (clock, clock_diags) = geode_core::clock::Clock::from_config(&services.config);
         cx.set_global(crate::clock::AppClock(clock));
+        // Empty until the bridge's first live reference answer: a module
+        // reading it before then sees no table rather than a missing global.
+        cx.set_global(crate::reference::ReferenceGlobal::default());
 
         // Publish bindings for module tooltip chord lookup through `tips::Chords`.
         cx.set_global(crate::tips::Chords(Arc::new(
@@ -1794,6 +1804,17 @@ impl ShellView {
                 });
             }
         }
+        // A dialog whose list reads the frame (the Groupings list's leading
+        // rows) re-derives when the frame changes under it; a stale `*` row
+        // would offer a chain that no longer exists. Last, after every
+        // `frame.update` above, so the key carries the final generation.
+        if self
+            .object_dialog
+            .as_ref()
+            .is_some_and(|state| state.domain.applies_from_browse())
+        {
+            self.refresh_dialog_rows(cx);
+        }
         cx.notify();
     }
 
@@ -1836,8 +1857,13 @@ impl ShellView {
             let next = !self.perf_overlay;
             self.set_perf_overlay(next, cx);
         }
-        if pending_page {
-            self.open_page_on_request(crate::diagnostics::DIAGNOSTICS_PAGE_KIND, window, cx);
+        if let Some(source) = pending_page {
+            self.open_page_on_request(
+                crate::diagnostics::DIAGNOSTICS_PAGE_KIND,
+                &source,
+                window,
+                cx,
+            );
         }
         cx.notify();
     }

@@ -104,9 +104,9 @@ pub fn item_for(
 /// fallback [`item_for`]'s doc explains, for `key` and `attribute`.
 ///
 /// A non-numeric column is `"dimension"`, so `views::kind_default` gives
-/// it [`ColumnFormat::TEXT`]: precision 0, no thousands separator, no
-/// color — the format a text column actually has in a blotter. A numeric
-/// one answers `None` and keeps the MEASURE default, which is right for
+/// it [`ColumnFormat::TEXT`](geode_core::view::ColumnFormat::TEXT): precision 0,
+/// no thousands separator, no color — the format a text column actually has
+/// in a blotter. A numeric one answers `None` and keeps the MEASURE default, which is right for
 /// it: a numeric attribute is formatted like a measure even though it
 /// does not sum.
 ///

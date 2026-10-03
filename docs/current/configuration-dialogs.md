@@ -43,7 +43,9 @@ query as typed. Both return to Normal mode without opening the selected row,
 committing a value, or closing the dialog. If Escape changes the query, the
 list resets toward the first match; edit stages then settle selection onto an
 eligible row as described below. An unchanged query preserves selection.
-After keeping a filter, a second Enter performs the stage's normal action: Browse opens the selected object, and eligible Edit rows open
+After keeping a filter, a second Enter performs the stage's normal action:
+Browse opens the selected object (on Groupings it applies the row; see
+[the Grouping dialog](#the-grouping-dialog)), and eligible Edit rows open
 Column or Values. Other rows retain their ordinary edit instructions.
 
 In Normal mode, Escape clears a remaining query, then returns to the parent
@@ -103,7 +105,7 @@ its read-only summaries from configuration with pending edits included.
 A Column stage can also be entered directly from a tile. "Edit column in
 view…" (`config::view_column`) and "Edit column in schema…"
 (`config::schema_column`) list the focused tile's presented columns; see
-[input and dialogs](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices).
+[input and dialogs](input-and-dialogs.md#scope-tile-log-and-column-choices).
 A pick opens Views on the tile's view, or Schema on the dataset that owns the
 column (the view's primary dataset, then its joins in declaration order), and
 enters that column's stage. Both are resolved against configuration with
@@ -167,10 +169,98 @@ unmodelled keys; Groupings has a bare-array definition instead.
 
 Schema definitions and derived-dimension rows are read-only. Only declared
 columns open its presentation editor. Groupings always lists slots 1–9,
-including empty slots, and does not create or rename slots. Its final selected
+including empty slots, after its two leading rows, and does not create or
+rename slots. Its final selected
 dimension cannot be unticked; deletion or reversion handles removing the user
 entry. Scopes selections have no meaningful order and offer no reorder route,
 and neither does a scope's named-expression list.
+
+## The Grouping dialog
+
+Groupings is the one object dialog whose list applies its rows. It is titled
+Grouping and opens from `frame::grouping` (`mod+g`), the toolbar's grouping
+readout, and `config::groupings`, on the lane of the workspace it was opened
+from, with the cursor on that lane's current choice.
+
+The list is the view default (`0`), the lane's ad hoc chain (`*`), and slots
+1–9, empty ones included. The first two are not configuration objects: they
+are read from the frame, so the list re-derives when the frame changes as
+well as when the configuration does, and a `*` row never offers a chain the
+lane no longer holds. They exist only in this dialog; an object named `0` or
+`*` in another domain is an ordinary object. Each row is one line, and the
+row for the lane's choice carries an `active` badge.
+
+| Key | Effect |
+|---|---|
+| `enter`, a row click | Apply the row and close. On an empty slot or an empty ad hoc row: open its chain field instead. |
+| `1`–`9`, `0`, `a` | As `enter` on that slot, the view default, or the ad hoc row, wherever the cursor is. |
+| `e`, the row's `edit` control | Open the row's tick-list editor, including for an empty slot. Refused on the view default. |
+| `i` | Type an ad hoc chain, seeded with the cursor row's chain (the stored ad hoc chain on the view default or an empty slot). `enter` applies it as the ad hoc chain and closes, even when the seed is untouched. |
+| `s`, the row's `save` control | Ask for a slot digit and save the row's chain there. Refused on a row with no chain. |
+| `d` | A slot: delete its user entry, after the usual question. The ad hoc row: forget the chain, with no question. Refused on the view default. |
+| `r` | A slot: revert to the lower layer. Refused elsewhere. |
+| `/` | Filter. `escape` restores the entry query, bare `enter` keeps it, and neither applies a row. |
+
+"Empty" means the frame holds no chain for the slot. A slot the
+configuration defines but the reader dropped (an unknown column) therefore
+also opens its chain field, where it can be fixed.
+
+The `edit` and `save` controls paint at the right of the cursor row, and of
+any slot or ad hoc row under the pointer; the view default has neither.
+`save` paints only where the frame holds a chain, the same rows `s` accepts.
+A press on a control acts on that row and does not also apply it. While a
+question is up (the save prompt or a confirmation), clicks on rows, row
+controls, the filter row, and the Back button do nothing.
+
+A chain field opened from the list is the whole visit: `enter` carries the
+chain out and closes the dialog, `escape` returns to the list, and `mod+s`
+asks for a slot to save the typed chain to. A chain the field refuses (an
+unknown name, or an untouched seed naming a column that no longer exists)
+keeps the field open with the refusal. A chain field opened with `i` inside
+an edit stage returns to that stage's tick list.
+
+Editing a slot writes `groupings.toml` through the pending batch, like every
+definitional edit. Editing the ad hoc chain writes no file: each completed
+edit sets the lane's ad hoc chain and makes it the choice, so an ad hoc edit
+always regroups. Its stage has no `Slot` row, `d` forgets the chain and
+returns to the list, and `r` is refused. The chain is checked by the slot
+reader, but its refusals name the ad hoc chain (`the ad hoc chain names
+'x', which is not a groupable column`) and carry no "not saved" prefix:
+nothing was going to be saved.
+
+### Saving to a slot
+
+`s` (list or edit stage) and `mod+s` (a list-opened chain field) put a prompt
+in the action bar's place that owns keys and pointer until answered. A digit
+or a click on one of its nine buttons chooses the slot; `escape` cancels. A
+prompt armed by `mod+s` returns to the chain field on `escape`, with the
+typed chain intact. A draft with a blocking error is refused before the
+prompt opens: the slot's reader would drop it.
+
+The target is classified against the configuration with the pending batch
+folded in, so a slot forked or saved moments ago already counts as the
+user's.
+
+| Target slot | Result |
+|---|---|
+| Empty | Saved. |
+| Holds an equal chain | No write. |
+| Defined only by a lower layer | Saved as a user-layer fork, announced on the status bar; the inherited value is recorded in `overrides.toml` in the same batch. No question: `r` restores it. |
+| Has a user-layer entry with another chain | Asks `y`/`n` first, naming the chain that would be lost as the user layer spells it, even when the reader dropped it for an unknown column. `n` changes nothing. |
+
+After a save the slot is the lane's choice and the dialog closes. A write
+the batch refuses leaves the dialog open with the refusal and the frame
+unchanged.
+
+A slot write reaches the frame only when its batch is promoted. To activate
+a slot on the keystroke that defines or saves it, the dialog first stages the
+chain in the frame's slots in memory (`Frame::stage_slot`). The promotion's
+reload then rebuilds equal slots and changes nothing. If the write fails, the
+reload of the batch's original documents restores the slot as those
+documents define it, and the write-failure status is shown. A save over an
+inherited slot therefore leaves the lane on that slot with the lower layer's
+chain; a slot that was empty disappears, and the lane returns to each view's
+own grouping.
 
 ## Validation and persistence
 
