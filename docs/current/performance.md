@@ -171,6 +171,7 @@ the measurement log for fixture and hardware details.
 | Palette paint | 551 items, the rows in view, prepared labels | 275 ns |
 | Diagnostics Log keystroke | full 4,096-record tail, a query every record matches (two to five words, or one 19-character word): the page's `rebuild` on the UI thread, timed inside the update, which shows the held answer and starts the narrowing (load average 22 to 39 on 18 cores) | 0.41 to 0.54 ms |
 | Diagnostics Log settled rebuild | the same tail under a held narrowing (records or gates changed, query unchanged; unfiltered 0.47 ms) | 0.60 to 0.95 ms |
+| Diagnostics Log cache fill | `LogCache::sync` formatting and lowering all 4,096 records cold, on the UI thread: paid when the Log is first shown over a full tail and after a clock change, then only for new records (load 29 to 31) | 5.14 ms |
 | Diagnostics Log narrowing, off the UI thread | the same: `log_cache::Narrowed::run`, two words / three / five / one 19-character word | 6.1 / 10.2 / 12.1 / 8.5 ms |
 
 Production view queries also carry the roster's context columns

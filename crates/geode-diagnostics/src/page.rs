@@ -116,9 +116,9 @@ pub struct DiagnosticsPage {
     /// previous one, so the table keeps its last answer until the new one
     /// lands.
     log_narrowed: Option<Narrowed>,
-    /// The narrowing in flight: its query, the newest sequence it covers,
+    /// The narrowing in flight: its query, the cache generation it reads,
     /// and the task, whose drop cancels it.
-    log_narrowing: Option<(String, Option<u64>, Task<()>)>,
+    log_narrowing: Option<(String, u64, Task<()>)>,
     follow: bool,
     /// The window this page was created in: the target select's items
     /// can only be replaced with a window, and observers bring none.
@@ -158,6 +158,9 @@ pub struct DiagnosticsPage {
     last_frame_versions: FrameVersions,
     #[cfg(test)]
     pub(crate) rebuild_count: u32,
+    /// Narrowing passes started, for tests of in-flight reuse.
+    #[cfg(test)]
+    log_passes: u32,
 }
 
 impl DiagnosticsPage {
@@ -407,6 +410,8 @@ impl DiagnosticsPage {
             last_frame_versions,
             #[cfg(test)]
             rebuild_count: 0,
+            #[cfg(test)]
+            log_passes: 0,
         };
         this.rebuild(cx);
         this
@@ -516,6 +521,23 @@ impl DiagnosticsPage {
                         self.log_filter.text = filter;
                         self.level_rows = Rc::new(levels::level_rows(&d.levels));
                         self.log_cache.sync(self.log.records(), clock);
+                        // A clock change reformats every entry: an answer,
+                        // held or in flight, matched the old time text.
+                        if self
+                            .log_narrowed
+                            .as_ref()
+                            .is_some_and(|n| n.is_stale(&self.log_cache))
+                        {
+                            self.log_narrowed = None;
+                            self.log_narrowing = None;
+                        }
+                        if self
+                            .log_narrowing
+                            .as_ref()
+                            .is_some_and(|(_, g, _)| *g != self.log_cache.generation())
+                        {
+                            self.log_narrowing = None;
+                        }
                         if self.log_filter.text.trim().is_empty() {
                             self.log_narrowed = None;
                             self.log_narrowing = None;
@@ -651,12 +673,25 @@ impl DiagnosticsPage {
     /// page's drain would report a wrap nobody sees and then clear it.
     /// Start the narrowing the Log's query still needs, off the UI thread:
     /// the whole cache for a changed query, or only the entries newer than
-    /// the current narrowing for an unchanged one. A pass already in flight
-    /// for the same query and stretch is left to finish; any other is
-    /// replaced, and dropping its task cancels it.
+    /// the current narrowing for an unchanged one.
+    ///
+    /// A pass already in flight for the same query is left to finish,
+    /// however many records have arrived since it started: restarting it
+    /// per arrival could starve it under a busy source. When it lands,
+    /// [`Self::apply_log_narrowing`] rebuilds, and this chains the cheap
+    /// pass over just the newer records. A pass for another query is
+    /// replaced; dropping its task stops its result from applying.
     fn narrow_log(&mut self, cx: &mut Context<Self>) {
         let query = self.log_filter.text.clone();
         let target = self.log_cache.last_seq();
+        let generation = self.log_cache.generation();
+        if self
+            .log_narrowing
+            .as_ref()
+            .is_some_and(|(q, g, _)| *q == query && *g == generation)
+        {
+            return;
+        }
         let from = match &self.log_narrowed {
             Some(n) if n.query() == query => {
                 if n.through() >= target {
@@ -667,14 +702,11 @@ impl DiagnosticsPage {
             }
             _ => None,
         };
-        if self
-            .log_narrowing
-            .as_ref()
-            .is_some_and(|(q, t, _)| *q == query && *t == target)
-        {
-            return;
-        }
         let entries = self.log_cache.after(from);
+        #[cfg(test)]
+        {
+            self.log_passes += 1;
+        }
         let task_query = query.clone();
         let task = cx.spawn(async move |this, cx| {
             let narrowed = cx
@@ -683,7 +715,7 @@ impl DiagnosticsPage {
                 .await;
             let _ = this.update(cx, |page, cx| page.apply_log_narrowing(narrowed, cx));
         });
-        self.log_narrowing = Some((query, target, task));
+        self.log_narrowing = Some((query, generation, task));
     }
 
     /// Take a finished narrowing: append it to the current one when it
@@ -692,7 +724,7 @@ impl DiagnosticsPage {
     /// dropped.
     fn apply_log_narrowing(&mut self, narrowed: Narrowed, cx: &mut Context<Self>) {
         self.log_narrowing = None;
-        if narrowed.query() != self.log_filter.text {
+        if narrowed.query() != self.log_filter.text || narrowed.is_stale(&self.log_cache) {
             return;
         }
         match &mut self.log_narrowed {
@@ -3318,6 +3350,126 @@ mod tests {
             ["partition loaded", "partition again"],
             "a pass for another query changes nothing"
         );
+    }
+
+    /// The table a fresh, whole-tail narrowing of the page's cache would
+    /// show: what the held answer must equal once it settles.
+    fn fresh_log_rows(
+        h: &Harness,
+        vcx: &gpui::VisualTestContext,
+    ) -> Vec<(String, Vec<Vec<std::ops::Range<usize>>>)> {
+        let rows = |t: &PreparedTable| {
+            t.rows
+                .iter()
+                .map(|r| {
+                    let marks = r.cells.iter().map(|c| c.marks.clone()).collect();
+                    (r.key.clone(), marks)
+                })
+                .collect::<Vec<_>>()
+        };
+        h.page.read_with(vcx, |p, _| {
+            let fresh = (!p.log_filter.text.trim().is_empty())
+                .then(|| Narrowed::run(&p.log_filter.text, &p.log_cache.after(None)));
+            let fresh =
+                log_cache::log_table(&p.log_cache, &p.log_filter, fresh.as_ref(), p.log.lost());
+            assert_eq!(
+                rows(&p.prepared),
+                rows(&fresh),
+                "the shown table is settled"
+            );
+            rows(&fresh)
+        })
+    }
+
+    /// A clock change reformats every time cell, so an answer that matched
+    /// the old time text is dropped and the query narrowed again. The
+    /// record's time is fixed: 06:08:46 UTC is 11:38:46 in Kolkata, where
+    /// `06:08` is no longer a subsequence.
+    #[gpui::test]
+    fn a_clock_change_drops_a_narrowing_of_the_old_time_text(cx: &mut gpui::TestAppContext) {
+        use geode_core::clock::Clock;
+        let (h, mut vcx) = open(cx);
+        vcx.update(|_, cx| cx.set_global(geode_shell::clock::AppClock(Clock::utc())));
+        open_log_section(&h, &mut vcx);
+        h.ring.push(geode_core::log::Record {
+            at: SystemTime::UNIX_EPOCH + Duration::from_secs(6 * 3600 + 8 * 60 + 46),
+            level: Level::INFO,
+            target: "geode::ingest",
+            message: "partition loaded".into(),
+            seq: 0,
+        });
+        notify(&h, &mut vcx);
+        h.page.update(&mut vcx, |p, cx| {
+            p.filters[Section::Log as usize] = "06:08".into();
+            p.rebuild(cx);
+        });
+        vcx.run_until_parked();
+        let rows = fresh_log_rows(&h, &vcx);
+        assert_eq!(rows.len(), 1, "the UTC time matches");
+        assert_eq!(rows[0].1[0], vec![0..5]);
+        vcx.update(|_, cx| {
+            cx.set_global(geode_shell::clock::AppClock(Clock::in_zone_named(
+                "Asia/Kolkata",
+            )))
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            h.page
+                .read_with(&vcx, |p, _| p.log_cache.after(None)[0].texts_for_test()[0]
+                    .to_string()),
+            "11:38:46.000"
+        );
+        assert!(
+            fresh_log_rows(&h, &vcx).is_empty(),
+            "the old answer must not hold over the new time text"
+        );
+    }
+
+    /// A changed query's pass survives records arriving while it runs: it
+    /// is not restarted per arrival. When it lands, one pass over just the
+    /// newcomers follows, and the table equals a fresh narrowing.
+    #[gpui::test]
+    fn a_pass_in_flight_survives_arrivals_and_an_extension_follows(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_with_ring(cx, None, 512);
+        open_log_section(&h, &mut vcx);
+        for i in 0..200 {
+            push(
+                &h.ring,
+                Level::INFO,
+                "geode::ingest",
+                &format!("rec {i} partition"),
+            );
+        }
+        notify(&h, &mut vcx);
+        let before = h.page.read_with(&vcx, |p, _| p.log_passes);
+        h.page.update(&mut vcx, |p, cx| {
+            p.filters[Section::Log as usize] = "ptn".into();
+            p.rebuild(cx);
+        });
+        for i in 0..5 {
+            push(
+                &h.ring,
+                Level::INFO,
+                "geode::ingest",
+                &format!("late {i} partition"),
+            );
+            h.page.update(&mut vcx, |p, cx| p.rebuild(cx));
+        }
+        h.page.read_with(&vcx, |p, _| {
+            assert_eq!(p.log_passes, before + 1, "one full pass, never restarted");
+            assert!(p.log_narrowing.is_some());
+            assert!(p.log_narrowed.is_none(), "no answer yet: every row shows");
+        });
+        vcx.run_until_parked();
+        h.page.read_with(&vcx, |p, _| {
+            assert_eq!(p.log_passes, before + 2, "then one extension");
+            assert!(p.log_narrowing.is_none());
+            assert_eq!(
+                p.log_narrowed.as_ref().and_then(Narrowed::through),
+                p.log_cache.last_seq()
+            );
+        });
+        assert_eq!(fresh_log_rows(&h, &vcx).len(), 205);
     }
 
     /// A blank query narrows nothing, so it leaves collapsed documents

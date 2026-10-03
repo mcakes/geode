@@ -32,6 +32,9 @@ pub struct LogEntry {
     pub seq: u64,
     pub level: geode_core::log::Level,
     pub target: &'static str,
+    /// The cache generation that formatted this entry: a narrowing of
+    /// entries from another generation matched other time text.
+    generation: u64,
     texts: [SharedString; COLUMNS],
     lowered: [Box<[char]>; COLUMNS],
     /// The row as painted without a filter; a narrowed rebuild clones it
@@ -45,7 +48,7 @@ fn hms_millis(t: SystemTime, clock: Clock) -> String {
 }
 
 impl LogEntry {
-    fn new(r: &Record, clock: Clock) -> LogEntry {
+    fn new(r: &Record, clock: Clock, generation: u64) -> LogEntry {
         let hms = SharedString::from(hms_millis(r.at, clock));
         let message = SharedString::from(r.message.clone());
         let texts = [
@@ -59,10 +62,17 @@ impl LogEntry {
             seq: r.seq,
             level: r.level,
             target: r.target,
+            generation,
             row: prepared::log_row(r.seq, r.level, r.target, hms, message),
             texts,
             lowered,
         }
+    }
+
+    /// The searchable column texts, for tests that read what was cached.
+    #[cfg(test)]
+    pub(crate) fn texts_for_test(&self) -> &[SharedString; COLUMNS] {
+        &self.texts
     }
 
     fn narrow(&self, narrow: &mut Narrow) -> Option<ColumnMarks> {
@@ -76,6 +86,9 @@ impl LogEntry {
 #[derive(Debug, Default)]
 pub struct LogCache {
     clock: Option<Clock>,
+    /// Bumped whenever every entry is reformatted (a clock change), so a
+    /// narrowing of the old text can be told from one of the new.
+    generation: u64,
     entries: VecDeque<Arc<LogEntry>>,
 }
 
@@ -88,6 +101,7 @@ impl LogCache {
         if self.clock != Some(clock) {
             self.entries.clear();
             self.clock = Some(clock);
+            self.generation += 1;
         }
         let mut records = records.into_iter().peekable();
         match records.peek() {
@@ -102,13 +116,19 @@ impl LogCache {
         let last = self.entries.back().map(|e| e.seq);
         for r in records {
             if last.is_none_or(|last| r.seq > last) {
-                self.entries.push_back(Arc::new(LogEntry::new(r, clock)));
+                self.entries
+                    .push_back(Arc::new(LogEntry::new(r, clock, self.generation)));
             }
         }
     }
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// The formatting generation: it moves when every entry is reformatted.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn is_empty(&self) -> bool {
@@ -141,6 +161,9 @@ impl LogCache {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Narrowed {
     query: String,
+    /// The generation of the entries it narrowed; `None` when it narrowed
+    /// none, which answers nothing and so cannot be stale.
+    generation: Option<u64>,
     through: Option<u64>,
     kept: HashMap<u64, ColumnMarks>,
 }
@@ -156,6 +179,7 @@ impl Narrowed {
             .collect();
         Narrowed {
             query: query.to_string(),
+            generation: entries.first().map(|e| e.generation),
             through: entries.last().map(|e| e.seq),
             kept,
         }
@@ -163,6 +187,12 @@ impl Narrowed {
 
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    /// Whether this narrowing matched text `cache` no longer holds: its
+    /// entries were reformatted since (a clock change).
+    pub fn is_stale(&self, cache: &LogCache) -> bool {
+        self.generation.is_some_and(|g| g != cache.generation)
     }
 
     /// The newest sequence this narrowing has answered for.
@@ -177,6 +207,10 @@ impl Narrowed {
         if more.query != self.query || more.through <= self.through {
             return false;
         }
+        if matches!((self.generation, more.generation), (Some(a), Some(b)) if a != b) {
+            return false;
+        }
+        self.generation = self.generation.or(more.generation);
         self.through = more.through;
         self.kept.extend(more.kept);
         true
@@ -359,10 +393,28 @@ mod tests {
         let kept = Arc::clone(&cache.entries[0]);
         cache.sync(&records[1..], Clock::utc());
         assert!(Arc::ptr_eq(&kept, &cache.entries[0]), "not reformatted");
+        // Seq 2 only, so a later pass over seq 3 would extend it.
+        let before = Narrowed::run("pa", &cache.after(None)[..1]);
+        assert!(!before.is_stale(&cache));
         cache.sync(&records[1..], Clock::in_zone_named("Europe/London"));
         assert!(
             !Arc::ptr_eq(&kept, &cache.entries[0]),
             "a clock change reformats"
+        );
+        assert!(
+            before.is_stale(&cache),
+            "a narrowing of the old text is stale"
+        );
+        let mut after = Narrowed::run("pa", &cache.after(Some(2)));
+        assert!(!after.is_stale(&cache));
+        assert!(!after.extend(Narrowed::run("pa", &[])), "nothing to add");
+        assert!(
+            !before.clone().extend(after.clone()),
+            "a later stretch of another generation is refused"
+        );
+        assert!(
+            !Narrowed::run("pa", &[]).is_stale(&cache),
+            "an empty pass answers nothing"
         );
         cache.sync(std::iter::empty(), Clock::utc());
         assert!(cache.is_empty(), "a cleared tail empties the cache");

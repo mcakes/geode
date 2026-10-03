@@ -1243,7 +1243,9 @@ document's name, path, and value as three columns, so no word aligns across
 the dot between them. The placement is greedy, longest word first, so a row
 only another assignment would fit is dropped. The Log narrows off the UI
 thread: after a keystroke its table keeps the previous answer until the pass
-lands, and records arriving under a query appear after their own pass. See the
+lands (every row, unfiltered, when there was no query before), and records
+arriving under a query appear after their own pass. A clock change drops the
+held answer, since it matched the old time text, and narrows again. See the
 crate README for each section's columns.
 
 | Section | Table and toolbar |

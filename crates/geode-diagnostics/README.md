@@ -106,11 +106,17 @@ target select.
 The Log caches each record's formatted, lowered row (`log_cache`) and
 reformats only records it has not seen. Narrowing a query costs a DP per word
 per row, too much for one keystroke over a full tail, so it runs on the
-background executor: a changed query keeps showing the previous answer (or
-every row, if there was no query) until the pass lands, and a pass for a query
-the input no longer holds is dropped. Level and target changes reuse the held
-answer. Records that arrive under an unchanged query wait for a pass over just
-those records, appended to the held answer, rather than showing unfiltered.
+background executor: a changed query keeps showing the previous answer (every
+row, unfiltered, when there was no query before) until the pass lands, and a
+pass for a query the input no longer holds is dropped. One pass per query is
+in flight: records arriving while it runs do not restart it; when it lands,
+one pass over just the newer records follows. Level and target changes reuse
+the held answer. Records that arrive under an unchanged query wait for a pass
+over just those records, appended to the held answer, rather than showing
+unfiltered. A clock change reformats every entry (a new cache generation) and
+drops the held answer and any pass in flight, since they matched the old time
+text. Filling the cache cold costs about 5 ms over a full tail on the UI
+thread, paid when the Log is first shown and after a clock change.
 
 A nonempty filter temporarily expands Data and Effective values results
 without changing the stored collapse state. Clearing it restores the stored

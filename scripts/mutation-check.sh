@@ -7188,14 +7188,58 @@ run_mutation "diagnostics fuzzy: a clock change keeps the old time text" \
   '        if self.clock.is_none() {' \
   geode-diagnostics the_cache_formats_only_new_records_and_follows_the_tail
 
+# A clock change reformats every time cell; an answer held from before it
+# matched the old text and must go.
+run_mutation "diagnostics fuzzy: a clock change keeps the stale narrowing" \
+  crates/geode-diagnostics/src/page.rs \
+  '                            .is_some_and(|n| n.is_stale(&self.log_cache))' \
+  '                            .is_some_and(|_| false)' \
+  geode-diagnostics a_clock_change_drops_a_narrowing_of_the_old_time_text
+
+run_mutation "diagnostics fuzzy: a clock change keeps the cache generation" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '            self.generation += 1;' \
+  '            {}' \
+  geode-diagnostics a_clock_change_drops_a_narrowing_of_the_old_time_text
+
+run_mutation "diagnostics fuzzy: a narrowing mixes cache generations" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '        if matches!((self.generation, more.generation), (Some(a), Some(b)) if a != b) {' \
+  '        if false {' \
+  geode-diagnostics the_cache_formats_only_new_records_and_follows_the_tail
+
+# Restarting the pass per arriving record could starve it under a busy
+# source; one pass per query stays in flight.
+run_mutation "diagnostics fuzzy: every arrival restarts the pass in flight" \
+  crates/geode-diagnostics/src/page.rs \
+  '            .is_some_and(|(q, g, _)| *q == query && *g == generation)' \
+  '            .is_some_and(|_| false)' \
+  geode-diagnostics a_pass_in_flight_survives_arrivals_and_an_extension_follows
+
+run_mutation "diagnostics fuzzy: leaves past the cap mark the document name" \
+  crates/geode-diagnostics/src/model.rs \
+  '            matched.truncate(MAX_LEAVES_PER_DOC);
+            // Bytes of the name a shown leaf matched; a leaf past the cap
+            // marks nothing, as it shows nothing.
+            let mut name_hits = vec![false; doc_name.len()];
+            for (_, _, marks) in &matched {
+                for r in marks.get(0) {
+                    name_hits[r.clone()].fill(true);
+                }
+            }' \
+  '            let mut name_hits = vec![false; doc_name.len()];
+            for (_, _, marks) in &matched {
+                for r in marks.get(0) {
+                    name_hits[r.clone()].fill(true);
+                }
+            }
+            matched.truncate(MAX_LEAVES_PER_DOC);' \
+  geode-diagnostics config_docs_cap_counts_only_matching_leaves
+
 run_mutation "diagnostics fuzzy: a pass for a query the input dropped still applies" \
   crates/geode-diagnostics/src/page.rs \
-  '        if narrowed.query() != self.log_filter.text {
-            return;
-        }' \
-  '        if false {
-            return;
-        }' \
+  '        if narrowed.query() != self.log_filter.text || narrowed.is_stale(&self.log_cache) {' \
+  '        if narrowed.is_stale(&self.log_cache) {' \
   geode-diagnostics records_arriving_under_a_filter_are_narrowed_and_stale_passes_dropped
 
 run_mutation "diagnostics fuzzy: spaces force collapsed documents open" \
@@ -7208,15 +7252,21 @@ run_mutation "diagnostics fuzzy: spaces force collapsed documents open" \
 # prefix, `keys` aligns through "keymap" and the `s` of "bindings".
 run_mutation "diagnostics fuzzy: a leaf matches through its document prefix" \
   crates/geode-diagnostics/src/model.rs \
-  '                        let mut marks = narrow.row(&[doc_name, &path, &value])?;' \
-  '                        let full = format!("{doc_name}.{path}");
-                        let mut marks = narrow.row(&["", &full, &value])?;' \
+  '                    let marks = narrow.row(&[doc_name, &path, &value])?;' \
+  '                    let full = format!("{doc_name}.{path}");
+                    let marks = narrow.row(&["", &full, &value])?;' \
   geode-diagnostics config_docs_narrow_fuzzily_and_mark_keys_values_and_documents
 
 run_mutation "diagnostics fuzzy: a matching document name is not marked" \
   crates/geode-diagnostics/src/model.rs \
-  '                            name_hits[r.clone()].fill(true);' \
-  '                            let _ = r;' \
+  '                    name_hits[r.clone()].fill(true);
+                }
+            }
+            let leaves' \
+  '                    let _ = r;
+                }
+            }
+            let leaves' \
   geode-diagnostics config_docs_narrow_fuzzily_and_mark_keys_values_and_documents
 
 # The typed text must reach the Log's narrowing through the input route.

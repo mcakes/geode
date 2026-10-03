@@ -11,7 +11,7 @@ use geode_core::config::{Config, Diagnostic, Severity};
 use geode_core::log::Record;
 use geode_core::query::AsOf;
 use geode_shell::diagnostics::{Diagnostics, Health, SourceShape, SourceState};
-use geode_shell::listfilter::Narrow;
+use geode_shell::listfilter::{ColumnMarks, Narrow};
 use geode_shell::perf::{BUCKET_UPPER_BOUNDS_MICROS, FrameHistogram, RequeryStats, format_ms};
 
 /// A row's visual weight; the page maps it to theme paint. `Marked`
@@ -442,41 +442,42 @@ pub fn config_docs(config: &Config, filter: &str) -> Vec<ConfigDoc> {
             let doc = config.doc(doc_name)?;
             let mut leaves = Vec::new();
             walk_leaves(&doc.value, "", &mut leaves);
-            // Bytes of the name any kept leaf matched.
-            let mut name_hits = vec![false; doc_name.len()];
-            let mut kept: Vec<ConfigLeaf> = leaves
+            let mut matched: Vec<(String, String, ColumnMarks)> = leaves
                 .into_iter()
                 .filter_map(|(path, value)| {
-                    let (key_marks, value_marks) = if narrow.is_empty() {
-                        (Vec::new(), Vec::new())
-                    } else {
-                        let mut marks = narrow.row(&[doc_name, &path, &value])?;
-                        for r in marks.get(0) {
-                            name_hits[r.clone()].fill(true);
-                        }
-                        (marks.take(1), marks.take(2))
-                    };
-                    Some((path, value, key_marks, value_marks))
+                    let marks = narrow.row(&[doc_name, &path, &value])?;
+                    Some((path, value, marks))
                 })
-                .map(|(path, value, key_marks, value_marks)| ConfigLeaf {
+                .collect();
+            if !narrow.is_empty() && matched.is_empty() {
+                return None;
+            }
+            let omitted = matched.len().saturating_sub(MAX_LEAVES_PER_DOC);
+            matched.truncate(MAX_LEAVES_PER_DOC);
+            // Bytes of the name a shown leaf matched; a leaf past the cap
+            // marks nothing, as it shows nothing.
+            let mut name_hits = vec![false; doc_name.len()];
+            for (_, _, marks) in &matched {
+                for r in marks.get(0) {
+                    name_hits[r.clone()].fill(true);
+                }
+            }
+            let leaves = matched
+                .into_iter()
+                .map(|(path, value, mut marks)| ConfigLeaf {
                     layer: config
                         .explain(doc_name, &path)
                         .map(|l| l.name().to_string())
                         .unwrap_or_else(|| "?".into()),
+                    key_marks: marks.take(1),
+                    value_marks: marks.take(2),
                     key: path,
                     value,
-                    key_marks,
-                    value_marks,
                 })
                 .collect();
-            if !narrow.is_empty() && kept.is_empty() {
-                return None;
-            }
-            let omitted = kept.len().saturating_sub(MAX_LEAVES_PER_DOC);
-            kept.truncate(MAX_LEAVES_PER_DOC);
             Some(ConfigDoc {
                 name: doc_name.to_string(),
-                leaves: kept,
+                leaves,
                 omitted,
                 name_marks: runs_of(&name_hits),
             })
@@ -1090,6 +1091,27 @@ pub(crate) mod tests {
         assert_eq!(docs[0].omitted, 3);
         assert!(docs[0].leaves.iter().all(|l| l.key.starts_with('a')));
         assert!(config_docs(&config, "zz").is_empty());
+
+        // Only leaves past the cap match through the document's name: the
+        // `v` of "xv" scores below a word-start `v` in every shown path,
+        // and the `z` leaves, which hold no `v`, sit past the cap. The
+        // name row marks nothing, since no shown leaf matched it.
+        let mut text = String::from("config_version = 1\n");
+        for i in 0..MAX_LEAVES_PER_DOC {
+            text.push_str(&format!("v{i} = {i}\n"));
+        }
+        for i in 0..3 {
+            text.push_str(&format!("z{i} = {i}\n"));
+        }
+        let config = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("xv", &text).unwrap()],
+            desk: None,
+            user: None,
+        });
+        let docs = config_docs(&config, "v");
+        assert_eq!(docs[0].omitted, 4, "one `v` leaf and three `z` leaves");
+        assert!(docs[0].leaves.iter().all(|l| !l.key_marks.is_empty()));
+        assert!(docs[0].name_marks.is_empty(), "omitted leaves mark nothing");
     }
 
     #[test]

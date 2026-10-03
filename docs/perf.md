@@ -2673,7 +2673,7 @@ for the same work and are the load spike, not the code.
 `palette::align_in` scores only the window between the first occurrence of
 the query's first character and the last of its last, and sizes its tables
 to that window. A differential run against the pre-change matcher (3,000,000
-random queries and candidates over six alphabets, including multi-word
+random queries and candidates over five alphabets, including multi-word
 queries, title-weighted candidates, claims, and expanding lowercase) found no
 divergence in scores or indices.
 
