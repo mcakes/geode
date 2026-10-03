@@ -12687,6 +12687,36 @@ run_mutation "colour: the readability floor pulls lightness until 3:1" \
   geode-core \
   readable_on_pulls_a_faint_colour_darker_until_it_clears
 
+run_mutation "theme additions: Kanagawa remains registered" \
+  crates/geode-shell/src/theme.rs \
+  '        include_str!("../../../assets/themes/kanagawa.json"),' \
+  '        include_str!("../../../assets/themes/default.json"),' \
+  geode-shell names_lists_every_bundled_theme_sorted_and_deduplicated
+
+run_mutation "theme additions: Rose Pine remains registered" \
+  crates/geode-shell/src/theme.rs \
+  '        include_str!("../../../assets/themes/rose-pine.json"),' \
+  '        include_str!("../../../assets/themes/default.json"),' \
+  geode-shell names_lists_every_bundled_theme_sorted_and_deduplicated
+
+run_mutation "theme additions: GitHub remains registered" \
+  crates/geode-shell/src/theme.rs \
+  '    ("github", include_str!("../../../assets/themes/github.json")),' \
+  '    ("github", include_str!("../../../assets/themes/default.json")),' \
+  geode-shell names_lists_every_bundled_theme_sorted_and_deduplicated
+
+run_mutation "theme additions: Wave gold remains separated from warm white" \
+  assets/themes/kanagawa.json \
+  '        "chart.2": "#c0a36e",' \
+  '        "chart.2": "#e6c384",' \
+  geode-chart every_bundled_themes_palette_is_readable_and_separated
+
+run_mutation "theme additions: Dragon green remains separated from blue grey" \
+  assets/themes/kanagawa.json \
+  '        "chart.4": "#8a9a7b",' \
+  '        "chart.4": "#87a987",' \
+  geode-chart every_bundled_themes_palette_is_readable_and_separated
+
 run_mutation "theme: bundled themes clear 3:1 through the resolver" \
   crates/geode-core/src/colour/mod.rs \
   '    if contrast_ratio(rgb, background) >= ratio {

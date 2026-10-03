@@ -69,6 +69,15 @@ GPUI globals or provide rendering helpers.
 | `shell/objectdialog` | Domain drafts, staged editing, validation, overrides, and debounced persistence. `render::open_object` opens a named object's edit stage or reports that it is undefined; `render::open_column` opens a tile's view (or the column's owning dataset) on one column's Column stage, reporting each failure in the footer. `apply::queue_object` queues a whole user-layer definition with pending edits; `apply::queue_edits` is the config door's end, folding a module's drained `ConfigEdit`s into the same debounced batch. The Expressions adapter validates named definitions and identifies referring scopes before deletion. See [configuration dialogs](../../docs/current/configuration-dialogs.md) for ownership and failure boundaries. |
 | `shell/objectdialog/grouping_list` | The Grouping dialog's list: the two rows the frame supplies (view default, ad hoc chain), applying a row, the ad hoc chain's commit to the frame, and the save-to-slot prompt. See [the Grouping dialog](../../docs/current/configuration-dialogs.md#the-grouping-dialog). |
 
+## Themes
+
+The bundled theme service exposes 52 named variants through Settings and the
+command palette, including Kanagawa (Wave, Dragon, Lotus), Rosé Pine (main,
+Moon, Dawn), and GitHub (Light, Dark Dimmed). Their JSON assets define explicit
+chart palettes and gain/loss colors; the same theme sweeps check their resolved
+paint as every other bundle. See [theme assets](../../assets/themes/README.md)
+for palette adaptations, source revisions, and licenses.
+
 ## Globals
 
 The workspace has five module-visible GPUI globals:

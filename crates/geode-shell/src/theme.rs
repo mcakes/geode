@@ -71,6 +71,7 @@ const BUNDLED: &[(&str, &str)] = &[
         "flexoki",
         include_str!("../../../assets/themes/flexoki.json"),
     ),
+    ("github", include_str!("../../../assets/themes/github.json")),
     (
         "gruvbox",
         include_str!("../../../assets/themes/gruvbox.json"),
@@ -80,6 +81,10 @@ const BUNDLED: &[(&str, &str)] = &[
     (
         "jellybeans",
         include_str!("../../../assets/themes/jellybeans.json"),
+    ),
+    (
+        "kanagawa",
+        include_str!("../../../assets/themes/kanagawa.json"),
     ),
     ("kibble", include_str!("../../../assets/themes/kibble.json")),
     (
@@ -96,6 +101,10 @@ const BUNDLED: &[(&str, &str)] = &[
     ),
     ("modus", include_str!("../../../assets/themes/modus.json")),
     ("nord", include_str!("../../../assets/themes/nord.json")),
+    (
+        "rose-pine",
+        include_str!("../../../assets/themes/rose-pine.json"),
+    ),
     (
         "solarized",
         include_str!("../../../assets/themes/solarized.json"),
@@ -335,9 +344,7 @@ mod tests {
     fn bundled_themes_all_parse_clean() {
         let (service, warnings) = load_bundled();
         assert!(warnings.is_empty(), "{warnings:?}");
-        // 26 files (22 vendored plus the 4 written here), several with more
-        // than one variant (e.g. Tokyo Night ships 3 dark variants) —
-        // comfortably more than one-per-file.
+        // Families can carry several independently selectable variants.
         assert!(
             service.entries.len() >= BUNDLED.len(),
             "expected at least one ThemeConfig per bundled file, got {}",
@@ -414,6 +421,18 @@ mod tests {
         assert!(names.contains(&"Default Dark".to_string()));
         assert!(names.contains(&"Gruvbox Dark".to_string()));
         assert!(names.contains(&"Tokyo Storm".to_string()));
+        for name in [
+            "Kanagawa Wave",
+            "Kanagawa Dragon",
+            "Kanagawa Lotus",
+            "Rosé Pine",
+            "Rosé Pine Moon",
+            "Rosé Pine Dawn",
+            "GitHub Light",
+            "GitHub Dark Dimmed",
+        ] {
+            assert!(names.iter().any(|entry| entry == name), "missing {name}");
+        }
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
