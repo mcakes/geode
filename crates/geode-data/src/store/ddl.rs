@@ -1,5 +1,6 @@
 //! Table DDL derived from the declared schema. Measure datasets own a live/archive
-//! pair per declared grain; document datasets own one pair for the whole dataset.
+//! pair per declared grain; document and reference datasets each own one pair
+//! for the whole dataset.
 //! Publication, retention, and history use these [`TablePair`] values. Series
 //! datasets use the separate storage layout in [`super::series`].
 //!
@@ -69,6 +70,16 @@ impl TablePair {
         }
     }
 
+    /// `reference` is neither a `Grain::short()` value nor `document`, so
+    /// these tables never collide with another family's tables of the same
+    /// dataset name.
+    pub fn for_reference(dataset: &str) -> TablePair {
+        TablePair {
+            live: format!("{dataset}_reference{}", TableKind::Live.suffix()),
+            archive: format!("{dataset}_reference{}", TableKind::Archive.suffix()),
+        }
+    }
+
     pub fn of(&self, kind: TableKind) -> &str {
         match kind {
             TableKind::Live => &self.live,
@@ -78,13 +89,16 @@ impl TablePair {
 }
 
 /// Every live/archive pair a dataset owns: one per declared measure grain or
-/// one per document dataset. Series datasets return no pairs; [`super::series`]
+/// one per document or reference dataset. Series datasets return no pairs; [`super::series`]
 /// names their payload and coverage tables. History and retention share this
 /// mapping so they cover the same tables as schema creation.
 pub fn table_pairs(ds: &DatasetSpec) -> Vec<TablePair> {
     if ds.is_series() {
         // Series history uses received-at timestamps, not generation-based table pairs.
         return Vec::new();
+    }
+    if ds.is_reference() {
+        return vec![TablePair::for_reference(&ds.name)];
     }
     if ds.is_document() {
         vec![TablePair::for_document(&ds.name)]
@@ -232,12 +246,26 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
 /// Document-level attributes repeat on each row because documents are published,
 /// replaced, and read as a whole.
 pub fn create_document_table_sql(ds: &DatasetSpec, kind: TableKind) -> String {
+    payload_table_sql(ds, TablePair::for_document(&ds.name).of(kind))
+}
+
+/// Create a reference table: the document table's shape under the
+/// reference pair's name. `batch` is the dataset name — a reference table is
+/// one partition, published and replaced whole — and `book` is NULL.
+pub fn create_reference_table_sql(ds: &DatasetSpec, kind: TableKind) -> String {
+    payload_table_sql(ds, TablePair::for_reference(&ds.name).of(kind))
+}
+
+/// `document_columns()` then the storage columns. Publication moves staged
+/// rows with a positional `select *`, so both families' writers stage in
+/// exactly this order.
+fn payload_table_sql(ds: &DatasetSpec, table: &str) -> String {
     let mut cols: Vec<String> = ds
         .document_columns()
         .iter()
         .map(|c| format!("  \"{}\" {}", c.name, c.ty.sql()))
         .collect();
-    // Document tables declare `book` explicitly because there is no grain key.
+    // These tables declare `book` explicitly because there is no grain key.
     // Its NULL value identifies the bookless partition used by publication,
     // retention, and generation-summary queries.
     cols.push("  \"batch\" VARCHAR".to_string());
@@ -246,8 +274,7 @@ pub fn create_document_table_sql(ds: &DatasetSpec, kind: TableKind) -> String {
     cols.push("  \"gen_id\" BIGINT".to_string());
     cols.push("  \"source_time\" TIMESTAMP WITH TIME ZONE".to_string());
     format!(
-        "CREATE TABLE IF NOT EXISTS {} (\n{}\n);",
-        TablePair::for_document(&ds.name).of(kind),
+        "CREATE TABLE IF NOT EXISTS {table} (\n{}\n);",
         cols.join(",\n")
     )
 }

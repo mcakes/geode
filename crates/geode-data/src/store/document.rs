@@ -388,7 +388,7 @@ fn value(v: &Value) -> duckdb::types::Value {
 /// Convert a cell to the DuckDB appender's owned value. Dates bind as epoch-day
 /// `Date32` values, preserving the declared DATE type without requiring a cast
 /// in the positional `select *` publication statement.
-fn days_since_epoch(d: chrono::NaiveDate) -> i32 {
+pub(crate) fn days_since_epoch(d: chrono::NaiveDate) -> i32 {
     (d - chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 is a date")).num_days()
         as i32
 }

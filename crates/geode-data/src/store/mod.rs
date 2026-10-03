@@ -8,6 +8,7 @@ pub mod ddl;
 pub mod document;
 pub mod drift;
 pub mod publish;
+pub mod reference;
 pub mod retention;
 pub mod series;
 
@@ -187,7 +188,12 @@ pub(crate) fn managed_tables(ds: &DatasetSpec) -> Vec<(String, String)> {
     }
     let mut out = Vec::new();
     for kind in [TableKind::Live, TableKind::Archive] {
-        if ds.is_document() {
+        if ds.is_reference() {
+            out.push((
+                ddl::TablePair::for_reference(&ds.name).of(kind).to_string(),
+                ddl::create_reference_table_sql(ds, kind),
+            ));
+        } else if ds.is_document() {
             out.push((
                 ddl::TablePair::for_document(&ds.name).of(kind).to_string(),
                 ddl::create_document_table_sql(ds, kind),

@@ -286,6 +286,31 @@ commits rows, categorical dictionaries, and provenance together, using the
 same backfill and source-time rules as file publication. Explicit appender
 flush errors abort publication rather than silently storing a shorter document.
 
+## Reference storage
+
+A reference dataset owns one table pair, `{dataset}_reference_live` and
+`_archive`, in the document table's column layout. The whole table is one
+partition: the dataset name is its batch and book is NULL, so every snapshot
+is one generation through the same publication transaction, catalog, history
+and retention as documents. A key absent from a newer snapshot leaves live
+with that generation and stays readable as of an earlier instant.
+
+[`publish_reference`](../../crates/geode-data/src/store/reference.rs) stages
+the conformed rows, then compares them with the live partition in SQL,
+`EXCEPT ALL` in both directions. When a live generation exists and neither
+direction differs, the snapshot is `Unchanged`: nothing is written and no
+identifier is spent. Set operations compare NULLs as equal, so a NULL cell is
+not a change. Comparing against stored rows rather than a remembered content
+hash survives restarts without a catalog column and cannot report unchanged
+after a failed publish. An empty snapshot is a real generation: it publishes
+once, then repeats as unchanged.
+
+`read_reference` takes the generation from the `generations` summary (newest
+by source time, then generation ID, live; `resolve_generations` as of an
+instant) and returns every cell cast to text in SQL, ordered by key, so the
+shell needs no column types. It answers `None` only when no generation
+exists at that instant; an empty snapshot reads as a table with no rows.
+
 ## Source discovery and adapters
 
 Directory discovery reads metadata and the JSON sentinel at

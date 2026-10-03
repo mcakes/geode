@@ -10488,6 +10488,50 @@ run_mutation "document: a document with no rows is refused" \
   '        if false {' \
   geode-core validate_refuses_a_document_with_no_rows
 
+# ---- Reference snapshot publishing ------------------------------------
+
+# Unchanged must mean live holds exactly the staged rows. Skipping the
+# comparison reports every repeat poll as unchanged, so a changed snapshot
+# never publishes.
+run_mutation "reference: a changed cell is not unchanged" \
+  crates/geode-data/src/store/reference.rs \
+  '        if differing == 0 {' \
+  '        if differing >= 0 {' \
+  geode-data a_changed_cell_publishes_a_new_generation
+
+# The comparison runs both ways. Dropping the live-minus-staged half lets a
+# snapshot that removed a key read as unchanged, leaving the key live.
+run_mutation "reference: the diff counts rows live has and staging lacks" \
+  crates/geode-data/src/store/reference.rs \
+  '                     except all select {payload} from {STAGING_TABLE}))"' \
+  '                     except all select {payload} from {live} where false))*0"' \
+  geode-data a_removed_key_leaves_live_and_stays_in_history
+
+# A live generation, not live rows, gates the comparison: an empty
+# snapshot is a real generation and repeating it must not publish again.
+run_mutation "reference: an empty live generation compares as unchanged" \
+  crates/geode-data/src/store/reference.rs \
+  '    if live_source_time.is_some() {' \
+  '    if live_source_time.is_some() && req.rows.rows > 0 {' \
+  geode-data an_empty_snapshot_is_a_generation_and_repeats_unchanged
+
+# The live read takes its generation from the summary. Reading it from a
+# live row instead makes an empty snapshot read as nothing published.
+run_mutation "reference: the live generation comes from the summary" \
+  crates/geode-data/src/store/reference.rs \
+  '                       where dataset = ? and batch = ? and book is null \' \
+  '                       where dataset = ? and batch = ? and book is null and gen_id in (select gen_id from u_reference_live) \' \
+  geode-data an_empty_snapshot_is_a_generation_and_repeats_unchanged
+
+# As-of reads must reach archive: the outgoing generation lives there.
+run_mutation "reference: as-of reads include the archive" \
+  crates/geode-data/src/store/reference.rs \
+  '                    "(select * from {} union all select * from {})",
+                    tables.live, tables.archive' \
+  '                    "(select * from {} union all select * from {} where false)",
+                    tables.live, tables.archive' \
+  geode-data a_removed_key_leaves_live_and_stays_in_history
+
 # ---- Document requests ------------------------------------------------
 #
 # `compile_document` resolves and pins the generation for the requested
