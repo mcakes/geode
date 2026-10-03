@@ -398,11 +398,11 @@ the lane beside the choice, so it survives a switch to a slot and can be
 returned to (`frame::grouping_adhoc`, "Ad hoc grouping", no default
 binding; with no chain stored it reports that in the status bar). The
 toolbar's grouping readout reads `n · chain` for a slot, `* · chain` for an
-ad hoc chain, and `view default` otherwise. The frame holds one shared lane and one lane per pinned workspace. An
-unpinned workspace reads and writes the shared lane; a pinned one reads and
-writes only its own. Definitions stay shared across lanes — grouping slot
-contents, saved scopes, named expressions — as do recent publications and the
-data and config versions.
+ad hoc chain, and `view default` otherwise. The frame holds one shared lane
+and one lane per pinned workspace. An unpinned workspace reads and writes
+the shared lane; a pinned one reads and writes only its own. Definitions
+stay shared across lanes — grouping slot contents, saved scopes, named
+expressions — as do recent publications and the data and config versions.
 
 Every lane draws its scope, grouping, and as-of generations from one
 frame-wide counter, so a generation number names exactly one value in any
@@ -1093,9 +1093,10 @@ The writer emits `config_version = 1` and these records:
 `ad_hoc` holds the lane's stored chain whenever one exists; `slot` is
 omitted while the chain is active. A malformed `ad_hoc` warns and is
 ignored, and `grouping = "ad_hoc"` without a usable chain warns and falls
-back to `slot`. A restored chain is checked against the groupable columns
-like a reloaded one. Each pinned workspace's record restores its own ad hoc
-chain, or none; a pin made at runtime copies the shared lane's.
+back to `slot` when one is present, else to each view's own grouping. A
+restored chain is checked against the groupable columns like a reloaded
+one. Each pinned workspace's record restores its own ad hoc chain, or none;
+a pin made at runtime copies the shared lane's.
 
 Trees use recursive `leaf`, `split`, and `stack` nodes. Splits store orientation,
 children, and ratios; stacks store tile IDs and the active member index. All
