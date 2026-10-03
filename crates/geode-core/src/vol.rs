@@ -55,9 +55,10 @@ impl Coordinate {
     }
 }
 
-/// Where a slice is evaluated. `Dense` is `n` strikes, ascending and
-/// evenly spaced, over the union of the document's own strike range for
-/// that expiry and `cover`; `At` is absolute strikes, in any order, echoed
+/// Where a slice is evaluated. `Dense` is `n` strictly ascending strikes
+/// from end to end of the union of the document's own strike range for
+/// that expiry and `cover`, the model choosing the spacing (the demo model
+/// packs them toward the forward so a short-dated density stays smooth); `At` is absolute strikes, in any order, echoed
 /// back in the same order. `Job(j)` is the strikes the batch's earlier
 /// `Slice` job `j` evaluated at: the vol worker resolves it to `At` before
 /// the model sees the request, so two curves can be compared at equal

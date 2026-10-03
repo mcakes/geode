@@ -17066,6 +17066,15 @@ run_mutation "vol: a cover inside the ladder does not narrow the grid" \
   '            lo / self.forward - 1.0,' \
   geode-pricing a_cover_inside_the_ladder_does_not_narrow_the_grid
 
+# A dense grid packs its points toward the forward on the scale of
+# sigma-root-t: spread evenly, a wide cover leaves a one-week density too
+# few points across its width to read smooth.
+run_mutation "vol: a dense grid packs its points toward the forward" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '                i => c * (u0 + (u1 - u0) * i as f64 / last as f64).sinh(),' \
+  '                i => k_min + (k_max - k_min) * i as f64 / last as f64,' \
+  geode-pricing a_wide_cover_keeps_the_points_per_sigma_root_t_at_the_forward
+
 # An inverted cover is refused naming it, not evaluated as a span that
 # runs backwards.
 run_mutation "vol: an inverted cover is refused" \
@@ -20651,10 +20660,19 @@ run_mutation "chart xy: a fill's zero is held to the plot" \
 # A filled line paints a cached fill beside its stroke.
 run_mutation "chart xy: a filled line paints its fill" \
   crates/geode-chart/src/xy/element.rs \
-  '                    if matches!(slot.kind, SlotKind::Line { fill: true, .. }) {' \
-  '                    if false {' \
+  '                            || matches!(s.kind, SlotKind::Line { fill: true, .. }))' \
+  '                            || false)' \
   geode-chart \
   a_filled_line_caches_its_fill_beside_its_stroke
+
+# Every fill goes down before any stroke: painted slot by slot, a later
+# slot's fill tints an earlier slot's line.
+run_mutation "chart xy: fills paint before every stroke" \
+  crates/geode-chart/src/xy/element.rs \
+  '        [Layer::Fill, Layer::Stroke]' \
+  '        [Layer::Stroke, Layer::Fill]' \
+  geode-chart \
+  every_fill_is_painted_before_any_stroke
 
 # A points slot reads a point only within the tolerance of the
 # crosshair. Otherwise a crosshair between two quotes reads the nearer as

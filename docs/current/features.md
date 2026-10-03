@@ -972,12 +972,12 @@ axis painters and the stroke builders the elements share.
 `timeseries::ChartElement` paints an immutable `ChartModel`: polylines over a
 session or continuous time axis, with percentile rules and density bars.
 `xy::XyElement` paints an immutable `XyModel`: lines, solid or dashed and
-optionally shaded down to zero, and point marks with a range bar over a linear x axis that can run reversed, with
-a crosshair that snaps to a quoted point. Both paint through gpui-component's
-plot surface in up to two panes. Paths and chrome are cached by the values
-that affect them; cursor movement does not rebuild the data model. The
-timeseries tile hosts the time chart and the vol slice viewer the xy
-element.
+optionally shaded down to zero, and point marks with a range bar over a
+linear x axis that can run reversed, with a crosshair that snaps to a quoted
+point. Both paint through gpui-component's plot surface in up to two panes.
+Paths and chrome are cached by the values that affect them; cursor movement
+does not rebuild the data model. The timeseries tile hosts the time chart and
+the vol slice viewer the xy element.
 
 The header's `⋯` button, a chip's right-click, and `.` open the action menu.
 It offers popup openers, actions for the selected slot, `Frequency…`, toggles,
@@ -1117,13 +1117,13 @@ through the axis's scale, so a reversed axis moves the way it reads. A
 coordinate change resets the view to the new extent, padded to that
 coordinate's narrowest span (a chain strike gap for strike).
 
-**Curves.** Each curve is evaluated at 1,000 strikes spanning the CVI's node
-ladder, widened to the listed chain's lowest and highest strike wherever a
-chain is loaded at that expiry, shown or hidden, so a curve is drawn at least
-as wide as the quotes and hiding the chain does not move its extent. Past the
-node ladder the demo model continues the smile's end slope, floored at its
-minimum vol; a steep wing that reaches the floor kinks there, and its density
-shows the kink.
+**Curves.** Each curve is evaluated at 1,000 strikes, packed toward the
+forward by the model, spanning the CVI's node ladder, widened to the listed
+chain's lowest and highest strike wherever a chain is loaded at that expiry,
+shown or hidden, so a curve is drawn at least as wide as the quotes and hiding
+the chain does not move its extent. Past the node ladder the demo model
+continues the smile's end slope, floored at its minimum vol; a steep wing that
+reaches the floor kinks there, and its density shows the kink.
 
 **Densities.** `shift+d` (the tile's binding beats the workspace's
 duplicate) asks each visible curve's density, painted on the right axis in
@@ -1131,9 +1131,10 @@ the curve's color at a fixed lower opacity, with the region between it and
 zero shaded at a fraction of that. A negative lobe (a butterfly violation)
 shades up to zero from beneath. The density is per unit of the shown
 coordinate, so its area is about one in each; where delta saturates the
-point is NaN and paints as a gap in both line and shading. A thousand points
-put some sixty across one σ√t·F of a one-week, 20%-vol expiry over the
-widest demo chain, so even short-dated densities read as smooth humps.
+point is NaN and paints as a gap in both line and shading. The demo model
+packs a curve's points toward the forward on the scale of σ√t, so a
+short-dated density keeps dozens of points across its width however wide
+the chain, and reads as a smooth hump.
 
 **Difference.** `d` opens a chooser of `none` and every ordered pair of
 loaded kinds (`:diff <kind> - <kind> | none` too). The pair paints in a lower

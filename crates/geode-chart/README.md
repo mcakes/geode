@@ -126,7 +126,8 @@ cargo run -p geode-chart --example xy
   to its axis's domain.
 - A line with `fill` also shades the region between it and its axis's zero,
   under its stroke, in the slot's color at `FILL_OPACITY` (0.3) of the slot's
-  own alpha. Each finite run is its own outline, so a gap breaks the fill as
+  own alpha, every fill in a pane before any stroke, so a fill never tints
+  another slot's line. Each finite run is its own outline, so a gap breaks the fill as
   it breaks the line. A value below zero shades up to zero from beneath, so a
   negative lobe is as visible as a positive one. A zero above or below the
   plot shades to the plot's nearer edge. The outline follows the decimated

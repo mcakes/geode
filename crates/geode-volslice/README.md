@@ -42,7 +42,7 @@ cargo bench -p geode-volslice
 The `model_build` bench times `core::build::model` alone over twelve active
 expiries, the three kinds, densities and a `cvi draft − chain` difference,
 with the batch answered once outside the loop. Its target is under 1 ms; it
-has not been measured locally (see the performance guide).
+measured about 100 µs with 1,000-point curves (see the performance guide).
 
 ## What it paints
 
@@ -61,9 +61,10 @@ position, so twelve expiries cycle the theme's five chart colors. `shift+d`
 adds each visible curve's density on the right axis at `DENSITY_ALPHA` of
 the expiry color, shaded down to zero (a filled xy line, so a negative lobe
 shades up to zero), per unit of the shown coordinate (a gap where delta
-saturates, in line and shading alike). `GRID_N` is sized so a one-week,
-20%-vol density over the widest demo chain carries some sixty points per
-σ√t·F and reads as a smooth hump.
+saturates, in line and shading alike). The model spaces a dense grid; the
+demo model packs it toward the forward on the scale of σ√t, so a
+short-dated density keeps 25 or more points per σ√t·F however wide the
+chain and reads as a smooth hump.
 
 A difference pair (`d`) paints in a lower pane under the vol pane:
 

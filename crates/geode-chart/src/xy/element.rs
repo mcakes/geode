@@ -199,6 +199,15 @@ pub(crate) fn title(u: f64, format: XFormat, tol: f64) -> String {
     })
 }
 
+/// One pass of a pane's slot painting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Layer {
+    /// A filled line's translucent region down to zero.
+    Fill,
+    /// A line's stroke or a points slot's marks.
+    Stroke,
+}
+
 /// Element state kept across frames: the reused buffers and the chrome of
 /// the last chrome key.
 #[derive(Default)]
@@ -550,8 +559,31 @@ impl XyElement {
         fill_points(&b.outlines)
     }
 
+    /// What a pane paints, in order: every visible filled line's fill, in
+    /// slot order, then every visible slot's stroke or marks, in slot
+    /// order. All fills come first so a fill never tints another slot's
+    /// stroke, whichever slot comes first. Indices are into the model's
+    /// slots; no allocation, as it runs on every paint.
+    pub(crate) fn layers(&self, pane: Pane) -> impl Iterator<Item = (usize, Layer)> + '_ {
+        [Layer::Fill, Layer::Stroke]
+            .into_iter()
+            .flat_map(move |layer| {
+                self.model
+                    .slots
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, s)| {
+                        s.visible
+                            && s.axis.pane() == pane
+                            && (layer == Layer::Stroke
+                                || matches!(s.kind, SlotKind::Line { fill: true, .. }))
+                    })
+                    .map(move |(k, _)| (k, layer))
+            })
+    }
+
     /// Paint one pane in layers: grid, axes, then every visible slot's
-    /// path in slot order, a filled line's fill under its own stroke.
+    /// paths in `layers` order, the fills under every stroke.
     fn paint_pane(
         &self,
         pane: Pane,
@@ -584,10 +616,8 @@ impl XyElement {
         window.with_content_mask(Some(mask), |window| {
             let caches = PathCaches::for_paint((SHAPES, pane.index()), window, cx);
             caches.update(cx, |caches, _| {
-                for (k, slot) in model.slots.iter().enumerate() {
-                    if !slot.visible || slot.axis.pane() != pane {
-                        continue;
-                    }
+                for (k, layer) in self.layers(pane) {
+                    let slot = &model.slots[k];
                     let Some(y) = side_scale_of(slot.axis.side(), left, right) else {
                         continue;
                     };
@@ -605,21 +635,24 @@ impl XyElement {
                         .f32(self.rem_px)
                         .finish();
                     let (stroke, fill) = caches.slot_pair(k);
-                    if matches!(slot.kind, SlotKind::Line { fill: true, .. }) {
-                        let path = fill.get(key, bounds.origin, || {
-                            note_rebuild();
-                            self.fill_shape(slot, plot, &y, buffers)
-                        });
-                        if let Some(path) = path {
-                            window.paint_path(path, slot.color.opacity(FILL_OPACITY));
-                        }
-                    }
-                    let path = stroke.get(key, bounds.origin, || {
-                        note_rebuild();
-                        self.shape(slot, plot, &y, buffers)
-                    });
+                    let (path, color) = match layer {
+                        Layer::Fill => (
+                            fill.get(key, bounds.origin, || {
+                                note_rebuild();
+                                self.fill_shape(slot, plot, &y, buffers)
+                            }),
+                            slot.color.opacity(FILL_OPACITY),
+                        ),
+                        Layer::Stroke => (
+                            stroke.get(key, bounds.origin, || {
+                                note_rebuild();
+                                self.shape(slot, plot, &y, buffers)
+                            }),
+                            slot.color,
+                        ),
+                    };
                     if let Some(path) = path {
-                        window.paint_path(path, slot.color);
+                        window.paint_path(path, color);
                     }
                 }
             });
@@ -1341,6 +1374,104 @@ mod tests {
         let zero = y.y(0.0);
         assert!(runs[0].iter().any(|p| p.y > zero + 1.0), "{runs:?}");
         assert!((runs[0][0].y - zero).abs() < 1e-3);
+    }
+
+    /// Fills go down before any stroke, so a later slot's fill cannot tint
+    /// an earlier slot's line; hidden slots and the other pane paint
+    /// nothing here.
+    #[test]
+    fn every_fill_is_painted_before_any_stroke() {
+        let slot = |number: u16, axis, fill, visible| XySlot {
+            number,
+            label: format!("s{number}").into(),
+            color: gpui::red(),
+            axis,
+            visible,
+            style: Style::Solid,
+            kind: SlotKind::Line {
+                xs: vec![1.0, 2.0],
+                ys: vec![1.0, 2.0],
+                fill,
+            },
+        };
+        let m = XyModel::new(
+            1,
+            XAxis::default(),
+            [YFormat::Plain; 4],
+            0.7,
+            vec![
+                slot(1, Axis::Left, false, true),
+                slot(2, Axis::Right, true, true),
+                slot(3, Axis::Left, true, false),
+                slot(4, Axis::BottomLeft, true, true),
+                slot(5, Axis::Left, true, true),
+            ],
+        );
+        let e = XyElement::new(m.clone(), View::with_min_span(m.full(), 0.01), 12.0, "o");
+        assert_eq!(
+            e.layers(Pane::Upper).collect::<Vec<_>>(),
+            [
+                (1, Layer::Fill),
+                (4, Layer::Fill),
+                (0, Layer::Stroke),
+                (1, Layer::Stroke),
+                (4, Layer::Stroke),
+            ]
+        );
+        assert_eq!(
+            e.layers(Pane::Lower).collect::<Vec<_>>(),
+            [(3, Layer::Fill), (3, Layer::Stroke)]
+        );
+    }
+
+    /// On a reversed (delta) axis the line is fed in ascending pixel
+    /// order, and each outline's ends drop from its own run's ends.
+    #[test]
+    fn a_reversed_fill_drops_from_its_runs_own_ends() {
+        let plot = Rect::new(44.0, 10.0, 400.0, 200.0);
+        let y = LinearScale::new((-1.0, 3.0), plot.y, plot.bottom());
+        let xs = vec![0.1, 0.3, 0.5, 0.7, 0.9];
+        let ys = vec![0.5, 1.0, f64::NAN, 2.0, 1.5];
+        let m = XyModel::new(
+            1,
+            XAxis {
+                format: XFormat::Delta,
+                reversed: true,
+            },
+            [YFormat::Plain; 4],
+            0.7,
+            vec![XySlot {
+                number: 1,
+                label: "density".into(),
+                color: gpui::red(),
+                axis: Axis::Left,
+                visible: true,
+                style: Style::Solid,
+                kind: SlotKind::Line { xs, ys, fill: true },
+            }],
+        );
+        let e = XyElement::new(m.clone(), View::with_min_span(m.full(), 0.01), 12.0, "r");
+        let mut b = Buffers::default();
+        assert!(e.fill_shape(&m.slots[0], plot, &y, &mut b).is_some());
+        let runs = outlines(&b);
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        let zero = y.y(0.0);
+        // Reversed: x = 0.9 is at the plot's left, so the first run holds
+        // the two knots past the gap.
+        let scale = m.x.scale();
+        let view = View::with_min_span(m.full(), 0.01);
+        for (run, (from, to)) in runs.iter().zip([(0.9, 0.7), (0.3, 0.1)]) {
+            let (first, last) = (run[0], run[run.len() - 1]);
+            assert!((first.y - zero).abs() < 1e-3 && (last.y - zero).abs() < 1e-3);
+            assert!((first.x - run[1].x).abs() < 1e-3, "{run:?}");
+            assert!((last.x - run[run.len() - 2].x).abs() < 1e-3, "{run:?}");
+            assert!(
+                (first.x - scale.x_of(from, view, plot)).abs() < 0.5,
+                "{run:?}"
+            );
+            assert!((last.x - scale.x_of(to, view, plot)).abs() < 0.5, "{run:?}");
+            assert!(first.x < last.x, "ascending pixels: {run:?}");
+        }
     }
 
     #[gpui::test]

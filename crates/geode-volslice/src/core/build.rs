@@ -21,16 +21,18 @@ use gpui::Hsla;
 use crate::core::docs::ChainExpiry;
 use crate::core::model::{Kind, Loaded, Pair, State, StripRow};
 
-/// Points per dense curve, evenly spaced in strike over the CVI's node
-/// ladder widened to the listed chain. The density is a second difference
-/// over these points, so its smoothness is points per σ√t·F. The widest
-/// demo cover is under half the forward (60 strikes at up to ~0.8% of it,
-/// with the ladder inside), and a one-week expiry at 20% vol has σ√t·F
-/// near 2.8% of the forward: a thousand points put some sixty across it,
-/// past the twenty-five that reads as a smooth hump, and keep twenty-five
-/// down to a little over a day. A curve's path is decimated to its pixel
-/// columns, so the count costs the chart nothing per frame; the model
-/// evaluates a Black price per point, once per batch.
+/// Points per dense curve over the CVI's node ladder widened to the listed
+/// chain. The density is a second difference over these points, so its
+/// smoothness is points per σ√t·F at the forward, where it has its mass.
+/// The model chooses the spacing; the demo model packs points toward the
+/// forward on the scale of σ√t, so that count holds however wide the
+/// chain. A thousand is enough that even spread evenly over the widest
+/// demo chain (under half the forward) they put some sixty across the
+/// σ√t·F of a one-week, 20%-vol expiry (2.8% of the forward), past the
+/// twenty-five that reads as a smooth hump; the vol curve's wings stay
+/// fine too. A curve's path is decimated to its pixel columns, so the
+/// count costs the chart nothing per frame; the model evaluates a Black
+/// price per point, once per batch.
 pub const GRID_N: usize = 1000;
 
 /// What each job of a batch is for, by position.
