@@ -5337,7 +5337,6 @@ impl PricerTile {
             chain: &self.chain,
             pinned: self.pin != Pin::None,
             ungrouped: matches!(&self.pin, Pin::Grouping(chain) if chain.is_empty()),
-            prompt: self.confirm.as_ref().map(|c| c.prompt_text().clone()),
             save: self.save_notice.clone(),
             settings: &settings,
             clock: self.clock,
@@ -6091,7 +6090,6 @@ impl gpui::Render for PricerTile {
                 menu_tip: self.menu_tip.clone(),
                 menu_selector: self.menu_selector.clone(),
                 health: self.health.chip(),
-                confirm: self.confirm.as_ref(),
                 mode: geode_tile::header::Mode::from_key_mode(self.mode()),
                 links: geode_tile::header::link_chips(&self.frame, cx),
                 name_tip: self.name_tip.clone(),
@@ -6162,6 +6160,18 @@ impl gpui::Render for PricerTile {
                     .stripe(false)
                     .into_any_element(),
             });
+        // The confirm (`:rm` or a take-over) asks on its own bar under the
+        // header, whole at any tile width; the door answers every key on it
+        // before the shell root sees one.
+        let tile_id = self.id.0;
+        let question = self.confirm.as_ref().map(|pending| {
+            confirm::bar(
+                pending,
+                &tile,
+                move || format!("pricer-remove-confirm-{tile_id}"),
+                theme,
+            )
+        });
         let bar = self.entry.as_ref().map(|e| {
             header::render_entry_bar(
                 &e.input,
@@ -6187,6 +6197,7 @@ impl gpui::Render for PricerTile {
                 .size_full()
                 .debug_selector(|| format!("tile-content-{}", self.id.0))
                 .child(header)
+                .children(question)
                 .children(bar)
                 .child(body)
                 .when(search.is_some(), |el| {
@@ -14028,8 +14039,15 @@ pub(crate) mod tests {
         h.draw(&mut vcx);
         let question = "remove sheet 'old' and all its history? (y/n)";
         assert_eq!(prompt(&h, &vcx).as_deref(), Some(question));
-        assert!(h.header(&vcx).contains(&question.to_string()));
+        assert!(
+            !h.header(&vcx).contains(&question.to_string()),
+            "the question asks on its own bar, not in the header"
+        );
         assert!(painted(&mut vcx, "pricer-remove-confirm-5"));
+        // The bar sits under the header strip, above the table.
+        let header = centre_of(&mut vcx, "pricer-header-5");
+        let bar = centre_of(&mut vcx, "pricer-remove-confirm-5-bar");
+        assert!(bar.y > header.y, "{bar:?} under {header:?}");
         assert_eq!(h.mode(&mut vcx), "insert", "the confirm holds the keyboard");
         assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
         assert!(h.store.forgets().is_empty(), "nothing before the answer");

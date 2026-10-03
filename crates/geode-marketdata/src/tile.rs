@@ -980,7 +980,6 @@ impl MarketDataTile {
                 notice: None,
                 upload_error: None,
                 echo: None,
-                prompt: None,
                 time: None,
                 time_stale: None,
                 stale: false,
@@ -2270,7 +2269,6 @@ impl MarketDataTile {
                 Echo::Confirmed(text) => (text, Tone::Time),
                 Echo::Differs { text, .. } => (text, Tone::Warn),
             }),
-            prompt: self.pending_upload.as_ref().map(|c| c.prompt_text()),
             source_at: self.source_at,
             incomplete: self.draft.incomplete_rows(&self.spec, &self.model.columns),
             clock: self.clock,
@@ -5079,7 +5077,6 @@ impl gpui::Render for MarketDataTile {
             &self.header,
             cursor_attr,
             editor,
-            self.pending_upload.as_ref(),
             menu_open,
             theme,
             &tones,
@@ -5154,8 +5151,21 @@ impl gpui::Render for MarketDataTile {
         let root = v_flex()
             .size_full()
             .debug_selector(|| format!("tile-content-{}", self.id.0));
+        // The upload question asks on its own bar under the header, whole
+        // at any tile width; the door answers every key on it (bare y
+        // submits, any other key cancels) before shell routing.
+        let tile_id = self.id.0;
+        let question = self.pending_upload.as_ref().map(|pending| {
+            confirm::bar(
+                pending,
+                &tile,
+                move || format!("marketdata-upload-confirm-{tile_id}"),
+                cx.theme(),
+            )
+        });
         confirm::cancel_on_press(root, self.pending_upload.is_some(), &tile)
             .child(header)
+            .children(question)
             .child(body)
             .when(search.is_some(), |el| {
                 el.pb(scale::design(geode_shell::fuzzyfind::FOOTER_HEIGHT))
@@ -15067,10 +15077,17 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         let prompt = "upload 1 cell, 0 rows added, 0 removed of SPX.Z to sophis? (y/n)";
         assert_eq!(h.upload_prompt(&vcx).as_deref(), Some(prompt));
         assert!(
-            h.header_texts(&vcx).contains(&prompt.to_string()),
-            "the header paints the question: {:?}",
+            !h.header_texts(&vcx).contains(&prompt.to_string()),
+            "the question asks on its own bar, not in the header: {:?}",
             h.header_texts(&vcx)
         );
+        let header = vcx
+            .debug_bounds("marketdata-header-3")
+            .expect("header painted");
+        let bar = vcx
+            .debug_bounds("marketdata-upload-confirm-3-bar")
+            .expect("the question's bar is painted");
+        assert!(bar.top() >= header.bottom(), "{bar:?} under {header:?}");
         assert_eq!(h.mode(&vcx), "insert", "the confirm holds the keyboard");
         assert!(
             h.upload_request().is_none(),

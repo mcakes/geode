@@ -181,21 +181,28 @@ pub fn withdraw<T: ConfirmHost>(host: &mut T, cx: &mut Context<T>) -> Option<T::
     Some(payload)
 }
 
-/// The prompt: the question on the element that holds the keyboard, and
-/// its Yes and No buttons. The question's key listener runs on the focused
-/// element, before the shell root's, and stops every key it answers. A
-/// press on the question takes no focus (and none passes to a focusable
-/// ancestor): the press has answered, and the shell's restoration path
-/// returns the keyboard to the tile, as for a press anywhere else.
+/// The prompt: a full-width bar the tile paints under its header while
+/// armed, holding the question on the element that holds the keyboard and
+/// its Yes and No buttons. The question wraps onto as many lines as the
+/// tile's width needs and is never cut, and the buttons never shrink: a
+/// trader must read the whole question before answering it, which a
+/// one-line header slot could not promise in a narrow tile.
+///
+/// The question's key listener runs on the focused element, before the
+/// shell root's, and stops every key it answers. A press on the question
+/// takes no focus (and none passes to a focusable ancestor): the press has
+/// answered, and the shell's restoration path returns the keyboard to the
+/// tile, as for a press anywhere else.
 ///
 /// Yes is `y` and No any other key ([`answer`]). A left press on a button
 /// moves no focus (gpui-component's `Button` prevents the default focus
 /// move) and [`cancel_on_press`] lets it through, so the question stands,
 /// keyboard and all, until the click lands. The press still bubbles to the
 /// shell's tile listener, whose focus restore keeps the prompt because the
-/// prompt holds focus. The buttons are selected as `{selector}-yes` and
+/// prompt holds focus. The question is selected as `{selector}`, the bar
+/// as `{selector}-bar` and the buttons as `{selector}-yes` and
 /// `{selector}-no`.
-pub fn prompt<T: ConfirmHost>(
+pub fn bar<T: ConfirmHost>(
     confirm: &Confirm<T::Payload>,
     tile: &Entity<T>,
     selector: impl Fn() -> String + 'static,
@@ -226,12 +233,24 @@ pub fn prompt<T: ConfirmHost>(
             .child(if yes { button.danger() } else { button.ghost() })
     };
     let question_selector = selector.clone();
+    let bar_selector = selector.clone();
     let buttons = confirm.buttons.clone();
     h_flex()
-        .gap_2()
+        .w_full()
+        .flex_none()
         .items_center()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .text_sm()
+        .border_b_1()
+        .border_color(theme.border)
+        .debug_selector(move || format!("{}-bar", bar_selector()))
         .child(
             div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
                 .track_focus(&confirm.focus)
                 .debug_selector(move || question_selector())
                 .text_color(theme.foreground)
@@ -251,6 +270,7 @@ pub fn prompt<T: ConfirmHost>(
         )
         .child(
             h_flex()
+                .flex_none()
                 .gap_1()
                 // Where the buttons are, for `cancel_on_press`: geometry
                 // from this frame's layout, not state.
@@ -335,7 +355,7 @@ mod tests {
                         .child("body"),
                 )
                 .when_some(self.confirm.as_ref(), |el, c| {
-                    el.child(prompt(c, &tile, || "probe-prompt".into(), cx.theme()))
+                    el.child(bar(c, &tile, || "probe-prompt".into(), cx.theme()))
                 });
             cancel_on_press(root, self.confirm.is_some(), &tile)
         }
@@ -602,5 +622,43 @@ mod tests {
         });
         assert!(!vcx.update(|window, _| first.is_focused(window)));
         assert!(vcx.update(|window, _| second.is_focused(window)));
+    }
+
+    /// A narrow tile wraps a long question onto more lines instead of
+    /// cutting it, and both buttons stay whole inside the tile, right of
+    /// the question.
+    #[gpui::test]
+    fn a_long_question_wraps_and_keeps_its_buttons_in_a_narrow_tile(cx: &mut TestAppContext) {
+        let (probe, vcx) = open(cx);
+        let width = px(240.);
+        vcx.simulate_resize(gpui::size(width, px(400.)));
+        let height = |question: &'static str, vcx: &mut VisualTestContext| {
+            vcx.update(|window, cx| probe.update(cx, |p, cx| arm(p, "x", question, window, cx)));
+            draw(vcx);
+            vcx.debug_bounds("probe-prompt")
+                .expect("painted")
+                .size
+                .height
+        };
+        let one_line = height("go? (y/n)", vcx);
+        let whole = |vcx: &mut VisualTestContext| {
+            let yes = vcx.debug_bounds("probe-prompt-yes").expect("Yes painted");
+            let no = vcx.debug_bounds("probe-prompt-no").expect("No painted");
+            (yes.size.width, no.size.width)
+        };
+        let short_buttons = whole(vcx);
+        let long = height(
+            "sheet 'duly' is open in another tile: open it here and move \
+             that tile to untitled-5? (y/n)",
+            vcx,
+        );
+        assert!(long >= one_line * 3.0, "{long:?} vs one line {one_line:?}");
+        assert_eq!(whole(vcx), short_buttons, "the buttons never shrink");
+        let question = vcx.debug_bounds("probe-prompt").unwrap();
+        let yes = vcx.debug_bounds("probe-prompt-yes").expect("Yes painted");
+        let no = vcx.debug_bounds("probe-prompt-no").expect("No painted");
+        assert!(question.right() <= yes.left(), "{question:?} vs {yes:?}");
+        assert!(yes.right() <= no.left());
+        assert!(no.right() <= width, "{no:?} inside {width:?}");
     }
 }

@@ -18318,6 +18318,24 @@ run_mutation "pricer rm: any key confirms" \
   '    answer(host, true, window, cx)' \
   geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
 
+run_mutation "confirm bar: the question is cut to one line" \
+  crates/geode-tile/src/confirm.rs \
+  '                .whitespace_normal()' \
+  '                .whitespace_nowrap()' \
+  geode-tile a_long_question_wraps_and_keeps_its_buttons_in_a_narrow_tile
+
+run_mutation "pricer rm: the question paints on no bar" \
+  crates/geode-pricer/src/tile.rs \
+  '                .children(question)' \
+  '                .children(None::<gpui::Div>)' \
+  geode-pricer colon_rm_asks_and_y_forgets
+
+run_mutation "market-data upload: the question paints on no bar" \
+  crates/geode-marketdata/src/tile.rs \
+  '            .children(question)' \
+  '            .children(None::<gpui::Div>)' \
+  geode-marketdata upload_arms_a_confirm_and_y_submits_the_assembled_document
+
 run_mutation "pricer rm: a modified y confirms" \
   crates/geode-tile/src/confirm.rs \
   '    answer(host, ks.key == "y" && !ks.modifiers.modified(), window, cx)' \

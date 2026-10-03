@@ -70,7 +70,10 @@ line, and the blotter the notice line. Diagnostics has none of them.
   notice (`upload cancelled: a new document arrived`); the pricer withdraws
   on a `:` command with no notice of its own. Each answer blurs the prompt before it
   drops, and the shell's focus restoration path returns the keyboard to the
-  tile.
+  tile. The question asks on a full-width bar under the tile header, not in
+  it: it wraps onto as many lines as the tile's width needs and is never
+  cut, and its Yes and No buttons never shrink, so a narrow tile still shows
+  the whole question before it is answered.
 - A notice is a status (muted), warning or danger line in the theme's text
   tones; which of a tile's notices shows is the tile's own precedence.
 - Every tile header is `geode_tile::header::frame`: 22 px at the design rem,
@@ -748,8 +751,8 @@ and the painted generation must be live. A live frame can still show a
 historical generation while a requery is pending or after it fails; uploading
 that document would overwrite untouched rows with old values.
 
-Arming confirmation assembles the rows and snapshots the draft. The header
-shows the target and counts of changed cells, attributes, added rows, and
+Arming confirmation assembles the rows and snapshots the draft. The confirm
+bar shows the target and counts of changed cells, attributes, added rows, and
 removed rows. Bare unmodified `y`, or the prompt's Yes button, submits that
 snapshot after rechecking the live frame, live painted generation, and full
 draft equality. Every other key cancels and is consumed, including chords; so
@@ -1726,7 +1729,7 @@ tile holds:
   sheets clears undo history, package expansion, cursor, and per-sheet save
   state, and cancels pricing in flight for the outgoing sheet. A sheet open in
   another tile is not switched to at once: two tiles never write one sheet,
-  so the header asks `sheet 'x' is open in another tile: open it here and
+  so the confirm bar asks `sheet 'x' is open in another tile: open it here and
   close it there? (y/n)` with the `:rm` confirm's keys, buttons and cancels
   (any answer but `y` leaves `sheet not opened`). `y` decides again: this
   tile's own unsaved changes are saved first, then the holding tile's. A
@@ -1766,7 +1769,7 @@ tile holds:
   documents remain.
 - `:rm <sheet>` is refused for any open sheet (this tile's own: close it or
   `:e` another sheet first) and for a name that is not a document. Otherwise
-  the header asks `remove sheet 'x' and all its history? (y/n)` beside Yes
+  the confirm bar asks `remove sheet 'x' and all its history? (y/n)` beside Yes
   and No buttons and holds the keyboard (the tile is in insert mode). Bare `y`
   or Yes removes the document and its whole history; any other key, No, a
   pointer press anywhere but the two buttons, or focus leaving it answers no
