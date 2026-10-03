@@ -217,8 +217,9 @@ impl CloseHandle {
     /// The × every tile paints last in its header (and the placeholder in
     /// its corner): a bare muted glyph with the control door's hover and
     /// pressed fills on the tile surface, id `("tile-close", tile)`,
-    /// selector `tile-close-{tile}`. The press is the button's own: it
-    /// stops propagation so the tile is not focused on its way out.
+    /// selector `tile-close-{tile}`. An unmodified press is the button's
+    /// own: it stops propagation so the tile is not focused on its way
+    /// out. A modified press passes to the tile (mod+press arms a drag).
     pub fn button(&self, theme: &gpui_component::Theme, tile: TileId) -> gpui::Stateful<gpui::Div> {
         use gpui::prelude::*;
         use gpui_component::{Icon, IconName, Sizable as _};
@@ -249,13 +250,18 @@ impl CloseHandle {
                 None,
             ))
             .on_mouse_down(gpui::MouseButton::Left, move |event, window, cx| {
+                // A modified press is the tile's own gesture (mod+press arms
+                // a tile drag): it passes through to the tile cell.
+                if event.modifiers.modified() {
+                    return;
+                }
                 cx.stop_propagation();
                 window.prevent_default();
-                // Only a first press closes. Closing one tile slides its
-                // neighbour (and its ×) under the pointer, so the second
-                // press of a double-click would otherwise close that tile
-                // too; swallowed, it reaches no tile's double-click gesture
-                // (fullscreen, picker) either.
+                // Only a first press closes. Closing one tile can slide a
+                // neighbour's × under the pointer; the shell root swallows
+                // the rest of the double-click after a close, and this
+                // guard keeps a later press of a double-click from closing
+                // whatever × it lands on even where that swallow is not set.
                 if event.click_count > 1 {
                     return;
                 }

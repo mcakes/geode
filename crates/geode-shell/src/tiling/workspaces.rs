@@ -348,8 +348,9 @@ impl Workspace {
     /// Close `id` wherever it sits in this workspace, for the tile's own
     /// close button. The focused tile of the focused region closes through
     /// [`Workspace::close_tile`], so the pointer and the key cannot
-    /// diverge. Any other tile leaves focus where it was; a dock it
-    /// empties hides, and focus falls back only if that dock held it.
+    /// diverge. Any other tile leaves focus where it was, and a dock it
+    /// empties hides. Focus needs no repair there: a tile that is not the
+    /// focused one cannot be the last in the focused region.
     /// `false` for a tile this workspace does not hold (a stale press).
     pub fn close_tile_id(&mut self, id: TileId) -> bool {
         let Some(region) = self.region_of(id) else {
@@ -359,22 +360,7 @@ impl Workspace {
             self.close_tile();
             return true;
         }
-        match region {
-            FocusRegion::Main => {
-                self.tree.remove(id);
-            }
-            FocusRegion::Dock(side) => {
-                let dock = self.docks.get_mut(side);
-                dock.tree_mut().remove(id);
-                if dock.tree().is_empty() {
-                    dock.set_visible(false);
-                    if self.region == region {
-                        self.region = self.fallback_region();
-                    }
-                }
-            }
-        }
-        true
+        self.remove_tile_anywhere(id).is_some()
     }
 
     /// Cycle the focused region's stack member; return false for a plain tile.

@@ -553,6 +553,7 @@ impl ShellView {
         }
         if self.services.workspaces.active_mut().close_tile_id(tile) {
             self.session_dirty = true;
+            self.swallow_double_click_followup = true;
             self.note_keyboard_focus_move(window, cx);
         }
         cx.notify();

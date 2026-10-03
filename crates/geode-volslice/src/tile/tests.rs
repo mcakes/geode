@@ -348,13 +348,12 @@ fn a_fresh_tile_asks_nothing_and_shows_no_underlying(cx: &mut gpui::TestAppConte
 fn the_header_paints_the_close_button(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     let pressed = std::rc::Rc::new(std::cell::Cell::new(false));
-    h.tile.update(&mut vcx, |t, cx| {
+    // Delivered through the shell's door, `TileContent::set_close`.
+    let close = {
         let pressed = pressed.clone();
-        t.set_close(
-            geode_shell::module::CloseHandle::new(move |_, _| pressed.set(true)),
-            cx,
-        );
-    });
+        geode_shell::module::CloseHandle::new(move |_, _| pressed.set(true))
+    };
+    vcx.update(|_, cx| h.content.set_close(close, cx));
     vcx.update(|window, cx| {
         let _ = window.draw(cx);
     });

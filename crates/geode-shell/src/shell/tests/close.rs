@@ -293,12 +293,96 @@ fn a_double_click_on_the_close_button_closes_one_tile(cx: &mut gpui::TestAppCont
         let tree = s.services.workspaces.active().tree();
         assert_eq!(tree.tiles(), vec![a], "exactly one tile closed");
         assert_eq!(tree.fullscreen(), None, "the survivor is not fullscreen");
-        assert!(
-            !matches!(
-                s.choice_dialog.as_ref().map(|d| &d.target),
-                Some(crate::shell::choicedialog::Target::TileKind { .. })
-            ),
-            "no tile picker opened"
+        assert!(!picker_open(s), "no tile picker opened");
+    });
+}
+
+/// Whether the tile picker is the open choice dialog.
+fn picker_open(s: &ShellView) -> bool {
+    matches!(
+        s.choice_dialog.as_ref().map(|d| &d.target),
+        Some(crate::shell::choicedialog::Target::TileKind { .. })
+    )
+}
+
+/// A double-click on the only tile's × closes it; the second press lands
+/// on the empty-tree hint, whose double-click would open the tile picker.
+#[gpui::test]
+fn a_double_click_on_the_last_tiles_close_button_opens_nothing(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let a = services.workspaces.split_active(Orientation::Horizontal);
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let at = cx.debug_bounds(sel(a)).expect("× painted").center();
+    press_counted(&mut cx, at, 1);
+    press_counted(&mut cx, at, 2);
+    shell.read_with(&cx, |s, _| {
+        assert!(s.services.workspaces.active().tree().tiles().is_empty());
+        assert!(!picker_open(s), "no tile picker opened");
+    });
+}
+
+/// A double-click on the left tile's × closes that tile only: the
+/// focused placeholder beside it grows under the pointer, and the second
+/// press reaches neither its picker nor its fullscreen gesture.
+#[gpui::test]
+fn a_double_click_on_the_left_close_button_reaches_no_neighbour(cx: &mut gpui::TestAppContext) {
+    let (services, a, b) = two_placeholders();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let at = cx.debug_bounds(sel(a)).expect("× painted").center();
+    press_counted(&mut cx, at, 1);
+    press_counted(&mut cx, at, 2);
+    shell.read_with(&cx, |s, _| {
+        let tree = s.services.workspaces.active().tree();
+        assert_eq!(tree.tiles(), vec![b], "exactly one tile closed");
+        assert_eq!(tree.fullscreen(), None, "the survivor is not fullscreen");
+        assert!(!picker_open(s), "no tile picker opened");
+    });
+}
+
+/// Only the closing double-click is swallowed: the next first press ends
+/// it, so a fresh double-click on the empty tree still opens the picker.
+#[gpui::test]
+fn a_fresh_double_click_after_a_close_still_reaches_its_gesture(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let a = services.workspaces.split_active(Orientation::Horizontal);
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let at = cx.debug_bounds(sel(a)).expect("× painted").center();
+    press_counted(&mut cx, at, 1);
+    press_counted(&mut cx, at, 2);
+    press_counted(&mut cx, at, 1);
+    press_counted(&mut cx, at, 2);
+    shell.read_with(&cx, |s, _| assert!(picker_open(s), "the picker opened"));
+}
+
+/// A mod+press on the × is the tile's drag gesture, not a close: the
+/// press passes through to the tile cell, which arms a drag.
+#[gpui::test]
+fn a_mod_press_on_the_close_button_arms_a_drag(cx: &mut gpui::TestAppContext) {
+    let (services, a, b) = two_placeholders();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let at = cx.debug_bounds(sel(a)).expect("× painted").center();
+    let alt = gpui::Modifiers {
+        alt: true,
+        ..gpui::Modifiers::none()
+    };
+    cx.simulate_mouse_down(at, MouseButton::Left, alt);
+    shell.read_with(&cx, |s, _| {
+        assert_eq!(s.services.workspaces.active().tree().tiles(), vec![a, b]);
+        assert_eq!(
+            s.tile_drag.as_ref().map(|d| d.tile),
+            Some(a),
+            "a drag armed"
         );
     });
+    cx.simulate_mouse_up(at, MouseButton::Left, gpui::Modifiers::none());
+    draw(&mut cx);
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles()),
+        vec![a, b],
+        "the release closes nothing"
+    );
 }

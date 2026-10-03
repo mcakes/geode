@@ -70,16 +70,25 @@ paints it in its top-right corner. The × is always painted, not gated on
 hover or focus, so the header never reflows under the pointer.
 
 A press closes the tile whose × it is, never "the focused tile". It
-stops at the button and prevents default, so it does not focus the tile on
-its way out. If the pressed tile was focused, the result is exactly
-`ctrl+w`'s (stack sibling, else tree-order neighbor; an emptied dock hides
-and focus falls back). If another tile held focus, that tile keeps it
-(`Workspace::close_tile_id`). Only the first press of a click closes: closing
-a tile slides its neighbor's × under the pointer, so the second press of a
-double-click is swallowed — it neither closes that neighbor nor reaches a
-tile's double-click gestures (fullscreen, the tile picker). There is no
-confirmation and no undo; the pricer saves a dirty sheet on `closed`, so
-only layout and view state go.
+stops at the button and prevents default: the press is the button's, so no
+listener beneath it — the tile cell's focus and gestures, a module's own
+header handlers — also acts on it. A modified press is not the button's: it
+passes to the tile, where mod+press arms a tile drag. If the pressed tile
+was focused, the result is exactly `ctrl+w`'s (stack sibling, else
+tree-order neighbor; an emptied dock hides and focus falls back). If another
+tile held focus, that tile keeps it (`Workspace::close_tile_id`).
+
+A double-click on a × closes one tile, and the rest of that double-click
+reaches nothing. Closing changes what lies under the pointer — a
+neighbor's ×, a focused placeholder whose double-click opens the tile
+picker, the empty tree's hint, a module header's own double-click — so a
+successful pointer close arms `ShellView::swallow_double_click_followup`,
+and the shell root's capture-phase press listener, which runs before every
+tile's and module's listener, stops any press with `click_count > 1` while
+it is set. The next first press clears it and passes. The button also
+ignores a press with `click_count > 1` itself. There is no confirmation and
+no undo; the pricer flushes a dirty sheet when its tile drops, so only
+layout and view state go.
 
 The press runs the key's path (`ShellView::close_tile_by_pointer`): it leaves
 an open `:` line as any press on another tile does, records
@@ -849,8 +858,8 @@ older than the last one the group held.
 `TileContent` is the module boundary. An occupant supplies its key context,
 handles actions and local commands, receives find events and deliveries,
 reports focus ownership, and accepts visibility, stack state and its close
-handle. Required
-methods make lifecycle obligations explicit for every feature.
+handle. Required methods make lifecycle obligations explicit for every
+feature.
 
 `Delivery` is an exhaustive enum. Adding a new outcome type forces every
 occupant to decide how it handles that variant at compile time. Query, pricing,

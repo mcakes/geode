@@ -534,6 +534,13 @@ pub struct ShellView {
     /// for a key event is unsafe: dropping a focused overlay can leave no live
     /// focus target through which that event could reach the shell.
     pending_focus_restore: bool,
+    /// Set when a tile's × closed it; the shell root's capture-phase press
+    /// listener swallows the rest of that double-click (any press with
+    /// `click_count > 1`) and the next first press clears it. Closing
+    /// changes what lies under the pointer — a neighbour's ×, a focused
+    /// placeholder, the empty tree, a module's header — and each has its
+    /// own double-click gesture the follow-on press must not reach.
+    swallow_double_click_followup: bool,
     /// Whether the scope input held focus when an overlay opened. Closing the
     /// overlay consumes this flag and restores either the input or shell focus.
     /// Palette selection closes before dispatching, so a dialog launched from
@@ -1472,6 +1479,7 @@ impl ShellView {
             last_frame_generation_written: 0,
             last_session_text: None,
             pending_focus_restore: false,
+            swallow_double_click_followup: false,
             overlay_return_to_filter: false,
             divider_drag: None,
             tile_drag: None,

@@ -1411,9 +1411,9 @@ that opens and closes the action menu (the pointer's `.`). The header is the
 [shared frame](#shared-tile-interaction): notices paint after the status
 items, the health chip sits between the time and `⋯`, and the × is last, at
 the trailing edge. The health chip covers `pricer_sheets` only (see the
-pricer README's limits). A pending load
-paints `loading…` muted in the header and `Loading sheet…` in the empty table;
-an empty loaded sheet says `No lines — press o to add one`. A pricer this
+pricer README's limits). A pending load paints `loading…` muted in the
+header and `Loading sheet…` in the empty table; an empty loaded sheet says
+`No lines — press o to add one`. A pricer this
 binary lacks is named in danger text with its recovery (`set [pricing]
 adapter and restart`).
 

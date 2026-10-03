@@ -33438,33 +33438,29 @@ run_mutation "keybinding capture: the round-trip check accepts everything" \
 
 run_mutation "close: an unfocused tile is removed by id, not by focus" \
   crates/geode-shell/src/tiling/workspaces.rs \
-  '            return true;
-        }
-        match region {
-            FocusRegion::Main => {
-                self.tree.remove(id);
-            }' \
-  '            return true;
-        }
-        match region {
-            FocusRegion::Main => {
-                self.tree.close();
-            }' \
+  '        self.remove_tile_anywhere(id).is_some()' \
+  '        self.close_tile();
+        true' \
   geode-shell close_tile_id_on_an_unfocused_tile_keeps_focus
 
 run_mutation "close: an emptied dock hides" \
   crates/geode-shell/src/tiling/workspaces.rs \
   '                if dock.tree().is_empty() {
                     dock.set_visible(false);
-                    if self.region == region {' \
+                }
+            }
+        }
+        Some(region)' \
   '                if false {
                     dock.set_visible(false);
-                    if self.region == region {' \
+                }
+            }
+        }
+        Some(region)' \
   geode-shell close_tile_id_of_an_unfocused_docks_last_tile_hides_it_and_keeps_focus
 
-# Unstopped, the press reaches the tile under it: the second press of a
-# double-click lands on the neighbour that slid under the pointer and
-# opens its double-click gesture (fullscreen, the tile picker).
+# The press is the button's: unstopped, it also reaches the listeners
+# beneath it, a module header's own press handlers among them.
 run_mutation "close: the press stops at the button" \
   crates/geode-shell/src/module.rs \
   '                cx.stop_propagation();
@@ -33472,10 +33468,12 @@ run_mutation "close: the press stops at the button" \
                 // Only a first press closes.' \
   '                window.prevent_default();
                 // Only a first press closes.' \
-  geode-shell a_double_click_on_the_close_button_closes_one_tile
+  geode-tile the_close_button_paints_last_and_runs_its_handle
 
 # Closing the right tile slides its neighbour's × under the pointer; the
-# double-click's second press must not close that one too.
+# double-click's second press must not close that one too. The root's
+# swallow also stops it, so this guard is checked where the button alone
+# meets a second press: the header strip, with no shell above it.
 run_mutation "close: a double-click's second press closes nothing" \
   crates/geode-shell/src/module.rs \
   '                if event.click_count > 1 {
@@ -33484,7 +33482,7 @@ run_mutation "close: a double-click's second press closes nothing" \
                 handle.close(window, cx);' \
   '                let _ = event.click_count;
                 handle.close(window, cx);' \
-  geode-shell a_double_click_on_the_close_button_closes_one_tile
+  geode-tile a_double_clicks_second_press_on_the_close_button_runs_nothing
 
 run_mutation "close: every occupant receives its close handle" \
   crates/geode-shell/src/shell/occupants.rs \
@@ -33559,6 +33557,67 @@ run_mutation "close: the vol slice header carries its handle" \
   crates/geode-volslice/src/header.rs \
   '    cluster.close = close.cloned();' \
   '    cluster.close = None;' \
+  geode-volslice the_header_paints_the_close_button
+
+# A pointer close changes what lies under the pointer (the empty tree's
+# hint, a focused placeholder, a module header); the rest of that
+# double-click must reach none of their double-click gestures.
+run_mutation "close: the shell root swallows a closing double-click" \
+  crates/geode-shell/src/shell/render.rs \
+  '                if event.click_count > 1 {
+                    cx.stop_propagation();' \
+  '                if false {
+                    cx.stop_propagation();' \
+  geode-shell a_double_click_on_the_last_tiles_close_button_opens_nothing
+
+run_mutation "close: a successful pointer close arms the swallow" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            self.swallow_double_click_followup = true;' \
+  '' \
+  geode-shell a_double_click_on_the_left_close_button_reaches_no_neighbour
+
+run_mutation "close: a first press ends the swallow" \
+  crates/geode-shell/src/shell/render.rs \
+  '                    view.swallow_double_click_followup = false;' \
+  '' \
+  geode-shell a_fresh_double_click_after_a_close_still_reaches_its_gesture
+
+run_mutation "close: a modified press passes to the tile" \
+  crates/geode-shell/src/module.rs \
+  '                if event.modifiers.modified() {' \
+  '                if false {' \
+  geode-shell a_mod_press_on_the_close_button_arms_a_drag
+
+# Each module forwards the shell's handle from its `TileContent` door to
+# its tile; dropped there, the header never paints the ×.
+run_mutation "close: the blotter content forwards its handle" \
+  crates/geode-blotter/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.set_close(close, cx))' \
+  '        let _ = (close, cx);' \
+  geode-blotter the_header_paints_the_close_button
+
+run_mutation "close: the market-data content forwards its handle" \
+  crates/geode-marketdata/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.set_close(close, cx))' \
+  '        let _ = (close, cx);' \
+  geode-marketdata the_header_paints_the_close_button
+
+run_mutation "close: the pricer content forwards its handle" \
+  crates/geode-pricer/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.set_close(close, cx))' \
+  '        let _ = (close, cx);' \
+  geode-pricer the_header_paints_the_close_button
+
+run_mutation "close: the timeseries content forwards its handle" \
+  crates/geode-timeseries/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.set_close(close, cx))' \
+  '        let _ = (close, cx);' \
+  geode-timeseries the_header_paints_the_close_button
+
+run_mutation "close: the vol slice content forwards its handle" \
+  crates/geode-volslice/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.set_close(close, cx))' \
+  '        let _ = (close, cx);' \
   geode-volslice the_header_paints_the_close_button
 
 if [[ -n "$changed_ref" ]]; then

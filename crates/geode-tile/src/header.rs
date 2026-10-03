@@ -1246,6 +1246,31 @@ mod tests {
         assert_eq!(parent_presses(&view, vcx), 0);
     }
 
+    /// Only a first press closes: the second press of a double-click on a
+    /// × runs no handle, whichever × it lands on.
+    #[gpui::test]
+    fn a_double_clicks_second_press_on_the_close_button_runs_nothing(cx: &mut TestAppContext) {
+        let (view, _, _, vcx) = open_strip(cx);
+        let pressed = Rc::new(Cell::new(0u32));
+        view.update(vcx, |s, cx| {
+            let pressed = pressed.clone();
+            s.close = Some(geode_shell::module::CloseHandle::new(move |_, _| {
+                pressed.set(pressed.get() + 1)
+            }));
+            cx.notify();
+        });
+        let at = centre(vcx, "tile-close-3");
+        vcx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        assert_eq!(pressed.get(), 0);
+        assert_eq!(parent_presses(&view, vcx), 0, "the press stops there");
+    }
+
     fn parent_presses(view: &Entity<Strip>, vcx: &mut VisualTestContext) -> u32 {
         view.read_with(vcx, |s, _| s.parent.get())
     }
@@ -1424,12 +1449,13 @@ mod tests {
     }
 
     /// A notice far wider than the tile cuts to one line inside its share:
-    /// it ends before the time run, the time, chip and `⋯` stay inside the
-    /// header, and the left side keeps a share of its own.
+    /// it ends before the time run, the time, chip, `⋯` and × stay inside
+    /// the header, and the left side keeps a share of its own.
     #[gpui::test]
     fn an_overlong_notice_cuts_and_leaves_the_tail_and_left_side(cx: &mut TestAppContext) {
         let (view, diagnostics, _, vcx) = open_strip(cx);
         view.update(vcx, |s, cx| {
+            s.close = Some(geode_shell::module::CloseHandle::new(|_, _| {}));
             s.notice = Notice::danger(
                 "IO Error: Could not set lock on file \"/tmp/geode-demo/store.duckdb\": \
                  Conflicting lock is held in another process; see the concurrency docs",
@@ -1462,7 +1488,12 @@ mod tests {
             notice.right() <= time.left(),
             "the notice {notice:?} runs into the time {time:?}"
         );
-        for s in ["tile-time-3-0", "tile-health-3", "strip-menu"] {
+        for s in [
+            "tile-time-3-0",
+            "tile-health-3",
+            "strip-menu",
+            "tile-close-3",
+        ] {
             let b = vcx
                 .debug_bounds(s)
                 .unwrap_or_else(|| panic!("{s} is painted"));

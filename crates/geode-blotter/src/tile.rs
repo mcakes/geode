@@ -6797,12 +6797,13 @@ mod tests {
         let p = next_query(&h.requests);
         deliver(&h, &mut vcx, p.tag, Ok(snapshot()));
         let pressed = std::rc::Rc::new(std::cell::Cell::new(false));
-        h.tile.update(&mut vcx, |t, cx| {
+        // Delivered through the shell's door, `TileContent::set_close`.
+        let close = {
             let pressed = pressed.clone();
-            t.set_close(
-                geode_shell::module::CloseHandle::new(move |_, _| pressed.set(true)),
-                cx,
-            );
+            geode_shell::module::CloseHandle::new(move |_, _| pressed.set(true))
+        };
+        vcx.update(|_, cx| {
+            crate::content::BlotterContent::for_tile(h.tile.clone()).set_close(close, cx)
         });
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
