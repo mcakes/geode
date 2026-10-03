@@ -34332,6 +34332,14 @@ run_mutation "value colors: an unchanged pick writes nothing" \
   geode-shell \
   enter_on_the_untouched_list_writes_nothing
 
+# The write is decided against the color as painted: an undefined name is none.
+run_mutation "value colors: an undefined color in force is no color to clear" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '        state.effective = state.effective.filter(|name| named.get(name).is_some());' \
+  '        let _ = &named;' \
+  geode-shell \
+  enter_over_an_undefined_desk_color_writes_nothing
+
 # No user directory says so instead of saving nothing silently.
 run_mutation "value colors: no user directory says so" \
   crates/geode-shell/src/shell/value_color.rs \

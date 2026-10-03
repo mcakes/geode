@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use geode_core::colour::{ValuePick, ValueWrite, value_color_state, value_write};
+use geode_core::colour::{NamedColours, ValuePick, ValueWrite, value_color_state, value_write};
 use geode_core::config::{Layer, VALUE_COLORS_DOC};
 use gpui::Context;
 
@@ -80,11 +80,18 @@ impl ShellView {
         pick: ValuePick,
         cx: &mut Context<Self>,
     ) {
-        let state = value_color_state(
+        let mut state = value_color_state(
             self.services.config.layered_docs(VALUE_COLORS_DOC),
             &dimension,
             &value,
         );
+        // Decided against the color as painted, from the definitions the
+        // list opened with: a name `colors.toml` no longer defines paints
+        // nothing, so `None` over it is no change. Without this an untouched
+        // enter would write `none` over a desk entry, masking it even after
+        // the desk defines the name again.
+        let (named, _) = NamedColours::from_config(&self.services.config);
+        state.effective = state.effective.filter(|name| named.get(name).is_some());
         let write = value_write(&state, &pick);
         if write == ValueWrite::Nothing {
             return;

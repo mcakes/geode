@@ -1195,7 +1195,16 @@ fn open_color_list(
     colors: &str,
     user_dir: Option<std::path::PathBuf>,
 ) -> (Entity<ShellView>, gpui::VisualTestContext) {
-    let (window, mut vcx) = open_shell(cx, color_services(colors));
+    open_color_list_on(cx, color_services(colors), user_dir)
+}
+
+/// [`open_color_list`] over `services` as given.
+fn open_color_list_on(
+    cx: &mut gpui::TestAppContext,
+    services: ShellServices,
+    user_dir: Option<std::path::PathBuf>,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    let (window, mut vcx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut vcx);
     shell.update(&mut vcx, |s, _| {
         s.text_dims.insert("underlying_ref".into());
@@ -1279,6 +1288,41 @@ fn a_clicked_color_row_writes_it(cx: &mut gpui::TestAppContext) {
 fn enter_on_the_untouched_list_writes_nothing(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, Some(dir.path().to_path_buf()));
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()),
+        "closed"
+    );
+    assert!(!dir.path().join("value_colors.toml").exists());
+    assert_eq!(shell_notice(&shell, &vcx), None);
+}
+
+/// The desk maps SPX to a color `colors.toml` no longer defines: nothing
+/// paints, the list opens on `None`, and enter on it is no change. Writing
+/// `none` would leave a user override masking the desk once it defines the
+/// color again.
+#[gpui::test]
+fn enter_over_an_undefined_desk_color_writes_nothing(cx: &mut gpui::TestAppContext) {
+    use geode_core::config::{Config, Layer, LayerDoc, VALUE_COLORS_DOC};
+    let dir = tempfile::tempdir().unwrap();
+    let mut services = color_services(TWO_COLORS);
+    services.config = Config::from_docs(vec![
+        LayerDoc::builtin("colors", TWO_COLORS).unwrap(),
+        LayerDoc {
+            layer: Layer::Desk,
+            name: VALUE_COLORS_DOC.into(),
+            file: "value_colors.toml".into(),
+            table: "[underlying_ref]\nSPX = \"gone\"\n".parse().unwrap(),
+        },
+    ]);
+    let (shell, mut vcx) = open_color_list_on(cx, services, Some(dir.path().to_path_buf()));
+    let lit = shell.read_with(&vcx, |s, _| {
+        s.choice_dialog
+            .as_ref()
+            .and_then(|d| d.list.highlighted_text().map(str::to_string))
+    });
+    assert_eq!(lit.as_deref(), Some("None"), "opens on None");
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
     assert!(

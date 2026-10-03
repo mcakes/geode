@@ -246,7 +246,10 @@ A pick writes only the user layer's `value_colors.toml`, through
 | `None`, no lower entry | the key removed, and the dimension table with it when that empties it |
 | `Follow desk` | the key removed, and an emptied dimension table |
 
-A pick equal to the color already in force writes nothing and says nothing.
+A pick equal to the color as painted writes nothing and says nothing; a
+name `colors.toml` no longer defines paints nothing, so `None` over it
+writes nothing either (a dangling user entry with no lower one is not
+cleared this way).
 After a write the status bar reads `SPX colored blue`, `SPX color cleared`
 or `SPX follows the desk`; the ordinary reload repaints. A failed write (a
 dimension entry that is not a table, an unreadable file) shows the writer's
