@@ -1524,6 +1524,13 @@ fn new_named_color_creates_the_color_and_colors_the_value(cx: &mut gpui::TestApp
     );
     assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()));
     assert_eq!(shell_notice(&shell, &vcx), Some("SPX colored spx".into()));
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .object_dialog
+            .as_ref()
+            .is_some_and(|d| d.on_created.is_none())),
+        "the create took the one-shot hook"
+    );
 }
 
 #[gpui::test]

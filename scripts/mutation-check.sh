@@ -35799,13 +35799,16 @@ run_mutation "value colors: the stage compares hue and tone with the color in fo
   geode-shell \
   the_stage_knows_when_it_holds_the_color_in_force
 
-# The hook is one-shot: a later create in the same dialog leaves the value.
+# The hook is one-shot: the create takes it. (A later create in the same
+# dialog also passes begin_naming, which clears it; the two guards are
+# redundant, so the_hook_colors_the_value_once_and_a_later_create_leaves_it
+# alone cannot see either one removed.)
 run_mutation "value colors: the new color hook fires once" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '            .and_then(|s| s.on_created.take());' \
   '            .and_then(|s| s.on_created.clone());' \
   geode-shell \
-  the_hook_colors_the_value_once_and_a_later_create_leaves_it
+  new_named_color_creates_the_color_and_colors_the_value
 
 # The Colors dialog's own n never arms the hook.
 run_mutation "value colors: naming begins without the hook" \
