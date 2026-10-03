@@ -262,7 +262,7 @@ mod tests {
             ),
             (
                 ControlInputs::new(theme, Rest::Bare, theme.background, theme.muted_foreground),
-                "market-data ⋯",
+                "market-data ⋯ and the tile ×",
             ),
             (
                 ControlInputs::new(theme, muted, theme.popover, theme.secondary_foreground),

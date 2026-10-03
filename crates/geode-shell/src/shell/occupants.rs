@@ -343,6 +343,18 @@ impl ShellView {
             // Announce initial visibility, including for occupants in hidden docks
             // or inactive workspaces that the later visibility diff cannot see.
             occupant.content.set_visible(active.contains(id), cx);
+            // Every occupant gets its close button's handle once, at
+            // creation: a replacement under the same id is a new occupant
+            // and passes through here again.
+            let close = {
+                let weak = cx.entity().downgrade();
+                let tile = *id;
+                crate::module::CloseHandle::new(move |window, cx| {
+                    let _ =
+                        weak.update(cx, |view, cx| view.close_tile_by_pointer(tile, window, cx));
+                })
+            };
+            occupant.content.set_close(close, cx);
             self.occupants.insert(*id, occupant);
             if from_add {
                 fresh.push(*id);
@@ -526,6 +538,30 @@ impl ShellView {
     /// in the active workspace. `false` when the workspace has no such tile.
     /// Only a change of focused tile dirties the session: the focus methods
     /// report success even when the requested tile was already focused.
+    /// Close `tile` for a press on its own ×: the same gates and
+    /// bookkeeping as `workspace::close_tile`, aimed at the pressed tile
+    /// rather than the focused one. A tile already gone is a no-op.
+    pub(super) fn close_tile_by_pointer(
+        &mut self,
+        tile: TileId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.leave_command_line(window, cx);
+        self.begin_action(crate::module::CLOSE_ACTION);
+        tracing::debug!(target: "geode::shell", tile = tile.0, "close by pointer");
+        if let Some(refusal) = self.action_refusal(crate::module::CLOSE_ACTION) {
+            self.notice = Some(refusal.into());
+            cx.notify();
+            return;
+        }
+        if self.services.workspaces.active_mut().close_tile_id(tile) {
+            self.session_dirty = true;
+            self.note_keyboard_focus_move(window, cx);
+        }
+        cx.notify();
+    }
+
     fn focus_pressed_tile(&mut self, tile: TileId) -> bool {
         let ws = self.services.workspaces.active_mut();
         let was_focused = ws.focused_tile();
