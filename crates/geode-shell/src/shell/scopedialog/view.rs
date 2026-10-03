@@ -23,10 +23,13 @@ use super::rows::{
 };
 use super::state::{After, Layer, Layers, Step};
 use crate::frame::FrameViewMut;
+use crate::shell::control::{self, PointerStates as _};
 use crate::shell::{ShellView, dialog, scale};
 
 const WIDTH: f32 = 560.0;
 const ROW_HEIGHT: f32 = 28.0;
+/// The glyph column: wide enough for one glyph, so labels line up by kind.
+const GLYPH_WIDTH: f32 = 16.0;
 
 /// Section headers as painted: the copy `Dimensions`, `Expressions`, `Text`
 /// in capitals.
@@ -41,11 +44,20 @@ pub(crate) const NAME_ONLY_TERMS: &str = "only an unnamed term can be named";
 /// Refusal when `i` is pressed off a named reference.
 pub(crate) const INLINE_ONLY_NAMED: &str = "only a named reference can be inlined";
 
+/// Each row's leading glyph, by kind, in its own fixed-width column.
+const DIMENSION_GLYPH: &str = "▦";
+const TERM_GLYPH: &str = "ƒ";
+const NAMED_GLYPH: &str = "≡";
+const TEXT_GLYPH: &str = "⌕";
+
 /// One row's painted strings, prepared when the rows derive so `build`
 /// only clones them instead of formatting on every frame.
 pub(crate) struct RowDisplay {
+    pub glyph: &'static str,
     pub label: SharedString,
     pub detail: SharedString,
+    /// A dimension's selected value count; `None` on every other row.
+    pub count: Option<SharedString>,
     /// A named reference that does not resolve: painted in the danger color.
     pub broken: bool,
 }
@@ -54,13 +66,17 @@ impl RowDisplay {
     fn of(row: &Row) -> Self {
         match &row.kind {
             RowKind::Dimension { column, values } => RowDisplay {
+                glyph: DIMENSION_GLYPH,
                 label: column.clone().into(),
                 detail: values.join(", ").into(),
+                count: Some(values.len().to_string().into()),
                 broken: false,
             },
             RowKind::Term { text, .. } => RowDisplay {
+                glyph: TERM_GLYPH,
                 label: text.clone().into(),
                 detail: TERM_DETAIL.into(),
+                count: None,
                 broken: false,
             },
             RowKind::Named { name, state } => {
@@ -70,14 +86,18 @@ impl RowDisplay {
                     NamedState::Missing => (format!("'{name}' is not defined"), true),
                 };
                 RowDisplay {
-                    label: format!("≡ {name}").into(),
+                    glyph: NAMED_GLYPH,
+                    label: name.clone().into(),
                     detail: detail.into(),
+                    count: None,
                     broken,
                 }
             }
             RowKind::Text { text } => RowDisplay {
+                glyph: TEXT_GLYPH,
                 label: format!("\"{text}\"").into(),
                 detail: TEXT_DETAIL.into(),
+                count: None,
                 broken: false,
             },
         }
@@ -461,6 +481,35 @@ fn enter_text_step(shell: &mut ShellView, window: &mut Window, cx: &mut Context<
     cx.notify();
 }
 
+/// The pointer route to `p`, `x` and `t`: a section header's `add` control
+/// or its empty row opens the step that adds to that section, the same door
+/// its key opens. Ignored under the text step, where these are a preview of
+/// the rows rather than controls: a step opened there would cover the typing.
+fn add_from_pointer(
+    shell: &mut ShellView,
+    section: Section,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if shell.scope_dialog.as_ref().is_none_or(in_text_step) {
+        return;
+    }
+    if let Some(state) = shell.scope_dialog.as_mut() {
+        state.error = None;
+    }
+    match section {
+        Section::Dimensions => crate::shell::picker::open(shell, None, window, cx),
+        Section::Expressions => crate::shell::scope_expr_view::open(
+            shell,
+            crate::shell::scope_expr_view::Mode::Add,
+            window,
+            cx,
+        ),
+        Section::Text => enter_text_step(shell, window, cx),
+    }
+    cx.notify();
+}
+
 /// `mod+s`: open the cursor's term in the expression dialog straight into
 /// its name entry. Off a term it refuses, so a dimension or reference is
 /// never handed to a dialog that would name some other term.
@@ -516,13 +565,53 @@ fn title_extra(shell: &ShellView, cx: &mut App) -> AnyElement {
         .into_any_element()
 }
 
-fn section_name(section: Section) -> (&'static str, &'static str) {
+/// A section's painted names, all static so `build` formats nothing: its
+/// header, the slug its row selectors carry, and its `add` control's id,
+/// tooltip title and key.
+struct SectionNames {
+    title: &'static str,
+    slug: &'static str,
+    add_id: &'static str,
+    add_tip: &'static str,
+    add_tip_title: &'static str,
+    add_key: &'static str,
+    empty_id: &'static str,
+}
+
+fn section_names(section: Section) -> SectionNames {
     match section {
-        Section::Dimensions => (DIMENSIONS_TITLE, "dimensions"),
-        Section::Expressions => (EXPRESSIONS_TITLE, "expressions"),
-        Section::Text => (TEXT_TITLE, "text"),
+        Section::Dimensions => SectionNames {
+            title: DIMENSIONS_TITLE,
+            slug: "dimensions",
+            add_id: "scope-dialog-add-dimensions",
+            add_tip: "tip-scope-dialog-add-dimensions",
+            add_tip_title: "Add a dimension",
+            add_key: "p",
+            empty_id: "scope-dialog-empty-dimensions",
+        },
+        Section::Expressions => SectionNames {
+            title: EXPRESSIONS_TITLE,
+            slug: "expressions",
+            add_id: "scope-dialog-add-expressions",
+            add_tip: "tip-scope-dialog-add-expressions",
+            add_tip_title: "Add an expression",
+            add_key: "x",
+            empty_id: "scope-dialog-empty-expressions",
+        },
+        Section::Text => SectionNames {
+            title: TEXT_TITLE,
+            slug: "text",
+            add_id: "scope-dialog-add-text",
+            add_tip: "tip-scope-dialog-add-text",
+            add_tip_title: "Set the text filter",
+            add_key: "t",
+            empty_id: "scope-dialog-empty-text",
+        },
     }
 }
+
+/// The `add` control's copy, painted at a section header's right.
+const ADD_LABEL: &str = "add";
 
 fn build(
     shell: &ShellView,
@@ -558,29 +647,64 @@ fn build(
                 .child(CONTRADICTION),
         );
     }
+    // The add controls and empty rows are muted labels on the modal panel.
+    let add_states = control::paint(theme, control::Rest::Bare, theme.popover, muted);
     for section in [Section::Dimensions, Section::Expressions, Section::Text] {
-        let (title, slug) = section_name(section);
+        let names = section_names(section);
+        let slug = names.slug;
+        let add = entity.clone();
         list = list.child(
-            div()
+            h_flex()
                 .flex_shrink_0()
                 .px_2()
                 .pt_2()
                 .pb_0p5()
+                .justify_between()
+                .items_center()
                 .text_xs()
                 .text_color(muted)
                 .debug_selector(move || format!("scope-dialog-section-{slug}"))
-                .child(title),
+                .child(names.title)
+                .child(
+                    div()
+                        .id(names.add_id)
+                        .px_1()
+                        .rounded(radius)
+                        .text_color(muted)
+                        .debug_selector(move || names.add_id.to_string())
+                        .pointer_states(add_states)
+                        .tooltip(crate::tips::tip_key(
+                            names.add_tip,
+                            names.add_tip_title,
+                            names.add_key,
+                        ))
+                        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                            add.update(cx, |shell, cx| {
+                                add_from_pointer(shell, section, window, cx)
+                            });
+                        })
+                        .child(ADD_LABEL),
+                ),
         );
         if state.rows.section_is_empty(section) {
+            // No cursor rests here, so a single press opens the step that
+            // fills the section.
+            let add = entity.clone();
             list = list.child(
                 div()
+                    .id(names.empty_id)
                     .px_2()
                     .h(scale::design(ROW_HEIGHT))
                     .flex()
                     .items_center()
                     .text_sm()
+                    .rounded(radius)
                     .text_color(muted)
-                    .debug_selector(move || format!("scope-dialog-empty-{slug}"))
+                    .debug_selector(move || names.empty_id.to_string())
+                    .pointer_states(add_states)
+                    .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                        add.update(cx, |shell, cx| add_from_pointer(shell, section, window, cx));
+                    })
                     .child(empty_hint(section)),
             );
             continue;
@@ -604,10 +728,30 @@ fn build(
             let mut el = crate::shell::listrow::paint_row(el, paint, highlighted);
             let shown = &state.display[i];
             let (label, detail) = (shown.label.clone(), shown.detail.clone());
+            el = el.child(
+                div()
+                    .w(scale::design(GLYPH_WIDTH))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .text_color(if shown.broken { danger } else { muted })
+                    .debug_selector(move || format!("scope-dialog-glyph-{i}"))
+                    .child(shown.glyph),
+            );
             el = match &row.kind {
                 RowKind::Dimension { .. } => el
                     .child(div().w(scale::design(120.0)).text_color(muted).child(label))
-                    .child(div().flex_1().truncate().child(detail)),
+                    .child(div().flex_1().truncate().child(detail))
+                    .when_some(shown.count.clone(), |el, count| {
+                        el.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(muted)
+                                .debug_selector(move || format!("scope-dialog-count-{i}"))
+                                .child(count),
+                        )
+                    }),
                 RowKind::Term { .. } => el
                     .child(div().flex_1().truncate().font_family(mono).child(label))
                     .child(div().text_xs().text_color(muted).child(detail)),

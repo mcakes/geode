@@ -501,7 +501,7 @@ impl Render for ShellView {
                         parked.state.domain == objectdialog::Domain::Groupings
                     })
                 });
-        // The load glyph holds its pressed fill while the scope picker is up.
+        // The load glyph holds its pressed fill while the saved-scope chooser is up.
         let scope_open = matches!(
             self.choice_dialog.as_ref().map(|d| &d.target),
             Some(choicedialog::Target::Scope { .. })

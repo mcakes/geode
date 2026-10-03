@@ -401,12 +401,21 @@ top does nothing; opening it while it sits lower in the dialog stack is
 refused with a status notice.
 
 Current paints three sections in fixed order, each under its header:
-`Dimensions` (one row per dimension selection: the column, then its values),
-`Expressions` (one row per named reference, `≡ name` with its definition's
-text, then one row per top-level `and` term of the expression, marked
-`unnamed`), and `Text` (the text filter in quotes, `textual columns`). An
-empty section paints one muted row naming the key that fills it:
-`no dimensions · p`, `no expressions · x`, `no text · t`. A reference the
+`Dimensions` (one row per dimension selection: the column, its values, then
+how many values are selected), `Expressions` (one row per top-level `and`
+term of the expression, marked `unnamed`, then one row per named reference,
+its name with its definition's text), and `Text` (the text filter in quotes,
+`textual columns`). Every row leads with its kind's glyph in a fixed-width
+muted column: `▦` dimension, `ƒ` term, `≡` reference, `⌕` text. An empty
+section paints one muted row naming the key that fills it:
+`no dimensions · p`, `no expressions · x`, `no text · t`.
+
+Each section header carries an `add` control at its right, the pointer route
+to the key that fills it (its tooltip names the key): Dimensions opens the
+picker's Columns list as `p` does, Expressions the expression dialog's Add
+mode as `x` does, Text the text step as `t` does. A single press on an empty
+section's muted row opens the same step, since that row has no cursor to
+move. While the text step is open, both ignore the pointer. A reference the
 frame cannot resolve paints in the danger tone with its reason, or with
 `'<name>' is not defined` for a missing name. When the scope records a
 contradiction (`Scope::impossible`), the line `nothing can match —
@@ -428,7 +437,7 @@ gone it keeps its index, clamped to the last row.
 
 | Key | Effect |
 |---|---|
-| `j` / `k`, arrows | Move the cursor, wrapping |
+| `j` / `k`, `up` / `down` | Move the cursor, wrapping |
 | `enter`, `e`, a row double-click | Edit the cursor's row: a dimension in the picker on its column, a term in the expression dialog's Term mode, a reference in the Expressions dialog's edit stage, the text in the text step |
 | `d` | Remove the cursor's row in one undoable edit |
 | `shift+d` | Clear the whole scope in one undoable edit |

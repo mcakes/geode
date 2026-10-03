@@ -857,3 +857,133 @@ fn hovering_the_plus_chip_names_the_scope_chord(cx: &mut gpui::TestAppContext) {
         "the tip names frame::scope's chord"
     );
 }
+
+fn click_selector(vcx: &mut gpui::VisualTestContext, selector: &'static str) {
+    let target = vcx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} paints"));
+    vcx.simulate_click(target.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    draw(vcx);
+}
+
+/// Each section header's `add` control is the pointer route to the key that
+/// fills the section; a real click opens the same step the key does.
+#[gpui::test]
+fn the_dimensions_add_control_opens_the_picker(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    click_selector(&mut vcx, "scope-dialog-add-dimensions");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Picker)
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().map(|p| p.stage.clone())),
+        Some(crate::shell::picker::Stage::Columns),
+        "add opens on the columns, not the cursor's column"
+    );
+}
+
+#[gpui::test]
+fn the_expressions_add_control_opens_the_expression_step(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    click_selector(&mut vcx, "scope-dialog-add-expressions");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::ScopeExpr)
+    );
+    vcx.simulate_input("npv > 1");
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(
+        lane_scope(&shell, &vcx).expression,
+        Some(parse_expr("npv > 0 and delta < 5 and npv > 1").unwrap()),
+        "the step adds a term rather than editing one"
+    );
+}
+
+#[gpui::test]
+fn the_text_add_control_opens_the_text_step(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, Scope::default());
+    click_selector(&mut vcx, "scope-dialog-add-text");
+    assert!(vcx.debug_bounds("scope-dialog-text-field").is_some());
+    vcx.simulate_input("spx");
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(lane_scope(&shell, &vcx).text.as_deref(), Some("spx"));
+}
+
+/// An empty section's muted row has no cursor to move: one click opens the
+/// step that fills it.
+#[gpui::test]
+fn an_empty_section_row_click_opens_its_step(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, Scope::default());
+    click_selector(&mut vcx, "scope-dialog-empty-expressions");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::ScopeExpr)
+    );
+}
+
+/// Under the text step the add controls and empty rows are not controls: a
+/// click would open a step over the typing.
+#[gpui::test]
+fn add_controls_under_the_text_step_ignore_the_pointer(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, Scope::default());
+    vcx.simulate_keystrokes("t");
+    vcx.simulate_input("x");
+    draw(&mut vcx);
+    click_selector(&mut vcx, "scope-dialog-add-dimensions");
+    click_selector(&mut vcx, "scope-dialog-empty-expressions");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+    let typed = shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(typed, "x", "the typing survives");
+}
+
+/// Hovering an add control names the key it stands for.
+#[gpui::test]
+fn hovering_an_add_control_names_its_key(cx: &mut gpui::TestAppContext) {
+    let (_shell, mut vcx) = open_on(cx, Scope::default());
+    let add = vcx
+        .debug_bounds("scope-dialog-add-expressions")
+        .expect("the add control paints");
+    vcx.simulate_mouse_move(
+        add.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("tip-scope-dialog-add-expressions-chord-x")
+            .is_some()
+    );
+}
+
+/// Each row leads with its kind's glyph, and a dimension row ends with its
+/// value count: both prepared when the rows derive, then painted.
+#[gpui::test]
+fn rows_paint_their_glyph_and_a_dimension_its_count(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    let (glyphs, counts) = shell.read_with(&vcx, |s, _| {
+        let d = &s.scope_dialog.as_ref().unwrap().display;
+        (
+            d.iter().map(|r| r.glyph).collect::<Vec<_>>(),
+            d.iter()
+                .map(|r| r.count.as_ref().map(|c| c.to_string()))
+                .collect::<Vec<_>>(),
+        )
+    });
+    assert_eq!(glyphs, ["▦", "ƒ", "ƒ", "≡", "⌕"]);
+    assert_eq!(counts, [Some("2".to_string()), None, None, None, None]);
+    for i in 0..5 {
+        assert!(
+            bounds(&mut vcx, format!("scope-dialog-glyph-{i}")).is_some(),
+            "row {i}'s glyph paints"
+        );
+    }
+    assert!(vcx.debug_bounds("scope-dialog-count-0").is_some());
+    assert!(vcx.debug_bounds("scope-dialog-count-1").is_none());
+}

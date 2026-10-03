@@ -717,8 +717,9 @@ is `o` in the Scope dialog. The save glyph, when the scope is savable, comes
 after it, so its appearance never moves the load glyph.
 
 The `+` verb opens the [Scope dialog](input-and-dialogs.md#scope-dialog)
-(`frame::scope`, `mod+o`), where every ingredient is added, and holds its
-pressed fill while that dialog is open; its tooltip names `frame::scope`'s
+(`frame::scope`, `mod+o`), where every ingredient is added — by key, or by
+pointer through each section header's `add` control or an empty section's
+row — and holds its pressed fill while that dialog is open; its tooltip names `frame::scope`'s
 chord. It paints on an empty scope too, since adding a filter is how a scope
 starts. Opened while the scope text field held focus, the dialog hands focus
 back to the field when it closes.

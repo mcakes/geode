@@ -18099,7 +18099,7 @@ run_mutation "grouping dialog: any object dialog presses the readout" \
   geode-shell \
   another_object_dialog_leaves_the_readout_at_rest
 
-# ---- Scope picker: frame::scope, mod-o and the toolbar load glyph ----
+# ---- Saved-scope chooser: the load glyph and `o` in the Scope dialog ----
 
 # open_shell_dialog_with_key prevents the shell root's bubble-phase focus
 # grab from taking focus back after an opening mouse-down. Title-bar chips
@@ -18326,6 +18326,65 @@ run_mutation "scope dialog: t opens the text step" \
   geode-shell \
   t_types_the_text_filter_and_returns
 
+# The Dimensions header's add control is the pointer route to `p`.
+run_mutation "scope dialog: the dimensions add control opens the picker" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        Section::Dimensions => crate::shell::picker::open(shell, None, window, cx),' \
+  '        Section::Dimensions => {}' \
+  geode-shell \
+  the_dimensions_add_control_opens_the_picker
+
+# The Expressions header's add control is the pointer route to `x`.
+run_mutation "scope dialog: the expressions add control opens the expression step" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        Section::Expressions => crate::shell::scope_expr_view::open(
+            shell,
+            crate::shell::scope_expr_view::Mode::Add,
+            window,
+            cx,
+        ),' \
+  '        Section::Expressions => {}' \
+  geode-shell \
+  the_expressions_add_control_opens_the_expression_step
+
+# The Text header's add control is the pointer route to `t`.
+run_mutation "scope dialog: the text add control opens the text step" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        Section::Text => enter_text_step(shell, window, cx),' \
+  '        Section::Text => {}' \
+  geode-shell \
+  the_text_add_control_opens_the_text_step
+
+# An empty section's row has no cursor to move: one press opens its step.
+run_mutation "scope dialog: an empty row click opens its step" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '                        add.update(cx, |shell, cx| add_from_pointer(shell, section, window, cx));' \
+  '                        let _ = (&add, section, window, cx);' \
+  geode-shell \
+  an_empty_section_row_click_opens_its_step
+
+# Add controls under the text step are a preview, not controls: a step
+# opened there would cover the typing.
+run_mutation "scope dialog: add controls under the text step ignore presses" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    cx: &mut Context<ShellView>,
+) {
+    if shell.scope_dialog.as_ref().is_none_or(in_text_step) {
+        return;
+    }' \
+  '    cx: &mut Context<ShellView>,
+) {' \
+  geode-shell \
+  add_controls_under_the_text_step_ignore_the_pointer
+
+# A dimension row's value count is prepared when the rows derive.
+run_mutation "scope dialog: a dimension row prepares its count" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '                count: Some(values.len().to_string().into()),' \
+  '                count: None,' \
+  geode-shell \
+  rows_paint_their_glyph_and_a_dimension_its_count
+
 # Inside the text step, Current's verbs are text for the field.
 run_mutation "scope dialog: the text step owns its keys" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
@@ -18351,7 +18410,7 @@ run_mutation "scope dialog: escape leaves the text step untouched" \
   geode-shell \
   escape_leaves_the_text_step_without_a_change
 
-# The toolbar's load glyph opens the saved-scope picker.
+# The toolbar's load glyph opens the saved-scope chooser.
 run_mutation "scope-picker: the load glyph click opens the picker" \
   crates/geode-shell/src/shell/render.rs \
   '                choicedialog::open_scopes(view, window, cx);' \

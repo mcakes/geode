@@ -10,7 +10,7 @@
 //! The as-of chip alone uses warning colors. Grouping opens the Grouping
 //! dialog and stays visibly pressed while it is open. Filled selection chips contain
 //! a separate, occluding close target; add/load/save actions are bare
-//! glyphs. The load glyph opens the scope picker and, like the grouping
+//! glyphs. The load glyph opens the saved-scope chooser and, like the grouping
 //! readout, stays pressed while it is open.
 //!
 //! Scope chips show dimensions, named expressions, top-level expression
@@ -188,7 +188,7 @@ fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
 /// benefit. `grouping_open` is whether the Grouping dialog is up right
 /// now — the readout paints its pressed fill for as long as it is (a
 /// control that owns a popup stays visibly pressed until it closes);
-/// `scope_open` is the same for the scope picker and the load glyph, which
+/// `scope_open` is the same for the saved-scope chooser and the load glyph, which
 /// `on_load` opens.
 /// `scope_dialog_open` is whether the Scope dialog is up; the `+` that
 /// opens it holds its pressed fill for as long as it is. `on_term_open` and
@@ -511,9 +511,9 @@ pub fn toolbar(
     );
     // The load glyph opens the saved-scope chooser. Always
     // painted: loading a saved scope is as useful on an empty scope as on
-    // a full one, and the picker says how to save one when none exist. It
+    // a full one, and the chooser says how to save one when none exist. It
     // sits before the conditional save glyph so save appearing never moves
-    // it, and it holds its pressed fill while the picker is up, as the
+    // it, and it holds its pressed fill while the chooser is up, as the
     // grouping readout does. `FolderOpen` is in the default icon bundle.
     verbs = verbs.child(
         verb(
