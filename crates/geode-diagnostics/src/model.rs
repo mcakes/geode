@@ -825,10 +825,11 @@ pub fn reference_answer<'a>(
 /// time of day alone would misdate.
 fn reference_summary(t: &ReferenceTable, clock: Clock) -> String {
     format!(
-        "gen {} · {} · {} rows",
+        "gen {} · {} · {} row{}",
         t.gen_id,
         clock.full(t.source_time),
-        t.rows.len()
+        t.rows.len(),
+        if t.rows.len() == 1 { "" } else { "s" }
     )
 }
 

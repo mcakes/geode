@@ -325,8 +325,16 @@ fn counts_come_from_the_answer_the_table_shows(cx: &mut gpui::TestAppContext) {
     assert_eq!(badge(&h, &vcx), 0, "no badge while Loading");
 
     answer_at(&h, &mut vcx, "underlyings", at, &["SPX"]);
-    assert_eq!(summary(&h, &vcx), "1 of 1 rows");
+    assert_eq!(summary(&h, &vcx), "1 of 1 row", "singular for one row");
+    assert!(
+        status(&h, &vcx).ends_with(" · 1 row"),
+        "{}",
+        status(&h, &vcx)
+    );
     assert_eq!(badge(&h, &vcx), 1);
+    type_filter(&h, &mut vcx, "nothing");
+    assert_eq!(empty_title(&h, &vcx), "Filter matches nothing (1 row)");
+    assert!(key(&h, &mut vcx, "alt+backspace"));
 
     // Another dataset's answer is not shown or counted under this one.
     assert!(key(&h, &mut vcx, "tab"));

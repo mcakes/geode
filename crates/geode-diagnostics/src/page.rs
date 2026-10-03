@@ -706,7 +706,12 @@ impl DiagnosticsPage {
     fn reference_empty_text(&self, ix: usize) -> (SharedString, SharedString) {
         if !self.filters[ix].is_empty() && self.reference_total > 0 {
             return (
-                format!("Filter matches nothing ({} rows)", self.reference_total).into(),
+                format!(
+                    "Filter matches nothing ({} row{})",
+                    self.reference_total,
+                    if self.reference_total == 1 { "" } else { "s" }
+                )
+                .into(),
                 "Try a broader filter or clear the search field.".into(),
             );
         }
@@ -851,7 +856,12 @@ impl DiagnosticsPage {
             ),
             // The total is the answer the table was built from, so the
             // two never disagree, even over a stale as-of's rows.
-            Section::Reference => format!("{} of {} rows", rows.len(), self.reference_total),
+            Section::Reference => format!(
+                "{} of {} row{}",
+                rows.len(),
+                self.reference_total,
+                if self.reference_total == 1 { "" } else { "s" }
+            ),
             Section::Config if self.showing_issues() => format!(
                 "{} of {} {} issue{}",
                 self.diag_prepared.rows.len(),
