@@ -37,6 +37,7 @@ use gpui::Context;
 use super::{Destination, Domain, Stage};
 use crate::config_write;
 use crate::shell::ShellView;
+use crate::tiling::TileId;
 
 /// Quiet period after the latest field edit before merging, applying, and writing the
 /// pending batch. The draft itself already shows each change. Restarting this timer
@@ -433,23 +434,85 @@ pub(crate) fn queue_object(
 /// one reload. Refuses, with nothing queued, when there is no writable user
 /// directory. Later edits to the same object overwrite earlier ones: each
 /// carries the whole object.
+///
+/// Setting an object a lower layer defines forks it as a dialog edit does:
+/// the inherited value is recorded in the overrides sidecar in the same
+/// batch, so drift and revert see it. Returns each fork's announcement with
+/// the tile that asked; a fork from an edit with no origin is recorded but
+/// announced to no one.
 pub(crate) fn queue_edits(
     shell: &mut ShellView,
     edits: Vec<crate::frame::ConfigEdit>,
     cx: &mut Context<ShellView>,
-) -> Result<(), String> {
+) -> Result<Vec<(TileId, String)>, String> {
     if edits.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let Some(user_dir) = shell.user_dir.clone() else {
         return Err("no writable user config directory — nothing was changed".to_string());
     };
-    let edits = edits
-        .into_iter()
-        .map(|e| ((e.doc, e.object), e.value))
-        .collect::<BTreeMap<_, _>>();
-    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, None, cx);
-    Ok(())
+    // Pending-aware: an object forked a moment ago is already the user's,
+    // and forking it again would overwrite its recorded baseline.
+    let mut config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+    let mut batch: BTreeMap<(&'static str, String), ObjectEdit> = BTreeMap::new();
+    let mut notices = Vec::new();
+    for e in edits {
+        if let Some(value) = &e.value
+            && let Some(notice) = fork_record(&config, e.doc, &e.object, &mut batch)
+        {
+            if let Some(tile) = e.origin {
+                notices.push((tile, notice));
+            }
+            // A later edit to the same object in this drain must find it
+            // the user's, or it would fork and announce a second time.
+            config = Config::from_docs(docs_with_object(
+                config.all_docs(),
+                &user_dir,
+                e.doc,
+                &e.object,
+                Some(value.clone()),
+            ));
+        }
+        batch.insert((e.doc, e.object), e.value);
+    }
+    queue_batch(shell, batch, user_dir, WRITE_DEBOUNCE, None, cx);
+    Ok(notices)
+}
+
+/// Record a user-layer write of `name` in `doc` as a fork when `config`'s
+/// winning copy comes from a lower layer: prune stale sidecar keys into
+/// `edits`, insert the shadowed copy's sidecar entry, and return the fork's
+/// announcement. `None`, touching nothing, when the user layer already wins
+/// or no layer defines the object — there is nothing to shadow.
+///
+/// The fresh entry is inserted after the prune so it wins over a stale twin
+/// of its own key: a fork's key can look stale before its definition reaches
+/// the user layer.
+fn fork_record(
+    config: &Config,
+    doc: &'static str,
+    name: &str,
+    edits: &mut BTreeMap<(&'static str, String), ObjectEdit>,
+) -> Option<String> {
+    // The last layer defining the object wins, the merge's own rule.
+    let winner = config
+        .layered_docs(doc)
+        .iter()
+        .filter(|d| d.table.contains_key(name))
+        .map(|d| d.layer)
+        .next_back()?;
+    if winner == Layer::User {
+        return None;
+    }
+    let (layer, value) = super::shadow_of(config, doc, name)?;
+    for stale in super::stale_override_keys(config) {
+        edits.insert((super::OVERRIDES_DOC, stale), None);
+    }
+    edits.insert(
+        (super::OVERRIDES_DOC, super::override_key(doc, name)),
+        Some(super::override_entry(layer, name, &value)),
+    );
+    Some(fork_notice_of(config, doc, name))
 }
 
 /// Queue `chain` as slot `slot`'s user-layer definition, with zero delay,
@@ -472,25 +535,8 @@ pub(super) fn queue_slot_chain(
     // Pending-aware: a slot forked a moment ago is already the user's, and
     // forking it again would overwrite its recorded baseline.
     let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
-    let inherited = Domain::Groupings
-        .objects(&config)
-        .into_iter()
-        .find(|row| row.name == name)
-        .is_some_and(|row| row.layer.is_some_and(|layer| layer != Layer::User));
     let mut edits: BTreeMap<(&'static str, String), ObjectEdit> = BTreeMap::new();
-    let mut notice = None;
-    if inherited && let Some((layer, value)) = super::shadow_of(&config, doc, &name) {
-        // Stale sidecar keys are pruned before the fresh entry is inserted,
-        // so the fresh entry wins over a stale twin of the same key.
-        for stale in super::stale_override_keys(&config) {
-            edits.insert((super::OVERRIDES_DOC, stale), None);
-        }
-        edits.insert(
-            (super::OVERRIDES_DOC, super::override_key(doc, &name)),
-            Some(super::override_entry(layer, &name, &value)),
-        );
-        notice = Some(fork_notice_of(&config, doc, &name));
-    }
+    let notice = fork_record(&config, doc, &name, &mut edits);
     edits.insert(
         (doc, name),
         Some(toml::Value::Array(

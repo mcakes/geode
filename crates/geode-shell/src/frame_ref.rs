@@ -15,7 +15,7 @@
 
 use gpui::{App, AppContext, Context, Entity};
 
-use crate::frame::{Frame, FrameView, FrameViewMut};
+use crate::frame::{ConfigEdit, Frame, FrameView, FrameViewMut};
 use crate::tiling::{TileId, WorkspaceIx};
 
 #[derive(Clone)]
@@ -61,6 +61,20 @@ impl FrameRef {
 
     pub fn tile(&self) -> Option<TileId> {
         self.tile
+    }
+
+    /// Queue whole-object config edits from this handle's tile and wake the
+    /// shell's drain. The only way a module should write configuration: the
+    /// handle stamps the origin, so the tile hears of a fork or refusal
+    /// (`Frame::take_tile_notices`), and notifies, so no caller forgets to.
+    pub fn queue_config_edits(&self, mut edits: Vec<ConfigEdit>, cx: &mut App) {
+        for e in &mut edits {
+            e.origin = self.tile;
+        }
+        self.entity.update(cx, |f, cx| {
+            f.queue_config_edits(edits);
+            cx.notify();
+        });
     }
 
     pub fn read<'a>(&self, cx: &'a App) -> FrameView<'a> {
