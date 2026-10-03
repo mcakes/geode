@@ -663,9 +663,10 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
             let Some(state) = shell.object_dialog.as_mut() else {
                 return;
             };
-            // `build_edit` still paints the frozen row during confirmation, so guard
-            // the transition here as well as in keyboard routing.
-            if state.confirm.is_some() {
+            // `build_edit` still paints the frozen row during confirmation (and
+            // under the save prompt), so guard the transition here as well as in
+            // keyboard routing.
+            if state.confirm.is_some() || state.save.is_some() {
                 return;
             }
             state.enter_filter();
@@ -1111,6 +1112,9 @@ pub(crate) fn hint_rows(hints: &[Hint]) -> AnyElement {
         }
         let last = members.len().saturating_sub(1);
         for (i, hint) in members.into_iter().enumerate() {
+            if let Some(ks) = &hint.keystroke {
+                line = line.child(super::kbd::chip(ks));
+            }
             for (k, key) in hint.keys.iter().enumerate() {
                 if k == 1
                     && let Some(between) = hint.between

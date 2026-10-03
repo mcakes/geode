@@ -467,7 +467,7 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // Open the dimension picker at column selection. Per-column actions are
     // registered separately from the startup schema by register_pick_actions.
     action(reg, "frame::pick", "Pick a dimension…", "Frame");
-    // The grouping picker lists filled slots and the view default with typeahead.
+    // The Grouping dialog: apply, edit, type an ad hoc chain, save to a slot.
     action(reg, "frame::grouping", "Pick a grouping…", "Frame");
     // The scope picker lists the frame's live saved scopes with typeahead;
     // a pick loads one undoably, like the `scope::<name>` actions.

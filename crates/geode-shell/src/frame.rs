@@ -648,6 +648,13 @@ impl Frame {
                 "slot must be 1–9 and the grouping non-empty (got {slot})"
             ));
         }
+        self.bump_lanes_on_slot(slot);
+        self.pending_persist = Some((slot, persisted));
+        Ok(())
+    }
+
+    /// Bump grouping in the lanes where `slot` is the choice.
+    fn bump_lanes_on_slot(&mut self, slot: u8) {
         let Frame {
             shared,
             pinned,
@@ -659,8 +666,32 @@ impl Frame {
                 lane.grouping_gen = fresh(generation);
             }
         }
-        self.pending_persist = Some((slot, persisted));
-        Ok(())
+    }
+
+    /// Hold `grouping` in slot 1–9 in memory, ahead of the config write that
+    /// makes it durable. A slot write reaches the frame only when its batch
+    /// is promoted, and `set_active_slot` refuses a slot the frame lacks, so
+    /// a dialog that defines and activates a slot in one keystroke stages it
+    /// here first. The promotion's reload then rebuilds equal slots and
+    /// changes nothing; a failed write reloads the earlier documents, which
+    /// removes the slot again. Queues no write of its own. `false` for a
+    /// slot outside 1–9 or an empty chain.
+    ///
+    /// A changed chain bumps config as `replace_slots` does, besides the
+    /// grouping of lanes on that slot: a tile pinned to the slot follows
+    /// config, not grouping, and the promotion's reload finds equal slots and
+    /// bumps nothing, so without this it would keep the old chain. An equal
+    /// chain bumps nothing.
+    pub fn stage_slot(&mut self, slot: u8, grouping: Vec<String>) -> bool {
+        if self.slots.get(slot) == Some(&grouping[..]) {
+            return true;
+        }
+        if !self.slots.set(slot, grouping) {
+            return false;
+        }
+        self.versions.config += 1;
+        self.bump_lanes_on_slot(slot);
+        true
     }
 
     /// Ask the shell to open the link group chooser on `tile`. Moves no
@@ -1915,6 +1946,85 @@ mod tests {
         );
         assert!(f.save_slot(0, vec!["book".into()]).is_err());
         assert!(f.save_slot(3, Vec::new()).is_err());
+    }
+
+    #[test]
+    fn a_staged_slot_can_be_activated_at_once_and_queues_no_write() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        assert!(!f.shared_mut().set_active_slot(Some(6)), "slot 6 is empty");
+        assert!(f.stage_slot(6, chain(&["lhu"])));
+        assert!(f.shared_mut().set_active_slot(Some(6)));
+        assert_eq!(
+            f.shared().active_grouping(),
+            Some(chain(&["lhu"]).as_slice())
+        );
+        assert_eq!(
+            f.take_pending_persist(),
+            None,
+            "the dialog's writer persists the slot; a second writer would race it"
+        );
+    }
+
+    #[test]
+    fn staging_over_the_active_slot_regroups_that_lane_only() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_active_slot(Some(1));
+        f.pin(ws(2));
+        f.view_mut(ws(2)).set_active_slot(Some(2));
+        let shared = f.shared().versions();
+        let pinned = f.view(ws(2)).versions();
+        assert!(f.stage_slot(1, chain(&["lhu"])));
+        assert_ne!(f.shared().versions().grouping, shared.grouping);
+        assert_eq!(f.view(ws(2)).versions().grouping, pinned.grouping);
+    }
+
+    #[test]
+    fn staging_an_equal_chain_changes_nothing() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_active_slot(Some(1));
+        let v = f.shared().versions();
+        assert!(f.stage_slot(1, chain(&["book", "lhu"])));
+        assert_eq!(f.shared().versions(), v);
+        assert_eq!(f.config_version(), v.config);
+    }
+
+    #[test]
+    fn a_changed_staged_slot_moves_config_for_tiles_pinned_to_it() {
+        // No lane has slot 2 as its choice; a tile pinned to slot 2 follows
+        // config, so config is the only signal it gets.
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let v = f.shared().versions();
+        assert!(f.stage_slot(2, chain(&["lhu"])));
+        let after = f.shared().versions();
+        assert_ne!(after.config, v.config, "a slot-pinned tile must requery");
+        assert_eq!(after.grouping, v.grouping, "not the lane's choice");
+    }
+
+    #[test]
+    fn staging_refuses_an_empty_chain_and_a_slot_outside_one_to_nine() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let before = f.slots().clone();
+        let v = f.shared().versions();
+        assert!(!f.stage_slot(3, Vec::new()));
+        assert!(!f.stage_slot(0, chain(&["book"])));
+        assert!(!f.stage_slot(10, chain(&["book"])));
+        assert_eq!(f.slots(), &before);
+        assert_eq!(f.shared().versions(), v);
+    }
+
+    #[test]
+    fn a_reload_that_agrees_with_a_staged_slot_changes_nothing() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.stage_slot(6, chain(&["lhu"]));
+        f.shared_mut().set_active_slot(Some(6));
+        let v = f.shared().versions();
+        let mut reloaded = slots();
+        reloaded.set(6, chain(&["lhu"]));
+        assert!(
+            !f.replace_slots(reloaded),
+            "the write's own reload finds the frame already there"
+        );
+        assert_eq!(f.shared().versions(), v);
     }
 
     #[test]

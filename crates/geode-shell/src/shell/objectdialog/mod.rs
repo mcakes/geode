@@ -15,6 +15,7 @@ pub mod apply;
 mod colours;
 mod dataset_columns;
 mod expressions;
+pub mod grouping_list;
 mod groupings;
 pub mod render;
 mod schema;
@@ -220,6 +221,39 @@ impl Domain {
             Domain::Colors => "Colors",
             Domain::Expressions => "Expressions",
         }
+    }
+
+    /// The title the dialog opens under. Groupings reads "Grouping": the
+    /// dialog is where a grouping is chosen, not only where slots are kept.
+    /// `title()` stays plural because `object_word` and the empty-state copy
+    /// derive from it.
+    pub fn dialog_title(self) -> &'static str {
+        match self {
+            Domain::Groupings => "Grouping",
+            other => other.title(),
+        }
+    }
+
+    /// Whether the browse list applies a row to the frame instead of opening
+    /// it: `enter`, a click and the list's digits commit a choice, and `e`
+    /// opens the editor. Groupings alone today.
+    pub fn applies_from_browse(self) -> bool {
+        matches!(self, Domain::Groupings)
+    }
+
+    /// Rows that lead the browse list and are not configuration objects,
+    /// read from the lane the dialog targets. Empty for a domain whose rows
+    /// are the configuration alone.
+    pub fn lead_rows(self, frame: &crate::frame::FrameView<'_>) -> Vec<ObjectRow> {
+        match self {
+            Domain::Groupings => grouping_list::lead_rows(frame),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether `s` saves a row's value into the fixed roster.
+    pub fn saves_into_roster(self) -> bool {
+        matches!(self, Domain::Groupings)
     }
 
     /// The plural noun the browse crumb counts (`2 views`, `9 slots`,
@@ -3143,10 +3177,21 @@ pub struct ObjectDialogState {
     /// arrives at the same point one frame later, where the just-opened
     /// stage has painted a DIFFERENT row — without this flag it would
     /// open `i` on whatever field now sits under the pointer, a field
-    /// the trader never aimed at (on Groupings, slot 3's chooser puts a
-    /// row there whose click opens the chain field). With it, a
-    /// double-click on a door row is "open the stage" and nothing more.
+    /// the trader never aimed at (a Views column row, say). Groupings'
+    /// list applies on a click, except on an empty slot or an empty ad hoc
+    /// row, where `grouping_list::click` opens that row's chain field and
+    /// sets this flag: the field's completion rows paint where the list
+    /// was. Read by `on_edit_row_clicked` and `on_completion_clicked`.
+    /// With it, a double-click on a door row is "open the stage" and
+    /// nothing more.
     pub click_opened_stage: bool,
+    /// The open chain field was opened from the list (`enter` or a digit on
+    /// an empty slot), not from inside an edit stage. There, `enter`
+    /// applies the chain and closes the dialog and `escape` returns to the
+    /// list, where the stage's own field returns to the tick list. Cleared
+    /// by every stage transition, so a stage entered any other way never
+    /// inherits it.
+    pub chain_from_list: bool,
     /// The object being edited. `None` in [`Stage::Browse`], and the only
     /// state this dialog stores rather than derives — deliberately, since
     /// it is also what the edit stage paints; see [`Draft`].
@@ -3166,6 +3211,11 @@ pub struct ObjectDialogState {
     /// object (a named expression's saved scopes and the frame). Written beside the
     /// question and cleared with it by [`Self::disarm`].
     pub confirm_detail: Option<String>,
+    /// The pending "save to slot" question (Groupings): which chain, and the
+    /// slot awaiting a y/n because saving there replaces a user-owned chain.
+    /// Like `confirm`, it replaces the action bar and owns keys and pointer
+    /// until answered, and every stage transition drops it.
+    pub save: Option<grouping_list::SaveToSlot>,
     /// Source dataset captured from the selected browse row when naming starts. Clear
     /// it when naming ends; it seeds the new source's dataset choice.
     pub naming_dataset: Option<String>,
@@ -3181,11 +3231,13 @@ pub struct ObjectDialogState {
     /// field never shows values fetched under another scope. Read only while
     /// `expression_entry_open` holds.
     pub expr: Option<crate::exprcomplete::ExprCompletion>,
-    /// The browse rows derived from the config at `ShellView::config_revision`,
-    /// ranked for `query`. Render and every browse handler read this list; the
-    /// shell refreshes it. A parked state is refreshed when it is revealed. The
-    /// edit stage's rows are the draft's and still derive in render.
-    pub rows: crate::prepared::Prepared<u64, String, ObjectRow>,
+    /// The browse rows: the domain's leading rows, then its configuration
+    /// objects, ranked for `query`. Keyed by the config revision and, for a
+    /// domain with leading rows, the frame generation they were read at.
+    /// Render and every browse handler read this list; the shell refreshes
+    /// it. A parked state is refreshed when it is revealed. The edit stage's
+    /// rows are the draft's and still derive in render.
+    pub rows: crate::prepared::Prepared<(u64, u64), String, ObjectRow>,
 }
 
 /// The delete question's "Used by …" sentence for a named expression: `scopes` in
@@ -3228,10 +3280,12 @@ impl ObjectDialogState {
             mode: DialogMode::Normal,
             notice: None,
             click_opened_stage: false,
+            chain_from_list: false,
             draft: None,
             confirm: None,
             confirm_target: None,
             confirm_detail: None,
+            save: None,
             naming_dataset: None,
             naming_seed: NameSeed::Empty,
             values_tag: 0,
@@ -3240,20 +3294,30 @@ impl ObjectDialogState {
         }
     }
 
-    /// Re-key the browse rows. The key is the config revision alone: the domain
-    /// is fixed for this state's life, and `Domain::objects` reads nothing but the
-    /// config (summaries and prefixes come from each object's own table, the
-    /// roster is static). The query ranks; in naming it is the typed name, which
-    /// narrows the list as a filter does.
-    pub fn refresh_rows(&mut self, config: &Config, config_revision: u64) {
+    /// The key the prepared rows are current under. The frame generation
+    /// takes part only where the frame supplies rows; elsewhere it is zero,
+    /// so a scope edit behind a Views dialog rebuilds nothing.
+    pub fn rows_key(&self, config_revision: u64, frame_generation: u64) -> (u64, u64) {
+        let frame = if self.domain.applies_from_browse() {
+            frame_generation
+        } else {
+            0
+        };
+        (config_revision, frame)
+    }
+
+    /// Re-key the browse rows: `lead` first, then `Domain::objects`. The
+    /// query ranks; in naming it is the typed name, which narrows the list
+    /// as a filter does.
+    pub fn refresh_rows(&mut self, config: &Config, key: (u64, u64), lead: Vec<ObjectRow>) {
         let domain = self.domain;
         self.rows.refresh(
-            &config_revision,
+            &key,
             &self.query,
             || {
-                domain
-                    .objects(config)
-                    .into_iter()
+                lead.iter()
+                    .cloned()
+                    .chain(domain.objects(config))
                     .map(|row| {
                         let text = crate::prepared::RowText {
                             primary: row.display_name().into(),
@@ -3274,6 +3338,7 @@ impl ObjectDialogState {
         self.confirm = None;
         self.confirm_target = None;
         self.confirm_detail = None;
+        self.save = None;
     }
 
     /// Pure stage entry, called through `render::enter_edit_stage` so scroll reset,
@@ -3300,6 +3365,7 @@ impl ObjectDialogState {
         self.mode = DialogMode::Normal;
         self.selected = 0;
         self.notice = None;
+        self.chain_from_list = false;
         self.disarm();
     }
 
@@ -3319,6 +3385,7 @@ impl ObjectDialogState {
         self.mode = DialogMode::Normal;
         self.selected = 0;
         self.notice = None;
+        self.chain_from_list = false;
         self.disarm();
     }
 
@@ -3330,6 +3397,7 @@ impl ObjectDialogState {
         self.stage = Stage::Browse;
         self.query.clear();
         self.notice = None;
+        self.chain_from_list = false;
         self.disarm();
     }
 
@@ -3506,7 +3574,9 @@ impl ObjectDialogState {
     /// Returns `false` and changes nothing while a confirmation is pending, because the
     /// question owns input until answered, or when no parent stage exists.
     pub fn abandon_for_back(&mut self) -> bool {
-        if self.confirm.is_some() || !self.has_previous_stage() {
+        // A pending question (a confirm or the save prompt) refuses: the
+        // stage change would disarm it without an answer.
+        if self.confirm.is_some() || self.save.is_some() || !self.has_previous_stage() {
             return false;
         }
         self.notice = None;
@@ -6866,6 +6936,17 @@ mod tests {
         assert!(!state.abandon_for_back());
         assert_eq!(state.effective_query(), "np", "nothing was discarded");
         assert_eq!(state.confirm, Some(Confirm::Revert));
+
+        let mut state = tree_edit_state();
+        state.save = Some(grouping_list::SaveToSlot {
+            chain: vec!["book".to_string()],
+            ..Default::default()
+        });
+        assert!(
+            !state.abandon_for_back(),
+            "the save prompt is a question too"
+        );
+        assert!(state.save.is_some());
 
         let mut state = ObjectDialogState::new(Domain::Views);
         assert!(!state.abandon_for_back());

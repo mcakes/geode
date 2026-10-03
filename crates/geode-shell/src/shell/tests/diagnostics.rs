@@ -708,8 +708,12 @@ fn the_back_button_returns_log_levels_to_targets(cx: &mut gpui::TestAppContext) 
 /// Choice dialogs with one step never paint a Back button.
 #[gpui::test]
 fn one_step_choice_dialogs_have_no_back_button(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = dialog_test_shell(cx, "frame::grouping");
+    let (shell, mut vcx) = dialog_test_shell(cx, "tile::add");
     assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
+    assert!(
+        shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()),
+        "fixture: a one-step choice dialog is up"
+    );
     assert!(vcx.debug_bounds("shell-modal-back").is_none());
 }
 
