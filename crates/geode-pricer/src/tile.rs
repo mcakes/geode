@@ -1766,11 +1766,8 @@ impl PricerTile {
     /// overwrites a set currency. Answers whether anything filled; the
     /// caller rebuilds, reprices and saves.
     fn fill_blank(&mut self, rows: Vec<usize>, cx: &App) -> bool {
-        let mut filled = false;
-        for (r, c) in self.blank_lookups(rows, cx) {
-            filled |= self.sheet.fill_currency(r, c);
-        }
-        filled
+        let fills = self.blank_lookups(rows, cx);
+        self.sheet.fill_currencies(fills) > 0
     }
 
     /// Look up each blank line an underlying edit `moved` from its new

@@ -192,6 +192,38 @@ fn bench(c: &mut Criterion) {
         )
     });
 
+    // A reference refresh over a sheet whose every line is blank: one
+    // batch fills all of them, and the packages fold once at its end.
+    let blank = {
+        let mut s = sheet(1_000);
+        let rows: Vec<usize> = (0..s.len()).filter(|r| s.is_line(*r)).collect();
+        for r in rows {
+            s.apply(Edit::SetCurrency {
+                row: r,
+                currency: None,
+            })
+            .expect("blank");
+        }
+        s
+    };
+    let blank_rows = to_rows(&blank).expect("rows");
+    let fills: Vec<(usize, Currency)> = blank
+        .lines_needing_currency()
+        .map(|r| (r, Currency::USD))
+        .collect();
+    g.bench_function("fill_currencies_1000", |b| {
+        b.iter_batched(
+            || {
+                (
+                    from_rows("bench", &blank_rows).expect("loads"),
+                    fills.clone(),
+                )
+            },
+            |(mut s, fills)| black_box(s.fill_currencies(fills)),
+            BatchSize::SmallInput,
+        )
+    });
+
     let s = sheet(1_000);
     g.bench_function("to_rows_from_rows_1000", |b| {
         b.iter(|| {

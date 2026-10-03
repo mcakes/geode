@@ -4,7 +4,7 @@
 //!
 //! Row edits go through [`Sheet::apply`]. Result delivery, repricing ticks, and package
 //! folding update pricing state without changing row identity or requests. The one
-//! request change outside `apply` is `Sheet::fill_currency`, which gives a blank line
+//! request change outside `apply` is `Sheet::fill_currencies`, which gives blank lines
 //! a default payout currency without an undo step. Sheet name, view, and refresh policy
 //! are independent metadata.
 
@@ -138,6 +138,17 @@ pub struct Folded {
     pub result: Option<PriceResult>,
     pub state: LineState,
     pub priced_at: Option<DateTime<Utc>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Package folds on this thread, for tests that prove a batch folds once.
+#[cfg(test)]
+pub(crate) fn folds() -> usize {
+    FOLDS.with(|f| f.get())
 }
 
 #[derive(Debug)]
@@ -492,6 +503,8 @@ impl Sheet {
     /// Fold every package's result from all of its legs with
     /// [`Sheet::fold_legs`].
     pub fn fold_packages(&mut self) {
+        #[cfg(test)]
+        FOLDS.with(|f| f.set(f.get() + 1));
         for p in 0..self.len() {
             if !self.is_package(p) {
                 continue;
@@ -733,19 +746,34 @@ impl Sheet {
         self.currency[row] = currency;
     }
 
-    /// Give a blank line `currency` and reprice it; false, changing
-    /// nothing, on a package or a line that already has one, so a fill
-    /// never overwrites a currency the user chose. Not an undo step: the
-    /// fill supplies a default, and undoing past it would only leave the
-    /// line blank for the next fill.
+    /// [`Sheet::fill_currencies`] for one line: true when it filled.
+    #[cfg(test)]
     pub(crate) fn fill_currency(&mut self, row: usize, currency: Currency) -> bool {
-        if !self.is_line(row) || self.currency[row].is_some() {
-            return false;
+        self.fill_currencies([(row, currency)]) == 1
+    }
+
+    /// Give each blank line among `fills` its `currency` and reprice it,
+    /// answering how many filled; a package or a line that already has one
+    /// is skipped, so a fill never overwrites a currency the user chose.
+    /// Not an undo step: the fill supplies a default, and undoing past it
+    /// would only leave the line blank for the next fill. The packages fold
+    /// once after the whole batch, not per line: a fold walks every
+    /// package, so folding per fill made a reference refresh over many
+    /// blank lines quadratic in sheet size.
+    pub fn fill_currencies(&mut self, fills: impl IntoIterator<Item = (usize, Currency)>) -> usize {
+        let mut filled = 0;
+        for (row, currency) in fills {
+            if !self.is_line(row) || self.currency[row].is_some() {
+                continue;
+            }
+            self.currency[row] = Some(currency);
+            self.touch(row);
+            filled += 1;
         }
-        self.currency[row] = Some(currency);
-        self.touch(row);
-        self.fold_packages();
-        true
+        if filled > 0 {
+            self.fold_packages();
+        }
+        filled
     }
 
     /// Bump the revision and mark stale: the line's request changed.
@@ -1590,5 +1618,56 @@ pub(crate) mod tests {
         );
         assert!(!s.fill_currency(2, eur()), "a package carries no currency");
         assert_eq!(s.currency(2), None);
+    }
+
+    /// A batch of fills folds the packages once, however many lines it
+    /// fills, and leaves the sheet as filling each line alone would.
+    #[test]
+    fn fill_currencies_folds_once_per_batch() {
+        let blank_package = || {
+            let mut cs = callspread(1);
+            if let RowSpec::Package { legs, .. } = &mut cs {
+                for l in legs {
+                    l.currency = None;
+                }
+            }
+            cs
+        };
+        let build = || {
+            let mut s = Sheet::new("t");
+            push(
+                &mut s,
+                vec![
+                    line_in(spx(5000.0, OptionKind::Call), 1, None),
+                    blank_package(),
+                    line_in(spx(5100.0, OptionKind::Put), 2, None),
+                    line(spx(5200.0, OptionKind::Call), 1),
+                    blank_package(),
+                ],
+            );
+            s
+        };
+        let mut batch = build();
+        let mut single = build();
+        let fills: Vec<(usize, Currency)> =
+            batch.lines_needing_currency().map(|r| (r, eur())).collect();
+        assert_eq!(fills.len(), 6, "two lines and four legs are blank");
+        let before = folds();
+        assert_eq!(batch.fill_currencies(fills.clone()), 6);
+        assert_eq!(folds() - before, 1, "one fold for the whole batch");
+        for (r, c) in fills {
+            assert!(single.fill_currency(r, c));
+        }
+        for r in 0..batch.len() {
+            assert_eq!(batch.record(r), single.record(r), "row {r}");
+            assert_eq!(batch.state(r), single.state(r), "row {r}");
+        }
+        let before = folds();
+        assert_eq!(
+            batch.fill_currencies([(0, Currency::USD)]),
+            0,
+            "a set line keeps its own"
+        );
+        assert_eq!(folds(), before, "a batch that fills nothing folds nothing");
     }
 }

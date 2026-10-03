@@ -204,43 +204,43 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `Sheet::currency`), the one its request asks the pricer to report in. The
   shorthand names none, so a parsed line is blank until given one. A blank
   line has no request: it is not submitted or counted as pricing, and its
-  status reads `needs currency` ahead of its state; a package with a blank
-  leg fails its fold naming that leg (`<leg>: needs currency`). The
-  `currency` cell edits (`Edit::SetCurrency`, a request change, so it
-  reprices and undoes): exactly three letters in any case, stored upper
-  case; empty text clears; anything else is refused with `a currency is
-  three letters, e.g. USD`. A package cell maps codes onto its legs like any
-  aggregated input. `Sheet::fill_currency` gives a blank line a currency
-  without an undo step and never overwrites one; `lines_needing_currency`
-  lists the blank lines. The tile supplies defaults from the shell's
-  `ReferenceGlobal` through `PricerSettings::payout` (`reference_currency`):
-  `commit_entry` and `put` give each blank line or leg its own underlying's
-  currency in the inserted spec, so it is part of that undo entry (a put
-  keeps a yanked currency); an instrument edit that moves a blank line to
-  another underlying (`apply_edit`/`apply_edits`, a package's legs each)
-  re-looks it up as `Edit::SetCurrency` edits joined to that edit's undo
-  entry (`fill_moved`), so `u` restores the old underlying and the blank
+  status reads `needs currency` ahead of its state; a package with a blank leg
+  fails its fold naming that leg (`<leg>: needs currency`). The `currency`
+  cell edits (`Edit::SetCurrency`, a request change, so it reprices and
+  undoes): exactly three letters in any case, stored upper case; empty text
+  clears; anything else is refused with `a currency is three letters, e.g.
+  USD`. A package cell maps codes onto its legs like any aggregated input.
+  `Sheet::fill_currencies` gives blank lines a currency without an undo step,
+  never overwrites one, and folds the packages once per batch;
+  `lines_needing_currency` lists the blank lines. The tile supplies defaults
+  from the shell's `ReferenceGlobal` through `PricerSettings::payout`
+  (`reference_currency`): `commit_entry` and `put` give each blank line or leg
+  its own underlying's currency in the inserted spec, so it is part of that
+  undo entry (a put keeps a yanked currency); an instrument edit that moves a
+  blank line to another underlying (`apply_edit`/`apply_edits`, a package's
+  legs each) re-looks it up as `Edit::SetCurrency` edits joined to that edit's
+  undo entry (`fill_moved`), so `u` restores the old underlying and the blank
   together; and `fill_from_reference` fills every blank line on a reference
-  change (`observe_global`), a load (open or `loaded`) and a
-  `config_changed` whose payout source differs from the last one seen
-  (`payout_seen`). Those refresh fills go through `fill_currency`: no undo
-  step, never over a set currency, and the sheet rebuilds, reprices and
-  saves only when one landed. A reference cell is trimmed and upper-cased
-  before `Currency::parse`. A line whose currency is set keeps it across an
-  underlying edit. A result whose currency differs from the line's
-  fails the line (`priced in EUR, asked for USD`) and installs nothing; a
-  result that lands after a currency edit answers an older revision and is
-  dropped. Yank copies the currency. `pricer_sheets` stores it in
+  change (`observe_global`), a load (open or `loaded`) and a `config_changed`
+  whose payout source differs from the last one seen (`payout_seen`). Those
+  refresh fills are one `fill_currencies` batch: no undo step, one package
+  fold however many lines fill, never over a set currency, and the sheet
+  rebuilds, reprices and saves only when one landed. A reference cell is
+  trimmed and upper-cased before `Currency::parse`. A line whose currency is
+  set keeps it across an underlying edit. A result whose currency differs from
+  the line's fails the line (`priced in EUR, asked for USD`) and installs
+  nothing; a result that lands after a currency edit answers an older revision
+  and is dropped. Yank copies the currency. `pricer_sheets` stores it in
   `currency`, its last value column (`""` when blank; a value that is not a
   code loads blank), and a load fills a blank line from reference data like
   any other: the stored `""` cannot tell a cleared currency from one never
-  set, so a cleared currency does not survive a reopen.
-  `Sheet::shown_result` is the result cells, sort keys, filters and totals
-  read: a line still holding an answer in a currency other than its payout
-  currency (after a currency edit, or once cleared) reads `Currency::MIXED`,
-  so its local measures paint `—` and its `_usd` twins still read; a
-  fold over such a leg is mixed too. Totals count a blank line as failed,
-  and `status` sorts it as `needs currency`, as it paints.
+  set, so a cleared currency does not survive a reopen. `Sheet::shown_result`
+  is the result cells, sort keys, filters and totals read: a line still
+  holding an answer in a currency other than its payout currency (after a
+  currency edit, or once cleared) reads `Currency::MIXED`, so its local
+  measures paint `—` and its `_usd` twins still read; a fold over such a leg
+  is mixed too. Totals count a blank line as failed, and `status` sorts it as
+  `needs currency`, as it paints.
 - Package rows derive from their legs; they are not independent instruments.
   Their pricing timestamp is the oldest present leg-attempt timestamp,
   including failed attempts. The fold keeps the legs' currency when they

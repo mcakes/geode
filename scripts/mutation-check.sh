@@ -18761,9 +18761,20 @@ run_mutation "pricer tile: a reference refresh fills nothing" \
 # line the trader moved on purpose.
 run_mutation "pricer core: fill_currency overwrites a set currency" \
   crates/geode-pricer/src/core/sheet.rs \
-  '        if !self.is_line(row) || self.currency[row].is_some() {' \
-  '        if !self.is_line(row) {' \
+  '            if !self.is_line(row) || self.currency[row].is_some() {' \
+  '            if !self.is_line(row) {' \
   geode-pricer fill_currency_touches_only_blank_lines
+
+# A fold walks every package, so folding per filled line makes a reference
+# refresh over many blank lines quadratic in sheet size.
+run_mutation "pricer core: fill_currencies folds per filled line" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '            filled += 1;
+        }' \
+  '            filled += 1;
+            self.fold_packages();
+        }' \
+  geode-pricer fill_currencies_folds_once_per_batch
 
 # A line without a currency has nothing to ask for; requesting it in a
 # guessed one prices it in units the line never claimed.

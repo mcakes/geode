@@ -2682,3 +2682,10 @@ load 16 to 27, before / after: `set_query_66_items` 21.4 / 16.1 µs,
 `set_query_500_items` 158.8 / 111.9 µs, `set_query_2000_items` 646.0 /
 443.6 µs; `fuzzy_match_one` 1.40 / 1.42 µs (within noise: one short
 candidate gains nothing from the window).
+
+`cargo bench -p geode-pricer --bench core -- fill_currencies` (load 19 to
+38): `fill_currencies_1000` 17.4 µs, filling every line of the 1,000-entry
+sheet blank in one batch with one package fold at its end (setup, which
+reloads the blank sheet from rows, is excluded). The same batch folding
+after each filled line measured 13.7 ms: each fold walks every package and
+formats the needs-currency failure for each one with a blank leg.
