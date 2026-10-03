@@ -2184,6 +2184,8 @@ impl DataService {
             source_time: now,
             received_at: now,
             bytes: 0,
+            recovered: false,
+            topic: None,
         });
     }
 
@@ -3504,6 +3506,8 @@ mod tests {
             source_time: Utc::now(),
             received_at: Utc::now(),
             bytes: 0,
+            recovered: false,
+            topic: None,
         };
         svc.ingest.submit_document(doc(0));
         held_rx

@@ -562,6 +562,8 @@ impl Receiving {
             source_time: pending.source_time,
             received_at: pending.received,
             bytes: pending.bytes,
+            recovered: false,
+            topic: None,
         });
     }
 }

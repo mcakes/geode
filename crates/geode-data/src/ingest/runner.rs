@@ -166,6 +166,15 @@ pub struct DocumentJob {
     pub source_time: DateTime<Utc>,
     pub received_at: DateTime<Utc>,
     pub bytes: u64,
+    /// A reply to a recovery request: publish only if it differs from live.
+    /// An equal reply then spends no file ID or generation and reports
+    /// `Unchanged`, so a reconnect does not republish every topic it asked
+    /// for.
+    pub recovered: bool,
+    /// Set on a topic's first document per run, so the publish records it
+    /// in the same transaction. `None` on every other document keeps the
+    /// hot path free of the extra write.
+    pub topic: Option<String>,
 }
 
 /// Delete one local document's whole history (every generation, its summary
@@ -637,8 +646,8 @@ fn publish_one_document(
                     source_time,
                     received_at: job.received_at,
                     bytes: job.bytes,
-                    compare_live: false,
-                    topic: None,
+                    compare_live: job.recovered,
+                    topic: job.topic.as_deref(),
                 },
             )
             .map_err(|e| e.to_string())
@@ -2314,6 +2323,8 @@ mod tests {
             source_time: ts("2026-09-12T14:00:00Z"),
             received_at: ts("2026-09-12T14:00:00Z"),
             bytes: 10,
+            recovered: false,
+            topic: None,
         }
     }
 
@@ -2544,6 +2555,53 @@ mod tests {
         }
         handle.shutdown();
         let _ = dir;
+    }
+
+    /// A recovery reply equal to what is live publishes nothing and reports
+    /// `Unchanged` by its batch; one that differs publishes as usual. A
+    /// runner that dropped `recovered` would publish the equal reply and
+    /// spend a generation on it.
+    #[test]
+    fn an_unchanged_recovered_document_job_reports_unchanged_not_published() {
+        let (dir, store) = document_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(cvi_dataset()));
+        handle.submit_document(job("cvi_params", spx()));
+        assert!(matches!(next_event(&rx), IngestEvent::Published { .. }));
+        handle.submit_document(DocumentJob {
+            recovered: true,
+            ..job("cvi_params", spx())
+        });
+        match next_event(&rx) {
+            IngestEvent::Unchanged { batch, .. } => assert_eq!(batch, "SPX.Z"),
+            other => panic!("expected Unchanged, got {other:?}"),
+        }
+        handle.submit_document(DocumentJob {
+            recovered: true,
+            ..job("cvi_params", cvi_doc("SPX.Z", [1., 2., 3., 4., 5., 7.]))
+        });
+        assert!(matches!(next_event(&rx), IngestEvent::Published { .. }));
+        handle.shutdown();
+        let _ = dir;
+    }
+
+    /// The job's topic reaches `subscription_topics` through the publish:
+    /// the one route by which a subscribed source learns what to recover.
+    #[test]
+    fn a_document_job_with_a_topic_records_it() {
+        let (dir, store) = document_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(cvi_dataset()));
+        handle.submit_document(DocumentJob {
+            topic: Some("marketdata/cvi/SPX/NOTIFY".into()),
+            ..job("cvi_params", spx())
+        });
+        assert!(matches!(next_event(&rx), IngestEvent::Published { .. }));
+        handle.shutdown();
+        drop(rx);
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        assert_eq!(
+            crate::store::topics::recent(store.writer(), "cvi").unwrap(),
+            vec!["marketdata/cvi/SPX/NOTIFY".to_string()]
+        );
     }
 
     #[test]
@@ -3217,6 +3275,8 @@ mod tests {
             source_time: at,
             received_at: at,
             bytes: 0,
+            recovered: false,
+            topic: None,
         }
     }
 
