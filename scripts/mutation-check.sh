@@ -29027,20 +29027,19 @@ run_mutation "visual commit: marketdata untouched choice keeps the selection" \
   '            self.close_popup_with_window(window, cx);' \
   geode-marketdata an_untouched_choice_commit_over_a_selection_writes_nothing
 
-# A selection's edit passes over open group rows; a closed one refuses it.
-run_mutation "pricer selection: any group row refuses the edit" \
+# A selection's edit passes over group rows, open or closed, and writes
+# only the visible lines it holds.
+run_mutation "pricer selection: a group row refuses the edit" \
   crates/geode-pricer/src/tile/select.rs \
-  '                    Some(GridRowKind::Group { open: false, .. })' \
-  '                    Some(GridRowKind::Group { .. })' \
+  $'    pub(crate) fn selection_read_only(&self) -> Option<&\'static str> {\n' \
+  $'    pub(crate) fn selection_read_only(&self) -> Option<&\'static str> {\n        if self.selection_holds_group() {\n            return Some(GROUP_ROW);\n        }\n' \
   geode-pricer a_selection_across_groups_edits_its_lines
 
-run_mutation "pricer selection: a closed group row is passed over" \
+run_mutation "pricer selection: a closed group's hidden lines are written" \
   crates/geode-pricer/src/tile/select.rs \
-  '        if self.selection_holds_closed_group() {
-            return Some(CLOSED_GROUP);
-        }' \
-  '' \
-  geode-pricer a_selection_over_a_closed_group_refuses_its_edit
+  '            .filter_map(|g| self.model.sheet_row(g))' \
+  '            .flat_map(|g| self.grid_rows_under(g))' \
+  geode-pricer a_selection_over_a_closed_group_edits_only_the_visible_lines
 
 run_mutation "nemo: ids are not encoded" \
   crates/geode-nemo/src/lib.rs \

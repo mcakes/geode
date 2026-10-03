@@ -307,10 +307,6 @@ pub(crate) const SPLIT: &str = "split package: edit its legs";
 /// structural verb whose target includes it refuse with this.
 pub(crate) const GROUP_ROW: &str = "a grouping row: edit its lines";
 
-/// A selection's typed commit or live step over a closed grouping row:
-/// its lines count in the selection's totals but paint nowhere.
-pub(crate) const CLOSED_GROUP: &str = "a closed group: open it to edit its lines";
-
 /// `shift+j`/`shift+k` move a line among its siblings in sheet order,
 /// which a column sort does not paint: refused while one applies.
 pub(crate) const MOVE_SORTED: &str = "lines move in sheet order: :sort clear first";

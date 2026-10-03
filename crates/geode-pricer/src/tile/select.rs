@@ -212,38 +212,20 @@ impl PricerTile {
             .collect()
     }
 
-    /// Why the selection is read-only, if it is: it holds a closed
-    /// grouping row ([`CLOSED_GROUP`]), or a package row that is split
-    /// ([`SPLIT`]) or that the scope partly hides ([`PARTLY_HIDDEN`]). An
-    /// open grouping row has no line of its own and is passed over: the
-    /// lines under it paint as rows the selection holds or does not. A
-    /// closed one's lines count in the selection's totals but paint
-    /// nowhere, so writing past them would leave a total that is not what
-    /// was edited, and writing them would edit lines the trader cannot see.
-    /// A selected package stands for every leg (`lines_of`), those another
-    /// node paints or the scope hides too, so a bulk write through it would
+    /// Why the selection is read-only, if it is: it holds a package row
+    /// that is split ([`SPLIT`]) or that the scope partly hides
+    /// ([`PARTLY_HIDDEN`]). A grouping row, open or closed, has no line of
+    /// its own and is passed over: an edit writes only the line rows the
+    /// selection paints, never the lines a closed group hides. A selected
+    /// package stands for every leg (`lines_of`), those another node
+    /// paints or the scope hides too, so a bulk write through it would
     /// reach legs its row does not show: the whole write refuses.
     pub(crate) fn selection_read_only(&self) -> Option<&'static str> {
-        if self.selection_holds_closed_group() {
-            return Some(CLOSED_GROUP);
-        }
         first_refusal(
             self.selected_sheet_rows()
                 .into_iter()
                 .map(|r| self.read_only(r)),
         )
-    }
-
-    /// Whether the resolved selection reaches a closed grouping row.
-    fn selection_holds_closed_group(&self) -> bool {
-        self.resolved.as_ref().is_some_and(|r| {
-            r.rows.clone().any(|g| {
-                matches!(
-                    self.model.kind(g),
-                    Some(GridRowKind::Group { open: false, .. })
-                )
-            })
-        })
     }
 
     /// Whether the resolved selection reaches a grouping row.

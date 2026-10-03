@@ -803,10 +803,10 @@ fn a_selection_across_groups_edits_its_lines(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.mode(&mut vcx), "normal");
 }
 
-/// A closed group inside the selection refuses the commit whole: its
-/// lines count in the totals but paint nowhere.
+/// A closed group inside the selection is passed over: the edit writes
+/// the lines the selection paints and leaves the hidden ones as they were.
 #[gpui::test]
-fn a_selection_over_a_closed_group_refuses_its_edit(cx: &mut gpui::TestAppContext) {
+fn a_selection_over_a_closed_group_edits_only_the_visible_lines(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 3000 P", "SPX Z26 4000 P", "SPX Z26 5000 P"]);
     h.command(&mut vcx, "group strike").unwrap();
     h.dispatch(&mut vcx, "expand_all", None);
@@ -819,16 +819,13 @@ fn a_selection_over_a_closed_group_refuses_its_edit(cx: &mut gpui::TestAppContex
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "3");
     h.dispatch(&mut vcx, "commit", None);
-    assert_eq!(h.footer(&vcx).as_deref(), Some(CLOSED_GROUP));
-    assert!(
-        h.tile.read_with(&vcx, |t, _| t.editor.is_some()),
-        "editor open"
-    );
-    assert_eq!(h.mode(&mut vcx), "insert");
-    assert!(
-        !h.tile.read_with(&vcx, |t, _| t.undo.can_undo()),
-        "nothing written"
-    );
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(h.mode(&mut vcx), "normal");
+    h.dispatch(&mut vcx, "expand_all", None);
+    let tree = h.tree(&vcx);
+    for line in ["3 SPX Z26 3000 P", "SPX Z26 4000 P", "3 SPX Z26 5000 P"] {
+        assert!(tree.iter().any(|t| t == line), "{line}: {tree:?}");
+    }
 }
 
 /// A selection holding a group row and one of its descendants totals each
