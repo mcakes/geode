@@ -20334,7 +20334,7 @@ run_mutation "chart: a hue palette color is floored to readable" \
             l: self.lightness,' \
   '        (to_srgb_in_gamut(Lch {
             l: self.lightness,' \
-  geode-chart every_bundled_themes_hue_palette_is_readable_and_separated
+  geode-chart faint_chart_colors_are_floored_to_readable
 
 run_mutation "chart: a hue palette floors its chroma" \
   crates/geode-chart/src/core/palette.rs \

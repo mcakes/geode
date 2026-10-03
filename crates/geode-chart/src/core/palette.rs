@@ -334,6 +334,17 @@ mod tests {
         assert!(failures.is_empty(), "{failures:#?}");
     }
 
+    /// Pale chart colors on white would give pale series: each color is
+    /// floored to the readable ratio, and its companion stays apart.
+    #[test]
+    fn faint_chart_colors_are_floored_to_readable() {
+        let faint: Hsla = rgb(0xffff99).into();
+        let white = hsla(0.0, 0.0, 1.0, 1.0);
+        let p = HuePalette::from_theme([faint; 5], white, hsla(0.0, 0.0, 0.0, 1.0));
+        let failures = hue_failures("faint", &p, white);
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     #[gpui::test]
     fn every_bundled_themes_hue_palette_is_readable_and_separated(cx: &mut gpui::TestAppContext) {
         use gpui_component::{ActiveTheme, Theme};
