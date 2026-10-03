@@ -190,8 +190,11 @@ with another notice behind it:
 - Following is compared through `FrameView::following()` on every frame
   notification; while following, the group's scope counts as a change,
   except one that still names the loaded underlying with no read out,
-  nothing staged, and the as-of and publications unmoved
-  (`documents_stale`): the tile self-arrives instead of refetching. A
+  nothing staged, and the as-of and publications unmoved since the loaded
+  documents were read (both reads succeeded under them, `loaded_ok`;
+  `documents_stale`): the tile self-arrives instead of refetching, on a
+  show through the deferred door. A failed or refused read clears
+  `loaded_ok`, so the next scope change retries it. A
   change of group clears the model and moves the vol tag, so no old
   group's draft trace stays painted or lands late.
 - An arrival made from `set_visible` or `closed` goes through

@@ -35,6 +35,8 @@ use crate::core::model::{Loaded, strip};
 #[derive(Debug)]
 pub(super) struct Fetched {
     underlying: String,
+    /// The versions the pair was asked under.
+    asked: Option<FrameVersions>,
     cvi: Result<Option<Arc<DocumentRows>>, String>,
     chain: Result<Vec<ChainExpiry>, String>,
 }
@@ -128,6 +130,7 @@ impl VolsliceTile {
             // old underlying is stale.
             self.loaded = Loaded::default();
             self.loaded_for = None;
+            self.loaded_ok = None;
             self.loaded_gen += 1;
             self.strip.clear();
             self.clear_model();
@@ -231,6 +234,9 @@ impl VolsliceTile {
                 let asked = underlying.clone();
                 let fetched = Fetched {
                     underlying,
+                    // The tag is current, so `acted` is still the versions
+                    // this pair was asked under.
+                    asked: self.following.acted(),
                     cvi,
                     chain,
                 };
@@ -277,8 +283,10 @@ impl VolsliceTile {
 
     /// A read for `asked` was refused or failed. The last good picture
     /// stays while it is `asked`'s; another underlying's goes, documents,
-    /// strip and curves, so none of it sits under the new name.
+    /// strip and curves, so none of it sits under the new name. Either way
+    /// the documents are no longer a good answer to the question asked.
     fn picture_failed_for(&mut self, asked: &str) {
+        self.loaded_ok = None;
         if self.loaded_for.as_deref() == Some(asked) {
             return;
         }
@@ -319,6 +327,11 @@ impl VolsliceTile {
             }
         };
         self.loaded_for = Some(u.clone());
+        // A failed read installs beside a notice: shown, but not an answer
+        // a scope change may keep.
+        self.loaded_ok = fetched
+            .asked
+            .filter(|_| fetched.cvi.is_ok() && fetched.chain.is_ok());
         self.loaded_gen += 1;
         self.compose_draft();
         self.restrip(cx);
@@ -441,19 +454,24 @@ impl VolsliceTile {
     /// moved since the last ask. A followed group's scope change that still
     /// names the underlying whose documents are loaded is not one, when
     /// nothing is out or held and neither the as-of nor a watched
-    /// publication moved: the documents depend on nothing else, and
-    /// refetching both would hold the flip behind two reads that answer
-    /// what is already on screen. The caller then self-arrives, which
-    /// answers the flip under the new versions; `acted` keeps the old ones,
-    /// so each later notification repeats this check rather than a fetch.
+    /// publication moved since the loaded documents were read successfully
+    /// (`loaded_ok`): the documents depend on nothing else, and refetching
+    /// both would hold the flip behind two reads that answer what is
+    /// already on screen. Compared with what was read, not with what was
+    /// last asked: a failed or refused read leaves an older or partial
+    /// picture on screen under the newer `acted`, and skipping then would
+    /// leave the failure standing with no other retry while following. The
+    /// caller then self-arrives, which answers the flip under the new
+    /// versions; `acted` keeps the old ones, so each later notification
+    /// repeats this check rather than a fetch.
     fn documents_stale(&self, now: FrameVersions, following: bool, cx: &App) -> bool {
         if !self.following.follows_changed(now, differs(following)) {
             return false;
         }
-        let Some(asked) = self.following.acted() else {
+        let Some(read) = self.loaded_ok else {
             return true;
         };
-        let scope_only = asked.as_of == now.as_of && asked.data == now.data;
+        let scope_only = read.as_of == now.as_of && read.data == now.data;
         let settled = !self.following.in_flight()
             && !self.following.is_staged()
             && matches!(self.fetch, Fetch::Idle);
@@ -577,6 +595,11 @@ impl VolsliceTile {
             let following = self.is_following(cx);
             if changed || self.documents_stale(now, following, cx) {
                 self.requery_with(Arrival::Deferred, cx);
+            } else {
+                // Nothing to ask, but a flip may be waiting on this tile.
+                let key = self.key();
+                self.following
+                    .self_arrive(&mut DeferredDoor::new(&self.frame, cx), key, now);
             }
             self.sync_board(cx);
         }

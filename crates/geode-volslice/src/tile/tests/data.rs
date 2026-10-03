@@ -574,24 +574,7 @@ fn a_group_scope_change_keeping_the_underlying_releases_the_flip_unasked(
     h.answer_vol(&mut vcx, &params);
     let painted = h.labels(&vcx);
     assert!(!painted.is_empty());
-    let mut wider = underlying_scope("SPX.Z");
-    wider.dimensions.push(DimensionSelection {
-        column: "book".into(),
-        values: vec!["B1".into()],
-    });
-    let bound = FrameRef::for_tile(h.frame.clone(), WorkspaceIx::FIRST, TileId(TILE));
-    bound.update(&mut vcx, |f, cx| {
-        f.post_for_test(
-            EMITTER,
-            Emission {
-                scope: Some(wider),
-                board: Vec::new(),
-            },
-        );
-        f.open_flip([KEY], Instant::now());
-        cx.notify();
-    });
-    vcx.run_until_parked();
+    h.widen_keeping_spx(&mut vcx, "B1");
     let reqs = h.requests();
     assert!(docs(&reqs).is_empty(), "nothing asked: {reqs:?}");
     assert!(!h.barrier_open(&vcx), "the follower answered the flip");
@@ -604,6 +587,141 @@ fn a_group_scope_change_keeping_the_underlying_releases_the_flip_unasked(
     });
     vcx.run_until_parked();
     assert_eq!(docs(&h.requests()).len(), 1, "the as-of asks again");
+}
+
+impl Harness {
+    /// Group A's scope gains a `book` selection and still names SPX.Z; the
+    /// shell enrolls the follower under its own reading, as `extend_flip`
+    /// does.
+    fn widen_keeping_spx(&self, vcx: &mut gpui::VisualTestContext, book: &str) {
+        let mut wider = underlying_scope("SPX.Z");
+        wider.dimensions.push(DimensionSelection {
+            column: "book".into(),
+            values: vec![book.into()],
+        });
+        let bound = FrameRef::for_tile(self.frame.clone(), WorkspaceIx::FIRST, TileId(TILE));
+        bound.update(vcx, |f, cx| {
+            f.post_for_test(
+                EMITTER,
+                Emission {
+                    scope: Some(wider),
+                    board: Vec::new(),
+                },
+            );
+            f.open_flip([KEY], Instant::now());
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+}
+
+/// A failed CVI read installs the chain beside a notice, so the documents
+/// on screen are not a good answer: a group scope change that keeps the
+/// underlying asks again rather than leaving the failure standing. While
+/// following, `u` and `:underlying` are refused, so this is the retry.
+#[gpui::test]
+fn a_failed_cvi_read_is_retried_by_a_scope_change_keeping_the_underlying(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_bound(cx, None);
+    h.show(&mut vcx);
+    h.follow_a(&mut vcx);
+    h.post(&mut vcx, scope_of("SPX.Z"));
+    let (_, chains) = published();
+    let reqs = h.requests();
+    let tag = docs(&reqs).last().expect("a cvi request").tag;
+    h.deliver(
+        &mut vcx,
+        Delivery::Query(QueryOutcome {
+            key: KEY,
+            tag,
+            snapshot: Err("cvi read failed".into()),
+            submitted: Instant::now(),
+        }),
+    );
+    let reqs = h.requests();
+    assert_eq!(docs(&reqs)[0].dataset, CHAIN, "the chain still paints");
+    h.answer_doc(&mut vcx, tag, chain_snapshot(&chains));
+    assert!(
+        h.notices(&vcx).contains(&"cvi read failed".to_string()),
+        "{:?}",
+        h.notices(&vcx)
+    );
+    let _ = h.requests();
+    h.widen_keeping_spx(&mut vcx, "B1");
+    let reqs = h.requests();
+    let asked = docs(&reqs);
+    assert_eq!(asked.len(), 1, "the failed read is asked again: {reqs:?}");
+    assert_eq!(asked[0].dataset, CVI);
+}
+
+/// A chain read refused after an as-of move keeps the previous as-of's
+/// picture for the same underlying under the refusal. Those documents
+/// answer the old as-of, so a group scope change keeping the underlying
+/// asks again.
+#[gpui::test]
+fn a_refused_chain_after_an_as_of_move_is_retried_by_a_scope_change(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_bound(cx, None);
+    h.show(&mut vcx);
+    h.follow_a(&mut vcx);
+    h.post(&mut vcx, scope_of("SPX.Z"));
+    let (doc, chains) = published();
+    let reqs = h.answer_documents(&mut vcx, &doc, &chains);
+    let params = vols(&reqs)[0].clone();
+    h.answer_vol(&mut vcx, &params);
+    h.frame.update(&mut vcx, |f, cx| {
+        f.shared_mut()
+            .set_as_of(geode_core::query::AsOf::At(chrono::Utc::now()));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let reqs = h.requests();
+    let tag = docs(&reqs).last().expect("the as-of asks again").tag;
+    h.data.fill_for_tests();
+    h.answer_doc(&mut vcx, tag, cvi_snapshot(&doc));
+    assert!(
+        h.notices(&vcx)
+            .contains(&"document request refused: the data service is busy".to_string()),
+        "{:?}",
+        h.notices(&vcx)
+    );
+    let _ = h.requests();
+    h.widen_keeping_spx(&mut vcx, "B1");
+    let reqs = h.requests();
+    let asked = docs(&reqs);
+    assert_eq!(
+        asked.len(),
+        1,
+        "the old as-of's picture is asked again: {reqs:?}"
+    );
+    assert_eq!(asked[0].dataset, CVI);
+}
+
+/// A follower hidden across a group scope change that keeps its
+/// underlying asks nothing on show, and still answers a flip waiting on
+/// it, from the draw through the deferred door so frame observers hear
+/// the release.
+#[gpui::test]
+fn a_show_keeping_the_underlying_answers_the_flip_from_the_draw(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_bound(cx, None);
+    h.show(&mut vcx);
+    h.follow_a(&mut vcx);
+    h.post(&mut vcx, scope_of("SPX.Z"));
+    let (doc, chains) = published();
+    let reqs = h.answer_documents(&mut vcx, &doc, &chains);
+    let params = vols(&reqs)[0].clone();
+    h.answer_vol(&mut vcx, &params);
+    h.in_draw(&mut vcx, Some(false), None);
+    h.widen_keeping_spx(&mut vcx, "B1");
+    assert!(h.barrier_open(&vcx), "a hidden tile does not answer");
+    let _ = h.requests();
+    let (heard, _sub) = h.frame_heard(&mut vcx);
+    h.in_draw(&mut vcx, Some(true), None);
+    vcx.run_until_parked();
+    let reqs = h.requests();
+    assert!(docs(&reqs).is_empty(), "nothing asked: {reqs:?}");
+    assert!(!h.barrier_open(&vcx), "the show answered the flip");
+    assert!(heard.get() > 0, "frame observers heard the release");
 }
 
 /// Leaving a group returns the tile to its own underlying: the draft and

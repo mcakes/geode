@@ -32071,9 +32071,34 @@ run_mutation "volslice: a close from the draw arrives deferred" \
 # answers the flip without refetching both documents.
 run_mutation "volslice: a scope change keeping the underlying asks nothing" \
   crates/geode-volslice/src/tile/data.rs \
-  '        let scope_only = asked.as_of == now.as_of && asked.data == now.data;' \
+  '        let scope_only = read.as_of == now.as_of && read.data == now.data;' \
   '        let scope_only = false;' \
   geode-volslice a_group_scope_change_keeping_the_underlying_releases_the_flip_unasked
+
+# Only documents read successfully let the skip apply: a failed CVI read
+# installs the chain beside a notice and must be retried by the next scope
+# change, since `u` and `:underlying` are refused while following.
+run_mutation "volslice: a failed cvi read is retried by a scope change" \
+  crates/geode-volslice/src/tile/data.rs \
+  '            .filter(|_| fetched.cvi.is_ok() && fetched.chain.is_ok());' \
+  '            .filter(|_| fetched.chain.is_ok());' \
+  geode-volslice a_failed_cvi_read_is_retried_by_a_scope_change_keeping_the_underlying
+
+# A refused read keeps the previous as-of's picture for the same underlying;
+# it no longer answers the question, so the skip must not apply.
+run_mutation "volslice: a refused chain after an as-of move is retried by a scope change" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        self.loaded_ok = None;
+        if self.loaded_for.as_deref() == Some(asked) {' \
+  '        if self.loaded_for.as_deref() == Some(asked) {' \
+  geode-volslice a_refused_chain_after_an_as_of_move_is_retried_by_a_scope_change
+
+# A show that skips the refetch still answers a waiting flip, from the draw.
+run_mutation "volslice: a show keeping the underlying answers the flip deferred" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                    .self_arrive(&mut DeferredDoor::new(&self.frame, cx), key, now);' \
+  '                    .self_arrive(&mut FrameDoor::new(&self.frame, cx), key, now);' \
+  geode-volslice a_show_keeping_the_underlying_answers_the_flip_from_the_draw
 
 # ...and one naming another underlying still refetches.
 run_mutation "volslice: a scope change naming another underlying refetches" \
