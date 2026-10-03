@@ -35388,13 +35388,13 @@ run_mutation "value colors: the list opens on the current color" \
   '        list.set_ranked_highlighted(opening);' \
   '        let _ = opening;' \
   geode-shell \
-  the_color_list_holds_the_names_then_none_and_opens_on_the_current
+  the_color_list_holds_the_names_first_and_ends_custom_then_none
 
 # A row stands for its pick by position: a color may be named None.
 run_mutation "value colors: a pick goes by position, not by text" \
   crates/geode-shell/src/shell/choicedialog.rs \
   '                pick: picks[declared].clone(),' \
-  '                pick: if self.list.options()[declared] == NO_COLOR_ROW { ValuePick::None } else { picks[declared].clone() },' \
+  '                pick: if self.list.options()[declared] == NO_COLOR_ROW { ColorRow::set(ValuePick::None) } else { picks[declared].clone() },' \
   geode-shell \
   a_color_named_none_is_still_picked_by_position
 
@@ -35679,6 +35679,72 @@ run_mutation "value colors: follow desk labels an inline entry" \
   '            options.push(format!("Follow desk ({lower:?})"));' \
   geode-shell \
   follow_desk_names_an_inline_desk_entry_by_its_hue
+
+# An inline entry in force opens on Custom…, so an untouched enter cannot
+# clear it.
+run_mutation "value colors: an inline entry opens on Custom" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            Some(ValueEntry::Inline(_)) => Some(custom),' \
+  '            Some(ValueEntry::Inline(_)) => None,' \
+  geode-shell \
+  an_inline_entry_in_force_opens_on_custom
+
+# Escape from the stage returns to the list and writes nothing.
+run_mutation "value colors: escape from the stage writes nothing" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            let _ = leave_hue_stage(shell, window, cx);' \
+  '            apply_hue_stage(shell, window, cx);' \
+  geode-shell \
+  escape_from_the_hue_stage_writes_nothing_and_returns_to_the_list
+
+# Steps wrap round the wheel.
+run_mutation "value colors: a stage step wraps" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        self.hue = (self.hue as i32 + delta).rem_euclid(360) as u16;' \
+  '        self.hue = (self.hue as i32 + delta).clamp(0, 359) as u16;' \
+  geode-shell \
+  stage_steps_wrap_and_shift_steps_one_degree
+
+# A hue is 0–360; out of range is refused.
+run_mutation "value colors: a typed hue is 0 to 360" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    (n <= 360).then_some(n % 360)' \
+  '    Some(n % 360)' \
+  geode-shell \
+  a_hue_is_a_whole_number_from_0_to_360
+
+# Apply is refused while the field is out of range.
+run_mutation "value colors: an invalid hue field does not apply" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    if !stage.valid() {' \
+  '    if false {' \
+  geode-shell \
+  an_out_of_range_hue_keeps_apply_from_writing
+
+# The preview resolves once per hue, tone and theme.
+run_mutation "value colors: the stage preview is cached per key" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            Some((k, color)) if *k == key => *color,' \
+  '            Some((k, color)) if false && *k == key => *color,' \
+  geode-shell \
+  hue_stage_track_and_preview_resolve_once_per_theme
+
+# A slider move reaches the stage.
+run_mutation "value colors: the slider feeds the stage" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        stage.set_hue(hue);' \
+  '        let _ = hue;' \
+  geode-shell \
+  a_slider_click_and_a_tone_click_set_the_stage
+
+# The palette closing over the hue stage hands its keys back to the stage,
+# not to the list's unpainted field.
+run_mutation "value colors: the stage keeps its keys after the palette" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        DialogKind::Choice if super::choicedialog::on_hue_stage(view) => {' \
+  '        DialogKind::Choice if false => {' \
+  geode-shell \
+  the_stage_keeps_its_keys_after_the_palette_closes
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

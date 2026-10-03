@@ -36,24 +36,37 @@
 //! whose module does neither, nothing opens and the status bar says so.
 //!
 //! The row menu's `Color…` lists, for one value of a text dimension, each
-//! named color (alphabetical, with its swatch), then `None`, then `Follow
-//! desk ({name})` when the user layer overrides a different, colored lower
-//! entry. It opens on the color in force (on `None` without one), so enter
-//! on an untouched list changes nothing; rows stand for their pick by
-//! position, so a color named `None` is still that color. A pick goes to
+//! named color (alphabetical, with its swatch), then `Custom…`, then
+//! `None`, then `Follow desk ({name})` when the user layer overrides a
+//! different, colored lower entry. It opens on the color in force (an
+//! inline entry on `Custom…`, `None` without one), so enter on an untouched
+//! list changes nothing; rows stand for their pick by position, so a color
+//! named `None` or `Custom…` is still that color. A pick goes to
 //! `ShellView::set_value_color`, which writes the user layer's
 //! `value_colors` entry off the UI thread. With no named color the list
-//! holds `None` and a muted line naming the Colors dialog.
+//! holds `Custom…`, `None` and a muted line naming the Colors dialog.
+//!
+//! `Custom…` opens the hue stage, a second stage of the same modal: the
+//! pure [`HueStage`] on the target, a gpui-component slider whose state
+//! entity is `ShellView::hue_slider` (created on entry, dropped on leaving),
+//! a hue field, a tone control, and Apply/Cancel. While it is open the list's
+//! field is unpainted and blurred and the stage claims every non-chord key
+//! through the shell's modal route; `escape` or `‹` returns to the list.
 
 use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Focusable as _, SharedString, Window, div};
-use gpui_component::{ActiveTheme as _, v_flex};
+use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _};
+use gpui_component::slider::{Slider, SliderEvent, SliderState};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 
 use geode_core::colour::{
-    Definition, NamedColours, ValueColorState, ValueEntry, ValuePick, value_color_state,
+    Base, Definition, NamedColours, Tone, ValueColorState, ValueEntry, ValuePick, value_color_state,
 };
+
 use geode_core::config::VALUE_COLORS_DOC;
 use geode_core::context::DimensionContext;
 use geode_core::link::{Group, Membership};
@@ -65,7 +78,7 @@ use geode_core::tile_columns::{TileColumn, TileColumns};
 
 use crate::choice::{self, ChoiceKey, ChoiceList};
 use crate::defaults::{AddPlacement, capitalize};
-use crate::keymap::Keystroke;
+use crate::keymap::{Keystroke, Modifiers};
 use crate::module::placeholder::PLACEHOLDER_KIND;
 use crate::tiling::TileId;
 
@@ -145,14 +158,19 @@ pub enum Target {
     /// The row menu's `Color…`: what `value` of `dimension` may be colored
     /// with. `picks[i]` is what declared option `i` does (a row stands for
     /// its pick by position: a color may be named like another row), and
-    /// `swatches[i]` the definition its row paints a swatch of. Captured
-    /// at open; `resolved` holds them resolved under the theme last painted.
+    /// `swatches[i]` the definition its row paints a swatch of. Captured at
+    /// open; `resolved` holds them resolved under the theme last painted.
+    /// `in_force` is the definition of the color in force at open (the
+    /// stage's start and `Custom…`'s swatch); `stage` is `Custom…`'s hue
+    /// stage while it is open.
     ValueColor {
         dimension: String,
         value: String,
-        picks: Vec<ValuePick>,
+        picks: Vec<ColorRow>,
         swatches: Vec<Option<Definition>>,
         resolved: SwatchCache,
+        in_force: Option<Definition>,
+        stage: Option<Box<HueStage>>,
     },
 }
 
@@ -198,26 +216,46 @@ impl SwatchCache {
     }
 }
 
-/// Each row's swatch resolved under `anchors` and `tokens`: a color row
-/// with a captured definition gets its color and `valuecolor-swatch-{name}`;
-/// every other row `None`.
+/// Each row's swatch resolved under `anchors` and `tokens`: a row with a
+/// captured definition and a selector gets its color; every other row `None`.
 fn resolve_swatches(
     swatches: &[Option<Definition>],
-    picks: &[ValuePick],
+    picks: &[ColorRow],
     anchors: &geode_core::colour::Anchors,
     tokens: &geode_core::colour::Tokens,
 ) -> Rc<[SwatchRow]> {
     swatches
         .iter()
         .zip(picks)
-        .map(|(definition, pick)| match (definition, pick) {
-            (Some(d), ValuePick::Color(name)) => Some((
-                super::colours::to_hsla(geode_core::colour::resolve(d, anchors, tokens)),
-                SharedString::from(format!("valuecolor-swatch-{name}")),
-            )),
-            _ => None,
+        .map(|(definition, row)| {
+            let definition = definition.as_ref()?;
+            let selector = swatch_selector(row)?;
+            Some((
+                super::colours::to_hsla(geode_core::colour::resolve(definition, anchors, tokens)),
+                SharedString::from(selector),
+            ))
         })
         .collect()
+}
+
+/// A swatch's stable selector, derived from what its row is.
+fn swatch_selector(row: &ColorRow) -> Option<String> {
+    match row {
+        ColorRow::Set {
+            pick: ValuePick::Color(name),
+            ..
+        } => Some(format!("valuecolor-swatch-{name}")),
+        ColorRow::Set {
+            pick: ValuePick::Inline(_),
+            preset: Some(preset),
+        } => Some(format!("valuecolor-swatch-preset-{preset}")),
+        ColorRow::Set {
+            pick: ValuePick::Inline(_),
+            preset: None,
+        } => Some("valuecolor-swatch-hue".to_string()),
+        ColorRow::Custom => Some("valuecolor-swatch-custom".to_string()),
+        ColorRow::Set { .. } => None,
+    }
 }
 
 /// What one link-chooser row changes about its tile: the group it follows
@@ -634,50 +672,306 @@ pub enum Pick {
         context: DimensionContext,
         value: String,
     },
-    /// `ShellView::set_value_color` of `pick` for `value` of `dimension`.
+    /// What one value-color row does, for `value` of `dimension`.
     ValueColor {
         dimension: String,
         value: String,
-        pick: ValuePick,
+        pick: ColorRow,
     },
 }
 
 /// The value-color list's no-color row.
 pub const NO_COLOR_ROW: &str = "None";
 
+/// The value-color list's row that opens the hue stage.
+pub const CUSTOM_ROW: &str = "Custom\u{2026}";
+
+/// The hue a stage opens on when the color in force has none (a token
+/// color, or no color).
+const DEFAULT_HUE: u16 = 240;
+
+/// What one value-color row does.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColorRow {
+    /// Write `pick`; `preset` names the preset row it is, for the notice.
+    Set {
+        pick: ValuePick,
+        preset: Option<&'static str>,
+    },
+    /// `Custom…`: open the hue stage.
+    Custom,
+}
+
+impl ColorRow {
+    pub fn set(pick: ValuePick) -> ColorRow {
+        ColorRow::Set { pick, preset: None }
+    }
+}
+
+/// A hue typed as text: one to three ASCII digits, 0–360, with 360 read as
+/// 0 as the document reads it. Shared by the typed `Hue {n}` row and the
+/// hue stage's field so the two accept the same text.
+pub(crate) fn parse_hue(text: &str) -> Option<u16> {
+    let text = text.trim();
+    if text.is_empty() || text.len() > 3 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: u16 = text.parse().ok()?;
+    (n <= 360).then_some(n % 360)
+}
+
+/// `Custom…`'s hue stage: the hue (always valid, 0–359) and tone the
+/// preview and Apply use, and the hue field's text, which may be mid-edit or
+/// out of range. Pure; the slider entity mirroring `hue` is
+/// `ShellView::hue_slider`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HueStage {
+    pub hue: u16,
+    pub tone: Tone,
+    pub field: String,
+    /// The next digit replaces the field rather than appending: true at open
+    /// and after every step, so typing `90` after `l` reads 90.
+    fresh: bool,
+    /// The value's text, painted by the preview.
+    pub value: SharedString,
+    pub cache: StageCache,
+}
+
+impl HueStage {
+    pub fn new(hue: u16, tone: Tone, value: SharedString) -> Self {
+        Self {
+            hue,
+            tone,
+            field: hue.to_string(),
+            fresh: true,
+            value,
+            cache: StageCache::default(),
+        }
+    }
+
+    /// The stage the color in force opens: its hue and tone when it is a
+    /// hue (inline or named), else [`DEFAULT_HUE`], normal.
+    pub fn start(in_force: Option<&Definition>, value: SharedString) -> Self {
+        match in_force.map(|d| &d.base) {
+            Some(Base::Hue { degrees, tone }) => Self::new(
+                (degrees.round() as i32).rem_euclid(360) as u16,
+                *tone,
+                value,
+            ),
+            _ => Self::new(DEFAULT_HUE, Tone::Normal, value),
+        }
+    }
+
+    /// Move `delta` degrees round the wheel, wrapping.
+    pub fn step(&mut self, delta: i32) {
+        self.hue = (self.hue as i32 + delta).rem_euclid(360) as u16;
+        self.field = self.hue.to_string();
+        self.fresh = true;
+    }
+
+    /// The slider moved to `hue`.
+    pub fn set_hue(&mut self, hue: u16) {
+        self.hue = hue % 360;
+        self.field = self.hue.to_string();
+        self.fresh = true;
+    }
+
+    /// A digit typed into the field; the hue follows when the text is valid.
+    pub fn digit(&mut self, digit: char) {
+        if self.fresh {
+            self.field.clear();
+            self.fresh = false;
+        }
+        if self.field.len() < 3 {
+            self.field.push(digit);
+        }
+        if let Some(hue) = parse_hue(&self.field) {
+            self.hue = hue;
+        }
+    }
+
+    /// Backspace in the field.
+    pub fn erase(&mut self) {
+        self.fresh = false;
+        self.field.pop();
+        if let Some(hue) = parse_hue(&self.field) {
+            self.hue = hue;
+        }
+    }
+
+    pub fn toggle_tone(&mut self) {
+        self.tone = match self.tone {
+            Tone::Normal => Tone::Light,
+            Tone::Light => Tone::Normal,
+        };
+    }
+
+    /// Whether the field holds a hue: Apply is refused otherwise.
+    pub fn valid(&self) -> bool {
+        parse_hue(&self.field).is_some()
+    }
+
+    pub fn definition(&self) -> Definition {
+        Definition::hue(f32::from(self.hue), self.tone)
+    }
+}
+
+/// The track memo: the theme signature and tone, and one stop per 15°.
+type TrackMemo = (([gpui::Hsla; 28], Tone), Rc<[gpui::Hsla]>);
+/// The preview memo: the theme signature, hue and tone, and the color.
+type PreviewMemo = (([gpui::Hsla; 28], u16, Tone), gpui::Hsla);
+
+/// The hue stage's colors resolved under one theme: the slider track (for a
+/// tone) and the preview (for a hue and tone). Each resolves once per key:
+/// a step re-resolves only the preview, a theme change both. A cache, not
+/// part of the stage's identity: any two compare equal.
+#[derive(Debug, Clone, Default)]
+pub struct StageCache {
+    track: std::cell::RefCell<Option<Box<TrackMemo>>>,
+    preview: std::cell::RefCell<Option<Box<PreviewMemo>>>,
+}
+
+impl PartialEq for StageCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl StageCache {
+    pub fn track(
+        &self,
+        theme: [gpui::Hsla; 28],
+        tone: Tone,
+        resolve: impl FnOnce() -> Rc<[gpui::Hsla]>,
+    ) -> Rc<[gpui::Hsla]> {
+        let key = (theme, tone);
+        let mut slot = self.track.borrow_mut();
+        match slot.as_deref() {
+            Some((k, stops)) if *k == key => stops.clone(),
+            _ => {
+                let stops = resolve();
+                *slot = Some(Box::new((key, stops.clone())));
+                stops
+            }
+        }
+    }
+
+    pub fn preview(
+        &self,
+        theme: [gpui::Hsla; 28],
+        hue: u16,
+        tone: Tone,
+        resolve: impl FnOnce() -> gpui::Hsla,
+    ) -> gpui::Hsla {
+        let key = (theme, hue, tone);
+        let mut slot = self.preview.borrow_mut();
+        match slot.as_deref() {
+            Some((k, color)) if *k == key => *color,
+            _ => {
+                let color = resolve();
+                *slot = Some(Box::new((key, color)));
+                color
+            }
+        }
+    }
+}
+
+/// What one key does on the hue stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageKey {
+    Back,
+    Apply,
+    Step(i32),
+    Tone,
+    Digit(char),
+    Erase,
+    Swallow,
+}
+
+/// The hue stage's keys: `escape` back, `enter` apply, `h`/`l` and `←`/`→`
+/// step 15° (with `shift` 1°), `t` tone, digits and `backspace` edit the
+/// field. Any other non-chord key is swallowed so it never types into the
+/// list's field beneath. `None` for a chord, which the shell's modal route
+/// may still resolve (the palette, a dialog opener).
+pub fn stage_key(ks: &Keystroke) -> Option<StageKey> {
+    if ks.mods.is_chord() {
+        return None;
+    }
+    let bare = ks.mods == Modifiers::NONE;
+    let shift = ks.mods
+        == (Modifiers {
+            shift: true,
+            ..Modifiers::NONE
+        });
+    Some(match ks.key.as_str() {
+        "escape" => StageKey::Back,
+        "enter" if bare => StageKey::Apply,
+        "h" | "left" if bare => StageKey::Step(-15),
+        "l" | "right" if bare => StageKey::Step(15),
+        "h" | "left" if shift => StageKey::Step(-1),
+        "l" | "right" if shift => StageKey::Step(1),
+        "t" if bare => StageKey::Tone,
+        "backspace" => StageKey::Erase,
+        key if bare && key.len() == 1 && key.as_bytes()[0].is_ascii_digit() => {
+            StageKey::Digit(key.as_bytes()[0] as char)
+        }
+        _ => StageKey::Swallow,
+    })
+}
+
+/// The hue stage's slider: its state entity and the subscription that
+/// feeds a pointer move back into the stage. Dropped with the stage.
+pub struct HueSlider {
+    pub(crate) state: Entity<SliderState>,
+    _change: gpui::Subscription,
+}
+
 impl ChoiceDialogState {
-    /// One row per named color (alphabetical), then [`NO_COLOR_ROW`], then
-    /// `Follow desk ({name})` when the user layer overrides a different
-    /// lower entry. Opens on the color in force, or on the no-color row
-    /// when there is none or it is no longer defined, so `enter` on an
-    /// untouched list changes nothing. The opening row is found by
-    /// position, never by text: a color may be named `None`.
+    /// One row per named color (alphabetical), then [`CUSTOM_ROW`], then
+    /// [`NO_COLOR_ROW`], then `Follow desk ({label})` when the user layer
+    /// overrides a different lower entry. Opens on the color in force: a
+    /// named color on its row, an inline entry on `Custom…`, none (or a
+    /// name no longer defined) on the no-color row, so `enter` on an
+    /// untouched list changes nothing. Rows are found by position, never by
+    /// text: a color may be named `None` or `Custom…`.
     pub fn value_colors(
         dimension: String,
         value: String,
         named: &NamedColours,
         state: &ValueColorState,
     ) -> Self {
+        let in_force = state.effective.as_ref().and_then(|entry| match entry {
+            ValueEntry::Named(name) => named.get(name).cloned(),
+            ValueEntry::Inline(definition) => Some(definition.clone()),
+        });
         let mut options: Vec<String> = named.names().map(str::to_string).collect();
-        let mut picks: Vec<ValuePick> = options.iter().cloned().map(ValuePick::Color).collect();
+        let mut picks: Vec<ColorRow> = options
+            .iter()
+            .map(|name| ColorRow::set(ValuePick::Color(name.clone())))
+            .collect();
         let mut swatches: Vec<Option<Definition>> = options
             .iter()
             .map(|name| named.get(name).cloned())
             .collect();
+        let custom = options.len();
+        options.push(CUSTOM_ROW.to_string());
+        picks.push(ColorRow::Custom);
+        swatches.push(in_force.clone());
         let no_color = options.len();
         options.push(NO_COLOR_ROW.to_string());
-        picks.push(ValuePick::None);
+        picks.push(ColorRow::set(ValuePick::None));
         swatches.push(None);
         if let Some(lower) = state.follow_desk() {
             options.push(format!("Follow desk ({})", lower.label()));
-            picks.push(ValuePick::FollowDesk);
+            picks.push(ColorRow::set(ValuePick::FollowDesk));
             swatches.push(None);
         }
         let opening = match state.effective.as_ref() {
-            Some(ValueEntry::Named(name)) => picks
-                .iter()
-                .position(|p| matches!(p, ValuePick::Color(n) if n == name)),
-            _ => None,
+            Some(ValueEntry::Named(name)) => picks.iter().position(
+                |p| matches!(p, ColorRow::Set { pick: ValuePick::Color(n), .. } if n == name),
+            ),
+            Some(ValueEntry::Inline(_)) => Some(custom),
+            None => None,
         }
         .unwrap_or(no_color);
         let mut list = ChoiceList::new(options, choice::DEFAULT_CAP);
@@ -691,6 +985,8 @@ impl ChoiceDialogState {
                 picks,
                 swatches,
                 resolved: SwatchCache::default(),
+                in_force,
+                stage: None,
             },
         }
     }
@@ -1133,9 +1429,15 @@ fn open(
         Some(Rc::new(handle_key)),
         true,
     );
-    dialog::set_back(view, on_level_step, |shell, window, cx| {
-        back_to_targets(shell, window, cx);
-    });
+    dialog::set_back(
+        view,
+        |shell| on_level_step(shell) || on_hue_stage(shell),
+        |shell, window, cx| {
+            if !back_to_targets(shell, window, cx) {
+                leave_hue_stage(shell, window, cx);
+            }
+        },
+    );
 }
 
 /// Whether the log-level dialog is on its level step, the only step any choice dialog
@@ -1171,6 +1473,423 @@ fn back_to_targets(
     input.read(cx).focus_handle(cx).focus(window, cx);
     cx.notify();
     true
+}
+
+fn hue_stage(shell: &ShellView) -> Option<&HueStage> {
+    match shell.choice_dialog.as_ref().map(|s| &s.target) {
+        Some(Target::ValueColor {
+            stage: Some(stage), ..
+        }) => Some(&**stage),
+        _ => None,
+    }
+}
+
+fn hue_stage_mut(shell: &mut ShellView) -> Option<&mut HueStage> {
+    match shell.choice_dialog.as_mut().map(|s| &mut s.target) {
+        Some(Target::ValueColor {
+            stage: Some(stage), ..
+        }) => Some(&mut **stage),
+        _ => None,
+    }
+}
+
+/// Whether the value-color list is on its hue stage.
+pub(super) fn on_hue_stage(shell: &ShellView) -> bool {
+    hue_stage(shell).is_some()
+}
+
+/// `Custom…`: open the hue stage on the color in force, with its slider
+/// entity and subscription (created here, never in render). The list's field
+/// is blurred: the stage claims its keys through the shell's modal route.
+fn enter_hue_stage(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let Some(Target::ValueColor {
+        value,
+        in_force,
+        stage,
+        ..
+    }) = shell.choice_dialog.as_mut().map(|s| &mut s.target)
+    else {
+        return;
+    };
+    let opened = HueStage::start(in_force.as_ref(), SharedString::from(value.clone()));
+    let hue = opened.hue;
+    *stage = Some(Box::new(opened));
+    let slider = cx.new(|_| {
+        SliderState::new()
+            .min(0.)
+            .max(359.)
+            .step(1.)
+            .default_value(f32::from(hue))
+    });
+    let change = cx.subscribe(&slider, |shell, _, event: &SliderEvent, cx| {
+        on_slider(shell, event, cx);
+    });
+    shell.hue_slider = Some(HueSlider {
+        state: slider,
+        _change: change,
+    });
+    warm_preview(shell, cx);
+    shell.focus_handle.focus(window, cx);
+    cx.notify();
+}
+
+/// Back from the hue stage to the list, writing nothing. The list keeps its
+/// query and highlight, and its field takes the keys again. `false`, changing
+/// nothing, off the stage.
+fn leave_hue_stage(
+    shell: &mut ShellView,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
+    let Some(Target::ValueColor { stage, .. }) =
+        shell.choice_dialog.as_mut().map(|s| &mut s.target)
+    else {
+        return false;
+    };
+    if stage.take().is_none() {
+        return false;
+    }
+    shell.hue_slider = None;
+    shell
+        .dialog_input
+        .read(cx)
+        .focus_handle(cx)
+        .focus(window, cx);
+    cx.notify();
+    true
+}
+
+/// Apply the stage: one inline pick of its hue and tone, closing the list
+/// (a pick equal to the color in force writes nothing). Refused while the
+/// field is out of range; Apply is disabled then.
+fn apply_hue_stage(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let Some(stage) = hue_stage(shell) else {
+        return;
+    };
+    if !stage.valid() {
+        return;
+    }
+    let definition = stage.definition();
+    let Some(Target::ValueColor {
+        dimension, value, ..
+    }) = shell.choice_dialog.as_ref().map(|s| &s.target)
+    else {
+        return;
+    };
+    let pick = Pick::ValueColor {
+        dimension: dimension.clone(),
+        value: value.clone(),
+        pick: ColorRow::set(ValuePick::Inline(definition)),
+    };
+    commit(shell, pick, window, cx);
+}
+
+/// The hue stage's key route ([`stage_key`]): every non-chord key is
+/// claimed, so nothing types into the list's field beneath.
+fn hue_stage_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
+    let Some(key) = stage_key(ks) else {
+        return false;
+    };
+    match key {
+        StageKey::Back => {
+            let _ = leave_hue_stage(shell, window, cx);
+        }
+        StageKey::Apply => apply_hue_stage(shell, window, cx),
+        StageKey::Swallow => {}
+        StageKey::Step(_) | StageKey::Tone | StageKey::Digit(_) | StageKey::Erase => {
+            if let Some(stage) = hue_stage_mut(shell) {
+                match key {
+                    StageKey::Step(delta) => stage.step(delta),
+                    StageKey::Tone => stage.toggle_tone(),
+                    StageKey::Digit(digit) => stage.digit(digit),
+                    _ => stage.erase(),
+                }
+            }
+            let hue = hue_stage(shell).map(|s| s.hue);
+            if let (Some(hue), Some(slider)) =
+                (hue, shell.hue_slider.as_ref().map(|s| s.state.clone()))
+            {
+                slider.update(cx, |s, cx| s.set_value(f32::from(hue), window, cx));
+            }
+            warm_preview(shell, cx);
+        }
+    }
+    cx.notify();
+    true
+}
+
+/// A pointer press or drag on the slider: the stage follows it.
+fn on_slider(shell: &mut ShellView, event: &SliderEvent, cx: &mut Context<ShellView>) {
+    let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
+    let hue = (value.end().round() as i32).rem_euclid(360) as u16;
+    if let Some(stage) = hue_stage_mut(shell) {
+        stage.set_hue(hue);
+    }
+    warm_preview(shell, cx);
+    cx.notify();
+}
+
+/// A tone option clicked.
+fn set_stage_tone(shell: &mut ShellView, tone: Tone, cx: &mut Context<ShellView>) {
+    if let Some(stage) = hue_stage_mut(shell) {
+        stage.tone = tone;
+    }
+    warm_preview(shell, cx);
+    cx.notify();
+}
+
+/// `definition` resolved under `theme` as a cell paints it, contrast floor
+/// included.
+fn resolve_hsla(definition: &Definition, theme: &gpui_component::Theme) -> gpui::Hsla {
+    super::colours::to_hsla(geode_core::colour::resolve(
+        definition,
+        &super::colours::anchors_from_theme(theme),
+        &super::colours::tokens_from_theme(theme),
+    ))
+}
+
+/// Slider track stops: every 15° from 0 to 360 inclusive.
+const TRACK_STOPS: usize = 25;
+
+/// The track's stops for `tone`, each resolved through the theme like any hue.
+fn track_stops(tone: Tone, theme: &gpui_component::Theme) -> Rc<[gpui::Hsla]> {
+    let anchors = super::colours::anchors_from_theme(theme);
+    let tokens = super::colours::tokens_from_theme(theme);
+    (0..TRACK_STOPS)
+        .map(|i| {
+            super::colours::to_hsla(geode_core::colour::resolve(
+                &Definition::hue((i * 15) as f32, tone),
+                &anchors,
+                &tokens,
+            ))
+        })
+        .collect()
+}
+
+/// Resolve the stage's preview in a handler, so the next paint finds it
+/// cached: a step or a slider move costs one resolve outside render. A theme
+/// change while the stage is open resolves once at the next paint, as the
+/// swatches do.
+fn warm_preview(shell: &ShellView, cx: &App) {
+    if let Some(stage) = hue_stage(shell) {
+        let theme = cx.theme();
+        stage.cache.preview(
+            super::colours::theme_signature(theme),
+            stage.hue,
+            stage.tone,
+            || resolve_hsla(&stage.definition(), theme),
+        );
+    }
+}
+
+/// The hue field's refusal, painted while its text is not a hue.
+const HUE_REFUSAL: &str = "a hue is 0\u{2013}360";
+
+const STAGE_HINTS: &[Hint] = &[
+    Hint::Key("h"),
+    Hint::Key("l"),
+    Hint::Text("15\u{b0} \u{b7}"),
+    Hint::Key("shift+h"),
+    Hint::Key("shift+l"),
+    Hint::Text("1\u{b0} \u{b7}"),
+    Hint::Key("t"),
+    Hint::Text("tone \u{b7}"),
+    Hint::Key("enter"),
+    Hint::Text("apply \u{b7}"),
+    Hint::Key("escape"),
+    Hint::Text("back"),
+];
+
+/// The hue stage: the preview (the value in its resolved color beside the
+/// same text in the foreground, both on the theme background), the slider
+/// over its wheel-gradient track, the hue field, the tone options, and Apply
+/// and Cancel. Colors come from the stage's per-theme cache.
+fn hue_stage_body(
+    shell: &ShellView,
+    stage: &HueStage,
+    entity: &Entity<ShellView>,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let signature = super::colours::theme_signature(theme);
+    let preview = stage.cache.preview(signature, stage.hue, stage.tone, || {
+        resolve_hsla(&stage.definition(), theme)
+    });
+    let track = stage
+        .cache
+        .track(signature, stage.tone, || track_stops(stage.tone, theme));
+    let valid = stage.valid();
+    let sample = |color: gpui::Hsla, selector: &'static str| {
+        div()
+            .px_2()
+            .py_1()
+            .rounded(theme.radius)
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.border)
+            .text_sm()
+            .text_color(color)
+            .debug_selector(move || selector.to_string())
+            .child(stage.value.clone())
+    };
+    let segments = track.windows(2).map(|pair| {
+        div().flex_1().h_full().bg(gpui::linear_gradient(
+            90.,
+            gpui::linear_color_stop(pair[0], 0.),
+            gpui::linear_color_stop(pair[1], 1.),
+        ))
+    });
+    let slider = div()
+        .relative()
+        .w_full()
+        .h_6()
+        .debug_selector(|| "valuecolor-stage-slider".to_string())
+        .child(
+            h_flex()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .items_center()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .h_1p5()
+                        .rounded(theme.radius)
+                        .overflow_hidden()
+                        .children(segments),
+                ),
+        )
+        .children(shell.hue_slider.as_ref().map(|slider| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .child(Slider::new(&slider.state).bg(theme.transparent))
+        }));
+    let field = h_flex()
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .font_family(crate::fonts::MONO)
+                .text_sm()
+                .px_2()
+                .py_0p5()
+                .rounded(theme.radius)
+                .border_1()
+                .border_color(if valid { theme.border } else { theme.danger })
+                .debug_selector(|| "valuecolor-stage-hue".to_string())
+                .child(stage.field.clone()),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("\u{b0}"),
+        )
+        .when(!valid, |row| {
+            row.child(
+                div()
+                    .text_sm()
+                    .text_color(theme.danger)
+                    .debug_selector(|| "valuecolor-stage-refusal".to_string())
+                    .child(HUE_REFUSAL),
+            )
+        });
+    let tone_entity = entity.clone();
+    let tone = div()
+        .debug_selector(|| "valuecolor-stage-tone".to_string())
+        .child(
+            ButtonGroup::new("valuecolor-tone")
+                .small()
+                .child(
+                    Button::new("valuecolor-tone-normal")
+                        .label("Normal")
+                        .selected(stage.tone == Tone::Normal),
+                )
+                .child(
+                    Button::new("valuecolor-tone-light")
+                        .label("Light")
+                        .selected(stage.tone == Tone::Light),
+                )
+                .on_click(move |clicks: &Vec<usize>, _window, cx| {
+                    let tone = if clicks.contains(&1) {
+                        Tone::Light
+                    } else {
+                        Tone::Normal
+                    };
+                    tone_entity.update(cx, |shell, cx| set_stage_tone(shell, tone, cx));
+                }),
+        );
+    let cancel_entity = entity.clone();
+    let apply_entity = entity.clone();
+    let buttons = h_flex()
+        .gap_2()
+        .justify_end()
+        .child(
+            div()
+                .debug_selector(|| "valuecolor-cancel".to_string())
+                .child(
+                    Button::new("valuecolor-cancel")
+                        .small()
+                        .ghost()
+                        .label("Cancel")
+                        .on_click(move |_event, window, cx| {
+                            cancel_entity.update(cx, |shell, cx| {
+                                leave_hue_stage(shell, window, cx);
+                            });
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .debug_selector(|| "valuecolor-apply".to_string())
+                .child(
+                    Button::new("valuecolor-apply")
+                        .small()
+                        .primary()
+                        .label("Apply")
+                        .disabled(!valid)
+                        .on_click(move |_event, window, cx| {
+                            apply_entity.update(cx, |shell, cx| apply_hue_stage(shell, window, cx));
+                        }),
+                ),
+        );
+    v_flex()
+        .gap_3()
+        .w(scale::design(WIDTH))
+        .child(
+            h_flex()
+                .gap_3()
+                .items_center()
+                .child(sample(preview, "valuecolor-stage-preview"))
+                .child(sample(theme.foreground, "valuecolor-stage-plain")),
+        )
+        .child(slider)
+        .child(
+            h_flex()
+                .gap_4()
+                .items_center()
+                .justify_between()
+                .child(field)
+                .child(tone),
+        )
+        .child(buttons)
+        .child(hint_row(
+            STAGE_HINTS,
+            "valuecolor-stage-hints",
+            WIDTH,
+            theme.muted_foreground,
+            theme.border,
+        ))
+        .into_any_element()
 }
 
 /// Notice for a saved scope removed after the dialog captured its rows.
@@ -1277,10 +1996,14 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
             dimension,
             value,
             pick,
-        } => {
-            shell.close_modal(window, cx);
-            shell.set_value_color(dimension, value, pick, None, cx);
-        }
+        } => match pick {
+            ColorRow::Set { pick, preset } => {
+                shell.close_modal(window, cx);
+                shell.set_value_color(dimension, value, pick, preset, cx);
+            }
+            // The list stays open beneath its own second stage.
+            ColorRow::Custom => enter_hue_stage(shell, window, cx),
+        },
     }
 }
 
@@ -1293,6 +2016,9 @@ fn handle_key(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
+    if on_hue_stage(shell) {
+        return hue_stage_key(shell, ks, window, cx);
+    }
     match choice::route(ks) {
         Some(ChoiceKey::Cancel) => {
             // The level step goes BACK to the target step; every other
@@ -1363,6 +2089,12 @@ fn build(
     let Some(state) = shell.choice_dialog.as_ref() else {
         return div().into_any_element();
     };
+    if let Target::ValueColor {
+        stage: Some(stage), ..
+    } = &state.target
+    {
+        return hue_stage_body(shell, stage, entity, cx);
+    }
     let (_, prefix, hints_selector, hints) = chrome(&state.target);
     let no_scopes = matches!(state.target, Target::Scope { .. }) && state.list.options().is_empty();
     let loading = matches!(state.target, Target::ActionValue { values: None, .. });
@@ -1376,7 +2108,7 @@ fn build(
     let leads = value_color_leads(&state.target, cx);
     let no_colors = matches!(
         &state.target,
-        Target::ValueColor { picks, .. } if !picks.iter().any(|p| matches!(p, ValuePick::Color(_)))
+        Target::ValueColor { picks, .. } if !picks.iter().any(|p| matches!(p, ColorRow::Set { pick: ValuePick::Color(_), .. }))
     );
     let theme = cx.theme();
     let muted = theme.muted_foreground;
@@ -2173,13 +2905,46 @@ mod tests {
         ChoiceDialogState::value_colors("underlying_ref".into(), "SPX".into(), &named(names), state)
     }
 
+    fn set(pick: ValuePick) -> ColorRow {
+        ColorRow::set(pick)
+    }
+
+    fn value_pick(state: &ChoiceDialogState, ranked: usize) -> Option<ColorRow> {
+        match state.pick_at_ranked(ranked) {
+            Some(Pick::ValueColor { pick, .. }) => Some(pick),
+            _ => None,
+        }
+    }
+
+    fn lit(state: &ChoiceDialogState) -> Option<ColorRow> {
+        match state.highlighted_pick() {
+            Some(Pick::ValueColor { pick, .. }) => Some(pick),
+            _ => None,
+        }
+    }
+
+    fn position_of(state: &ChoiceDialogState, text: &str) -> usize {
+        state
+            .list
+            .options()
+            .iter()
+            .position(|o| o == text)
+            .expect(text)
+    }
+
     #[test]
-    fn the_color_list_holds_the_names_then_none_and_opens_on_the_current() {
+    fn the_color_list_holds_the_names_first_and_ends_custom_then_none() {
         let state = value_list(&["blue", "amber"], &value_state(None, Some("blue")));
+        let options = state.list.options();
+        assert_eq!(&options[..2], ["amber", "blue"], "alphabetical first");
         assert_eq!(
-            state.list.options(),
-            ["amber", "blue", "None"],
-            "alphabetical, then None"
+            options.last().map(String::as_str),
+            Some(NO_COLOR_ROW),
+            "None last"
+        );
+        assert!(
+            position_of(&state, CUSTOM_ROW) > 1,
+            "Custom… after the named colors, before None"
         );
         assert_eq!(state.title().as_ref(), "Color \u{b7} underlying_ref SPX");
         assert_eq!(
@@ -2187,35 +2952,30 @@ mod tests {
             Some(Pick::ValueColor {
                 dimension: "underlying_ref".into(),
                 value: "SPX".into(),
-                pick: ValuePick::Color("blue".into()),
+                pick: set(ValuePick::Color("blue".into())),
             }),
             "enter on an untouched list changes nothing"
         );
-        // No color in force: it opens on None.
-        let state = value_list(&["blue"], &value_state(None, None));
-        assert!(matches!(
-            state.highlighted_pick(),
-            Some(Pick::ValueColor {
-                pick: ValuePick::None,
-                ..
-            })
-        ));
+        let none = value_list(&["blue"], &value_state(None, None));
+        assert_eq!(lit(&none), Some(set(ValuePick::None)));
+        assert_eq!(
+            value_pick(&none, position_of(&none, CUSTOM_ROW)),
+            Some(ColorRow::Custom)
+        );
     }
 
     #[test]
     fn follow_desk_is_offered_only_over_a_different_desk_entry() {
         let state = value_list(&["blue", "teal"], &value_state(Some("blue"), Some("teal")));
+        let options = state.list.options();
         assert_eq!(
-            state.list.options(),
-            ["blue", "teal", "None", "Follow desk (blue)"]
+            &options[options.len() - 2..],
+            [NO_COLOR_ROW, "Follow desk (blue)"]
         );
-        assert!(matches!(
-            state.pick_at_ranked(3),
-            Some(Pick::ValueColor {
-                pick: ValuePick::FollowDesk,
-                ..
-            })
-        ));
+        assert_eq!(
+            value_pick(&state, options.len() - 1),
+            Some(set(ValuePick::FollowDesk))
+        );
         for (desk, user) in [
             (Some("blue"), None),
             (None, Some("teal")),
@@ -2225,8 +2985,8 @@ mod tests {
         ] {
             let state = value_list(&["blue", "teal"], &value_state(desk, user));
             assert_eq!(
-                state.list.options(),
-                ["blue", "teal", "None"],
+                state.list.options().last().map(String::as_str),
+                Some(NO_COLOR_ROW),
                 "{desk:?} {user:?}"
             );
         }
@@ -2235,45 +2995,250 @@ mod tests {
     #[test]
     fn a_color_named_none_is_still_picked_by_position() {
         let state = value_list(&["None", "blue"], &value_state(None, None));
-        assert_eq!(state.list.options(), ["None", "blue", "None"]);
-        assert!(matches!(
-            state.pick_at_ranked(0),
-            Some(Pick::ValueColor { pick: ValuePick::Color(name), .. }) if name == "None"
-        ));
-        assert!(matches!(
-            state.pick_at_ranked(2),
-            Some(Pick::ValueColor {
-                pick: ValuePick::None,
-                ..
-            })
-        ));
+        assert_eq!(state.list.options()[0], "None");
+        assert_eq!(
+            value_pick(&state, 0),
+            Some(set(ValuePick::Color("None".into())))
+        );
+        let last = state.list.options().len() - 1;
+        assert_eq!(value_pick(&state, last), Some(set(ValuePick::None)));
         // It opens on the no-color row by position, not on the first row
         // spelled like it, so enter on the untouched list still changes
         // nothing.
-        assert!(matches!(
-            state.highlighted_pick(),
-            Some(Pick::ValueColor {
-                pick: ValuePick::None,
-                ..
-            })
-        ));
+        assert_eq!(lit(&state), Some(set(ValuePick::None)));
+    }
+
+    /// A color may be named `Custom…` (`check_object_name` allows it; it
+    /// refuses `preset · red` and `New named color…`, which hold spaces).
+    #[test]
+    fn a_color_named_custom_is_still_picked_by_position() {
+        let state = value_list(
+            &["Custom\u{2026}"],
+            &value_state(None, Some("Custom\u{2026}")),
+        );
+        assert_eq!(
+            value_pick(&state, 0),
+            Some(set(ValuePick::Color("Custom\u{2026}".into())))
+        );
+        let custom = state
+            .list
+            .options()
+            .iter()
+            .rposition(|o| o == CUSTOM_ROW)
+            .unwrap();
+        assert_ne!(custom, 0);
+        assert_eq!(value_pick(&state, custom), Some(ColorRow::Custom));
+        assert_eq!(
+            lit(&state),
+            Some(set(ValuePick::Color("Custom\u{2026}".into()))),
+            "the color in force, not the stage row"
+        );
     }
 
     #[test]
     fn a_color_no_longer_defined_opens_the_list_on_none() {
         let state = value_list(&["blue"], &value_state(None, Some("gone")));
-        assert!(matches!(
-            state.highlighted_pick(),
-            Some(Pick::ValueColor {
-                pick: ValuePick::None,
-                ..
-            })
-        ));
+        assert_eq!(lit(&state), Some(set(ValuePick::None)));
     }
 
     #[test]
-    fn with_no_named_colors_the_list_holds_only_none() {
+    fn an_inline_entry_in_force_opens_on_custom() {
+        let mut state = value_state(None, None);
+        let inline = ValueEntry::Inline(Definition::hue(200.0, Tone::Light));
+        state.user = Some(inline.clone());
+        state.effective = Some(inline);
+        let list = value_list(&["blue"], &state);
+        assert_eq!(lit(&list), Some(ColorRow::Custom));
+    }
+
+    #[test]
+    fn with_no_named_colors_the_list_holds_no_named_rows() {
         let state = value_list(&[], &value_state(None, None));
-        assert_eq!(state.list.options(), ["None"]);
+        let Target::ValueColor { picks, .. } = &state.target else {
+            panic!("a value-color list");
+        };
+        assert!(!picks.iter().any(|p| matches!(
+            p,
+            ColorRow::Set {
+                pick: ValuePick::Color(_),
+                ..
+            }
+        )));
+        assert_eq!(
+            state.list.options().last().map(String::as_str),
+            Some(NO_COLOR_ROW)
+        );
+    }
+
+    #[test]
+    fn a_hue_is_a_whole_number_from_0_to_360() {
+        assert_eq!(parse_hue("0"), Some(0));
+        assert_eq!(parse_hue("210"), Some(210));
+        assert_eq!(
+            parse_hue("07"),
+            Some(7),
+            "a leading zero is still a whole number"
+        );
+        assert_eq!(parse_hue(" 45 "), Some(45));
+        assert_eq!(parse_hue("359"), Some(359));
+        assert_eq!(
+            parse_hue("360"),
+            Some(0),
+            "360 reads as 0, as the document does"
+        );
+        for refused in [
+            "", " ", "-5", "1e2", "3600", "361", "400", "21a", "2.5", "+5",
+        ] {
+            assert_eq!(parse_hue(refused), None, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn the_stage_starts_from_the_color_in_force() {
+        let start = |d: Option<Definition>| {
+            let s = HueStage::start(d.as_ref(), "SPX".into());
+            (s.hue, s.tone, s.field)
+        };
+        assert_eq!(
+            start(Some(Definition::hue(210.0, Tone::Light))),
+            (210, Tone::Light, "210".into())
+        );
+        assert_eq!(
+            start(Some(Definition::hue(12.6, Tone::Normal))),
+            (13, Tone::Normal, "13".into())
+        );
+        assert_eq!(
+            start(Some(Definition::token(geode_core::colour::Token::Warning))),
+            (240, Tone::Normal, "240".into())
+        );
+        assert_eq!(start(None), (240, Tone::Normal, "240".into()));
+    }
+
+    #[test]
+    fn stage_steps_wrap_and_shift_steps_one_degree() {
+        let mut s = HueStage::new(0, Tone::Normal, "SPX".into());
+        s.step(-15);
+        assert_eq!((s.hue, s.field.as_str()), (345, "345"));
+        s.step(15);
+        s.step(15);
+        assert_eq!(s.hue, 15);
+        s.step(-1);
+        assert_eq!(s.hue, 14);
+        let mut s = HueStage::new(350, Tone::Normal, "SPX".into());
+        s.step(15);
+        assert_eq!(s.hue, 5, "wraps past 359");
+    }
+
+    #[test]
+    fn stage_digits_replace_then_append_and_refuse_out_of_range() {
+        let mut s = HueStage::new(240, Tone::Normal, "SPX".into());
+        s.digit('4');
+        assert_eq!(
+            (s.field.as_str(), s.hue, s.valid()),
+            ("4", 4, true),
+            "the first digit replaces"
+        );
+        s.digit('0');
+        s.digit('0');
+        assert_eq!(s.field, "400");
+        assert!(!s.valid(), "out of range is refused");
+        assert_eq!(s.hue, 40, "the last valid hue stays in force");
+        s.digit('9');
+        assert_eq!(s.field, "400", "three digits at most");
+        s.erase();
+        assert_eq!((s.field.as_str(), s.hue, s.valid()), ("40", 40, true));
+        s.erase();
+        s.erase();
+        // Erasing through `4` set the hue to 4, as typing it did; the empty
+        // field leaves that hue in force.
+        assert!(!s.valid(), "an empty field is not a hue");
+        assert_eq!(s.hue, 4);
+        s.step(15);
+        assert_eq!(
+            (s.field.as_str(), s.valid()),
+            ("19", true),
+            "a step rewrites the field"
+        );
+        s.digit('9');
+        assert_eq!(s.field, "9", "after a step the next digit replaces");
+    }
+
+    #[test]
+    fn stage_tone_toggles() {
+        let mut s = HueStage::new(240, Tone::Normal, "SPX".into());
+        s.toggle_tone();
+        assert_eq!(s.tone, Tone::Light);
+        assert_eq!(s.definition(), Definition::hue(240.0, Tone::Light));
+        s.toggle_tone();
+        assert_eq!(s.tone, Tone::Normal);
+    }
+
+    #[test]
+    fn stage_keys_map_and_leave_chords_to_the_shell() {
+        let k = |s: &str| parse_keystroke(s, Modifiers::CTRL).unwrap();
+        assert_eq!(stage_key(&k("escape")), Some(StageKey::Back));
+        assert_eq!(stage_key(&k("enter")), Some(StageKey::Apply));
+        assert_eq!(stage_key(&k("h")), Some(StageKey::Step(-15)));
+        assert_eq!(stage_key(&k("left")), Some(StageKey::Step(-15)));
+        assert_eq!(stage_key(&k("l")), Some(StageKey::Step(15)));
+        assert_eq!(stage_key(&k("right")), Some(StageKey::Step(15)));
+        assert_eq!(stage_key(&k("shift+h")), Some(StageKey::Step(-1)));
+        assert_eq!(stage_key(&k("shift+right")), Some(StageKey::Step(1)));
+        assert_eq!(stage_key(&k("t")), Some(StageKey::Tone));
+        assert_eq!(stage_key(&k("7")), Some(StageKey::Digit('7')));
+        assert_eq!(stage_key(&k("backspace")), Some(StageKey::Erase));
+        assert_eq!(
+            stage_key(&k("x")),
+            Some(StageKey::Swallow),
+            "never typed into the list beneath"
+        );
+        assert_eq!(stage_key(&k("ctrl+k")), None, "a chord is the shell's");
+    }
+
+    /// The track and the preview resolve once per key: a repaint resolves
+    /// nothing, a step only the preview, a theme change while the stage is
+    /// open both.
+    #[test]
+    fn hue_stage_track_and_preview_resolve_once_per_theme() {
+        let cache = StageCache::default();
+        let calls = std::cell::Cell::new(0);
+        let count = |color: gpui::Hsla| {
+            calls.set(calls.get() + 1);
+            color
+        };
+        let red = gpui::hsla(0.0, 0.5, 0.5, 1.0);
+        let light = [gpui::Hsla::default(); 28];
+        let mut dark = light;
+        dark[12] = gpui::hsla(0.0, 0.0, 1.0, 1.0);
+        assert_eq!(cache.preview(light, 210, Tone::Normal, || count(red)), red);
+        cache.preview(light, 210, Tone::Normal, || count(red));
+        assert_eq!(calls.get(), 1, "an unchanged key resolves nothing");
+        cache.preview(light, 225, Tone::Normal, || count(red));
+        assert_eq!(calls.get(), 2, "a step resolves the preview");
+        cache.preview(dark, 225, Tone::Normal, || count(red));
+        assert_eq!(calls.get(), 3, "a theme change resolves it again");
+
+        let tracks = std::cell::Cell::new(0);
+        let stops = || {
+            tracks.set(tracks.get() + 1);
+            Rc::<[gpui::Hsla]>::from(vec![red; TRACK_STOPS])
+        };
+        let first = cache.track(light, Tone::Normal, stops);
+        let again = cache.track(light, Tone::Normal, || {
+            tracks.set(tracks.get() + 1);
+            Rc::<[gpui::Hsla]>::from(vec![red; TRACK_STOPS])
+        });
+        assert_eq!(tracks.get(), 1);
+        assert!(Rc::ptr_eq(&first, &again));
+        cache.track(light, Tone::Light, || {
+            tracks.set(tracks.get() + 1);
+            Rc::<[gpui::Hsla]>::from(vec![red; TRACK_STOPS])
+        });
+        assert_eq!(tracks.get(), 2, "a tone change resolves the track");
+        assert_eq!(
+            StageCache::default(),
+            cache,
+            "a cache is not part of the stage's identity"
+        );
     }
 }

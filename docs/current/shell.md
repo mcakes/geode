@@ -241,14 +241,35 @@ rebuilds them on a configuration reload. A row standing for no single value
 Picking it opens a choice list titled `Color · {column} {value}` (see
 [choice lists](input-and-dialogs.md#scope-tile-log-and-column-choices)):
 one row per named color in `colors.toml`, alphabetical, each with its
-swatch, then `None`, then `Follow desk ({label})` only when the user layer
-holds an entry for this value and a lower layer holds a different, colored
-one. The label is the lower entry's color name, or for an inline entry
-`hue 210`, `hue 30 light`, or the token's name. It opens on the value's current color, or on `None` when it has none or
-its color is no longer defined, so `enter` on an untouched list changes
-nothing. A row stands for its pick by position, so a color named `None` is
-still that color. With no named color the list holds only `None` and a muted
-line, `no named colors: define one in the Colors dialog`.
+swatch, then `Custom…` (with the swatch of the color in force), then
+`None`, then `Follow desk ({label})` only when the user layer holds an entry
+for this value and a lower layer holds a different, colored one. The label
+is the lower entry's color name, or for an inline entry `hue 210`,
+`hue 30 light`, or the token's name. It opens on the named color in force,
+on `Custom…` when an inline entry is in force, or on `None` when the value
+has no color or its color is no longer defined, so `enter` on an untouched
+list changes nothing (on `Custom…` it opens the hue stage on the color in
+force, whose Apply writes nothing). A row stands for its pick by position,
+so a color named `None` or `Custom…` is still that color. With no named
+color the list holds `Custom…`, `None` and a muted line, `no named colors:
+define one in the Colors dialog`.
+
+`Custom…` opens the hue stage: a second stage of the same modal, under the
+same title, with the title row's `‹` back button. The preview shows the
+value's text in its resolved color beside the same text in the foreground
+color, both on the theme background, as a cell paints it in this theme,
+contrast floor included. Below it a slider runs 0–359 over a gradient of
+the wheel resolved through the current theme, beside a hue field (degrees)
+and a `Normal` | `Light` tone control; `Apply` and `Cancel` close the row.
+The field accepts a whole number 0–360 (360 reads as 0); out of range or
+empty it shows `a hue is 0–360` and disables Apply, and the last valid hue
+stays in force. The stage starts on the in-force color's hue and tone (an
+inline entry or a named hue color), else hue 240, normal. Nothing is
+written until Apply, which makes one inline pick and closes the list;
+Apply on the color in force writes nothing. `escape`, `Cancel` or `‹`
+returns to the list as it was, writing nothing. The track and the preview
+are resolved once per theme signature (the preview also per hue and tone),
+a step or slider move resolving only the preview, in its handler.
 
 A pick writes only the user layer's `value_colors.toml`, through
 `config_write`, off the UI thread, keeping the rest of the file:

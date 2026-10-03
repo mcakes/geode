@@ -829,6 +829,10 @@ pub struct ShellView {
     /// (`dialog::choice_rows`'s viewport) — the `settings_scroll` split,
     /// one dialog over.
     choice_dialog_scroll: ScrollHandle,
+    /// The value-color hue stage's slider, while that stage is open:
+    /// created when `Custom…` opens it (never in render), dropped with the
+    /// stage and with the choice dialog.
+    hue_slider: Option<choicedialog::HueSlider>,
     /// Scroll state for the scope expression suggestions' row list. Refresh
     /// scrolls it to the top; a highlight move follows the lit row.
     expr_scroll: ScrollHandle,
@@ -1593,6 +1597,7 @@ impl ShellView {
             scope_expr_dialog: None,
             choice_dialog: None,
             choice_dialog_scroll: ScrollHandle::new(),
+            hue_slider: None,
             expr_scroll: ScrollHandle::new(),
             object_dialog: None,
             object_dialog_scroll: ScrollHandle::new(),
@@ -1642,7 +1647,10 @@ impl ShellView {
             DialogKind::Picker => self.picker = None,
             DialogKind::AsOf => self.as_of_dialog = None,
             DialogKind::ScopeExpr => self.scope_expr_dialog = None,
-            DialogKind::Choice => self.choice_dialog = None,
+            DialogKind::Choice => {
+                self.choice_dialog = None;
+                self.hue_slider = None;
+            }
             DialogKind::Object => {
                 self.object_dialog = None;
                 // The next object dialog down, if any, becomes live again.

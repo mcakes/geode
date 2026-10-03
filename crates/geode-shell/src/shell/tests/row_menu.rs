@@ -5,6 +5,7 @@ use super::drag::main_tile_point;
 use super::launch::{draw, focused, underlying_state};
 use super::*;
 use crate::module::recording::{Recorded, RecordingAction, RecordingFactory};
+use geode_core::colour::Tone;
 use geode_core::context::DimensionContext;
 use std::rc::Rc;
 
@@ -1223,6 +1224,46 @@ fn shell_notice(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Opt
     shell.read_with(vcx, |s, _| s.notice.clone().map(|n| n.to_string()))
 }
 
+/// Press `up` until the lit row reads `text` (at most one lap of the list).
+fn light_row(shell: &Entity<ShellView>, vcx: &mut gpui::VisualTestContext, text: &str) {
+    for _ in 0..40 {
+        let lit = shell.read_with(vcx, |s, _| {
+            s.choice_dialog
+                .as_ref()
+                .and_then(|d| d.list.highlighted_text().map(str::to_string))
+        });
+        if lit.as_deref() == Some(text) {
+            return;
+        }
+        vcx.simulate_keystrokes("up");
+    }
+    panic!("no row reads {text:?}");
+}
+
+fn hue_stage(
+    shell: &Entity<ShellView>,
+    vcx: &gpui::VisualTestContext,
+) -> Option<crate::shell::choicedialog::HueStage> {
+    shell.read_with(vcx, |s, _| {
+        match s.choice_dialog.as_ref().map(|d| &d.target) {
+            Some(crate::shell::choicedialog::Target::ValueColor { stage, .. }) => {
+                stage.as_deref().cloned()
+            }
+            _ => None,
+        }
+    })
+}
+
+fn open_stage(shell: &Entity<ShellView>, vcx: &mut gpui::VisualTestContext) {
+    light_row(shell, vcx, "Custom\u{2026}");
+    vcx.simulate_keystrokes("enter");
+    draw(vcx);
+}
+
+fn value_colors_file(dir: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(dir.join("value_colors.toml")).ok()
+}
+
 #[gpui::test]
 fn color_opens_the_pick_list_with_swatches(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, None);
@@ -1233,10 +1274,9 @@ fn color_opens_the_pick_list_with_swatches(cx: &mut gpui::TestAppContext) {
     let options = shell.read_with(&vcx, |s, _| {
         s.choice_dialog.as_ref().map(|d| d.list.options().to_vec())
     });
-    assert_eq!(
-        options,
-        Some(vec!["amber".into(), "blue".into(), "None".into()])
-    );
+    let options = options.expect("the list is open");
+    assert_eq!(&options[..2], ["amber", "blue"]);
+    assert_eq!(options.last().map(String::as_str), Some("None"));
     assert!(
         vcx.debug_bounds("valuecolor-swatch-blue").is_some(),
         "a swatch per color"
@@ -1253,8 +1293,8 @@ fn color_opens_the_pick_list_with_swatches(cx: &mut gpui::TestAppContext) {
 fn picking_a_color_writes_the_user_layer_and_says_so(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, Some(dir.path().to_path_buf()));
-    // Opens on None (last row); one up is `blue`.
-    vcx.simulate_keystrokes("up enter");
+    light_row(&shell, &mut vcx, "blue");
+    vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
     draw(&mut vcx);
     assert!(
@@ -1336,7 +1376,8 @@ fn enter_over_an_undefined_desk_color_writes_nothing(cx: &mut gpui::TestAppConte
 #[gpui::test]
 fn a_pick_with_no_user_directory_says_so(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, None);
-    vcx.simulate_keystrokes("up enter");
+    light_row(&shell, &mut vcx, "blue");
+    vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
     assert_eq!(
         shell_notice(&shell, &vcx),
@@ -1351,7 +1392,8 @@ fn a_failed_write_shows_the_writers_error(cx: &mut gpui::TestAppContext) {
     let before = "config_version = 1\nunderlying_ref = \"blue\"\n";
     std::fs::write(&path, before).unwrap();
     let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, Some(dir.path().to_path_buf()));
-    vcx.simulate_keystrokes("up enter");
+    light_row(&shell, &mut vcx, "blue");
+    vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
     let notice = shell_notice(&shell, &vcx);
     assert!(
@@ -1371,6 +1413,201 @@ fn with_no_named_colors_the_list_holds_none_and_says_where_to_define_one(
     let options = shell.read_with(&vcx, |s, _| {
         s.choice_dialog.as_ref().map(|d| d.list.options().to_vec())
     });
-    assert_eq!(options, Some(vec!["None".into()]));
+    assert_eq!(
+        options.and_then(|o| o.last().cloned()).as_deref(),
+        Some("None")
+    );
     assert!(vcx.debug_bounds("valuecolor-empty").is_some());
+}
+
+#[gpui::test]
+fn custom_opens_the_hue_stage_and_enter_applies_the_stepped_hue(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, Some(dir.path().to_path_buf()));
+    open_stage(&shell, &mut vcx);
+    let stage = hue_stage(&shell, &vcx).expect("the stage is open");
+    assert_eq!(
+        (stage.hue, stage.tone),
+        (240, Tone::Normal),
+        "no color in force: hue 240"
+    );
+    assert!(vcx.debug_bounds("valuecolor-stage-preview").is_some());
+    assert!(vcx.debug_bounds("valuecolor-stage-slider").is_some());
+    assert!(
+        vcx.debug_bounds("shell-modal-back").is_some(),
+        "the back button paints"
+    );
+    vcx.simulate_keystrokes("l shift-h t");
+    draw(&mut vcx);
+    let stage = hue_stage(&shell, &vcx).unwrap();
+    assert_eq!((stage.hue, stage.tone), (254, Tone::Light));
+    assert!(
+        value_colors_file(dir.path()).is_none(),
+        "no write before Apply"
+    );
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()),
+        "closed"
+    );
+    let text = value_colors_file(dir.path()).unwrap();
+    assert!(
+        text.contains("SPX = { hue = 254, tone = \"light\" }"),
+        "{text}"
+    );
+    assert_eq!(
+        shell_notice(&shell, &vcx),
+        Some("SPX colored hue 254 light".into())
+    );
+}
+
+#[gpui::test]
+fn escape_from_the_hue_stage_writes_nothing_and_returns_to_the_list(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, Some(dir.path().to_path_buf()));
+    open_stage(&shell, &mut vcx);
+    vcx.simulate_keystrokes("l escape");
+    draw(&mut vcx);
+    assert!(hue_stage(&shell, &vcx).is_none(), "the stage closed");
+    let lit = shell.read_with(&vcx, |s, _| {
+        s.choice_dialog
+            .as_ref()
+            .and_then(|d| d.list.highlighted_text().map(str::to_string))
+    });
+    assert_eq!(lit.as_deref(), Some("Custom\u{2026}"), "the list as it was");
+    assert!(shell.read_with(&vcx, |s, _| s.hue_slider.is_none()));
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()),
+        "a second escape closes"
+    );
+    assert!(value_colors_file(dir.path()).is_none());
+    assert_eq!(shell_notice(&shell, &vcx), None);
+}
+
+#[gpui::test]
+fn the_back_button_leaves_the_hue_stage(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, None);
+    open_stage(&shell, &mut vcx);
+    let at = vcx.debug_bounds("shell-modal-back").unwrap().center();
+    vcx.simulate_click(at, gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert!(hue_stage(&shell, &vcx).is_none());
+    assert!(
+        shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()),
+        "still the list"
+    );
+}
+
+#[gpui::test]
+fn an_out_of_range_hue_keeps_apply_from_writing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, Some(dir.path().to_path_buf()));
+    open_stage(&shell, &mut vcx);
+    vcx.simulate_keystrokes("4 0 0");
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("valuecolor-stage-refusal").is_some());
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(hue_stage(&shell, &vcx).is_some(), "still on the stage");
+    assert!(value_colors_file(dir.path()).is_none());
+    vcx.simulate_keystrokes("backspace enter");
+    vcx.run_until_parked();
+    let text = value_colors_file(dir.path()).unwrap();
+    assert!(text.contains("SPX = { hue = 40 }"), "{text}");
+}
+
+#[gpui::test]
+fn a_slider_click_and_a_tone_click_set_the_stage(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, None);
+    open_stage(&shell, &mut vcx);
+    let at = vcx
+        .debug_bounds("valuecolor-stage-slider")
+        .unwrap()
+        .center();
+    vcx.simulate_click(at, gpui::Modifiers::none());
+    draw(&mut vcx);
+    let hue = hue_stage(&shell, &vcx).unwrap().hue;
+    assert!((170..=190).contains(&hue), "the middle of the track: {hue}");
+    let tone = vcx.debug_bounds("valuecolor-stage-tone").unwrap();
+    vcx.simulate_click(
+        gpui::point(tone.right() - gpui::px(4.), tone.center().y),
+        gpui::Modifiers::none(),
+    );
+    draw(&mut vcx);
+    assert_eq!(hue_stage(&shell, &vcx).unwrap().tone, Tone::Light);
+}
+
+#[gpui::test]
+fn a_clicked_apply_writes_and_apply_on_the_color_in_force_writes_nothing(
+    cx: &mut gpui::TestAppContext,
+) {
+    use geode_core::config::{Config, Layer, LayerDoc, VALUE_COLORS_DOC};
+    let dir = tempfile::tempdir().unwrap();
+    let mut services = color_services(TWO_COLORS);
+    services.config = Config::from_docs(vec![
+        LayerDoc::builtin("colors", TWO_COLORS).unwrap(),
+        LayerDoc {
+            layer: Layer::User,
+            name: VALUE_COLORS_DOC.into(),
+            file: "value_colors.toml".into(),
+            table: "[underlying_ref]\nSPX = { hue = 200 }\n".parse().unwrap(),
+        },
+    ]);
+    let (shell, mut vcx) = open_color_list_on(cx, services, Some(dir.path().to_path_buf()));
+    let lit = shell.read_with(&vcx, |s, _| {
+        s.choice_dialog
+            .as_ref()
+            .and_then(|d| d.list.highlighted_text().map(str::to_string))
+    });
+    assert_eq!(
+        lit.as_deref(),
+        Some("Custom\u{2026}"),
+        "an inline entry opens on Custom…"
+    );
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(
+        hue_stage(&shell, &vcx).unwrap().hue,
+        200,
+        "the stage opens on it"
+    );
+    let apply = vcx.debug_bounds("valuecolor-apply").unwrap().center();
+    vcx.simulate_click(apply, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()),
+        "Apply closes"
+    );
+    assert!(
+        value_colors_file(dir.path()).is_none(),
+        "the color in force: nothing written"
+    );
+    assert_eq!(shell_notice(&shell, &vcx), None);
+}
+
+/// The palette opened over the hue stage and closed again hands the keys
+/// back to the stage: its list's field is not painted, so focusing it
+/// would leave no surface listening.
+#[gpui::test]
+fn the_stage_keeps_its_keys_after_the_palette_closes(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, None);
+    open_stage(&shell, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-k");
+    draw(&mut vcx);
+    assert!(
+        shell.read_with(&vcx, |s, _| s.palette.is_some()),
+        "the palette opened"
+    );
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    assert!(
+        shell.read_with(&vcx, |s, _| s.palette.is_none()),
+        "the palette closed"
+    );
+    vcx.simulate_keystrokes("l");
+    draw(&mut vcx);
+    assert_eq!(hue_stage(&shell, &vcx).map(|s| s.hue), Some(255));
 }
