@@ -885,6 +885,18 @@ pub fn open_log_level(view: &mut ShellView, window: &mut Window, cx: &mut Contex
     open(view, state, window, cx);
 }
 
+/// Open the color pick list for `value` of `dimension` (the row menu's
+/// `Color…`).
+pub(crate) fn open_value_color(
+    view: &mut ShellView,
+    dimension: String,
+    value: String,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let _ = (view, dimension, value, window, cx);
+}
+
 /// Open the loading value choice for `ActionCx::choose_value`: `column`'s
 /// values for the roster action at `action`, minus `exclude`, titled
 /// `title`, waiting on the `ACTION_KEY` request tagged `tag`. False when the

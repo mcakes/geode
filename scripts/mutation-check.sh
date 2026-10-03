@@ -34252,6 +34252,54 @@ run_mutation "pricer: a group label's value color is floored on its ground" \
   geode-pricer \
   a_reloaded_mapping_reaches_the_prepared_rows
 
+# Color… is offered for text dimensions only.
+run_mutation "row menu: Color is offered for text dimensions only" \
+  crates/geode-shell/src/dimension.rs \
+  '        .filter(|column| text_dims.contains(*column))' \
+  '        .filter(|_| true)' \
+  geode-shell \
+  no_color_row_without_a_text_dimension_value_at_the_row
+
+# A clicked text dimension leads the row's own.
+run_mutation "row menu: the clicked text dimension takes Color" \
+  crates/geode-shell/src/dimension.rs \
+  '    [ctx.first.as_ref(), ctx.own.as_ref()]' \
+  '    [ctx.own.as_ref(), ctx.first.as_ref()]' \
+  geode-shell \
+  a_clicked_text_dimension_takes_color_from_the_rows_own
+
+# The shell's open path hands the menu its cached text dimensions.
+run_mutation "row menu: the open path offers Color from the shell's text dimensions" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '        let rows = menu_rows(&context, &self.services.roster, &self.text_dims);' \
+  '        let rows = menu_rows(&context, &self.services.roster, &Default::default());' \
+  geode-shell \
+  g_dot_offers_color_for_the_rows_own_text_dimension
+
+# A reload that changes the datasets rebuilds the text dimensions.
+run_mutation "row menu: a reload rebuilds the text dimensions" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                self.text_dims = text_dimension_names(&self.services.config);' \
+  '                let _ = text_dimension_names(&self.services.config);' \
+  geode-shell \
+  a_reload_that_removes_a_column_rebuilds_the_text_dimensions
+
+# A blotter row owns the grouping column at its depth; the grand total none.
+run_mutation "blotter: a row owns the grouping column at its depth" \
+  crates/geode-blotter/src/delegate.rs \
+  '                .checked_sub(1)' \
+  '                .checked_sub(0)' \
+  geode-blotter \
+  the_rows_context_names_the_grouping_column_at_its_depth
+
+# A pricer row naming an underlying owns underlying_ref.
+run_mutation "pricer: a line's context owns its underlying" \
+  crates/geode-pricer/src/tile.rs \
+  '                ctx.own = Some("underlying_ref".into());' \
+  '                ctx.own = None;' \
+  geode-pricer \
+  a_lines_context_owns_its_underlying
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

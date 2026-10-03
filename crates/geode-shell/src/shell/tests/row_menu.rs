@@ -319,6 +319,61 @@ fn a_right_press_opens_the_row_menu_at_the_pointer(cx: &mut gpui::TestAppContext
     );
 }
 
+fn spx_own() -> DimensionContext {
+    let mut ctx = DimensionContext::of(&[("underlying_ref", "SPX")]);
+    ctx.own = Some("underlying_ref".into());
+    ctx
+}
+
+#[gpui::test]
+fn g_dot_offers_color_for_the_rows_own_text_dimension(cx: &mut gpui::TestAppContext) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.fragment = Some(ROW_FRAGMENT);
+    *rec.dimension_context.borrow_mut() = Some(spx_own());
+    let (window, mut vcx) = open_shell(cx, services_with_recorders(vec![rec]));
+    let shell = shell_of(&window, &mut vcx);
+    shell.update(&mut vcx, |s, _| {
+        s.text_dims.insert("underlying_ref".into());
+    });
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g .");
+    draw(&mut vcx);
+    assert_eq!(
+        row_menu_titles(&shell, &vcx),
+        Some(vec![
+            "# underlying_ref \u{b7} SPX".into(),
+            "Color\u{2026}".into(),
+        ])
+    );
+    // Rows paint under index selectors: section, then Color….
+    assert!(vcx.debug_bounds("row-menu-row-1").is_some(), "painted");
+}
+
+#[gpui::test]
+fn a_right_press_offers_color_for_the_pressed_row(cx: &mut gpui::TestAppContext) {
+    let rec = RecordingFactory::new("rec");
+    *rec.press_context.borrow_mut() = Some(spx_own());
+    let (window, mut vcx) = open_shell(cx, services_with_recorders(vec![rec]));
+    let shell = shell_of(&window, &mut vcx);
+    shell.update(&mut vcx, |s, _| {
+        s.text_dims.insert("underlying_ref".into());
+    });
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let id = focused(&shell, &vcx);
+    let at = main_tile_point(&mut vcx, &shell, id, 0.5, 0.5);
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert_eq!(
+        row_menu_titles(&shell, &vcx),
+        Some(vec![
+            "# underlying_ref \u{b7} SPX".into(),
+            "Color\u{2026}".into(),
+        ])
+    );
+}
+
 /// An occupant that stops a right press's propagation (gpui-component's
 /// selectable table does, on a cell) cannot hide it from the shell: the
 /// tile cell's listener runs in the capture phase, so the press still

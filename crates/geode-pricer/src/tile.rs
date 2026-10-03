@@ -5589,7 +5589,12 @@ impl PricerTile {
     /// an empty context when it names none.
     fn context_at(&self, g: usize) -> geode_core::context::DimensionContext {
         match self.underlying_at(g) {
-            Some(u) => geode_core::context::DimensionContext::of(&[("underlying_ref", &u)]),
+            Some(u) => {
+                let mut ctx = geode_core::context::DimensionContext::of(&[("underlying_ref", &u)]);
+                // The pricer's row context names only the row's underlying.
+                ctx.own = Some("underlying_ref".into());
+                ctx
+            }
             None => geode_core::context::DimensionContext::default(),
         }
     }
@@ -7003,6 +7008,29 @@ pub(crate) mod tests {
             .update(|_, cx| h.content.dimension_context(cx))
             .expect("a pricer always has a context");
         assert_eq!(ctx.get("underlying_ref"), Some("NDX"));
+    }
+
+    /// A line row stands for its underlying: the row menu's `Color…` is
+    /// for `underlying_ref`. A package across underlyings owns none.
+    #[gpui::test]
+    fn a_lines_context_owns_its_underlying(cx: &mut gpui::TestAppContext) {
+        let (store, mut record) = seeded(&["SPX Z26 5000 C", "NDX Z26 20000 C"]);
+        record.insert("cursor".into(), toml::Value::Integer(2));
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.visible(&mut vcx, true);
+        let ctx = vcx
+            .update(|_, cx| h.content.dimension_context(cx))
+            .expect("a pricer always has a context");
+        assert_eq!(ctx.own.as_deref(), Some("underlying_ref"));
+
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 20000 C"]);
+        h.dispatch(&mut vcx, "group", Some(2));
+        h.motion(&mut vcx, "top", None);
+        assert!(h.tree(&vcx)[0].starts_with("CUSTOM SPX/NDX"));
+        let ctx = vcx
+            .update(|_, cx| h.content.dimension_context(cx))
+            .expect("a cursor row has a context");
+        assert_eq!(ctx.own, None, "{ctx:?}");
     }
 
     /// With no cursor row there is no context, so `g m` opens the plain

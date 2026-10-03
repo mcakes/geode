@@ -259,7 +259,7 @@ impl ShellView {
         if self.modal_open() {
             return;
         }
-        let rows = menu_rows(&context, &self.services.roster);
+        let rows = menu_rows(&context, &self.services.roster, &self.text_dims);
         if rows.is_empty() {
             self.notice = Some(NO_ROW_ACTIONS.into());
             cx.notify();
@@ -423,6 +423,9 @@ impl MenuHost for ShellView {
                     action: index,
                 };
                 action.run(&open.context, &mut acx);
+            }
+            RowPick::Color { column, value } => {
+                choicedialog::open_value_color(self, column, value, window, cx);
             }
         }
     }

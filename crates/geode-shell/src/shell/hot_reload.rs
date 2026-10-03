@@ -19,7 +19,7 @@ use geode_core::groupings::GroupingSlots;
 use geode_core::log::LogLevels;
 use geode_core::schema::SchemaSpec;
 
-use super::{ShellEvent, ShellView, docs_equal, pickable_columns};
+use super::{ShellEvent, ShellView, docs_equal, pickable_columns, text_dimension_names};
 
 /// Delay between background reload polls. Scanning and loading run off the UI
 /// thread; validation and application run on it. Work adds to this interval.
@@ -303,6 +303,7 @@ impl ShellView {
 
             if pickable_changed {
                 self.pickable = pickable_columns(&self.services.config);
+                self.text_dims = text_dimension_names(&self.services.config);
                 // Every open expression field re-ranks against the new columns
                 // at once, not at its next keystroke — including one covered
                 // by another dialog. `expr_suggest::completion_mut` reaches

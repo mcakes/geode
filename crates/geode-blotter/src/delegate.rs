@@ -790,6 +790,13 @@ impl BlotterDelegate {
             values: crate::core::context::values_at(snapshot, plan, row),
             selection,
             anchor: self.cursor_anchor.get(),
+            // The row's label is a value of the grouping column at its depth.
+            own: snapshot
+                .tree()
+                .depth(row)
+                .checked_sub(1)
+                .and_then(|level| plan.grouping.get(level))
+                .cloned(),
             ..Default::default()
         })
     }
@@ -2038,6 +2045,29 @@ mod tests {
         d.cursor.row = at(&d, 1);
         let context = d.dimension_context().unwrap();
         assert_eq!(context.selection.len(), 0, "the cursor left the selection");
+    }
+
+    /// A row's own column is the grouping column at its depth: the row
+    /// menu's `Color…` is for that value. The grand total stands for none.
+    #[test]
+    fn the_rows_context_names_the_grouping_column_at_its_depth() {
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        d.expansion
+            .toggle(path_of(&snapshot(), d.plan.as_ref().unwrap(), 1));
+        d.reflatten();
+        let at = |d: &BlotterDelegate, snap_row: u32| {
+            d.shown.iter().position(|r| *r == snap_row).unwrap()
+        };
+        let own =
+            |d: &BlotterDelegate, snap_row: u32| d.context_at_row(at(d, snap_row)).unwrap().own;
+        assert_eq!(own(&d, 0), None, "the grand total");
+        assert_eq!(own(&d, 1).as_deref(), Some(grouping()[0].as_str()), "L1");
+        assert_eq!(
+            own(&d, 3).as_deref(),
+            Some(grouping()[1].as_str()),
+            "L1/SPX"
+        );
     }
 
     /// The pinned table does not record visible ranges of length zero or

@@ -15,6 +15,11 @@ pub struct DimensionContext {
     /// The clicked column, when it names a dimension or key; its menu
     /// section leads. Set by a right press (Part 2); `None` otherwise.
     pub first: Option<String>,
+    /// The column whose value this row stands for: in a grouped grid the
+    /// grouping column at the row's depth. `None` when the row stands for
+    /// no single dimension value (a grand total). The row menu's `Color…`
+    /// row is offered for it when no dimension cell was clicked.
+    pub own: Option<String>,
     /// When the target row is inside a selection: each selected top-most
     /// row's values. Empty otherwise.
     pub selection: Vec<Vec<(String, String)>>,
