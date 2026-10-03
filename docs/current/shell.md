@@ -391,8 +391,14 @@ follow.
 ### Workspace lanes
 
 The selection lives in a lane: scope with its undo/redo stacks and open text
-session, the active grouping slot, and as-of with its one remembered previous
-value. The frame holds one shared lane and one lane per pinned workspace. An
+session, the grouping, and as-of with its one remembered previous value. A
+lane's grouping is one of three choices: each view's own grouping, a
+numbered slot, or the lane's own ad hoc chain. The ad hoc chain is stored on
+the lane beside the choice, so it survives a switch to a slot and can be
+returned to (`frame::grouping_adhoc`, "Ad hoc grouping", no default
+binding; with no chain stored it reports that in the status bar). The
+toolbar's grouping readout reads `n · chain` for a slot, `* · chain` for an
+ad hoc chain, and `view default` otherwise. The frame holds one shared lane and one lane per pinned workspace. An
 unpinned workspace reads and writes the shared lane; a pinned one reads and
 writes only its own. Definitions stay shared across lanes — grouping slot
 contents, saved scopes, named expressions — as do recent publications and the
@@ -410,6 +416,11 @@ workspace reads the shared lane again. A grouping reload (`replace_slots`)
 bumps grouping in every lane, hidden pinned ones included, and clears an
 active slot that no longer exists in each lane separately; saving a slot
 (`save_slot`) bumps grouping only in the lanes where that slot is active.
+A reload that changes `groupings`, `datasets` or `dimensions` also checks
+each lane's ad hoc chain against the groupable columns. A chain naming a
+column outside them is dropped whole, with a warning, and a lane it was
+active in returns to each view's own grouping. It is never narrowed: a
+partly kept chain would be a plausible wrong grouping.
 
 Tiles receive a `FrameRef` bound to their own tile and its workspace (see
 [architecture](architecture.md)), so a pin or unpin changes the lane a tile
@@ -1073,11 +1084,18 @@ The writer emits `config_version = 1` and these records:
 | `workspaces.N` | Main tree, focused tile, optional fullscreen tile, and focused region |
 | `workspaces.N.docks.<side>` | Left, right, or bottom dock tree, focused tile, visibility, and size |
 | `workspaces.N.tiles.<id>` | Module name, its opaque state table, and the link groups the tile is in: `follow` and `emit`, each a group letter `"a"` to `"d"`, written only when set |
-| `frame` | Dimension selections, named-expression references, text/expression scope, grouping slot, and as-of |
+| `frame` | Dimension selections, named-expression references, text/expression scope, grouping (`slot`, or `ad_hoc` with `grouping = "ad_hoc"` while the ad hoc chain is active), and as-of |
 | `workspaces.N.frame` | Pinned lane for workspace N (same fields as `frame`); present iff workspace N is pinned |
 | `links.<letter>` | One link group's scope, under `scope`, in the encoding `frame` uses for its own (dimension selections, text, expression, named-expression references); written only for a group whose scope is not empty, and an absent table reads as an empty scope |
 | `palette.usage` | Per-row usage count and last-used timestamp |
 | `pages.<kind>` | One opaque table per page kind from `PageContent::serialize`, kept for kinds that never opened this session; the diagnostics page writes its `section` |
+
+`ad_hoc` holds the lane's stored chain whenever one exists; `slot` is
+omitted while the chain is active. A malformed `ad_hoc` warns and is
+ignored, and `grouping = "ad_hoc"` without a usable chain warns and falls
+back to `slot`. A restored chain is checked against the groupable columns
+like a reloaded one. Each pinned workspace's record restores its own ad hoc
+chain, or none; a pin made at runtime copies the shared lane's.
 
 Trees use recursive `leaf`, `split`, and `stack` nodes. Splits store orientation,
 children, and ratios; stacks store tile IDs and the active member index. All

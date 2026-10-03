@@ -282,7 +282,7 @@ persisted by the tile.
 
 The tile's grouping is, in order of precedence: a `:group <columns>` pin; a
 `:group slot <n>` pin (the view's own grouping while that slot is empty);
-the frame's active slot; the view's own `grouping`. The blotter always
+the frame's grouping (its active slot or ad hoc chain); the view's own `grouping`. The blotter always
 groups: an empty grouping would be one grand-total row, so `:group none`
 (the pricer's flat-sheet pin), and `none` anywhere in a column list, is
 refused with `the blotter always groups: :group takes columns or \`slot
@@ -1973,7 +1973,7 @@ The tile arranges its shown lines under a grouping chain, as a blotter
 arranges positions, and follows the frame's grouping the way a blotter
 does. The chain is, in order of precedence: a `:group <columns>` pin; a
 `:group slot <n>` pin, which reads frame slot `n` (the view's own grouping
-while that slot is empty); the frame's active slot; the planned view's own
+while that slot is empty); the frame's grouping (its active slot or ad hoc chain); the planned view's own
 `grouping`. `:group none` pins the empty chain: the flat sheet, whatever
 the frame's grouping, with moves and a counted `g p` as in any flat sheet.
 `none` is reserved beside `slot` — never read as a column, and `:group none
