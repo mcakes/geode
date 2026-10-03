@@ -34,9 +34,9 @@ publishes `grid` beside its mode, so the cursor takes the shell's shared
 `motion::*` bindings (`j`/`k` and the arrows, `g g`/`G`, `ctrl+d`/`ctrl+u`,
 `ctrl+f`/`ctrl+b` and the page keys, with count prefixes), applied to rows by
 `geode_tile::motion`; column motions are ignored, and the detail strip
-follows the cursor. The fragment binds only the page's own keys. `z o`/`z c`
-and Enter expand or collapse the cursor row where it expands (Data datasets
-and Config documents); a double-click on a row does the same, and a single
+follows the cursor. The fragment binds only the page's own keys. `z o`/`z c`,
+Enter, and Space expand or collapse the cursor row where it expands (Data
+datasets and Config documents); a double-click on a row does the same, and a single
 click only selects. `/` focuses the selected section's filter input, which
 puts the page's context in `mode == insert`. Enter keeps the filter and
 Escape restores its entry value; both return to normal mode. Clicking a row
@@ -46,12 +46,20 @@ the header's back control through the shell-actions handle. The retired
 `diagnostics::` motion ids are registered as renames (`RENAMED_ACTIONS`).
 
 `g s`, `g d`, `g c`, `g l`, and `g p` jump directly to a section.
-Within Config, `ctrl+tab` / `ctrl+shift+tab` cycle Current issues, History,
-and Effective values. `y` copies the active row's full details in any table;
-`r` refreshes the catalog; `z R` / `z M` expand or collapse all datasets.
+`tab` / `shift+tab` (and `ctrl+tab` / `ctrl+shift+tab`) step the section's
+views, wrapping; only Config has views (Current issues, History, Effective
+values), and elsewhere the keys are consumed and do nothing. `y` copies the
+active row's full details in any table; `r` refreshes the catalog;
+`z shift+r` / `z shift+m` expand or collapse all datasets; `o` in Config
+opens the config directory. In Log, `-` / `=` step the minimum shown level
+(ERROR stays), `t` / `shift+t` step the target filter, `f` toggles Follow,
+`ctrl+l` clears the log, and `shift+l` opens the shell's `log::level`
+chooser, because the Levels popover's buttons take no keyboard focus.
+Escape over an open popover closes it and keeps the page.
 `alt+backspace` and Reset filters clear the visible section’s filters and
 return focus to navigation. In Log this also restores all levels and targets;
-other sections retain their filters.
+other sections retain their filters. Toolbar tooltips name each control's
+key; the footer names the section's main keys.
 
 Sources filters by name and health; Data by dataset name and generation
 fields (partition/book label, generation ID, source/load time, row count,
@@ -118,6 +126,9 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
   lifetime, so its observers move their version baselines and return while
   it is closed, and `set_visible(true)` rebuilds once with everything that
   arrived meanwhile. A clock change waits for the show the same way.
+- Fragment keys spell modifiers with `+` and shift explicitly (`alt+backspace`,
+  `z shift+r`); the keystroke parser refuses `alt-backspace` and `z R`, and
+  `geode-app`'s production keymap test fails on any refusal.
 - Every bare-key table in the fragment carries `mode == normal`. The
   page's context carries `mode == insert` while the filter holds focus,
   and the shell's insert route resolves bare keys against every context
@@ -180,8 +191,9 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
 ## Limits
 
 Every table row has one height; full details wrap and scroll below it and
-can be copied. Clear log, level toggles, and target selection use the native
-controls' keyboard focus path, without dedicated page shortcuts. Columns
+can be copied; the detail strip scrolls only by pointer. The level keys reach
+contiguous minimum-severity sets only; a non-contiguous set of levels still
+needs the toggles. Columns
 resize but do not move or sort. The config explainer shows at most 2,000
 leaves per document with an omitted-count row, but still traverses every
 leaf. Stopped data threads are shown on the status bar, not in Sources.

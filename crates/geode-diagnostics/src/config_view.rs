@@ -49,6 +49,7 @@ pub(crate) fn render(
                         .small()
                         .selected(!view.values && !view.history)
                         .label("Current issues")
+                        .tooltip("Current issues (Tab / Shift+Tab step views)")
                         .on_click(move |_, window, cx| {
                             let _ = current.update(cx, |p, cx| {
                                 p.set_config_history(false, cx);
@@ -63,6 +64,7 @@ pub(crate) fn render(
                         .small()
                         .selected(!view.values && view.history)
                         .label(view.history_label)
+                        .tooltip("Prior issue batches (Tab / Shift+Tab step views)")
                         .on_click(move |_, window, cx| {
                             let _ = history.update(cx, |p, cx| {
                                 p.set_config_history(true, cx);
@@ -77,6 +79,7 @@ pub(crate) fn render(
                         .small()
                         .selected(view.values)
                         .label("Effective values")
+                        .tooltip("Merged configuration values (Tab / Shift+Tab step views)")
                         .on_click(move |_, window, cx| {
                             let _ = values.update(cx, |p, cx| {
                                 p.set_config_values(cx);
@@ -99,6 +102,7 @@ pub(crate) fn render(
                         .ghost()
                         .small()
                         .label("Open config directory")
+                        .tooltip("Open the user configuration directory (O)")
                         .on_click(move |_, window, cx| {
                             actions(&ActionId("config::open_directory".into()), window, cx);
                         }),

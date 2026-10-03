@@ -32236,6 +32236,138 @@ run_mutation "volslice: close cancels by key" \
   '        let _ = &self.data;' \
   geode-volslice hide_keeps_the_query_and_close_cancels
 
+# ---- the diagnostics page: keyboard routes through the real keymap
+
+run_mutation "diagnostics keys: space does not toggle a tree row" \
+  crates/geode-diagnostics/src/lib.rs \
+  '"space" = "diagnostics::activate"' \
+  '# space unbound' \
+  geode-diagnostics space_toggles_a_dataset_row_as_enter_does
+
+run_mutation "diagnostics keys: the filter loses its space" \
+  crates/geode-diagnostics/src/lib.rs \
+  '"escape" = "diagnostics::blur"' \
+  '"escape" = "diagnostics::blur"
+"space" = "diagnostics::activate"' \
+  geode-diagnostics space_in_the_filter_types_a_space
+
+run_mutation "diagnostics keys: tab does not step the views" \
+  crates/geode-diagnostics/src/lib.rs \
+  '"tab" = "diagnostics::next_view"' \
+  '# tab unbound' \
+  geode-diagnostics tab_and_shift_tab_step_the_config_views
+
+run_mutation "diagnostics keys: shift+tab steps forward" \
+  crates/geode-diagnostics/src/lib.rs \
+  '"shift+tab" = "diagnostics::prev_view"' \
+  '"shift+tab" = "diagnostics::next_view"' \
+  geode-diagnostics tab_and_shift_tab_step_the_config_views
+
+run_mutation "diagnostics keys: reset filters spelled with a dash" \
+  crates/geode-diagnostics/src/lib.rs \
+  '"alt+backspace" = "diagnostics::reset_filters"' \
+  '"alt-backspace" = "diagnostics::reset_filters"' \
+  geode-diagnostics dataset_fold_all_and_reset_filters_take_their_shifted_and_alt_keys
+
+run_mutation "diagnostics keys: expand all spelled by case" \
+  crates/geode-diagnostics/src/lib.rs \
+  '"z shift+r" = "diagnostics::expand_all"' \
+  '"z R" = "diagnostics::expand_all"' \
+  geode-diagnostics dataset_fold_all_and_reset_filters_take_their_shifted_and_alt_keys
+
+run_mutation "diagnostics keys: o opens the config directory from any section" \
+  crates/geode-diagnostics/src/page.rs \
+  '            "open_config_dir" if self.section == Section::Config => {' \
+  '            "open_config_dir" => {' \
+  geode-diagnostics o_opens_the_config_directory_only_from_config
+
+run_mutation "diagnostics keys: minus never drops a level" \
+  crates/geode-diagnostics/src/page.rs \
+  '            (Some(ix), false) => ix.saturating_sub(1),' \
+  '            (Some(ix), false) => ix,' \
+  geode-diagnostics minus_and_equals_step_the_minimum_log_level
+
+run_mutation "diagnostics keys: equals steps from the least verbose level shown" \
+  crates/geode-diagnostics/src/page.rs \
+  '        let shown = self.log_filter.levels.iter().rposition(|on| *on);' \
+  '        let shown = self.log_filter.levels.iter().position(|on| !*on).map(|ix| ix.saturating_sub(1));' \
+  geode-diagnostics minus_and_equals_step_the_minimum_log_level
+
+run_mutation "diagnostics keys: shift+t steps forward" \
+  crates/geode-diagnostics/src/page.rs \
+  '            (at + len - 1) % len' \
+  '            (at + 1) % len' \
+  geode-diagnostics t_and_shift_t_step_the_log_target
+
+run_mutation "diagnostics keys: ctrl+l clears nothing" \
+  crates/geode-diagnostics/src/page.rs \
+  '            "clear_log" if self.section == Section::Log => self.clear_log(cx),' \
+  '            "clear_log" if self.section == Section::Log => {}' \
+  geode-diagnostics ctrl_l_clears_the_log
+
+run_mutation "diagnostics keys: shift+l opens no chooser" \
+  crates/geode-diagnostics/src/page.rs \
+  '                (self.actions)(&ActionId("log::level".into()), window, cx);' \
+  '                let _ = &self.actions;' \
+  geode-diagnostics shift_l_opens_the_level_chooser
+
+run_mutation "diagnostics keys: escape over the popover closes the page" \
+  crates/geode-diagnostics/src/page.rs \
+  '            if self.levels.open {
+                self.set_levels_open(false, cx);
+                return true;
+            }' \
+  '            if false {
+                return true;
+            }' \
+  geode-app escape_over_the_levels_popover_closes_it_and_keeps_the_page
+
+
+run_mutation "keystroke parser: an uppercase letter parses as the lowercase key" \
+  crates/geode-shell/src/keymap/keystroke.rs \
+  '        if c.is_uppercase() {' \
+  '        if false {' \
+  geode-shell keys_a_keyboard_never_sends_are_refused_with_the_spelling_that_works
+
+run_mutation "keystroke parser: any text is a key name" \
+  crates/geode-shell/src/keymap/keystroke.rs \
+  '    Err(format!("'\''{spec}'\'': '\''{part}'\'' is not a key name"))' \
+  '    Ok(lower)' \
+  geode-shell keys_a_keyboard_never_sends_are_refused_with_the_spelling_that_works
+
+run_mutation "keystroke parser: a dashed spelling gets no + hint" \
+  crates/geode-shell/src/keymap/keystroke.rs \
+  '    if dashed.len() > 1' \
+  '    if dashed.len() > 99' \
+  geode-shell keys_a_keyboard_never_sends_are_refused_with_the_spelling_that_works
+
+run_mutation "keystroke parser: a user key no keyboard sends still binds" \
+  crates/geode-shell/src/keymap/keystroke.rs \
+  '                key = Some(key_name(part, s)?);' \
+  '                key = Some(key_name(part, s).unwrap_or(lower));' \
+  geode-shell a_user_key_no_keyboard_sends_is_an_error_naming_the_fix
+
+run_mutation "keystroke parser: named keys lose a gpui name" \
+  crates/geode-shell/src/keymap/keystroke.rs \
+  '    "pageup",
+    "pagedown",' \
+  '    "pageup",
+    "page_down",' \
+  geode-shell every_gpui_named_key_and_single_characters_parse
+
+
+run_mutation "keybinding capture: an unreadable key is written anyway" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '                    match capture_refusal(&keystrokes) {' \
+  '                    match None::<String> {' \
+  geode-shell capturing_a_key_the_parser_cannot_read_writes_nothing_and_says_so
+
+run_mutation "keybinding capture: the round-trip check accepts everything" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        (!reads_back).then(' \
+  '        false.then(' \
+  geode-shell a_capture_the_parser_cannot_read_back_is_refused
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

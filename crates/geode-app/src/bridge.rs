@@ -8068,6 +8068,108 @@ role = "key"
         assert!(vcx.debug_bounds("diagnostics-page").is_none());
     }
 
+    /// A real Escape over the open Levels popover closes the popover and
+    /// keeps the page open with focus on it, whether the popover holds
+    /// focus (its own `Cancel` binding dismisses it and hands focus back)
+    /// or the page does (the shell offers `page::close` to the page, which
+    /// consumes it). A second Escape then closes the page.
+    #[gpui::test]
+    fn escape_over_the_levels_popover_closes_it_and_keeps_the_page(cx: &mut gpui::TestAppContext) {
+        init_grid_modules(cx);
+        let (mut services, diags) = shell_with_one_grid_tile("blotter", None);
+        assert!(diags.is_empty(), "{diags:?}");
+        let config = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", "name = \"example\"\n").unwrap()],
+            ..Default::default()
+        });
+        let mut pages = geode_shell::module::PageRoster::new();
+        pages.add(Box::new(DiagnosticsPageFactory::new(
+            Arc::new(Ring::new(16)),
+            config,
+        )));
+        services.pages = pages;
+        let window = open_shell_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|window, cx| {
+            window.activate_window();
+            let _ = window.draw(cx);
+        });
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("alt-d g l");
+        vcx.run_until_parked();
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+        };
+        let open_popover = |vcx: &mut gpui::VisualTestContext| {
+            draw(vcx);
+            let b = vcx
+                .debug_bounds("diagnostics-levels-open")
+                .expect("the Levels button is painted");
+            vcx.simulate_click(b.center(), gpui::Modifiers::default());
+            draw(vcx);
+            assert!(
+                vcx.debug_bounds("diagnostics-level-pick-ingest-debug")
+                    .is_some(),
+                "the popover is open"
+            );
+        };
+        let page_focused = |vcx: &mut gpui::VisualTestContext| {
+            let handle = shell
+                .read_with(vcx, |s, cx| s.page_focus_handle_for_test(cx))
+                .expect("the page is open");
+            vcx.update(|window, _| handle.is_focused(window))
+        };
+        let page_open = |vcx: &gpui::VisualTestContext| {
+            shell.read_with(vcx, |s, _| s.open_page_kind_for_test()) == Some("diagnostics")
+        };
+
+        // The popover holds focus: its own Cancel dismisses it.
+        open_popover(&mut vcx);
+        assert!(!page_focused(&mut vcx), "the open popover took focus");
+        vcx.simulate_keystrokes("escape");
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("diagnostics-level-pick-ingest-debug")
+                .is_none()
+        );
+        assert!(page_open(&vcx));
+        assert!(page_focused(&mut vcx), "focus returned to the page");
+
+        // The page holds focus: the shell's `page::close` reaches the page.
+        open_popover(&mut vcx);
+        let handle = shell
+            .read_with(&vcx, |s, cx| s.page_focus_handle_for_test(cx))
+            .unwrap();
+        vcx.update(|window, cx| handle.focus(window, cx));
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("diagnostics-level-pick-ingest-debug")
+                .is_some(),
+            "the popover stays open with focus on the page"
+        );
+        vcx.simulate_keystrokes("escape");
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("diagnostics-level-pick-ingest-debug")
+                .is_none()
+        );
+        assert!(page_open(&vcx));
+        assert!(page_focused(&mut vcx));
+
+        vcx.simulate_keystrokes("escape");
+        draw(&mut vcx);
+        assert!(
+            !page_open(&vcx),
+            "with nothing over it, Escape closes the page"
+        );
+    }
+
     /// One user override of a shared motion, under the shipped context,
     /// reaches the diagnostics page: it publishes `grid` like the tiles.
     #[gpui::test]

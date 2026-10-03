@@ -54,6 +54,13 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("diagnostics::refresh", "Refresh catalog"),
     ("diagnostics::expand_all", "Expand all datasets"),
     ("diagnostics::collapse_all", "Collapse all datasets"),
+    ("diagnostics::more_levels", "Show one more log level"),
+    ("diagnostics::fewer_levels", "Show one fewer log level"),
+    ("diagnostics::next_target", "Next log target"),
+    ("diagnostics::prev_target", "Previous log target"),
+    ("diagnostics::clear_log", "Clear log"),
+    ("diagnostics::log_levels", "Set log levels…"),
+    ("diagnostics::open_config_dir", "Open config directory"),
 ];
 
 /// Retired action ids and their successors: a user keymap that still names
@@ -76,8 +83,11 @@ pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
 /// One context with two modes. The page publishes `grid` beside its mode,
 /// so its cursor takes the shell's shared `motion::*` bindings, which this
 /// fragment therefore does not repeat: it binds `[`/`]` to cycle sections,
-/// `z o`/`z c`/`enter` to fold, and `/` to focus the filter; in insert mode
-/// `escape` leaves it. The page's toggle binding is the factory's
+/// `z o`/`z c`/`enter`/`space` to fold, `tab`/`shift+tab` to step a
+/// section's views, `/` to focus the filter, and a key for every toolbar
+/// control; in insert mode `escape` leaves it. Modifiers join with `+` and
+/// shift is explicit (`z shift+r`); the keystroke parser refuses anything
+/// else. The page's toggle binding is the factory's
 /// `toggle_binding`, emitted by the roster.
 ///
 /// The bare keys carry `mode == normal` for the reason a module's do: with
@@ -94,8 +104,9 @@ context = "diagnostics && mode == normal"
 "z o" = "diagnostics::expand"
 "z c" = "diagnostics::collapse"
 "enter" = "diagnostics::activate"
+"space" = "diagnostics::activate"
 "/" = "diagnostics::filter"
-"alt-backspace" = "diagnostics::reset_filters"
+"alt+backspace" = "diagnostics::reset_filters"
 "g s" = "diagnostics::sources"
 "g d" = "diagnostics::data"
 "g c" = "diagnostics::config"
@@ -104,10 +115,19 @@ context = "diagnostics && mode == normal"
 "y" = "diagnostics::copy"
 "ctrl+tab" = "diagnostics::next_view"
 "ctrl+shift+tab" = "diagnostics::prev_view"
+"tab" = "diagnostics::next_view"
+"shift+tab" = "diagnostics::prev_view"
+"o" = "diagnostics::open_config_dir"
 "f" = "diagnostics::follow"
 "r" = "diagnostics::refresh"
-"z R" = "diagnostics::expand_all"
-"z M" = "diagnostics::collapse_all"
+"z shift+r" = "diagnostics::expand_all"
+"z shift+m" = "diagnostics::collapse_all"
+"=" = "diagnostics::more_levels"
+"-" = "diagnostics::fewer_levels"
+"t" = "diagnostics::next_target"
+"shift+t" = "diagnostics::prev_target"
+"ctrl+l" = "diagnostics::clear_log"
+"shift+l" = "diagnostics::log_levels"
 
 [[bindings]]
 context = "diagnostics && mode == insert"

@@ -273,16 +273,16 @@ pub(crate) fn footer(
                 "`[` / `]` Sections   `/` Filter   `up` / `down` Rows   `y` Copy   `escape` Back"
             }
             Section::Data => {
-                "`[` / `]` Sections   `/` Filter   `enter` Expand   `r` Refresh   `y` Copy   `escape` Back"
+                "`[` / `]` Sections   `/` Filter   `space` / `enter` Expand   `r` Refresh   `y` Copy   `escape` Back"
             }
             Section::Config if !config_values => {
-                "`[` / `]` Sections   `ctrl+tab` Views   `/` Filter   `y` Copy   `escape` Back"
+                "`[` / `]` Sections   `tab` / `shift+tab` Views   `/` Filter   `y` Copy   `escape` Back"
             }
             Section::Config => {
-                "`[` / `]` Sections   `ctrl+tab` Views   `/` Filter   `enter` Expand   `y` Copy   `escape` Back"
+                "`[` / `]` Sections   `tab` / `shift+tab` Views   `/` Filter   `space` / `enter` Expand   `y` Copy   `escape` Back"
             }
             Section::Log => {
-                "`[` / `]` Sections   `/` Filter   `f` Follow   `y` Copy   `escape` Back"
+                "`[` / `]` Sections   `/` Filter   `-` / `=` Levels   `t` Target   `f` Follow   `y` Copy   `escape` Back"
             }
             Section::Perf => "`[` / `]` Sections   `escape` Back",
         }

@@ -438,6 +438,65 @@ fn listening_then_enter_persists_the_new_binding_to_the_user_keymap_file(
     assert_eq!(binding.keystrokes[1].mods, Modifiers::NONE);
 }
 
+/// A captured key whose platform name the keymap parser does not read is
+/// refused at commit with a notice naming it, and nothing is written: the
+/// next load would skip the binding with an error.
+#[gpui::test]
+fn capturing_a_key_the_parser_cannot_read_writes_nothing_and_says_so(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+    let dir = tempfile::tempdir().unwrap();
+    let user_dir = dir.path().to_path_buf();
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| {
+                    ShellView::new(test_services(), None, Some(user_dir.clone()), window, cx)
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let shell = window.root(&mut cx).unwrap().read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("keybindings::open".to_string()), None, window, cx);
+        });
+    });
+
+    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("capslock");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    let state = |cx: &gpui::VisualTestContext| {
+        shell.read_with(cx, |shell, _| {
+            let s = shell.keybindings.as_ref().unwrap();
+            (s.listening.is_none(), s.notice.clone())
+        })
+    };
+    let (ended, notice) = state(&cx);
+    assert!(ended, "enter ended the capture");
+    assert_eq!(
+        notice.as_deref(),
+        Some("capslock can't be bound: not a key Geode reads")
+    );
+    assert!(
+        !user_dir.join("keymap.toml").exists(),
+        "a refused capture writes nothing"
+    );
+}
+
 /// The `ctrl+a` reclaim is scoped to every `GeodeModal > Input`, including the
 /// keybinding filter. It must be swallowed before the component's SelectAll or MoveHome
 /// binding, while ordinary typing continues to reach the field.

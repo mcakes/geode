@@ -64,6 +64,7 @@ pub(crate) fn toolbar(view: LogView<'_>, weak: WeakEntity<DiagnosticsPage>) -> A
                     .label(label)
                     .selected(view.levels_on[ix])
                     .toggled(view.levels_on[ix])
+                    .tooltip("Show or hide this level (- / = step the minimum level)")
                     .on_click(move |_, _window, cx| {
                         let _ = weak.update(cx, |p, cx| p.toggle_level(ix, cx));
                     }),
@@ -95,6 +96,7 @@ pub(crate) fn toolbar(view: LogView<'_>, weak: WeakEntity<DiagnosticsPage>) -> A
                         .small()
                         .checked(view.follow)
                         .label("Follow")
+                        .tooltip("Follow new records (F)")
                         .on_change(move |&on, _window, cx| {
                             let _ = follow.update(cx, |p, cx| p.set_follow(on, cx));
                         }),
@@ -105,7 +107,7 @@ pub(crate) fn toolbar(view: LogView<'_>, weak: WeakEntity<DiagnosticsPage>) -> A
                         .ghost()
                         .small()
                         .label("Clear log")
-                        .tooltip("Forget retained records; new records will continue to arrive")
+                        .tooltip("Forget retained records; new records continue to arrive (Ctrl+L)")
                         .on_click(move |_, _window, cx| {
                             let _ = clear.update(cx, |p, cx| p.clear_log(cx));
                         }),
@@ -126,7 +128,8 @@ pub(crate) fn toolbar(view: LogView<'_>, weak: WeakEntity<DiagnosticsPage>) -> A
                                 .ghost()
                                 .small()
                                 .selected(view.popover_open)
-                                .label("Log levels…"),
+                                .label("Log levels…")
+                                .tooltip("Set per-target log levels (Shift+L)"),
                         )
                         .open(view.popover_open)
                         .on_open_change(move |&is_open, _window, cx| {

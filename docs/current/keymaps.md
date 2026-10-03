@@ -87,11 +87,26 @@ and loading it warns with both ids.
 
 A binding is a whitespace-separated sequence of keystrokes, such as `"g g"` or
 `"mod+shift+h"`. A keystroke joins modifiers and one key with `+`. Modifiers are
-`ctrl`, `alt`, `shift`, `cmd` (also `super` or `win`), and `mod`. Parsing folds
-ASCII case but never infers Shift from a capital letter: `G` parses as `g`,
-whereas `shift+g` retains Shift. The parser accepts arbitrary non-modifier key
-names; successful parsing alone does not prove a platform can deliver that key.
-A literal `+` cannot be represented through this separator syntax.
+`ctrl`, `alt`, `shift`, `cmd` (also `super` or `win`), and `mod`, in any case.
+The key must be one a keyboard sends: a single character, or one of the names
+gpui reports in a keystroke (`space`, `tab`, `enter`, `escape`, `backspace`,
+`delete`, `insert`, the arrows `up`/`down`/`left`/`right`, `home`, `end`,
+`pageup`, `pagedown`, `back`, `forward`, `menu`, and `f1` to `f35`; named keys
+ignore case). The parser refuses anything else, because a key the platform
+never reports would compile into a binding that silently never fires:
+
+- A capital letter is refused with a hint to write `shift+<letter>`: Shift is
+  a modifier, never inferred from case, so `G` is not `shift+g` (and no longer
+  parses as a plain `g`).
+- A `-`-joined spelling such as `alt-backspace` or `shift-tab` is refused with
+  the `+` spelling as the hint.
+- Any other unknown name (`pgdn`) is refused as not a key name.
+
+In a desk or user `keymap.toml` the refusal is an error diagnostic naming the
+file and the fix, and only that binding is skipped, as for any malformed
+entry. The shipped builtin document and every module fragment go through the
+same parser; `geode-app`'s production keymap test fails on any refusal. A
+literal `+` cannot be represented through this separator syntax.
 
 Editable market-data and pricer grids bind `shift+i` (`I`) to their
 `edit_start` action in normal and visual modes: text editors open with the
@@ -323,9 +338,14 @@ insert` (the underlying picker's field) it binds `enter`, `escape` and
 `up`/`down` (`volslice::list_down`/`list_up`); under `mode == menu` (the
 difference chooser) `enter` and `escape`, its steps being the shared ones.
 The diagnostics page's fragment binds only its verbs (`[`/`]`, `z o`/`z c`,
-`enter`, `/`) under `mode == normal` and `escape` under `mode == insert`; the
-page publishes `grid` beside its mode, so the shared motions reach its cursor
-in normal mode and stay out of the focused filter.
+`enter` and `space`, `tab`/`shift+tab` for a section's views, `/`, and a key
+per toolbar control) under `mode == normal` and `escape` under `mode ==
+insert`; the page publishes `grid` beside its mode, so the shared motions
+reach its cursor in normal mode and stay out of the focused filter. Its
+`tab` reaches the page because the shell root's `GeodeShell` context reclaims
+Tab from the component `Root`'s focus cycling, and the page keeps focus on its
+own handle, so no `DataTable` context (whose `tab` selects the next column)
+is on the focus path.
 
 A fragment may name any action, not only ones its own module registers, so
 long as its context is the module's own: both the blotter's and the pricer's
