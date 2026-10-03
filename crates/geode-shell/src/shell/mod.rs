@@ -1338,6 +1338,13 @@ impl ShellView {
                 if let Some(chain) = record.ad_hoc {
                     s.restore_ad_hoc(chain, record.ad_hoc_active);
                 }
+                if !s.restore_loaded_from(record.loaded_from.clone()) {
+                    tracing::warn!(
+                        target: "geode::session",
+                        "restored scope provenance dropped: no saved scope '{}'",
+                        record.loaded_from.as_deref().unwrap_or_default()
+                    );
+                }
                 s.set_as_of(record.as_of);
                 s.clear_history();
             });
@@ -1376,6 +1383,15 @@ impl ShellView {
                 // `clear_history`, like every other restored value.
                 if let Some(chain) = record.ad_hoc {
                     lane.restore_ad_hoc(chain, record.ad_hoc_active);
+                }
+                // `pin` copied the shared lane's provenance; the record names
+                // this lane's own, and a record without one clears the copy.
+                if !lane.restore_loaded_from(record.loaded_from.clone()) {
+                    tracing::warn!(
+                        target: "geode::session",
+                        "restored scope provenance dropped: no saved scope '{}'",
+                        record.loaded_from.as_deref().unwrap_or_default()
+                    );
                 }
                 lane.set_as_of(record.as_of);
                 lane.clear_history();

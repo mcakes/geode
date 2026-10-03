@@ -18198,12 +18198,29 @@ run_mutation "scope dialog: a new source dirties the session" \
 # Restore refuses a name no saved scope has.
 run_mutation "scope dialog: restore refuses an unknown source" \
   crates/geode-shell/src/frame.rs \
-  '        if !self.frame.saved_scopes.contains_key(&name) {
-            return false;
-        }' \
-  '' \
+  '            .is_none_or(|n| self.frame.saved_scopes.contains_key(n));' \
+  '            .is_none_or(|_| true);' \
   geode-shell \
   restoring_provenance_refuses_a_name_no_saved_scope_has
+
+# A pinned record without provenance must clear the copy pin took from the
+# shared lane, or the pinned lane reads "from <shared's scope>".
+run_mutation "scope dialog: restoring none clears a pinned copy" \
+  crates/geode-shell/src/frame.rs \
+  '        self.set_loaded_from(name.filter(|_| known));' \
+  '        if name.is_some() {
+            self.set_loaded_from(name.filter(|_| known));
+        }' \
+  geode-shell \
+  a_pinned_record_without_provenance_does_not_inherit_the_shared_lanes
+
+# The shared lane's provenance must be written to the session.
+run_mutation "scope dialog: the session writes the source" \
+  crates/geode-shell/src/session.rs \
+  '            t.insert("loaded_from".into(), toml::Value::String(name.clone()));' \
+  '' \
+  geode-shell \
+  provenance_round_trips
 
 # ---- Tile picker: placeholder double-click, tile::add and mod-n ----
 

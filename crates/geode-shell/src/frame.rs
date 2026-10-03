@@ -1234,15 +1234,18 @@ impl<'a> FrameViewMut<'a> {
         }
     }
 
-    /// Session restore's door for the lane's provenance. Unlike a load it
-    /// changes no scope. A name no saved scope has is refused: the title
-    /// would otherwise read "from <gone>, changed" until the next load.
-    pub fn restore_loaded_from(&mut self, name: String) -> bool {
-        if !self.frame.saved_scopes.contains_key(&name) {
-            return false;
-        }
-        self.set_loaded_from(Some(name));
-        true
+    /// Session restore's door for the lane's provenance: the record's value
+    /// replaces whatever the lane holds, so a pinned lane does not keep the
+    /// copy `pin` took from the shared lane. Unlike a load it changes no
+    /// scope. A name no saved scope has is refused, leaving no provenance,
+    /// and returns false: the title would otherwise read "from <gone>,
+    /// changed" until the next load.
+    pub fn restore_loaded_from(&mut self, name: Option<String>) -> bool {
+        let known = name
+            .as_ref()
+            .is_none_or(|n| self.frame.saved_scopes.contains_key(n));
+        self.set_loaded_from(name.filter(|_| known));
+        known
     }
 
     /// Replace the scope, pushing its outgoing value and clearing redo.
@@ -3780,10 +3783,13 @@ mod tests {
     #[test]
     fn restoring_provenance_refuses_a_name_no_saved_scope_has() {
         let mut f = Frame::new(slots(), saved_eu(), None);
-        assert!(!f.shared_mut().restore_loaded_from("gone".into()));
+        assert!(!f.shared_mut().restore_loaded_from(Some("gone".into())));
         assert_eq!(f.shared().loaded_from(), None);
-        assert!(f.shared_mut().restore_loaded_from("eu".into()));
+        assert!(f.shared_mut().restore_loaded_from(Some("eu".into())));
         assert_eq!(f.shared().loaded_from(), Some("eu"));
+        // A record without provenance clears what the lane held.
+        assert!(f.shared_mut().restore_loaded_from(None));
+        assert_eq!(f.shared().loaded_from(), None);
     }
 
     #[test]

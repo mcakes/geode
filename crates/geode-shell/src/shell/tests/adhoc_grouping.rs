@@ -40,6 +40,7 @@ fn record(slot: Option<u8>, ad_hoc: &[&str], active: bool) -> crate::session::Fr
         active_slot: slot,
         ad_hoc: (!ad_hoc.is_empty()).then(|| ad_hoc.iter().map(|c| c.to_string()).collect()),
         ad_hoc_active: active,
+        loaded_from: None,
         as_of: geode_core::query::AsOf::Live,
     }
 }
