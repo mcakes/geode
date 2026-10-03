@@ -168,9 +168,9 @@ const NO_DOCUMENT: &str = "no document to edit";
 /// [`Editing::labels`] for how that happens and why it is refused.
 const CELL_MOVED: &str = "the document changed under the edit — nothing was written";
 
-/// Refusal for a Behind draft. The painted base is older than the held document; rebase
-/// or revert must resolve that difference before further edits.
-const BEHIND_REFUSED: &str = "the draft is behind — :rebase or :revert first";
+/// Refusal for a Behind draft whose base is not painted. The grid on screen is not the
+/// one its edits were keyed to; rebase or revert must resolve that before further edits.
+const BEHIND_REFUSED: &str = "the draft's base is gone — :rebase or :revert first";
 
 /// Refusal while a differing upload echo is held. The sent edits still cover their
 /// base; rebase or revert resolves the newer upstream document first.
@@ -179,10 +179,6 @@ const ECHO_REFUSED: &str = "the echo differs — :rebase or :revert first";
 /// Refusal for editing a row marked Deleted. It remains visible, but new values would
 /// target a row scheduled for removal. Revert restores the draft's rows.
 pub(crate) const DELETED_REFUSED: &str = "row is deleted — :revert restores it";
-
-/// Upload refusal while Behind: the displayed draft is based on an older document.
-const UPLOAD_BEHIND: &str =
-    "rebase or revert first: an upload must be of a document you have seen whole";
 
 /// The notice every non-`y` answer to the confirm leaves — a key, focus
 /// leaving the confirm, or a pointer press on the tile.
@@ -980,7 +976,6 @@ impl MarketDataTile {
                 notice: None,
                 upload_error: None,
                 echo: None,
-                prompt: None,
                 time: None,
                 time_stale: None,
                 stale: false,
@@ -1224,8 +1219,15 @@ impl MarketDataTile {
                 // The WHOLE draft, `base` included: a rebase while the
                 // upload was in flight keeps the same edits on a base
                 // that was never sent.
+                // A Behind upload is Sent too: the held delivery is superseded
+                // by what went out, and the echo check decides from here.
                 let unchanged = submitted.is_some_and(|d| d == self.draft);
-                if unchanged && self.draft.state == DraftState::Editing {
+                if unchanged
+                    && matches!(
+                        self.draft.state,
+                        DraftState::Editing | DraftState::Behind { .. }
+                    )
+                {
                     self.draft.state = DraftState::Sent {
                         at: chrono::Utc::now().to_rfc3339(),
                     };
@@ -1296,9 +1298,6 @@ impl MarketDataTile {
         if let Some(refusal) = self.not_live(cx) {
             return Err(refusal);
         }
-        if self.draft.is_behind() {
-            return Err(UPLOAD_BEHIND.into());
-        }
         if self.draft.is_sent() {
             return Err("already sent".into());
         }
@@ -1325,8 +1324,20 @@ impl MarketDataTile {
             n => format!("{n} attributes, "),
         };
         let key = self.key.as_deref().map(display_key).unwrap_or_default();
+        // A Behind upload is allowed (restoring an older fit with changes over
+        // a bad newer one), but it replaces a document the trader has not
+        // taken in, so the question names the update it overrides.
+        let overrides = match &self.draft.state {
+            DraftState::Behind { newer } => {
+                format!(
+                    "overrides update {} — ",
+                    local_hhmm(&newer.as_of, self.clock)
+                )
+            }
+            _ => String::new(),
+        };
         let prompt = format!(
-            "upload {cells}, {attrs}{added}, {} removed of {key} to {target}? (y/n)",
+            "{overrides}upload {cells}, {attrs}{added}, {} removed of {key} to {target}? (y/n)",
             self.draft.rows_removed()
         );
         // A confirm already armed is replaced, never stacked.
@@ -2270,7 +2281,6 @@ impl MarketDataTile {
                 Echo::Confirmed(text) => (text, Tone::Time),
                 Echo::Differs { text, .. } => (text, Tone::Warn),
             }),
-            prompt: self.pending_upload.as_ref().map(|c| c.prompt_text()),
             source_at: self.source_at,
             incomplete: self.draft.incomplete_rows(&self.spec, &self.model.columns),
             clock: self.clock,
@@ -2416,9 +2426,9 @@ impl MarketDataTile {
                     false
                 }
             }
-            "edit" | "edit_start" => {
-                let caret = if verb == "edit_start" {
-                    EditCaret::Start
+            "edit" | "edit_select" => {
+                let caret = if verb == "edit_select" {
+                    EditCaret::Select
                 } else {
                     EditCaret::End
                 };
@@ -2639,10 +2649,13 @@ impl MarketDataTile {
 
     // ---- the cell editor ---------------------------------------------
 
-    /// Editing is blocked by Behind state or a held differing echo. Both require rebase
-    /// or revert before further changes against the painted generation.
+    /// A Behind draft stays editable while its own base is retained and painted:
+    /// edits are keyed to that grid, so a further one lands on the same document and
+    /// the held delivery still waits for rebase or revert. A Behind draft without
+    /// its base (restored, base never delivered) paints a newer fallback its edits
+    /// were not keyed to, so it refuses, as does a held differing echo.
     fn held_refusal(&self) -> Option<&'static str> {
-        if self.draft.is_behind() {
+        if self.draft.is_behind() && self.base_snapshot.is_none() {
             Some(BEHIND_REFUSED)
         } else if self.draft.is_sent() && matches!(self.echo, Some(Echo::Differs { .. })) {
             Some(ECHO_REFUSED)
@@ -2904,11 +2917,13 @@ impl MarketDataTile {
                     // before the close, which would otherwise undo them.
                     editing.bulk = None;
                     self.close_editor(window, cx);
+                    self.end_selection_on_commit(cx);
                     return true;
                 }
                 if self.selection.is_some() && text == editing.opened {
                     // Untouched over a selection: nothing to write.
                     self.close_editor(window, cx);
+                    self.end_selection_on_commit(cx);
                     return true;
                 }
                 self.commit_cell_edit(cell, labels, &text, window, cx)
@@ -2946,6 +2961,7 @@ impl MarketDataTile {
                     if !editing.typed && text == editing.opened {
                         // Untouched over a selection: nothing to write.
                         self.close_editor(window, cx);
+                        self.end_selection_on_commit(cx);
                         return true;
                     }
                     return self.commit_bulk(&text, window, cx);
@@ -3749,6 +3765,7 @@ impl MarketDataTile {
             // `enter` on the value the cell already holds, over a
             // selection: nothing to write. A row click stays a pick.
             self.close_popup_with_window(window, cx);
+            self.end_selection_on_commit(cx);
             return true;
         }
         self.pick_option(option, window, cx)
@@ -5079,7 +5096,6 @@ impl gpui::Render for MarketDataTile {
             &self.header,
             cursor_attr,
             editor,
-            self.pending_upload.as_ref(),
             menu_open,
             theme,
             &tones,
@@ -5154,8 +5170,21 @@ impl gpui::Render for MarketDataTile {
         let root = v_flex()
             .size_full()
             .debug_selector(|| format!("tile-content-{}", self.id.0));
+        // The upload question asks on its own bar under the header, whole
+        // at any tile width; the door answers every key on it (bare y
+        // submits, any other key cancels) before shell routing.
+        let tile_id = self.id.0;
+        let question = self.pending_upload.as_ref().map(|pending| {
+            confirm::bar(
+                pending,
+                &tile,
+                move || format!("marketdata-upload-confirm-{tile_id}"),
+                cx.theme(),
+            )
+        });
         confirm::cancel_on_press(root, self.pending_upload.is_some(), &tile)
             .child(header)
+            .children(question)
             .child(body)
             .when(search.is_some(), |el| {
                 el.pb(scale::design(geode_shell::fuzzyfind::FOOTER_HEIGHT))
@@ -6264,11 +6293,12 @@ mod tests {
         assert_eq!(h.mode(&vcx), "normal");
     }
 
-    /// A double-click meets `i`'s own refusals: while the draft is
-    /// `Behind` the notice names `:rebase`/`:revert`, nothing opens, and
-    /// the mode stays `normal`.
+    /// Hold keeps the draft's own base painted, so a `Behind` draft stays
+    /// editable: a double-click opens the editor, the commit lands against
+    /// the held base, the draft stays `Behind`, and `:rebase` carries both
+    /// edits onto the delivered generation.
     #[gpui::test]
-    fn a_double_click_while_behind_is_refused_with_the_notice(cx: &mut gpui::TestAppContext) {
+    fn a_behind_draft_edits_against_its_held_base(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
         h.dispatch(&mut vcx, "edit", None);
@@ -6281,13 +6311,27 @@ mod tests {
         let at = centre_of(&mut vcx, "marketdata-cell-1-5");
         click_at(&mut vcx, at, 1);
         click_at(&mut vcx, at, 2);
-        assert_eq!(h.editor_value(&vcx), None, "nothing opened");
-        assert_eq!(h.mode(&vcx), "normal");
+        assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.5000"));
+        assert_eq!(h.mode(&vcx), "insert");
+        h.set_editor(&mut vcx, "7.7");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.cell(&vcx, 1, 4), ("7.7000".to_string(), true));
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
-            Some(BEHIND_REFUSED.to_string())
+            None
         );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_behind()),
+            "an edit does not resolve the held delivery"
+        );
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().cell_count()), 2);
+
+        h.command(&mut vcx, "rebase")
+            .expect("the held delivery rebases");
+        assert!(!h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+        assert_eq!(h.cell(&vcx, 1, 4), ("7.7000".to_string(), true));
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().cell_count()), 2);
     }
 
     /// Clicking another cell cancels typed editor text before moving selection; it does
@@ -10012,12 +10056,11 @@ deleted = true
         assert_eq!(h.cell(&vcx, 0, 2), ("estimated".to_string(), true));
     }
 
-    /// A step is refused with the same gates `:bump` uses: no document,
-    /// the cursor in the strip, and a draft that is `Behind`.
+    /// A step is refused with the same gates `:bump` uses: no document and
+    /// the cursor in the strip. A `Behind` draft whose base is still painted
+    /// is not a gate.
     #[gpui::test]
-    fn a_step_is_refused_without_a_document_in_the_strip_and_while_behind(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn a_step_is_refused_without_a_document_and_in_the_strip(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
         h.dispatch(&mut vcx, "step", None);
         assert_eq!(
@@ -10046,7 +10089,8 @@ deleted = true
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
-            Some(BEHIND_REFUSED.to_string())
+            Some("not a choice cell".to_string()),
+            "a held Behind base passes the gate; the cell's kind answers"
         );
     }
 
@@ -10230,10 +10274,10 @@ deleted = true
         assert_eq!(h.mode(&vcx), "normal");
     }
 
-    /// Double-click and i open the same Choice popup. Both obey the editor refusal
-    /// gate, so Behind opens nothing.
+    /// Double-click and i open the same Choice popup. Both pass the editor
+    /// refusal gate, so a Behind draft whose base is held opens it too.
     #[gpui::test]
-    fn a_double_click_opens_the_choice_popup_and_behind_refuses_it(cx: &mut gpui::TestAppContext) {
+    fn a_double_click_opens_the_choice_popup_and_so_does_behind(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
         h.with_flat_document(&mut vcx);
         let at = centre_of(&mut vcx, "marketdata-cell-0-3");
@@ -10263,12 +10307,12 @@ deleted = true
         );
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
         h.dispatch(&mut vcx, "edit", None);
-        assert!(!h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
-        assert_eq!(h.mode(&vcx), "normal");
+        assert!(h.tile.read_with(&vcx, |t, _| t.choice_popup_open()));
+        assert_eq!(h.mode(&vcx), "insert");
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
-            Some(BEHIND_REFUSED.to_string())
+            None
         );
     }
 
@@ -11077,10 +11121,10 @@ edits = [["2026-09-18#2", "amount", 9.0]]
         assert!(behind.contains(&"rebase".to_string()));
     }
 
-    /// Both live and restored Behind drafts refuse editing and bumps until the newer
-    /// document is resolved.
+    /// A live Behind draft still paints its base, so the editor opens and a bump
+    /// writes against that base while the newer document waits.
     #[gpui::test]
-    fn edit_and_bump_are_refused_while_behind(cx: &mut gpui::TestAppContext) {
+    fn edit_and_bump_write_while_behind(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.command(&mut vcx, "key SPX.Z").unwrap();
         h.visible(&mut vcx, true);
@@ -11099,22 +11143,22 @@ edits = [["2026-09-18#2", "amount", 9.0]]
 
         h.dispatch(&mut vcx, "edit", None);
         assert!(
-            h.editor_value(&vcx).is_none(),
-            "no editor opens while behind"
+            h.editor_value(&vcx).is_some(),
+            "the editor opens over the held base"
         );
+        h.dispatch(&mut vcx, "cancel", None);
+        h.command(&mut vcx, "bump 1")
+            .expect("a bump over the held base");
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().len()) > 1,
+            "the bump wrote the row"
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
         assert_eq!(
             h.tile
-                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
-            Some("the draft is behind — :rebase or :revert first".to_string())
-        );
-        assert_eq!(
-            h.command(&mut vcx, "bump 1"),
-            Err("the draft is behind — :rebase or :revert first".to_string())
-        );
-        assert_eq!(
-            h.tile.read_with(&vcx, |t, _| t.draft().len()),
-            1,
-            "no second edit was written"
+                .read_with(&vcx, |t, _| t.model().base.clone().map(|b| b.as_of)),
+            Some(BASE.to_string()),
+            "the base generation is still the one painted"
         );
     }
 
@@ -11124,27 +11168,29 @@ edits = [["2026-09-18#2", "amount", 9.0]]
     /// draft is already Clean and nothing is left to explain it.
     #[gpui::test]
     fn revert_clears_the_behind_refusal_notice_it_resolves(cx: &mut gpui::TestAppContext) {
-        let (h, mut vcx) = open(cx);
-        h.command(&mut vcx, "key SPX.Z").unwrap();
+        // Only a Behind draft whose base is gone refuses: a restored one
+        // whose base generation never comes back.
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = [["2026-11-20", "-1", 9.5]]
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_with(cx, Some(restored));
         h.visible(&mut vcx, true);
         let tag = h.document_request().unwrap().tag;
-        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
-
-        h.dispatch(&mut vcx, "edit", None);
-        h.set_editor(&mut vcx, "0.5");
-        h.dispatch(&mut vcx, "commit", None);
-        h.deliver(
-            &mut vcx,
-            tag,
-            Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
-        );
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
 
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
-            Some("the draft is behind — :rebase or :revert first".to_string())
+            Some(BEHIND_REFUSED.to_string())
         );
         assert_eq!(h.mode(&vcx), "normal");
 
@@ -11397,6 +11443,40 @@ edits = [["2026-11-20", "-1", 9.5]]
             "the newest generation keeps painting: nothing here is the \
              edits' own base"
         );
+    }
+
+    /// A restored Behind draft whose base never came back paints the
+    /// delivered grid, which is not the grid its edits were keyed to, so
+    /// every edit route still refuses until `:rebase` or `:revert`.
+    #[gpui::test]
+    fn a_restored_behind_draft_without_its_base_refuses_edits(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = [["2026-11-20", "-1", 9.5]]
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_with(cx, Some(restored));
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.editor_value(&vcx), None, "nothing opened");
+        assert_eq!(notice_of(&h, &vcx).as_deref(), Some(BEHIND_REFUSED));
+        assert_eq!(
+            h.command(&mut vcx, "bump 1"),
+            Err(BEHIND_REFUSED.to_string())
+        );
+        h.dispatch(&mut vcx, "insert_below", None);
+        assert_eq!(notice_of(&h, &vcx).as_deref(), Some(BEHIND_REFUSED));
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().cell_count()), 1);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().rows.len()), 0);
     }
 
     /// An unbuildable generation changes only the notice. Keep the last usable model,
@@ -14543,10 +14623,11 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// The three verbs are refused while `Behind` (with the standing
-    /// notice) and in the strip ("not a row"), writing nothing.
+    /// The three verbs are refused in the strip ("not a row"), writing
+    /// nothing. A `Behind` draft whose base is held is not refused: a
+    /// delete lands against that base and the draft stays `Behind`.
     #[gpui::test]
-    fn row_verbs_are_refused_while_behind_and_in_the_strip(cx: &mut gpui::TestAppContext) {
+    fn row_verbs_are_refused_in_the_strip_but_not_while_behind(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         let tag = h.with_document_tagged(&mut vcx);
         h.motion(&mut vcx, "up", None); // Attr(0)
@@ -14562,16 +14643,10 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.dispatch(&mut vcx, "commit", None);
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
-        for verb in ["insert_below", "insert_above", "delete_row"] {
-            h.dispatch(&mut vcx, verb, None);
-            assert_eq!(
-                notice_of(&h, &vcx).as_deref(),
-                Some(BEHIND_REFUSED),
-                "{verb}"
-            );
-            assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().rows.len()), 0);
-            assert!(!h.tile.read_with(&vcx, |t, _| t.label_editor_open()));
-        }
+        h.dispatch(&mut vcx, "delete_row", None);
+        assert_eq!(notice_of(&h, &vcx), None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().rows.len()), 1);
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
         assert_eq!(h.rows(&vcx), 2);
     }
 
@@ -14944,23 +15019,46 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(h.upload_request().is_none());
     }
 
+    /// A Behind draft uploads on purpose (restoring an older fit with
+    /// changes over a bad newer one): the confirm warns which update the
+    /// upload overrides, `y` sends the held base with its edits, the
+    /// accepted draft is Sent, and the upstream's publish of it confirms.
     #[gpui::test]
-    fn upload_is_refused_on_a_behind_draft(cx: &mut gpui::TestAppContext) {
+    fn a_behind_draft_uploads_over_the_newer_document_with_a_warning(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        const ECHOED: &str = "2026-09-12T14:15:00Z";
         let (h, mut vcx) = open_upload(cx);
         h.with_document(&mut vcx);
         h.edit_one_cell(&mut vcx);
         let tag = h.tile.read_with(&vcx, |t, _| t.following.tag());
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
-        assert_eq!(
-            h.command(&mut vcx, "upload"),
-            Err(
-                "rebase or revert first: an upload must be of a document you have seen whole"
-                    .into()
-            )
+
+        h.command(&mut vcx, "upload").expect("armed with a warning");
+        let newer = h.tile.read_with(&vcx, |t, _| local_hhmm(NEWER, t.clock));
+        let prompt = h.upload_prompt(&vcx).expect("a confirm");
+        assert!(
+            prompt.starts_with(&format!("overrides update {newer} — upload ")),
+            "{prompt}"
         );
-        assert_eq!(h.upload_prompt(&vcx), None);
-        assert!(h.upload_request().is_none());
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        let req = h.upload_request().expect("y submits");
+        h.deliver_upload(&mut vcx, req.tag, Ok(()));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_sent()),
+            "an accepted Behind upload is Sent, awaiting its echo"
+        );
+        assert_eq!(h.painted_as_of(&vcx).as_deref(), Some(BASE));
+
+        h.echo(
+            &mut vcx,
+            test_fixtures::snapshot_of_at(&CVI, &req.rows, ECHOED),
+        );
+        let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert_eq!(draft.state, DraftState::Clean, "the echo confirms");
+        assert_eq!(h.painted_as_of(&vcx).as_deref(), Some(ECHOED));
     }
 
     #[gpui::test]
@@ -15067,10 +15165,17 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         let prompt = "upload 1 cell, 0 rows added, 0 removed of SPX.Z to sophis? (y/n)";
         assert_eq!(h.upload_prompt(&vcx).as_deref(), Some(prompt));
         assert!(
-            h.header_texts(&vcx).contains(&prompt.to_string()),
-            "the header paints the question: {:?}",
+            !h.header_texts(&vcx).contains(&prompt.to_string()),
+            "the question asks on its own bar, not in the header: {:?}",
             h.header_texts(&vcx)
         );
+        let header = vcx
+            .debug_bounds("marketdata-header-3")
+            .expect("header painted");
+        let bar = vcx
+            .debug_bounds("marketdata-upload-confirm-3-bar")
+            .expect("the question's bar is painted");
+        assert!(bar.top() >= header.bottom(), "{bar:?} under {header:?}");
         assert_eq!(h.mode(&vcx), "insert", "the confirm holds the keyboard");
         assert!(
             h.upload_request().is_none(),
@@ -16405,7 +16510,7 @@ edits = [["2026-11-20", "-1", 9.5]]
     }
 
     #[gpui::test]
-    fn edit_keys_place_the_caret_at_the_requested_end(cx: &mut gpui::TestAppContext) {
+    fn edit_keys_select_the_text_or_place_the_caret_at_the_end(cx: &mut gpui::TestAppContext) {
         let (mut vcx, shell, tile, _rx) = open_in_shell(cx);
         let tag = tile.read_with(&vcx, |t, _| t.following.tag());
         let outcome = QueryOutcome {
@@ -16424,7 +16529,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             if !selection.is_empty() {
                 type_keys(&mut vcx, selection);
             }
-            for (key, at_start) in [("shift-i", true), ("i", false), ("enter", false)] {
+            for (key, selects) in [("shift-i", true), ("i", false), ("enter", false)] {
                 type_keys(&mut vcx, key);
                 let input = tile.read_with(&vcx, |t, _| match &t.editor {
                     Some(Editing {
@@ -16436,19 +16541,31 @@ edits = [["2026-11-20", "-1", 9.5]]
                 let before = input.read_with(&vcx, |s, _| s.value().to_string());
                 assert!(!before.is_empty());
                 assert_eq!(
-                    input.read_with(&vcx, |s, _| s.cursor()),
-                    if at_start { 0 } else { before.len() },
+                    input.read_with(&vcx, |s, _| s.selected_range()),
+                    if selects {
+                        0..before.len()
+                    } else {
+                        before.len()..before.len()
+                    },
                     "{selection} {key}"
                 );
+                if selects {
+                    type_keys(&mut vcx, "backspace");
+                    assert_eq!(
+                        input.read_with(&vcx, |s, _| s.value().to_string()),
+                        "",
+                        "one backspace clears the selected text"
+                    );
+                }
                 vcx.simulate_input("7");
                 assert_eq!(
                     input.read_with(&vcx, |s, _| s.value().to_string()),
-                    if at_start {
-                        format!("7{before}")
+                    if selects {
+                        "7".to_string()
                     } else {
                         format!("{before}7")
                     },
-                    "typing must insert without replacing the cell text"
+                    "{selection} {key}"
                 );
                 type_keys(&mut vcx, "escape");
             }

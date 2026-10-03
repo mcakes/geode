@@ -9,9 +9,7 @@ use crate::core::draft::{DraftBadge, local_hhmm};
 use crate::core::matrix::{HeaderCell, MatrixIndex, RowState};
 use crate::core::spec::PanelSpec;
 use crate::delegate::{CellPaint, cell_paint};
-use crate::tile::{
-    DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, PendingUpload, display_key,
-};
+use crate::tile::{DateFieldPaint, EditorPaint, FlooredTones, MarketDataTile, display_key};
 use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
 use geode_shell::fonts;
@@ -19,7 +17,6 @@ use geode_shell::module::StackHandle;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
-use geode_tile::confirm::{self, Confirm};
 use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks, TimeRun};
 use geode_tile::notice::{self, Notice};
 use gpui::prelude::*;
@@ -164,9 +161,6 @@ pub(crate) struct HeaderInputs<'a> {
     /// Prepared upload-echo result and tone: confirmed timestamps or a mismatch
     /// warning. Transport success and publication confirmation are separate states.
     pub echo: Option<(&'a SharedString, Tone)>,
-    /// The armed `:upload` confirm's question, `upload … to <target>?
-    /// (y/n)`.
-    pub prompt: Option<&'a SharedString>,
     pub source_at: Option<DateTime<Utc>>,
     /// Count of inserted rows with a required cell still empty.
     pub incomplete: usize,
@@ -207,10 +201,6 @@ pub(crate) struct HeaderModel {
     /// The echo's line, painted after the state and the incomplete-rows
     /// chip, ahead of the upload error and the notice.
     pub echo: Option<(SharedString, Tone)>,
-    /// The armed upload confirm's question, the last status item — after
-    /// it come the notice and the time — painted on the element that holds
-    /// the keyboard while it is armed.
-    pub prompt: Option<SharedString>,
     /// The generation's source time, `HH:MM:SS` on the trader's own clock.
     pub time: Option<SharedString>,
     /// `time` followed by ` stale`, prepared so paint never formats.
@@ -268,7 +258,6 @@ impl HeaderModel {
             notice: i.notice.cloned().map(Notice::danger),
             upload_error: i.upload_error.cloned().map(Notice::danger),
             echo: i.echo.map(|(text, tone)| (text.clone(), tone)),
-            prompt: i.prompt.cloned(),
             time: i.source_at.map(|t| i.clock.hms(t).into()),
             time_stale: i
                 .source_at
@@ -303,9 +292,6 @@ impl HeaderModel {
         if let Some(e) = &self.upload_error {
             out.push(e.text().to_string());
         }
-        if let Some(p) = &self.prompt {
-            out.push(p.to_string());
-        }
         if let Some(n) = &self.notice {
             out.push(n.text().to_string());
         }
@@ -320,19 +306,18 @@ impl HeaderModel {
 }
 
 /// Render the header through the shared frame: kind badge, underlying and
-/// attributes on the left; state, incomplete rows, echo, upload error and
-/// the confirm prompt as cluster status; then the notice, the time, the
-/// health chip and `⋯` from the shared cluster. The attribute cursor and
-/// editor are passed separately from prepared values; `menu_open` keeps the
-/// action button's selected fill; `mode` (the key context's own) paints the
-/// cluster's mode icon. A pending upload prompt is the confirm door's: it
-/// holds the keyboard and answers its keys.
+/// attributes on the left; state, incomplete rows, echo and upload error
+/// as cluster status; then the notice, the time, the health chip and `⋯`
+/// from the shared cluster. The attribute cursor and editor are passed
+/// separately from prepared values; `menu_open` keeps the action button's
+/// selected fill; `mode` (the key context's own) paints the cluster's mode
+/// icon. A pending upload asks on the confirm door's bar under the header,
+/// not here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     h: &HeaderModel,
     cursor_attr: Option<usize>,
     editor: Option<(usize, EditorPaint<'_>)>,
-    confirm: Option<&Confirm<PendingUpload>>,
     menu_open: bool,
     theme: &Theme,
     tones: &FlooredTones,
@@ -441,7 +426,7 @@ pub(crate) fn render(
     }
 
     // Module-own status, in order: state, incomplete rows, echo, upload
-    // error, the confirm prompt.
+    // error.
     let mut status: Vec<AnyElement> = Vec::new();
     if let Some((text, tone)) = &h.state {
         status.push(
@@ -502,20 +487,6 @@ pub(crate) fn render(
             .into_any_element(),
         );
     }
-    // The upload prompt holds the keyboard and answers its keys before shell
-    // routing (bare y submits; any other key cancels), in the foreground tone.
-    if let (Some(_), Some(pending)) = (&h.prompt, confirm) {
-        status.push(
-            confirm::prompt(
-                pending,
-                tile,
-                move || format!("marketdata-upload-confirm-{tile_id}"),
-                theme,
-            )
-            .into_any_element(),
-        );
-    }
-
     // The shared cluster: status, the notice, the time (its stale label
     // prepared), the health chip, `⋯`. The trigger toggles in the capture
     // phase and lets the press bubble on so the shell still focuses the tile.
@@ -587,7 +558,6 @@ mod tests {
             notice: None,
             upload_error: None,
             echo: None,
-            prompt: None,
             source_at: None,
             incomplete: 0,
             clock: Clock::utc(),
@@ -764,20 +734,20 @@ mod tests {
     }
 
     /// Paint order after the migration: status (state, incomplete, echo,
-    /// upload error, prompt), then the notice, then the time.
+    /// upload error), then the notice, then the time.
     #[test]
-    fn the_prompt_paints_before_the_notice_and_the_time_is_last() {
+    fn the_upload_error_paints_before_the_notice_and_the_time_is_last() {
         let model = model_with_rows();
         let key = vec!["SPX.Z".to_string()];
         let notice: SharedString = "'abc' is not a number".into();
-        let prompt: SharedString = "upload 1 edit to desk? (y/n)".into();
+        let error: SharedString = "upload refused".into();
         let mut i = inputs(&model, Some(&key), DraftBadge::Dirty);
         i.notice = Some(&notice);
-        i.prompt = Some(&prompt);
+        i.upload_error = Some(&error);
         i.source_at = Some(chrono::Utc::now());
         let texts = HeaderModel::prepare(i).texts();
         let at = |s: &str| texts.iter().position(|t| t == s).unwrap();
-        assert!(at("upload 1 edit to desk? (y/n)") < at("'abc' is not a number"));
+        assert!(at("upload refused") < at("'abc' is not a number"));
         assert_eq!(
             texts.len() - 1,
             texts.iter().position(|t| t.contains(':')).unwrap()

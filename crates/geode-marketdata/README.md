@@ -31,7 +31,7 @@ Current behavior and rationale:
 | `core::cursor`, `core::menu` | Grid navigation over `geode_tile::motion` (the shared rules; `step_clamped` for a live selection), with the attribute strip outside the wrap cycle, and the action list's rows (`geode_tile::menu` rows over action ids, hints as live chords). Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
 | `core::bulk` | Selection-wide edit rules: whether a typed value lands in a cell of each kind, one arrow step's delta per column, and the `set`/`stepped` notices that count skips by reason. |
 | `commands` | The `:` line: `:rebase`, `:revert`, `:auto`, `:bump`, `:upload`, `:autosize [reset]` and the rest, parsed to data. |
-| `header` | Prepared identity, attributes, draft/upload feedback, source time (and its prepared stale label), and shared date-field rendering. Paints through `geode_tile::header::frame`: kind badge, underlying and attributes on the left; state, incomplete rows, echo, upload error and the confirm prompt as cluster status; the notice, the time, the health chip (the panel's dataset) and `⋯` from the shared cluster. |
+| `header` | Prepared identity, attributes, draft/upload feedback, source time (and its prepared stale label), and shared date-field rendering. Paints through `geode_tile::header::frame`: kind badge, underlying and attributes on the left; state, incomplete rows, echo and upload error as cluster status; the notice, the time, the health chip (the panel's dataset) and `⋯` from the shared cluster. The `:upload` question asks on the confirm door's bar under the header (`tile`'s render), not here. |
 | `tile` | `MarketDataTile`: requests one document by key through `DataHandle`, runs its document request through `geode_tile::following` (following `as_of` and its watched document's data; hiding keeps the request in flight, `closed` cancels it and answers the barrier; arrivals from `closed` and `set_visible`, which the shell calls inside its draw, go through `geode_tile::following::DeferredDoor` so the release is heard), owns the cursor, the editor, the draft and the parked drafts per underlying. |
 | `tile::select` | The `V`/`v` grid selection: its state doors, label-anchored resolution, and every verb that takes it as operand (`y`, `d`, `:bump`, the bulk commit, the live step and its undo). |
 | `delegate` | `MatrixDelegate`, the `TableDelegate` over gpui-component's table, and the window (`geode_tile::grid::WindowCache<MdCell>`) `render_td` reads. It fills the window for the range the table reports (`visible_rows_changed`) and refills the recorded range on every install; before any report it prepares the first `FIRST_WINDOW` rows. Holds `:autosize`'s fitted widths by column label (`__row_axis` for the row labels), which `column()` prefers over the fixed defaults. |
@@ -84,7 +84,9 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   `:auto` policy is applied only on a real transition, never on a
   redelivery or the first usable delivery after a restore. Without the saved
   base snapshot, a restored Behind draft paints the delivered grid while its
-  unresolved cell edits remain withheld.
+  unresolved cell edits remain withheld. `held_refusal` lets a Behind draft
+  edit while its base is retained (the grid its edits are keyed to) and
+  refuses only once that base is gone.
 - `DocumentBase::differs_from` compares source time and, when both are known,
   store generations. Unknown generations fall back to source time, so they
   cannot detect a same-time republish. Retaining a base snapshot, capturing
@@ -205,7 +207,8 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
 ## Input and popup contracts
 
 `i` and Enter open the cell editor with the caret at the end of its text;
-`I` (`shift+i`, `marketdata::edit_start`) opens it at the start. Both routes
+`I` (`shift+i`, `marketdata::edit_select`) opens it with the whole text
+selected, so typing replaces it and one backspace clears it. Both routes
 work in normal and selection modes and share the same edit guards. Text
 attributes follow the same rule; date fields and choice pickers open as usual.
 Text placement uses `geode_tile::edit::EditCaret`.

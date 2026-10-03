@@ -777,6 +777,57 @@ fn a_group_row_is_read_only_and_yanks_its_lines(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.sheet_len(&vcx), len);
 }
 
+/// A `V` selection spanning groups edits the lines it paints: the group
+/// rows between them have no line and are passed over, not refused.
+#[gpui::test]
+fn a_selection_across_groups_edits_its_lines(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    cursor_to(&h, &mut vcx, "NDX Z26 4000 P");
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C"); // over the SPX group row
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "4500");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None);
+    let tree = h.tree(&vcx);
+    for line in [
+        "NDX Z26 4500 P",
+        "SPX Z26 4500 C",
+        "-5 SPX Z26 4800/5200 CS",
+    ] {
+        assert!(tree.iter().any(|t| t == line), "{line}: {tree:?}");
+    }
+    assert_eq!(h.mode(&mut vcx), "normal");
+}
+
+/// A closed group inside the selection is passed over: the edit writes
+/// the lines the selection paints and leaves the hidden ones as they were.
+#[gpui::test]
+fn a_selection_over_a_closed_group_edits_only_the_visible_lines(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 3000 P", "SPX Z26 4000 P", "SPX Z26 5000 P"]);
+    h.command(&mut vcx, "group strike").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    cursor_to(&h, &mut vcx, "4000");
+    h.dispatch(&mut vcx, "toggle", None);
+    cursor_to(&h, &mut vcx, "SPX Z26 3000 P");
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 P");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "3");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(h.mode(&mut vcx), "normal");
+    h.dispatch(&mut vcx, "expand_all", None);
+    let tree = h.tree(&vcx);
+    for line in ["3 SPX Z26 3000 P", "SPX Z26 4000 P", "3 SPX Z26 5000 P"] {
+        assert!(tree.iter().any(|t| t == line), "{line}: {tree:?}");
+    }
+}
+
 /// A selection holding a group row and one of its descendants totals each
 /// leg once: the group row's total is its own sum, and adding the line
 /// beneath it changes nothing.
@@ -1249,10 +1300,10 @@ fn an_edit_of_the_grouped_value_keeps_the_cursor_on_its_line(cx: &mut gpui::Test
     assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 4000 C"));
 }
 
-/// A `V` edit of the grouped column keeps the selection: its anchor line
-/// paints once, in its new group.
+/// A `V` edit of the grouped column ends visual mode with the cursor on
+/// the edited line, in its new group.
 #[gpui::test]
-fn a_selection_edit_of_the_grouped_value_keeps_the_selection(cx: &mut gpui::TestAppContext) {
+fn a_selection_edit_of_the_grouped_value_follows_the_line(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &STRIKES);
     h.command(&mut vcx, "group strike").unwrap();
     h.dispatch(&mut vcx, "expand_all", None);
@@ -1263,13 +1314,9 @@ fn a_selection_edit_of_the_grouped_value_keeps_the_selection(cx: &mut gpui::Test
     set_editor(&h, &mut vcx, "4000");
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(h.footer(&vcx), None, "no lost anchor");
-    assert_eq!(h.mode(&mut vcx), "visual");
-    let row = h.cursor(&vcx).unwrap().0;
+    assert_eq!(h.mode(&mut vcx), "normal");
     assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("SPX Z26 4000 C"));
-    let rows = h
-        .tile
-        .read_with(&vcx, |t, _| t.resolved().map(|r| r.rows.clone()));
-    assert_eq!(rows, Some(row..row + 1));
+    assert!(h.tile.read_with(&vcx, |t, _| t.resolved().is_none()));
 }
 
 fn find(h: &Harness, vcx: &mut VisualTestContext, e: FindEvent) {

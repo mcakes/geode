@@ -109,8 +109,9 @@ same parser; `geode-app`'s production keymap test fails on any refusal. A
 literal `+` cannot be represented through this separator syntax.
 
 Editable market-data and pricer grids bind `shift+i` (`I`) to their
-`edit_start` action in normal and visual modes: text editors open with the
-caret at the start. `i` and Enter retain the `edit` action and end placement.
+`edit_select` action in normal and visual modes: text editors open with the
+whole text selected, so typing replaces it and one backspace clears it. `i`
+and Enter retain the `edit` action and end placement.
 Date fields and choice pickers open as usual through either action.
 
 The primary modifier is configured separately in **`app.toml`**:
@@ -174,7 +175,7 @@ mode, and the shared bindings match only `mode == normal` or
 `mode == visual`); its `marketdata && mode == visual` block binds the
 selection verbs as single keys — `y` (`marketdata::yank`), `d`
 (`marketdata::delete_row`), `i` and `enter` (`marketdata::edit`), `I`
-(`marketdata::edit_start`), `v`, `V`,
+(`marketdata::edit_select`), `v`, `V`,
 and `escape` — because a doubled normal-mode form (`y y`, `y c`, `d d`) would
 leave the first press waiting for a second. Normal-mode keys the block does
 not list, such as `space`, `o`, `u`, `n`, and `.`, have no panel binding while
@@ -196,7 +197,7 @@ dispatched from the palette while the entry bar, the cell editor or the action
 menu is open closes it first, then moves. The pricer's
 `pricer && mode == visual` block binds `y` (`pricer::yank`), `d`
 (`pricer::delete`), `shift+j`/`shift+k`, `g p`, `g u`, `i` and `enter`
-(`pricer::edit`), `I` (`pricer::edit_start`), `v`, `V` and `escape` as the selection's verbs.
+(`pricer::edit`), `I` (`pricer::edit_select`), `v`, `V` and `escape` as the selection's verbs.
 Normal-mode keys it does not list — the doubled `y y`, `y c` and `d d`, `p`,
 `shift+p`, `u`, `ctrl+r`, `o`, `shift+o`, `n`, `shift+n`, `space`, the `z`
 folds, `g m` and `.` — are unbound while a selection is live; the palette still reaches

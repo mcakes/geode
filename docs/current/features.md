@@ -70,7 +70,10 @@ line, and the blotter the notice line. Diagnostics has none of them.
   notice (`upload cancelled: a new document arrived`); the pricer withdraws
   on a `:` command with no notice of its own. Each answer blurs the prompt before it
   drops, and the shell's focus restoration path returns the keyboard to the
-  tile.
+  tile. The question asks on a full-width bar under the tile header, not in
+  it: it wraps onto as many lines as the tile's width needs and is never
+  cut, and its Yes and No buttons never shrink, so a narrow tile still shows
+  the whole question before it is answered.
 - A notice is a status (muted), warning or danger line in the theme's text
   tones; which of a tile's notices shows is the tile's own precedence.
 - Every tile header is `geode_tile::header::frame`: 22 px at the design rem,
@@ -279,10 +282,11 @@ persisted by the tile.
 
 The tile's grouping is, in order of precedence: a `:group <columns>` pin; a
 `:group slot <n>` pin (the view's own grouping while that slot is empty);
-the frame's active slot; the view's own `grouping`. The blotter always
-groups: an empty grouping would be one grand-total row, so `:group none`
-(the pricer's flat-sheet pin), and `none` anywhere in a column list, is
-refused with `the blotter always groups: :group takes columns or \`slot
+the frame's grouping (its active slot or ad hoc chain); the view's own
+`grouping`. The blotter always groups: an empty grouping would be one
+grand-total row, so `:group none` (the pricer's flat-sheet pin), and
+`none` anywhere in a column list, is refused with
+`the blotter always groups: :group takes columns or \`slot
 N\``. A bare `:group` refuses with `group needs columns or \`slot N\``.
 `:group` completes the groupable dimensions and `slot`. While a pin holds,
 a frame grouping change or slot switch does not regroup the tile; `:unpin`
@@ -518,11 +522,18 @@ differing delivery. `:auto` selects how unsent edits handle the transition:
 | Rebase | Move edits by row and column labels, reporting labels that cannot be resolved |
 | Replace | Discard edits and report how much unsent work was replaced |
 
+A Behind draft whose base is retained stays editable: cell, attribute, row,
+step and bump edits land against the painted base, the draft stays Behind,
+and `:rebase` later carries every edit onto the delivered generation by label.
+Upload stays available with a warning; see [uploads](#uploads).
+
 Changing policy does not retroactively apply it to a held delivery. Redelivery
 of the same generation does not trigger it, and the first usable delivery
 after session restoration uses Hold. If the saved base is unavailable, a
 restored Behind draft paints the delivered grid while withholding unresolved
-cell edits. Automatic rebase also holds when the
+cell edits, and every edit route refuses (`the draft's base is gone — :rebase
+or :revert first`) because the painted grid is not the one those edits were
+keyed to. Automatic rebase also holds when the
 incoming document has no rows. Sent drafts follow the separate echo rules
 below. A snapshot that cannot build a valid grid leaves the last usable model
 and draft unchanged and reports the error.
@@ -584,8 +595,8 @@ to the grid at that column, uncounted to the first or last row and counted to
 row N. A live selection's motions clamp and never enter the strip.
 
 `i` and Enter open a cell or header attribute editor with the caret at the
-end of its text. `I` (`shift+i`) opens it at the start without selecting the
-text. Both routes also work over a selection and use the same edit guards;
+end of its text. `I` (`shift+i`) opens it with the whole text selected, so
+typing replaces it and one backspace clears it. Both routes also work over a selection and use the same edit guards;
 date fields and choice pickers open as usual.
 
 `[ui] line_numbers` adds a gutter beside the grid's pinned column: the row
@@ -691,8 +702,9 @@ so a no-op gesture never copies one cell's value across the selection:
 text still equal to what the editor opened on, a date field no digit was
 typed into whose date is unchanged, or `enter` on the option the cell
 already holds. Stepping a date or moving the choice highlight is a change;
-a click on a choice row is always a pick. The selection stays after a
-commit.
+a click on a choice row is always a pick. A commit that settles (written,
+or an untouched `enter`) ends the selection, as `escape` would; a refused
+commit keeps it with the editor open.
 
 **Live steps.** On a number cursor cell with its text untouched, the editor's
 arrows (`up`/`down`, `shift+` for ten) step every selected number in the
@@ -703,9 +715,10 @@ integer column, and is never rounded to the painted grid: snapping would
 silently rewrite each cell's unpainted decimals. Empty, deleted, and
 non-number cells are skipped and counted. Each press is all-or-nothing: if
 any cell refuses (an overflow), nothing is written. A step refuses while the
-draft is Behind or its upload echo differs, as every edit does.
+draft is Behind with its base gone or its upload echo differs, as every edit
+does.
 
-- `enter` on the untouched text keeps the steps and the selection.
+- `enter` on the untouched text keeps the steps and ends the selection.
 - `escape` restores the draft exactly as `i` found it, provided the steps are
   still its last change and the painted document has not moved; a delivery
   held Behind meanwhile stays reported, and a draft that was Sent comes back
@@ -742,14 +755,14 @@ from the palette acts on the cursor cell alone; the footer shows no totals.
 ### Uploads
 
 `:upload [target]` and the action list's `Upload` row send the edited document
-to a configured egress target. Upload requires a complete Editing draft, an
-eligible target, and no other upload in flight from the tile. Both the frame
+to a configured egress target. Upload requires a complete Editing or Behind
+draft, an eligible target, and no other upload in flight from the tile. Both the frame
 and the painted generation must be live. A live frame can still show a
 historical generation while a requery is pending or after it fails; uploading
 that document would overwrite untouched rows with old values.
 
-Arming confirmation assembles the rows and snapshots the draft. The header
-shows the target and counts of changed cells, attributes, added rows, and
+Arming confirmation assembles the rows and snapshots the draft. The confirm
+bar shows the target and counts of changed cells, attributes, added rows, and
 removed rows. Bare unmodified `y`, or the prompt's Yes button, submits that
 snapshot after rechecking the live frame, live painted generation, and full
 draft equality. Every other key cancels and is consumed, including chords; so
@@ -758,8 +771,13 @@ cancels. A delivery that changes the draft or painted generation,
 or a switch of underlying, withdraws the prompt unanswered. The prompt is the
 shared `geode_tile::confirm` door.
 
+A Behind draft uploads its held base with its edits, which replaces the newer
+delivered document upstream: the deliberate route for restoring an older fit
+with changes after a bad newer one. The prompt opens with `overrides update
+HH:MM —` naming the generation it replaces, and `y` is the override.
+
 Transport success marks the draft `sent HH:MM` only if the current draft is
-still Editing and equals the submitted draft, including its base. Failure
+still Editing or Behind and equals the submitted draft, including its base. Failure
 keeps the draft editable and shows `upload failed: <e>`. Service admission,
 transport success, and a stored echo are separate stages; see
 [document uploads](request-delivery.md#document-uploads) for delivery limits.
@@ -1563,7 +1581,7 @@ Normal-mode keys:
 | `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end; a package typed inside a package lands just after that package) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
 | `shift+o` | The same bar, but the first line lands above the cursor row (on a leg, before that leg in its package; on a package or a top-level line, before it; on the first row, `at top`; on a grouping row, `at end`); each further line lands after the one just added, so a typed run reads top to bottom |
 | `i`, `enter`, double-click | Edit the cell in place (a double-click on a package's tree cell, or anywhere on a group row, opens or closes it instead) with the caret at the end of text; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
-| `I` (`shift+i`) | Edit the cell with the caret at the start of text, without selecting it; date fields and choice pickers open as usual |
+| `I` (`shift+i`) | Edit the cell with its whole text selected: typing replaces it, one backspace clears it; date fields and choice pickers open as usual |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
 | `y y` / `y c` | Copy the shorthand of what the row shows (and remember it for `p`): a line or package its own, a grouping row its lines, a split package row its legs under that group / the column's cells |
@@ -1742,7 +1760,7 @@ tile holds:
   sheets clears undo history, package expansion, cursor, and per-sheet save
   state, and cancels pricing in flight for the outgoing sheet. A sheet open in
   another tile is not switched to at once: two tiles never write one sheet,
-  so the header asks `sheet 'x' is open in another tile: open it here and
+  so the confirm bar asks `sheet 'x' is open in another tile: open it here and
   close it there? (y/n)` with the `:rm` confirm's keys, buttons and cancels
   (any answer but `y` leaves `sheet not opened`). `y` decides again: this
   tile's own unsaved changes are saved first, then the holding tile's. A
@@ -1782,7 +1800,7 @@ tile holds:
   documents remain.
 - `:rm <sheet>` is refused for any open sheet (this tile's own: close it or
   `:e` another sheet first) and for a name that is not a document. Otherwise
-  the header asks `remove sheet 'x' and all its history? (y/n)` beside Yes
+  the confirm bar asks `remove sheet 'x' and all its history? (y/n)` beside Yes
   and No buttons and holds the keyboard (the tile is in insert mode). Bare `y`
   or Yes removes the document and its whole history; any other key, No, a
   pointer press anywhere but the two buttons, or focus leaving it answers no
@@ -1972,9 +1990,10 @@ The tile arranges its shown lines under a grouping chain, as a blotter
 arranges positions, and follows the frame's grouping the way a blotter
 does. The chain is, in order of precedence: a `:group <columns>` pin; a
 `:group slot <n>` pin, which reads frame slot `n` (the view's own grouping
-while that slot is empty); the frame's active slot; the planned view's own
-`grouping`. `:group none` pins the empty chain: the flat sheet, whatever
-the frame's grouping, with moves and a counted `g p` as in any flat sheet.
+while that slot is empty); the frame's grouping (its active slot or ad hoc
+chain); the planned view's own `grouping`. `:group none` pins the empty
+chain: the flat sheet, whatever the frame's grouping, with moves and a
+counted `g p` as in any flat sheet.
 `none` is reserved beside `slot` — never read as a column, and `:group none
 <anything>` is refused with `usage: group none`. `:unpin` drops any pin and
 the tile follows the frame again at once. `:group` takes columns separated
@@ -2083,8 +2102,12 @@ row would reach legs another group paints. Both refuse cell edits (`i`,
 structural verbs `d`, `shift+j`/`shift+k`, `g p` and `g u` (keys, the `.`
 menu, `:package`, `:unpackage`), with `a grouping row: edit its lines` and
 `split package: edit its legs` in the footer; a package both split and
-partly hidden reads the split reason. A selection containing either refuses
-whole. A split package's legs, and the lines under a group, edit as usual.
+partly hidden reads the split reason. For structural verbs, a selection
+containing either refuses whole. A selection's typed commit or live step
+passes over group rows and edits the visible lines it holds, across groups;
+a closed group inside it is ignored, its hidden lines left as they were. A
+split package row inside it still refuses. A split package's legs, and the
+lines under a group, edit as usual.
 `y y` on a group row copies the shorthand of its lines, and a `V` selection
 over a group row totals and yanks its lines once, whether or not their rows
 are selected too. `y y` or `V y` on a split package row yanks that row's
@@ -2282,8 +2305,9 @@ changes nothing records no entry. The header notices `set 5 cells, skipped 3
 (2 read-only, 1 n/a)`, counting read-only cells, barrier cells on a vanilla
 line (`n/a`), and refused values.
 When no selected cell accepts the value, nothing is written and the editor
-stays open with `no selected cell accepts '<text>'` in the footer. The
-selection stays after a commit. Because the cursor's column is what a commit
+stays open with `no selected cell accepts '<text>'` in the footer and the
+selection kept. A commit that settles (written, or an untouched `enter`)
+ends the selection, as `escape` would. Because the cursor's column is what a commit
 writes, `enter` re-checks that the cursor still sits on the editor's cell;
 if it does not, nothing is written and the editor closes with `the cell
 moved; edit refused`.

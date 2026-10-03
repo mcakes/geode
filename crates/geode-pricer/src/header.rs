@@ -10,7 +10,7 @@ use crate::core::complete::Completion;
 use crate::core::rollup::EffectiveChain;
 use crate::core::sheet::{LineState, Sheet};
 use crate::popup;
-use crate::tile::{LOADING, PendingSheet, PricerTile};
+use crate::tile::{LOADING, PricerTile};
 use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
 use geode_shell::actions::ActionId;
@@ -22,7 +22,6 @@ use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
-use geode_tile::confirm::{self, Confirm};
 use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks, TimeRun};
 use geode_tile::notice::Notice;
 use gpui::prelude::*;
@@ -64,8 +63,6 @@ pub(crate) struct HeaderInputs<'a> {
     /// `:group none` pins the empty chain: a muted `ungrouped` where the
     /// chain would be.
     pub ungrouped: bool,
-    /// The armed `:rm` confirm's question.
-    pub prompt: Option<SharedString>,
     /// The save state's own slot (a refused save, or a failed load that
     /// blocks saving). Separate from `notice` so a pricing notice can
     /// neither overwrite nor clear it; painted first, left of `notice`,
@@ -94,8 +91,6 @@ pub(crate) struct HeaderModel {
     /// `loading…` is a status (muted), a missing pricer a failure (danger
     /// text), everything else a warning.
     pub notice: Option<Notice>,
-    /// The armed `:rm` confirm's question (see `HeaderInputs::prompt`).
-    pub prompt: Option<SharedString>,
     /// The save state (see `HeaderInputs::save`), always a warning.
     pub save: Option<Notice>,
     /// `N hidden` while the frame's scope hides any line (muted).
@@ -173,7 +168,6 @@ pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
         time_stale: time.as_ref().map(|t| format!("{t} stale").into()),
         time: time.map(Into::into),
         notice,
-        prompt: i.prompt,
         save: i.save.map(Notice::warning),
         hidden: (i.hidden > 0).then(|| format!("{} hidden", i.hidden).into()),
         unscoped: i.unscoped,
@@ -211,7 +205,6 @@ impl HeaderModel {
             out.push("unscoped".to_string());
         }
         out.extend(self.hidden.iter().map(|s| s.to_string()));
-        out.extend(self.prompt.iter().map(|s| s.to_string()));
         out.extend(self.pricing.iter().map(|s| s.to_string()));
         out.extend(self.failed.iter().map(|s| s.to_string()));
         out.push(PRICER_LABEL.to_string());
@@ -293,8 +286,8 @@ fn view_control(
         .into_any_element()
 }
 
-/// Live rendering inputs: freshness, stack marker, menu trigger, and confirmation
-/// focus. The tile retains their state; the header only installs their handlers.
+/// Live rendering inputs: freshness, stack marker and menu trigger. The tile
+/// retains their state; the header only installs their handlers.
 pub(crate) struct HeaderChrome<'a> {
     /// Whether the last priced time is older than `stale_after` —
     /// computed by the caller per frame and passed in, so rendering never
@@ -310,8 +303,6 @@ pub(crate) struct HeaderChrome<'a> {
     pub menu_selector: SharedString,
     /// The header's health chip (the sheet store's dataset), if any.
     pub health: Option<&'a HealthChip>,
-    /// The armed `:rm` confirm: its prompt is painted through the confirm door.
-    pub confirm: Option<&'a Confirm<PendingSheet>>,
     /// The tile's mode, read from the key context's own decision
     /// (`PricerTile::mode`), painted as the cluster's mode icon.
     pub mode: Mode,
@@ -524,20 +515,6 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
         });
     let mut cluster = Cluster::new(c.tile_id);
     cluster.mode = c.mode;
-    // The confirm prompt (`:rm` or a take-over) owns the keyboard; the
-    // confirm door answers every key on it before the shell root sees one,
-    // and paints its Yes/No.
-    if let Some(pending) = h.prompt.as_ref().and(c.confirm) {
-        cluster.status.push(
-            confirm::prompt(
-                pending,
-                c.tile,
-                move || format!("pricer-remove-confirm-{tile_id}"),
-                theme,
-            )
-            .into_any_element(),
-        );
-    }
     if let Some(p) = h.pricing.clone() {
         cluster.status.push(div().child(p).into_any_element());
     }
@@ -746,7 +723,6 @@ mod tests {
             chain: &EffectiveChain::default(),
             pinned: false,
             ungrouped: false,
-            prompt: None,
             save: None,
             settings: &settings(false),
             clock: Clock::utc(),
@@ -778,7 +754,6 @@ mod tests {
             chain: &EffectiveChain::default(),
             pinned: false,
             ungrouped: false,
-            prompt: None,
             save: None,
             settings: &settings(false),
             clock: Clock::utc(),
@@ -800,7 +775,6 @@ mod tests {
             chain: &EffectiveChain::default(),
             pinned: false,
             ungrouped: false,
-            prompt: None,
             save: None,
             settings: &settings(false),
             clock: Clock::utc(),
@@ -814,7 +788,7 @@ mod tests {
     }
 
     /// After the migration the notices paint after the status items: the
-    /// prompt, the counts and the pricer label, then save, then notice.
+    /// counts and the pricer label, then save, then notice.
     #[test]
     fn notices_paint_after_the_status_items() {
         let s = Sheet::new("book");
@@ -828,14 +802,13 @@ mod tests {
             chain: &EffectiveChain::default(),
             pinned: false,
             ungrouped: false,
-            prompt: Some("remove 'old'? (y/n)".into()),
             save: Some("not saved".into()),
             settings: &settings(false),
             clock: Clock::utc(),
         });
         let texts = h.texts();
         let at = |s: &str| texts.iter().position(|t| t == s).unwrap();
-        assert!(at("remove 'old'? (y/n)") < at("vendor"));
+        assert!(at(PRICER_LABEL) < at("vendor"));
         assert!(at("vendor") < at("not saved"));
         assert!(at("not saved") < at("sheet 'book' was not found; opened empty"));
     }
@@ -853,7 +826,6 @@ mod tests {
             chain: &EffectiveChain::default(),
             pinned: false,
             ungrouped: false,
-            prompt: None,
             save: None,
             settings: &settings(true),
             clock: Clock::utc(),
@@ -879,7 +851,6 @@ mod tests {
             chain: &EffectiveChain::default(),
             pinned: false,
             ungrouped: false,
-            prompt: None,
             save: None,
             settings: &settings(true),
             clock: Clock::utc(),
@@ -903,7 +874,6 @@ mod tests {
             chain: &EffectiveChain::default(),
             pinned: false,
             ungrouped: false,
-            prompt: None,
             save: None,
             settings: &settings(true),
             clock: Clock::utc(),

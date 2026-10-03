@@ -2166,9 +2166,7 @@ impl PricerTile {
                 if let Some(bulk) = self.take_bulk() {
                     self.settle_bulk(bulk, true, cx);
                 }
-                self.close_editor(window, cx);
-                self.rebuild_chrome();
-                cx.notify();
+                self.close_ending_selection(window, cx);
                 return;
             }
             if let Some(bulk) = self.take_bulk() {
@@ -2232,9 +2230,7 @@ impl PricerTile {
         // filled across every target would be a plausible wrong block
         // from a no-op gesture. No edit, no notice, no undo entry.
         if unchanged && self.selection.is_some() {
-            self.close_editor(window, cx);
-            self.rebuild_chrome();
-            cx.notify();
+            self.close_ending_selection(window, cx);
             return;
         }
         let value = match value {
@@ -2262,7 +2258,7 @@ impl PricerTile {
             if !self.cursor_on_editor(line, kind) {
                 self.refuse_moved(window, cx);
             } else if self.commit_selection(&value, None, cx) {
-                self.close_editor(window, cx);
+                self.close_ending_selection(window, cx);
             }
             return;
         }
@@ -2362,6 +2358,20 @@ impl PricerTile {
 
     /// Close the editor with `MOVED`: its commit no longer means what the
     /// trader saw when it opened.
+    /// A commit over a selection settled — written, or a no-op left as
+    /// it was: the editor closes and visual mode ends with it, as `escape`
+    /// would. A refusal never comes here, so the selection survives for
+    /// the trader to retype or adjust.
+    fn close_ending_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_editor(window, cx);
+        self.clear_selection();
+        // The table's highlight goes, and an order the selection held
+        // under a sort re-ranks now.
+        self.sync_cursor(cx);
+        self.rebuild_chrome();
+        cx.notify();
+    }
+
     fn refuse_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_editor(window, cx);
         self.footer = Some(MOVED.into());
@@ -2407,16 +2417,14 @@ impl PricerTile {
         // from a no-op gesture.
         if self.selection.is_some() {
             if date == initial && !typed {
-                self.close_editor(window, cx);
-                self.rebuild_chrome();
-                cx.notify();
+                self.close_ending_selection(window, cx);
                 return;
             }
             let text = date.format("%Y-%m-%d").to_string();
             if !self.cursor_on_editor(line, kind) {
                 self.refuse_moved(window, cx);
             } else if self.commit_selection(&text, Some(date), cx) {
-                self.close_editor(window, cx);
+                self.close_ending_selection(window, cx);
             }
             return;
         }
@@ -3346,9 +3354,9 @@ impl PricerTile {
                 self.open_entry(verb == "add_below", window, cx);
                 return true;
             }
-            "edit" | "edit_start" => {
-                let caret = if verb == "edit_start" {
-                    EditCaret::Start
+            "edit" | "edit_select" => {
+                let caret = if verb == "edit_select" {
+                    EditCaret::Select
                 } else {
                     EditCaret::End
                 };
@@ -5337,7 +5345,6 @@ impl PricerTile {
             chain: &self.chain,
             pinned: self.pin != Pin::None,
             ungrouped: matches!(&self.pin, Pin::Grouping(chain) if chain.is_empty()),
-            prompt: self.confirm.as_ref().map(|c| c.prompt_text().clone()),
             save: self.save_notice.clone(),
             settings: &settings,
             clock: self.clock,
@@ -6091,7 +6098,6 @@ impl gpui::Render for PricerTile {
                 menu_tip: self.menu_tip.clone(),
                 menu_selector: self.menu_selector.clone(),
                 health: self.health.chip(),
-                confirm: self.confirm.as_ref(),
                 mode: geode_tile::header::Mode::from_key_mode(self.mode()),
                 links: geode_tile::header::link_chips(&self.frame, cx),
                 name_tip: self.name_tip.clone(),
@@ -6162,6 +6168,18 @@ impl gpui::Render for PricerTile {
                     .stripe(false)
                     .into_any_element(),
             });
+        // The confirm (`:rm` or a take-over) asks on its own bar under the
+        // header, whole at any tile width; the door answers every key on it
+        // before the shell root sees one.
+        let tile_id = self.id.0;
+        let question = self.confirm.as_ref().map(|pending| {
+            confirm::bar(
+                pending,
+                &tile,
+                move || format!("pricer-remove-confirm-{tile_id}"),
+                theme,
+            )
+        });
         let bar = self.entry.as_ref().map(|e| {
             header::render_entry_bar(
                 &e.input,
@@ -6187,6 +6205,7 @@ impl gpui::Render for PricerTile {
                 .size_full()
                 .debug_selector(|| format!("tile-content-{}", self.id.0))
                 .child(header)
+                .children(question)
                 .children(bar)
                 .child(body)
                 .when(search.is_some(), |el| {
@@ -10241,7 +10260,7 @@ pub(crate) mod tests {
     // ---- the cell editor ----
 
     #[gpui::test]
-    fn edit_keys_place_the_caret_at_the_requested_end(cx: &mut gpui::TestAppContext) {
+    fn edit_keys_select_the_text_or_place_the_caret_at_the_end(cx: &mut gpui::TestAppContext) {
         use geode_shell::keymap::{MatchResult, Matcher, build_keymap, parse_keystroke};
         let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
         let mut registry = geode_shell::actions::ActionRegistry::default();
@@ -10256,7 +10275,7 @@ pub(crate) mod tests {
             if let Some(verb) = selection {
                 h.dispatch(&mut vcx, verb, None);
             }
-            for (key, at_start) in [("shift+i", true), ("i", false), ("enter", false)] {
+            for (key, selects) in [("shift+i", true), ("i", false), ("enter", false)] {
                 let stack = [h.tile.read_with(&vcx, |t, _| t.key_context())];
                 let ks = parse_keystroke(key, geode_shell::defaults::default_mod()).unwrap();
                 let MatchResult::Matched { action, count } =
@@ -10271,13 +10290,13 @@ pub(crate) mod tests {
                 });
                 assert_eq!(input.read_with(&vcx, |s, _| s.value().to_string()), "1");
                 assert_eq!(
-                    input.read_with(&vcx, |s, _| s.cursor()),
-                    if at_start { 0 } else { 1 }
+                    input.read_with(&vcx, |s, _| s.selected_range()),
+                    if selects { 0..1 } else { 1..1 }
                 );
                 vcx.simulate_input("7");
                 assert_eq!(
                     editor_text(&h, &vcx).as_deref(),
-                    Some(if at_start { "71" } else { "17" })
+                    Some(if selects { "7" } else { "17" })
                 );
                 h.dispatch(&mut vcx, "cancel", None);
                 assert_eq!(h.cell(&vcx, 0, "qty"), "1", "cancel keeps the cell");
@@ -14028,8 +14047,15 @@ pub(crate) mod tests {
         h.draw(&mut vcx);
         let question = "remove sheet 'old' and all its history? (y/n)";
         assert_eq!(prompt(&h, &vcx).as_deref(), Some(question));
-        assert!(h.header(&vcx).contains(&question.to_string()));
+        assert!(
+            !h.header(&vcx).contains(&question.to_string()),
+            "the question asks on its own bar, not in the header"
+        );
         assert!(painted(&mut vcx, "pricer-remove-confirm-5"));
+        // The bar sits under the header strip, above the table.
+        let header = centre_of(&mut vcx, "pricer-header-5");
+        let bar = centre_of(&mut vcx, "pricer-remove-confirm-5-bar");
+        assert!(bar.y > header.y, "{bar:?} under {header:?}");
         assert_eq!(h.mode(&mut vcx), "insert", "the confirm holds the keyboard");
         assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
         assert!(h.store.forgets().is_empty(), "nothing before the answer");

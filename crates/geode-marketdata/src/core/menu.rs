@@ -59,7 +59,7 @@ fn policy_rows(policy: UpdatePolicy) -> impl Iterator<Item = Row<ActionId>> {
 /// enabled because they configure later deliveries rather than edit the draft.
 pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<Row<ActionId>> {
     let dirty = !matches!(i.badge, DraftBadge::Clean);
-    let behind = matches!(i.badge, DraftBadge::Behind { .. });
+    // Upload stays live while Behind: its confirm names the update it overrides.
     let mut out = vec![
         action(
             "marketdata::load_underlying",
@@ -73,8 +73,6 @@ pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<Row<ActionId>> {
             Hint::chord_or_verb("marketdata::upload", ":upload"),
             if !i.upload_built {
                 Err("not built yet")
-            } else if behind {
-                Err("rebase or revert first")
             } else if matches!(i.badge, DraftBadge::Sent { .. }) {
                 Err("already sent")
             } else if !dirty {
@@ -223,17 +221,14 @@ mod tests {
     }
 
     #[test]
-    fn behind_shows_rebase_and_greys_upload() {
+    fn behind_shows_rebase_and_leaves_upload_live() {
         let mut i = inputs(DraftBadge::Behind {
             newer: "2026-09-14T14:09:00Z".into(),
         });
         i.upload_built = true;
         let rows = rows(&i, Clock::utc());
         assert!(titles(&rows).iter().any(|t| t.starts_with("Rebase onto ")));
-        assert_eq!(
-            enabled(&rows, "Upload"),
-            Err("rebase or revert first".into())
-        );
+        assert_eq!(enabled(&rows, "Upload"), Ok(()));
     }
 
     #[test]

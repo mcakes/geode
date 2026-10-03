@@ -2555,8 +2555,8 @@ run_mutation "frame: set_scope bumps only the scope counter" \
 
 run_mutation "frame: a vanished active slot is cleared on reload" \
   crates/geode-shell/src/frame.rs \
-  '            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {' \
-  '            if false {' \
+  '                && slots.get(n).is_none()' \
+  '                && false' \
   geode-shell \
   replacing_slots_bumps_config_and_grouping_and_drops_a_vanished_active_slot
 
@@ -2578,9 +2578,11 @@ run_mutation "frame: lane generations come from the shared counter" \
 run_mutation "frame: a slot reload regroups hidden pinned lanes" \
   crates/geode-shell/src/frame.rs \
   '        for lane in std::iter::once(shared).chain(pinned.values_mut()) {
-            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {' \
+            if let GroupingChoice::Slot(n) = lane.grouping
+                && slots.get(n).is_none()' \
   '        for lane in std::iter::once(shared) {
-            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {' \
+            if let GroupingChoice::Slot(n) = lane.grouping
+                && slots.get(n).is_none()' \
   geode-shell \
   a_slot_reload_regroups_every_lane_and_clears_a_vanished_slot_in_a_hidden_lane
 
@@ -3502,8 +3504,20 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
             }
             if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
+                // The same inputs decide what an ad hoc chain may name. A
+                // chain left naming a removed column would be refused by
+                // every following tile'"'"'s query with no way to see why.
+                let groupable = groupable_names(&self.services.config);
                 self.frame.update(cx, |f, cx| {
-                    if f.replace_slots(slots) {
+                    let replaced = f.replace_slots(slots);
+                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));
+                    for column in &dropped {
+                        tracing::warn!(
+                            target: "geode::config",
+                            "ad hoc grouping dropped: '"'"'{column}'"'"' is no longer a groupable column"
+                        );
+                    }
+                    if replaced || !dropped.is_empty() {
                         cx.notify();
                     }
                 });
@@ -3514,8 +3528,20 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
             }
             if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
+                // The same inputs decide what an ad hoc chain may name. A
+                // chain left naming a removed column would be refused by
+                // every following tile'"'"'s query with no way to see why.
+                let groupable = groupable_names(&self.services.config);
                 self.frame.update(cx, |f, cx| {
-                    if f.replace_slots(slots) {
+                    let replaced = f.replace_slots(slots);
+                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));
+                    for column in &dropped {
+                        tracing::warn!(
+                            target: "geode::config",
+                            "ad hoc grouping dropped: '"'"'{column}'"'"' is no longer a groupable column"
+                        );
+                    }
+                    if replaced || !dropped.is_empty() {
                         cx.notify();
                     }
                 });
@@ -13646,21 +13672,24 @@ run_mutation "mddraft: rebase resolves labels against the newer document" \
   geode-marketdata \
   rebase_reapplies_edits_by_label_and_reports_dropped_ones
 
-# Editing is refused while Behind. New edits would otherwise be keyed
-# against the base grid while rebase is pending to move edits onto the newer
-# document by label.
-run_mutation "mddraft: editing is refused while the draft is behind" \
+# A Behind draft whose base is gone refuses editing. Its edits are keyed to
+# the base grid, and the painted fallback is a different one, so a new edit
+# would land on the wrong row and column.
+run_mutation "mddraft: editing is refused while behind with the base gone" \
   crates/geode-marketdata/src/tile.rs \
-  '        if let Some(refusal) = self.held_refusal() {
-            self.notice = Some(refusal.into());
-            return;
-        }' \
-  '        if let Some(refusal) = self.held_refusal().filter(|_| false) {
-            self.notice = Some(refusal.into());
-            return;
-        }' \
+  '        if self.draft.is_behind() && self.base_snapshot.is_none() {' \
+  '        if false && self.draft.is_behind() && self.base_snapshot.is_none() {' \
   geode-marketdata \
-  edit_and_bump_are_refused_while_behind
+  a_restored_behind_draft_without_its_base_refuses_edits
+
+# A Behind draft whose base is retained stays editable: the painted grid is
+# the one its edits are keyed to, and the held delivery waits for rebase.
+run_mutation "mddraft: a behind draft with its base held stays editable" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.draft.is_behind() && self.base_snapshot.is_none() {' \
+  '        if self.draft.is_behind() {' \
+  geode-marketdata \
+  a_behind_draft_edits_against_its_held_base
 
 # Revert clears the retained base as well as the draft. Keeping the base
 # would show stale data with a Clean state and no remaining draft to rebase
@@ -14559,14 +14588,13 @@ run_mutation "mdattr: the strip clears the table selection" \
             }),' \
   geode-marketdata k_from_the_top_row_enters_the_strip_and_i_edits_the_attribute
 
-# Upload reports rebase or revert first while Behind. Skipping that gate
-# gives the wrong refusal or permits an upload despite the pending document
-# change.
-run_mutation "mdmenu: upload is greyed while behind" \
+# Upload stays live while Behind: restoring an older fit with changes over a
+# bad newer one is a deliberate upload, warned in its confirm.
+run_mutation "mdmenu: upload stays live while behind" \
   crates/geode-marketdata/src/core/menu.rs \
-  '} else if behind {' \
-  '} else if false {' \
-  geode-marketdata behind_shows_rebase_and_greys_upload
+  '            } else if matches!(i.badge, DraftBadge::Sent { .. }) {' \
+  '            } else if matches!(i.badge, DraftBadge::Sent { .. } | DraftBadge::Behind { .. }) {' \
+  geode-marketdata behind_shows_rebase_and_leaves_upload_live
 
 # An unrelated dispatched action closes the popup before running. Without
 # this guard, cursor motions act behind an open menu.
@@ -17304,6 +17332,168 @@ run_mutation "stacks: the marker is gated on len > 1" \
   geode-blotter \
   the_stack_marker_paints_only_while_a_member
 
+# ---- Ad hoc grouping: the lane's own chain ----
+
+# Tiles read one door. If it does not resolve the ad hoc chain, every
+# following tile silently groups by its view default.
+run_mutation "ad hoc: the stored chain is the grouping in force" \
+  crates/geode-shell/src/frame.rs \
+  '            GroupingChoice::AdHoc => self.lane.ad_hoc.as_deref(),' \
+  '            GroupingChoice::AdHoc => None,' \
+  geode-shell \
+  an_ad_hoc_chain_is_the_grouping_in_force_and_survives_a_slot_switch
+
+# A pinned workspace starts from the shared lane's chain.
+run_mutation "ad hoc: pinning copies the chain" \
+  crates/geode-shell/src/frame.rs \
+  '            ad_hoc: self.ad_hoc.clone(),' \
+  '            ad_hoc: None,' \
+  geode-shell \
+  pinning_copies_the_ad_hoc_chain_and_the_lanes_then_diverge
+
+# Forgetting the active chain must leave the lane on a choice that exists.
+run_mutation "ad hoc: forgetting the active chain falls to view default" \
+  crates/geode-shell/src/frame.rs \
+  '            lane.grouping = GroupingChoice::ViewDefault;
+            self.bump_grouping();
+        } else {' \
+  '            self.bump_grouping();
+        } else {' \
+  geode-shell \
+  forgetting_the_active_chain_falls_to_view_default
+
+# The stored chain is session state even when nothing requeries.
+run_mutation "ad hoc: forgetting an inactive chain dirties the session" \
+  crates/geode-shell/src/frame.rs \
+  '            fresh(&mut self.frame.generation);
+        }
+        true' \
+  '        }
+        true' \
+  geode-shell \
+  forgetting_an_inactive_chain_requeries_nothing_but_dirties_the_session
+
+# Kept whole or dropped whole: the drop must clear the chain, not skip it.
+run_mutation "ad hoc: a stale chain is dropped" \
+  crates/geode-shell/src/frame.rs \
+  '                .and_then(|chain| chain.iter().find(|column| !known(column)).cloned())' \
+  '                .and_then(|chain| chain.iter().find(|_| false).cloned())' \
+  geode-shell \
+  a_stale_ad_hoc_chain_is_dropped_whole_and_an_active_lane_falls_to_view_default
+
+# An active chain is written without a slot beside it and read back active.
+run_mutation "ad hoc: the session writes the active marker" \
+  crates/geode-shell/src/session.rs \
+  '            if self.ad_hoc_active {' \
+  '            if false {' \
+  geode-shell \
+  an_active_ad_hoc_chain_round_trips_and_writes_no_slot
+
+# `grouping = "ad_hoc"` with no chain must not leave an ad hoc choice.
+run_mutation "ad hoc: an active marker needs a chain" \
+  crates/geode-shell/src/session.rs \
+  '                Some("ad_hoc") if ad_hoc.is_some() => true,' \
+  '                Some("ad_hoc") => true,' \
+  geode-shell \
+  ad_hoc_active_without_a_chain_warns_and_falls_back_to_the_slot
+
+# A hand-edited record holding both a slot and an active chain must read
+# as the chain alone; a slot beside it would be restored over the chain.
+run_mutation "ad hoc: an active chain hides the record's slot" \
+  crates/geode-shell/src/session.rs \
+  '        let active_slot = if ad_hoc_active { None } else { active_slot };' \
+  '        let active_slot = if false { None } else { active_slot };' \
+  geode-shell \
+  an_active_ad_hoc_marker_beside_a_slot_reads_without_the_slot
+
+# A chain naming a column twice is refused whole, never deduplicated.
+run_mutation "ad hoc: a chain with a repeated name is refused" \
+  crates/geode-shell/src/session.rs \
+  '                                .all(|(i, n)| !names[..i].contains(n)) =>' \
+  '                                .all(|_| true) =>' \
+  geode-shell \
+  a_malformed_ad_hoc_chain_warns_and_is_ignored
+
+# Restore applies the chain to the lane.
+run_mutation "ad hoc: the session restore reaches the lane" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                if let Some(chain) = record.ad_hoc {
+                    s.restore_ad_hoc(chain, record.ad_hoc_active);
+                }' \
+  '                let _ = (&record.ad_hoc, record.ad_hoc_active);' \
+  geode-shell \
+  a_restored_active_ad_hoc_chain_is_the_grouping_in_force
+
+# A pinned workspace's record restores into its own lane, not the shared one.
+run_mutation "ad hoc: a pinned restore applies its own chain" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                if let Some(chain) = record.ad_hoc {
+                    lane.restore_ad_hoc(chain, record.ad_hoc_active);
+                }' \
+  '                let _ = (&record.ad_hoc, record.ad_hoc_active);' \
+  geode-shell \
+  a_pinned_lane_restores_its_own_ad_hoc_chain
+
+# The session writer must capture the shared lane's chain, or a chain the
+# user built vanishes on restart.
+run_mutation "ad hoc: the session writer captures the shared chain" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '            ad_hoc: frame.ad_hoc().map(<[String]>::to_vec),' \
+  '            ad_hoc: None,' \
+  geode-shell \
+  the_session_writer_saves_each_lanes_ad_hoc_chain
+
+# Each pinned lane's chain is captured into its own workspace record.
+run_mutation "ad hoc: the session writer captures a pinned chain" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '                        ad_hoc: lane.ad_hoc().map(<[String]>::to_vec),' \
+  '                        ad_hoc: None,' \
+  geode-shell \
+  the_session_writer_saves_each_lanes_ad_hoc_chain
+
+# Pinning at restore copies the shared lane's chain; a pinned record
+# without one must not keep it, or the writer saves it as the pin's own.
+run_mutation "ad hoc: a pinned restore clears the copied chain" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                lane.set_active_slot(None);
+                lane.forget_ad_hoc();' \
+  '                lane.set_active_slot(None);' \
+  geode-shell \
+  a_pinned_lane_without_a_chain_does_not_inherit_the_shared_one
+
+# A session written under another configuration can name a column this
+# one cannot group by; startup must drop that chain whole.
+run_mutation "ad hoc: startup checks the restored chain" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            for column in f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column)) {' \
+  '            for column in f.retain_ad_hoc(|_| true) {' \
+  geode-shell \
+  a_restored_chain_naming_an_unknown_column_is_dropped
+
+# A reload that removes a column drops the chain naming it.
+run_mutation "ad hoc: a reload checks the chain" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));' \
+  '                    let dropped = f.retain_ad_hoc(|_| true);' \
+  geode-shell \
+  a_reload_that_removes_a_column_drops_the_chain_naming_it
+
+# The readout must not call an ad hoc chain the view default.
+run_mutation "ad hoc: the readout names the chain" \
+  crates/geode-shell/src/scopebar.rs \
+  '        (GroupingChoice::AdHoc, _) => format!(' \
+  '        (GroupingChoice::AdHoc, _) if false => format!(' \
+  geode-shell \
+  an_ad_hoc_chain_reads_with_a_star_where_the_slot_number_goes
+
+# With nothing stored the action reports instead of appearing inert.
+run_mutation "ad hoc: the action with nothing stored says so" \
+  crates/geode-shell/src/shell/input.rs \
+  '                self.notice = Some(NO_AD_HOC.into());' \
+  '                let _ = NO_AD_HOC;' \
+  geode-shell \
+  the_ad_hoc_action_with_nothing_stored_says_so
+
 # ---- Grouping picker: toolbar click, frame::grouping and mod-g ----
 
 # Only FILLED slots are rows: an empty slot listed would be a row that
@@ -18582,6 +18772,24 @@ run_mutation "pricer rm: any key confirms" \
   '    answer(host, ks.key == "y" && !ks.modifiers.modified(), window, cx)' \
   '    answer(host, true, window, cx)' \
   geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
+
+run_mutation "confirm bar: the question is cut to one line" \
+  crates/geode-tile/src/confirm.rs \
+  '                .whitespace_normal()' \
+  '                .whitespace_nowrap()' \
+  geode-tile a_long_question_wraps_and_keeps_its_buttons_in_a_narrow_tile
+
+run_mutation "pricer rm: the question paints on no bar" \
+  crates/geode-pricer/src/tile.rs \
+  '                .children(question)' \
+  '                .children(None::<gpui::Div>)' \
+  geode-pricer colon_rm_asks_and_y_forgets
+
+run_mutation "market-data upload: the question paints on no bar" \
+  crates/geode-marketdata/src/tile.rs \
+  '            .children(question)' \
+  '            .children(None::<gpui::Div>)' \
+  geode-marketdata upload_arms_a_confirm_and_y_submits_the_assembled_document
 
 run_mutation "pricer rm: a modified y confirms" \
   crates/geode-tile/src/confirm.rs \
@@ -21126,14 +21334,25 @@ run_mutation "marketdata: create narrows the factory's egress list to this panel
   geode-marketdata \
   the_tile_stores_the_targets_its_factory_resolves_for_its_document
 
-# Upload refuses a Behind draft whose newer document has not been applied.
-# Sending its old base would overwrite data the user has not reviewed.
-run_mutation "panel: upload refused while Behind" \
+# A Behind upload replaces a newer document the trader has not taken in, so
+# its confirm names the update it overrides. Without the warning, `y` would
+# overwrite that document unannounced.
+run_mutation "panel: a behind upload's confirm names the update it overrides" \
   crates/geode-marketdata/src/tile.rs \
-  '            return Err(UPLOAD_BEHIND.into());' \
-  '            let _ = UPLOAD_BEHIND;' \
+  '                    "overrides update {} — ",' \
+  '                    "{}",' \
   geode-marketdata \
-  upload_is_refused_on_a_behind_draft
+  a_behind_draft_uploads_over_the_newer_document_with_a_warning
+
+# An accepted Behind upload is Sent, so the echo check confirms it. Left
+# Behind, the upstream's publish of the upload would read as yet another
+# held delivery and the draft would never clear.
+run_mutation "panel: an accepted behind upload is Sent" \
+  crates/geode-marketdata/src/tile.rs \
+  '                        DraftState::Editing | DraftState::Behind { .. }' \
+  '                        DraftState::Editing' \
+  geode-marketdata \
+  a_behind_draft_uploads_over_the_newer_document_with_a_warning
 
 # The armed confirm consumes the key that answers it: a `j` that cancels
 # must not also bubble to the shell root and move the cursor or feed the
@@ -26133,8 +26352,10 @@ run_mutation "shell: a restored pinned lane has no undo back to empty" \
 run_mutation "shell: a restored pinned lane drops an empty recorded slot" \
   crates/geode-shell/src/shell/mod.rs \
   '                lane.set_active_slot(None);
+                lane.forget_ad_hoc();
                 lane.set_active_slot(record.active_slot);' \
-  '                lane.set_active_slot(record.active_slot);' \
+  '                lane.forget_ad_hoc();
+                lane.set_active_slot(record.active_slot);' \
   geode-shell a_restored_pin_with_an_empty_slot_drops_the_slot
 
 # A pin restored onto a workspace the layout lacks would surface as an
@@ -28238,7 +28459,7 @@ run_mutation "pricer grouping: a V edit of the grouped value loses its anchor" \
   crates/geode-pricer/src/tile.rs \
   '            } => self.exact_row(*id, within).or_else(|| self.only_row(*id)),' \
   '            } => self.exact_row(*id, within),' \
-  geode-pricer a_selection_edit_of_the_grouped_value_keeps_the_selection
+  geode-pricer a_selection_edit_of_the_grouped_value_follows_the_line
 
 run_mutation "pricer grouping: a split package counts as painted once" \
   crates/geode-pricer/src/tile.rs \
@@ -29151,68 +29372,129 @@ run_mutation "fuzzy find: a pick survives a re-rank by identity" \
   '            .and(Some(0))' \
   geode-shell fzf_tree_folds_preserve_candidates_and_query_edits_reopen_matches
 
-# Text edit entry keeps the cell value and chooses only the initial caret.
-run_mutation "edit caret: start entry leaves the caret at the end" \
+# Text edit entry keeps the cell value; `I` selects it all, `i` puts the caret at the end.
+run_mutation "edit caret: select entry leaves the caret at the start" \
   crates/geode-tile/src/edit.rs \
+  '            input.set_selected_range(0..len, cx);' \
   '            input.set_selected_range(0..0, cx);' \
-  '            input.set_selected_range(input.value().len()..input.value().len(), cx);' \
-  geode-marketdata edit_keys_place_the_caret_at_the_requested_end
+  geode-marketdata edit_keys_select_the_text_or_place_the_caret_at_the_end
 
-run_mutation "edit caret: marketdata start action opens at the end" \
+run_mutation "edit caret: marketdata select action opens at the end" \
   crates/geode-marketdata/src/tile.rs \
-  'let caret = if verb == "edit_start" {
-                    EditCaret::Start' \
-  'let caret = if verb == "edit_start" {
+  'let caret = if verb == "edit_select" {
+                    EditCaret::Select' \
+  'let caret = if verb == "edit_select" {
                     EditCaret::End' \
-  geode-marketdata edit_keys_place_the_caret_at_the_requested_end
+  geode-marketdata edit_keys_select_the_text_or_place_the_caret_at_the_end
 
 run_mutation "edit caret: marketdata normal binds I to end placement" \
   crates/geode-marketdata/src/content.rs \
   'context = "marketdata && mode == normal"
 [bindings.keys]
-"shift+i" = "marketdata::edit_start"' \
+"shift+i" = "marketdata::edit_select"' \
   'context = "marketdata && mode == normal"
 [bindings.keys]
 "shift+i" = "marketdata::edit"' \
-  geode-marketdata edit_keys_place_the_caret_at_the_requested_end
+  geode-marketdata edit_keys_select_the_text_or_place_the_caret_at_the_end
 
 run_mutation "edit caret: marketdata visual binds I to end placement" \
   crates/geode-marketdata/src/content.rs \
   'context = "marketdata && mode == visual"
 [bindings.keys]
-"shift+i" = "marketdata::edit_start"' \
+"shift+i" = "marketdata::edit_select"' \
   'context = "marketdata && mode == visual"
 [bindings.keys]
 "shift+i" = "marketdata::edit"' \
-  geode-marketdata edit_keys_place_the_caret_at_the_requested_end
+  geode-marketdata edit_keys_select_the_text_or_place_the_caret_at_the_end
 
-run_mutation "edit caret: pricer start action opens at the end" \
+run_mutation "edit caret: pricer select action opens at the end" \
   crates/geode-pricer/src/tile.rs \
-  'let caret = if verb == "edit_start" {
-                    EditCaret::Start' \
-  'let caret = if verb == "edit_start" {
+  'let caret = if verb == "edit_select" {
+                    EditCaret::Select' \
+  'let caret = if verb == "edit_select" {
                     EditCaret::End' \
-  geode-pricer edit_keys_place_the_caret_at_the_requested_end
+  geode-pricer edit_keys_select_the_text_or_place_the_caret_at_the_end
 
 run_mutation "edit caret: pricer normal binds I to end placement" \
   crates/geode-pricer/src/content.rs \
   'context = "pricer && mode == normal"
 [bindings.keys]
-"shift+i" = "pricer::edit_start"' \
+"shift+i" = "pricer::edit_select"' \
   'context = "pricer && mode == normal"
 [bindings.keys]
 "shift+i" = "pricer::edit"' \
-  geode-pricer edit_keys_place_the_caret_at_the_requested_end
+  geode-pricer edit_keys_select_the_text_or_place_the_caret_at_the_end
 
 run_mutation "edit caret: pricer visual binds I to end placement" \
   crates/geode-pricer/src/content.rs \
   'context = "pricer && mode == visual"
 [bindings.keys]
-"shift+i" = "pricer::edit_start"' \
+"shift+i" = "pricer::edit_select"' \
   'context = "pricer && mode == visual"
 [bindings.keys]
 "shift+i" = "pricer::edit"' \
-  geode-pricer edit_keys_place_the_caret_at_the_requested_end
+  geode-pricer edit_keys_select_the_text_or_place_the_caret_at_the_end
+
+# A commit over a selection that settles ends visual mode; a refusal keeps it.
+run_mutation "visual commit: pricer close keeps the selection" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.close_editor(window, cx);
+        self.clear_selection();
+        // The table'"'"'s highlight goes' \
+  '        self.close_editor(window, cx);
+        // The table'"'"'s highlight goes' \
+  geode-pricer i_over_rows_writes_the_cursor_column_on_every_target_line_in_one_undo
+
+run_mutation "visual commit: pricer written commit only closes the editor" \
+  crates/geode-pricer/src/tile.rs \
+  '            } else if self.commit_selection(&value, None, cx) {
+                self.close_ending_selection(window, cx);' \
+  '            } else if self.commit_selection(&value, None, cx) {
+                self.close_editor(window, cx);' \
+  geode-pricer i_over_rows_writes_the_cursor_column_on_every_target_line_in_one_undo
+
+run_mutation "visual commit: pricer untouched date only closes the editor" \
+  crates/geode-pricer/src/tile.rs \
+  '            if date == initial && !typed {
+                self.close_ending_selection(window, cx);' \
+  '            if date == initial && !typed {
+                self.close_editor(window, cx);' \
+  geode-pricer an_unchanged_untyped_date_over_a_selection_writes_nothing
+
+run_mutation "visual commit: marketdata end keeps the selection" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '        self.clear_selection();
+        self.sync_cursor(cx);' \
+  '        self.sync_cursor(cx);' \
+  geode-marketdata i_over_a_block_writes_one_value_to_every_accepting_cell
+
+run_mutation "visual commit: marketdata bulk write keeps the selection" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '        self.rebuild_model(cx);
+        self.end_selection_on_commit(cx);' \
+  '        self.rebuild_model(cx);' \
+  geode-marketdata i_over_a_block_writes_one_value_to_every_accepting_cell
+
+run_mutation "visual commit: marketdata untouched choice keeps the selection" \
+  crates/geode-marketdata/src/tile.rs \
+  '            self.close_popup_with_window(window, cx);
+            self.end_selection_on_commit(cx);' \
+  '            self.close_popup_with_window(window, cx);' \
+  geode-marketdata an_untouched_choice_commit_over_a_selection_writes_nothing
+
+# A selection's edit passes over group rows, open or closed, and writes
+# only the visible lines it holds.
+run_mutation "pricer selection: a group row refuses the edit" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'    pub(crate) fn selection_read_only(&self) -> Option<&\'static str> {\n' \
+  $'    pub(crate) fn selection_read_only(&self) -> Option<&\'static str> {\n        if self.selection_holds_group() {\n            return Some(GROUP_ROW);\n        }\n' \
+  geode-pricer a_selection_across_groups_edits_its_lines
+
+run_mutation "pricer selection: a closed group's hidden lines are written" \
+  crates/geode-pricer/src/tile/select.rs \
+  '            .filter_map(|g| self.model.sheet_row(g))' \
+  '            .flat_map(|g| self.grid_rows_under(g))' \
+  geode-pricer a_selection_over_a_closed_group_edits_only_the_visible_lines
 
 run_mutation "nemo: ids are not encoded" \
   crates/geode-nemo/src/lib.rs \

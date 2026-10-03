@@ -5,6 +5,7 @@
 use gpui::App;
 use std::path::PathBuf;
 
+use crate::frame::GroupingChoice;
 use crate::session::{self, FrameRecord};
 use geode_core::link::Group;
 
@@ -18,6 +19,8 @@ impl ShellView {
         FrameRecord {
             scope: frame.scope().clone(),
             active_slot: frame.active_slot(),
+            ad_hoc: frame.ad_hoc().map(<[String]>::to_vec),
+            ad_hoc_active: frame.grouping_choice() == GroupingChoice::AdHoc,
             as_of: frame.as_of().clone(),
         }
     }
@@ -36,6 +39,8 @@ impl ShellView {
                     FrameRecord {
                         scope: lane.scope().clone(),
                         active_slot: lane.active_slot(),
+                        ad_hoc: lane.ad_hoc().map(<[String]>::to_vec),
+                        ad_hoc_active: lane.grouping_choice() == GroupingChoice::AdHoc,
                         as_of: lane.as_of().clone(),
                     },
                 )

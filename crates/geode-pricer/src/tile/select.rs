@@ -212,16 +212,15 @@ impl PricerTile {
             .collect()
     }
 
-    /// Why the selection is read-only, if it is: it holds a grouping row
-    /// ([`GROUP_ROW`]), or a package row that is split ([`SPLIT`]) or that
-    /// the scope partly hides ([`PARTLY_HIDDEN`]). A selected package
-    /// stands for every leg (`lines_of`), those another node paints or the
-    /// scope hides too, so a bulk write through it would reach legs its
-    /// row does not show: the whole write refuses.
+    /// Why the selection is read-only, if it is: it holds a package row
+    /// that is split ([`SPLIT`]) or that the scope partly hides
+    /// ([`PARTLY_HIDDEN`]). A grouping row, open or closed, has no line of
+    /// its own and is passed over: an edit writes only the line rows the
+    /// selection paints, never the lines a closed group hides. A selected
+    /// package stands for every leg (`lines_of`), those another node
+    /// paints or the scope hides too, so a bulk write through it would
+    /// reach legs its row does not show: the whole write refuses.
     pub(crate) fn selection_read_only(&self) -> Option<&'static str> {
-        if self.selection_holds_group() {
-            return Some(GROUP_ROW);
-        }
         first_refusal(
             self.selected_sheet_rows()
                 .into_iter()
