@@ -6342,18 +6342,91 @@ run_mutation "diagnostics: refresh_memory copies while unwatched" \
         if let Some(shown) = &self.memory' \
   geode-shell the_memory_reading_is_copied_only_while_watched
 
-run_mutation "diagnostics: refresh_memory compares raw bytes, not the displayed text" \
+run_mutation "diagnostics: refresh_memory compares current at display granularity, not the hysteresis" \
   crates/geode-shell/src/diagnostics.rs \
-  '            && memory::format_bytes(shown.current_bytes)
-                == memory::format_bytes(reading.current_bytes)' \
+  '            && shown.current_bytes.abs_diff(reading.current_bytes)
+                < memory::current_hysteresis(shown.current_bytes)' \
+  '            && memory::format_bytes(shown.current_bytes) == memory::format_bytes(reading.current_bytes)' \
+  geode-shell idle_jitter_across_a_display_boundary_does_not_copy
+
+run_mutation "diagnostics: refresh_memory copies on any change of current" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            && shown.current_bytes.abs_diff(reading.current_bytes)
+                < memory::current_hysteresis(shown.current_bytes)' \
   '            && shown.current_bytes == reading.current_bytes' \
-  geode-shell refresh_memory_copies_only_when_the_displayed_value_changes
+  geode-shell refresh_memory_copies_only_past_the_hysteresis_or_a_peak_change
 
 run_mutation "diagnostics: refresh_memory ignores a peak-only change" \
   crates/geode-shell/src/diagnostics.rs \
   '            && memory::format_bytes(shown.peak_bytes) == memory::format_bytes(reading.peak_bytes)' \
   '            && true' \
-  geode-shell refresh_memory_copies_only_when_the_displayed_value_changes
+  geode-shell refresh_memory_copies_only_past_the_hysteresis_or_a_peak_change
+
+run_mutation "diagnostics: refresh_memory ignores the stale mark after a rewatch" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            && !self.memory_stale
+' \
+  '' \
+  geode-shell the_first_refresh_after_rewatching_always_copies
+
+run_mutation "diagnostics: watch never marks the memory copy stale" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.watchers == 0 {
+            self.memory_stale = true;' \
+  '        if false {
+            self.memory_stale = true;' \
+  geode-shell the_first_refresh_after_rewatching_always_copies
+
+run_mutation "diagnostics: every watch marks the memory copy stale, not only the first" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.watchers == 0 {
+            self.memory_stale = true;' \
+  '        if true {
+            self.memory_stale = true;' \
+  geode-shell the_first_refresh_after_rewatching_always_copies
+
+run_mutation "diagnostics: a copy leaves the stale mark set" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        self.memory_stale = false;
+        self.memory = Some(*reading);' \
+  '        self.memory = Some(*reading);' \
+  geode-shell the_first_refresh_after_rewatching_always_copies
+
+run_mutation "memory: the current hysteresis floor is 64 MiB" \
+  crates/geode-shell/src/memory.rs \
+  'pub const CURRENT_HYSTERESIS_BYTES: u64 = 128 * MIB;' \
+  'pub const CURRENT_HYSTERESIS_BYTES: u64 = 64 * MIB;' \
+  geode-shell refresh_memory_copies_only_past_the_hysteresis_or_a_peak_change
+
+run_mutation "memory: the current hysteresis is a tenth, not a twentieth" \
+  crates/geode-shell/src/memory.rs \
+  'pub const CURRENT_HYSTERESIS_DIVISOR: u64 = 20;' \
+  'pub const CURRENT_HYSTERESIS_DIVISOR: u64 = 10;' \
+  geode-shell the_current_hysteresis_is_128_mib_or_a_twentieth
+
+run_mutation "memory: the current hysteresis takes the smaller bound" \
+  crates/geode-shell/src/memory.rs \
+  'CURRENT_HYSTERESIS_BYTES.max(copied / CURRENT_HYSTERESIS_DIVISOR)' \
+  'CURRENT_HYSTERESIS_BYTES.min(copied / CURRENT_HYSTERESIS_DIVISOR)' \
+  geode-shell the_current_hysteresis_is_128_mib_or_a_twentieth
+
+run_mutation "memory: format_bytes has no terabyte unit" \
+  crates/geode-shell/src/memory.rs \
+  '    if b >= TB {' \
+  '    if false {' \
+  geode-shell format_bytes_uses_binary_units_with_one_decimal
+
+run_mutation "perf model: an unlimited DuckDB limit reads as a byte figure" \
+  crates/geode-diagnostics/src/model.rs \
+  '            } else if c.memory_limit_bytes >= UNLIMITED_LIMIT_BYTES {' \
+  '            } else if false {' \
+  geode-diagnostics perf_model_formats_process_memory_and_duckdb_memory_detail
+
+run_mutation "perf model: a limit just under a petabyte reads as unlimited" \
+  crates/geode-diagnostics/src/model.rs \
+  'pub const UNLIMITED_LIMIT_BYTES: u64 = 1 << 50;' \
+  'pub const UNLIMITED_LIMIT_BYTES: u64 = (1 << 50) - 1;' \
+  geode-diagnostics perf_model_formats_process_memory_and_duckdb_memory_detail
 
 run_mutation "shell: the reload poll never copies process memory into diagnostics" \
   crates/geode-shell/src/shell/mod.rs \
@@ -6372,6 +6445,12 @@ run_mutation "catalog: a GiB memory limit reads as GB" \
   '        "gib" => 1024f64.powi(3),' \
   '        "gib" => 1e9,' \
   geode-data duckdb_size_text_parses_in_every_form_duckdb_writes
+
+run_mutation "catalog: an unlimited memory limit (PiB) is unreadable" \
+  crates/geode-data/src/query/catalog.rs \
+  '        "pib" => 1024f64.powi(5),' \
+  '        "pib" => return None,' \
+  geode-data the_catalog_reads_a_configured_memory_limit
 
 run_mutation "catalog: the memory limit is not read" \
   crates/geode-data/src/query/catalog.rs \

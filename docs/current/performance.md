@@ -46,8 +46,14 @@ system on every 500 ms reload-poll tick, whether or not diagnostics is open:
 - Windows: `PROCESS_MEMORY_COUNTERS_EX.PrivateUsage` (private bytes) and
   `PeakPagefileUsage` (peak private commit). Private bytes count committed
   memory whether resident or paged out; the working set is not used.
-- Other platforms read nothing, and a failed read is skipped silently; the
-  page then shows the process row as not available.
+- Other platforms read nothing; the page shows the process row as not
+  available.
+- A failed read is skipped silently and the tick does nothing else with
+  memory. Before any success the page shows the row as not available. After
+  one, the page keeps showing the last copied reading with no stale marker,
+  the tracker is not advanced, and the debug cadence pauses: the next
+  successful sample is compared with the last successful one, and logs its
+  debug line if a minute has passed since the last.
 
 A pure `MemoryTracker` keeps current, a peak that never falls, and the wall
 time of the tick that first saw the peak (the first sample's peak may predate
@@ -60,12 +66,28 @@ the `geode::memory` target (`[log] memory = "debug"`):
 - `debug` with current and peak at most once a minute, the first a minute
   after the baseline.
 
-The poll copies the reading into `Diagnostics` only while the page is watched,
-and only when the displayed text of current or peak changes (the shared
-`memory::format_bytes`, one decimal of the largest binary unit). A rise too
-small to change the displayed peak leaves the previous peak time shown. An
-idle poll therefore never notifies, preserving the `IDLE_CUTOFF` guarantee
-that a poll-spaced redraw cannot sustain a repaint loop.
+The poll copies the reading into `Diagnostics` only while the page is
+watched, and then only when one of these holds:
+
+- it is the first refresh since the page became watched (so a reopened page
+  never shows the reading and peak time it had when hidden);
+- current has moved from the copied value by at least
+  `memory::current_hysteresis`: the larger of 128 MiB and 5% of the copied
+  value;
+- the displayed peak text (`memory::format_bytes`, one decimal of the largest
+  binary unit) changes.
+
+An idle macOS footprint was measured moving about 90 MB between ticks, which
+crosses one-decimal display steps on irregular ticks; comparing current at
+display granularity would repaint an idle page. Under the hysteresis such
+jitter copies nothing. The peak never falls, so its text changes only on
+growth and cannot alternate. The guarantee is therefore: a footprint that
+moves less than the hysteresis around its last copied value, under a steady
+peak, never notifies, preserving the `IDLE_CUTOFF` guarantee that a
+poll-spaced redraw cannot sustain a repaint loop. Real growth or release past
+the hysteresis notifies once per crossing. The cost is accuracy: the page can
+show a current up to the hysteresis away from the live value, and a peak rise
+too small to change the displayed peak leaves the previous peak time shown.
 
 DuckDB's figures come from the catalog snapshot instead: `duckdb_memory()`
 in use and its three largest non-zero tags, `duckdb_temporary_files()` spill
@@ -73,7 +95,8 @@ bytes, and the `memory_limit` setting. DuckDB reports the limit only as text
 with one truncated decimal (`"38.3 GiB"`), so the parsed figure can be up to
 a tenth of a unit low; unreadable text warns on `geode::query` and shows as
 an unknown limit. Geode does not set `memory_limit`; DuckDB's default is 80%
-of physical memory.
+of physical memory. A limit of 1 PiB or more, which is how DuckDB reports
+`memory_limit = '-1'` (16383.9 PiB), shows as no limit.
 
 The optional `profiling` feature enables GPUI's profiler, frame overlay, input
 latency histograms, and hang detection:

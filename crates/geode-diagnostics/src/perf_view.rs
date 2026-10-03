@@ -151,6 +151,8 @@ impl PerformanceView {
                     unavailable()
                 } else if m.memory_limit.is_empty() {
                     format!("{} of unknown limit", m.memory).into()
+                } else if m.memory_limit == crate::model::UNLIMITED {
+                    format!("{} · no limit", m.memory).into()
                 } else {
                     format!("{} of {}", m.memory, m.memory_limit).into()
                 },
@@ -584,6 +586,20 @@ mod tests {
                 "2.0GB of 38.0GB",
                 "8 threads · from the last catalog snapshot"
             ))
+        );
+        let mut unlimited = d.catalog.clone().unwrap();
+        unlimited.memory_limit_bytes = u64::MAX;
+        d.set_catalog(unlimited, SystemTime::now());
+        let unlimited_view = PerformanceView::new(&crate::model::perf_model(
+            &d,
+            &RequeryStats::new(),
+            Clock::utc(),
+        ));
+        assert_eq!(
+            unlimited_view
+                .metric("DuckDB memory")
+                .map(|(value, _)| value),
+            Some("2.0GB · no limit")
         );
         assert_eq!(
             view.metric("Temporary files"),

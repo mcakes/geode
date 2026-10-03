@@ -569,7 +569,8 @@ pub struct PerfModel {
     pub block_size: String,
     pub memory: String,
     pub threads: String,
-    /// DuckDB's memory limit; empty without a catalog or when unknown.
+    /// DuckDB's memory limit, or [`UNLIMITED`]; empty without a catalog or
+    /// when unknown.
     pub memory_limit: String,
     /// DuckDB's spilled temporary files; empty without a catalog.
     pub temp: String,
@@ -589,6 +590,13 @@ pub struct ProcessMemoryModel {
     /// When the peak was first seen, in the app clock's zone.
     pub peak_at: String,
 }
+
+/// A DuckDB memory limit at or above this (1 PiB) is read as unlimited:
+/// `memory_limit = '-1'` reads back as 16383.9 PiB, not a real budget.
+pub const UNLIMITED_LIMIT_BYTES: u64 = 1 << 50;
+
+/// `PerfModel::memory_limit` for a limit at or above [`UNLIMITED_LIMIT_BYTES`].
+pub const UNLIMITED: &str = "unlimited";
 
 pub fn perf_model(d: &Diagnostics, requery: &RequeryStats, clock: Clock) -> PerfModel {
     let h = &d.frame_hist;
@@ -618,6 +626,8 @@ pub fn perf_model(d: &Diagnostics, requery: &RequeryStats, clock: Clock) -> Perf
         Some(c) => (
             if c.memory_limit_bytes == 0 {
                 String::new()
+            } else if c.memory_limit_bytes >= UNLIMITED_LIMIT_BYTES {
+                UNLIMITED.to_string()
             } else {
                 format_bytes(c.memory_limit_bytes)
             },
@@ -656,9 +666,8 @@ pub fn perf_model(d: &Diagnostics, requery: &RequeryStats, clock: Clock) -> Perf
     }
 }
 
-/// The shell's byte formatter, shared so the Performance page shows a
-/// process memory reading at exactly the granularity
-/// `Diagnostics::refresh_memory` compares.
+/// The shell's byte formatter, shared so the Performance page shows the
+/// peak at exactly the text `Diagnostics::refresh_memory` compares.
 pub use geode_shell::memory::format_bytes;
 
 // ------------------------------------------------------------ Badges and header
@@ -1150,6 +1159,20 @@ pub(crate) mod tests {
         );
         assert_eq!(m.memory, "2.0GB");
         assert_eq!(m.memory_limit, "38.0GB");
+        let mut unlimited = d.catalog.clone().unwrap();
+        unlimited.memory_limit_bytes = (16383.9 * (1u64 << 50) as f64) as u64;
+        d.set_catalog(unlimited, SystemTime::now());
+        assert_eq!(
+            perf_model(&d, &RequeryStats::new(), clock()).memory_limit,
+            "unlimited"
+        );
+        let mut huge = d.catalog.clone().unwrap();
+        huge.memory_limit_bytes = (1 << 50) - 1; // a literal, so the constant is pinned
+        d.set_catalog(huge, SystemTime::now());
+        assert_eq!(
+            perf_model(&d, &RequeryStats::new(), clock()).memory_limit,
+            "1024.0TB"
+        );
         assert_eq!(m.temp, "512.0MB");
         assert_eq!(
             m.memory_top,

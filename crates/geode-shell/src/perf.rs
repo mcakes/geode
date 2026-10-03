@@ -18,8 +18,9 @@ use std::time::Duration;
 ///
 /// Keep `hot_reload::RELOAD_POLL_INTERVAL` at least this long: the poll also
 /// refreshes watched diagnostics histograms and process memory. Those
-/// refreshes notify only when sample count or maximum changes, or when the
-/// displayed memory text changes. If a notification-driven redraw becomes
+/// refreshes notify only when sample count or maximum changes, or when
+/// memory moves past `memory::current_hysteresis` or its displayed peak
+/// changes. If a notification-driven redraw becomes
 /// a new sample on every poll, it can sustain a repaint loop. The idle cutoff
 /// prevents a poll-spaced redraw from feeding that loop; shortening the poll
 /// requires a corresponding sampling guard.

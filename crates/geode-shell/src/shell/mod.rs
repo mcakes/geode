@@ -1081,7 +1081,8 @@ impl ShellView {
                 // Sample process memory on every tick, watched or not, so the
                 // `geode::memory` log keeps its peak record with the page
                 // closed. The copy into diagnostics is gated on watchers and
-                // on a displayed-value change, so an idle poll never notifies.
+                // on `refresh_memory`'s hysteresis, so idle jitter never
+                // notifies.
                 if let Some(sample) = crate::memory::sample() {
                     let log = memory.observe(sample, Instant::now(), SystemTime::now());
                     if let Some(reading) = memory.reading().copied() {

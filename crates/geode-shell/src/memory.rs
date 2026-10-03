@@ -30,6 +30,21 @@ pub const PEAK_STEP_DIVISOR: u64 = 4;
 /// The shortest interval between periodic debug events.
 pub const DEBUG_INTERVAL: Duration = Duration::from_secs(60);
 
+/// The smallest change in current memory that diagnostics copies, whatever
+/// the displayed text says. An idle Geode's macOS footprint was measured
+/// moving about 90 MB between 500 ms ticks; the floor sits above that.
+pub const CURRENT_HYSTERESIS_BYTES: u64 = 128 * MIB;
+
+/// Above the floor, current must move by at least `1 / divisor` (5%) of the
+/// copied value: idle movement grows with the heap, and at 7 GB the floor
+/// alone would be a fifth of a displayed tenth-gigabyte step.
+pub const CURRENT_HYSTERESIS_DIVISOR: u64 = 20;
+
+/// How far current must move from `copied` before diagnostics copies it.
+pub fn current_hysteresis(copied: u64) -> u64 {
+    CURRENT_HYSTERESIS_BYTES.max(copied / CURRENT_HYSTERESIS_DIVISOR)
+}
+
 /// Whether [`sample`] can read anything on this platform.
 pub const SUPPORTED: bool = cfg!(any(target_os = "macos", windows));
 
@@ -153,6 +168,9 @@ fn peak_rose_enough(logged: u64, peak: u64) -> bool {
 
 /// Emit `log` for `reading` on [`LOG_TARGET`].
 pub fn emit(log: MemoryLog, reading: &MemoryReading) {
+    if log == MemoryLog::default() {
+        return;
+    }
     let current = format_bytes(reading.current_bytes);
     let peak = format_bytes(reading.peak_bytes);
     match log.peak {
@@ -174,14 +192,17 @@ pub fn emit(log: MemoryLog, reading: &MemoryReading) {
 
 /// A plain binary-unit byte count with at most one decimal place — a
 /// diagnostics readout, not a figure a trader reads regularly, so no
-/// humanize crate. Diagnostics compares readings at this granularity, so
-/// a change that does not alter this text does not repaint.
+/// humanize crate. A peak reading copies into diagnostics when this text
+/// changes.
 pub fn format_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
     const GB: f64 = MB * 1024.0;
+    const TB: f64 = GB * 1024.0;
     let b = bytes as f64;
-    if b >= GB {
+    if b >= TB {
+        format!("{:.1}TB", b / TB)
+    } else if b >= GB {
         format!("{:.1}GB", b / GB)
     } else if b >= MB {
         format!("{:.1}MB", b / MB)
@@ -210,9 +231,12 @@ mod platform {
     use std::mem::{offset_of, size_of};
 
     /// The `natural_t` count covering `task_vm_info` through
-    /// `ledger_phys_footprint_peak` (`TASK_VM_INFO_REV1_COUNT` in
-    /// <mach/task_info.h>). A kernel answers with the count it filled; one
-    /// short of this has no peak field to read.
+    /// `ledger_phys_footprint_peak`, the field revision 3 added in
+    /// <mach/task_info.h>. It is no revision's count itself: it falls between
+    /// `TASK_VM_INFO_REV2_COUNT` and `TASK_VM_INFO_REV3_COUNT`. The kernel
+    /// answers with the count of the newest revision that fits the buffer,
+    /// so an answer at or above this is revision 3 or later and holds the
+    /// peak; an older kernel answers below it.
     const PEAK_COUNT: usize = (offset_of!(task_vm_info, ledger_phys_footprint_peak)
         + size_of::<i64>())
         / size_of::<natural_t>();
@@ -433,7 +457,15 @@ mod tests {
     }
 
     #[test]
+    fn the_current_hysteresis_is_128_mib_or_a_twentieth() {
+        assert_eq!(current_hysteresis(0), 128 * MIB);
+        assert_eq!(current_hysteresis(2560 * MIB), 128 * MIB);
+        assert_eq!(current_hysteresis(4000 * MIB), 200 * MIB);
+    }
+
+    #[test]
     fn format_bytes_uses_binary_units_with_one_decimal() {
+        assert_eq!(format_bytes(3 * 1024 * 1024 * MIB), "3.0TB");
         assert_eq!(format_bytes(512), "512B");
         assert_eq!(format_bytes(1536), "1.5KB");
         assert_eq!(format_bytes(256 * MIB), "256.0MB");

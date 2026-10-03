@@ -928,10 +928,12 @@ requery statistics have no dedicated perf invalidation, so they appear on the
 next perf-section rebuild.
 
 The reload poll copies the frame histogram and the process memory reading only
-while a page watches, and only when they change at the granularity the page
-shows (histogram count or maximum; the displayed text of current or peak
-memory), so an idle poll never notifies. Memory is sampled and logged on every
-tick regardless; see [memory instrumentation](performance.md#memory).
+while a page watches. The histogram copies when its count or maximum changes.
+Memory copies on the first refresh after the page becomes watched, when
+current moves past a hysteresis (the larger of 128 MiB and 5% of the copied
+value), or when the displayed peak text changes; idle jitter under the
+hysteresis never notifies. Memory is sampled and logged on every tick
+regardless; see [memory instrumentation](performance.md#memory).
 
 `set_catalog` stores the snapshot together with the arrival time its caller
 supplies, `catalog_at`. An equal snapshot changes neither the counters nor

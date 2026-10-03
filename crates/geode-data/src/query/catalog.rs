@@ -292,7 +292,9 @@ fn memory_bytes(conn: &Connection) -> Result<u64, StoreError> {
 /// setting has no numeric form: `current_setting` answers DuckDB's
 /// human-readable text, so it is parsed by [`parse_duckdb_bytes`]. An
 /// unreadable value warns rather than failing the whole catalog, because
-/// the limit is a readout, not an input to any other figure.
+/// the limit is a readout, not an input to any other figure. The warning
+/// repeats on every catalog read while the text stays unreadable; DuckDB's
+/// own writer cannot produce such text, so only a format change would.
 fn memory_limit_bytes(conn: &Connection) -> Result<u64, StoreError> {
     let sql = "select current_setting('memory_limit')::varchar";
     let err = |source| StoreError::Sql {
@@ -311,10 +313,13 @@ fn memory_limit_bytes(conn: &Connection) -> Result<u64, StoreError> {
 
 /// A size in DuckDB's text form: a number, optional spaces, then a unit.
 /// DuckDB writes `memory_limit` with binary units and one decimal
-/// (`"38.3 GiB"`, `"512.0 KiB"`, `"0 bytes"`, `"1 byte"`); its own parser
-/// also accepts decimal units (`kB`, `MB`, `GB`, `TB`, `PB`) and the
-/// single letters, case-insensitively, which are mirrored here. Anything
-/// else, including a negative or non-finite number, is `None`.
+/// (`"38.3 GiB"`, `"512.0 KiB"`, `"0 bytes"`, `"1 byte"`), and an
+/// unlimited setting (`memory_limit = '-1'`) as `"16383.9 PiB"`. Its own
+/// parser accepts `KB`, `MB`, `GB`, `TB`, `KiB`, `MiB`, `GiB`, `TiB` and the
+/// single letters, case-insensitively, which are mirrored here; it rejects
+/// `PB` and `PiB` as input, but `PiB` is parsed because DuckDB writes it and
+/// `PB` for symmetry. Anything else, including a negative or non-finite
+/// number, is `None`.
 pub(crate) fn parse_duckdb_bytes(text: &str) -> Option<u64> {
     let text = text.trim();
     let split = text
@@ -605,6 +610,17 @@ grain = "position"
             .unwrap();
         let snap = build_catalog(f.store.writer(), &f.schema, &AsOf::Live).unwrap();
         assert_eq!(snap.memory_limit_bytes, 3 * 1024 * 1024 * 1024);
+        // Unlimited reads back as DuckDB's maximum, far above a petabyte.
+        f.store
+            .writer()
+            .execute_batch("set memory_limit = '-1'")
+            .unwrap();
+        let snap = build_catalog(f.store.writer(), &f.schema, &AsOf::Live).unwrap();
+        assert!(
+            snap.memory_limit_bytes >= 1 << 50,
+            "{}",
+            snap.memory_limit_bytes
+        );
     }
 
     #[test]
