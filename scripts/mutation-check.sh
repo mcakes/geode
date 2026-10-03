@@ -32660,7 +32660,7 @@ run_mutation "blotter find: the arriving index re-formats the opened rows" \
 run_mutation "blotter find: the row report formats nothing" \
   crates/geode-blotter/src/delegate.rs \
   '            cell(&p.snapshot, &p.plan, colours.values(), row, c)' \
-  '            { let _ = (p, colours, row, c); None }' \
+  '            { let _ = (p, row, c); None }' \
   geode-blotter \
   fzf_formats_only_the_rows_it_paints
 
