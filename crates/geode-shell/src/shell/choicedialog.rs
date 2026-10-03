@@ -3234,6 +3234,17 @@ mod tests {
         assert_eq!(state.list.options()[0], "blue");
     }
 
+    /// A lit row the query keeps by text (a color whose name holds the
+    /// digits) does not keep the highlight from the typed row.
+    #[test]
+    fn a_typed_hue_is_lit_over_a_row_kept_by_text() {
+        let mut state = value_list(&["b210"], &value_state(None, Some("b210")));
+        assert_eq!(state.list.highlighted_text(), Some("b210"));
+        assert!(state.set_query("210"));
+        assert_eq!(state.list.highlighted_text(), Some("Hue 210"));
+        assert_eq!(state.list.ranked()[0].row, 0, "pinned on top");
+    }
+
     /// Enter re-feeds the live text; an unchanged query must not re-pin and
     /// take the highlight back from the row the trader moved to.
     #[test]

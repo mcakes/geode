@@ -35760,7 +35760,7 @@ run_mutation "value colors: the typed hue row is pinned" \
   '                    self.list.pin_top(0);' \
   '                    let _ = 0;' \
   geode-shell \
-  a_typed_hue_pins_its_row_and_picks_it
+  a_typed_hue_is_lit_over_a_row_kept_by_text
 
 # Enter's re-feed of an unchanged query keeps a moved highlight.
 run_mutation "value colors: an unchanged query does not re-pin" \
