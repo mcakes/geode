@@ -18711,6 +18711,27 @@ run_mutation "pricer storage: a stored currency loads blank" \
   '                None' \
   geode-pricer a_sheet_round_trips_its_currencies
 
+# The currency an underlying edit looks up is part of that edit: undone
+# apart, `u` would restore the old underlying under the new one's
+# currency and the line would price in it.
+run_mutation "pricer tile: an underlying edit's currency lookup is no part of its undo" \
+  crates/geode-pricer/src/tile.rs \
+  '                fills.push(u);' \
+  '                drop(u);' \
+  geode-pricer editing_a_blank_lines_underlying_looks_its_currency_up
+
+run_mutation "pricer tile: a lower-case reference currency is a miss" \
+  crates/geode-pricer/src/tile.rs \
+  '        Currency::parse(&cell.trim().to_ascii_uppercase())' \
+  '        Currency::parse(cell)' \
+  geode-pricer a_reference_cell_in_lower_case_or_padded_still_fills
+
+run_mutation "pricer tile: every reload refills blank currencies" \
+  crates/geode-pricer/src/tile.rs \
+  '        if payout != self.payout_seen {' \
+  '        if true {' \
+  geode-pricer a_reload_keeping_the_payout_source_does_not_refill
+
 run_mutation "pricer store: a refused submission answers Refused, not Pending" \
   crates/geode-pricer/src/store.rs \
   '        match queued {

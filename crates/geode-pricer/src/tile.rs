@@ -5,7 +5,7 @@
 //! undo; deliveries use deliver and refresh ticks use tick. These paths rebuild and
 //! install the index on change, and refill the delegate's window, outside rendering.
 
-use crate::content::{PricerSettings, Shared};
+use crate::content::{PayoutSource, PricerSettings, Shared};
 use crate::core::cell::{self, CellEditor};
 use crate::core::clip::{put_place, spec_of};
 use crate::core::columns::ColumnKind;
@@ -756,6 +756,11 @@ pub struct PricerTile {
     /// read). Re-read only when the revision moves.
     underlyings: Rc<[SharedString]>,
     underlyings_rev: Option<u64>,
+    /// The payout source the blank lines were last filled under. A reload
+    /// refills only when it names another one: a reload of views,
+    /// templates, colors or refresh alone would otherwise refill a
+    /// currency the trader cleared.
+    payout_seen: Option<PayoutSource>,
     /// The live `V`/`v` selection, anchored by line and plan column name
     /// so a rebuild re-finds the same cells. `None` outside visual mode.
     pub(crate) selection: Option<Selection<At, &'static str>>,
@@ -1065,6 +1070,7 @@ impl PricerTile {
         })
         .detach();
 
+        let payout_seen = shared.settings.borrow().payout.clone();
         let cursor = Cursor {
             at: record.cursor.map(|id| At::Line { id, within: None }),
             col: 0,
@@ -1163,6 +1169,7 @@ impl PricerTile {
             row_drag: None,
             underlyings: Rc::from([]),
             underlyings_rev: None,
+            payout_seen,
             selection: None,
             resolved: None,
             selection_extent: None,
@@ -1656,9 +1663,9 @@ impl PricerTile {
             return Err(EditError::EmptyInsert);
         }
         let moved = self.underlying_moves(std::slice::from_ref(&edit));
-        let undo = self.sheet.apply(edit)?;
+        let mut undo = self.sheet.apply(edit)?;
+        self.fill_moved(moved, &mut undo, cx);
         self.undo.record(undo);
-        self.fill_blank(moved, cx);
         self.after_edit(cx);
         Ok(())
     }
@@ -1678,9 +1685,9 @@ impl PricerTile {
                 Err(e)
             }
             Ok(undo) => {
-                if let Some(undo) = undo {
+                if let Some(mut undo) = undo {
+                    self.fill_moved(moved, &mut undo, cx);
                     self.undo.record(undo);
-                    self.fill_blank(moved, cx);
                     self.after_edit(cx);
                 }
                 Ok(())
@@ -1699,11 +1706,11 @@ impl PricerTile {
         let settings = self.shared.settings.borrow();
         let payout = settings.payout.as_ref()?;
         let reference = cx.try_global::<ReferenceGlobal>()?;
-        Currency::parse(
-            reference
-                .0
-                .lookup(&payout.dataset, underlying, &payout.column)?,
-        )
+        let cell = reference
+            .0
+            .lookup(&payout.dataset, underlying, &payout.column)?;
+        // Read as the currency cell reads typed text: ` usd ` is USD.
+        Currency::parse(&cell.trim().to_ascii_uppercase())
     }
 
     /// Give each blank line or leg of `specs` its own underlying's
@@ -1739,25 +1746,56 @@ impl PricerTile {
             .collect()
     }
 
-    /// Fill each blank line among `rows` from its own underlying. A fill
-    /// is reference data arriving, not a trader's edit: it records no
-    /// undo step, so `u` never takes it back, and it never overwrites a
-    /// set currency. Answers whether anything filled; the caller
-    /// rebuilds, reprices and saves.
-    fn fill_blank(&mut self, rows: Vec<usize>, cx: &App) -> bool {
-        let found: Vec<(usize, Currency)> = rows
-            .into_iter()
-            .filter(|&r| r < self.sheet.len())
+    /// The reference currency of each blank line among `rows`, from its
+    /// own underlying.
+    fn blank_lookups(&self, rows: Vec<usize>, cx: &App) -> Vec<(usize, Currency)> {
+        rows.into_iter()
+            .filter(|&r| {
+                r < self.sheet.len() && self.sheet.is_line(r) && self.sheet.currency(r).is_none()
+            })
             .filter_map(|r| {
                 let underlying = self.sheet.instrument(r)?.underlying();
                 Some((r, self.reference_currency(underlying, cx)?))
             })
-            .collect();
+            .collect()
+    }
+
+    /// Fill each blank line among `rows` from its own underlying. A
+    /// refresh fill is reference data arriving, not a trader's edit: it
+    /// records no undo step, so `u` never takes it back, and it never
+    /// overwrites a set currency. Answers whether anything filled; the
+    /// caller rebuilds, reprices and saves.
+    fn fill_blank(&mut self, rows: Vec<usize>, cx: &App) -> bool {
         let mut filled = false;
-        for (r, c) in found {
+        for (r, c) in self.blank_lookups(rows, cx) {
             filled |= self.sheet.fill_currency(r, c);
         }
         filled
+    }
+
+    /// Look up each blank line an underlying edit `moved` from its new
+    /// underlying, as `SetCurrency` edits joined to that edit's `undo`:
+    /// the lookup is part of the trader's edit, so `u` takes back the
+    /// underlying and its currency together and redo replays both. Kept
+    /// apart, undo would restore the old underlying under a currency
+    /// looked up for the new one, and the line would price in it.
+    fn fill_moved(&mut self, moved: Vec<usize>, undo: &mut Undo, cx: &App) {
+        let mut fills: Vec<Undo> = Vec::new();
+        for (row, c) in self.blank_lookups(moved, cx) {
+            let set = Edit::SetCurrency {
+                row,
+                currency: Some(c),
+            };
+            // `blank_lookups` names only existing lines, the one refusal
+            // `SetCurrency` has; a refusal would leave the line blank.
+            if let Ok(u) = self.sheet.apply(set) {
+                fills.push(u);
+            }
+        }
+        // The fills landed last, so their inverses run first.
+        let mut inverse: Vec<Edit> = fills.into_iter().rev().flat_map(|u| u.inverse).collect();
+        inverse.append(&mut undo.inverse);
+        undo.inverse = inverse;
     }
 
     /// [`Self::fill_blank`] over every line still without a currency.
@@ -3303,8 +3341,13 @@ impl PricerTile {
         self.refresh_entry_completion(cx);
         self.resolve_plan();
         self.rebuild(cx);
-        // A new payout source can resolve lines the old one left blank.
-        self.fill_from_reference(cx);
+        // A new payout source can resolve lines the old one left blank;
+        // the same one has nothing new to fill.
+        let payout = self.shared.settings.borrow().payout.clone();
+        if payout != self.payout_seen {
+            self.payout_seen = payout;
+            self.fill_from_reference(cx);
+        }
         self.restart_timer(cx);
     }
 

@@ -1475,14 +1475,17 @@ A line takes its currency from reference data: a typed or put line whose
 currency is blank looks up its own underlying (each leg of a package its
 own) in the `[pricing] payout_currency` column, `underlyings.currency` by
 default, and a put line keeps the currency it was yanked with. An underlying
-the table does not list, a cell that is not a code, or no payout source
-leaves the line blank, reading `needs currency`, rather than pricing it in a
-guessed currency. Blank lines fill again whenever the reference table
-changes, a sheet loads, or a reload names a payout source; a fill never
-overwrites a currency already set, and it is not an undo step (`u` does not
-unfill), but the sheet saves it. Editing a blank line's underlying looks the
-new one up; a line whose currency is set keeps it when its underlying
-changes. Column 0 is a connector tree. A package row shows its
+the table does not list, a cell that is not a code (read trimmed and in any
+case, so ` usd ` is USD), or no payout source leaves the line blank, reading
+`needs currency`, rather than pricing it in a guessed currency. Blank lines
+fill again whenever the reference table changes, a sheet loads, or a reload
+names a different payout source (a reload of anything else refills nothing,
+so a cleared currency stays cleared); such a fill never overwrites a
+currency already set, and it is not an undo step (`u` does not unfill), but
+the sheet saves it. Editing a blank line's underlying looks the new one up
+as part of that edit: `u` restores the old underlying and the blank
+currency together, and redo replays both. A line whose currency is set
+keeps it when its underlying changes. Column 0 is a connector tree. A package row shows its
 chevron, its template (`CS`, `CUSTOM`) as a neutral chip, a summary of its
 legs' distinct expiries and strikes (`Z26 4800/5200`) and a muted leg count
 (`· 2 legs`). Each leg hangs from a drawn connector under the package's

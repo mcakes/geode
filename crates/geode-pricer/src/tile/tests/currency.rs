@@ -177,6 +177,10 @@ fn a_reference_refresh_that_fills_nothing_changes_nothing(cx: &mut gpui::TestApp
     assert!(!dirty(&h, &vcx));
 }
 
+/// The lookup is part of the trader's edit: `u` takes back the
+/// underlying and the currency it brought together, so the line never
+/// keeps a currency looked up for an underlying it no longer has; redo
+/// replays both.
 #[gpui::test]
 fn editing_a_blank_lines_underlying_looks_its_currency_up(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_in(cx, &[("AAPL Z26 100 C", None)]);
@@ -191,9 +195,15 @@ fn editing_a_blank_lines_underlying_looks_its_currency_up(cx: &mut gpui::TestApp
     assert_eq!(h.cell(&vcx, 0, "underlying_ref"), "AAPL");
     assert_eq!(
         h.cell(&vcx, 0, "currency"),
-        "USD",
-        "undo takes back the underlying edit; the fill was no part of it"
+        "",
+        "undo unfills with the edit"
     );
+    assert_eq!(h.cell(&vcx, 0, "status"), "needs currency");
+    assert!(!can_undo(&h, &vcx), "one undo entry");
+    h.dispatch(&mut vcx, "redo", None);
+    h.draw(&mut vcx);
+    assert_eq!(h.cell(&vcx, 0, "underlying_ref"), "SPX");
+    assert_eq!(h.cell(&vcx, 0, "currency"), "USD", "redo replays both");
 }
 
 #[gpui::test]
@@ -223,6 +233,24 @@ fn editing_a_blank_packages_underlying_looks_each_leg_up(cx: &mut gpui::TestAppC
     assert_eq!(legs, vec![Some(Currency::USD); 2]);
     assert_eq!(h.cell(&vcx, 0, "currency"), "USD");
     assert_eq!(asked(&h).len(), 2);
+    h.dispatch(&mut vcx, "undo", None);
+    h.draw(&mut vcx);
+    let legs = h.tile.read_with(&vcx, |t, _| {
+        t.sheet
+            .children(0)
+            .map(|r| {
+                (
+                    t.sheet.instrument(r).unwrap().underlying().to_string(),
+                    t.sheet.currency(r),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        legs,
+        vec![("AAPL".to_string(), None); 2],
+        "undo unfills every leg"
+    );
 }
 
 #[gpui::test]
@@ -338,6 +366,40 @@ fn a_reload_naming_a_payout_source_fills_blank_lines(cx: &mut gpui::TestAppConte
     });
     h.draw(&mut vcx);
     assert_eq!(h.cell(&vcx, 0, "currency"), "USD");
+}
+
+/// A reload that leaves the payout source as it was (templates, views,
+/// colors, refresh) fills nothing: a line the trader cleared stays blank.
+#[gpui::test]
+fn a_reload_keeping_the_payout_source_does_not_refill(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
+    edit_cell(&h, &mut vcx, "currency", "");
+    assert_eq!(h.cell(&vcx, 0, "currency"), "", "fixture: cleared");
+    let (views, settings) = (h.factory.views_for_tests(), h.factory.settings());
+    vcx.update(|_, cx| {
+        h.factory.reload(
+            views,
+            TemplateSet::builtin(),
+            NamedColours::default(),
+            settings.refresh,
+            settings.stale_after,
+            settings.payout.clone(),
+            cx,
+        )
+    });
+    h.draw(&mut vcx);
+    assert_eq!(h.cell(&vcx, 0, "currency"), "");
+}
+
+/// A reference cell is read as the currency cell reads typed text:
+/// trimmed and upper-cased.
+#[gpui::test]
+fn a_reference_cell_in_lower_case_or_padded_still_fills(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_in(cx, &[("AAPL Z26 100 C", None), ("NDX Z26 3000 C", None)]);
+    assert_eq!(h.cell(&vcx, 1, "currency"), "USD", "fixture: NDX mapped");
+    publish_reference(&mut vcx, &[("AAPL", " eur ")]);
+    h.draw(&mut vcx);
+    assert_eq!(h.cell(&vcx, 0, "currency"), "EUR");
 }
 
 #[gpui::test]

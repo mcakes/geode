@@ -218,11 +218,15 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   currency in the inserted spec, so it is part of that undo entry (a put
   keeps a yanked currency); an instrument edit that moves a blank line to
   another underlying (`apply_edit`/`apply_edits`, a package's legs each)
-  re-looks it up; and `fill_from_reference` fills every blank line on a
-  reference change (`observe_global`), a load (open or `loaded`) and
-  `config_changed`. Those fills go through `fill_currency`: no undo step,
-  never over a set currency, and the sheet rebuilds, reprices and saves only
-  when one landed. A line whose currency is set keeps it across an
+  re-looks it up as `Edit::SetCurrency` edits joined to that edit's undo
+  entry (`fill_moved`), so `u` restores the old underlying and the blank
+  together; and `fill_from_reference` fills every blank line on a reference
+  change (`observe_global`), a load (open or `loaded`) and a
+  `config_changed` whose payout source differs from the last one seen
+  (`payout_seen`). Those refresh fills go through `fill_currency`: no undo
+  step, never over a set currency, and the sheet rebuilds, reprices and
+  saves only when one landed. A reference cell is trimmed and upper-cased
+  before `Currency::parse`. A line whose currency is set keeps it across an
   underlying edit. A result whose currency differs from the line's
   fails the line (`priced in EUR, asked for USD`) and installs nothing; a
   result that lands after a currency edit answers an older revision and is
