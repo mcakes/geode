@@ -34712,6 +34712,39 @@ run_mutation "recovery: only asked topics count as answered" \
   '        if !self.answered.contains(topic) {' \
   geode-data a_reply_on_a_topic_never_asked_answers_nothing
 
+# ---- service recovery hand-over
+# Recovery asks recorded concrete topics; patterns would be published as
+# literal topics and never answered.
+run_mutation "recovery: asks the recorded topics, not the patterns" \
+  crates/geode-data/src/service.rs \
+  '                    known_topics.insert(spec.name.clone(), matching);' \
+  '                    known_topics.insert(spec.name.clone(), spec.topics.clone());' \
+  geode-data recovery_asks_the_recorded_concrete_topics
+
+# The topics read at open reach the worker; handing it none leaves every
+# document published while the service was down stale until its next update.
+run_mutation "recovery: the service hands each worker its recorded topics" \
+  crates/geode-data/src/service.rs \
+  '                known_topics.remove(&spec.name).unwrap_or_default(),' \
+  '                Vec::new(),' \
+  geode-data recovery_asks_the_recorded_concrete_topics
+
+# A recorded topic outside the source's patterns is not asked; asked, the
+# transport is sent requests for topics the subscription no longer takes.
+run_mutation "recovery: only topics the patterns match are asked" \
+  crates/geode-data/src/service.rs \
+  '                                .any(|p| crate::adapter::topic_matches(p, t))' \
+  '                                .any(|_| true)' \
+  geode-data a_recorded_topic_no_longer_matching_the_patterns_is_not_asked
+
+# Open prunes topics past recover_max_age; unpruned, a topic gone for weeks
+# is asked for on every start.
+run_mutation "recovery: open prunes topics past the max age" \
+  crates/geode-data/src/service.rs \
+  '                crate::store::topics::prune(conn, &spec.name, spec.recover_max_age, Utc::now())' \
+  '                crate::store::topics::prune(conn, &spec.name, Duration::MAX, Utc::now())' \
+  geode-data topics_older_than_recover_max_age_are_pruned_at_open
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

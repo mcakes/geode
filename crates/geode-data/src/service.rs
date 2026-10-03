@@ -964,6 +964,41 @@ impl DataService {
             }
         }
         Catalog::new(store.writer()).ensure_tables()?;
+        // Pruned and read before the runner takes the writer: the only store
+        // access a subscription's recovery needs. A failure costs the recovery,
+        // never the open; the source still subscribes. Only topics a pattern
+        // still matches are kept, or a recovery would ask the transport for
+        // topics the subscription no longer receives.
+        let mut known_topics: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for spec in config
+            .sources
+            .iter()
+            .filter(|s| s.shape(&config.schema) == SourceShape::Subscribed)
+        {
+            let conn = store.writer();
+            let read =
+                crate::store::topics::prune(conn, &spec.name, spec.recover_max_age, Utc::now())
+                    .and_then(|_| crate::store::topics::recent(conn, &spec.name));
+            match read {
+                Ok(topics) => {
+                    let matching: Vec<String> = topics
+                        .into_iter()
+                        .filter(|t| {
+                            spec.topics
+                                .iter()
+                                .any(|p| crate::adapter::topic_matches(p, t))
+                        })
+                        .collect();
+                    known_topics.insert(spec.name.clone(), matching);
+                }
+                Err(e) => tracing::warn!(
+                    target: "geode::ingest",
+                    "source {}: recorded topics unreadable, no recovery this run: {e}",
+                    spec.name
+                ),
+            }
+        }
         let drifted = store.drifted_all().clone();
         // One error per drifted dataset, once, at open: the diagnostics page
         // names the tables and the recovery even if no tile asks for them.
@@ -1745,7 +1780,7 @@ impl DataService {
                 on_connection,
                 config.clock,
                 Arc::clone(&sink),
-                Vec::new(),
+                known_topics.remove(&spec.name).unwrap_or_default(),
             ) {
                 Ok(worker) => subscriptions.push(worker),
                 Err(e) => report_unservable(e.message),
@@ -3466,6 +3501,307 @@ mod tests {
             vol: crate::vol::VolConfig::default(),
         };
         (dir, feed, config)
+    }
+
+    /// Every `recover` call a subscription's recovery makes, in order.
+    type Asked = Arc<Mutex<Vec<Vec<String>>>>;
+
+    /// The channel bus with every recovery request recorded on the way
+    /// through: the service's own adapter door, so what is recorded is what
+    /// the service handed the receiver, not what a test passed in.
+    struct RecordingAdapter {
+        inner: Arc<crate::adapter::ChannelAdapter>,
+        asked: Asked,
+    }
+
+    impl crate::adapter::Adapter for RecordingAdapter {
+        fn name(&self) -> &'static str {
+            "demo_bus"
+        }
+
+        fn subscription(&self) -> Option<Box<dyn crate::adapter::Subscription>> {
+            Some(Box::new(RecordingSubscription {
+                inner: self.inner.subscription()?,
+                asked: Arc::clone(&self.asked),
+            }))
+        }
+
+        fn egress(&self) -> Option<Box<dyn crate::adapter::Egress>> {
+            self.inner.egress()
+        }
+    }
+
+    struct RecordingSubscription {
+        inner: Box<dyn crate::adapter::Subscription>,
+        asked: Asked,
+    }
+
+    impl crate::adapter::Subscription for RecordingSubscription {
+        fn subscribe(
+            &mut self,
+            topics: &[String],
+            sink: crate::adapter::MessageSink,
+            health: HealthSink,
+        ) -> Result<(), crate::adapter::AdapterError> {
+            self.inner.subscribe(topics, sink, health)
+        }
+
+        fn unsubscribe(&mut self) {
+            self.inner.unsubscribe();
+        }
+
+        fn recovery(&mut self) -> Option<Box<dyn crate::adapter::Recovery>> {
+            Some(Box::new(RecordingRecovery {
+                inner: self.inner.recovery()?,
+                asked: Arc::clone(&self.asked),
+            }))
+        }
+    }
+
+    struct RecordingRecovery {
+        inner: Box<dyn crate::adapter::Recovery>,
+        asked: Asked,
+    }
+
+    impl crate::adapter::Recovery for RecordingRecovery {
+        fn recover(
+            &mut self,
+            topics: &[String],
+            timeout: Duration,
+        ) -> Result<(), crate::adapter::AdapterError> {
+            self.asked.lock().unwrap().push(topics.to_vec());
+            self.inner.recover(topics, timeout)
+        }
+    }
+
+    /// One subscribed `cvi` source on `topics` over `adapters`, storing at
+    /// `db_path` — opened twice on the same path by a test that restarts.
+    fn recovery_config(
+        db_path: PathBuf,
+        adapters: AdapterRegistry,
+        topics: &[&str],
+    ) -> DataServiceConfig {
+        let mut documents = DocumentRegistry::default();
+        documents.register(Arc::new(FakeKind::new()));
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(cvi_dataset());
+        DataServiceConfig {
+            db_path,
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                adapter: "demo_bus".into(),
+                document: Some("fake_cvi".into()),
+                topics: topics.iter().map(|t| t.to_string()).collect(),
+                coalesce: Duration::ZERO,
+                ..crate::source::SourceSpec::directory("cvi", "cvi_params", Vec::new())
+            }],
+            adapters,
+            documents,
+            egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
+            positions: None,
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+        }
+    }
+
+    /// A recording bus registered as `demo_bus`, its feed, and its log.
+    fn recording_bus() -> (AdapterRegistry, crate::adapter::ChannelFeed, Asked) {
+        let (bus, feed) = crate::adapter::ChannelAdapter::new("demo_bus");
+        let asked: Asked = Arc::default();
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(Arc::new(RecordingAdapter {
+            inner: bus,
+            asked: Arc::clone(&asked),
+        }));
+        (adapters, feed, asked)
+    }
+
+    /// Topics recorded for `cvi` before the service opens, at `at`.
+    fn seed_topics(path: &std::path::Path, topics: &[&str], at: DateTime<Utc>) {
+        let store = Store::open(path).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        for topic in topics {
+            crate::store::topics::record(store.writer(), "cvi", topic, at).unwrap();
+        }
+    }
+
+    /// The live `param` of SPX's first row, read through the ordinary
+    /// document request.
+    fn live_spx_param(svc: &DataService, rx: &std::sync::mpsc::Receiver<DataEvent>) -> f64 {
+        svc.document(&DocumentParams {
+            key: QueryKey(1),
+            tag: 1,
+            submitted: Instant::now(),
+            dataset: "cvi_params".into(),
+            document_key: vec!["SPX".into()],
+            as_of: AsOf::Live,
+        })
+        .unwrap();
+        let snap = next(rx).snapshot.unwrap();
+        snap.f64_value("param", 0).expect("a live SPX row")
+    }
+
+    /// A NOTIFY published and waited for: the receiver asks its recovery
+    /// before it takes its first message, so once this document is
+    /// published every start-time ask has been made.
+    fn publish_and_wait(
+        feed: &crate::adapter::ChannelFeed,
+        rx: &std::sync::mpsc::Receiver<DataEvent>,
+        topic: &str,
+        param: f64,
+    ) {
+        assert!(feed.publish(topic, FakeKind::message("SPX", [param, 2., 3., 4., 5., 6.])));
+        assert_eq!(next_published(rx).1, "SPX");
+    }
+
+    #[test]
+    fn recovery_asks_the_recorded_concrete_topics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geode.duckdb");
+        let (adapters, feed, asked) = recording_bus();
+
+        let (svc, rx) = DataService::open_channel(recovery_config(
+            path.clone(),
+            adapters.clone(),
+            &["md/*/NOTIFY"],
+        ))
+        .unwrap();
+        publish_and_wait(&feed, &rx, "md/SPX/NOTIFY", 0.1);
+        assert_eq!(live_spx_param(&svc, &rx), 0.1);
+        svc.shutdown();
+        drop(svc);
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "a fresh store asks for nothing"
+        );
+
+        // A newer document while nobody is subscribed. The throwaway
+        // subscriber is only the proof it went through the dispatcher,
+        // which records the bus's last message per topic before any push.
+        let mut watcher = adapters.get("demo_bus").unwrap().subscription().unwrap();
+        let (sink, seen) = crate::adapter::MessageSink::bounded(4);
+        watcher
+            .subscribe(&["md/>".to_string()], sink, Arc::new(|_| {}))
+            .unwrap();
+        assert!(feed.publish(
+            "md/SPX/NOTIFY",
+            FakeKind::message("SPX", [0.7, 2., 3., 4., 5., 6.])
+        ));
+        seen.recv_timeout(Duration::from_secs(30))
+            .expect("the bus dispatched the newer document");
+        watcher.unsubscribe();
+
+        // Reopened on the same store: no NOTIFY is published, so SPX can
+        // only go live with 0.7 by the recovery asking the recorded topic.
+        let (svc, rx) =
+            DataService::open_channel(recovery_config(path, adapters, &["md/*/NOTIFY"])).unwrap();
+        assert_eq!(next_published(&rx).1, "SPX");
+        assert_eq!(live_spx_param(&svc, &rx), 0.7);
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![vec!["md/SPX/NOTIFY".to_string()]],
+            "the concrete topic, never the pattern"
+        );
+        svc.shutdown();
+    }
+
+    #[test]
+    fn overlapping_patterns_ask_a_topic_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geode.duckdb");
+        seed_topics(&path, &["md/SPX/NOTIFY"], Utc::now());
+        let (adapters, feed, asked) = recording_bus();
+        let (svc, rx) =
+            DataService::open_channel(recovery_config(path, adapters, &["md/*/NOTIFY", "md/>"]))
+                .unwrap();
+        publish_and_wait(&feed, &rx, "md/SPX/NOTIFY", 0.2);
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![vec!["md/SPX/NOTIFY".to_string()]],
+            "matched by both patterns, asked once"
+        );
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_source_with_no_recorded_topics_runs_no_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geode.duckdb");
+        let (adapters, feed, asked) = recording_bus();
+        let (svc, rx) =
+            DataService::open_channel(recovery_config(path, adapters, &["md/*/NOTIFY"])).unwrap();
+        let recovery_key = crate::health::condition_key("cvi", crate::health::RECOVERY);
+        let mut named_recovery = Vec::new();
+        assert!(feed.publish(
+            "md/SPX/NOTIFY",
+            FakeKind::message("SPX", [0.3, 2., 3., 4., 5., 6.])
+        ));
+        until(&rx, |e| match e {
+            DataEvent::Health { detail, .. } => {
+                if detail.contains(&recovery_key) {
+                    named_recovery.push(detail);
+                }
+                None
+            }
+            DataEvent::Published { .. } => Some(()),
+            _ => None,
+        });
+        assert!(asked.lock().unwrap().is_empty(), "no recover call");
+        assert!(named_recovery.is_empty(), "{named_recovery:?}");
+        assert_eq!(svc.health.load_lane("cvi", &recovery_key), None);
+        svc.shutdown();
+    }
+
+    #[test]
+    fn topics_older_than_recover_max_age_are_pruned_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geode.duckdb");
+        seed_topics(
+            &path,
+            &["md/SPX/NOTIFY"],
+            Utc::now() - chrono::Duration::days(8),
+        );
+        let (adapters, feed, asked) = recording_bus();
+        let config = recovery_config(path, adapters, &["md/*/NOTIFY"]);
+        assert_eq!(
+            config.sources[0].recover_max_age,
+            Duration::from_secs(7 * 24 * 3600),
+            "the default max age"
+        );
+        let (svc, rx) = DataService::open_channel(config).unwrap();
+        // Read before any NOTIFY re-records the topic.
+        assert_eq!(
+            crate::store::topics::recent(&svc.conn, "cvi").unwrap(),
+            Vec::<String>::new(),
+            "the old row is gone"
+        );
+        publish_and_wait(&feed, &rx, "md/SPX/NOTIFY", 0.4);
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "a pruned topic is not asked"
+        );
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_recorded_topic_no_longer_matching_the_patterns_is_not_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geode.duckdb");
+        seed_topics(&path, &["old/SPX/NOTIFY"], Utc::now());
+        let (adapters, feed, asked) = recording_bus();
+        let (svc, rx) =
+            DataService::open_channel(recovery_config(path, adapters, &["md/*/NOTIFY"])).unwrap();
+        publish_and_wait(&feed, &rx, "md/SPX/NOTIFY", 0.5);
+        assert_eq!(
+            *asked.lock().unwrap(),
+            Vec::<Vec<String>>::new(),
+            "a topic outside the patterns is not asked"
+        );
+        svc.shutdown();
     }
 
     /// The writer is held on the first document's `Loading` (the sink runs
