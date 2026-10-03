@@ -158,8 +158,8 @@ fn source_row(d: &Diagnostics, name: &str, state: &SourceState, clock: Clock) ->
     };
     // The bridge resolves `SourceSummary::shape` from the dataset
     // family: neither the adapter name nor an empty topic list can
-    // tell the three shapes apart, so a fetch source is its adapter
-    // plus `fetch`, never an empty `topics:`.
+    // tell the shapes apart, so a fetch source is its adapter plus
+    // `fetch`, never an empty `topics:`.
     let (shape, detail) = match &state.spec {
         None => (String::new(), Vec::new()),
         Some(spec) => match spec.shape {
@@ -176,6 +176,13 @@ fn source_row(d: &Diagnostics, name: &str, state: &SourceState, clock: Clock) ->
             SourceShape::Fetch => (
                 "fetch".to_string(),
                 vec![format!("adapter: {}", spec.adapter), "fetch".to_string()],
+            ),
+            SourceShape::Snapshot => (
+                "snapshot".to_string(),
+                vec![
+                    format!("adapter: {}", spec.adapter),
+                    format!("priority: {}", spec.priority),
+                ],
             ),
             SourceShape::Subscribed => (
                 format!("subscribed · {} topics", spec.topics.len()),

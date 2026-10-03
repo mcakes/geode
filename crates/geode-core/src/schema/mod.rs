@@ -442,8 +442,8 @@ impl SchemaSpec {
             diags.extend(validate_dataset(&mut dataset));
             if (dataset.is_document() || dataset.is_reference()) && dataset.columns.is_empty() {
                 // Rejected or columnless documents and references cannot be stored or
-                // queried. Empty
-                // measure datasets remain inert because they declare no storage grain.
+                // queried. Empty measure datasets remain inert because they declare no
+                // storage grain.
                 continue;
             }
             out.datasets.push(dataset);
@@ -719,7 +719,16 @@ fn validate_reference(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
         ));
         keep = false;
     }
-    for k in &ds.key {
+    for (i, k) in ds.key.iter().enumerate() {
+        // Storage DDL emits one column per key entry; a repeat is a duplicate column.
+        if ds.key[..i].contains(k) {
+            diags.push(err(
+                format!("dataset '{name}': '{k}' appears twice in 'key'; dataset dropped"),
+                format!("datasets.{name}.key"),
+            ));
+            keep = false;
+            continue;
+        }
         let ok = ds.column(k).is_some_and(|c| {
             c.role == ColumnRole::Dimension { grain: None } && c.ty == ColumnType::Utf8
         });
@@ -2600,6 +2609,21 @@ role = "attribute"
         assert!(
             diags.iter().any(|d| d.severity == Severity::Error
                 && d.path.as_deref() == Some("datasets.underlyings.key")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_reference_key_named_twice_is_dropped() {
+        let (schema, diags) = reference_with(
+            "key = [\"underlying_ref\"]",
+            "key = [\"underlying_ref\", \"underlying_ref\"]",
+        );
+        assert!(schema.dataset("underlyings").is_none());
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Error
+                && d.path.as_deref() == Some("datasets.underlyings.key")
+                && d.message.contains("appears twice in 'key'")),
             "{diags:?}"
         );
     }

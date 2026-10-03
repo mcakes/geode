@@ -1353,6 +1353,10 @@ impl DataService {
                     continue;
                 }
                 SourceShape::Subscribed => {}
+                SourceShape::Snapshot => {
+                    report_unservable("snapshot sources are not served by this build yet".into());
+                    continue;
+                }
                 SourceShape::Fetch => {
                     let Some(adapter) = config.adapters.get(&spec.adapter) else {
                         report_unservable(format!(

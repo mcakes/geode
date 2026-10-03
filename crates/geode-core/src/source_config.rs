@@ -8,7 +8,7 @@
 //! assembled application and service. See `docs/current/configuration.md`.
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
-use crate::schema::{ColumnRole, ColumnType, SchemaSpec};
+use crate::schema::{ColumnRole, ColumnType, Family, SchemaSpec};
 use std::path::Path;
 use std::time::Duration;
 use toml::Table;
@@ -17,6 +17,9 @@ use toml::Table;
 /// the effective values of omitted settings.
 pub const DEFAULT_POLL: Duration = Duration::from_secs(30);
 pub const DEFAULT_PENDING_TIMEOUT: Duration = Duration::from_secs(600);
+/// Snapshot polling default: a reference table changes rarely, and each poll
+/// rereads it whole.
+pub const DEFAULT_SNAPSHOT_POLL: Duration = Duration::from_secs(300);
 /// Default minimum spacing between coalescer releases for each document key.
 /// This limits submission rate, not publication timing on the ingest writer.
 /// A zero window releases every accepted, valid message without coalescing.
@@ -63,13 +66,17 @@ pub enum SourceTime {
 }
 
 /// Runtime pipeline selected by adapter and dataset family. `csv_dir` uses
-/// discovery; another adapter uses fetching for series and subscription for
-/// documents. Derive this from the schema rather than storing a second answer.
+/// discovery; another adapter uses fetching for series, snapshot polling for
+/// reference datasets, and subscription for documents. Derive this from the
+/// schema rather than storing a second answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceShape {
     Directory,
     Subscribed,
     Fetch,
+    /// Another adapter over a reference dataset: a worker polls the whole
+    /// table on `poll_interval`.
+    Snapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +108,8 @@ pub struct SourceSpec {
     pub coalesce: Duration,
     /// Which timestamp a publish is stamped with. See [`SourceTime`].
     pub source_time: SourceTime,
+    /// Snapshot only: the adapter-defined name of the table to read.
+    pub table: Option<String>,
 }
 
 impl SourceSpec {
@@ -129,10 +138,13 @@ impl SourceSpec {
     }
 
     pub fn shape(&self, schema: &SchemaSpec) -> SourceShape {
+        let family = schema.dataset(&self.dataset).map(|d| d.family);
         if !self.is_subscribed() {
             SourceShape::Directory
-        } else if schema.dataset(&self.dataset).is_some_and(|d| d.is_series()) {
+        } else if family == Some(Family::Series) {
             SourceShape::Fetch
+        } else if family == Some(Family::Reference) {
+            SourceShape::Snapshot
         } else {
             SourceShape::Subscribed
         }
@@ -160,6 +172,7 @@ impl SourceSpec {
             topics: Vec::new(),
             coalesce: DEFAULT_COALESCE,
             source_time: SourceTime::Receive,
+            table: None,
         }
     }
 }
@@ -384,10 +397,11 @@ impl SourceSpec {
                 .to_string();
             let subscribed = adapter != CSV_DIR_ADAPTER;
             let family = schema.dataset(&dataset).map(|d| d.family);
-            let fetch = subscribed && family == Some(crate::schema::Family::Series);
+            let fetch = subscribed && family == Some(Family::Series);
+            let snapshot = subscribed && family == Some(Family::Reference);
 
             // Directory loading writes grain tables, so it cannot fill a series dataset.
-            if !subscribed && family == Some(crate::schema::Family::Series) {
+            if !subscribed && family == Some(Family::Series) {
                 diags.push(diag(
                     Severity::Error,
                     name,
@@ -399,8 +413,25 @@ impl SourceSpec {
                 ));
                 continue;
             }
-            // A non-fetch adapter publishes DocumentRows and requires a document dataset.
-            if subscribed && !fetch && !schema.dataset(&dataset).is_some_and(|d| d.is_document()) {
+            // Nor a reference dataset, whose whole table a snapshot worker replaces.
+            if !subscribed && family == Some(Family::Reference) {
+                diags.push(diag(
+                    Severity::Error,
+                    name,
+                    Some("dataset"),
+                    format!(
+                        "a directory source cannot fill the reference dataset '{dataset}'; \
+                         name a snapshot adapter"
+                    ),
+                ));
+                continue;
+            }
+            // A subscription adapter publishes DocumentRows and requires a document dataset.
+            if subscribed
+                && !fetch
+                && !snapshot
+                && !schema.dataset(&dataset).is_some_and(|d| d.is_document())
+            {
                 diags.push(diag(
                     Severity::Error,
                     name,
@@ -421,6 +452,8 @@ impl SourceSpec {
                 }
                 let m = if fetch {
                     format!("'{key}' is ignored by a fetch source (a series dataset)")
+                } else if snapshot {
+                    format!("'{key}' is ignored by a snapshot source (a reference dataset)")
                 } else if subscribed {
                     format!(
                         "'{key}' is ignored by a subscribed source \
@@ -440,15 +473,19 @@ impl SourceSpec {
                 "pending_timeout",
                 "batch_pattern",
             ] {
-                if subscribed {
+                // A snapshot worker polls on its own interval.
+                if subscribed && !(snapshot && key == "poll_interval") {
                     ignored(key, &mut diags);
                 }
             }
             // Only subscriptions use document kind, topics, coalescing, and source time.
             for key in ["document", "topics", "coalesce", "source_time"] {
-                if !subscribed || fetch {
+                if !subscribed || fetch || snapshot {
                     ignored(key, &mut diags);
                 }
+            }
+            if !snapshot {
+                ignored("table", &mut diags);
             }
 
             let mut paths: Vec<String> = table
@@ -465,6 +502,8 @@ impl SourceSpec {
                 if !paths.is_empty() {
                     let m = if fetch {
                         "'paths' is ignored by a fetch source (a series dataset)".to_string()
+                    } else if snapshot {
+                        "'paths' is ignored by a snapshot source (a reference dataset)".to_string()
                     } else {
                         format!(
                             "'paths' is ignored by a subscribed source \
@@ -510,8 +549,15 @@ impl SourceSpec {
                 }
             };
 
+            // Reference data is not current risk, so a snapshot defaults behind it.
+            let (default_priority, default_priority_name) = if snapshot {
+                (Priority::LatestOther, "latest_other")
+            } else {
+                (Priority::LatestRisk, "latest_risk")
+            };
             let priority = match table.get("priority").and_then(|v| v.as_str()) {
-                None | Some("latest_risk") => Priority::LatestRisk,
+                None => default_priority,
+                Some("latest_risk") => Priority::LatestRisk,
                 Some("latest_other") => Priority::LatestOther,
                 Some("backfill") => Priority::Backfill,
                 Some(other) => {
@@ -519,13 +565,37 @@ impl SourceSpec {
                         Severity::Warning,
                         name,
                         Some("priority"),
-                        format!("unknown priority '{other}'; using \"latest_risk\""),
+                        format!("unknown priority '{other}'; using \"{default_priority_name}\""),
                     ));
-                    Priority::LatestRisk
+                    default_priority
                 }
             };
 
-            let (poll_interval, pending_timeout, batch_pattern) = if subscribed {
+            let (poll_interval, pending_timeout, batch_pattern) = if snapshot {
+                let poll = read_duration_or_warn(
+                    table,
+                    &mut diags,
+                    name,
+                    "poll_interval",
+                    DEFAULT_SNAPSHOT_POLL,
+                );
+                // A zero interval would reread the whole table in a tight loop.
+                let poll = if poll.is_zero() {
+                    diags.push(diag(
+                        Severity::Warning,
+                        name,
+                        Some("poll_interval"),
+                        format!(
+                            "'poll_interval' must be greater than zero; using {}",
+                            spell_duration(DEFAULT_SNAPSHOT_POLL)
+                        ),
+                    ));
+                    DEFAULT_SNAPSHOT_POLL
+                } else {
+                    poll
+                };
+                (poll, DEFAULT_PENDING_TIMEOUT, None)
+            } else if subscribed {
                 (DEFAULT_POLL, DEFAULT_PENDING_TIMEOUT, None)
             } else {
                 let poll_interval =
@@ -555,7 +625,24 @@ impl SourceSpec {
                 (poll_interval, pending_timeout, batch_pattern)
             };
 
-            let (document, topics, coalesce, source_time) = if subscribed && !fetch {
+            let table_name = if snapshot {
+                match table.get("table").and_then(|v| v.as_str()) {
+                    Some(t) if !t.is_empty() => Some(t.to_string()),
+                    _ => {
+                        diags.push(diag(
+                            Severity::Error,
+                            name,
+                            Some("table"),
+                            format!("adapter '{adapter}' needs 'table' naming what to read"),
+                        ));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+
+            let (document, topics, coalesce, source_time) = if subscribed && !fetch && !snapshot {
                 let document = match table.get("document").and_then(|v| v.as_str()) {
                     Some(d) => Some(d.to_string()),
                     None => {
@@ -681,6 +768,7 @@ impl SourceSpec {
                 topics,
                 coalesce,
                 source_time,
+                table: table_name,
             });
         }
 
@@ -732,6 +820,16 @@ role = "attribute"
 
 [series]
 family = "series"
+
+[underlyings]
+family = "reference"
+key = ["underlying_ref"]
+[underlyings.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[underlyings.columns.currency]
+type = "utf8"
+role = "attribute"
 "#;
         let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
         SchemaSpec::from_doc(&doc).0
@@ -1420,7 +1518,7 @@ paths = ["/x/*.csv"]
     }
 
     #[test]
-    fn shape_names_all_three() {
+    fn shape_names_all_four() {
         let (specs, _) = from(
             r#"
 [a]
@@ -1434,6 +1532,10 @@ topics = ["t/>"]
 [c]
 adapter = "kdb"
 dataset = "series"
+[d]
+adapter = "sql"
+dataset = "underlyings"
+table = "underlyings"
 "#,
         );
         let shapes: Vec<SourceShape> = specs.iter().map(|s| s.shape(&schema())).collect();
@@ -1442,8 +1544,96 @@ dataset = "series"
             vec![
                 SourceShape::Directory,
                 SourceShape::Subscribed,
-                SourceShape::Fetch
+                SourceShape::Fetch,
+                SourceShape::Snapshot
             ]
+        );
+    }
+
+    #[test]
+    fn an_adapter_over_a_reference_dataset_is_a_snapshot_source() {
+        let (specs, diags) = from(
+            r#"
+[refdb]
+adapter = "sql"
+dataset = "underlyings"
+table = "underlyings"
+"#,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let s = &specs[0];
+        assert_eq!(s.shape(&schema()), SourceShape::Snapshot);
+        assert_eq!(s.table.as_deref(), Some("underlyings"));
+        assert_eq!(s.poll_interval, DEFAULT_SNAPSHOT_POLL);
+        assert_eq!(s.priority, Priority::LatestOther);
+    }
+
+    #[test]
+    fn a_snapshot_source_reads_its_poll_interval() {
+        let (specs, _) = from(
+            "[refdb]\nadapter = \"sql\"\ndataset = \"underlyings\"\ntable = \"t\"\npoll_interval = \"30s\"\n",
+        );
+        assert_eq!(specs[0].poll_interval, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn a_zero_snapshot_poll_interval_warns_and_uses_the_default() {
+        let (specs, diags) = from(
+            "[refdb]\nadapter = \"sql\"\ndataset = \"underlyings\"\ntable = \"t\"\npoll_interval = \"0\"\n",
+        );
+        assert_eq!(specs[0].poll_interval, DEFAULT_SNAPSHOT_POLL);
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Warning
+                && d.path.as_deref() == Some("sources.refdb.poll_interval")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_source_without_a_table_is_refused() {
+        let (specs, diags) = from("[refdb]\nadapter = \"sql\"\ndataset = \"underlyings\"\n");
+        assert!(specs.is_empty());
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Error
+                && d.path.as_deref() == Some("sources.refdb.table")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_csv_dir_source_over_a_reference_dataset_is_refused() {
+        let (specs, diags) = from("[files]\ndataset = \"underlyings\"\npaths = [\"/x/*.csv\"]\n");
+        assert!(specs.is_empty());
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Error
+                && d.path.as_deref() == Some("sources.files.dataset")
+                && d.message.contains("reference")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn table_is_ignored_with_a_warning_off_the_snapshot_shape() {
+        let (specs, diags) = from(
+            "[cvi]\nadapter = \"bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\ntopics = [\"a/>\"]\ntable = \"t\"\n",
+        );
+        assert_eq!(specs[0].table, None);
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Warning
+                && d.path.as_deref() == Some("sources.cvi.table")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn subscription_settings_on_a_snapshot_source_warn() {
+        let (_, diags) = from(
+            "[refdb]\nadapter = \"sql\"\ndataset = \"underlyings\"\ntable = \"t\"\ntopics = [\"a\"]\n",
+        );
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Warning
+                && d.path.as_deref() == Some("sources.refdb.topics")),
+            "{diags:?}"
         );
     }
 }
