@@ -17,11 +17,12 @@ use crate::core::shorthand::{render_expiry, render_strike};
 use crate::core::tree::Expansion;
 use crate::core::views::ColumnPlan;
 use geode_core::clock::Clock;
-use geode_core::colour::Sign;
+use geode_core::colour::{Sign, ValueColors};
 use geode_core::expansion::{Expansion as GroupExpansion, Path};
 use geode_core::view::Colour;
 use gpui::SharedString;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct GridColumn {
@@ -71,6 +72,9 @@ pub struct GridCell {
     pub state: CellState,
     /// A measure's sign as formatted; `None` on a text cell.
     pub sign: Option<Sign>,
+    /// The color `value_colors` maps this cell's dimension value to,
+    /// looked up when the window is filled.
+    pub value_color: Option<Arc<str>>,
 }
 
 /// One painted row's tree-column facts, as [`Flatten`] pushes them.
@@ -102,6 +106,9 @@ struct TreeRow {
     search: SharedString,
     /// The enclosing group row, for a group row's grouped-column cells.
     parent: Option<u32>,
+    /// A group row's value color (its label is the group's value); `None`
+    /// on every other row.
+    value_color: Option<Arc<str>>,
 }
 
 /// Every painted row's tree-column facts, in parallel arrays, and where
@@ -121,6 +128,7 @@ pub struct GridIndex {
     note: Vec<SharedString>,
     search: Vec<SharedString>,
     parent: Vec<Option<u32>>,
+    value_color: Vec<Option<Arc<str>>>,
     /// Line → (first painted row, how many rows paint it).
     row_of: HashMap<LineId, (u32, u32)>,
 }
@@ -141,6 +149,8 @@ pub struct TreeRef<'a> {
     pub text: &'a SharedString,
     pub note: &'a SharedString,
     pub search: &'a SharedString,
+    /// A group row's value color; `None` on every other row.
+    pub value_color: Option<&'a Arc<str>>,
 }
 
 #[cfg(test)]
@@ -289,6 +299,7 @@ impl GridIndex {
         self.note.push(r.note);
         self.search.push(r.search);
         self.parent.push(r.parent);
+        self.value_color.push(r.value_color);
     }
 
     pub fn len(&self) -> usize {
@@ -312,6 +323,7 @@ impl GridIndex {
             text: &self.text[g],
             note: &self.note[g],
             search: &self.search[g],
+            value_color: self.value_color[g].as_ref(),
         })
     }
 
@@ -388,6 +400,7 @@ impl GridIndex {
         packages: &Expansion,
         plan: &ColumnPlan,
         clock: Clock,
+        values: &ValueColors,
     ) -> GridIndex {
         #[cfg(test)]
         BUILDS.with(|b| b.set(b.get() + 1));
@@ -411,6 +424,7 @@ impl GridIndex {
             packages,
             plan,
             clock,
+            values,
             out: GridIndex::default(),
             enclosing: Vec::new(),
         };
@@ -505,6 +519,8 @@ struct Flatten<'a> {
     packages: &'a Expansion,
     plan: &'a ColumnPlan,
     clock: Clock,
+    /// The value → color mapping a group row's label is looked up in.
+    values: &'a ValueColors,
     out: GridIndex,
     /// The enclosing group rows, root first: each pushed row's `parent`.
     enclosing: Vec<u32>,
@@ -527,6 +543,12 @@ impl<'a> Flatten<'a> {
                     None => SharedString::new_static(NULL_LABEL),
                     Some(_) => self.label(column, legs.first().copied(), label),
                 };
+                // The rollup's `label` is the value's own text; the painted
+                // label may be the column's formatted spelling of it.
+                let value_color = value
+                    .as_ref()
+                    .and_then(|_| self.values.get(column, label))
+                    .cloned();
                 self.out.push(TreeRow {
                     kind: GridRowKind::Group {
                         open,
@@ -542,6 +564,7 @@ impl<'a> Flatten<'a> {
                     text,
                     note: SharedString::default(),
                     parent: self.enclosing.last().copied(),
+                    value_color,
                 });
                 self.enclosing.push((self.out.len() - 1) as u32);
                 if open {
@@ -610,6 +633,7 @@ impl<'a> Flatten<'a> {
             note: leg_note(if partial { legs.len() } else { total }, total).into(),
             search: package_search(sheet, r, partial.then_some(legs)).into(),
             parent: self.enclosing.last().copied(),
+            value_color: None,
         });
     }
 
@@ -629,18 +653,20 @@ impl<'a> Flatten<'a> {
             note: SharedString::default(),
             search: s,
             parent: self.enclosing.last().copied(),
+            value_color: None,
         });
     }
 }
 
 /// What a window fill reads: the sheet, the rollup the index was built
-/// from, the plan, the clock.
+/// from, the plan, the clock, and the value → color mapping.
 #[derive(Clone, Copy)]
 pub struct FillSource<'a> {
     pub sheet: &'a Sheet,
     pub rollup: &'a Rollup,
     pub plan: &'a ColumnPlan,
     pub clock: Clock,
+    pub values: &'a ValueColors,
 }
 
 /// A row's fold, prepared once for every cell of the row.
@@ -788,10 +814,18 @@ impl<'a> CellPass<'a> {
             }
             _ => cell_text(sheet, self.index.sheet_row(g)?, c.def, &c.format, clock),
         };
+        // A text dimension's cell shows its value; a mapping holds text
+        // dimensions only, so a measure or date column finds nothing.
+        // `mixed` and blank are not values.
+        let value_color = (t.state == CellState::Own)
+            .then(|| self.src.values.get(c.def.name, &t.text))
+            .flatten()
+            .cloned();
         Some(GridCell {
             text: t.text.into(),
             state: t.state,
             sign: t.sign,
+            value_color,
         })
     }
 }
@@ -821,12 +855,16 @@ mod tests {
         ColumnPlan::build(Views::builtin().get("vanilla").unwrap())
     }
 
+    static NO_VALUES: std::sync::LazyLock<ValueColors> =
+        std::sync::LazyLock::new(ValueColors::default);
+
     fn src<'a>(s: &'a Sheet, r: &'a Rollup, plan: &'a ColumnPlan) -> FillSource<'a> {
         FillSource {
             sheet: s,
             rollup: r,
             plan,
             clock: Clock::utc(),
+            values: &NO_VALUES,
         }
     }
 
@@ -859,7 +897,15 @@ mod tests {
     fn build_vis(s: &Sheet, e: &Expansion, v: &Visibility) -> (Rollup, GridIndex) {
         let dims = DerivedDimensions::default();
         let r = rollup::build(s, v, &EffectiveChain::default(), &dims, Clock::utc());
-        let m = GridIndex::build(s, &r, &GroupExpansion::default(), e, &plan(), Clock::utc());
+        let m = GridIndex::build(
+            s,
+            &r,
+            &GroupExpansion::default(),
+            e,
+            &plan(),
+            Clock::utc(),
+            &ValueColors::default(),
+        );
         (r, m)
     }
 
@@ -1268,7 +1314,15 @@ mod tests {
         let levels: Vec<String> = levels.iter().map(|l| l.to_string()).collect();
         let chain = effective_chain(&levels, dims);
         let r = rollup::build(s, &Visibility::all(s), &chain, dims, Clock::utc());
-        let m = GridIndex::build(s, &r, groups, packages, plan, Clock::utc());
+        let m = GridIndex::build(
+            s,
+            &r,
+            groups,
+            packages,
+            plan,
+            Clock::utc(),
+            &ValueColors::default(),
+        );
         (r, m)
     }
 
@@ -1372,7 +1426,15 @@ mod tests {
     #[test]
     fn the_window_paints_what_the_formatter_formats() {
         let (s, tree, plan, groups, packages) = grouped_fixture();
-        let index = GridIndex::build(&s, &tree, &groups, &packages, &plan, Clock::utc());
+        let index = GridIndex::build(
+            &s,
+            &tree,
+            &groups,
+            &packages,
+            &plan,
+            Clock::utc(),
+            &ValueColors::default(),
+        );
         let mut window = WindowCache::default();
         let mut pass = CellPass::new(src(&s, &tree, &plan), &index);
         window.set_window(0..index.len(), index.columns.len(), |g, c| pass.cell(g, c));
@@ -1384,11 +1446,78 @@ mod tests {
         }
     }
 
+    /// A group's label takes its raw value's color, and a leg's dimension
+    /// cell its value's; a measure cell, a line's shorthand and a `mixed`
+    /// cell (whose text is no value) never do.
+    #[test]
+    fn a_group_label_and_a_dimension_cell_carry_their_values_color() {
+        let (s, rollup, plan, groups, packages) = grouped_fixture();
+        let mut values = ValueColors::default();
+        values.insert("underlying_ref", "SPX", "blue");
+        // `option_type` reads `mixed` on the SPX group row (puts and calls).
+        values.insert("option_type", "mixed", "blue");
+        let m = GridIndex::build(
+            &s,
+            &rollup,
+            &groups,
+            &packages,
+            &plan,
+            Clock::utc(),
+            &values,
+        );
+        let spx = group_row(&m, "SPX");
+        assert_eq!(
+            m.tree(spx).unwrap().value_color.map(|c| &**c),
+            Some("blue"),
+            "the group's label is its value"
+        );
+        assert_eq!(
+            m.tree(group_row(&m, "NDX")).unwrap().value_color,
+            None,
+            "an unmapped group"
+        );
+        let src = FillSource {
+            sheet: &s,
+            rollup: &rollup,
+            plan: &plan,
+            clock: Clock::utc(),
+            values: &values,
+        };
+        let mut pass = CellPass::new(src, &m);
+        let under = col("underlying_ref");
+        // The first leg row under the SPX group shows SPX in its
+        // underlying cell.
+        let leg = (spx + 1..m.len())
+            .find(|&g| m.sheet_row(g).is_some())
+            .expect("a line under the group");
+        let cell = pass.cell(leg, under).expect("an underlying cell");
+        assert_eq!(&*cell.text, "SPX");
+        assert_eq!(cell.value_color.as_deref(), Some("blue"));
+        // A measure cell and a line's shorthand never do.
+        assert_eq!(pass.cell(leg, col("qty")).and_then(|c| c.value_color), None);
+        assert_eq!(m.tree(leg).unwrap().value_color, None);
+        let mixed = pass.cell(spx, col("option_type")).expect("an option cell");
+        assert_eq!(
+            (mixed.text.as_ref(), mixed.state),
+            ("mixed", CellState::Mixed),
+            "fixture: the SPX group's option type is mixed"
+        );
+        assert_eq!(mixed.value_color, None, "`mixed` is not a value");
+    }
+
     /// `row_of` names a line's first painted row; a split package paints twice.
     #[test]
     fn row_of_is_the_first_painted_row_of_a_line() {
         let (s, tree, plan, groups, packages) = grouped_fixture();
-        let index = GridIndex::build(&s, &tree, &groups, &packages, &plan, Clock::utc());
+        let index = GridIndex::build(
+            &s,
+            &tree,
+            &groups,
+            &packages,
+            &plan,
+            Clock::utc(),
+            &ValueColors::default(),
+        );
         let cal = s.id(5);
         assert_eq!(index.paints(cal), 2, "the calendar splits by expiry");
         for g in 0..index.len() {
@@ -1410,7 +1539,15 @@ mod tests {
     #[test]
     fn a_group_row_shows_its_ancestors_grouped_values() {
         let (s, tree, plan, groups, packages) = grouped_fixture();
-        let index = GridIndex::build(&s, &tree, &groups, &packages, &plan, Clock::utc());
+        let index = GridIndex::build(
+            &s,
+            &tree,
+            &groups,
+            &packages,
+            &plan,
+            Clock::utc(),
+            &ValueColors::default(),
+        );
         let und = index
             .columns
             .iter()

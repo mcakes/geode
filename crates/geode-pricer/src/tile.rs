@@ -38,6 +38,7 @@ use crate::session::Record;
 use crate::store::Loaded;
 use chrono::Utc;
 use geode_core::clock::Clock;
+use geode_core::colour::NamedColours;
 use geode_core::document::DocumentRows;
 use geode_core::expansion::{Expansion as GroupExpansion, Path};
 use geode_core::grid::selection::{Resolved, SelectKind, Selection};
@@ -518,6 +519,11 @@ pub struct PricerTile {
     frame: FrameRef,
     pub(crate) data: DataHandle,
     pub(crate) shared: Rc<Shared>,
+    /// The color definitions and value mapping the installed model was
+    /// built under: the factory's at the last rebuild. Window fills look
+    /// values up in it, and the delegate resolves against it, so a fill
+    /// never mixes a mapping with definitions from another reload.
+    colors: Arc<NamedColours>,
     pub(crate) sheet: Sheet,
     pub(crate) expansion: Expansion,
     /// The grouping override (`:group`, `:group slot N`, `:unpin`).
@@ -1077,10 +1083,12 @@ impl PricerTile {
             group_expansion.open(p.clone());
         }
         let held_paths = loading.then(|| record.expanded_paths.clone());
+        let colors = shared.colours.borrow().clone();
         let mut this = PricerTile {
             id,
             frame,
             data,
+            colors,
             shared,
             visibility: Visibility::all(&sheet),
             sheet,
@@ -1428,6 +1436,7 @@ impl PricerTile {
             &packages,
             &self.plan,
             self.clock,
+            self.colors.values(),
         ));
         let targets: Vec<_> = model
             .trees()
@@ -1444,7 +1453,7 @@ impl PricerTile {
         // shows, as it reports them; its paint only reads them.
         let mut painter = SheetDelegate::new(cx.theme(), cx.entity().downgrade());
         painter.model = model;
-        painter.set_colours(self.shared.colours.borrow().clone());
+        painter.set_colours(Arc::clone(&self.colors));
         let paint = Rc::new(std::cell::RefCell::new(crate::delegate::FindPaint::new(
             painter,
             Rc::clone(&self.model),
@@ -4969,6 +4978,10 @@ impl PricerTile {
             cx.notify();
             return;
         }
+        // The factory's current definitions and mapping: a reload's rebuild
+        // (`config_changed`) lands here, so the model, its window fills and
+        // the delegate all read the new ones together.
+        self.colors = self.shared.colours.borrow().clone();
         let model = Rc::new(GridIndex::build(
             &self.sheet,
             &self.rollup,
@@ -4976,6 +4989,7 @@ impl PricerTile {
             &self.expansion,
             &self.plan,
             self.clock,
+            self.colors.values(),
         ));
         self.recover_hidden_cursor(&model);
         self.model = model;
@@ -5208,13 +5222,15 @@ impl PricerTile {
     }
 
     /// What a window fill reads: the sheet, the rollup the installed index
-    /// was built from, the plan and the display clock.
+    /// was built from, the plan, the display clock and the value mapping
+    /// the index was built under.
     pub(crate) fn fill_source(&self) -> FillSource<'_> {
         FillSource {
             sheet: &self.sheet,
             rollup: &self.rollup,
             plan: &self.plan,
             clock: self.clock,
+            values: self.colors.values(),
         }
     }
 
@@ -5223,10 +5239,10 @@ impl PricerTile {
     pub(crate) fn install_model(&mut self, cx: &mut Context<Self>) {
         let model = Rc::clone(&self.model);
         let loading = self.loading;
-        // The factory's current `colors.toml`: a reload's rebuild lands
-        // here, so the delegate sees the new definitions with the model
-        // planned under them.
-        let colours = self.shared.colours.borrow().clone();
+        // The definitions the model was built under (`rebuild_as` refreshes
+        // them before every build), so the delegate resolves the value
+        // colors the window carries against the same reload.
+        let colours = Arc::clone(&self.colors);
         let src = self.fill_source();
         let sort = self.sort;
         let grips = self.grip_rows();
@@ -7580,6 +7596,77 @@ pub(crate) mod tests {
             second_base,
             "the redefined name repaints; the first resolve is not kept"
         );
+    }
+
+    const UNDERLYING_VIEW: &str = "[vanilla]\ndataset = \"pricer\"\n\
+        [[vanilla.columns]]\nname = \"underlying_ref\"\n\
+        [[vanilla.columns]]\nname = \"npv\"\n";
+
+    /// A reload that changes only the mapping repaints the open sheet: the
+    /// rows prepared under the old mapping are prepared again, and a group
+    /// row's label takes its value's color floored on the group ground.
+    #[gpui::test]
+    fn a_reloaded_mapping_reaches_the_prepared_rows(cx: &mut gpui::TestAppContext) {
+        use geode_core::colour::{Definition, Tone, ValueColors};
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 4000 P"]);
+        reload_views(&h, &mut vcx, UNDERLYING_VIEW, NamedColours::default());
+        let own = text_colour(&h, &mut vcx, 0, "underlying_ref");
+
+        let mut colours = NamedColours::default();
+        colours.insert("blue".into(), Definition::hue(240.0, Tone::Normal));
+        let mut values = ValueColors::default();
+        values.insert("underlying_ref", "SPX", "blue");
+        let colours = colours.with_values(values);
+        reload_views(&h, &mut vcx, UNDERLYING_VIEW, colours.clone());
+
+        let (blue, group) = vcx.update(|_, cx| {
+            let theme = cx.theme();
+            let blue = geode_tile::colour::ColourCache::new()
+                .get(
+                    &colours,
+                    "blue",
+                    &geode_shell::shell::colours::anchors_from_theme(theme),
+                    &geode_shell::shell::colours::tokens_from_theme(theme),
+                )
+                .expect("blue is defined")
+                .base;
+            (blue, crate::paint::Paints::derive(theme).group)
+        });
+        assert_ne!(blue, own, "fixture: the color differs from the own paint");
+        assert_eq!(
+            text_colour(&h, &mut vcx, 0, "underlying_ref"),
+            blue,
+            "the SPX line's underlying cell takes SPX's color"
+        );
+        assert_eq!(
+            text_colour(&h, &mut vcx, 1, "underlying_ref"),
+            own,
+            "an unmapped value keeps the own paint"
+        );
+        assert_eq!(
+            text_colour(&h, &mut vcx, 0, "npv"),
+            text_colour(&h, &mut vcx, 1, "npv"),
+            "the rest of the row is not painted"
+        );
+
+        // Grouped: the group rows sort NDX, SPX.
+        h.command(&mut vcx, "group underlying_ref").unwrap();
+        assert_eq!(h.tree(&vcx), ["NDX", "SPX"]);
+        let label = |vcx: &mut VisualTestContext, row: usize| {
+            h.draw(vcx);
+            h.tile.update(vcx, |t, cx| {
+                t.table.update(cx, |table, cx| {
+                    table.delegate_mut().group_label_paint(row, cx.theme())
+                })
+            })
+        };
+        assert_ne!(group.floor(blue), group.own, "fixture: apart on the ground");
+        assert_eq!(
+            label(&mut vcx, 1),
+            group.floor(blue),
+            "SPX's label: its color floored on the group ground"
+        );
+        assert_eq!(label(&mut vcx, 0), group.own, "NDX's label is unmapped");
     }
 
     /// The shell's `Edit column in view…` reads the tile's columns: the

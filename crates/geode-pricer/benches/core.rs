@@ -9,6 +9,7 @@
 use chrono::Utc;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use geode_core::clock::Clock;
+use geode_core::colour::ValueColors;
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::expansion::Expansion as GroupExpansion;
 use geode_core::pricing::{Currency, Measure, PriceResult};
@@ -23,6 +24,9 @@ use geode_pricer::core::{
 use geode_pricer::grid::{CellPass, FillSource, GridIndex};
 use geode_tile::grid::WindowCache;
 use std::hint::black_box;
+
+/// No value is mapped: the benches measure the lookup's miss path.
+static NO_VALUES: std::sync::LazyLock<ValueColors> = std::sync::LazyLock::new(ValueColors::default);
 
 /// `n` shorthand entries with varied quantity, option kind, and strike.
 /// Every tenth entry is a callspread, exercising package folding as well.
@@ -230,6 +234,7 @@ fn bench(c: &mut Criterion) {
                 &expansion,
                 &plan,
                 Clock::utc(),
+                &NO_VALUES,
             ))
         })
     });
@@ -247,11 +252,20 @@ fn bench(c: &mut Criterion) {
                 &expansion,
                 &plan,
                 Clock::utc(),
+                &NO_VALUES,
             ))
         })
     });
     // A cold window fill of 40 rows: what a scroll or an install formats.
-    let index = GridIndex::build(&s, &flat, &no_groups, &expansion, &plan, Clock::utc());
+    let index = GridIndex::build(
+        &s,
+        &flat,
+        &no_groups,
+        &expansion,
+        &plan,
+        Clock::utc(),
+        &NO_VALUES,
+    );
     g.bench_function("window_fill_40", |b| {
         b.iter(|| {
             let mut window = WindowCache::default();
@@ -261,6 +275,7 @@ fn bench(c: &mut Criterion) {
                     rollup: &flat,
                     plan: &plan,
                     clock: Clock::utc(),
+                    values: &NO_VALUES,
                 },
                 &index,
             );
@@ -285,7 +300,15 @@ fn bench(c: &mut Criterion) {
             apply_scope(&s, &empty, &dims, Clock::utc()).expect("the empty scope applies");
         let chain0 = effective_chain(&[], &dims);
         let tree0 = rollup::build(&s, &visibility, &chain0, &dims, Clock::utc());
-        let index = GridIndex::build(&s, &tree0, &no_groups, &expansion, &plan, Clock::utc());
+        let index = GridIndex::build(
+            &s,
+            &tree0,
+            &no_groups,
+            &expansion,
+            &plan,
+            Clock::utc(),
+            &NO_VALUES,
+        );
         let mut window = WindowCache::default();
         g.bench_function("deliver_unchanged_structure_1000", |b| {
             b.iter_batched(
@@ -308,6 +331,7 @@ fn bench(c: &mut Criterion) {
                             rollup: &tree,
                             plan: &plan,
                             clock: Clock::utc(),
+                            values: &NO_VALUES,
                         },
                         &index,
                     );
@@ -352,6 +376,7 @@ fn bench(c: &mut Criterion) {
                 &expansion,
                 &plan,
                 Clock::utc(),
+                &NO_VALUES,
             ))
         })
     });
@@ -397,6 +422,7 @@ fn bench(c: &mut Criterion) {
                 &expansion,
                 &plan,
                 Clock::utc(),
+                &NO_VALUES,
             ))
         })
     });
@@ -412,10 +438,19 @@ fn bench(c: &mut Criterion) {
                 &expansion,
                 &plan,
                 Clock::utc(),
+                &NO_VALUES,
             ))
         })
     });
-    let index = GridIndex::build(&s, &tree, &groups, &expansion, &plan, Clock::utc());
+    let index = GridIndex::build(
+        &s,
+        &tree,
+        &groups,
+        &expansion,
+        &plan,
+        Clock::utc(),
+        &NO_VALUES,
+    );
     g.bench_function("window_fill_40_grouped", |b| {
         b.iter(|| {
             let mut window = WindowCache::default();
@@ -425,6 +460,7 @@ fn bench(c: &mut Criterion) {
                     rollup: &tree,
                     plan: &plan,
                     clock: Clock::utc(),
+                    values: &NO_VALUES,
                 },
                 &index,
             );
@@ -440,7 +476,15 @@ fn bench(c: &mut Criterion) {
             apply_scope(&s, &empty, &dims, Clock::utc()).expect("the empty scope applies");
         let chain0 = effective_chain(&levels, &dims);
         let tree0 = rollup::build(&s, &visibility, &chain0, &dims, Clock::utc());
-        let index = GridIndex::build(&s, &tree0, &groups, &expansion, &plan, Clock::utc());
+        let index = GridIndex::build(
+            &s,
+            &tree0,
+            &groups,
+            &expansion,
+            &plan,
+            Clock::utc(),
+            &NO_VALUES,
+        );
         let mut window = WindowCache::default();
         g.bench_function("deliver_unchanged_structure_1000_grouped", |b| {
             b.iter_batched(
@@ -463,6 +507,7 @@ fn bench(c: &mut Criterion) {
                             rollup: &tree,
                             plan: &plan,
                             clock: Clock::utc(),
+                            values: &NO_VALUES,
                         },
                         &index,
                     );
@@ -510,6 +555,7 @@ fn bench(c: &mut Criterion) {
                     &expansion,
                     &plan,
                     Clock::utc(),
+                    &NO_VALUES,
                 ))
             })
         });
@@ -541,6 +587,7 @@ fn bench(c: &mut Criterion) {
                     &expansion,
                     &plan,
                     Clock::utc(),
+                    &NO_VALUES,
                 ))
             })
         });

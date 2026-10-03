@@ -34209,6 +34209,49 @@ run_mutation "blotter: a find display under a new mapping drops its cells" \
   geode-blotter \
   a_find_display_under_a_new_mapping_drops_its_held_cells
 
+# A failed or stale cell keeps its state paint even when its value is colored.
+run_mutation "pricer: a state paint wins over a value color" \
+  crates/geode-pricer/src/paint.rs \
+  '    if !matches!(state, CellState::Own) {
+        return CellColour::State;
+    }
+    if value {' \
+  '    if value {' \
+  geode-pricer \
+  a_values_color_sits_between_the_state_paint_and_the_columns_color
+
+# Only an own value is looked up: `mixed` and blank are not values.
+run_mutation "pricer: only an own cell carries a value color" \
+  crates/geode-pricer/src/grid.rs \
+  '        let value_color = (t.state == CellState::Own)' \
+  '        let value_color = (true)' \
+  geode-pricer \
+  a_group_label_and_a_dimension_cell_carry_their_values_color
+
+# A group row's label is its value: the index carries its color.
+run_mutation "pricer: a group row carries its value color" \
+  crates/geode-pricer/src/grid.rs \
+  '                    .and_then(|_| self.values.get(column, label))' \
+  '                    .and_then(|_| None::<&Arc<str>>)' \
+  geode-pricer \
+  a_group_label_and_a_dimension_cell_carry_their_values_color
+
+# A reload's rebuild reads the factory's new mapping before building.
+run_mutation "pricer: a reloaded mapping reaches the prepared rows" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.colors = self.shared.colours.borrow().clone();' \
+  '' \
+  geode-pricer \
+  a_reloaded_mapping_reaches_the_prepared_rows
+
+# A value color on a group row's ground is floored like a named column color.
+run_mutation "pricer: a group label's value color is floored on its ground" \
+  crates/geode-pricer/src/delegate.rs \
+  '            (Some(c), Some(palette)) => self.on_ground(palette, c.base),' \
+  '            (Some(c), Some(_)) => c.base,' \
+  geode-pricer \
+  a_reloaded_mapping_reaches_the_prepared_rows
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

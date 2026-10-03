@@ -1468,6 +1468,19 @@ in the theme's bearish color and a positive one bullish, a named color from
 `colors.toml` tints the column and its header; a stale cell stays muted and a
 failed one danger whatever the column's color. Measures default to `sign`;
 a column says `color = "none"` to opt out.
+A dimension value that `value_colors` maps paints in that value's named
+color: a text dimension's cell showing an own value (`underlying_ref` on a
+line or leg, and a package or group row's agreed value), and a group row's
+label when the sheet is grouped by that dimension. The label matches the
+group's raw value, not the column's formatted spelling of it. Stale, failed,
+inherited, `mixed` and blank cells keep their state paint; otherwise the
+value's color wins over the column's own `color`, which wins over the
+foreground. A value has no sign, so a `tint_sign` color paints its base; on
+a leg's or a group row's ground it is floored as a named column color is.
+Measures, the line shorthand in column 0, headers and the selection footer
+are never value-colored. The name is looked up when the index is built and
+the window filled, not in render; a mapping or definitions reload rebuilds
+the index and refills the window under the new mapping.
 Result columns
 carry risk_snapshot's names — `npv`, `delta01`, `gamma01`, `vega01`,
 `rho010`, `clean_theta_business_day` and the rest — each with a `_usd` twin
