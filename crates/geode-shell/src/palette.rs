@@ -1095,6 +1095,19 @@ mod tests {
 
     // -- fuzzy_match indices ----------------------------------------------
 
+    /// Alignment scores only the columns between the first occurrence of
+    /// the query's first character and the last of its last. The last
+    /// character's earlier occurrences sit before the first one's here, so
+    /// a window cut at the earliest would lose the match.
+    #[test]
+    fn the_scoring_window_ends_at_the_last_char_s_last_occurrence() {
+        let (_, indices) = fuzzy_match("ab", "bab").unwrap();
+        assert_eq!(indices, vec![1, 2]);
+        let (_, indices) = fuzzy_match("ac", "c b a c").unwrap();
+        assert_eq!(indices, vec![4, 6]);
+        assert!(fuzzy_match("ba", "a b").is_none());
+    }
+
     #[test]
     fn indices_are_contiguous_for_a_prefix_match() {
         // "app" against "Apple Pie" (lowered "apple pie") matches

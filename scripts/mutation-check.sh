@@ -7088,21 +7088,170 @@ run_mutation "diagnostics page: hiding leaves the Levels popover open" \
 
 run_mutation "diagnostics leaf filter: dataset-only matching drops leaves" \
   crates/geode-diagnostics/src/prepared.rs \
-  '        if !dataset_matches && children.peek().is_none() {' \
+  '        if !dataset_matches && children.is_empty() {' \
   '        if !dataset_matches {' \
   geode-diagnostics data_filter_matches_leaf_fields_and_preserves_dataset_context
 
 run_mutation "diagnostics leaf filter: unrelated siblings remain visible" \
   crates/geode-diagnostics/src/prepared.rs \
-  '            .filter(|c| dataset_matches || partition_matches(c, &query))' \
-  '            .filter(|c| dataset_matches || !query.is_empty() || partition_matches(c, &query))' \
+  '                None => None,
+            })
+            .collect();
+        if !dataset_matches && children.is_empty() {' \
+  '                None => Some((c, ColumnMarks::default())),
+            })
+            .collect();
+        if !dataset_matches && children.is_empty() {' \
   geode-diagnostics data_filter_matches_leaf_fields_and_preserves_dataset_context
 
 run_mutation "diagnostics leaf filter: collapsed datasets hide matching leaves" \
   crates/geode-diagnostics/src/prepared.rs \
-  '        let expanded = !query.is_empty() || !collapsed.contains(&r.name);' \
+  '        let expanded = !narrow.is_empty() || !collapsed.contains(&r.name);' \
   '        let expanded = !collapsed.contains(&r.name);' \
   geode-diagnostics data_filter_input_reveals_collapsed_leaves_and_reset_restores_expansion
+
+# ---- the diagnostics page: fuzzy filters and their marks
+
+# A generation's fields map to the cells they paint in; a shuffled map
+# marks the wrong cell.
+run_mutation "diagnostics fuzzy: generation marks land in the wrong cells" \
+  crates/geode-diagnostics/src/prepared.rs \
+  'const PARTITION_CELLS: [usize; 6] = [0, 2, 3, 7, 4, 6];' \
+  'const PARTITION_CELLS: [usize; 6] = [0, 2, 3, 4, 7, 6];' \
+  geode-diagnostics the_data_filter_marks_dataset_names_and_generation_cells
+
+run_mutation "diagnostics fuzzy: a matching dataset name is not marked" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '                cell(name, tone).marked(dataset_marks.map(|mut m| m.take(0)).unwrap_or_default()),' \
+  '                cell(name, tone),' \
+  geode-diagnostics the_data_filter_marks_dataset_names_and_generation_cells
+
+run_mutation "diagnostics fuzzy: Sources ignores the Since clock text" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '                &r.since_hms,' \
+  '                "",' \
+  geode-diagnostics the_sources_filter_is_fuzzy_over_every_column_and_marks_cells
+
+run_mutation "diagnostics fuzzy: Sources ignores the Loading column" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '                &r.loading,' \
+  '                "",' \
+  geode-diagnostics the_sources_filter_is_fuzzy_over_every_column_and_marks_cells
+
+run_mutation "diagnostics fuzzy: issues stop matching their full text" \
+  crates/geode-diagnostics/src/prepared.rs \
+  '                    .chain(std::iter::once(r.full.as_str()))' \
+  '                    .chain(std::iter::empty())' \
+  geode-diagnostics the_issue_filter_matches_cells_and_detail_and_marks_cells_only
+
+run_mutation "diagnostics fuzzy: the Log stops matching time and level" \
+  crates/geode-diagnostics/src/model.rs \
+  '            let marks = narrow.row(&[&hms_millis, r.level.as_str(), r.target, &r.message])?;' \
+  '            let marks = narrow.row(&["", "", r.target, &r.message])?;' \
+  geode-diagnostics log_rows_narrow_fuzzily_over_every_column_after_level_and_target
+
+run_mutation "diagnostics fuzzy: key marks keep the hidden document prefix" \
+  crates/geode-diagnostics/src/model.rs \
+  '                        (shift_marks(marks.take(0), prefix), marks.take(1))' \
+  '                        (marks.take(0), marks.take(1))' \
+  geode-diagnostics config_docs_narrow_fuzzily_and_mark_keys_values_and_documents
+
+run_mutation "diagnostics fuzzy: a matching document name is not marked" \
+  crates/geode-diagnostics/src/model.rs \
+  '                .row(&[doc_name])' \
+  '                .row(&[""])' \
+  geode-diagnostics config_docs_narrow_fuzzily_and_mark_keys_values_and_documents
+
+# The typed text must reach the Log's narrowing through the input route.
+run_mutation "diagnostics fuzzy: the typed filter never reaches the Log" \
+  crates/geode-diagnostics/src/page.rs \
+  '                        self.log_filter.text = filter;' \
+  '                        self.log_filter.text = String::new();' \
+  geode-diagnostics typing_a_fuzzy_filter_narrows_in_order_and_marks_the_painted_cells
+
+run_mutation "diagnostics fuzzy: an expander shifts nothing" \
+  crates/geode-diagnostics/src/table.rs \
+  '                .map(|r| r.start + shift..r.end + shift)' \
+  '                .map(|r| r.start..r.end)' \
+  geode-diagnostics painted_marks_follow_the_expander
+
+run_mutation "diagnostics fuzzy: matches paint in raw primary" \
+  crates/geode-diagnostics/src/table.rs \
+  '            let accent = self.accent.get(theme);' \
+  '            let accent = theme.primary;' \
+  geode-diagnostics match_runs_take_the_table_accent
+
+run_mutation "diagnostics fuzzy: the accent memo ignores a theme change" \
+  crates/geode-diagnostics/src/table.rs \
+  '            Some((k, accent)) if k == key => accent,' \
+  '            Some((_, accent)) => accent,' \
+  geode-diagnostics the_accent_memo_follows_the_theme
+
+# ---- shell: order-keeping table narrowing and the table accent
+
+run_mutation "narrow: two words share a character in one column" \
+  crates/geode-shell/src/listfilter.rs \
+  '                let claims = if several && !self.placed[c].is_empty() {' \
+  '                let claims = if false {' \
+  geode-shell narrow_words_in_one_column_take_distinct_characters
+
+run_mutation "narrow: marks come back in placement order" \
+  crates/geode-shell/src/listfilter.rs \
+  '                placed.sort_unstable();' \
+  '                {}' \
+  geode-shell narrow_words_in_one_column_take_distinct_characters
+
+run_mutation "narrow: a word takes the first column it fits" \
+  crates/geode-shell/src/listfilter.rs \
+  '                if best.as_ref().is_none_or(|(s, _, _)| score > *s) {' \
+  '                if best.is_none() {' \
+  geode-shell narrow_places_a_word_in_its_best_column
+
+run_mutation "narrow: equal scores take the rightmost column" \
+  crates/geode-shell/src/listfilter.rs \
+  '                if best.as_ref().is_none_or(|(s, _, _)| score > *s) {' \
+  '                if best.as_ref().is_none_or(|(s, _, _)| score >= *s) {' \
+  geode-shell narrow_places_a_word_in_its_best_column
+
+run_mutation "narrow: a word matching nowhere keeps the row" \
+  crates/geode-shell/src/listfilter.rs \
+  '            let (_, c, indices) = best?;' \
+  '            let Some((_, c, indices)) = best else { continue };' \
+  geode-shell narrow_needs_every_word_somewhere
+
+run_mutation "narrow: ASCII columns keep their case" \
+  crates/geode-shell/src/listfilter.rs \
+  '                    lowered.push(ch.to_ascii_lowercase());' \
+  '                    lowered.push(ch);' \
+  geode-shell narrow_is_case_insensitive_both_ways
+
+run_mutation "narrow: placements leak into the next row" \
+  crates/geode-shell/src/listfilter.rs \
+  '            self.placed[c].clear();' \
+  '            {}' \
+  geode-shell narrow_scratch_does_not_leak_between_rows
+
+run_mutation "narrow: a blank query still builds per-column marks" \
+  crates/geode-shell/src/listfilter.rs \
+  '        if self.words.is_empty() {
+            return Some(ColumnMarks::default());
+        }' \
+  '        if false {
+            return Some(ColumnMarks::default());
+        }' \
+  geode-shell narrow_with_a_blank_query_keeps_every_row_unmarked
+
+run_mutation "palette: the scoring window ends at the last char's first occurrence" \
+  crates/geode-shell/src/palette.rs \
+  '    let hi = (0..m).rev().find(|&j| c[j] == q[n - 1] && free(j))?;' \
+  '    let hi = (0..m).find(|&j| c[j] == q[n - 1] && free(j))?;' \
+  geode-shell the_scoring_window_ends_at_the_last_char_s_last_occurrence
+
+run_mutation "listrow: the table accent is raw primary" \
+  crates/geode-shell/src/shell/listrow.rs \
+  '            readable_on(accent, ground, pole(ground))' \
+  '            accent' \
+  geode-shell the_table_accent_is_readable_on_every_table_ground
 
 
 run_mutation "diagnostics data: sources sorted best-first instead of worst-first" \
@@ -7244,7 +7393,7 @@ run_mutation "diagnostics log: the filter ignores level and target" \
             && self.target.as_deref().is_none_or(|t| t == r.target)' \
   '        true' \
   geode-diagnostics \
-  the_filter_gates_on_level_target_and_text
+  the_filter_gates_on_level_and_target
 
 run_mutation "diagnostics log: a notice row paints in the first column" \
   crates/geode-diagnostics/src/prepared.rs \

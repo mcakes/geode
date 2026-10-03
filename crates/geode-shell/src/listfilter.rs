@@ -341,6 +341,13 @@ mod tests {
             marks_of(&mut narrow, &["one two"]),
             Some(vec![vec![0..1, 6..7]])
         );
+        // "two" is placed first (longest), then "on" before it: the marks
+        // still come back in text order.
+        let mut narrow = Narrow::new("on two");
+        assert_eq!(
+            marks_of(&mut narrow, &["one two"]),
+            Some(vec![vec![0..2, 4..7]])
+        );
     }
 
     /// A word takes the column where it scores best; a contiguous prefix
