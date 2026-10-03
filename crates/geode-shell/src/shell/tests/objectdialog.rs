@@ -3043,6 +3043,51 @@ fn n_creates_a_view_on_enter_and_opens_its_edit_stage(cx: &mut gpui::TestAppCont
     );
 }
 
+/// `*` is the Groupings list's ad hoc row and nothing else: a view named
+/// `*` is an ordinary view. Its edits reach `views.toml`, and its `d` arms
+/// its own delete rather than forgetting the lane's ad hoc chain.
+#[gpui::test]
+fn a_view_named_star_is_an_ordinary_view(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+    let frame = shell.read_with(&cx, |s, _| s.frame().clone());
+    frame.update(&mut cx, |f, cx| {
+        f.shared_mut().set_ad_hoc(vec!["book".to_string()]);
+        cx.notify();
+    });
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    cx.simulate_input("*");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { object } if object == "*"
+    ));
+    let created = std::fs::read_to_string(dir.path().join("views.toml")).unwrap();
+    assert!(created.contains("[\"*\"]"), "{created}");
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let edited = std::fs::read_to_string(dir.path().join("views.toml")).unwrap();
+    assert_ne!(edited, created, "the edit reaches views.toml");
+    assert!(edited.contains("[\"*\"]"), "{edited}");
+
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert!(
+        dialog_state(&shell, &cx, |s| s.confirm.is_some()),
+        "d arms the view's own delete"
+    );
+    assert_eq!(
+        frame.read_with(&cx, |f, _| f.shared().ad_hoc().map(<[String]>::to_vec)),
+        Some(vec!["book".to_string()]),
+        "the lane's ad hoc chain is untouched"
+    );
+}
+
 /// Starting naming after filtering clears both the query state and the shared input.
 /// They are separate buffers, and programmatic input changes do not emit the event used
 /// for mirroring. A retained query must not become an invisible prefix on the new

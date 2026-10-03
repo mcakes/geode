@@ -200,7 +200,7 @@ pub(crate) fn crumb_text(shell: &ShellView) -> String {
     };
     match &state.stage {
         Stage::Edit { object } if state.domain == Domain::Groupings => {
-            if object == super::grouping_list::AD_HOC {
+            if super::grouping_list::is_ad_hoc(state.domain, object) {
                 "ad hoc".to_string()
             } else {
                 format!("ctrl+{object}")
@@ -2328,7 +2328,8 @@ fn in_column_stage(shell: &ShellView) -> bool {
 /// Whether the open edit stage is the lane's ad hoc chain.
 fn editing_ad_hoc(shell: &ShellView) -> bool {
     shell.object_dialog.as_ref().is_some_and(|state| {
-        matches!(&state.stage, Stage::Edit { object } if object == super::grouping_list::AD_HOC)
+        matches!(&state.stage, Stage::Edit { object }
+            if super::grouping_list::is_ad_hoc(state.domain, object))
     })
 }
 
@@ -3665,13 +3666,13 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 .child(
                     div()
                         .text_lg()
-                        .child(super::grouping_list::title_of(&draft.name)),
+                        .child(super::grouping_list::title_of(state.domain, &draft.name)),
                 )
                 .into_any_element()
         }
         _ => div()
             .text_lg()
-            .child(super::grouping_list::title_of(&draft.name))
+            .child(super::grouping_list::title_of(state.domain, &draft.name))
             .into_any_element(),
     };
 
@@ -4577,7 +4578,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // field names the object and the row it is editing.
     let filter = if let Some(entry) = draft.text_entry {
         let label = if entry.completions == Completions::Chain {
-            if draft.name == super::grouping_list::AD_HOC {
+            if super::grouping_list::is_ad_hoc(state.domain, &draft.name) {
                 "ad hoc · chain".to_string()
             } else {
                 format!("slot {} · chain", draft.name)

@@ -230,6 +230,13 @@ pub(super) fn finish_list_chain(
     if let Some(state) = shell.object_dialog.as_mut() {
         state.chain_from_list = false;
     }
+    // Both targets pass the same check: an untouched seed (a slot's chain as
+    // the frame holds it) was never checked against this field's vocabulary.
+    render::revalidate(shell);
+    if let Some(refusal) = super::apply::blocking_diagnostic(shell) {
+        render::set_notice(shell, refusal);
+        return;
+    }
     let n = match kind_of(&name) {
         Some(RowKind::Slot(n)) => n,
         Some(RowKind::AdHoc) => {
@@ -248,11 +255,6 @@ pub(super) fn finish_list_chain(
         }
         _ => return,
     };
-    render::revalidate(shell);
-    if let Some(refusal) = super::apply::blocking_diagnostic(shell) {
-        render::set_notice(shell, refusal);
-        return;
-    }
     if dirty && let Some(refusal) = super::apply::commit_edit(shell, cx) {
         render::set_notice(shell, refusal);
         return;
@@ -321,8 +323,12 @@ pub(super) fn commit_ad_hoc(shell: &mut ShellView, cx: &mut Context<ShellView>) 
     let Some(chain) = shell
         .object_dialog
         .as_ref()
-        .and_then(|state| state.draft.as_ref())
-        .filter(|draft| draft.name == AD_HOC)
+        .and_then(|state| {
+            state
+                .draft
+                .as_ref()
+                .filter(|draft| is_ad_hoc(state.domain, &draft.name))
+        })
         .map(super::groupings::ticked)
     else {
         return false;
@@ -436,9 +442,17 @@ pub fn has_chain(row: &ObjectRow) -> bool {
     }
 }
 
+/// Whether `name` in `domain` is the lane's ad hoc chain. Only Groupings
+/// has one: another domain accepts `*` as an ordinary object name, and
+/// treating that object as the ad hoc chain would drop its edits and turn
+/// its `d` into forgetting the lane's chain.
+pub fn is_ad_hoc(domain: super::Domain, name: &str) -> bool {
+    domain == super::Domain::Groupings && name == AD_HOC
+}
+
 /// How an edit stage names its object on screen.
-pub fn title_of(name: &str) -> String {
-    if name == AD_HOC {
+pub fn title_of(domain: super::Domain, name: &str) -> String {
+    if is_ad_hoc(domain, name) {
         "ad hoc".to_string()
     } else {
         name.to_string()

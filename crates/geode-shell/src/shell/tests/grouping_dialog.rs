@@ -798,6 +798,26 @@ fn r_in_the_ad_hoc_editor_is_refused(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn an_untouched_seed_the_field_cannot_check_is_refused_not_applied(cx: &mut gpui::TestAppContext) {
+    // The frame holds slot 2 as a chain no dataset column backs.
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.stage_slot(2, chain(&["nope"]));
+    });
+    cx.simulate_keystrokes("j j j i"); // row 3 is slot 2
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(is_open(&shell, &cx), "the refusal keeps the field open");
+    assert!(
+        notice(&shell, &cx).contains("nope"),
+        "{}",
+        notice(&shell, &cx)
+    );
+    assert_eq!(stored(&shell, &cx), None);
+    assert_eq!(choice(&shell, &cx), GroupingChoice::ViewDefault);
+}
+
+#[gpui::test]
 fn a_failed_slot_write_leaves_an_open_ad_hoc_editor_as_it_was(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx, dir) = open_dialog(cx);
     std::fs::write(dir.path().join("groupings.toml"), "3 = [\n").unwrap();
