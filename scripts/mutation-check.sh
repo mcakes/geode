@@ -18273,6 +18273,14 @@ run_mutation "scope dialog: saved expressions show applied" \
   geode-shell \
   scopes_then_expressions_each_in_name_order_with_applied_and_broken
 
+# A one-shot door's step must close the dialog, not leave an empty modal.
+run_mutation "scope dialog: an emptied stack closes" \
+  crates/geode-shell/src/shell/scopedialog/state.rs \
+  '        if self.layers.is_empty() {' \
+  '        if false {' \
+  geode-shell \
+  a_one_shot_step_closes_on_commit_and_on_escape
+
 # ---- Tile picker: placeholder double-click, tile::add and mod-n ----
 
 # Only a PLACEHOLDER's double-click is the door — a real tile's may
