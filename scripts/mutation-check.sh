@@ -31909,6 +31909,7 @@ run_mutation "volslice: the barrier sees one arrival for both documents" \
                         &underlying.clone(),
                         Ok(Arc::new(Fetched {
                             underlying,
+                            asked: self.following.acted(),
                             cvi,
                             chain: Ok(Vec::new()),
                         })),
