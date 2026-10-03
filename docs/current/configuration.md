@@ -694,10 +694,14 @@ no underlyings are configured.
 `payout_currency = "<dataset>.<column>"` names the reference column a new
 pricer line's payout currency defaults from, looked up by the line's
 underlying. When the key is absent it is `underlyings.currency` if the
-`underlyings` reference dataset declares a `currency` column, and otherwise
-nothing, without a diagnostic. An explicit value must split on one `.` into
-a declared reference dataset and one of its non-key columns; anything else,
-including a non-string value, is an error at `app.pricing.payout_currency`
+`underlyings` reference dataset is keyed by one column and declares a
+`currency` column of type `utf8`, and otherwise nothing, without a
+diagnostic. An explicit value must split on one `.` into a declared
+reference dataset keyed by exactly one column and one of its non-key `utf8`
+columns. A multi-column key never matches: a lookup joins its parts with
+`/`, and the pricer looks up by the underlying alone. A column of another
+type never parses as a currency code. Anything else, including a
+non-string value, is an error at `app.pricing.payout_currency`
 and resolves to nothing, so new lines get no currency rather than one read
 from a guessed column. The value is checked against the startup schema, the
 one the running service serves, because datasets are restart-required. A

@@ -23623,9 +23623,24 @@ run_mutation "pricer config key: payout_currency is not part of the key" \
 # A key column is the row identity, never a payout currency.
 run_mutation "pricer payout currency: a key column resolves" \
   crates/geode-app/src/bridge.rs \
-  '            .filter(|d| d.column(column).is_some() && !d.key.iter().any(|k| k == column))' \
-  '            .filter(|d| d.column(column).is_some())' \
+  '            .filter(|d| d.key.len() == 1 && d.key[0] != column)' \
+  '            .filter(|d| d.key.len() == 1)' \
   geode-app a_payout_currency_naming_the_key_column_is_an_error
+
+# A lookup joins a multi-column key with `/`; the pricer looks up by the
+# underlying alone, so a two-key dataset never matches a line.
+run_mutation "pricer payout currency: a multi-key dataset resolves" \
+  crates/geode-app/src/bridge.rs \
+  '            .filter(|d| d.key.len() == 1 && d.key[0] != column)' \
+  '            .filter(|d| !d.key.iter().any(|k| k == column))' \
+  geode-app a_payout_currency_in_a_multi_key_dataset_is_an_error
+
+# A column that is not text never parses as a currency code.
+run_mutation "pricer payout currency: a non-text column resolves" \
+  crates/geode-app/src/bridge.rs \
+  '            .filter(|d| d.column(column).is_some_and(|c| c.ty == ColumnType::Utf8))' \
+  '            .filter(|d| d.column(column).is_some())' \
+  geode-app a_payout_currency_naming_a_non_text_column_is_an_error
 
 # Only a reference dataset answers lookups by underlying.
 run_mutation "pricer payout currency: any dataset family resolves" \

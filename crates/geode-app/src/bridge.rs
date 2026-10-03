@@ -11,7 +11,7 @@ use geode_core::document::DocumentKind;
 use geode_core::egress_config;
 use geode_core::panel::{KindActionRegistry, PANELS_DOC, PanelSpec, load_panels, refusal};
 use geode_core::query::{AsOf, CatalogParams, DistinctOutcome, ReferenceOutcome, ReferenceParams};
-use geode_core::schema::SchemaSpec;
+use geode_core::schema::{ColumnType, SchemaSpec};
 use geode_core::source_config::{SourceShape, parse_duration};
 use geode_core::view::ViewSpec;
 use geode_data::adapter::AdapterRegistry;
@@ -486,10 +486,12 @@ const DEFAULT_PAYOUT_CURRENCY: (&str, &str) = ("underlyings", "currency");
 /// schema: datasets are restart-required, so it is the one the service
 /// serves on reload too. An absent key means `underlyings.currency` when
 /// that column exists, and quietly nothing when it does not (a desk without
-/// that dataset has not asked for it). A value naming anything but a
-/// non-key column of a declared reference dataset is an error and resolves
-/// to nothing rather than to a guessed column: new lines get no currency
-/// and say so, where a wrong column would price in a plausible wrong one.
+/// that dataset has not asked for it, nor when it is not a text column of
+/// a single-key dataset). A value naming anything but a non-key text column
+/// of a declared reference dataset keyed by one column is an error and
+/// resolves to nothing rather than to a guessed column: new lines get no
+/// currency and say so, where a wrong column would price in a plausible
+/// wrong one.
 pub fn pricing_payout_currency_from_config(
     config: &Config,
     schema: &SchemaSpec,
@@ -499,7 +501,12 @@ pub fn pricing_payout_currency_from_config(
             .datasets
             .iter()
             .find(|d| d.name == dataset && d.is_reference())
-            .filter(|d| d.column(column).is_some() && !d.key.iter().any(|k| k == column))
+            // A lookup joins a multi-column key with `/` and the pricer
+            // looks up by underlying alone, so only a single-key dataset
+            // ever matches; a column that is not text never parses as a
+            // code. Either would leave every line blank without saying why.
+            .filter(|d| d.key.len() == 1 && d.key[0] != column)
+            .filter(|d| d.column(column).is_some_and(|c| c.ty == ColumnType::Utf8))
             .map(|_| PayoutSource {
                 dataset: dataset.to_string(),
                 column: column.to_string(),
@@ -527,7 +534,7 @@ pub fn pricing_payout_currency_from_config(
             layer: config.explain("app", "pricing.payout_currency"),
             file: None,
             message: format!(
-                "[pricing] payout_currency = \"{shown}\" must name a reference dataset column, e.g. \"underlyings.currency\"; new lines get no currency"
+                "[pricing] payout_currency = \"{shown}\" must name a text column of a single-key reference dataset, e.g. \"underlyings.currency\"; new lines get no currency"
             ),
             path: Some("app.pricing.payout_currency".to_string()),
         }],
@@ -2282,8 +2289,8 @@ role = "attribute"
         assert_eq!(
             diags[0].message,
             format!(
-                "[pricing] payout_currency = \"{shown}\" must name a reference dataset column, \
-                 e.g. \"underlyings.currency\"; new lines get no currency"
+                "[pricing] payout_currency = \"{shown}\" must name a text column of a \
+                 single-key reference dataset, e.g. \"underlyings.currency\"; new lines get no currency"
             )
         );
     }
@@ -2322,6 +2329,63 @@ role = "attribute"
             "[pricing]\npayout_currency = \"underlyings.underlying_ref\"\n",
             "underlyings.underlying_ref",
         );
+    }
+
+    /// A lookup joins a multi-column key with `/` and the pricer looks up
+    /// by `underlying_ref` alone, so a column of a two-key dataset never
+    /// matches a line: refused, and quietly nothing for the absent key.
+    #[test]
+    fn a_payout_currency_in_a_multi_key_dataset_is_an_error() {
+        let mut schema = underlyings_schema();
+        schema.datasets[0].key.push("name".into());
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\npayout_currency = \"underlyings.currency\"\n"),
+            &schema,
+        );
+        assert_eq!(source, None);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("app.pricing.payout_currency")
+        );
+
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\nrefresh = \"10s\"\n"),
+            &schema,
+        );
+        assert_eq!(source, None, "the default needs a single key too");
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    /// A column that is not text never parses as a currency code: refused,
+    /// and quietly nothing for the absent key.
+    #[test]
+    fn a_payout_currency_naming_a_non_text_column_is_an_error() {
+        let mut schema = underlyings_schema();
+        for c in &mut schema.datasets[0].columns {
+            if c.name == "currency" {
+                c.ty = geode_core::schema::ColumnType::I64;
+            }
+        }
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\npayout_currency = \"underlyings.currency\"\n"),
+            &schema,
+        );
+        assert_eq!(source, None);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("app.pricing.payout_currency")
+        );
+
+        let (source, diags) = pricing_payout_currency_from_config(
+            &app_config("[pricing]\nrefresh = \"10s\"\n"),
+            &schema,
+        );
+        assert_eq!(source, None, "the default needs a text column too");
+        assert!(diags.is_empty(), "{diags:?}");
     }
 
     #[test]
