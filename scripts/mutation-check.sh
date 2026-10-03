@@ -32212,8 +32212,10 @@ run_mutation "keystroke parser: a user key no keyboard sends still binds" \
 
 run_mutation "keystroke parser: named keys lose a gpui name" \
   crates/geode-shell/src/keymap/keystroke.rs \
-  '    "pagedown",' \
-  '    "page_down",' \
+  '    "pageup",
+    "pagedown",' \
+  '    "pageup",
+    "page_down",' \
   geode-shell every_gpui_named_key_and_single_characters_parse
 
 if [[ -n "$changed_ref" ]]; then
