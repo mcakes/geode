@@ -2084,8 +2084,13 @@ row would reach legs another group paints. Both refuse cell edits (`i`,
 structural verbs `d`, `shift+j`/`shift+k`, `g p` and `g u` (keys, the `.`
 menu, `:package`, `:unpackage`), with `a grouping row: edit its lines` and
 `split package: edit its legs` in the footer; a package both split and
-partly hidden reads the split reason. A selection containing either refuses
-whole. A split package's legs, and the lines under a group, edit as usual.
+partly hidden reads the split reason. For structural verbs, a selection
+containing either refuses whole. A selection's typed commit or live step
+passes over open group rows and edits the lines it holds, across groups; a
+closed group row inside it refuses the edit whole with `a closed group: open
+it to edit its lines`, since its lines count in the totals but paint nowhere.
+A split package row inside it still refuses. A split package's legs, and the
+lines under a group, edit as usual.
 `y y` on a group row copies the shorthand of its lines, and a `V` selection
 over a group row totals and yanks its lines once, whether or not their rows
 are selected too. `y y` or `V y` on a split package row yanks that row's

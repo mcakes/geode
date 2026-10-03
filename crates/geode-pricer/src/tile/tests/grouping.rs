@@ -777,6 +777,60 @@ fn a_group_row_is_read_only_and_yanks_its_lines(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.sheet_len(&vcx), len);
 }
 
+/// A `V` selection spanning groups edits the lines it paints: the group
+/// rows between them have no line and are passed over, not refused.
+#[gpui::test]
+fn a_selection_across_groups_edits_its_lines(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    cursor_to(&h, &mut vcx, "NDX Z26 4000 P");
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C"); // over the SPX group row
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "4500");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None);
+    let tree = h.tree(&vcx);
+    for line in [
+        "NDX Z26 4500 P",
+        "SPX Z26 4500 C",
+        "-5 SPX Z26 4800/5200 CS",
+    ] {
+        assert!(tree.iter().any(|t| t == line), "{line}: {tree:?}");
+    }
+    assert_eq!(h.mode(&mut vcx), "normal");
+}
+
+/// A closed group inside the selection refuses the commit whole: its
+/// lines count in the totals but paint nowhere.
+#[gpui::test]
+fn a_selection_over_a_closed_group_refuses_its_edit(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 3000 P", "SPX Z26 4000 P", "SPX Z26 5000 P"]);
+    h.command(&mut vcx, "group strike").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    cursor_to(&h, &mut vcx, "4000");
+    h.dispatch(&mut vcx, "toggle", None);
+    cursor_to(&h, &mut vcx, "SPX Z26 3000 P");
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 P");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "3");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some(CLOSED_GROUP));
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.editor.is_some()),
+        "editor open"
+    );
+    assert_eq!(h.mode(&mut vcx), "insert");
+    assert!(
+        !h.tile.read_with(&vcx, |t, _| t.undo.can_undo()),
+        "nothing written"
+    );
+}
+
 /// A selection holding a group row and one of its descendants totals each
 /// leg once: the group row's total is its own sum, and adding the line
 /// beneath it changes nothing.

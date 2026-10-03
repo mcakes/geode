@@ -29027,6 +29027,21 @@ run_mutation "visual commit: marketdata untouched choice keeps the selection" \
   '            self.close_popup_with_window(window, cx);' \
   geode-marketdata an_untouched_choice_commit_over_a_selection_writes_nothing
 
+# A selection's edit passes over open group rows; a closed one refuses it.
+run_mutation "pricer selection: any group row refuses the edit" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    Some(GridRowKind::Group { open: false, .. })' \
+  '                    Some(GridRowKind::Group { .. })' \
+  geode-pricer a_selection_across_groups_edits_its_lines
+
+run_mutation "pricer selection: a closed group row is passed over" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        if self.selection_holds_closed_group() {
+            return Some(CLOSED_GROUP);
+        }' \
+  '' \
+  geode-pricer a_selection_over_a_closed_group_refuses_its_edit
+
 run_mutation "nemo: ids are not encoded" \
   crates/geode-nemo/src/lib.rs \
   '    format!("{prefix}{}", utf8_percent_encode(id, ID))' \
