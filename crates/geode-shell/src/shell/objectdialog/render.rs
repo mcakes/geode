@@ -67,6 +67,13 @@ use super::super::scale;
 const ROW_HEIGHT: f32 = 44.0;
 /// Rows visible before the list scrolls — see `palette::VISIBLE_ROWS`.
 const VISIBLE_ROWS: usize = 10;
+/// A Groupings row is one line: its number, then its chain. Measured at 23px
+/// on the design scale; rounded up so the eleventh row never clips.
+const GROUPING_ROW_HEIGHT: f32 = 24.0;
+/// The view default, the ad hoc row and nine slots, with no scrolling.
+const GROUPING_VISIBLE_ROWS: usize = 11;
+/// The lead column a row's number sits in, wide enough for one mono digit.
+const GROUPING_LEAD_WIDTH: f32 = 14.0;
 /// Target dialog content width in pixels — the keybinding dialog's, so
 /// the two modals are the same object on screen.
 const WIDTH: f32 = 640.0;
@@ -96,13 +103,25 @@ pub fn open(
         window,
         cx,
         dialog::DialogKind::Object,
-        domain.title(),
+        domain.dialog_title(),
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
         // This dialog's mode owns focus. Install its state before opening so shared
         // input synchronization sees Normal mode and blurs the input for command keys.
         false,
     );
+    // Open on the lane's current choice, so a bare `enter` changes nothing.
+    // The door above derived the rows, so the active row is already listed.
+    if domain.applies_from_browse() {
+        let active =
+            super::grouping_list::active_row(view.target_frame().read(cx).grouping_choice());
+        if let Some(state) = view.object_dialog.as_mut()
+            && let Some(ix) = state.rows.position(|row| row.name == active)
+        {
+            state.selected = ix;
+            view.object_dialog_scroll.scroll_to_item(ix);
+        }
+    }
     // the crumb plus the pill, sharing the same title-row slot every Geode modal has —
     // see `crumb_text`'s own doc for what the crumb says in each stage.
     dialog::set_title_extra(view, |shell, cx| {
@@ -180,7 +199,13 @@ pub(crate) fn crumb_text(shell: &ShellView) -> String {
         return String::new();
     };
     match &state.stage {
-        Stage::Edit { object } if state.domain == Domain::Groupings => format!("ctrl+{object}"),
+        Stage::Edit { object } if state.domain == Domain::Groupings => {
+            if object == super::grouping_list::AD_HOC {
+                "ad hoc".to_string()
+            } else {
+                format!("ctrl+{object}")
+            }
+        }
         Stage::Edit { .. } => String::new(),
         // The one crumb that is a PATH rather than a count or a chord:
         // the edit header still paints the object's name alone, so
@@ -191,7 +216,13 @@ pub(crate) fn crumb_text(shell: &ShellView) -> String {
         // Values stage is a projection over one column exactly as the column stage is.
         Stage::Values { object, column } => format!("{object} › {column}"),
         Stage::Browse | Stage::Naming => {
-            let n = state.rows.rows().len();
+            // The frame's leading rows are not objects of the domain.
+            let n = state
+                .rows
+                .rows()
+                .iter()
+                .filter(|row| !super::grouping_list::is_lead(&row.name))
+                .count();
             format!("{n} {}", state.domain.crumb_noun())
         }
     }
@@ -2481,7 +2512,17 @@ fn landing_rows(shell: &ShellView) -> Vec<ObjectRow> {
         return Vec::new();
     };
     match apply::config_with_pending(shell) {
-        Some(config) => state.domain.objects(&config),
+        // The leading rows come from the frame, not the config: carry over
+        // the ones already derived, so a position in this list is a position
+        // in the painted one.
+        Some(config) => state
+            .rows
+            .rows()
+            .iter()
+            .filter(|row| super::grouping_list::is_lead(&row.name))
+            .cloned()
+            .chain(state.domain.objects(&config))
+            .collect(),
         None => state.rows.rows().to_vec(),
     }
 }
@@ -3065,6 +3106,15 @@ fn build(
     // never repaired.
     #[cfg(debug_assertions)]
     shell.assert_rows_current(cx);
+    let one_line = state.domain.applies_from_browse();
+    let (row_height, visible_rows) = if one_line {
+        (GROUPING_ROW_HEIGHT, GROUPING_VISIBLE_ROWS)
+    } else {
+        (ROW_HEIGHT, VISIBLE_ROWS)
+    };
+    // Read once per build: which row stands for the lane's choice.
+    let active_row = one_line
+        .then(|| super::grouping_list::active_row(shell.target_frame().read(cx).grouping_choice()));
     let theme = cx.theme();
     // Copied out so the row closures below don't hold the `theme` borrow.
     let row_paint = super::super::listrow::row_paint(theme);
@@ -3090,7 +3140,7 @@ fn build(
         .id("objectdialog-list")
         .w(scale::design(WIDTH))
         .h(scale::design(
-            (state.rows.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
+            (state.rows.len().max(1) as f32 * row_height).min(visible_rows as f32 * row_height),
         ))
         .overflow_y_scroll()
         .track_scroll(&shell.object_dialog_scroll)
@@ -3122,17 +3172,49 @@ fn build(
             theme.muted_foreground,
             row_paint.accent,
         );
-        let label = v_flex().gap_0p5().child(head).child(
-            div()
-                .font_family(crate::fonts::MONO)
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(crate::palette::highlighted_runs(
-                    &text.secondary,
-                    &shown.secondary,
-                    row_paint.accent,
-                )),
-        );
+        let label = if one_line {
+            // A row with no chain (an empty slot, no ad hoc chain yet) reads muted.
+            let muted = !super::grouping_list::has_chain(row)
+                && row.name != super::grouping_list::VIEW_DEFAULT;
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .w(scale::design(GROUPING_LEAD_WIDTH))
+                        .font_family(crate::fonts::MONO)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(crate::palette::highlighted_runs(
+                            &text.primary,
+                            &shown.primary,
+                            row_paint.accent,
+                        )),
+                )
+                .child(
+                    div()
+                        .font_family(crate::fonts::MONO)
+                        .text_sm()
+                        .when(muted, |el| el.text_color(theme.muted_foreground))
+                        .child(crate::palette::highlighted_runs(
+                            &text.secondary,
+                            &shown.secondary,
+                            row_paint.accent,
+                        )),
+                )
+        } else {
+            v_flex().gap_0p5().child(head).child(
+                div()
+                    .font_family(crate::fonts::MONO)
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(crate::palette::highlighted_runs(
+                        &text.secondary,
+                        &shown.secondary,
+                        row_paint.accent,
+                    )),
+            )
+        };
 
         // Show the winning layer, user override, and drift markers. Unconfigured roster
         // entries have no winning layer and receive no fabricated provenance.
@@ -3166,6 +3248,34 @@ fn build(
                 Some(format!("objectdialog-drifted-{}", row.name)),
                 cx,
             ));
+        }
+        if one_line {
+            if row.name == super::grouping_list::VIEW_DEFAULT {
+                markers = markers.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(super::grouping_list::VIEW_DEFAULT_NOTE),
+                );
+            }
+            if row.name == super::grouping_list::AD_HOC && super::grouping_list::has_chain(row) {
+                markers = markers.child(dialog::badge(
+                    "ad hoc",
+                    theme.muted_foreground,
+                    theme.border,
+                    Some("objectdialog-adhoc".to_string()),
+                    cx,
+                ));
+            }
+            if active_row.as_deref() == Some(row.name.as_str()) {
+                markers = markers.child(dialog::badge(
+                    "active",
+                    theme.primary,
+                    theme.primary,
+                    Some("objectdialog-active".to_string()),
+                    cx,
+                ));
+            }
         }
 
         // a swatch before the label, resolved from this row's own saved color —
@@ -3484,10 +3594,17 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         cx,
                     ))
                 })
-                .child(div().text_lg().child(draft.name.clone()))
+                .child(
+                    div()
+                        .text_lg()
+                        .child(super::grouping_list::title_of(&draft.name)),
+                )
                 .into_any_element()
         }
-        _ => div().text_lg().child(draft.name.clone()).into_any_element(),
+        _ => div()
+            .text_lg()
+            .child(super::grouping_list::title_of(&draft.name))
+            .into_any_element(),
     };
 
     // The object header: its name, and the same two provenance markers
@@ -4392,7 +4509,11 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // field names the object and the row it is editing.
     let filter = if let Some(entry) = draft.text_entry {
         let label = if entry.completions == Completions::Chain {
-            format!("slot {} · chain", draft.name)
+            if draft.name == super::grouping_list::AD_HOC {
+                "ad hoc · chain".to_string()
+            } else {
+                format!("slot {} · chain", draft.name)
+            }
         } else {
             // Use the field label when the entry names a field; other row shapes use
             // the shared row label rather than assuming all entries are field rows.
