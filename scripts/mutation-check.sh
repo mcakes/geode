@@ -34125,6 +34125,23 @@ run_mutation "value colors: a non-text dimension is ignored" \
   geode-core \
   a_dimension_is_text_not_text_or_undeclared
 
+# None over a desk color must write `none`: removing the user key alone
+# would let the desk's color show again.
+run_mutation "value colors: None over a desk color writes none" \
+  crates/geode-core/src/colour/values.rs \
+  '            } else if state.lower.as_deref().is_some_and(|c| c != NO_COLOR) {' \
+  '            } else if false {' \
+  geode-core \
+  a_pick_becomes_the_smallest_user_layer_write
+
+# A user `none` over a desk color is no color, not the desk's.
+run_mutation "value colors: a user none clears the effective color" \
+  crates/geode-core/src/colour/values.rs \
+  '        .filter(|c| c != NO_COLOR);' \
+  '        ;' \
+  geode-core \
+  the_state_separates_the_user_entry_from_the_layers_below
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

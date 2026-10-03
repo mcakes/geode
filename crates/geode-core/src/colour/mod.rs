@@ -7,8 +7,8 @@ pub mod oklab;
 pub mod values;
 
 pub use values::{
-    DimensionColors, DimensionKind, ValueColors, check_value_colors, dimension_kind,
-    text_dimensions,
+    DimensionColors, DimensionKind, NO_COLOR, ValueColorState, ValueColors, ValuePick, ValueWrite,
+    check_value_colors, dimension_kind, text_dimensions, value_color_state, value_write,
 };
 
 use crate::config::{Diagnostic, MergedDoc, Severity, check_object_name};

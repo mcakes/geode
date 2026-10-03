@@ -5,7 +5,7 @@
 //! the color definitions, and the layer arithmetic behind the pick list.
 
 use crate::colour::{NamedColours, RESERVED_PREFIX};
-use crate::config::{Diagnostic, MergedDoc, Severity, VALUE_COLORS_DOC};
+use crate::config::{Diagnostic, Layer, LayerDoc, MergedDoc, Severity, VALUE_COLORS_DOC};
 use crate::dimensions::DerivedDimensions;
 use crate::schema::{ColumnRole, ColumnType, SchemaSpec};
 use std::collections::{BTreeMap, BTreeSet};
@@ -253,6 +253,104 @@ pub fn check_value_colors(
     (out, diags)
 }
 
+/// One value's entries as the layers hold them, raw (`"none"` included).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ValueColorState {
+    /// The color in force: the highest layer's entry, unless it is `none`.
+    pub effective: Option<String>,
+    /// The user layer's entry.
+    pub user: Option<String>,
+    /// The highest lower layer's entry (desk over builtin).
+    pub lower: Option<String>,
+}
+
+impl ValueColorState {
+    /// The lower layer's entry the user layer overrides with a different
+    /// one: what `Follow desk` would return to.
+    pub fn follow_desk(&self) -> Option<&str> {
+        match (&self.user, &self.lower) {
+            (Some(user), Some(lower)) if user != lower => Some(lower),
+            _ => None,
+        }
+    }
+}
+
+/// Read `dimension.value` from the unmerged `value_colors` layers, in
+/// merge order (`Config::layered_docs`). A non-string entry is no entry.
+pub fn value_color_state(layers: &[LayerDoc], dimension: &str, value: &str) -> ValueColorState {
+    let mut state = ValueColorState::default();
+    for doc in layers {
+        let Some(entry) = doc
+            .table
+            .get(dimension)
+            .and_then(|d| d.as_table())
+            .and_then(|d| d.get(value))
+            .and_then(|c| c.as_str())
+        else {
+            continue;
+        };
+        if doc.layer == Layer::User {
+            state.user = Some(entry.to_string());
+        } else {
+            state.lower = Some(entry.to_string());
+        }
+    }
+    state.effective = state
+        .user
+        .clone()
+        .or_else(|| state.lower.clone())
+        .filter(|c| c != NO_COLOR);
+    state
+}
+
+/// What the pick list offers for a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValuePick {
+    Color(String),
+    None,
+    FollowDesk,
+}
+
+/// What a pick does to the user layer's entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueWrite {
+    Set(String),
+    Remove,
+    Nothing,
+}
+
+/// The smallest user-layer change that makes `pick` the value's state. A
+/// pick that changes nothing writes nothing; `None` writes `"none"` only
+/// when a lower layer colors the value, since otherwise removing the user
+/// entry already clears it.
+pub fn value_write(state: &ValueColorState, pick: &ValuePick) -> ValueWrite {
+    match pick {
+        ValuePick::Color(name) => {
+            if state.effective.as_deref() == Some(name.as_str()) {
+                ValueWrite::Nothing
+            } else {
+                ValueWrite::Set(name.clone())
+            }
+        }
+        ValuePick::None => {
+            if state.effective.is_none() {
+                ValueWrite::Nothing
+            } else if state.lower.as_deref().is_some_and(|c| c != NO_COLOR) {
+                ValueWrite::Set(NO_COLOR.to_string())
+            } else {
+                ValueWrite::Remove
+            }
+        }
+        ValuePick::FollowDesk => {
+            if state.user.is_some() {
+                ValueWrite::Remove
+            } else {
+                ValueWrite::Nothing
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +551,97 @@ mod tests {
         // Without the documents, both are empty and nothing is said.
         let (empty, diags) = NamedColours::from_config(&crate::config::Config::default());
         assert!(empty.is_empty() && empty.values().is_empty() && diags.is_empty());
+    }
+
+    use crate::config::Layer;
+
+    fn layer(layer: Layer, text: &str) -> LayerDoc {
+        LayerDoc {
+            layer,
+            name: VALUE_COLORS_DOC.to_string(),
+            file: "value_colors.toml".into(),
+            table: text.parse().unwrap(),
+        }
+    }
+
+    fn state(desk: Option<&str>, user: Option<&str>) -> ValueColorState {
+        let entry = |c: &str| format!("[underlying_ref]\nSPX = \"{c}\"\n");
+        let mut layers = Vec::new();
+        if let Some(c) = desk {
+            layers.push(layer(Layer::Desk, &entry(c)));
+        }
+        if let Some(c) = user {
+            layers.push(layer(Layer::User, &entry(c)));
+        }
+        value_color_state(&layers, "underlying_ref", "SPX")
+    }
+
+    #[test]
+    fn the_state_separates_the_user_entry_from_the_layers_below() {
+        let s = state(Some("blue"), Some("teal"));
+        assert_eq!(s.user.as_deref(), Some("teal"));
+        assert_eq!(s.lower.as_deref(), Some("blue"));
+        assert_eq!(s.effective.as_deref(), Some("teal"));
+        assert_eq!(s.follow_desk(), Some("blue"));
+
+        let s = state(Some("blue"), Some("none"));
+        assert_eq!(s.effective, None, "the user cleared the desk's color");
+        assert_eq!(s.follow_desk(), Some("blue"));
+
+        let s = state(Some("blue"), None);
+        assert_eq!(s.effective.as_deref(), Some("blue"));
+        assert_eq!(s.follow_desk(), None, "nothing to follow back to");
+
+        let s = state(None, Some("teal"));
+        assert_eq!(s.follow_desk(), None, "no lower entry");
+        let s = state(Some("teal"), Some("teal"));
+        assert_eq!(s.follow_desk(), None, "the same as the desk");
+        assert_eq!(state(None, None), ValueColorState::default());
+    }
+
+    #[test]
+    fn a_pick_becomes_the_smallest_user_layer_write() {
+        use ValuePick as P;
+        use ValueWrite as W;
+        let blue = || P::Color("blue".into());
+        // A color: set it, unless it is already the effective one.
+        assert_eq!(
+            value_write(&state(None, None), &blue()),
+            W::Set("blue".into())
+        );
+        assert_eq!(
+            value_write(&state(Some("teal"), None), &blue()),
+            W::Set("blue".into())
+        );
+        assert_eq!(value_write(&state(Some("blue"), None), &blue()), W::Nothing);
+        assert_eq!(value_write(&state(None, Some("blue")), &blue()), W::Nothing);
+        // None: `none` only when a lower layer colors it; else just remove.
+        assert_eq!(
+            value_write(&state(Some("blue"), None), &P::None),
+            W::Set("none".into())
+        );
+        assert_eq!(
+            value_write(&state(Some("blue"), Some("teal")), &P::None),
+            W::Set("none".into())
+        );
+        assert_eq!(value_write(&state(None, Some("teal")), &P::None), W::Remove);
+        assert_eq!(
+            value_write(&state(Some("none"), Some("teal")), &P::None),
+            W::Remove
+        );
+        assert_eq!(value_write(&state(None, None), &P::None), W::Nothing);
+        assert_eq!(
+            value_write(&state(Some("blue"), Some("none")), &P::None),
+            W::Nothing
+        );
+        // Follow desk: drop the user entry, if there is one.
+        assert_eq!(
+            value_write(&state(Some("blue"), Some("teal")), &P::FollowDesk),
+            W::Remove
+        );
+        assert_eq!(
+            value_write(&state(Some("blue"), None), &P::FollowDesk),
+            W::Nothing
+        );
     }
 }
