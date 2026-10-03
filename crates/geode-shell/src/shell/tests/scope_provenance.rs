@@ -93,6 +93,68 @@ fn a_pinned_record_without_provenance_does_not_inherit_the_shared_lanes(
     );
 }
 
+/// Loading the scope already in force changes only the lane's provenance,
+/// which advances the frame generation. Observers keyed on that generation
+/// (the Grouping dialog's prepared rows) must hear about it, or the next
+/// paint finds them stale.
+#[gpui::test]
+fn loading_the_scope_in_force_notifies_the_frames_observers(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.shared_mut()
+            .set_scope(geode_core::scope::Scope::one("book", "BK001"));
+        cx.notify();
+    });
+    dispatch_action(&shell, "frame::grouping", &mut vcx);
+    vcx.run_until_parked();
+
+    let notified = std::rc::Rc::new(std::cell::Cell::new(0));
+    let seen = notified.clone();
+    let _watch = vcx.update(|_, cx| cx.observe(&frame, move |_, _| seen.set(seen.get() + 1)));
+    dispatch_action(&shell, "scope::eu", &mut vcx);
+    vcx.run_until_parked();
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+
+    assert_eq!(shared_source(&frame, &vcx), Some("eu".to_string()));
+    assert!(
+        notified.get() > 0,
+        "the provenance change was never announced"
+    );
+}
+
+/// Clearing a scope that is already empty still forgets its provenance, and
+/// observers must hear that too.
+#[gpui::test]
+fn clearing_an_empty_scope_with_a_source_notifies_the_frames_observers(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.shared_mut().load_scope("eu").unwrap();
+        f.shared_mut()
+            .set_scope(geode_core::scope::Scope::default());
+        cx.notify();
+    });
+    vcx.run_until_parked();
+
+    let notified = std::rc::Rc::new(std::cell::Cell::new(0));
+    let seen = notified.clone();
+    let _watch = vcx.update(|_, cx| cx.observe(&frame, move |_, _| seen.set(seen.get() + 1)));
+    dispatch_action(&shell, "frame::scope_clear", &mut vcx);
+    vcx.run_until_parked();
+
+    assert_eq!(shared_source(&frame, &vcx), None);
+    assert!(
+        notified.get() > 0,
+        "the provenance change was never announced"
+    );
+}
+
 #[gpui::test]
 fn the_session_snapshot_carries_the_lanes_provenance(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

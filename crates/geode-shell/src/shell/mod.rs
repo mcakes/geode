@@ -1965,8 +1965,11 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) -> Result<bool, String> {
         self.target_frame().update(cx, |f, cx| {
+            let before = f.generation();
             let loaded = f.load_scope(name);
-            if let Ok(true) = loaded {
+            // Loading the scope in force changes only the lane's provenance;
+            // observers keyed on the generation still have to hear it.
+            if f.generation() != before {
                 cx.notify();
             }
             loaded

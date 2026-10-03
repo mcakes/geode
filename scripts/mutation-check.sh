@@ -4868,8 +4868,8 @@ run_mutation "palette: out-of-order words claim distinct characters" \
 
 run_mutation "palette: selecting a saved scope loads it" \
   crates/geode-shell/src/shell/palette_ctl.rs \
-  '                    if let Ok(true) = f.load_scope(&name) {' \
-  '                    if let Ok(true) = f.load_scope("no-such-scope") {' \
+  '                let _ = self.load_saved_scope(&name, cx);' \
+  '                let _ = self.load_saved_scope("no-such-scope", cx);' \
   geode-shell a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it
 
 # Category matches have a lower weight than title matches. Without the
@@ -18280,6 +18280,50 @@ run_mutation "scope dialog: an emptied stack closes" \
   '        if false {' \
   geode-shell \
   a_one_shot_step_closes_on_commit_and_on_escape
+
+# A successful save makes the saved name the lane's source.
+run_mutation "scope dialog: a save records its name" \
+  crates/geode-shell/src/frame.rs \
+  '        self.set_loaded_from(Some(name.to_string()));
+        Ok(())' \
+  '        Ok(())' \
+  geode-shell \
+  loading_and_saving_a_scope_record_its_name_and_clearing_forgets_it
+
+# Clearing the lane forgets its source.
+run_mutation "scope dialog: clearing the lane forgets its source" \
+  crates/geode-shell/src/frame.rs \
+  '        if following.is_none() {
+            self.set_loaded_from(None);
+        }' \
+  '' \
+  geode-shell \
+  loading_and_saving_a_scope_record_its_name_and_clearing_forgets_it
+
+# A pinned lane starts from the shared lane's source.
+run_mutation "scope dialog: pinning copies the source" \
+  crates/geode-shell/src/frame.rs \
+  '            loaded_from: self.loaded_from.clone(),' \
+  '            loaded_from: None,' \
+  geode-shell \
+  pinning_copies_the_provenance_and_the_lanes_then_diverge
+
+# A load that changes only the source must still notify the frame's
+# observers, or the Grouping dialog's prepared rows go stale under it.
+run_mutation "scope dialog: a source-only load notifies" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            if f.generation() != before {' \
+  '            if false {' \
+  geode-shell \
+  loading_the_scope_in_force_notifies_the_frames_observers
+
+# Clearing an empty scope that still names a source must notify.
+run_mutation "scope dialog: a source-only clear notifies" \
+  crates/geode-shell/src/shell/input.rs \
+  '                if f.generation() != before {' \
+  '                if false {' \
+  geode-shell \
+  clearing_an_empty_scope_with_a_source_notifies_the_frames_observers
 
 # ---- Tile picker: placeholder double-click, tile::add and mod-n ----
 
