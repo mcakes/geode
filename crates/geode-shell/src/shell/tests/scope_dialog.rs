@@ -732,3 +732,95 @@ fn escape_leaves_the_text_step_without_a_change(cx: &mut gpui::TestAppContext) {
     vcx.simulate_keystrokes("escape");
     assert_eq!(shell.read_with(&vcx, |s, _| s.top_kind()), None);
 }
+
+/// The rows painted under the text step are not controls: a double-click on
+/// any of them (the text row's own `enter` re-opens the step; a dimension's
+/// opens the picker) leaves the typed text, the one step layer and the
+/// lane alone, so one `enter` commits the typing and returns to Current.
+#[gpui::test]
+fn rows_under_the_text_step_ignore_the_pointer(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(
+        cx,
+        Scope {
+            dimensions: vec![DimensionSelection {
+                column: "book".into(),
+                values: vec!["BK001".into()],
+            }],
+            text: Some("dec".into()),
+            ..Scope::default()
+        },
+    );
+    vcx.simulate_keystrokes("t");
+    vcx.simulate_input("x");
+    draw(&mut vcx);
+    for selector in ["scope-dialog-row-0", "scope-dialog-row-1"] {
+        let row = vcx.debug_bounds(selector).expect("the row paints");
+        super::double_click(&mut vcx, row.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        draw(&mut vcx);
+    }
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope),
+        "no step opened over the typing"
+    );
+    let typed = shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(typed, "decx", "the typing survives");
+    vcx.simulate_input("y");
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(lane_scope(&shell, &vcx).text.as_deref(), Some("decxy"));
+    assert!(
+        vcx.debug_bounds("scope-dialog-text-field").is_none(),
+        "one enter leaves the one step"
+    );
+    assert_eq!(lane_scope(&shell, &vcx).sole("book"), Some("BK001"));
+}
+
+/// The scope bar's `+` is the Scope dialog's pointer door; it holds its
+/// pressed fill while the dialog is up.
+#[gpui::test]
+fn the_plus_chip_opens_the_scope_dialog_and_stays_pressed(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services());
+    let shell = shell_of(&window, &mut vcx);
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-pick-chip-open").is_none());
+    let plus = vcx
+        .debug_bounds("scope-pick-chip")
+        .expect("the + chip paints");
+    vcx.simulate_click(plus.center(), gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+    assert!(vcx.debug_bounds("scope-pick-chip-open").is_some());
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-pick-chip-open").is_none());
+}
+
+/// Hovering the `+` names the Scope dialog and `frame::scope`'s chord.
+#[gpui::test]
+fn hovering_the_plus_chip_names_the_scope_chord(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services());
+    let _shell = shell_of(&window, &mut vcx);
+    draw(&mut vcx);
+    let plus = vcx
+        .debug_bounds("scope-pick-chip")
+        .expect("the + chip paints");
+    vcx.simulate_mouse_move(
+        plus.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("tip-scope-pick-chip").is_some());
+    assert!(
+        vcx.debug_bounds("tip-scope-pick-chip-chord-alt+o")
+            .is_some(),
+        "the tip names frame::scope's chord"
+    );
+}

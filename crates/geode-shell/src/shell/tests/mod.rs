@@ -651,7 +651,6 @@ pub(super) fn config_with_mod(mod_key: &str) -> Config {
     })
 }
 
-mod addfilter;
 mod adhoc_grouping;
 mod asof;
 mod autosize;

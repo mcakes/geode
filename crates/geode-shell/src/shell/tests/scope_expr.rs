@@ -1242,3 +1242,223 @@ fn a_revealed_field_asks_again_for_the_values_a_covering_dialog_may_have_replace
     assert_ne!(again.tag, first);
     assert_eq!((again.key, again.column.as_str()), (EXPR_KEY, "book"));
 }
+
+// ---- Expression terms on the scope bar and the add/clear actions ----
+
+fn terms(frame: &Entity<crate::frame::Frame>, vcx: &gpui::VisualTestContext) -> Vec<String> {
+    frame.read_with(vcx, |f, _| {
+        f.shared()
+            .scope()
+            .expression
+            .as_ref()
+            .map(|e| e.conjuncts().iter().map(|t| t.to_string()).collect())
+            .unwrap_or_default()
+    })
+}
+
+fn modal_title(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Option<String> {
+    shell.read_with(vcx, |s, _| s.top_modal().map(|m| m.title.to_string()))
+}
+
+fn dialog_text(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> String {
+    shell.read_with(vcx, |s, cx| s.dialog_input.read(cx).value().to_string())
+}
+
+/// A shell whose frame carries `expr`, painted once.
+fn shell_with_expr(
+    cx: &mut gpui::TestAppContext,
+    expr: &str,
+) -> (
+    Entity<ShellView>,
+    Entity<crate::frame::Frame>,
+    gpui::VisualTestContext,
+) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(expr_scope(expr));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    (shell, frame, vcx)
+}
+
+fn click(vcx: &mut gpui::VisualTestContext, selector: &'static str) {
+    let bounds = vcx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} paints"));
+    vcx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+}
+
+/// Each `and` term is its own chip; a click on a term's `×` drops that
+/// term alone and does NOT open the dialog its body opens.
+#[gpui::test]
+fn a_terms_close_glyph_drops_only_that_term(cx: &mut gpui::TestAppContext) {
+    let (shell, frame, mut vcx) = shell_with_expr(cx, "a = 1 and b = 2 and c = 3");
+    for sel in [
+        "scope-expr-chip-0",
+        "scope-expr-chip-1",
+        "scope-expr-chip-2",
+    ] {
+        assert!(vcx.debug_bounds(sel).is_some(), "{sel} paints");
+    }
+    click(&mut vcx, "scope-expr-chip-close-1");
+    assert_eq!(terms(&frame, &vcx), vec!["a = 1", "c = 3"]);
+    assert!(
+        shell.read_with(&vcx, |s, _| !s.modal_open()
+            && s.scope_expr_dialog.is_none()),
+        "dropping a term must not also open the dialog its body opens"
+    );
+    assert!(vcx.debug_bounds("scope-expr-chip-2").is_none());
+    dispatch_action(&shell, "frame::scope_undo", &mut vcx);
+    assert_eq!(
+        terms(&frame, &vcx),
+        vec!["a = 1", "b = 2", "c = 3"],
+        "the drop went through set_scope"
+    );
+}
+
+/// A click on a term's body opens the dialog seeded with that term
+/// alone; typing after the click lands, and `enter` replaces only it.
+#[gpui::test]
+fn a_terms_body_edits_that_term_alone(cx: &mut gpui::TestAppContext) {
+    let (shell, frame, mut vcx) = shell_with_expr(cx, "a = 1 and b = 2 and c = 3");
+    click(&mut vcx, "scope-expr-chip-1");
+    assert_eq!(
+        modal_title(&shell, &vcx).as_deref(),
+        Some("Edit scope term")
+    );
+    assert_eq!(dialog_text(&shell, &vcx), "b = 2", "seeded with the term");
+    assert!(
+        vcx.debug_bounds("scope-expr-note").is_some(),
+        "the term note"
+    );
+    vcx.simulate_input(" or x = 9");
+    vcx.run_until_parked();
+    assert_eq!(
+        dialog_text(&shell, &vcx),
+        "b = 2 or x = 9",
+        "typing after the click reaches the field"
+    );
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+    assert_eq!(
+        terms(&frame, &vcx),
+        vec!["a = 1", "(b = 2) or (x = 9)", "c = 3"]
+    );
+}
+
+/// If the scope loses the term while its dialog is open, `enter` refuses
+/// inline instead of editing whichever term now has that index.
+#[gpui::test]
+fn a_term_gone_at_commit_refuses_inline(cx: &mut gpui::TestAppContext) {
+    let (shell, frame, mut vcx) = shell_with_expr(cx, "a = 1 and b = 2");
+    click(&mut vcx, "scope-expr-chip-1");
+    frame.update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(expr_scope("a = 1"));
+        cx.notify();
+    });
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()), "stays open");
+    assert!(vcx.debug_bounds("scope-expr-error").is_some());
+    assert_eq!(terms(&frame, &vcx), vec!["a = 1"], "nothing edited");
+}
+
+/// The scope is replaced underneath with the SAME number of terms: index
+/// 1 still exists but holds a different term, so both an edit and an
+/// empty (removing) commit refuse inline rather than touch `y = 2`.
+#[gpui::test]
+fn a_term_replaced_underneath_refuses_edit_and_removal(cx: &mut gpui::TestAppContext) {
+    let (shell, frame, mut vcx) = shell_with_expr(cx, "a = 1 and b = 2");
+    click(&mut vcx, "scope-expr-chip-1");
+    frame.update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(expr_scope("x = 1 and y = 2"));
+        cx.notify();
+    });
+    vcx.simulate_input(" or z = 3");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()), "stays open");
+    assert!(vcx.debug_bounds("scope-expr-error").is_some());
+    assert_eq!(
+        terms(&frame, &vcx),
+        vec!["x = 1", "y = 2"],
+        "nothing edited"
+    );
+
+    vcx.update(|window, cx| {
+        let input = shell.read(cx).dialog_input.clone();
+        input.update(cx, |i, cx| i.set_value("", window, cx));
+    });
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()), "stays open");
+    assert_eq!(
+        terms(&frame, &vcx),
+        vec!["x = 1", "y = 2"],
+        "an empty commit does not remove the other term"
+    );
+}
+
+/// The palette actions: `frame::add_expression` opens the add dialog
+/// (empty, joined with `and`), and `frame::clear_expression` drops the
+/// whole layer undoably.
+#[gpui::test]
+fn the_add_and_clear_expression_actions(cx: &mut gpui::TestAppContext) {
+    let (shell, frame, mut vcx) = shell_with_expr(cx, "a = 1");
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
+    assert_eq!(
+        modal_title(&shell, &vcx).as_deref(),
+        Some("Add scope expression")
+    );
+    assert!(dialog_filter_is_focused(&shell, &mut vcx));
+    assert_eq!(dialog_text(&shell, &vcx), "");
+    vcx.simulate_input("b = 2");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(terms(&frame, &vcx), vec!["a = 1", "b = 2"]);
+
+    dispatch_action(&shell, "frame::clear_expression", &mut vcx);
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().scope().expression.clone()),
+        None
+    );
+    dispatch_action(&shell, "frame::scope_undo", &mut vcx);
+    assert_eq!(terms(&frame, &vcx), vec!["a = 1", "b = 2"]);
+
+    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    assert_eq!(
+        modal_title(&shell, &vcx).as_deref(),
+        Some("Scope expression")
+    );
+    assert_eq!(
+        dialog_text(&shell, &vcx),
+        "(a = 1) and (b = 2)",
+        "scope_expression keeps whole mode"
+    );
+}
+
+/// `mod+x` (alt under the test alias) opens the add dialog as `mod+p` opens the
+/// dimension picker.
+#[gpui::test]
+fn mod_x_opens_the_add_expression_dialog(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("alt-x");
+    vcx.run_until_parked();
+    assert_eq!(
+        modal_title(&shell, &vcx).as_deref(),
+        Some("Add scope expression")
+    );
+    vcx.simulate_input("npv");
+    vcx.run_until_parked();
+    assert_eq!(
+        dialog_text(&shell, &vcx),
+        "npv",
+        "the field takes the typing"
+    );
+}

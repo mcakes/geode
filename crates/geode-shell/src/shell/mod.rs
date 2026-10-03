@@ -4,7 +4,6 @@
 //! input routing, persistence, and occupant lifecycle live in sibling modules.
 
 mod add_tile;
-pub mod addfilter;
 pub mod aggregates;
 pub mod asof_rows;
 pub mod asof_view;
@@ -725,15 +724,10 @@ pub struct ShellView {
     /// `notice`), and dropped by `render`'s generic staleness check when
     /// its tile stops being the focused member.
     stack_list: Option<stacklist::StackList>,
-    /// The scope bar's open "Add a filter" menu, or `None` when closed.
-    /// Owns the keyboard while open (`handle_key_down`'s own branch),
-    /// closed by any dispatch (which is also how a row commits), by the
-    /// palette or a dialog opening, and by a click outside it.
-    add_filter_menu: Option<addfilter::AddFilterMenu>,
     /// The row menu (`tile::context_menu`), or `None` when closed. Owns
-    /// the keyboard while open, as `add_filter_menu` does, and closes the
-    /// same ways: any dispatch, the palette or a dialog opening, a press
-    /// outside it.
+    /// the keyboard while open (`handle_key_down`'s own branch) and
+    /// closes on any dispatch, the palette or a dialog opening, or a
+    /// press outside it.
     row_menu: Option<row_menu::RowMenu>,
     /// Reusable storage for the per-frame tile diff. Each reconciliation
     /// clears and refills it, retaining capacity between renders.
@@ -1574,7 +1568,6 @@ impl ShellView {
             focused_sent: None,
             notice: None,
             stack_list: None,
-            add_filter_menu: None,
             row_menu: None,
             scratch_all_tiles: HashSet::new(),
             scratch_active_tiles: HashSet::new(),

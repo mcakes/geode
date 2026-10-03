@@ -8360,7 +8360,7 @@ run_mutation "expr-chips: the add dialog appends rather than replaces" \
   '                scope.expression = Some(crate::frame::and_join(scope.expression.take(), term));' \
   '                scope.expression = Some(term);' \
   geode-shell \
-  the_plus_menus_expression_row_appends_with_and
+  the_add_and_clear_expression_actions
 
 # A term chip's body opens the dialog on that term, not the whole.
 run_mutation "expr-chips: a term chip opens term mode" \
@@ -8390,94 +8390,40 @@ run_mutation "expr-chips: the term × occludes the chip body" \
   geode-shell \
   a_terms_close_glyph_drops_only_that_term
 
-# The menu's click catcher occludes: without it the closing press also
-# reaches what is beneath (the grouping readout opens the Grouping dialog).
-run_mutation "add-filter: an outside press closes the menu and goes no further" \
-  crates/geode-shell/src/shell/render.rs \
-  '                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())
-                        .occlude()' \
-  '                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())' \
-  geode-shell \
-  a_click_outside_the_menu_closes_it_and_goes_no_further
-
-# `j` moves the highlight.
-run_mutation "add-filter: j moves the highlight" \
-  crates/geode-shell/src/shell/addfilter.rs \
-  '            "j" | "down" => step(menu, 1),' \
-  '            "j" | "down" => step(menu, 0),' \
-  geode-shell \
-  the_plus_menu_answers_j_k_enter_and_escape
-
 # `frame::clear_expression` drops the layer.
-run_mutation "add-filter: clear_expression drops the expression" \
+run_mutation "expr-chips: clear_expression drops the expression" \
   crates/geode-shell/src/shell/input.rs \
   '                if f.clear_expression() {' \
   '                if false {' \
   geode-shell \
   the_add_and_clear_expression_actions
 
-# Opening the menu takes the root's focus, so it records whether the
-# scope text field held focus first; without the record nothing returns.
-run_mutation "add-filter: the menu records the text field's focus at open" \
-  crates/geode-shell/src/shell/addfilter.rs \
-  '        let return_to_filter = self.filter_field_focused(window, cx);' \
-  '        let return_to_filter = false;' \
-  geode-shell \
-  focus_returns_to_the_text_field_after_the_menu
-
-# The menu's own close (escape, outside press) returns focus to the field.
-run_mutation "add-filter: the menu's own close returns focus to the field" \
-  crates/geode-shell/src/shell/addfilter.rs \
-  '        self.overlay_return_to_filter = menu.return_to_filter;
-        self.return_focus_from_overlay(window, cx);' \
-  '        self.overlay_return_to_filter = false;
-        self.return_focus_from_overlay(window, cx);' \
-  geode-shell \
-  focus_returns_to_the_text_field_after_the_menu
-
-# A row's dialog recorded the root as its origin; the commit hands it the
-# menu's record so closing that dialog returns to the field.
-run_mutation "add-filter: a row's dialog returns focus to the field" \
-  crates/geode-shell/src/shell/addfilter.rs \
-  '            if self.modal_open() {
-                self.overlay_return_to_filter = true;' \
-  '            if self.modal_open() {
-                self.overlay_return_to_filter = false;' \
-  geode-shell \
-  focus_returns_to_the_text_field_after_the_menu
-
-# The catcher swallows every button, so every button must close the menu.
-run_mutation "add-filter: any button outside closes the menu" \
+# The scope bar's + is the Scope dialog's pointer door.
+run_mutation "scope dialog: + opens the dialog" \
   crates/geode-shell/src/shell/render.rs \
-  '                        .on_any_mouse_down(cx.listener(|view, _event, window, cx| {' \
-  '                        .on_mouse_down(MouseButton::Left, cx.listener(|view, _event, window, cx| {' \
+  '                super::scopedialog::view::open(view, window, cx);' \
+  '' \
   geode-shell \
-  any_button_outside_the_menu_closes_it
+  the_plus_chip_opens_the_scope_dialog_and_stays_pressed
 
-# A chord prefix typed while the menu was open must not outlive it.
-run_mutation "add-filter: closing the menu cancels a pending sequence" \
-  crates/geode-shell/src/shell/addfilter.rs \
-  '        self.matcher.cancel();
-        self.overlay_return_to_filter = menu.return_to_filter;' \
-  '        self.overlay_return_to_filter = menu.return_to_filter;' \
-  geode-shell \
-  closing_the_menu_cancels_a_pending_sequence
-
-# The palette opening over the menu closes it.
-run_mutation "add-filter: the palette toggle closes the menu" \
-  crates/geode-shell/src/shell/palette_ctl.rs \
-  '        self.close_add_filter_menu(cx);' \
-  '        let _ = &self.add_filter_menu;' \
-  geode-shell \
-  the_palette_toggle_closes_the_menu
-
-# The `+` holds its pressed fill (and its open marker) while the menu is up.
-run_mutation "add-filter: the + holds its pressed fill while open" \
+# The `+` holds its pressed fill (and its open marker) while the dialog is up.
+run_mutation "scope dialog: the + holds its pressed fill while open" \
   crates/geode-shell/src/shell/toolbar.rs \
-  '                    add_open.then_some("scope-pick-chip-open"),' \
-  '                    None,' \
+  '            scope_dialog_open.then_some("scope-pick-chip-open"),' \
+  '            None,' \
   geode-shell \
-  the_plus_holds_its_pressed_fill_while_the_menu_is_open
+  the_plus_chip_opens_the_scope_dialog_and_stays_pressed
+
+# Rows under the text step ignore the pointer: a double-click would re-run
+# the step's open, re-seed the field and push a second step layer.
+run_mutation "scope dialog: rows under the text step ignore presses" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '                    if shell.scope_dialog.as_ref().is_some_and(in_text_step) {
+                        return;
+                    }' \
+  '' \
+  geode-shell \
+  rows_under_the_text_step_ignore_the_pointer
 
 # ---- Adding tiles -----------------------------------------------------
 #

@@ -455,9 +455,6 @@ pub fn open_shell_dialog_with_key<F>(
     // Cancel the command line before the modal takes its key route; otherwise the line
     // would remain visible but unable to receive its own controls.
     view.cancel_command_line(window, cx);
-    // The scope bar's add-a-filter menu is transient chrome under a modal's
-    // key route; it never survives one opening.
-    view.add_filter_menu = None;
     view.close_row_menu(cx);
 
     // Recorded after the palette close above (which may itself have just

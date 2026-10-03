@@ -15,7 +15,7 @@
 //!
 //! Scope chips show dimensions, named expressions, top-level expression
 //! terms, and any
-//! contradiction. The add action opens [`super::addfilter`]. The text input
+//! contradiction. The add action opens the Scope dialog. The text input
 //! shows the frame's text and supplies its own clear glyph.
 //!
 //! Pressable controls and the scope input wrapper use `occlude()` so their
@@ -28,8 +28,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Div, ElementId, Entity, Hsla, IntoElement, MouseButton, Pixels, SharedString,
-    Stateful, Window, div, px,
+    App, Div, ElementId, Entity, Hsla, IntoElement, MouseButton, Pixels, SharedString, Stateful,
+    Window, div, px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::separator::Separator;
@@ -190,9 +190,8 @@ fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
 /// control that owns a popup stays visibly pressed until it closes);
 /// `scope_open` is the same for the scope picker and the load glyph, which
 /// `on_load` opens.
-/// `add_menu` is the add-a-filter menu's painted panel while it is open
-/// ([`super::addfilter::render`]); the `+` hangs it under itself and holds
-/// its pressed fill for as long as it is there. `on_term_open` and
+/// `scope_dialog_open` is whether the Scope dialog is up; the `+` that
+/// opens it holds its pressed fill for as long as it is. `on_term_open` and
 /// `on_term_close` take the expression term's index; `on_named_open` and
 /// `on_named_close` take the named expression's name. `pin` is the active
 /// workspace and whether it is pinned; `on_pin` toggles that pin.
@@ -202,7 +201,7 @@ pub fn toolbar(
     model: &ScopeBarModel,
     grouping_open: bool,
     scope_open: bool,
-    add_menu: Option<AnyElement>,
+    scope_dialog_open: bool,
     on_chip_close: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_chip_open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_add: impl Fn(&mut Window, &mut App) + Clone + 'static,
@@ -486,42 +485,31 @@ pub fn toolbar(
     }
 
     // The verbs, `gap_0p5` apart and one group gap after the chips. The `+`
-    // opens the add-a-filter menu (a dimension through the picker, or an
-    // expression through the dialog's add mode) — always painted, empty
-    // scope or not, since adding a filter is exactly how a scope starts.
-    // The menu hangs from a box at the glyph's bottom-left, so it opens
-    // directly under the `+`; the glyph holds its pressed fill while the
-    // menu is up. No tooltip action: the menu names each row's own key.
-    let add_open = add_menu.is_some();
+    // opens the Scope dialog (`frame::scope`), where every ingredient is
+    // added — always painted, empty scope or not, since adding a filter is
+    // exactly how a scope starts. It holds its pressed fill while the
+    // dialog is up, as the grouping readout does for its dialog.
     let mut verbs = h_flex().gap_0p5().items_center().child(
-        div()
-            .relative()
-            .child(
-                verb(
-                    "scope-pick-chip",
-                    Icon::new(CatalogIcon::Plus),
-                    chip_fg,
-                    glyph_radius,
-                    glyph_states,
-                    add_open.then_some("scope-pick-chip-open"),
-                    || "scope-pick-chip".to_string(),
-                )
-                .tooltip(tips::tip("tip-scope-pick-chip", "Add a filter", None, None))
-                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                    on_add(window, cx)
-                }),
-            )
-            .when_some(add_menu, |el, menu| {
-                el.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top(scale::design(GLYPH_BOX))
-                        .child(menu),
-                )
-            }),
+        verb(
+            "scope-pick-chip",
+            Icon::new(CatalogIcon::Plus),
+            chip_fg,
+            glyph_radius,
+            glyph_states,
+            scope_dialog_open.then_some("scope-pick-chip-open"),
+            || "scope-pick-chip".to_string(),
+        )
+        .tooltip(tips::tip(
+            "tip-scope-pick-chip",
+            "Scope",
+            Some("frame::scope"),
+            None,
+        ))
+        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            on_add(window, cx)
+        }),
     );
-    // The load glyph opens the scope picker (`frame::scope`). Always
+    // The load glyph opens the saved-scope chooser. Always
     // painted: loading a saved scope is as useful on an empty scope as on
     // a full one, and the picker says how to save one when none exist. It
     // sits before the conditional save glyph so save appearing never moves
@@ -540,7 +528,9 @@ pub fn toolbar(
         .tooltip(tips::tip(
             "tip-scope-load-chip",
             "Load a named scope",
-            Some("frame::scope"),
+            // No chord: `frame::scope` opens the Scope dialog, not this
+            // chooser, and the chooser has no action of its own yet.
+            None,
             None,
         ))
         .on_mouse_down(MouseButton::Left, move |_event, window, cx| {

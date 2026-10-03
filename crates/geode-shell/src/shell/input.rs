@@ -164,7 +164,6 @@ impl ShellView {
         // its own bare keys before dispatch, so only external actions close it here.
         self.notice = None;
         self.stack_list = None;
-        self.add_filter_menu = None;
         self.row_menu = None;
     }
 
@@ -1106,15 +1105,6 @@ impl ShellView {
             self.handle_palette_key(event, window, cx);
             cx.notify();
             return;
-        }
-
-        if self.add_filter_menu.is_some() {
-            // The add-a-filter menu consumes every bare key; a chord passes to the
-            // matcher below, and its dispatch closes the menu.
-            let is_chord = convert_keystroke(&event.keystroke).is_some_and(|ks| ks.mods.is_chord());
-            if self.handle_add_filter_key(event.keystroke.key.as_str(), is_chord, window, cx) {
-                return;
-            }
         }
 
         if self.row_menu.is_some() {

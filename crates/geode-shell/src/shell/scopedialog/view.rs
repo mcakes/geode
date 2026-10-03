@@ -438,7 +438,13 @@ fn open_term_row(
 
 /// Open the text step over Current, seeded with the lane's text so `enter`
 /// on the text row edits it rather than retyping it.
+///
+/// A no-op when the step is already open: re-seeding would drop what was
+/// typed, and a second step layer would need two `escape`s to leave.
 fn enter_text_step(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    if shell.scope_dialog.as_ref().is_none_or(in_text_step) {
+        return;
+    }
     let seed = shell
         .target_frame()
         .read(cx)
@@ -627,6 +633,13 @@ fn build(
             let click = entity.clone();
             el = el.on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 click.update(cx, |shell, cx| {
+                    // The rows painted under the text step are its preview,
+                    // not controls: a press there would move Current's
+                    // cursor under the field, and a double-click would open
+                    // a row's step over the typing.
+                    if shell.scope_dialog.as_ref().is_some_and(in_text_step) {
+                        return;
+                    }
                     if let Some(state) = shell.scope_dialog.as_mut() {
                         state.cursor = i;
                         state.cursor_id = state.rows.rows.get(i).map(|r| r.id.clone());

@@ -235,9 +235,10 @@ fn with_no_saved_scopes_the_picker_says_how_to_save_one(cx: &mut gpui::TestAppCo
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
-/// Hovering the load glyph names the action and its chord.
+/// Hovering the load glyph names the chooser with no chord: `mod+o`
+/// (`frame::scope`) opens the Scope dialog, not this chooser.
 #[gpui::test]
-fn hovering_the_load_glyph_names_the_chord(cx: &mut gpui::TestAppContext) {
+fn hovering_the_load_glyph_names_no_chord(cx: &mut gpui::TestAppContext) {
     let (mut vcx, _shell, _frame) = open_with_scopes(cx);
     let glyph = vcx.debug_bounds("scope-load-chip").expect("glyph painted");
     vcx.simulate_mouse_move(
@@ -251,10 +252,11 @@ fn hovering_the_load_glyph_names_the_chord(cx: &mut gpui::TestAppContext) {
     assert!(vcx.debug_bounds("tip-scope-load-chip").is_some());
     assert!(
         vcx.debug_bounds("tip-scope-load-chip-chord-mod+o")
-            .is_some()
-            || vcx
+            .is_none()
+            && vcx
                 .debug_bounds("tip-scope-load-chip-chord-alt+o")
-                .is_some()
+                .is_none(),
+        "the load glyph's tip names no chord"
     );
 }
 

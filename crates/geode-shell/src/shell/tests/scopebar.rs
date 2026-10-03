@@ -295,14 +295,13 @@ fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui
 }
 
 /// The `+` chip paints regardless of the scope's own state — adding a
-/// filter is how a scope starts — and its menu's "Dimension…" row opens
-/// the same picker `mod+p`/`frame::pick` does, with the filter field
-/// HOLDING the focus the open gave it, so typing after the click lands
-/// (the mouse-opened-dialog rule; the row stops its press's propagation,
-/// and `open_shell_dialog_with_key`'s `prevent_default` covers every
-/// other mouse-opened dialog).
+/// filter is how a scope starts — and opens the Scope dialog, the same
+/// door as `frame::scope`. The dialog keeps the focus the open gave it
+/// through the rest of the mouse-down, so a key typed after the click
+/// reaches it: `p` pushes the dimension picker over it (the
+/// mouse-opened-dialog rule).
 #[gpui::test]
-fn the_pick_chip_is_always_present_and_its_menu_opens_the_picker(cx: &mut gpui::TestAppContext) {
+fn the_plus_chip_is_always_present_and_opens_the_scope_dialog(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
     assert!(shell.read_with(&vcx, |s, cx| s.frame().read(cx).shared().scope().is_empty()));
@@ -312,36 +311,16 @@ fn the_pick_chip_is_always_present_and_its_menu_opens_the_picker(cx: &mut gpui::
         .expect("the pick chip should paint even with an empty scope");
     vcx.simulate_click(pick.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.add_filter_menu.is_some()));
-    assert!(
-        shell.read_with(&vcx, |s, _| s.picker.is_none()),
-        "the + opens its menu, not the picker"
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
     );
-    let row = vcx
-        .debug_bounds("scope-add-menu-row-dimension")
-        .expect("the menu's Dimension row paints");
-    vcx.simulate_click(row.center(), gpui::Modifiers::default());
-    vcx.run_until_parked();
-
-    assert!(shell.read_with(&vcx, |s, _| s.picker.is_some()));
-    assert!(
-        shell.read_with(&vcx, |s, _| s.add_filter_menu.is_none()),
-        "a commit closes the menu"
-    );
-    let focused = vcx.update(|window, cx| {
-        let input = shell.read(cx).dialog_input.clone();
-        input.read(cx).focus_handle(cx).is_focused(window)
-    });
-    assert!(
-        focused,
-        "the picker's field must keep focus through the rest of the mouse-down"
-    );
-    vcx.simulate_input("bo");
+    vcx.simulate_keystrokes("p");
     vcx.run_until_parked();
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.picker.as_ref().map(|p| p.query.clone())),
-        Some("bo".to_string()),
-        "typing after the click reaches the filter"
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Picker),
+        "the key typed after the click reaches the dialog"
     );
 }
 

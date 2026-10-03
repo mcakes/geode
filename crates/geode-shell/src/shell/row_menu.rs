@@ -268,10 +268,9 @@ impl ShellView {
         self.close_palette(window, cx);
         self.leave_command_line(window, cx);
         self.close_stack_list(cx);
-        self.close_add_filter_menu(cx);
         self.matcher.cancel();
-        // Recorded before the root takes focus, as the add-a-filter menu
-        // records it.
+        // Recorded before the root takes focus: the root is about to hold
+        // it, so this is the only record of whether the field did.
         let return_to_filter = !by_pointer && self.filter_field_focused(window, cx);
         self.row_menu = Some(RowMenu {
             menu: Menu::new(rows, self.services.keymap.bindings()),
