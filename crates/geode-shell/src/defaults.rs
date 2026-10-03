@@ -488,13 +488,6 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Swap to the previous as of",
         "Frame",
     );
-    // Open the frame-scope expression dialog through the palette.
-    action(
-        reg,
-        "frame::scope_expression",
-        "Set scope expression…",
-        "Frame",
-    );
     // Join a new expression to the current one with `and` (the toolbar's
     // add-a-filter menu reaches the same action; `mod+x`), and drop the
     // whole expression layer undoably (no default chord).

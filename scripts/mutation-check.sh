@@ -8271,22 +8271,24 @@ run_mutation "service: the load lane is keyed by source only, so any batch's cle
 
 # ---- Scope expression dialog ------------------------------------------
 
-# An empty commit clears the frame's expression.
-run_mutation "expr-dialog: an empty commit clears the expression" \
+# An empty commit is no expression, not an error: Term mode's empty
+# field removes its term.
+run_mutation "expr-dialog: an empty commit removes the term" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
   '        return Ok(None);' \
   '        return Err("empty".into());' \
   geode-shell \
-  the_field_opens_seeded_and_an_empty_commit_clears
+  term_mode_replaces_only_its_term_and_empty_removes_it
 
 # `clear_scope()` in place of `set_scope(scope)` drops the parsed
 # expression instead of committing it — caught by the test's very first
 # assertion (the expression never lands), not by its later undo check.
 run_mutation "expr-dialog: enter commits the parsed expression to the frame" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '            scope.expression = parsed;
+  '            }
             Ok(frame.set_scope(scope))' \
-  '            Ok(frame.clear_scope())' \
+  '            }
+            Ok(frame.clear_scope())' \
   geode-shell \
   typing_an_expression_and_enter_sets_it_through_set_scope
 
@@ -8354,7 +8356,7 @@ run_mutation "expr-chips: append joins the existing expression with and" \
   geode-shell \
   and_join_joins_with_and_or_sets_it
 
-# The dialog's add mode appends; committing as whole mode replaces.
+# The dialog's add mode appends to the expression, never replaces it.
 run_mutation "expr-chips: the add dialog appends rather than replaces" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
   '                scope.expression = Some(crate::frame::and_join(scope.expression.take(), term));' \
@@ -8362,11 +8364,11 @@ run_mutation "expr-chips: the add dialog appends rather than replaces" \
   geode-shell \
   the_add_and_clear_expression_actions
 
-# A term chip's body opens the dialog on that term, not the whole.
+# A term chip's body opens the dialog on that term, not in add mode.
 run_mutation "expr-chips: a term chip opens term mode" \
   crates/geode-shell/src/shell/render.rs \
   '                scope_expr_view::open_term(view, i, window, cx);' \
-  '                scope_expr_view::open(view, scope_expr_view::Mode::Whole, window, cx);' \
+  '                scope_expr_view::open(view, scope_expr_view::Mode::Add, window, cx);' \
   geode-shell \
   a_terms_body_edits_that_term_alone
 
@@ -25377,15 +25379,6 @@ run_mutation "expr suggest: accepting a named row stages it" \
   '            _ => Accept::Write(Write {' \
   geode-shell \
   accepting_a_named_row_stages_it_and_erases_the_token
-
-# Whole mode's Enter replaces the frame's names with the staged ones; left
-# out, a removed chip would stay in the scope.
-run_mutation "scope expr: whole apply sets the staged names" \
-  crates/geode-shell/src/shell/scope_expr_view.rs \
-  '            scope.named = staged.to_vec();' \
-  '            let _ = staged;' \
-  geode-shell \
-  backspace_at_the_start_unstages_the_last_name_and_undo_restores
 
 # Backspace at the field's start removes the last staged chip.
 run_mutation "scope expr: backspace at the start unstages" \

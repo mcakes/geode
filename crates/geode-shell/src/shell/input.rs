@@ -507,9 +507,6 @@ impl ShellView {
         } else if action.0 == "frame::as_of" {
             // Open the as-of selector.
             asof_view::open(self, window, cx);
-        } else if action.0 == "frame::scope_expression" {
-            // Open the frame-expression editor on the whole expression.
-            scope_expr_view::open(self, scope_expr_view::Mode::Whole, window, cx);
         } else if action.0 == "frame::add_expression" {
             // Open the expression editor in add mode: the typed expression is
             // joined to the current one with `and` (the `+` menu's Expression row).

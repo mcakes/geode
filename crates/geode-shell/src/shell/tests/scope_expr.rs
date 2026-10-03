@@ -1,5 +1,5 @@
 //! Scope-expression integration: opening from the palette, committing through
-//! `FrameViewMut::set_scope` for undo support, parse errors, empty-expression clearing, chip
+//! `FrameViewMut::set_scope` for undo support, parse errors, chip
 //! clicks, and restoring focus to the text field.
 
 use super::*;
@@ -19,7 +19,7 @@ fn expr_scope(text: &str) -> Scope {
 /// than bypassing undo — `frame::scope_undo` restores the prior scope.
 #[gpui::test]
 fn typing_an_expression_and_enter_sets_it_through_set_scope(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = dialog_test_shell(cx, "frame::scope_expression");
+    let (shell, mut vcx) = dialog_test_shell(cx, "frame::add_expression");
     assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
     assert!(dialog_filter_is_focused(&shell, &mut vcx));
     vcx.simulate_input("book = 'BK000'");
@@ -47,7 +47,7 @@ fn typing_an_expression_and_enter_sets_it_through_set_scope(cx: &mut gpui::TestA
 /// error.
 #[gpui::test]
 fn a_parse_error_paints_inline_and_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = dialog_test_shell(cx, "frame::scope_expression");
+    let (shell, mut vcx) = dialog_test_shell(cx, "frame::add_expression");
     vcx.simulate_input("book =");
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
@@ -61,37 +61,9 @@ fn a_parse_error_paints_inline_and_leaves_the_frame_alone(cx: &mut gpui::TestApp
     assert!(vcx.debug_bounds("scope-expr-error").is_none());
 }
 
-/// The field opens seeded with the frame's current expression text, and
-/// committing it emptied (`enter` on a blank field) clears the
-/// expression rather than refusing.
-#[gpui::test]
-fn the_field_opens_seeded_and_an_empty_commit_clears(cx: &mut gpui::TestAppContext) {
-    let (window, mut vcx) = open_shell(cx, test_services());
-    let shell = shell_of(&window, &mut vcx);
-    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
-    frame.update(&mut vcx, |f, cx| {
-        f.shared_mut().set_scope(expr_scope("book = 'BK000'"));
-        cx.notify();
-    });
-    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
-    assert_eq!(
-        shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string()),
-        "book = 'BK000'",
-        "seeded with the frame's expression"
-    );
-    vcx.update(|window, cx| {
-        let input = shell.read(cx).dialog_input.clone();
-        input.update(cx, |i, cx| i.set_value("", window, cx));
-    });
-    vcx.simulate_keystrokes("enter");
-    assert!(frame.read_with(&vcx, |f, _| f.shared().scope().expression.is_none()));
-    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
-}
-
-/// A click on the toolbar's expression chip opens the same dialog as
-/// `frame::scope_expression`, and — the mouse-opened-dialog rule —
-/// typing right after the click reaches the field rather than falling
-/// on the floor.
+/// A click on the toolbar's expression chip opens the expression dialog
+/// on that term, and — the mouse-opened-dialog rule — typing right after
+/// the click reaches the field rather than falling on the floor.
 #[gpui::test]
 fn clicking_the_expression_chip_opens_the_dialog_and_typing_lands(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -126,7 +98,7 @@ fn opened_from_the_text_field_focus_returns_to_it(cx: &mut gpui::TestAppContext)
     let shell = shell_of(&window, &mut vcx);
     dispatch_action(&shell, "frame::focus_text", &mut vcx);
     assert!(filter_is_focused(&shell, &mut vcx));
-    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
@@ -211,7 +183,7 @@ fn field(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> String {
 #[gpui::test]
 fn tab_inserts_a_column_and_the_list_moves_to_operators(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) =
-        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+        dialog_test_shell_with(cx, services_with_schema(), "frame::add_expression");
     vcx.run_until_parked();
     assert!(
         vcx.debug_bounds("scope-expr-row-book").is_some(),
@@ -236,7 +208,7 @@ fn tab_inserts_a_column_and_the_list_moves_to_operators(cx: &mut gpui::TestAppCo
 #[gpui::test]
 fn arrows_move_the_highlight_that_tab_inserts(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) =
-        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+        dialog_test_shell_with(cx, services_with_schema(), "frame::add_expression");
     vcx.simulate_input("npv ");
     vcx.simulate_keystrokes("down down tab");
     vcx.run_until_parked();
@@ -258,7 +230,7 @@ fn values_arrive_through_the_distinct_path_and_stale_replies_are_dropped(
     cx: &mut gpui::TestAppContext,
 ) {
     let (shell, mut vcx) =
-        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+        dialog_test_shell_with(cx, services_with_schema(), "frame::add_expression");
     let seen = requests(&shell, &mut vcx);
     vcx.simulate_input("book = ");
     vcx.run_until_parked();
@@ -297,7 +269,7 @@ fn values_arrive_through_the_distinct_path_and_stale_replies_are_dropped(
 #[gpui::test]
 fn a_reply_after_close_is_ignored(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) =
-        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+        dialog_test_shell_with(cx, services_with_schema(), "frame::add_expression");
     let seen = requests(&shell, &mut vcx);
     vcx.simulate_input("book = ");
     vcx.run_until_parked();
@@ -344,7 +316,7 @@ fn add_mode_requests_values_under_the_current_expression(cx: &mut gpui::TestAppC
 #[gpui::test]
 fn a_moved_caret_is_followed_before_tab_writes(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) =
-        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+        dialog_test_shell_with(cx, services_with_schema(), "frame::add_expression");
     vcx.simulate_input("npv > 1 and live ");
     vcx.run_until_parked();
     assert!(
@@ -372,7 +344,7 @@ fn a_moved_caret_is_followed_before_tab_writes(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn undo_takes_an_insertion_back(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) =
-        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+        dialog_test_shell_with(cx, services_with_schema(), "frame::add_expression");
     vcx.simulate_input("np");
     vcx.simulate_keystrokes("tab");
     vcx.run_until_parked();
@@ -386,7 +358,7 @@ fn undo_takes_an_insertion_back(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn clicking_a_row_inserts_it_and_typing_continues(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) =
-        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+        dialog_test_shell_with(cx, services_with_schema(), "frame::add_expression");
     vcx.run_until_parked();
     let bounds = vcx.debug_bounds("scope-expr-row-npv").expect("row painted");
     vcx.simulate_click(bounds.center(), gpui::Modifiers::none());
@@ -401,7 +373,7 @@ fn clicking_a_row_inserts_it_and_typing_continues(cx: &mut gpui::TestAppContext)
 #[gpui::test]
 fn double_clicking_a_row_inserts_it_once(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) =
-        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+        dialog_test_shell_with(cx, services_with_schema(), "frame::add_expression");
     vcx.run_until_parked();
     let bounds = vcx.debug_bounds("scope-expr-row-npv").expect("row painted");
     double_click(&mut vcx, bounds.center(), gpui::Modifiers::none());
@@ -415,7 +387,7 @@ fn double_clicking_a_row_inserts_it_once(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn double_clicking_a_row_that_stays_listed_inserts_it_once(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) =
-        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+        dialog_test_shell_with(cx, services_with_schema(), "frame::add_expression");
     vcx.run_until_parked();
     let bounds = vcx.debug_bounds("scope-expr-row-(").expect("row painted");
     double_click(&mut vcx, bounds.center(), gpui::Modifiers::none());
@@ -427,7 +399,7 @@ fn double_clicking_a_row_that_stays_listed_inserts_it_once(cx: &mut gpui::TestAp
 #[gpui::test]
 fn enter_refuses_an_unknown_column(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) =
-        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+        dialog_test_shell_with(cx, services_with_schema(), "frame::add_expression");
     vcx.simulate_input("bokk = 'A'");
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
@@ -450,7 +422,7 @@ fn enter_refuses_an_unknown_column(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn a_reload_rebuilds_the_vocab_under_an_open_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) =
-        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+        dialog_test_shell_with(cx, services_with_schema(), "frame::add_expression");
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("scope-expr-row-region").is_none());
     let datasets = LayerDoc::builtin(
@@ -519,16 +491,29 @@ fn tab_stages_a_named_row_and_enter_applies_it(cx: &mut gpui::TestAppContext) {
     assert_eq!(named_of(&shell, &vcx), vec!["liq".to_string()]);
 }
 
-/// Whole mode opens with the frame's names staged. Backspace at offset 0
-/// removes the last chip, Enter applies names and text in one undoable
-/// step, and one `frame::scope_undo` brings both names back.
+/// Stage `names` in the open Add dialog by typing each and accepting its
+/// named row with tab.
+fn stage(vcx: &mut gpui::VisualTestContext, names: &[&str]) {
+    for name in names {
+        vcx.simulate_input(name);
+        vcx.simulate_keystrokes("tab");
+        vcx.run_until_parked();
+        // `debug_bounds` takes a `'static` selector; a test leaks a few bytes.
+        let selector: &'static str = format!("scope-expr-staged-{name}").leak();
+        assert!(vcx.debug_bounds(selector).is_some(), "{name} staged");
+    }
+}
+
+/// Backspace at offset 0 removes the last chip, Enter applies names and
+/// text in one undoable step, and one `frame::scope_undo` restores the
+/// prior scope, names and expression together.
 #[gpui::test]
 fn backspace_at_the_start_unstages_the_last_name_and_undo_restores(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = named_shell(cx, &["liq", "hedges"], Some("npv > 5"));
-    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    let (shell, mut vcx) = named_shell(cx, &[], None);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
     vcx.run_until_parked();
-    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_some());
-    assert!(vcx.debug_bounds("scope-expr-staged-hedges").is_some());
+    stage(&mut vcx, &["liq", "hedges"]);
+    vcx.simulate_input("npv > 5");
     vcx.simulate_keystrokes("home backspace");
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("scope-expr-staged-hedges").is_none());
@@ -548,10 +533,13 @@ fn backspace_at_the_start_unstages_the_last_name_and_undo_restores(cx: &mut gpui
         Some("npv > 5".to_string())
     );
     dispatch_action(&shell, "frame::scope_undo", &mut vcx);
-    assert_eq!(
-        named_of(&shell, &vcx),
-        vec!["liq".to_string(), "hedges".to_string()],
-        "one undo restores both names"
+    assert!(
+        named_of(&shell, &vcx).is_empty(),
+        "one undo restores the names"
+    );
+    assert!(
+        frame.read_with(&vcx, |f, _| f.shared().scope().expression.is_none()),
+        "and the expression, in the same step"
     );
 }
 
@@ -559,8 +547,11 @@ fn backspace_at_the_start_unstages_the_last_name_and_undo_restores(cx: &mut gpui
 /// character and every staged chip stays.
 #[gpui::test]
 fn backspace_past_the_start_edits_the_text(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = named_shell(cx, &["liq"], Some("npv > 5"));
-    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    let (shell, mut vcx) = named_shell(cx, &[], None);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
+    vcx.run_until_parked();
+    stage(&mut vcx, &["liq"]);
+    vcx.simulate_input("npv > 5");
     vcx.simulate_keystrokes("backspace");
     vcx.run_until_parked();
     assert_eq!(field(&shell, &vcx), "npv > ");
@@ -615,9 +606,10 @@ fn term_mode_offers_no_named_rows(cx: &mut gpui::TestAppContext) {
 /// A click on a staged chip's `×` removes that name alone.
 #[gpui::test]
 fn clicking_a_staged_chips_close_unstages_it(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = named_shell(cx, &["liq", "hedges"], None);
-    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    let (shell, mut vcx) = named_shell(cx, &[], None);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
     vcx.run_until_parked();
+    stage(&mut vcx, &["liq", "hedges"]);
     let close = vcx
         .debug_bounds("scope-expr-staged-close-liq")
         .expect("the close paints");
@@ -724,22 +716,29 @@ fn staging_a_name_requests_values_again_under_it(cx: &mut gpui::TestAppContext) 
 }
 
 /// A missing staged name is the value position's error; removing its
-/// chip asks for the values again, and the error goes with it.
+/// chip asks for the values again, and the error goes with it. The name
+/// goes missing by a reload that drops its definition after it was staged.
 #[gpui::test]
 fn unstaging_a_missing_name_clears_its_values_error(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = named_shell(cx, &["gone"], None);
+    let (shell, mut vcx) = named_shell(cx, &[], None);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
+    vcx.run_until_parked();
+    stage(&mut vcx, &["liq"]);
+    shell.update(&mut vcx, |s, cx| {
+        s.apply_reload(services_with_schema().config, cx)
+    });
+    vcx.run_until_parked();
     let seen = requests(&shell, &mut vcx);
-    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
     vcx.simulate_input("book = ");
     vcx.run_until_parked();
     assert!(seen.borrow().is_empty(), "a missing name never requests");
     assert!(
-        expr_hint(&shell, &vcx).contains("gone"),
+        expr_hint(&shell, &vcx).contains("liq"),
         "{}",
         expr_hint(&shell, &vcx)
     );
     let close = vcx
-        .debug_bounds("scope-expr-staged-close-gone")
+        .debug_bounds("scope-expr-staged-close-liq")
         .expect("the close paints");
     vcx.simulate_click(close.center(), gpui::Modifiers::none());
     vcx.run_until_parked();
@@ -750,7 +749,7 @@ fn unstaging_a_missing_name_clears_its_values_error(cx: &mut gpui::TestAppContex
     assert_eq!(req.column, "book");
     assert!(req.scope.named.is_empty());
     assert!(
-        !expr_hint(&shell, &vcx).contains("gone"),
+        !expr_hint(&shell, &vcx).contains("liq"),
         "{}",
         expr_hint(&shell, &vcx)
     );
@@ -790,7 +789,7 @@ fn saving_shell(
         cx,
         services_with_named(),
         dir.path(),
-        "frame::scope_expression",
+        "frame::add_expression",
     )
 }
 
@@ -923,7 +922,7 @@ fn mod_s_refuses_a_reserved_name(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn mod_s_without_a_user_dir_refuses(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) =
-        dialog_test_shell_with(cx, services_with_named(), "frame::scope_expression");
+        dialog_test_shell_with(cx, services_with_named(), "frame::add_expression");
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     let before = frame.read_with(&vcx, |f, _| f.named_expressions().clone());
     vcx.simulate_input("npv > 0");
@@ -959,7 +958,7 @@ fn the_save_chip_paints_only_where_saving_works(cx: &mut gpui::TestAppContext) {
     vcx.run_until_parked();
     assert!(
         vcx.debug_bounds("scope-expr-save-hint").is_some(),
-        "whole mode"
+        "add mode"
     );
     vcx.simulate_input("npv > 0");
     vcx.simulate_keystrokes("alt-s");
@@ -1224,7 +1223,7 @@ fn a_revealed_field_asks_again_for_the_values_a_covering_dialog_may_have_replace
     cx: &mut gpui::TestAppContext,
 ) {
     let (shell, mut vcx) =
-        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+        dialog_test_shell_with(cx, services_with_schema(), "frame::add_expression");
     let seen = requests(&shell, &mut vcx);
     vcx.simulate_input("book = ");
     vcx.run_until_parked();
@@ -1429,17 +1428,6 @@ fn the_add_and_clear_expression_actions(cx: &mut gpui::TestAppContext) {
     );
     dispatch_action(&shell, "frame::scope_undo", &mut vcx);
     assert_eq!(terms(&frame, &vcx), vec!["a = 1", "b = 2"]);
-
-    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
-    assert_eq!(
-        modal_title(&shell, &vcx).as_deref(),
-        Some("Scope expression")
-    );
-    assert_eq!(
-        dialog_text(&shell, &vcx),
-        "(a = 1) and (b = 2)",
-        "scope_expression keeps whole mode"
-    );
 }
 
 /// `mod+x` (alt under the test alias) opens the add dialog as `mod+p` opens the

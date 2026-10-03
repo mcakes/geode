@@ -229,7 +229,6 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
             | "frame::pick"
             | "scope::save_current"
             | "frame::as_of"
-            | "frame::scope_expression"
             | "frame::add_expression"
             | "frame::grouping"
             | "frame::scope"
