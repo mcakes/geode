@@ -297,6 +297,21 @@ grain = "underlying"
         );
         assert!(validate_source("strike", &schema(), &dims()).is_err());
         assert!(validate_source("underlying_ref", &schema(), &dims()).is_ok());
+
+        // A hand-written dimension shadowing a column (creation refuses one)
+        // takes that name: offering it as a source would chain through it.
+        let shadowing = DerivedDimensions::from_doc(&merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin(
+                "dimensions",
+                "[book]\nfrom = \"underlying_ref\"\n[book.values]\nX = [\"A\"]\n",
+            )
+            .unwrap()],
+        ))
+        .0;
+        let cols = source_columns(&schema(), &shadowing);
+        assert!(!cols.contains(&"book".to_string()), "{cols:?}");
+        assert!(cols.contains(&"underlying_ref".to_string()), "{cols:?}");
     }
 
     #[test]

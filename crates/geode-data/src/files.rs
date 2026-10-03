@@ -221,6 +221,22 @@ mod tests {
             panic!("expected a refusal");
         };
         assert!(e.contains("larger than"), "{e}");
+
+        // The size is refused before any read: without that check the
+        // buffer is sized from the reported length, so a huge file would
+        // be allocated for before the post-read check could refuse it. A
+        // directory opens on unix and reports a nonzero size, but reading
+        // it fails, so only the check before the read answers "larger".
+        #[cfg(unix)]
+        {
+            let TextFileResult::Read(Err(e)) = run(&params(
+                dir.path().to_path_buf(),
+                TextFileOp::Read { max_bytes: 1 },
+            )) else {
+                panic!("expected a refusal");
+            };
+            assert!(e.contains("larger than 1 bytes"), "{e}");
+        }
     }
 
     #[test]
