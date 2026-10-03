@@ -1,7 +1,6 @@
 //! Prepared tables: what a section paints, built from its typed rows with
 //! expansion and filtering applied. Pure; `Rc`-shared with the delegate.
 
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::time::SystemTime;
 
@@ -15,12 +14,14 @@ use crate::model::{
     health_title,
 };
 
-/// Key and name are static for the fixed sections and owned for the
-/// Reference section, whose columns are the dataset's declared names.
+/// Key and name are static for the fixed sections and built once per
+/// prepared table for the Reference section, whose columns are the
+/// dataset's declared names. The table asks for every header on every
+/// frame, so a header hands out refcounted clones and never allocates.
 #[derive(Debug, Clone)]
 pub struct ColumnSpec {
-    pub key: Cow<'static, str>,
-    pub name: Cow<'static, str>,
+    pub key: SharedString,
+    pub name: SharedString,
     /// Width in pixels at the design rem (`shell::scale`).
     pub width: f32,
     pub right: bool,
@@ -118,8 +119,8 @@ pub fn widest_column(columns: &[ColumnSpec]) -> usize {
 
 const fn col(key: &'static str, name: &'static str, width: f32) -> ColumnSpec {
     ColumnSpec {
-        key: Cow::Borrowed(key),
-        name: Cow::Borrowed(name),
+        key: SharedString::new_static(key),
+        name: SharedString::new_static(name),
         width,
         right: false,
     }
@@ -127,8 +128,8 @@ const fn col(key: &'static str, name: &'static str, width: f32) -> ColumnSpec {
 
 const fn num(key: &'static str, name: &'static str, width: f32) -> ColumnSpec {
     ColumnSpec {
-        key: Cow::Borrowed(key),
-        name: Cow::Borrowed(name),
+        key: SharedString::new_static(key),
+        name: SharedString::new_static(name),
         width,
         right: true,
     }
@@ -529,11 +530,14 @@ pub fn reference_table(table: Option<&ReferenceTable>, filter: &str) -> Prepared
     let columns = table
         .columns
         .iter()
-        .map(|c| ColumnSpec {
-            key: Cow::Owned(c.clone()),
-            name: Cow::Owned(c.clone()),
-            width: REFERENCE_WIDTH,
-            right: false,
+        .map(|c| {
+            let name = SharedString::from(c.clone());
+            ColumnSpec {
+                key: name.clone(),
+                name,
+                width: REFERENCE_WIDTH,
+                right: false,
+            }
         })
         .collect();
     let rows = table

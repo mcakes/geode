@@ -3,7 +3,6 @@
 //! row selection through `TableEvent::SelectRow` on the `TableState`; the
 //! delegate only paints.
 
-use std::borrow::Cow;
 use std::rc::Rc;
 
 use geode_shell::fonts;
@@ -107,15 +106,6 @@ impl Default for SectionDelegate {
     }
 }
 
-/// A static column label stays borrowed; only a reference table's declared
-/// names, owned per answer, are copied.
-fn shared(text: Cow<'static, str>) -> SharedString {
-    match text {
-        Cow::Borrowed(s) => SharedString::new_static(s),
-        Cow::Owned(s) => SharedString::from(s),
-    }
-}
-
 impl TableDelegate for SectionDelegate {
     fn render_empty(
         &mut self,
@@ -149,8 +139,8 @@ impl TableDelegate for SectionDelegate {
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
         let spec = &self.table.columns[col_ix];
         Column {
-            key: shared(spec.key.clone()),
-            name: shared(spec.name.clone()),
+            key: spec.key.clone(),
+            name: spec.name.clone(),
             align: if spec.right {
                 TextAlign::Right
             } else {
@@ -245,6 +235,30 @@ mod tests {
             let doubled = d.column(0, cx);
             assert_eq!(doubled.width, at_design.width * 2.0);
             assert!(!doubled.movable);
+        });
+    }
+
+    /// The table asks for every header on every frame: a reference
+    /// column's declared name is shared, not copied, so a repeated
+    /// `column()` hands out the same allocation. `SharedString` keeps a
+    /// name of up to 23 bytes inline, which copies without allocating, so
+    /// the pointer check needs a longer, heap-held name.
+    #[gpui::test]
+    fn a_reference_header_shares_its_name_across_calls(cx: &mut gpui::TestAppContext) {
+        const LONG: &str = "settlement_calendar_for_the_listed_future";
+        let mut answer = crate::model::tests::ref_table();
+        answer.columns[1] = LONG.to_string();
+        let mut d = SectionDelegate::new();
+        d.set(Rc::new(crate::prepared::reference_table(Some(&answer), "")));
+        cx.update(|cx| {
+            let (first, second) = (d.column(1, cx), d.column(1, cx));
+            assert_eq!(first.name.as_ref(), LONG);
+            assert!(std::ptr::eq(first.name.as_ptr(), second.name.as_ptr()));
+            assert!(std::ptr::eq(first.key.as_ptr(), second.key.as_ptr()));
+            assert!(std::ptr::eq(
+                first.name.as_ptr(),
+                d.table().columns[1].name.as_ptr()
+            ));
         });
     }
 }
