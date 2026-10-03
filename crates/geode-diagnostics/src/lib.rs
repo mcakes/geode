@@ -6,6 +6,7 @@
 mod config_view;
 mod levels;
 pub mod log;
+pub mod log_cache;
 mod log_view;
 pub mod model;
 mod page;

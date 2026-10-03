@@ -33,6 +33,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, 
 use crate::config_view::{self, ConfigView};
 use crate::levels::{self, LevelRow, LevelsState};
 use crate::log::{LogFilter, LogTail};
+use crate::log_cache::{self, LogCache, Narrowed};
 use crate::log_view::{self, LogView};
 use crate::model::{self, Badges, Tone};
 use crate::prepared::{self, PreparedTable, SINCE_COLUMN, SINCE_SEPARATOR};
@@ -108,6 +109,16 @@ pub struct DiagnosticsPage {
     catalog_matches: bool,
     log: LogTail,
     log_filter: LogFilter,
+    /// The tail's rows, formatted once per record.
+    log_cache: LogCache,
+    /// The narrowing the Log table shows: `None` without a query. While a
+    /// changed query narrows off the UI thread this still holds the
+    /// previous one, so the table keeps its last answer until the new one
+    /// lands.
+    log_narrowed: Option<Narrowed>,
+    /// The narrowing in flight: its query, the newest sequence it covers,
+    /// and the task, whose drop cancels it.
+    log_narrowing: Option<(String, Option<u64>, Task<()>)>,
     follow: bool,
     /// The window this page was created in: the target select's items
     /// can only be replaced with a window, and observers bring none.
@@ -362,6 +373,9 @@ impl DiagnosticsPage {
             catalog_matches: false,
             log,
             log_filter: LogFilter::all(),
+            log_cache: LogCache::default(),
+            log_narrowed: None,
+            log_narrowing: None,
             follow: true,
             window: window.window_handle(),
             target_select,
@@ -453,6 +467,7 @@ impl DiagnosticsPage {
         // version. Both tables are retained across view switches.
         let mut diag_prepared = None;
         let mut source_since = Vec::new();
+        let mut narrow_log = false;
         let prepared =
             {
                 let d = self.diagnostics.read(cx);
@@ -500,8 +515,22 @@ impl DiagnosticsPage {
                         // The one input is the log's text filter.
                         self.log_filter.text = filter;
                         self.level_rows = Rc::new(levels::level_rows(&d.levels));
-                        prepared::log_table(
-                            &model::log_rows(self.log.records(), &self.log_filter, clock),
+                        self.log_cache.sync(self.log.records(), clock);
+                        if self.log_filter.text.trim().is_empty() {
+                            self.log_narrowed = None;
+                            self.log_narrowing = None;
+                        } else {
+                            narrow_log = true;
+                        }
+                        if let (Some(narrowed), Some(first)) =
+                            (&mut self.log_narrowed, self.log_cache.first_seq())
+                        {
+                            narrowed.prune(first);
+                        }
+                        log_cache::log_table(
+                            &self.log_cache,
+                            &self.log_filter,
+                            self.log_narrowed.as_ref(),
                             self.log.lost(),
                         )
                     }
@@ -515,6 +544,9 @@ impl DiagnosticsPage {
             };
         self.prepared = Rc::new(prepared);
         self.source_since = source_since;
+        if narrow_log {
+            self.narrow_log(cx);
+        }
         let len = self.prepared.rows.len();
         let ix = self.section as usize;
         if self.section == Section::Log && self.follow {
@@ -617,6 +649,67 @@ impl DiagnosticsPage {
 
     /// Pull the ring into the tail, when the page is shown. A hidden
     /// page's drain would report a wrap nobody sees and then clear it.
+    /// Start the narrowing the Log's query still needs, off the UI thread:
+    /// the whole cache for a changed query, or only the entries newer than
+    /// the current narrowing for an unchanged one. A pass already in flight
+    /// for the same query and stretch is left to finish; any other is
+    /// replaced, and dropping its task cancels it.
+    fn narrow_log(&mut self, cx: &mut Context<Self>) {
+        let query = self.log_filter.text.clone();
+        let target = self.log_cache.last_seq();
+        let from = match &self.log_narrowed {
+            Some(n) if n.query() == query => {
+                if n.through() >= target {
+                    self.log_narrowing = None;
+                    return;
+                }
+                n.through()
+            }
+            _ => None,
+        };
+        if self
+            .log_narrowing
+            .as_ref()
+            .is_some_and(|(q, t, _)| *q == query && *t == target)
+        {
+            return;
+        }
+        let entries = self.log_cache.after(from);
+        let task_query = query.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let narrowed = cx
+                .background_executor()
+                .spawn(async move { Narrowed::run(&task_query, &entries) })
+                .await;
+            let _ = this.update(cx, |page, cx| page.apply_log_narrowing(narrowed, cx));
+        });
+        self.log_narrowing = Some((query, target, task));
+    }
+
+    /// Take a finished narrowing: append it to the current one when it
+    /// continues the same query, else replace it, then rebuild if the Log
+    /// still shows. A result for a query the input no longer holds is
+    /// dropped.
+    fn apply_log_narrowing(&mut self, narrowed: Narrowed, cx: &mut Context<Self>) {
+        self.log_narrowing = None;
+        if narrowed.query() != self.log_filter.text {
+            return;
+        }
+        match &mut self.log_narrowed {
+            // An older stretch than the one already held is stale.
+            Some(n) if n.query() == narrowed.query() => {
+                if !n.extend(narrowed) {
+                    return;
+                }
+            }
+            _ => self.log_narrowed = Some(narrowed),
+        }
+        if self.visible && self.section == Section::Log {
+            self.rebuild(cx);
+            cx.notify();
+        }
+    }
+
     fn drain_tail(&mut self) {
         if self.visible {
             self.log.drain();
@@ -2915,10 +3008,13 @@ mod tests {
         assert!(painted.ends_with(" · 4 m"), "{painted}");
     }
 
-    /// The headless measurement recorded in `docs/current/performance.md`:
-    /// the Log section's `rebuild` over a full 4,096-record tail, without
-    /// a filter and under a two-word fuzzy filter every record matches.
-    /// Not a painted frame. Run with
+    /// The headless measurements recorded in `docs/current/performance.md`,
+    /// over a full 4,096-record tail every query below keeps whole. Per
+    /// query: a keystroke (the query changes: the synchronous `rebuild`
+    /// that shows the held answer and starts the narrowing), a settled
+    /// rebuild (records or gates change under a narrowed query), and the
+    /// narrowing pass itself, which runs off the UI thread. Not a painted
+    /// frame. Run with
     /// `cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --nocapture`.
     #[gpui::test]
     #[ignore]
@@ -2937,7 +3033,11 @@ mod tests {
                 &h.ring,
                 level,
                 "geode::ingest",
-                &format!("record {i}: partition 2026-09-27 · EU_TECH loaded"),
+                &format!(
+                    "record {i}: partition 2026-09-27 · EU_TECH loaded {} rows in {} ms",
+                    i * 13,
+                    i % 97
+                ),
             );
         }
         notify(&h, &mut vcx);
@@ -2945,35 +3045,68 @@ mod tests {
             h.page.read_with(&vcx, |p, _| p.prepared().rows.len()),
             crate::log::LOG_CAP
         );
-        const RUNS: u32 = 20;
-        for query in ["", "eutch ld"] {
-            h.page.update(&mut vcx, |p, _| {
-                p.filters[Section::Log as usize] = query.to_string();
-            });
-            let mut samples = Vec::with_capacity(RUNS as usize);
+        const RUNS: usize = 20;
+        let median = |mut samples: Vec<std::time::Duration>| {
+            samples.sort();
+            (samples[samples.len() / 2], *samples.last().unwrap())
+        };
+        let build = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        for query in [
+            "",
+            "eutch ld",
+            "partition loaded rows",
+            "record partition loaded rows ms",
+            "partition2026loaded",
+        ] {
+            let mut keystroke = Vec::with_capacity(RUNS);
             for _ in 0..RUNS {
-                let started = std::time::Instant::now();
-                h.page.update(&mut vcx, |p, cx| p.rebuild(cx));
-                samples.push(started.elapsed());
+                // From the empty query, so each run is a changed query.
+                h.page.update(&mut vcx, |p, cx| {
+                    p.filters[Section::Log as usize].clear();
+                    p.rebuild(cx);
+                });
+                vcx.run_until_parked();
+                // Timed inside the update: the rebuild, not GPUI's flush.
+                keystroke.push(h.page.update(&mut vcx, |p, cx| {
+                    p.filters[Section::Log as usize] = query.to_string();
+                    let started = std::time::Instant::now();
+                    p.rebuild(cx);
+                    started.elapsed()
+                }));
+                vcx.run_until_parked();
             }
             assert_eq!(
                 h.page.read_with(&vcx, |p, _| p.prepared().rows.len()),
                 crate::log::LOG_CAP,
                 "every record matches {query:?}"
             );
-            samples.sort();
-            let median = samples[samples.len() / 2];
-            let max = *samples.last().unwrap();
+            let mut settled = Vec::with_capacity(RUNS);
+            for _ in 0..RUNS {
+                settled.push(h.page.update(&mut vcx, |p, cx| {
+                    let started = std::time::Instant::now();
+                    p.rebuild(cx);
+                    started.elapsed()
+                }));
+            }
+            let entries = h.page.read_with(&vcx, |p, _| p.log_cache.after(None));
+            let mut pass = Vec::with_capacity(RUNS);
+            for _ in 0..RUNS {
+                let started = std::time::Instant::now();
+                std::hint::black_box(Narrowed::run(query, &entries));
+                pass.push(started.elapsed());
+            }
+            let (k, k_max) = median(keystroke);
+            let (s, s_max) = median(settled);
+            let (n, n_max) = median(pass);
             eprintln!(
-                "log rebuild over {} records, filter {query:?}: median {:?}, max {:?} over {RUNS} runs (headless; {} build)",
+                "log over {} records, filter {query:?}: keystroke median {k:?} (max {k_max:?}), \
+                 settled rebuild median {s:?} (max {s_max:?}), off-thread narrowing median \
+                 {n:?} (max {n_max:?}); {RUNS} runs, headless, {build} build",
                 crate::log::LOG_CAP,
-                median,
-                max,
-                if cfg!(debug_assertions) {
-                    "debug"
-                } else {
-                    "release"
-                }
             );
         }
     }
@@ -3139,6 +3272,94 @@ mod tests {
                 "a cleared filter marks nothing"
             );
         });
+    }
+
+    /// Records that arrive under a filter are narrowed on their own and
+    /// appended to the held answer; a finished pass for a query the input
+    /// no longer holds is dropped.
+    #[gpui::test]
+    fn records_arriving_under_a_filter_are_narrowed_and_stale_passes_dropped(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        open_log_section(&h, &mut vcx);
+        push(&h.ring, Level::INFO, "geode::ingest", "partition loaded");
+        notify(&h, &mut vcx);
+        dispatch(&h, &mut vcx, "diagnostics::filter");
+        vcx.simulate_input("ptn");
+        vcx.run_until_parked();
+        let messages = |vcx: &gpui::VisualTestContext| {
+            h.page.read_with(vcx, |p, _| {
+                p.prepared
+                    .rows
+                    .iter()
+                    .map(|r| r.cells[3].text.to_string())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(messages(&vcx), ["partition loaded"]);
+        push(&h.ring, Level::INFO, "geode::shell", "noise");
+        push(&h.ring, Level::INFO, "geode::ingest", "partition again");
+        notify(&h, &mut vcx);
+        vcx.run_until_parked();
+        assert_eq!(messages(&vcx), ["partition loaded", "partition again"]);
+        h.page.read_with(&vcx, |p, _| {
+            let held = p.log_narrowed.as_ref().expect("a held narrowing");
+            assert_eq!(held.query(), "ptn");
+            assert_eq!(held.through(), p.log_cache.last_seq(), "it covers the tail");
+            assert!(p.log_narrowing.is_none(), "nothing in flight");
+        });
+        h.page.update(&mut vcx, |p, cx| {
+            let stale = Narrowed::run("zz", &p.log_cache.after(None));
+            p.apply_log_narrowing(stale, cx);
+        });
+        assert_eq!(
+            messages(&vcx),
+            ["partition loaded", "partition again"],
+            "a pass for another query changes nothing"
+        );
+    }
+
+    /// A blank query narrows nothing, so it leaves collapsed documents
+    /// collapsed; a real query reveals its matches inside them.
+    #[gpui::test]
+    fn a_blank_filter_leaves_collapsed_documents_collapsed(cx: &mut gpui::TestAppContext) {
+        use geode_core::config::{ConfigSources, LayerDoc};
+        let (h, mut vcx) = open(cx);
+        h.page.update(&mut vcx, |p, _| {
+            *p.config.borrow_mut() = Config::load(&ConfigSources {
+                builtin: vec![LayerDoc::builtin("app", "name = \"example\"\n").unwrap()],
+                ..Default::default()
+            });
+            p.collapsed_docs.insert("app".into());
+        });
+        open_config_section(&h, &mut vcx);
+        click(&mut vcx, "diagnostics-config-values");
+        let parents = |vcx: &gpui::VisualTestContext| {
+            h.page.read_with(vcx, |p, _| {
+                p.prepared
+                    .rows
+                    .iter()
+                    .filter_map(|r| match r.kind {
+                        RowKind::Parent { expanded } => Some(expanded),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(parents(&vcx), [false]);
+        dispatch(&h, &mut vcx, "diagnostics::filter");
+        vcx.simulate_input("  ");
+        vcx.run_until_parked();
+        assert_eq!(
+            h.page
+                .read_with(&vcx, |p, _| p.filters[Section::Config as usize].clone()),
+            "  "
+        );
+        assert_eq!(parents(&vcx), [false], "spaces force nothing open");
+        vcx.simulate_input("exa");
+        vcx.run_until_parked();
+        assert_eq!(parents(&vcx), [true], "a match is revealed");
     }
 
     #[gpui::test]

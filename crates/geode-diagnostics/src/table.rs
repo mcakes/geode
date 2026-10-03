@@ -237,7 +237,7 @@ fn painted_text<'a>(cell: &'a Cell, expander: &str) -> (SharedString, Cow<'a, [R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prepared::{data_table, log_table};
+    use crate::prepared::data_table;
 
     /// A parent's expander shifts its marks by the expander's bytes, so
     /// the accent still lands on the matched letters; other cells paint
@@ -299,7 +299,12 @@ mod tests {
             assert_eq!(d.columns_count(cx), 0);
             assert_eq!(d.rows_count(cx), 0);
         });
-        d.set(Rc::new(log_table(&[], 3)));
+        d.set(Rc::new(crate::log_cache::log_table(
+            &Default::default(),
+            &crate::log::LogFilter::all(),
+            None,
+            3,
+        )));
         cx.update(|cx| {
             assert_eq!(d.columns_count(cx), 4);
             assert_eq!(d.rows_count(cx), 1, "the loss notice is a row");

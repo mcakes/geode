@@ -11,7 +11,7 @@ use geode_shell::listfilter::{ColumnMarks, Narrow};
 use gpui::SharedString;
 
 use crate::model::{
-    ConfigDoc, DatasetRow, DiagnosticRow, Lane, LogRow, PartitionRow, SourceRow, Tone, age_text,
+    ConfigDoc, DatasetRow, DiagnosticRow, Lane, PartitionRow, SourceRow, Tone, age_text,
     health_title,
 };
 
@@ -526,38 +526,41 @@ fn level_tone(level: Level) -> Tone {
     }
 }
 
-pub fn log_table(rows: &[LogRow], lost: u64) -> PreparedTable {
-    let mut out = Vec::with_capacity(rows.len() + 1);
-    if lost > 0 {
-        out.push(PreparedRow {
-            key: "lost".into(),
-            kind: RowKind::Notice,
-            cells: vec![cell(
-                format!("{lost} records lost — the ring wrapped before the last drain"),
-                Tone::Warn,
-            )],
-            detail: Vec::new(),
-            tone: Tone::Warn,
-        });
+/// The loss notice that leads the Log table when the ring wrapped.
+pub fn log_notice(lost: u64) -> PreparedRow {
+    PreparedRow {
+        key: "lost".into(),
+        kind: RowKind::Notice,
+        cells: vec![cell(
+            format!("{lost} records lost — the ring wrapped before the last drain"),
+            Tone::Warn,
+        )],
+        detail: Vec::new(),
+        tone: Tone::Warn,
     }
-    out.extend(rows.iter().map(|r| {
-        let tone = level_tone(r.level);
-        PreparedRow {
-            key: r.seq.to_string(),
-            kind: RowKind::Plain,
-            cells: vec![
-                cell(r.hms_millis.clone(), Tone::Muted).marked(r.marks.get(0).to_vec()),
-                cell(r.level.as_str(), tone).marked(r.marks.get(1).to_vec()),
-                cell(r.target, Tone::Muted).marked(r.marks.get(2).to_vec()),
-                cell(r.message.clone(), tone).marked(r.marks.get(3).to_vec()),
-            ],
-            detail: vec![format!("{} {} {} {}", r.hms_millis, r.level, r.target, r.message).into()],
-            tone,
-        }
-    }));
-    PreparedTable {
-        columns: LOG_COLUMNS.to_vec(),
-        rows: out,
+}
+
+/// One log record's row, unmarked: time, level, target, message.
+pub fn log_row(
+    seq: u64,
+    level: Level,
+    target: &'static str,
+    hms_millis: SharedString,
+    message: SharedString,
+) -> PreparedRow {
+    let tone = level_tone(level);
+    let detail = format!("{hms_millis} {level} {target} {message}").into();
+    PreparedRow {
+        key: seq.to_string(),
+        kind: RowKind::Plain,
+        cells: vec![
+            cell(hms_millis, Tone::Muted),
+            cell(level.as_str(), tone),
+            cell(target, Tone::Muted),
+            cell(message, tone),
+        ],
+        detail: vec![detail],
+        tone,
     }
 }
 
@@ -698,36 +701,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_log_table_leads_with_a_loss_notice_when_records_were_lost() {
-        let rows = vec![LogRow {
-            hms_millis: "09:00:00.000".into(),
-            level: geode_core::log::Level::ERROR,
-            target: "geode::shell",
-            message: "boom".into(),
-            seq: 1,
-            marks: Default::default(),
-        }];
-        let t = log_table(&rows, 7);
-        assert!(matches!(t.rows[0].kind, RowKind::Notice));
-        assert!(t.rows[0].cells[0].text.contains("7 records lost"));
-        assert_eq!(t.rows[1].tone, Tone::Error);
-        assert_eq!(
-            t.rows[1].detail,
-            vec![gpui::SharedString::from(
-                "09:00:00.000 ERROR geode::shell boom"
-            )]
-        );
-        assert_eq!(log_table(&rows, 0).rows.len(), 1);
-    }
-
     /// The notice's one cell must land where it has room: the `Time`
     /// column would clip it to "7 records l…".
     #[test]
     fn a_notice_row_paints_its_cell_in_the_widest_column_only() {
         let message = LOG_COLUMNS.iter().position(|c| c.key == "message").unwrap();
         assert_eq!(widest_column(&LOG_COLUMNS), message);
-        let t = log_table(&[], 7);
+        let t = PreparedTable {
+            columns: LOG_COLUMNS.to_vec(),
+            rows: vec![log_notice(7)],
+        };
         assert!(t.cell_at(0, 0).is_none(), "nothing in Time");
         assert!(t.cell_at(0, 1).is_none());
         let cell = t.cell_at(0, message).expect("the notice in Message");

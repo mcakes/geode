@@ -169,9 +169,9 @@ the measurement log for fixture and hardware details.
 | Object browse rows | 500 views: derive and rank, per input change | 188 µs |
 | Object browse filter keystroke | the same, prepared re-rank | 240 µs |
 | Palette paint | 551 items, the rows in view, prepared labels | 275 ns |
-| Diagnostics Log rebuild, fuzzy filter | full 4,096-record tail, a two-word query every record matches in its message: the page's headless `rebuild` (heavily loaded machine; the unfiltered rebuild measured 3.95 ms in the same run) | 6.78 ms |
-| Diagnostics Log table build, fuzzy filter | the same tail and query: `log_rows` + `log_table` (unfiltered 1.51 ms) | 4.95 ms |
-| Diagnostics Log narrowing | the same, `listfilter::Narrow` alone over pre-formatted four-column text | 3.26 ms |
+| Diagnostics Log keystroke | full 4,096-record tail, a query every record matches (two to five words, or one 19-character word): the page's `rebuild` on the UI thread, timed inside the update, which shows the held answer and starts the narrowing (load average 22 to 39 on 18 cores) | 0.41 to 0.54 ms |
+| Diagnostics Log settled rebuild | the same tail under a held narrowing (records or gates changed, query unchanged; unfiltered 0.47 ms) | 0.60 to 0.95 ms |
+| Diagnostics Log narrowing, off the UI thread | the same: `log_cache::Narrowed::run`, two words / three / five / one 19-character word | 6.1 / 10.2 / 12.1 / 8.5 ms |
 
 Production view queries also carry the roster's context columns
 (`underlying_ref`, `position_ref`, `instrument_ref`; see
@@ -292,13 +292,15 @@ measure already reads. Re-measure on an idle machine before quoting them.
 
 ## Known gaps
 
-- The Diagnostics Log rebuilds its whole tail on every filter keystroke and
-  every batch of new records, reformatting each record's time and re-running
-  the fuzzy narrowing; nothing is cached across keystrokes. A two-word query
-  every one of 4,096 records matches stays under the 8 ms UI budget on the
-  reference machine (6.78 ms headless, loaded), about half of it the
-  unfiltered rebuild. A slower machine could cross it; caching formatted rows
-  per record is the next step if it does.
+- The Diagnostics Log's fuzzy narrowing over a full tail exceeds the 8 ms UI
+  budget for phrase queries (6 to 12 ms on the reference machine, loaded, and
+  more on a slower one), so it runs on the background executor and the UI
+  thread only builds the table from the held answer (under 1 ms). The cost:
+  after a keystroke the table shows the previous answer for one pass, and
+  records arriving under a query appear after their own pass. A changed query
+  always re-narrows the whole tail; extending the previous query is not used
+  to narrow only its kept rows, because the greedy word placement does not
+  guarantee that a row the longer query keeps was kept by the shorter one.
 
 - Object-dialog paint still formats per-row element ids (layer, override,
   drift badges; field and provenance ids) and resolves the Colors browse

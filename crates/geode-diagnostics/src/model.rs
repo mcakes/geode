@@ -8,13 +8,11 @@ use std::time::SystemTime;
 use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
 use geode_core::config::{Config, Diagnostic, Severity};
-use geode_core::log::{Level, Record};
+use geode_core::log::Record;
 use geode_core::query::AsOf;
 use geode_shell::diagnostics::{Diagnostics, Health, SourceShape, SourceState};
-use geode_shell::listfilter::{ColumnMarks, Narrow};
+use geode_shell::listfilter::Narrow;
 use geode_shell::perf::{BUCKET_UPPER_BOUNDS_MICROS, FrameHistogram, RequeryStats, format_ms};
-
-use crate::log::LogFilter;
 
 /// A row's visual weight; the page maps it to theme paint. `Marked`
 /// highlights the generation resolved under a historical as-of.
@@ -70,11 +68,6 @@ fn local_hms(t: SystemTime, clock: Clock) -> String {
 
 fn local_hms_utc(t: DateTime<Utc>, clock: Clock) -> String {
     clock.hms(t)
-}
-
-fn local_hms_millis(t: SystemTime, clock: Clock) -> String {
-    let dt = DateTime::<Utc>::from(t);
-    format!("{}.{:03}", clock.hms(dt), dt.timestamp_subsec_millis())
 }
 
 // ------------------------------------------------------------ Sources
@@ -426,19 +419,21 @@ pub struct ConfigDoc {
     pub leaves: Vec<ConfigLeaf>,
     /// Leaves past the cap, after filtering.
     pub omitted: usize,
-    /// Filter matches in `name` when the whole query fits the name alone.
+    /// Filter matches in `name`: every character a kept leaf matched in
+    /// the document column, merged.
     pub name_marks: Vec<Range<usize>>,
 }
 
 /// Every loaded document with its leaves (`a.b.0.c = value [layer]`),
-/// narrowed by the fuzzy `filter` over the full `doc.key` path and the
-/// value, capped per document after narrowing. A document no leaf matches
-/// disappears.
+/// narrowed by the fuzzy `filter`, capped per document after narrowing. A
+/// document no leaf matches disappears.
 ///
-/// A leaf's key matches with its document prefix, so a document's name
-/// keeps all its leaves; the Key cell shows only the path, so marks that
-/// fall in the prefix are dropped there, and the document row marks its
-/// own name when the query fits it.
+/// A leaf narrows over three columns: its document's name, its path, and
+/// its value. The name is a column of its own rather than a prefix of the
+/// path, so a word lands wholly in the name or wholly in the path and
+/// never aligns across the dot. A name that holds the whole query keeps
+/// every leaf; the name's matches mark the document row, and the Key cell
+/// marks only what matched in the path.
 pub fn config_docs(config: &Config, filter: &str) -> Vec<ConfigDoc> {
     let mut narrow = Narrow::new(filter);
     config
@@ -447,17 +442,19 @@ pub fn config_docs(config: &Config, filter: &str) -> Vec<ConfigDoc> {
             let doc = config.doc(doc_name)?;
             let mut leaves = Vec::new();
             walk_leaves(&doc.value, "", &mut leaves);
-            // The Key cell's text starts after `{doc}.`.
-            let prefix = doc_name.len() + 1;
+            // Bytes of the name any kept leaf matched.
+            let mut name_hits = vec![false; doc_name.len()];
             let mut kept: Vec<ConfigLeaf> = leaves
                 .into_iter()
                 .filter_map(|(path, value)| {
                     let (key_marks, value_marks) = if narrow.is_empty() {
                         (Vec::new(), Vec::new())
                     } else {
-                        let full = format!("{doc_name}.{path}");
-                        let mut marks = narrow.row(&[&full, &value])?;
-                        (shift_marks(marks.take(0), prefix), marks.take(1))
+                        let mut marks = narrow.row(&[doc_name, &path, &value])?;
+                        for r in marks.get(0) {
+                            name_hits[r.clone()].fill(true);
+                        }
+                        (marks.take(1), marks.take(2))
                     };
                     Some((path, value, key_marks, value_marks))
                 })
@@ -477,29 +474,32 @@ pub fn config_docs(config: &Config, filter: &str) -> Vec<ConfigDoc> {
             }
             let omitted = kept.len().saturating_sub(MAX_LEAVES_PER_DOC);
             kept.truncate(MAX_LEAVES_PER_DOC);
-            let name_marks = narrow
-                .row(&[doc_name])
-                .map(|mut m| m.take(0))
-                .unwrap_or_default();
             Some(ConfigDoc {
                 name: doc_name.to_string(),
                 leaves: kept,
                 omitted,
-                name_marks,
+                name_marks: runs_of(&name_hits),
             })
         })
         .collect()
 }
 
-/// `marks` over a text, re-based onto that text minus its first `prefix`
-/// bytes: ranges wholly inside the prefix go, a range straddling it is cut
-/// at its end.
-fn shift_marks(marks: Vec<Range<usize>>, prefix: usize) -> Vec<Range<usize>> {
-    marks
-        .into_iter()
-        .filter(|r| r.end > prefix)
-        .map(|r| r.start.max(prefix) - prefix..r.end - prefix)
-        .collect()
+/// The maximal runs of `true` in `hits`, as ranges. Marks are char-aligned
+/// byte ranges, so the runs they set are too.
+fn runs_of(hits: &[bool]) -> Vec<Range<usize>> {
+    let mut runs = Vec::new();
+    let mut start = None;
+    for (ix, &hit) in hits.iter().chain(std::iter::once(&false)).enumerate() {
+        match (hit, start) {
+            (true, None) => start = Some(ix),
+            (false, Some(s)) => {
+                runs.push(s..ix);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    runs
 }
 
 /// Walk nested tables and arrays, giving each leaf its own indexed path
@@ -529,44 +529,6 @@ fn walk_value(value: &toml::Value, path: &str, out: &mut Vec<(String, String)>) 
 }
 
 // ------------------------------------------------------------ Log
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LogRow {
-    pub hms_millis: String,
-    pub level: Level,
-    pub target: &'static str,
-    pub message: String,
-    pub seq: u64,
-    /// Filter matches per column in [`crate::prepared::LOG_COLUMNS`] order:
-    /// time, level, target, message.
-    pub marks: ColumnMarks,
-}
-
-/// The records the level toggles and target select pass, narrowed by the
-/// fuzzy text filter over every column: the displayed time, the level
-/// name, the target, and the message.
-pub fn log_rows<'a>(
-    records: impl Iterator<Item = &'a Record>,
-    filter: &LogFilter,
-    clock: Clock,
-) -> Vec<LogRow> {
-    let mut narrow = Narrow::new(&filter.text);
-    records
-        .filter(|r| filter.accepts(r))
-        .filter_map(|r| {
-            let hms_millis = local_hms_millis(r.at, clock);
-            let marks = narrow.row(&[&hms_millis, r.level.as_str(), r.target, &r.message])?;
-            Some(LogRow {
-                hms_millis,
-                level: r.level,
-                target: r.target,
-                message: r.message.clone(),
-                seq: r.seq,
-                marks,
-            })
-        })
-        .collect()
-}
 
 /// Distinct targets in the tail, sorted, for the target select.
 pub fn log_targets<'a>(records: impl Iterator<Item = &'a Record>) -> Vec<&'static str> {
@@ -1045,7 +1007,7 @@ pub(crate) mod tests {
                     .unwrap(),
                 LayerDoc::builtin(
                     "keymap",
-                    "config_version = 1\n[[bindings]]\n[bindings.keys]\n\"j\" = \"x::down\"\n",
+                    "config_version = 1\n[[bindings]]\nwhen = \"grid\"\n[bindings.keys]\n\"j\" = \"x::down\"\n",
                 )
                 .unwrap(),
             ],
@@ -1054,9 +1016,9 @@ pub(crate) mod tests {
         })
     }
 
-    /// Effective values narrow fuzzily over `doc.key` and the value; the
-    /// Key cell shows only the path, so its marks are re-based past the
-    /// document prefix, and a document-name match marks the document row.
+    /// Effective values narrow fuzzily over three columns: the document's
+    /// name, the leaf's path, and its value. The Key cell marks only the
+    /// path, and a name match marks the document row.
     #[test]
     fn config_docs_narrow_fuzzily_and_mark_keys_values_and_documents() {
         let config = two_doc_config();
@@ -1077,11 +1039,29 @@ pub(crate) mod tests {
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].name, "keymap");
         assert_eq!(docs[0].name_marks, vec![0..6]);
-        assert!(!docs[0].leaves.is_empty(), "the name keeps every leaf");
+        assert_eq!(docs[0].leaves.len(), 3, "the name keeps every leaf");
         assert!(
             docs[0].leaves.iter().all(|l| l.key_marks.is_empty()),
-            "marks inside the hidden prefix are dropped"
+            "the whole query landed in the name"
         );
+
+        // `keys` must not align through the hidden name: `key` in
+        // "keymap" and the `s` of "bindings" would keep every keymap leaf
+        // and mark one stray letter of the path.
+        let docs = config_docs(&config, "keys");
+        assert_eq!(docs.len(), 1);
+        let keys: Vec<&str> = docs[0].leaves.iter().map(|l| l.key.as_str()).collect();
+        assert_eq!(keys, ["bindings.0.keys.j"], "the `when` leaf drops");
+        let leaf = &docs[0].leaves[0];
+        assert_eq!(marked(&leaf.key, &leaf.key_marks), ["keys"]);
+        assert!(docs[0].name_marks.is_empty());
+
+        // Words split across the name and the path mark both rows.
+        let docs = config_docs(&config, "kmp when");
+        let leaf = &docs[0].leaves[0];
+        assert_eq!(leaf.key, "bindings.0.when");
+        assert_eq!(marked(&leaf.key, &leaf.key_marks), ["when"]);
+        assert_eq!(marked(&docs[0].name, &docs[0].name_marks), ["k", "m", "p"]);
 
         let all = config_docs(&config, "  ");
         assert_eq!(all.len(), 2, "a blank query narrows nothing");
@@ -1110,65 +1090,6 @@ pub(crate) mod tests {
         assert_eq!(docs[0].omitted, 3);
         assert!(docs[0].leaves.iter().all(|l| l.key.starts_with('a')));
         assert!(config_docs(&config, "zz").is_empty());
-    }
-
-    fn record(level: Level, target: &'static str, message: &str, seq: u64) -> Record {
-        Record {
-            at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(9 * 3600),
-            level,
-            target,
-            message: message.to_string(),
-            seq,
-        }
-    }
-
-    /// The Log's text filter narrows fuzzily over every visible column,
-    /// time and level included, and marks what it matched; the level
-    /// toggles and target select still gate first.
-    #[test]
-    fn log_rows_narrow_fuzzily_over_every_column_after_level_and_target() {
-        let records = [
-            record(Level::INFO, "geode::ingest", "partition loaded", 1),
-            record(Level::WARN, "geode::shell", "slow paint", 2),
-            record(Level::ERROR, "geode::query", "planned 3 tables", 3),
-        ];
-        let clock = Clock::utc();
-        let seqs = |filter: &LogFilter| -> Vec<u64> {
-            log_rows(records.iter(), filter, clock)
-                .iter()
-                .map(|r| r.seq)
-                .collect()
-        };
-        let mut f = LogFilter::all();
-        for (query, expected) in [
-            ("ptn ld", vec![1]),
-            ("INGST", vec![1]),
-            ("warn", vec![2]),
-            ("09:00", vec![1, 2, 3]),
-            ("shell paint", vec![2]),
-            ("ingest paint", vec![]),
-        ] {
-            f.text = query.into();
-            assert_eq!(seqs(&f), expected, "{query:?}");
-        }
-        f.text = "ingest ptn".into();
-        let rows = log_rows(records.iter(), &f, clock);
-        assert_eq!(rows.len(), 1);
-        let r = &rows[0];
-        assert!(r.marks.get(0).is_empty() && r.marks.get(1).is_empty());
-        assert_eq!(marked(r.target, r.marks.get(2)), ["ingest"]);
-        assert_eq!(marked(&r.message, r.marks.get(3)), ["p", "t", "n"]);
-        f.text = "err".into();
-        let rows = log_rows(records.iter(), &f, clock);
-        assert_eq!(
-            marked(rows[0].level.as_str(), rows[0].marks.get(1)),
-            ["ERR"]
-        );
-        f.levels[LogFilter::level_index(Level::ERROR)] = false;
-        assert!(seqs(&f).is_empty(), "a level toggle gates before the text");
-        f.text.clear();
-        f.target = Some("geode::shell".into());
-        assert_eq!(seqs(&f), vec![2]);
     }
 
     #[test]

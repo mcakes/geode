@@ -91,8 +91,8 @@ pub struct LogFilter {
     /// Indexed by [`LogFilter::level_index`]; all true by default.
     pub levels: [bool; 5],
     pub target: Option<String>,
-    /// The fuzzy text filter. [`crate::model::log_rows`] narrows by it over
-    /// the formatted columns, which [`LogFilter::accepts`] never sees.
+    /// The fuzzy text filter. The page narrows the cached rows by it
+    /// ([`crate::log_cache::Narrowed`]); [`LogFilter::accepts`] never sees it.
     pub text: String,
 }
 
@@ -112,8 +112,12 @@ impl LogFilter {
     /// Whether the level toggles and the exact target select pass `r`.
     /// The text filter is applied after, where the time is formatted.
     pub fn accepts(&self, r: &Record) -> bool {
-        self.levels[Self::level_index(r.level)]
-            && self.target.as_deref().is_none_or(|t| t == r.target)
+        self.gates(r.level, r.target)
+    }
+
+    /// [`LogFilter::accepts`] over a record's level and target alone.
+    pub fn gates(&self, level: Level, target: &str) -> bool {
+        self.levels[Self::level_index(level)] && self.target.as_deref().is_none_or(|t| t == target)
     }
 }
 
@@ -175,6 +179,6 @@ mod tests {
         f.target = Some("geode::query".into());
         assert!(f.accepts(&r));
         f.text = "absent".into();
-        assert!(f.accepts(&r), "text narrows later, in model::log_rows");
+        assert!(f.accepts(&r), "text narrows later, over the cached rows");
     }
 }

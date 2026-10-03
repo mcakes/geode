@@ -188,9 +188,14 @@ alignment and scoring; words may land in different columns, never across a
 column boundary, and two words in one column take characters of their own.
 Words are placed longest first, each in its best-scoring column (the leftmost
 of equals), greedily as above. It returns each column's matched byte ranges
-for painting, and reuses its lowered words and scratch buffers across rows.
-A table paints those ranges in `listrow::table_accent`, floored on the
-table's cursor, hover, and rest grounds rather than the list's popover ones.
+for painting, and reuses its lowered words and scratch buffers across rows;
+a caller that narrows the same rows under many queries lowers each column once
+(`listfilter::lower`) and passes it to `Narrow::row_lowered`. Marks map back
+by character position, so a character whose lowercase is longer (`İ`) shifts
+the marks after it, as in the palette. Every table match highlight (the
+diagnostics tables and the blotter, pricer, and market-data find tables) paints
+in `listrow::table_accent` through a `listrow::TableAccent` memo, floored on
+the table's cursor, hover, and rest grounds rather than the list's popover ones.
 
 [`ChoiceList`](../../crates/geode-shell/src/choice.rs) owns options, query,
 ranking, and highlight. Re-ranking preserves the highlighted option by its

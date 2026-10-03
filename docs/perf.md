@@ -2633,40 +2633,52 @@ run-to-run noise of before, as expected for paths this slice left alone.
 
 Headless model work only: no layout, paint or text shaping.
 
-## Diagnostics fuzzy filter (2026-10-02)
+## Diagnostics fuzzy filter (2026-10-03)
 
 Apple M5 Pro, rustc 1.96.0, release/bench profiles. The machine was heavily
-loaded throughout (load average 13 to 47 on 18 cores); runs swung by up to
-2.5x, so read each group as a ratio within one run.
+loaded throughout (load average 15 to 45 on 18 cores) and Criterion runs
+swung by up to 3x between runs; read each group as a ratio within one run.
 
-`cargo bench -p geode-diagnostics --bench log_filter` over a synthetic
-4,096-record tail (four targets, five levels, ~70-character messages
-`record {i}: partition 2026-09-27 · EU_TECH loaded {n} rows in {m} ms`):
-
-| Group | Query | Median | What it is |
-|---|---|---:|---|
-| `log_table_4096` | `""` | 1.51 ms | `log_rows` + `log_table`, no narrowing |
-| `log_table_4096` | `"ingest"` | 1.41 ms | a quarter of rows kept |
-| `log_table_4096` | `"eutch ld"` | 4.95 ms | two words, every row kept, marks in the message |
-| `log_table_4096` | `"zzq"` | 936 µs | every row rejected (formatting + subsequence reject) |
-| `narrow_4096` | `"ingest"` | 597 µs | `Narrow::row` alone over pre-formatted text |
-| `narrow_4096` | `"eutch ld"` | 3.26 ms | the same, worst case |
+Fixture: a synthetic 4,096-record tail, four targets, five levels, messages
+`record {i}: partition 2026-09-27 · EU_TECH loaded {n} rows in {m} ms`. Every
+query below keeps every record (the worst case for marks) except `zzq`.
 
 `cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing
---nocapture` (the page's headless `rebuild`, 20 runs): unfiltered median
-3.95 ms (max 4.41 ms); `"eutch ld"` median 6.78 ms (max 7.17 ms).
+--nocapture` (load 22 to 39; 20 runs each; the page's `rebuild` timed inside
+its update, so GPUI's effect flush and any draw are excluded):
 
-The first `Narrow` drafts ran `eutch ld` at 19.6 ms (load ~47) and 7.0 ms
-(load ~20) for the table build. A sample showed `palette::align` dominating:
-it re-decoded both strings and allocated two score tables per call. Two
-changes brought it to the figures above: `align_in` over pre-decoded
-characters with caller-owned tables, and scoring only the columns between
-the first occurrence of the query's first character and the last of its
-last (no alignment lies outside them). ASCII characters lower without the
-Unicode mapping.
+| Query | Keystroke rebuild | Settled rebuild | Off-thread narrowing |
+|---|---:|---:|---:|
+| none | 0.49 ms | 0.47 ms | — |
+| `eutch ld` | 0.54 ms | 0.95 ms | 6.08 ms |
+| `partition loaded rows` | 0.46 ms | 0.72 ms | 10.2 ms |
+| `record partition loaded rows ms` | 0.41 ms | 0.60 ms | 12.1 ms |
+| `partition2026loaded` | 0.43 ms | 0.63 ms | 8.51 ms |
 
-The window also speeds the palette. `cargo bench -p geode-shell --bench
-shell_cores -- palette/`, same load, before / after: `set_query_66_items`
-16.2 / 13.4 µs, `set_query_500_items` 120.9 / 91.3 µs,
-`set_query_2000_items` 464.6 / 344.8 µs; `fuzzy_match_one` 1.13 / 1.15 µs
-(within noise: one short candidate gains nothing from the window).
+The keystroke rebuild is a changed query: it shows the held answer and
+starts the narrowing. The settled rebuild is records or gates changing under
+a narrowed query. The narrowing column is `log_cache::Narrowed::run` over
+the cached entries, which the page runs on the background executor. Earlier
+readings of this test timed the whole `update`, flush included (3.95 ms
+unfiltered at load ~20); they are not comparable with these.
+
+`cargo bench -p geode-diagnostics --bench log_filter` (load 29 to 31):
+`log_cache_sync/cold_4096` 5.14 ms (formatting and lowering every record,
+paid once per record); `log_table_4096` 0.50 ms with no query, 0.47 to
+0.59 ms under a held narrowing. `narrowed_run_4096` ran 4.65 ms for
+`eutch ld`, 32 to 56 ms for the phrase queries, 3.5 ms for `ingest` and
+0.73 ms for `zzq`; the phrase figures are two to four times the page test's
+for the same work and are the load spike, not the code.
+
+`palette::align_in` scores only the window between the first occurrence of
+the query's first character and the last of its last, and sizes its tables
+to that window. A differential run against the pre-change matcher (3,000,000
+random queries and candidates over six alphabets, including multi-word
+queries, title-weighted candidates, claims, and expanding lowercase) found no
+divergence in scores or indices.
+
+`cargo bench -p geode-shell --bench shell_cores -- palette/`, back to back,
+load 16 to 27, before / after: `set_query_66_items` 21.4 / 16.1 µs,
+`set_query_500_items` 158.8 / 111.9 µs, `set_query_2000_items` 646.0 /
+443.6 µs; `fuzzy_match_one` 1.40 / 1.42 µs (within noise: one short
+candidate gains nothing from the window).

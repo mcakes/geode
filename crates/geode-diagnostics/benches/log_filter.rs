@@ -1,8 +1,16 @@
-//! The Log section's prepared-table build over a full 4,096-record tail:
-//! the level and target gates, time formatting, the fuzzy text filter with
-//! its per-column marks, and the prepared rows. This is the work one
-//! keystroke in the filter, or one batch of new records, costs on the UI
-//! thread; GPUI and paint are excluded. Performance guidance and reference
+//! The Log section's work over a full 4,096-record tail, in the three
+//! parts the page pays separately:
+//!
+//! - `log_cache_sync`: formatting and lowering every record, which a
+//!   rebuild pays only for records it has not seen;
+//! - `narrowed_run`: one query's fuzzy narrowing with its marks, which the
+//!   page runs off the UI thread when the query changes (and over only
+//!   the new records when records arrive under an unchanged query);
+//! - `log_table`: the table a rebuild builds on the UI thread from the
+//!   cache and the held narrowing, the same for every query.
+//!
+//! Every query below keeps every record (the worst case for marks), except
+//! `zzq`, which keeps none. GPUI and paint are excluded. Reference
 //! measurements are in `docs/current/performance.md`.
 
 use std::hint::black_box;
@@ -12,13 +20,22 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::clock::Clock;
 use geode_core::log::{Level, Record};
 use geode_diagnostics::log::{LOG_CAP, LogFilter};
-use geode_diagnostics::{model, prepared};
+use geode_diagnostics::log_cache::{LogCache, Narrowed, log_table};
 
 const TARGETS: [&str; 4] = [
     "geode::ingest",
     "geode::query",
     "geode::shell",
     "geode::data",
+];
+
+const QUERIES: [&str; 6] = [
+    "eutch ld",
+    "partition loaded rows",
+    "record partition loaded rows ms",
+    "partition2026loaded",
+    "ingest",
+    "zzq",
 ];
 
 fn tail() -> Vec<Record> {
@@ -37,7 +54,7 @@ fn tail() -> Vec<Record> {
                 i * 13,
                 i % 97
             ),
-            seq: i as u64,
+            seq: i as u64 + 1,
         })
         .collect()
 }
@@ -45,51 +62,37 @@ fn tail() -> Vec<Record> {
 fn bench(c: &mut Criterion) {
     let records = tail();
     let clock = Clock::utc();
+    c.bench_function("log_cache_sync/cold_4096", |b| {
+        b.iter(|| {
+            let mut cache = LogCache::default();
+            cache.sync(&records, clock);
+            black_box(cache.len())
+        })
+    });
+    let mut cache = LogCache::default();
+    cache.sync(&records, clock);
+    let entries = cache.after(None);
+    let mut group = c.benchmark_group("narrowed_run_4096");
+    for query in QUERIES {
+        group.bench_function(format!("query {query:?}"), |b| {
+            b.iter(|| black_box(Narrowed::run(query, &entries)))
+        });
+    }
+    group.finish();
     let mut group = c.benchmark_group("log_table_4096");
-    // Empty: no narrowing. `ingest`: one word, a quarter of rows kept.
-    // `eutch ld`: two words in the message of every row (the worst case
-    // for marks). `zzq`: one word no row holds (the reject path).
-    for query in ["", "ingest", "eutch ld", "zzq"] {
+    group.bench_function("no query", |b| {
+        b.iter(|| black_box(log_table(&cache, &LogFilter::all(), None, 0)))
+    });
+    for query in ["eutch ld", "record partition loaded rows ms"] {
+        let narrowed = Narrowed::run(query, &entries);
         let mut filter = LogFilter::all();
         filter.text = query.to_string();
-        group.bench_function(format!("query {query:?}"), |b| {
-            b.iter(|| {
-                let rows = model::log_rows(records.iter(), &filter, clock);
-                black_box(prepared::log_table(&rows, 0))
-            })
+        group.bench_function(format!("held {query:?}"), |b| {
+            b.iter(|| black_box(log_table(&cache, &filter, Some(&narrowed), 0)))
         });
     }
     group.finish();
 }
 
-/// The narrowing alone, over pre-formatted column text: what the fuzzy
-/// filter adds to the build above, separated from formatting and rows.
-fn narrow_only(c: &mut Criterion) {
-    let columns: Vec<[String; 4]> = tail()
-        .iter()
-        .map(|r| {
-            [
-                "09:00:00.000".to_string(),
-                r.level.as_str().to_string(),
-                r.target.to_string(),
-                r.message.clone(),
-            ]
-        })
-        .collect();
-    let mut group = c.benchmark_group("narrow_4096");
-    for query in ["ingest", "eutch ld"] {
-        group.bench_function(format!("query {query:?}"), |b| {
-            b.iter(|| {
-                let mut narrow = geode_shell::listfilter::Narrow::new(query);
-                columns
-                    .iter()
-                    .filter_map(|c| narrow.row(&[&c[0], &c[1], &c[2], &c[3]]))
-                    .count()
-            })
-        });
-    }
-    group.finish();
-}
-
-criterion_group!(benches, bench, narrow_only);
+criterion_group!(benches, bench);
 criterion_main!(benches);

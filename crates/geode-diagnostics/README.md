@@ -16,7 +16,7 @@ The seam it sits on: [pages](../../docs/current/shell.md#pages).
 |---|---|
 | [`lib`](src/lib.rs) | `DiagnosticsPageFactory`: kind, title, icon, action registration, the default keymap fragment (`diagnostics && mode == normal` for the bare keys, `diagnostics && mode == insert` for Escape), the `mod+d` toggle binding, and the `PageContent` adapter over the page entity. |
 | [`section`](src/section.rs) | The five sections in rail order: names, titles, and cycling. |
-| [`model`](src/model.rs) | Typed rows per section (`SourceRow`, `DatasetRow`, `DiagnosticRow`, `ConfigDoc`, `LogRow`, `PerfModel`), the badges, and the header chips. Pure: explicit `now` and clock inputs, no GPUI, no I/O. |
+| [`model`](src/model.rs) | Typed rows per section (`SourceRow`, `DatasetRow`, `DiagnosticRow`, `ConfigDoc`, `PerfModel`), the badges, and the header chips. Pure: explicit `now` and clock inputs, no GPUI, no I/O. |
 | [`prepared`](src/prepared.rs) | `PreparedTable`: the column specs and rows a section paints, with expansion and fuzzy filtering applied and each cell's match ranges; `cell_at` places a notice row's one cell in the widest column. Pure; `Rc`-shared with the delegate. |
 | [`table`](src/table.rs) | `SectionDelegate`, the one `TableDelegate` for every table section: paints a shared prepared table, scales column widths with the window rem, paints match ranges in the memoised table accent, and formats nothing per paint but a parent row's expander. |
 | [`page`](src/page.rs) | `DiagnosticsPage`: the observers, the selected section, per-section cursors and filters, the expansion sets, the log tail and its filter, the target select, the Levels state, the cached badge and header strings, the ages timer, key dispatch, visibility, serialization, and the frame layout. |
@@ -25,7 +25,8 @@ The seam it sits on: [pages](../../docs/current/shell.md#pages).
 | [`log_view`](src/log_view.rs) | The Log toolbar: level toggles, the target select, the text filter, Follow, Clear, and the Levels popover. |
 | [`levels`](src/levels.rs) | The Levels popover's pure rows: the read-only default, then the known targets, then any configured target outside that list (a hand-edited `[log]` key, shown but not offered for adding), each with the effective level resolved by the longest configured prefix, spelled as `LogLevels` stores them. |
 | [`perf_view`](src/perf_view.rs) | The Performance body and its prepared readouts: aligned percentile and sample-count columns, a labeled frame-interval histogram, a Memory section (sampled process memory with its peak and peak time, then DuckDB memory against its limit, temporary files and the largest tags from the catalog snapshot), storage metrics, dropped events and refused requests (both warning-toned when non-zero), and the overlay switch in a scrolling region. |
-| [`log`](src/log.rs) | `LogTail`, a bounded copy of the ring from the sequence at creation (4,096 records, the loss gap measured per drain), and `LogFilter`: the level and target gates, plus the text that `model::log_rows` narrows by over the formatted columns. Pure. |
+| [`log`](src/log.rs) | `LogTail`, a bounded copy of the ring from the sequence at creation (4,096 records, the loss gap measured per drain), and `LogFilter`: the level and target gates, plus the text the page narrows the cached rows by. Pure. |
+| [`log_cache`](src/log_cache.rs) | `LogCache`, the tail's rows formatted and lowered once per record; `Narrowed`, one query's narrowing over them (run off the UI thread, appended for new records, pruned with the tail); `log_table`, the table from the cache and the held narrowing. Pure. |
 
 ## Interaction
 
@@ -69,14 +70,19 @@ Columns are never joined, so a word cannot be stitched from the end of one
 column and the start of the next, and two words in one column take characters
 of their own. Words are placed longest first, each in the column where it
 scores best (the leftmost of equals); the placement is greedy, so a row only a
-different assignment would fit is dropped. A blank query narrows nothing.
+different assignment would fit is dropped (`ab ba` against `abab`). A blank
+query narrows nothing. Matching runs on lowercased text and marks map back by
+character position, so a character whose lowercase is longer (`İ`) shifts the
+marks after it in that cell; matching is unaffected.
 
 The matched characters paint in the table accent, bold, over the cell's own
 tone. Marks are byte ranges computed with the prepared table, never in paint.
 `listrow::table_accent` floors `primary` to the readable ratio on the cursor
 row's `table_active`, the pointer's `table_hover`, and the `table` surface;
 the list accent (`RowPaint::accent`) floors on popover grounds instead and
-falls short on some themes' table grounds.
+falls short on some themes' table grounds. The delegate holds a
+`listrow::TableAccent` memo, the same one the blotter, pricer, and market-data
+find tables use, so every table match paints one colour.
 
 What each section matches: Sources, every column, with Since matched on its
 clock text only (the age after it ticks every second; the ages tick keeps the
@@ -87,12 +93,24 @@ across the two levels. A matching dataset includes all its generations, marked
 only where a generation matches on its own; a generation-only match shows just
 the matching generations beneath their unmarked dataset. Config issues, every
 visible cell plus the full diagnostic text the detail strip shows; a word that
-lands only in that text keeps its row unmarked. Effective values, the full
-`document.key` path and the value: a document's name keeps all its leaves, the
-Key cell's marks exclude the hidden document prefix, and the document row marks
-its own name when the whole query fits it. The per-document leaf cap applies
-after narrowing. Log, the displayed time, level, target, and message, after the
-level toggles and the target select.
+lands only in that text keeps its row unmarked. Effective values, three
+columns per leaf: its document's name, its path, and its value. The name is its
+own column, not a prefix of the path, so a word never aligns across the dot
+(`keys` does not match `keymap.bindings…` through `key` and the `s` of
+`bindings`). A name holding the whole query keeps every leaf; the document row
+marks every character a kept leaf matched in the name, and the Key cell marks
+only the path. The per-document leaf cap applies after narrowing. Log, the
+displayed time, level, target, and message, after the level toggles and the
+target select.
+
+The Log caches each record's formatted, lowered row (`log_cache`) and
+reformats only records it has not seen. Narrowing a query costs a DP per word
+per row, too much for one keystroke over a full tail, so it runs on the
+background executor: a changed query keeps showing the previous answer (or
+every row, if there was no query) until the pass lands, and a pass for a query
+the input no longer holds is dropped. Level and target changes reuse the held
+answer. Records that arrive under an unchanged query wait for a pass over just
+those records, appended to the held answer, rather than showing unfiltered.
 
 A nonempty filter temporarily expands Data and Effective values results
 without changing the stored collapse state. Clearing it restores the stored
@@ -136,10 +154,10 @@ window's lifetime.
 
 ```sh
 cargo test -p geode-diagnostics
-# The headless rebuild reading recorded in docs/current/performance.md,
-# without a filter and under a two-word fuzzy filter:
+# The headless Log readings recorded in docs/current/performance.md: per
+# query, the keystroke and settled rebuilds and the off-thread narrowing:
 cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --nocapture
-# The Log table build and the narrowing alone over a full tail:
+# The cache fill, each query's narrowing, and the table build over a full tail:
 cargo bench -p geode-diagnostics --bench log_filter
 ```
 
