@@ -3017,6 +3017,374 @@ role = "attribute"
         );
     }
 
+    // --- Classifications through the composition root -----------------
+
+    /// The dataset the end-to-end classifications are checked against, as
+    /// the module's own fixtures declare it: `underlying_ref` is a
+    /// groupable text column there, so a classification over it may be
+    /// written (with no measure at a grain it is not groupable).
+    const CLASS_DATASETS: &str = r#"
+[risk.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk.columns.delta]
+type = "f64"
+role = "measure"
+grain = "position"
+[risk.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+    const CLASS_DIMS: &str =
+        "[region]\nfrom = \"underlying_ref\"\n[region.values]\nEurope = [\"SX5E\", \"DAX\"]\n";
+
+    /// A shell assembled as startup assembles it (`add_bridge_modules`, the
+    /// roster's actions and keymap fragments, the bridge's drain) with two
+    /// classifications tiles showing `region` (1, focused, and 2) and a
+    /// recording tile (3), over a writable user directory. The
+    /// classifications factory holds its snapshot before any tile is
+    /// restored, as `start` pushes it.
+    struct ClassificationsShell {
+        vcx: gpui::VisualTestContext,
+        shell: Entity<ShellView>,
+        handle: DataHandle,
+        requests: std::sync::mpsc::Receiver<geode_data::Request>,
+        events: crate::events::Sender,
+        tail: Arc<std::sync::Mutex<geode_shell::diagnostics::ActionTail>>,
+        _user: tempfile::TempDir,
+    }
+
+    impl ClassificationsShell {
+        fn open(cx: &mut gpui::TestAppContext) -> ClassificationsShell {
+            let user = tempfile::tempdir().unwrap();
+            let (handle, requests) = DataHandle::for_tests();
+            let (tx, rx) = crate::events::channel();
+            let mut bridge = test_bridge(handle.clone());
+            bridge.events = rx;
+            let sources = ConfigSources {
+                builtin: vec![
+                    LayerDoc::builtin("datasets", CLASS_DATASETS).unwrap(),
+                    LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+                    LayerDoc::builtin("dimensions", CLASS_DIMS).unwrap(),
+                ],
+                desk: None,
+                user: Some(user.path().to_path_buf()),
+            };
+            let mut services = test_shell_services_with_sources(sources);
+            let config = services.config.clone();
+            let dims = DerivedDimensions::from_doc(config.doc(DIMENSIONS_DOC).unwrap()).0;
+            let schema = SchemaSpec::from_doc(config.doc("datasets").unwrap()).0;
+            let (layers, shadowed) = classification_provenance(&config, &dims);
+            cx.update(|cx| {
+                bridge.classifications.set_config(
+                    geode_classifications::ClassificationsConfig {
+                        dims,
+                        schema: Rc::new(schema),
+                        views: Vec::new(),
+                        layers,
+                        shadowed,
+                    },
+                    cx,
+                )
+            });
+
+            let mut roster = ModuleRoster::new();
+            crate::add_bridge_modules(&mut roster, &bridge);
+            roster.add(Box::new(RecordingFactory::new("rec")));
+            roster.register_actions(&mut services.registry);
+            let (fragments, diags) = roster.keymap_fragments();
+            assert!(diags.is_empty(), "{diags:?}");
+            let layered = geode_shell::keymap::fragments::splice(
+                &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+                &fragments,
+            );
+            let (keymap, diags) = build_keymap(&layered, services.mod_alias, &services.registry);
+            assert!(diags.is_empty(), "{diags:?}");
+            services.keymap = keymap;
+            services.roster = roster;
+
+            let mut table = geode_shell::session::to_toml(
+                &Workspaces::new(),
+                &TileRecords::new(),
+                None,
+                &geode_shell::session::PinnedRecords::new(),
+                &geode_shell::palette_usage::PaletteUsage::new(),
+                &geode_shell::session::PageRecords::new(),
+            );
+            let ws1: toml::Table = r#"
+                focused = 1
+                [node]
+                kind = "split"
+                orientation = "horizontal"
+                ratios = [0.34, 0.33, 0.33]
+                [[node.children]]
+                kind = "leaf"
+                id = 1
+                [[node.children]]
+                kind = "leaf"
+                id = 2
+                [[node.children]]
+                kind = "leaf"
+                id = 3
+                [tiles.1]
+                module = "classifications"
+                [tiles.1.state]
+                version = 1
+                name = "region"
+                [tiles.2]
+                module = "classifications"
+                [tiles.2.state]
+                version = 1
+                name = "region"
+                [tiles.3]
+                module = "rec"
+            "#
+            .parse()
+            .unwrap();
+            if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+                ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+            }
+            let restored = geode_shell::session::from_toml(&table).unwrap();
+            assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+            services.workspaces = restored.workspaces;
+            services.restored_tiles = restored.tiles;
+            let tail = services.action_tail.clone();
+
+            cx.update(gpui_component::init);
+            cx.update(geode_classifications::init);
+            let user_dir = user.path().to_path_buf();
+            let window = cx
+                .update(|cx| {
+                    cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                        let view =
+                            cx.new(|cx| ShellView::new(services, None, Some(user_dir), window, cx));
+                        cx.new(|cx| Root::new(view, window, cx))
+                    })
+                })
+                .unwrap();
+            cx.update(|cx| attach(&bridge, window, cx));
+            let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+            let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+                root.view().clone().downcast::<ShellView>().unwrap()
+            });
+            let mut s = ClassificationsShell {
+                vcx,
+                shell,
+                handle,
+                requests,
+                events: tx,
+                tail,
+                _user: user,
+            };
+            s.draw();
+            assert_eq!(
+                s.shell.read_with(&s.vcx, |sh, _| (
+                    sh.occupant_kind(TileId(1)),
+                    sh.occupant_kind(TileId(2)),
+                    sh.occupant_kind(TileId(3))
+                )),
+                (
+                    Some("classifications"),
+                    Some("classifications"),
+                    Some("rec")
+                )
+            );
+            s
+        }
+
+        fn draw(&mut self) {
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            self.vcx.run_until_parked();
+        }
+
+        /// The values reads the tiles asked since the last call, in order.
+        fn distinct_requests(&self) -> Vec<geode_core::query::DistinctParams> {
+            self.requests
+                .try_iter()
+                .filter_map(|r| match r {
+                    geode_data::Request::Distinct(p) => Some(p),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Post a values answer to the bridge's real drain.
+        fn answer(&mut self, key: QueryKey, tag: u64, values: &[(&str, u64)]) {
+            self.events
+                .try_send(DataEvent::Distinct(geode_core::query::DistinctOutcome {
+                    key,
+                    tag,
+                    column: "underlying_ref".into(),
+                    values: Ok(values.iter().map(|(s, n)| (s.to_string(), *n)).collect()),
+                }))
+                .unwrap();
+            self.draw();
+        }
+
+        fn focused(&self) -> Option<TileId> {
+            self.shell.read_with(&self.vcx, |s, _| {
+                s.services().workspaces.active().focused_tile()
+            })
+        }
+
+        fn dispatched(&self, id: &str) -> usize {
+            let h = geode_shell::diagnostics::fnv1a(id);
+            self.tail
+                .lock()
+                .unwrap()
+                .recent()
+                .filter(|x| *x == h)
+                .count()
+        }
+
+        /// Run `title` from the shell's palette.
+        fn palette(&mut self, title: &str) {
+            self.vcx.simulate_keystrokes("ctrl-k");
+            self.draw();
+            self.vcx.simulate_input(title);
+            self.vcx.simulate_keystrokes("enter");
+            self.draw();
+        }
+    }
+
+    /// A tile-keyed values answer through the bridge's drain reaches the
+    /// classifications tile that asked; a shell-keyed one (the picker's)
+    /// goes to the shell's own consumers and never to a tile, even
+    /// carrying that tile's tag and column.
+    #[gpui::test]
+    fn a_tile_keyed_distinct_reaches_a_classifications_tile_and_a_picker_one_does_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut s = ClassificationsShell::open(cx);
+        let asked = s.distinct_requests();
+        let first = asked
+            .iter()
+            .find(|p| p.key == QueryKey(1))
+            .expect("tile 1 asks for its values")
+            .clone();
+        assert_eq!(first.column, "underlying_ref");
+        assert!(
+            asked.iter().any(|p| p.key == QueryKey(2)),
+            "tile 2 asks under its own key"
+        );
+        assert!(
+            s.vcx.debug_bounds("classifications-row-SMI").is_none(),
+            "fixture: SMI is not in the map"
+        );
+
+        s.answer(
+            geode_shell::shell::PICKER_KEY,
+            first.tag,
+            &[("SMI", 4), ("DAX", 2)],
+        );
+        assert!(
+            s.vcx.debug_bounds("classifications-row-SMI").is_none(),
+            "a picker answer reaches no tile"
+        );
+
+        s.answer(QueryKey(1), first.tag, &[("SMI", 4), ("DAX", 2)]);
+        assert!(
+            s.vcx.debug_bounds("classifications-row-SMI").is_some(),
+            "the tile's own answer fills its grid"
+        );
+    }
+
+    /// A classifications action run from the palette reaches the focused
+    /// classifications tile only: the refresh asks for that tile's values
+    /// alone, and with another kind focused it asks for none.
+    #[gpui::test]
+    fn a_palette_classifications_action_reaches_only_the_focused_classifications_tile(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut s = ClassificationsShell::open(cx);
+        s.distinct_requests();
+        assert_eq!(s.focused(), Some(TileId(1)), "fixture");
+
+        s.palette("Classification: Refresh values");
+        assert_eq!(
+            s.dispatched("classifications::refresh"),
+            1,
+            "fixture: the palette dispatched the refresh"
+        );
+        let keys: Vec<QueryKey> = s.distinct_requests().iter().map(|p| p.key).collect();
+        assert_eq!(keys, [QueryKey(1)], "only the focused tile refreshed");
+
+        s.vcx.simulate_keystrokes("alt-l alt-l");
+        s.draw();
+        assert_eq!(
+            s.focused(),
+            Some(TileId(3)),
+            "fixture: the recorder focused"
+        );
+        s.palette("Classification: Refresh values");
+        assert_eq!(
+            s.dispatched("classifications::refresh"),
+            2,
+            "fixture: the palette dispatched it again"
+        );
+        assert!(
+            s.distinct_requests().is_empty(),
+            "no classifications tile acted for another kind's focus"
+        );
+    }
+
+    /// A label set in a classifications tile goes through the config door:
+    /// past the debounce the shell's `dimensions` document carries it, and
+    /// the reload hands the data service the relabelled dimension.
+    #[gpui::test]
+    fn a_label_edit_reaches_the_dimensions_doc_and_the_data_service(cx: &mut gpui::TestAppContext) {
+        let mut s = ClassificationsShell::open(cx);
+        let tag = s
+            .distinct_requests()
+            .iter()
+            .find(|p| p.key == QueryKey(1))
+            .expect("tile 1 asks for its values")
+            .tag;
+        // SMI, unclassified, leads the default order under the cursor.
+        s.answer(QueryKey(1), tag, &[("SMI", 4), ("DAX", 2), ("SX5E", 1)]);
+        assert!(
+            s.handle.pending_dimensions_for_tests().is_none(),
+            "fixture: no views handed over yet"
+        );
+
+        s.vcx.simulate_keystrokes("c");
+        s.draw();
+        s.vcx.simulate_input("Alpine");
+        s.vcx.simulate_keystrokes("enter");
+        s.draw();
+        s.vcx.executor().advance_clock(Duration::from_millis(300));
+        s.draw();
+
+        let label = |dims: &DerivedDimensions, source: &str| {
+            dims.get("region")
+                .and_then(|d| d.values.get(source).cloned())
+        };
+        let shell_dims = s.shell.read_with(&s.vcx, |sh, _| {
+            DerivedDimensions::from_doc(sh.config().doc(DIMENSIONS_DOC).unwrap()).0
+        });
+        assert_eq!(label(&shell_dims, "SMI").as_deref(), Some("Alpine"));
+        assert_eq!(
+            label(&shell_dims, "DAX").as_deref(),
+            Some("Europe"),
+            "the whole object, the other labels kept"
+        );
+        let handed = s
+            .handle
+            .pending_dimensions_for_tests()
+            .expect("the reload replaced the service's views");
+        assert_eq!(label(&handed, "SMI").as_deref(), Some("Alpine"));
+    }
+
     /// A desk `pricer_templates` layer: a `CONDOR` and a broken `RR`
     /// (`weight = 0`), over the builtin seven.
     fn desk_templates() -> Vec<LayerDoc> {

@@ -18074,8 +18074,8 @@ run_mutation "grouping dialog: saving an equal chain writes nothing" \
 # A fork records the inherited value, so drift and revert see it.
 run_mutation "grouping dialog: a save that forks records its baseline" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    if inherited && let Some((layer, value)) = super::shadow_of(&config, doc, &name) {' \
-  '    if false && let Some((layer, value)) = super::shadow_of(&config, doc, &name) {' \
+  '    let notice = fork_record(&config, doc, &name, &mut edits);' \
+  '    let notice = None::<String>;' \
   geode-shell \
   saving_over_an_inherited_slot_forks_it_without_asking
 
@@ -35523,10 +35523,37 @@ run_mutation "distinct: shell keys stay with the shell" \
 # A module edit must reach the batch.
 run_mutation "config door: drained edits are queued" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, None, cx);' \
-  '    let _ = (edits, user_dir);' \
+  '    queue_batch(shell, batch, user_dir, WRITE_DEBOUNCE, None, cx);' \
+  '    let _ = (batch, user_dir);' \
   geode-shell \
   queued_config_edits_reach_the_user_layer_through_the_batch
+
+# A tile's edit to an inherited object is a fork: without its sidecar
+# record drift and revert cannot see the shadowed copy.
+run_mutation "config door: an inherited object is fork-recorded" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '            && let Some(notice) = fork_record(&config, e.doc, &e.object, &mut batch)' \
+  '            && let Some(notice) = None::<String>' \
+  geode-shell \
+  a_door_edit_to_a_desk_object_forks_records_and_tells_its_tile
+
+# A refused drain must tell the tile, or its optimistic edit stays shown.
+run_mutation "config door: the origin tile hears the refusal" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                            .map(|t| (t, crate::frame::TileNotice::Refused(e.clone())))' \
+  '                            .filter(|_| false)
+                            .map(|t| (t, crate::frame::TileNotice::Refused(e.clone())))' \
+  geode-shell \
+  a_refused_door_edit_tells_its_tile
+
+# A closed tile never takes its notices; kept, they pile up and reach a
+# later occupant under the same id.
+run_mutation "config door: a closed tile's notices are dropped" \
+  crates/geode-shell/src/frame.rs \
+  '        self.tile_notices.retain(|(t, _)| *t != tile);' \
+  '        let _ = &self.tile_notices;' \
+  geode-shell \
+  closing_an_unlinked_tile_drops_its_pending_notices
 
 # The read limit is checked before reading.
 run_mutation "files: oversized reads are refused" \
@@ -35667,6 +35694,80 @@ run_mutation "classifications: a restore notice clears on the first action" \
   '            let _ = &self.notices.restore;' \
   geode-classifications \
   a_restore_notice_clears_on_the_first_action
+
+# The grid: a put cursor follows its row; a blank label is unclassified.
+run_mutation "classifications: the cursor follows its source across a rebuild" \
+  crates/geode-classifications/src/core/grid.rs \
+  '            Some(at) => self.cursor = Some(at),' \
+  '            Some(_) => self.set_cursor(self.cursor.map_or(0, |c| c.min(len - 1))),' \
+  geode-classifications \
+  the_cursor_follows_its_source_across_a_row_rebuild
+
+run_mutation "classifications: a blank label counts as unclassified" \
+  crates/geode-classifications/src/core/grid.rs \
+  '        self.unclassified = rows.iter().filter(|r| label_text(r).is_none()).count();' \
+  '        self.unclassified = rows.iter().filter(|r| r.label.is_none()).count();' \
+  geode-classifications \
+  counts_ignore_the_filter_and_treat_a_blank_label_as_unclassified
+
+# Undo pops the last entry; taking the oldest reverts the wrong edit.
+run_mutation "classifications: undo reverts only the last edit" \
+  crates/geode-classifications/src/core/history.rs \
+  '        let entry = self.undo.pop()?;' \
+  '        let entry = self.undo.drain(..).next()?;' \
+  geode-classifications \
+  two_quick_edits_compose_and_undo_reverts_only_the_second
+
+# A reload carrying an earlier own write is a step behind: treated as
+# foreign, it drops the later edits and the next edit overwrites them.
+run_mutation "classifications: a reload of an earlier own write keeps later edits" \
+  crates/geode-classifications/src/core/history.rs \
+  '        } else if let Some(at) = self.in_flight.iter().position(|o| o == config) {' \
+  '        } else if let Some(at) = None::<usize> {' \
+  geode-classifications \
+  a_reload_of_the_first_write_keeps_a_later_edit_in_flight
+
+run_mutation "classifications: a stale distinct tag is ignored" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if outcome.tag != self.tag || !current {' \
+  '        if !current {' \
+  geode-classifications \
+  a_stale_tag_is_ignored
+
+# Only a change is a relabel; a no-op verb must not end the selection.
+run_mutation "classifications: a no-op verb keeps the selection" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if changed {
+            self.rebuild_rows(true, cx);' \
+  '        if true {
+            self.rebuild_rows(true, cx);' \
+  geode-classifications \
+  a_verb_that_changes_nothing_keeps_the_selection
+
+# A desk object cannot be removed from the user layer: a delete would
+# queue a removal that removes nothing and wait for it forever.
+run_mutation "classifications: delete refuses a desk object" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            Some(Layer::Desk) => return Err(lower(Layer::Desk, "defined in desk config")),' \
+  '            Some(Layer::Desk) => {}' \
+  geode-classifications \
+  delete_refuses_a_desk_object
+
+# The new object and the old one's removal travel together: one batch,
+# one reload, never a moment with both or neither.
+run_mutation "classifications: rename writes both objects in one queue call" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            vec![set_edit(&renamed), remove_edit(&from)],' \
+  '            vec![set_edit(&renamed)],' \
+  geode-classifications \
+  rename_confirms_with_the_reference_count_and_writes_one_batch
+
+run_mutation "classifications: a refused rename shows the old name" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                Some(name) => self.show(&name, cx),' \
+  '                Some(name) => drop(name),' \
+  geode-classifications \
+  a_refused_rename_shows_the_old_name_again
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

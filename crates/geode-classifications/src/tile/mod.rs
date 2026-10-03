@@ -727,7 +727,7 @@ impl ClassificationsTile {
     /// The `⋯` menu: the label verbs, then the classification's own, each
     /// running the palette's action, with its live chord. A row that cannot
     /// act says why in its lane, and in full when picked; Revert is listed
-    /// only over a desk copy.
+    /// only over a user copy shadowing a lower layer's.
     fn action_rows(&self) -> Vec<Row<Pick>> {
         let row = |id: &'static str, enabled: Result<(), Blocked>| {
             let title = action_title(id);
@@ -774,7 +774,7 @@ impl ClassificationsTile {
     /// The shown classification when the user layer owns it outright, so
     /// a rename or delete can remove it; else why not. A desk or builtin
     /// definition cannot be removed from the user layer, and removing a
-    /// user copy over a desk one would leave the desk one standing under
+    /// user copy over a lower layer's would leave that copy standing under
     /// the old name.
     fn own(&self, verb: Verb) -> Result<String, Blocked> {
         let Some(name) = self.shown() else {
@@ -811,7 +811,10 @@ impl ClassificationsTile {
         if let Some(&under) = config.shadowed.get(&name) {
             let short = match under {
                 Layer::Builtin => "a builtin copy stands under it",
-                Layer::Desk | Layer::User => "a desk copy stands under it",
+                Layer::Desk => "a desk copy stands under it",
+                // A user copy shadows only a lower layer; kept neutral
+                // rather than misname a layer if that ever changes.
+                Layer::User => "another copy stands under it",
             };
             return Err(Blocked {
                 short,

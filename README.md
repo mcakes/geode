@@ -90,6 +90,7 @@ crates/
   geode-marketdata   market-data document panels with an edit draft (CVI)
   geode-timeseries   fetchable series, expressions, statistics and chart tile
   geode-volslice     vol smiles per expiry: CVI, a group's draft and the chain
+  geode-classifications  one classification's source values and labels, edited in place
   geode-diagnostics  the diagnostics page over health, generations, config and the log
   geode-guide        offline user-guide tile with section navigation and find
   geode-documents    typed parsers and writers per document wire format

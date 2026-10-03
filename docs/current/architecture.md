@@ -65,7 +65,7 @@ lives there. The menu and popover implementations live in `geode-shell`,
 which also uses them for its row menu; `geode-tile` re-exports them for tiles.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
-`geode-timeseries`, `geode-volslice`, and
+`geode-timeseries`, `geode-volslice`, `geode-classifications`, and
 `geode-pricer` implement the shell's module contract and may ask the data
 service through `DataHandle`. They do not depend on sibling features. `geode-app` constructs shared
 services, registers module factories (one market-data factory per accepted

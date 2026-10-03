@@ -107,7 +107,10 @@ desk and user configuration. Its files declare:
   coalescing per key over 500 ms like the CVI and dividend sources. Chains
   are subscribed only; the demo egress target does not upload them.
 - `views.toml`: the default `tree` view and a 100-column `wide` view.
-- `dimensions.toml` and `groupings.toml`: book-to-desk mapping and grouping slots.
+- `dimensions.toml` and `groupings.toml`: book-to-desk mapping, the
+  `region` classification over `underlying_ref` (`SMI` and `KOSPI2` left
+  unclassified, so a Classifications tile opens with rows to label), and
+  grouping slots.
 - `app.toml`: blotter staleness, the default series source, and pricer
   underlying suggestions matching `demo_underlyings`.
 

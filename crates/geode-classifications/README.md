@@ -137,8 +137,8 @@ views, saved scopes and named expressions still name the classification
 removes the old in one `queue_config_edits` batch; delete and revert remove
 the user definition. Rename and delete act only on a classification the
 user layer owns outright: a desk or builtin one cannot be removed from the
-user layer, and removing a user copy over a desk one would leave the desk
-one under the old name (Revert… is the verb for that, and its question
+user layer, and removing a user copy over a lower layer's would leave that
+copy under the old name (Revert… is the verb for that, and its question
 names the lower copy's layer). A classification with no recorded layer is
 refused too (`can't tell where <name> is defined`). After a
 create or rename the tile shows the new name (`Saving <name>…` until the
@@ -150,6 +150,18 @@ prompt or answers the question no.
 A verb that changes nothing (`x` on unclassified rows, `u` with nothing to
 undo, a replay that skips every row) is not a relabel: it keeps a live
 selection and a waiting cursor.
+
+## Known limitations
+
+- `distinct` skips computed datasets, so a column only a computed dataset
+  carries shows its mapped values alone.
+- Rename and delete do not rewrite references; `references` misses ad hoc
+  lane chains, pricer views and view sort keys.
+- A reload the shell rejects (kept last good) sends the tile nothing: its
+  pending labels stay until the next verb or switch.
+
+The behavior as the trader sees it is in
+[features](../../docs/current/features.md#classifications).
 
 ## Commands
 

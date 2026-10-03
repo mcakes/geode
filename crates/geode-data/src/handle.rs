@@ -445,6 +445,20 @@ impl DataHandle {
     pub fn fill_for_tests(&self) {
         while self.cancel(QueryKey(u64::MAX)) {}
     }
+
+    /// The derived dimensions of the view replacement waiting in the
+    /// mailbox, if any: what the last `replace_views` handed the service.
+    /// A test is the service of a `for_tests` handle and nothing drains
+    /// the mailbox, so this reads the latest hand-off.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pending_dimensions_for_tests(&self) -> Option<DerivedDimensions> {
+        self.inner
+            .pending_views
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|r| r.dimensions.clone())
+    }
 }
 
 impl DataService {
