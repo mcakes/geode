@@ -208,6 +208,8 @@ impl TileContent for TimeseriesContent {
             Delivery::VolSlices(_) => {}
             // This tile never uploads; an outcome addressed here is a routing bug.
             Delivery::Upload(_) => {}
+            // This tile asks for no distinct values; an outcome addressed here is a routing bug.
+            Delivery::Distinct(_) => {}
         }
         let _ = window;
     }

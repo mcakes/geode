@@ -216,6 +216,8 @@ impl TileContent for MarketDataContent {
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
             // The tile checks upload tags and draft identity before applying outcomes.
             Delivery::Upload(u) => self.tile.update(cx, |t, cx| t.deliver_upload(u, cx)),
+            // This tile asks for no distinct values.
+            Delivery::Distinct(_) => {}
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {

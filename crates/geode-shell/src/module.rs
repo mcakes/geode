@@ -19,7 +19,7 @@ use crate::tiling::TileId;
 use geode_core::config::{Diagnostic, LayerDoc};
 use geode_core::context::DimensionContext;
 use geode_core::pricing::PriceOutcome;
-use geode_core::query::{QueryKey, QueryOutcome};
+use geode_core::query::{DistinctOutcome, QueryKey, QueryOutcome};
 use geode_core::series::SeriesOutcome;
 use geode_core::tile_columns::TileColumns;
 use geode_core::vol::VolSliceOutcome;
@@ -62,6 +62,9 @@ pub enum Delivery {
     /// the shell independent of `geode-data`; the market-data tile checks the
     /// upload tag before changing draft state or reporting the result.
     Upload(UploadDelivery),
+    /// A distinct-values answer for a tile that asked for one, routed by tile
+    /// key. Shell-owned keys (`shell::is_shell_key`) never arrive here.
+    Distinct(DistinctOutcome),
 }
 
 /// [`Delivery::Upload`]'s fields, mirroring `geode_data::egress::
@@ -90,6 +93,7 @@ impl Delivery {
             Delivery::Series(outcome) => Some(outcome.key),
             Delivery::SeriesFetched { .. } => None,
             Delivery::Upload(u) => Some(u.key),
+            Delivery::Distinct(outcome) => Some(outcome.key),
         }
     }
 }
@@ -1021,6 +1025,8 @@ pub mod placeholder {
                 Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
                 // This tile has no module; nothing is ever addressed here.
                 Delivery::Upload(_) => {}
+                // This tile has no module; nothing is ever addressed here.
+                Delivery::Distinct(_) => {}
             }
         }
         fn set_visible(&self, _: bool, _: &mut App) {}
@@ -1593,6 +1599,12 @@ pub mod recording {
                     self.log
                         .borrow_mut()
                         .push(Recorded::Delivered(self.tile, u.tag));
+                }
+                // Recorded like an `Upload`: the tag tells them apart.
+                Delivery::Distinct(outcome) => {
+                    self.log
+                        .borrow_mut()
+                        .push(Recorded::Delivered(self.tile, outcome.tag));
                 }
             }
         }

@@ -254,6 +254,19 @@ pub const EXPR_KEY: QueryKey = QueryKey(u64::MAX - 4);
 /// open choice dialog, which drops a reply whose tag is not its own.
 pub const ACTION_KEY: QueryKey = QueryKey(u64::MAX - 5);
 
+/// Whether `key` is one of the shell's own reserved query keys. A distinct
+/// outcome under any other key belongs to the tile with that id.
+pub fn is_shell_key(key: QueryKey) -> bool {
+    [
+        PICKER_KEY,
+        DIAGNOSTICS_KEY,
+        SCOPES_KEY,
+        EXPR_KEY,
+        ACTION_KEY,
+    ]
+    .contains(&key)
+}
+
 /// The bridge's live reference reads (`Request::Reference` at `AsOf::Live`)
 /// submit under this key — one lower than `ACTION_KEY`, same reservation
 /// reasoning. Their answers never reach the shell's delivery routes: the
@@ -2023,9 +2036,9 @@ impl ShellView {
     /// Deliver a distinct-value reply from the app bridge. `EXPR_KEY` routes
     /// to the open expression field's suggestions. `SCOPES_KEY` routes
     /// to the object dialog's Values stage. `ACTION_KEY` routes to an open
-    /// action value choice. Other replies reach the dimension
+    /// action value choice. `PICKER_KEY` replies reach the dimension
     /// picker only if it is open in Values stage and both column and latest
-    /// request tag match. Stale replies cause no mutation or notification.
+    /// request tag match; any other key is dropped. Stale replies cause no mutation or notification.
     pub fn deliver_distinct(&mut self, outcome: DistinctOutcome, cx: &mut Context<Self>) {
         if outcome.key == EXPR_KEY {
             expr_suggest::deliver(self, outcome, cx);
@@ -2037,6 +2050,11 @@ impl ShellView {
         }
         if outcome.key == ACTION_KEY {
             choicedialog::deliver_action_values(self, outcome, cx);
+            return;
+        }
+        // Only the picker's own key reaches it: a tile's tag counter can
+        // match the picker's, and its values would then fill the picker.
+        if outcome.key != PICKER_KEY {
             return;
         }
         let Some(state) = self.picker.as_mut() else {

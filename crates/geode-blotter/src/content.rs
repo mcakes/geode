@@ -163,6 +163,8 @@ impl TileContent for BlotterContent {
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
             // This tile never uploads; an outcome addressed here is a routing bug.
             Delivery::Upload(_) => {}
+            // This tile asks for no distinct values; an outcome addressed here is a routing bug.
+            Delivery::Distinct(_) => {}
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {

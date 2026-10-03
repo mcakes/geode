@@ -420,6 +420,8 @@ impl TileContent for PricerContent {
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
             // The pricer uploads no document.
             Delivery::Upload(_) => {}
+            // The pricer asks for no distinct values.
+            Delivery::Distinct(_) => {}
         }
     }
 

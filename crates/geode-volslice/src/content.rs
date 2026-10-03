@@ -169,6 +169,8 @@ impl TileContent for VolsliceContent {
             Delivery::Series(_) => {}
             Delivery::SeriesFetched { .. } => {}
             Delivery::Upload(_) => {}
+            // This tile asks for no distinct values.
+            Delivery::Distinct(_) => {}
         }
     }
 

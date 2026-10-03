@@ -32,7 +32,7 @@ use geode_shell::diagnostics::{CatalogRequest, Diagnostics, ReferenceLane, Sourc
 use geode_shell::module::placeholder::PLACEHOLDER_KIND;
 use geode_shell::module::{Delivery, UploadDelivery};
 use geode_shell::reference::ReferenceGlobal;
-use geode_shell::shell::{DIAGNOSTICS_KEY, REFERENCE_KEY, ShellEvent, ShellView};
+use geode_shell::shell::{DIAGNOSTICS_KEY, REFERENCE_KEY, ShellEvent, ShellView, is_shell_key};
 use geode_shell::vimfind::FindStyle;
 use gpui::{App, AsyncApp, Entity, WindowHandle};
 use gpui_component::Root;
@@ -1560,9 +1560,18 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             }
                         });
                     }
-                    // The picker validates request tag, column, and open state in deliver_distinct.
+                    // Shell keys go to the shell's own consumers (picker,
+                    // scopes, expression suggestions, action values), which
+                    // validate tag and column themselves; any other key is a
+                    // tile's, delivered like a query.
                     DataEvent::Distinct(outcome) => {
-                        shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
+                        if is_shell_key(outcome.key) {
+                            shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
+                        } else {
+                            shell.update(cx, |s, cx| {
+                                s.deliver(Delivery::Distinct(outcome), window, cx)
+                            });
+                        }
                     }
                     DataEvent::Catalog(outcome) => {
                         let Some((tag, request)) = catalog_refresh.in_flight.get() else {

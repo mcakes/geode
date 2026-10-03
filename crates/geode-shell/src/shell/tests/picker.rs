@@ -419,6 +419,49 @@ fn a_stale_distinct_outcome_is_dropped(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// A distinct outcome under any key but `PICKER_KEY` never feeds the
+/// picker, even with its column and latest tag: tile requests run their own
+/// tag counters, so an unkeyed fallthrough could fill an open picker with
+/// another tile's values.
+#[gpui::test]
+fn a_distinct_outcome_under_another_key_never_reaches_the_picker(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+
+    dispatch_action(&shell, "frame::pick_book", &mut vcx);
+    let tag = shell.read_with(&vcx, |s, _| s.picker.as_ref().expect("picker open").tag);
+    shell.update(&mut vcx, |s, cx| {
+        s.deliver_distinct(
+            DistinctOutcome {
+                key: QueryKey(1),
+                tag,
+                column: "book".into(),
+                values: Ok(vec![("BK000".into(), 1)]),
+            },
+            cx,
+        )
+    });
+    assert!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().values.is_none()),
+        "a tile-keyed outcome must not fill the picker"
+    );
+}
+
+#[test]
+fn shell_keys_are_recognised_and_tile_keys_are_not() {
+    for key in [
+        PICKER_KEY,
+        DIAGNOSTICS_KEY,
+        SCOPES_KEY,
+        EXPR_KEY,
+        ACTION_KEY,
+    ] {
+        assert!(is_shell_key(key), "{key:?}");
+    }
+    assert!(!is_shell_key(QueryKey(1)));
+    assert!(!is_shell_key(QueryKey(u64::MAX - 6)));
+}
+
 #[gpui::test]
 fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services_with_pickable());
