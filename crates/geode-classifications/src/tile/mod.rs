@@ -24,6 +24,7 @@ use std::sync::Arc;
 use geode_core::classification;
 use geode_core::query::{AsOf, DistinctOutcome, DistinctParams, QueryKey};
 use geode_core::scope::Scope;
+use geode_core::sort::SortOrder;
 use geode_data::{DataHandle, Refusal};
 use geode_shell::actions::ActionId;
 use geode_shell::frame::FrameRef;
@@ -36,7 +37,7 @@ use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, MenuPick,
 use geode_tile::notice::Notice;
 use gpui::prelude::*;
 use gpui::{Context, Entity, SharedString, Window, div};
-use gpui_component::table::TableState;
+use gpui_component::table::{TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, v_flex};
 
 use crate::content::{ClassificationsConfig, Shared, action_title};
@@ -126,6 +127,9 @@ pub struct ClassificationsTile {
     menu_selector: SharedString,
     menu_tip: SharedString,
     switch_tip: SharedString,
+    /// How many times `sync_table` refreshed the table's columns.
+    #[cfg(test)]
+    refreshes: usize,
 }
 
 impl ClassificationsTile {
@@ -164,6 +168,17 @@ impl ClassificationsTile {
             this.sort_clicked(e.0, cx)
         })
         .detach();
+        // A header drag's widths are recorded in the delegate, so the next
+        // refresh (a heading, a sort, the rem) keeps them. The table's
+        // other events are its own: the cursor and selection come through
+        // `RowPressed`, and the tile sets the table's selected row itself.
+        cx.subscribe(&table, |this, _, e: &TableEvent, cx| {
+            if let TableEvent::ColumnWidthsChanged(widths) = e {
+                this.table
+                    .update(cx, |t, _| t.delegate_mut().record_widths(widths));
+            }
+        })
+        .detach();
         // A keymap reload re-resolves an open menu's hints at once.
         cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
             this.chords = menu::live_bindings(cx);
@@ -196,6 +211,8 @@ impl ClassificationsTile {
             menu_selector: format!("classifications-menu-button-{}", id.0).into(),
             menu_tip: format!("tip-classifications-menu-{}", id.0).into(),
             switch_tip: format!("tip-classifications-switch-{}", id.0).into(),
+            #[cfg(test)]
+            refreshes: 0,
         };
         tile.settle(cx);
         tile
@@ -294,19 +311,24 @@ impl ClassificationsTile {
         if outcome.tag != self.tag || !current {
             return;
         }
-        match outcome.values {
+        let answered = match outcome.values {
             Ok(values) => {
                 self.observed = values;
                 self.values_notice = None;
+                true
             }
             Err(why) => {
                 self.values_notice = Some(format!("values not loaded: {why} \u{2014} R retries"));
+                false
             }
-        }
+        };
         self.rebuild_rows(cx);
-        // A restored cursor the answer did not hold has nowhere left to
-        // arrive from.
-        self.grid.forget_seed();
+        // A restored cursor the values did not hold has nowhere left to
+        // arrive from. A failed read is not that answer: `R` may still
+        // bring its row.
+        if answered {
+            self.grid.forget_seed();
+        }
         cx.notify();
     }
 
@@ -353,13 +375,18 @@ impl ClassificationsTile {
         let selected = self.grid.selected();
         let sort = self.grid.sort();
         let cursor = self.grid.cursor();
-        self.table.update(cx, |t, cx| {
+        let refreshed = self.table.update(cx, |t, cx| {
             let d = t.delegate_mut();
             d.set_selected(selected);
-            d.set_sort(sort);
+            // The table reads headings and sort marks only on a refresh,
+            // which also re-lays every column: refresh only when one of
+            // them changed, never for a filter keystroke or new values.
+            let mut refresh = d.set_sort(sort);
             if let Some(prepared) = prepared {
-                d.set(prepared);
+                refresh |= d.set(prepared);
                 d.set_empty(title.into(), help.into());
+            }
+            if refresh {
                 t.refresh(cx);
             }
             match cursor {
@@ -368,7 +395,14 @@ impl ClassificationsTile {
                 None => t.clear_selection(cx),
             }
             cx.notify();
+            refresh
         });
+        #[cfg(test)]
+        {
+            self.refreshes += usize::from(refreshed);
+        }
+        #[cfg(not(test))]
+        let _ = refreshed;
     }
 
     fn rebuild_chrome(&mut self) {
@@ -510,15 +544,23 @@ impl ClassificationsTile {
         cx.notify();
     }
 
-    /// A header press cycles its column asc → desc → the default order,
-    /// the `s` key's cycle (`SortOrder::cycle`); another column starts at
-    /// asc.
+    /// A header press cycles its column the way every grid tile's header
+    /// does (`SortOrder::click_cycle`): desc → asc → the default order;
+    /// another column starts at desc. No column here has a signed
+    /// magnitude, so the absolute orders are skipped.
     fn sort_clicked(&mut self, col: SortCol, cx: &mut Context<Self>) {
-        let next = match self.grid.sort() {
-            Some((c, false)) if c == col => Some((col, true)),
-            Some((c, true)) if c == col => None,
-            _ => Some((col, false)),
-        };
+        let current = self
+            .grid
+            .sort()
+            .filter(|(c, _)| *c == col)
+            .map(|(_, desc)| {
+                if desc {
+                    SortOrder::Desc
+                } else {
+                    SortOrder::Asc
+                }
+            });
+        let next = SortOrder::click_cycle(current, false).map(|o| (col, o.descending()));
         self.set_sort(next, cx);
     }
 

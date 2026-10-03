@@ -128,6 +128,10 @@ pub(crate) struct GridDelegate {
     selected: Option<Range<usize>>,
     sort: Option<(SortCol, bool)>,
     rem_px: f32,
+    /// Widths the trader dragged a column to, in pixels; `None` keeps the
+    /// rem-scaled default. A `TableState::refresh` re-reads `column()`, so
+    /// a dragged width lives here or the next refresh undoes the drag.
+    widths: [Option<f32>; COLUMNS.len()],
     empty_title: SharedString,
     empty_help: SharedString,
     accent: listrow::TableAccent,
@@ -140,22 +144,48 @@ impl GridDelegate {
             selected: None,
             sort: None,
             rem_px: scale::DESIGN_REM,
+            widths: [None; COLUMNS.len()],
             empty_title: SharedString::default(),
             empty_help: SharedString::default(),
             accent: listrow::TableAccent::default(),
         }
     }
 
-    pub(crate) fn set(&mut self, prepared: Rc<Prepared>) {
+    /// Install new rows; `true` when a column heading changed, which the
+    /// table reads only on a refresh. The row count is read live.
+    pub(crate) fn set(&mut self, prepared: Rc<Prepared>) -> bool {
+        let headed = prepared.source_head != self.prepared.source_head
+            || prepared.label_head != self.prepared.label_head;
         self.prepared = prepared;
+        headed
     }
 
     pub(crate) fn set_selected(&mut self, selected: Option<Range<usize>>) {
         self.selected = selected;
     }
 
-    pub(crate) fn set_sort(&mut self, sort: Option<(SortCol, bool)>) {
-        self.sort = sort;
+    /// `true` when the sort changed: the headers' sort marks are read only
+    /// on a refresh.
+    pub(crate) fn set_sort(&mut self, sort: Option<(SortCol, bool)>) -> bool {
+        std::mem::replace(&mut self.sort, sort) != sort
+    }
+
+    /// Record the widths a header drag reports (every column's, in table
+    /// order). Only a column whose width differs from what `column()` gives
+    /// is recorded, so an untouched column keeps following the rem.
+    pub(crate) fn record_widths(&mut self, widths: &[gpui::Pixels]) {
+        for (ix, width) in widths.iter().enumerate().take(COLUMNS.len()) {
+            let width = f32::from(*width);
+            if width != self.width(ix) {
+                self.widths[ix] = Some(width);
+            }
+        }
+    }
+
+    /// Column `ix`'s width in pixels: a dragged one, else the default at
+    /// the window's rem.
+    pub(crate) fn width(&self, ix: usize) -> f32 {
+        self.widths[ix].unwrap_or_else(|| scale::design_px(COLUMNS[ix].1, px(self.rem_px)))
     }
 
     pub(crate) fn set_empty(&mut self, title: SharedString, help: SharedString) {
@@ -226,7 +256,7 @@ impl TableDelegate for GridDelegate {
     }
 
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
-        let (col, width) = COLUMNS[col_ix];
+        let (col, _) = COLUMNS[col_ix];
         let name = match col {
             SortCol::Source => self.prepared.source_head.clone(),
             SortCol::Label => self.prepared.label_head.clone(),
@@ -245,7 +275,7 @@ impl TableDelegate for GridDelegate {
                 Some((c, false)) if c == col => ColumnSort::Ascending,
                 _ => ColumnSort::Default,
             }),
-            width: px(scale::design_px(width, px(self.rem_px))),
+            width: px(self.width(col_ix)),
             fixed: None,
             movable: false,
             resizable: true,

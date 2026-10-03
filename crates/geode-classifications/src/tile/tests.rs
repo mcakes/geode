@@ -635,12 +635,11 @@ fn j_moves_the_cursor_and_v_selects_rows(cx: &mut gpui::TestAppContext) {
     vcx.simulate_keystrokes("escape");
     assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
     assert_eq!(h.targets(&vcx), ["DAX"]);
-    // A counted motion clamps at the top rather than wrap (the count
-    // arrives with the action, as the shell's matcher hands it over).
-    vcx.update(|window, cx| {
-        let up = ActionId(geode_tile::motion::UP.to_string());
-        assert!(h.content.dispatch(&up, Some(5), window, cx));
-    });
+    // Counted keys: `2 j` steps two rows, `5 k` clamps at the top rather
+    // than wrap.
+    vcx.simulate_keystrokes("k 2 j");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+    vcx.simulate_keystrokes("5 k");
     assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
     // The cursor is what the session saves.
     let saved = vcx.update(|_, cx| h.content.serialize(cx));
@@ -702,18 +701,21 @@ fn a_header_click_cycles_the_sort(cx: &mut gpui::TestAppContext) {
         });
     };
     let sort = |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.state.sort);
+    // The pricer's header cycle: desc → asc → the default order.
+    click(2, &mut vcx);
+    assert_eq!(sort(&vcx), Some((SortCol::Rows, true)));
+    assert_eq!(h.shown(&vcx), ["NKY", "DAX", "SX5E"]);
     click(2, &mut vcx);
     assert_eq!(sort(&vcx), Some((SortCol::Rows, false)));
     assert_eq!(h.shown(&vcx), ["SX5E", "DAX", "NKY"]);
     click(2, &mut vcx);
-    assert_eq!(sort(&vcx), Some((SortCol::Rows, true)));
-    click(2, &mut vcx);
     assert_eq!(sort(&vcx), None);
     assert_eq!(h.shown(&vcx), ["NKY", "DAX", "SX5E"]);
-    // Another column starts its own cycle at asc.
+    // Another column starts its own cycle at desc.
     click(2, &mut vcx);
     click(0, &mut vcx);
-    assert_eq!(sort(&vcx), Some((SortCol::Source, false)));
+    assert_eq!(sort(&vcx), Some((SortCol::Source, true)));
+    assert_eq!(h.shown(&vcx), ["SX5E", "NKY", "DAX"]);
     // The header marks the column in force.
     let marked = vcx.update(|_, cx| {
         let d = table.read(cx).delegate();
@@ -722,11 +724,89 @@ fn a_header_click_cycles_the_sort(cx: &mut gpui::TestAppContext) {
     assert_eq!(
         marked,
         [
-            Some(ColumnSort::Ascending),
+            Some(ColumnSort::Descending),
             Some(ColumnSort::Default),
             Some(ColumnSort::Default)
         ]
     );
+}
+
+/// A failed values read is not the answer a restored cursor waits for:
+/// `R` brings its row and the cursor still lands there.
+#[gpui::test]
+fn a_failed_read_keeps_the_restored_cursor_waiting(cx: &mut gpui::TestAppContext) {
+    let record = crate::core::session::to_table(&crate::core::session::State {
+        name: Some("region".into()),
+        cursor: Some("NKY".into()),
+        ..Default::default()
+    });
+    let (h, mut vcx) = open_with(cx, config(TWO), Some(record));
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Err("timed out"));
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert_eq!(saved["cursor"].as_str(), Some("NKY"), "still waiting");
+    vcx.simulate_keystrokes("shift-r");
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Ok(REGION_VALUES.to_vec()));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+}
+
+/// A selection started on a resting cursor keeps its span when the values
+/// arrive and reorder the rows beneath it.
+#[gpui::test]
+fn a_selection_made_before_the_values_keeps_its_rows(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), restored("region"));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    vcx.simulate_keystrokes("shift-v");
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Ok(REGION_VALUES.to_vec()));
+    assert_eq!(h.targets(&vcx), ["DAX"]);
+}
+
+/// A dragged column width survives what rebuilds the table: the drag is
+/// recorded in the delegate (the table's `ColumnWidthsChanged`, emitted
+/// as its resize handle does), and a filter keystroke or a values answer
+/// does not refresh the columns at all. The table's own laid-out widths
+/// are private, so the test reads what `column()` reports, which is what a
+/// refresh lays out, and counts the tile's refreshes.
+#[gpui::test]
+fn a_dragged_column_width_survives_filter_values_and_sort(cx: &mut gpui::TestAppContext) {
+    use gpui_component::table::TableDelegate as _;
+    let (h, mut vcx) = region_with_values(cx);
+    h.draw(&mut vcx);
+    let table = h.tile.read_with(&vcx, |t, _| t.table.clone());
+    let widths = |vcx: &mut gpui::VisualTestContext| {
+        vcx.update(|_, cx| {
+            let d = table.read(cx).delegate();
+            (0..3)
+                .map(|c| f32::from(d.column(c, cx).width))
+                .collect::<Vec<_>>()
+        })
+    };
+    let before = widths(&mut vcx);
+    let mut dragged: Vec<gpui::Pixels> = before.iter().map(|w| gpui::px(*w)).collect();
+    dragged[1] = gpui::px(before[1] + 40.0);
+    table.update(&mut vcx, |_, cx| {
+        cx.emit(gpui_component::table::TableEvent::ColumnWidthsChanged(
+            dragged,
+        ))
+    });
+    vcx.run_until_parked();
+    assert_eq!(widths(&mut vcx)[1], before[1] + 40.0);
+    let refreshes = |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.refreshes);
+    let at = refreshes(&vcx);
+    h.find(&mut vcx, FindEvent::Changed("e".into()));
+    h.find(&mut vcx, FindEvent::Cancelled);
+    vcx.simulate_keystrokes("shift-r");
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Ok(REGION_VALUES.to_vec()));
+    assert_eq!(refreshes(&vcx), at, "no refresh for a filter or values");
+    // A sort does refresh (its header marks), and the drag survives it.
+    h.command(&mut vcx, "sort rows").unwrap();
+    assert_eq!(refreshes(&vcx), at + 1);
+    let after = widths(&mut vcx);
+    assert_eq!(after[1], before[1] + 40.0);
+    assert_eq!(after[0], before[0], "an untouched column is not pinned");
 }
 
 #[gpui::test]

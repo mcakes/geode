@@ -59,9 +59,16 @@ pub struct GridModel {
     marks: Vec<ColumnMarks>,
     /// Index into `visible`; `None` while nothing is shown.
     cursor: Option<usize>,
-    /// The cursor's row, by identity. Kept while nothing is shown, so the
-    /// cursor returns to its row when the rows (or a wider filter) do.
+    /// The row under the cursor, by identity. Kept while nothing is shown,
+    /// so the cursor returns to its row when the rows (or a wider filter)
+    /// do.
     cursor_source: Option<String>,
+    /// A put cursor's row that the filter hides while it is still held:
+    /// the cursor rests on the nearest shown row meanwhile, and returns
+    /// here when a filter shows the row again (escape restoring the filter
+    /// in force before a search). Dropped by a move, or when the rows no
+    /// longer hold it.
+    hidden: Option<String>,
     /// Whether the cursor was put on its row (a move, a press, a restored
     /// cursor) rather than resting where a rebuild left it. Only a put
     /// cursor follows its row: a resting one keeps its index, so a tile
@@ -189,9 +196,13 @@ impl GridModel {
         self.place(i);
     }
 
-    /// Anchor a row selection at the cursor.
+    /// Anchor a row selection at the cursor. The cursor is put on its row
+    /// with it: the anchor follows its row across a rebuild, and a resting
+    /// cursor keeping its index instead would silently widen or shift the
+    /// span.
     pub fn start_selection(&mut self) {
-        if self.cursor.is_some() {
+        if let Some(at) = self.cursor {
+            self.place(at);
             self.anchor = self.cursor_source.clone();
         }
     }
@@ -253,6 +264,7 @@ impl GridModel {
     /// still waiting is dropped with it.
     fn place(&mut self, to: usize) {
         self.seed = None;
+        self.hidden = None;
         self.put = true;
         self.set_cursor(to);
     }
@@ -313,14 +325,32 @@ impl GridModel {
             self.set_cursor(at);
             return;
         }
-        let followed = self
-            .cursor_source
+        if self
+            .hidden
             .as_deref()
-            .filter(|_| self.put)
-            .and_then(|s| self.position(s));
-        match followed {
+            .is_some_and(|h| !self.rows.iter().any(|r| r.source == h))
+        {
+            self.hidden = None;
+        }
+        if let Some(at) = self.hidden.as_deref().and_then(|h| self.position(h)) {
+            self.hidden = None;
+            self.set_cursor(at);
+            return;
+        }
+        let put = self.cursor_source.as_deref().filter(|_| self.put);
+        match put.and_then(|s| self.position(s)) {
             Some(at) => self.cursor = Some(at),
-            None => self.set_cursor(self.cursor.map_or(0, |c| c.min(len - 1))),
+            None => {
+                // A put cursor's row still held but filtered out: remember
+                // it, so a filter that shows it again returns the cursor.
+                if self.hidden.is_none()
+                    && let Some(s) = put
+                    && self.rows.iter().any(|r| r.source == s)
+                {
+                    self.hidden = Some(s.to_string());
+                }
+                self.set_cursor(self.cursor.map_or(0, |c| c.min(len - 1)));
+            }
         }
     }
 }
@@ -568,6 +598,64 @@ mod tests {
         g.set_filter("zzz");
         assert_eq!(g.cursor(), None);
         assert!(g.targets().is_empty());
+    }
+
+    /// Starting a selection puts a resting cursor: otherwise the anchor
+    /// follows its row across a rebuild while the cursor keeps its index,
+    /// and the span silently grows.
+    #[test]
+    fn a_selection_from_a_resting_cursor_survives_a_reordering_rebuild() {
+        let mut g = GridModel::new();
+        g.set_rows(vec![
+            row("DAX", Some("E"), None),
+            row("SX5E", Some("E"), None),
+        ]);
+        assert_eq!(g.cursor_source(), Some("DAX"), "resting on the top row");
+        g.start_selection();
+        assert_eq!(g.targets(), ["DAX"]);
+        g.set_rows(vec![
+            row("NKY", None, Some(7)),
+            row("DAX", Some("E"), Some(5)),
+            row("SX5E", Some("E"), Some(3)),
+        ]);
+        assert_eq!(g.targets(), ["DAX"]);
+        assert_eq!(g.cursor_source(), Some("DAX"));
+    }
+
+    /// A filter hiding a put cursor's row rests the cursor on a shown one;
+    /// the filter that shows the row again (escape restoring the one in
+    /// force) returns the cursor to it.
+    #[test]
+    fn a_filter_hiding_the_cursor_row_returns_it_when_the_row_shows_again() {
+        let mut g = GridModel::new();
+        g.set_rows(vec![
+            row("AB", None, Some(3)),
+            row("AC", None, Some(2)),
+            row("XY", None, Some(1)),
+        ]);
+        g.move_cursor(Motion::Bottom(None), false);
+        assert_eq!(g.cursor_source(), Some("XY"));
+        g.set_filter("a");
+        assert_eq!(g.cursor_source(), Some("AC"), "the nearest shown row");
+        g.set_filter("ab");
+        g.set_filter("");
+        assert_eq!(g.cursor_source(), Some("XY"), "back on its own row");
+        // A move while the row is hidden is the trader's new choice.
+        g.set_filter("a");
+        g.move_cursor(Motion::Top(None), false);
+        g.set_filter("");
+        assert_eq!(g.cursor_source(), Some("AB"));
+        // A row the rows no longer hold is not waited for.
+        g.move_cursor(Motion::Bottom(None), false);
+        g.set_filter("a");
+        g.set_rows(vec![row("AB", None, Some(3)), row("AC", None, Some(2))]);
+        g.set_rows(vec![
+            row("AB", None, Some(3)),
+            row("AC", None, Some(2)),
+            row("XY", None, Some(1)),
+        ]);
+        g.set_filter("");
+        assert_eq!(g.cursor_source(), Some("AC"));
     }
 
     #[test]

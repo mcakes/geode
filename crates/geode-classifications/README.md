@@ -26,7 +26,11 @@ the frame's config door.
   (counts, sort, paint). Unclassified labels and values not in the data
   sort last in either direction. A sort or filter change ends a selection.
   A restored cursor waits for the values that hold it, then is dropped once
-  an answer arrives without it.
+  a successful answer arrives without it (a failed read keeps it waiting).
+  A cursor nobody moved keeps its index across a rebuild; a moved one (or
+  one a selection starts from) follows its row. A filter hiding a moved
+  cursor's row rests it on the nearest shown row and returns it when the
+  row shows again.
 - `tile/`: the hosted entity. `tile/header.rs` paints the header: the
   switch control (`Classification: <name> ▾`, also `g c`), the source
   column, `<n> values` and `<k> unclassified` from the grid, and the winning
@@ -41,7 +45,9 @@ the frame's config door.
   when unclassified, `not in data` beside a map-only value) and `rows`.
   Rows are identified by source value; a press reports `RowPressed`, a
   header sort control `SortClicked`. The wrapper keeps window focus out of
-  the table.
+  the table. A dragged column width is recorded in the delegate, and the
+  table is refreshed only when a heading, a sort mark or the rem changes,
+  so a filter or new values never re-lay the columns.
 
 ## Values and grid
 
@@ -57,7 +63,8 @@ selection, a double-click dispatches `classifications::edit`. `/` narrows
 the rows; escape restores the filter in force when the search began.
 `:sort <source|label|rows> [asc|desc]` orders the grid (bare `:sort`
 restores the default order: unclassified first, then by label); a header
-sort control cycles asc → desc → default. The sort is saved in the session.
+sort control cycles desc → asc → default (`SortOrder::click_cycle`, as
+every grid tile's header does). The sort is saved in the session.
 
 ## Commands
 
