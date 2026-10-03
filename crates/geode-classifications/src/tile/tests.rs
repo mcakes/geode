@@ -4,17 +4,22 @@ use geode_core::config::{Layer, LayerDoc, merge_docs};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
 use geode_core::log::LogLevels;
+use geode_core::query::{AsOf, DistinctOutcome, DistinctParams, QueryKey};
+use geode_core::scope::Scope;
 use geode_core::scopes::SavedScopes;
 use geode_data::DataHandle;
+use geode_data::Request;
 use geode_shell::actions::ActionRegistry;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameRef};
 use geode_shell::keymap::{KeyContext, Keymap, MatchResult, Matcher, build_keymap};
+use geode_shell::module::{Delivery, FindEvent};
 use geode_shell::module::{ModuleFactory, ModuleRoster, TileContent};
 use geode_shell::tiling::{TileId, WorkspaceIx};
 use gpui::{Entity, Window};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::mpsc::Receiver;
 
 const TILE: u64 = 7;
 
@@ -72,10 +77,11 @@ impl gpui::Render for ShellStandIn {
                 else {
                     return;
                 };
-                // `menu` is a fieldless list popup: the shell routes it as
-                // normal mode, over the whole stack.
+                // `menu` is a fieldless list popup and `visual` a live row
+                // selection: the shell routes both as normal mode, over the
+                // whole stack.
                 let stack = match context.get("mode") {
-                    Some("normal") | Some("menu") => vec![
+                    Some("normal") | Some("visual") | Some("menu") => vec![
                         KeyContext::new("workspace"),
                         KeyContext::new("tile"),
                         context,
@@ -125,6 +131,8 @@ struct Harness {
     /// title read arrive through.
     content: Rc<dyn TileContent>,
     factory: Rc<ClassificationsFactory>,
+    /// What the tile asked of the data tier: the test is the service.
+    requests: Receiver<Request>,
 }
 
 /// A tile built by the factory after `config` was pushed, with `restored`
@@ -134,8 +142,23 @@ fn open_with(
     config: ClassificationsConfig,
     restored: Option<toml::Table>,
 ) -> (Harness, gpui::VisualTestContext) {
+    open_over(cx, config, restored, false)
+}
+
+/// [`open_with`] over a data tier that refuses `Busy` until the test
+/// drains its queue (`busy`).
+fn open_over(
+    cx: &mut gpui::TestAppContext,
+    config: ClassificationsConfig,
+    restored: Option<toml::Table>,
+    busy: bool,
+) -> (Harness, gpui::VisualTestContext) {
     cx.update(gpui_component::init);
-    let (data, _rx) = DataHandle::for_tests();
+    cx.update(crate::init);
+    let (data, requests) = DataHandle::for_tests();
+    if busy {
+        data.fill_for_tests();
+    }
     let factory = Rc::new(ClassificationsFactory::new(data));
     cx.update(|cx| factory.set_config(config, cx));
     let keymap = Rc::new(app_keymap(&factory));
@@ -190,6 +213,7 @@ fn open_with(
             tile: built.tile,
             content: built.content,
             factory,
+            requests,
         },
         vcx,
     )
@@ -222,6 +246,67 @@ impl Harness {
             let _ = window.draw(cx);
         });
     }
+    /// The values reads asked since the last call, in order. Other
+    /// requests (the `Busy` filler's cancels) are not the tile's.
+    fn distinct_requests(&self) -> Vec<DistinctParams> {
+        self.requests
+            .try_iter()
+            .filter_map(|r| match r {
+                Request::Distinct(p) => Some(p),
+                _ => None,
+            })
+            .collect()
+    }
+    /// Answer through the shell's door, as the bridge routes it.
+    fn deliver(
+        &self,
+        vcx: &mut gpui::VisualTestContext,
+        tag: u64,
+        column: &str,
+        values: Result<Vec<(&str, u64)>, &str>,
+    ) {
+        let outcome = DistinctOutcome {
+            key: QueryKey(TILE),
+            tag,
+            column: column.into(),
+            values: values
+                .map(|v| v.into_iter().map(|(s, n)| (s.to_string(), n)).collect())
+                .map_err(str::to_string),
+        };
+        vcx.update(|window, cx| h_deliver(&self.content, outcome, window, cx));
+    }
+    fn shown(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
+        self.tile.read_with(vcx, |t, _| t.shown_sources())
+    }
+    fn targets(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
+        self.tile.read_with(vcx, |t, _| t.targets())
+    }
+    fn cursor(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+        self.tile
+            .read_with(vcx, |t, _| t.grid.cursor_source().map(str::to_string))
+    }
+    fn notices(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
+        self.tile.read_with(vcx, |t, _| t.notice_texts())
+    }
+    fn mode(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+        self.tile
+            .read_with(vcx, |t, _| t.key_context().get("mode").map(str::to_string))
+    }
+    fn find(&self, vcx: &mut gpui::VisualTestContext, event: FindEvent) {
+        vcx.update(|window, cx| self.content.find(event, window, cx));
+    }
+    fn command(&self, vcx: &mut gpui::VisualTestContext, line: &str) -> Result<(), String> {
+        vcx.update(|window, cx| self.content.command(line, window, cx))
+    }
+}
+
+fn h_deliver(
+    content: &Rc<dyn TileContent>,
+    outcome: DistinctOutcome,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    content.deliver(Delivery::Distinct(outcome), window, cx);
 }
 
 fn rows(names: &[&str]) -> Option<Vec<(String, bool)>> {
@@ -345,4 +430,387 @@ fn with_no_classifications_the_tile_says_how_to_make_one(cx: &mut gpui::TestAppC
     assert_eq!(h.switcher(&vcx), None);
     h.draw(&mut vcx);
     assert!(vcx.debug_bounds("classifications-empty-7").is_some());
+}
+
+/// The values read for `region` from the fixture's data: one value the map
+/// does not hold (NKY) and the two it does.
+const REGION_VALUES: [(&str, u64); 3] = [("DAX", 5), ("NKY", 7), ("SX5E", 3)];
+
+/// A tile restored on `region` whose values read was answered.
+fn region_with_values(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), restored("region"));
+    let asked = h.distinct_requests();
+    assert_eq!(asked.len(), 1);
+    h.deliver(
+        &mut vcx,
+        asked[0].tag,
+        "underlying_ref",
+        Ok(REGION_VALUES.to_vec()),
+    );
+    (h, vcx)
+}
+
+#[gpui::test]
+fn opening_a_classification_asks_for_its_source_values_by_tile_key(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), None);
+    assert!(
+        h.distinct_requests().is_empty(),
+        "nothing shown, nothing asked"
+    );
+    vcx.simulate_keystrokes("j enter");
+    let asked = h.distinct_requests();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let p = &asked[0];
+    assert_eq!(p.key, QueryKey(TILE));
+    assert_eq!(p.column, "underlying_ref", "the base column, not the name");
+    assert_eq!(p.scope, Scope::default());
+    assert_eq!(p.as_of, AsOf::Live);
+    // Switching to another classification asks about its column.
+    vcx.simulate_keystrokes("g c k enter");
+    let asked2 = h.distinct_requests();
+    assert_eq!(asked2.len(), 1, "{asked2:?}");
+    assert_eq!(asked2[0].column, "book");
+    assert!(asked2[0].tag > p.tag, "each read carries a newer tag");
+    // A reload that leaves the shown classification as it was asks nothing.
+    vcx.update(|_, cx| h.factory.set_config(config(TWO), cx));
+    assert!(h.distinct_requests().is_empty());
+}
+
+/// A reload that moves the shown classification to another source column
+/// asks again, and drops the values counted for the old one.
+#[gpui::test]
+fn a_reload_changing_the_source_column_asks_again(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    assert_eq!(h.shown(&vcx).len(), 3);
+    let moved = "[region]\nfrom = \"lhu\"\n[region.values]\nEurope = [\"SX5E\"]\n";
+    vcx.update(|_, cx| h.factory.set_config(config(moved), cx));
+    let asked = h.distinct_requests();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].column, "lhu");
+    assert_eq!(h.shown(&vcx), ["SX5E"], "the map alone until lhu answers");
+}
+
+#[gpui::test]
+fn delivered_values_fill_the_grid_with_unclassified_rows_first(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), restored("region"));
+    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"], "the map before the values");
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Ok(REGION_VALUES.to_vec()));
+    assert_eq!(h.shown(&vcx), ["NKY", "DAX", "SX5E"]);
+    let header = h.header(&vcx);
+    assert!(
+        header.ends_with("3 values \u{00b7} 1 unclassified \u{00b7} desk"),
+        "{header}"
+    );
+    // Painted: the rows by source value, the unclassified count in the
+    // header.
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("classifications-row-NKY").is_some());
+    assert!(vcx.debug_bounds("classifications-unclassified-7").is_some());
+    let painted = h.tile.read_with(&vcx, |t, cx| {
+        let p = t.table.read(cx).delegate().prepared().clone();
+        p.rows
+            .iter()
+            .map(|r| {
+                (
+                    r.source.to_string(),
+                    r.label.as_ref().map(|l| l.to_string()),
+                    r.count.to_string(),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        painted,
+        [
+            ("NKY".into(), None, "7".into()),
+            ("DAX".into(), Some("Europe".into()), "5".into()),
+            ("SX5E".into(), Some("Europe".into()), "3".into()),
+        ]
+    );
+}
+
+#[gpui::test]
+fn a_stale_tag_is_ignored(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), restored("region"));
+    let first = h.distinct_requests()[0].tag;
+    vcx.simulate_keystrokes("shift-r");
+    let second = h.distinct_requests()[0].tag;
+    assert!(second > first);
+    h.deliver(
+        &mut vcx,
+        first,
+        "underlying_ref",
+        Ok(REGION_VALUES.to_vec()),
+    );
+    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"], "overtaken: dropped");
+    // The current tag for another column is not this read's answer either.
+    h.deliver(&mut vcx, second, "book", Ok(REGION_VALUES.to_vec()));
+    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"]);
+    h.deliver(
+        &mut vcx,
+        second,
+        "underlying_ref",
+        Ok(REGION_VALUES.to_vec()),
+    );
+    assert_eq!(h.shown(&vcx), ["NKY", "DAX", "SX5E"]);
+}
+
+#[gpui::test]
+fn a_refused_or_failed_read_shows_the_map_alone_with_a_notice_and_shift_r_retries(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_over(cx, config(TWO), restored("region"), true);
+    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"], "the map alone");
+    assert_eq!(
+        h.notices(&vcx),
+        ["values not loaded: the data service is busy \u{2014} R retries"]
+    );
+    assert!(
+        h.distinct_requests().is_empty(),
+        "the refused read never queued"
+    );
+    vcx.simulate_keystrokes("shift-r");
+    let asked = h.distinct_requests();
+    assert_eq!(asked.len(), 1, "the retry was admitted");
+    assert!(
+        h.notices(&vcx).is_empty(),
+        "an admitted read clears the notice"
+    );
+    // A read that fails says why and keeps the map on screen.
+    h.deliver(
+        &mut vcx,
+        asked[0].tag,
+        "underlying_ref",
+        Err("no such column"),
+    );
+    assert_eq!(
+        h.notices(&vcx),
+        ["values not loaded: no such column \u{2014} R retries"]
+    );
+    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"]);
+    vcx.simulate_keystrokes("shift-r");
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Ok(REGION_VALUES.to_vec()));
+    assert!(h.notices(&vcx).is_empty());
+    assert_eq!(h.shown(&vcx).len(), 3);
+}
+
+#[gpui::test]
+fn slash_filters_the_rows_and_escape_restores(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    h.find(&mut vcx, FindEvent::Changed("nk".into()));
+    assert_eq!(h.shown(&vcx), ["NKY"]);
+    h.find(&mut vcx, FindEvent::Cancelled);
+    assert_eq!(h.shown(&vcx), ["NKY", "DAX", "SX5E"], "escape restores");
+    // The label column is searched too.
+    h.find(&mut vcx, FindEvent::Changed("eur".into()));
+    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"]);
+    h.find(&mut vcx, FindEvent::Committed("eur".into()));
+    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"], "enter keeps it");
+    // A later cancelled search restores the committed filter, not none.
+    h.find(&mut vcx, FindEvent::Changed("dax".into()));
+    assert_eq!(h.shown(&vcx), ["DAX"]);
+    h.find(&mut vcx, FindEvent::Cancelled);
+    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"]);
+    // Painted highlights follow the filter.
+    let marks = h.tile.read_with(&vcx, |t, cx| {
+        t.table.read(cx).delegate().prepared().rows[0]
+            .label_marks
+            .clone()
+    });
+    assert_eq!(marks, [std::ops::Range { start: 0, end: 3 }]);
+}
+
+#[gpui::test]
+fn j_moves_the_cursor_and_v_selects_rows(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    vcx.simulate_keystrokes("j");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    vcx.simulate_keystrokes("k shift-v j");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("visual"));
+    assert_eq!(h.targets(&vcx), ["NKY", "DAX"]);
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert_eq!(h.targets(&vcx), ["DAX"]);
+    // A counted motion clamps at the top rather than wrap (the count
+    // arrives with the action, as the shell's matcher hands it over).
+    vcx.update(|window, cx| {
+        let up = ActionId(geode_tile::motion::UP.to_string());
+        assert!(h.content.dispatch(&up, Some(5), window, cx));
+    });
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    // The cursor is what the session saves.
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert_eq!(saved["cursor"].as_str(), Some("NKY"));
+}
+
+#[gpui::test]
+fn sort_command_orders_by_rows_and_bare_sort_restores(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    h.command(&mut vcx, "sort rows desc").unwrap();
+    assert_eq!(h.shown(&vcx), ["NKY", "DAX", "SX5E"]);
+    h.command(&mut vcx, "sort rows").unwrap();
+    assert_eq!(
+        h.shown(&vcx),
+        ["SX5E", "DAX", "NKY"],
+        "a bare column is asc"
+    );
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    let (state, _) = crate::core::session::from_table(&saved);
+    assert_eq!(
+        state.sort,
+        Some((SortCol::Rows, false)),
+        "the session saves it"
+    );
+    h.command(&mut vcx, "sort source desc").unwrap();
+    assert_eq!(h.shown(&vcx), ["SX5E", "NKY", "DAX"]);
+    h.command(&mut vcx, "sort").unwrap();
+    assert_eq!(h.shown(&vcx), ["NKY", "DAX", "SX5E"], "the default order");
+    for bad in [
+        "sort colour",
+        "sort rows up",
+        "sort rows asc extra",
+        "grep x",
+    ] {
+        assert!(h.command(&mut vcx, bad).is_err(), "{bad}");
+    }
+    let complete = |line: &str, vcx: &mut gpui::VisualTestContext| {
+        vcx.update(|_, cx| h.content.completions(line, line.len(), cx))
+    };
+    assert_eq!(complete("so", &mut vcx), ["sort"]);
+    assert_eq!(complete("sort ", &mut vcx), ["source", "label", "rows"]);
+    assert_eq!(complete("sort rows d", &mut vcx), ["asc", "desc"]);
+}
+
+/// The sort icon carries no debug selector to press headless, so the press
+/// is driven through the delegate's `perform_sort` hook, which the icon's
+/// click calls.
+#[gpui::test]
+fn a_header_click_cycles_the_sort(cx: &mut gpui::TestAppContext) {
+    use gpui_component::table::{ColumnSort, TableDelegate as _};
+    let (h, mut vcx) = region_with_values(cx);
+    let table = h.tile.read_with(&vcx, |t, _| t.table.clone());
+    let click = |col: usize, vcx: &mut gpui::VisualTestContext| {
+        vcx.update(|window, cx| {
+            table.update(cx, |t, cx| {
+                t.delegate_mut()
+                    .perform_sort(col, ColumnSort::Default, window, cx)
+            })
+        });
+    };
+    let sort = |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.state.sort);
+    click(2, &mut vcx);
+    assert_eq!(sort(&vcx), Some((SortCol::Rows, false)));
+    assert_eq!(h.shown(&vcx), ["SX5E", "DAX", "NKY"]);
+    click(2, &mut vcx);
+    assert_eq!(sort(&vcx), Some((SortCol::Rows, true)));
+    click(2, &mut vcx);
+    assert_eq!(sort(&vcx), None);
+    assert_eq!(h.shown(&vcx), ["NKY", "DAX", "SX5E"]);
+    // Another column starts its own cycle at asc.
+    click(2, &mut vcx);
+    click(0, &mut vcx);
+    assert_eq!(sort(&vcx), Some((SortCol::Source, false)));
+    // The header marks the column in force.
+    let marked = vcx.update(|_, cx| {
+        let d = table.read(cx).delegate();
+        (0..3).map(|c| d.column(c, cx).sort).collect::<Vec<_>>()
+    });
+    assert_eq!(
+        marked,
+        [
+            Some(ColumnSort::Ascending),
+            Some(ColumnSort::Default),
+            Some(ColumnSort::Default)
+        ]
+    );
+}
+
+#[gpui::test]
+fn a_restored_cursor_lands_on_its_source_when_rows_arrive(cx: &mut gpui::TestAppContext) {
+    let record = crate::core::session::to_table(&crate::core::session::State {
+        name: Some("region".into()),
+        sort: Some((SortCol::Rows, true)),
+        cursor: Some("NKY".into()),
+    });
+    let (h, mut vcx) = open_with(cx, config(TWO), Some(record));
+    // NKY is only in the data: the map's rows rest the cursor elsewhere,
+    // and the session still names NKY while it waits.
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert_eq!(saved["cursor"].as_str(), Some("NKY"));
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Ok(REGION_VALUES.to_vec()));
+    assert_eq!(h.shown(&vcx), ["NKY", "DAX", "SX5E"], "the restored sort");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.grid.cursor()), Some(0));
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, cx| t.table.read(cx).selected_row()),
+        Some(0),
+        "the table paints it there"
+    );
+}
+
+#[gpui::test]
+fn a_restored_cursor_on_a_mapped_value_survives_the_values(cx: &mut gpui::TestAppContext) {
+    let record = crate::core::session::to_table(&crate::core::session::State {
+        name: Some("region".into()),
+        cursor: Some("SX5E".into()),
+        ..Default::default()
+    });
+    let (h, mut vcx) = open_with(cx, config(TWO), Some(record));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Ok(REGION_VALUES.to_vec()));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.grid.cursor()), Some(2));
+}
+
+#[gpui::test]
+fn a_row_click_moves_the_cursor(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    h.draw(&mut vcx);
+    let sx5e = vcx
+        .debug_bounds("classifications-row-SX5E")
+        .expect("the row is painted");
+    vcx.simulate_click(sx5e.center(), gpui::Modifiers::none());
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, cx| t.table.read(cx).selected_row()),
+        Some(2),
+        "the table paints the cursor row"
+    );
+    // Shift-click extends a row selection from the cursor.
+    h.draw(&mut vcx);
+    let nky = vcx.debug_bounds("classifications-row-NKY").unwrap();
+    vcx.simulate_click(nky.center(), gpui::Modifiers::shift());
+    assert_eq!(h.targets(&vcx), ["NKY", "DAX", "SX5E"]);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("visual"));
+    // A plain click ends it.
+    h.draw(&mut vcx);
+    let dax = vcx.debug_bounds("classifications-row-DAX").unwrap();
+    vcx.simulate_click(dax.center(), gpui::Modifiers::none());
+    assert_eq!(h.targets(&vcx), ["DAX"]);
+}
+
+/// A label that is blank after trimming is unclassified everywhere: the
+/// header counts it, and it paints as the unclassified mark.
+#[gpui::test]
+fn a_blank_label_counts_and_paints_as_unclassified(cx: &mut gpui::TestAppContext) {
+    let blank = "[region]\nfrom = \"underlying_ref\"\n[region.values]\n\"  \" = [\"DAX\"]\n";
+    let (h, vcx) = open_with(cx, config(blank), restored("region"));
+    let header = h.header(&vcx);
+    assert!(
+        header.contains("1 value \u{00b7} 1 unclassified"),
+        "{header}"
+    );
+    let label = h.tile.read_with(&vcx, |t, cx| {
+        t.table.read(cx).delegate().prepared().rows[0].label.clone()
+    });
+    assert_eq!(label, None);
 }

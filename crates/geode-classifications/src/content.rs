@@ -159,26 +159,31 @@ impl TileContent for ClassificationsContent {
             .update(cx, |t, cx| t.dispatch(action, count, window, cx))
     }
 
-    /// The tile takes no `:` commands: its configuration-level verbs are
-    /// registered actions, so they never act from another tile's line.
-    fn command(&self, line: &str, _window: &mut Window, _cx: &mut App) -> Result<(), String> {
-        let verb = line.split_whitespace().next().unwrap_or(line);
-        Err(format!("not a classifications command: {verb}"))
+    /// Only `:sort`, which orders this tile's grid. The configuration-level
+    /// verbs are registered actions, so they never act from another tile's
+    /// line.
+    fn command(&self, line: &str, _window: &mut Window, cx: &mut App) -> Result<(), String> {
+        self.tile.update(cx, |t, cx| t.command(line, cx))
     }
 
-    fn completions(&self, _line: &str, _cursor: usize, _cx: &App) -> Vec<String> {
-        Vec::new()
+    fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
+        self.tile.read(cx).completions(line, cursor)
     }
 
-    /// No rows to search yet; `/` changes nothing here.
-    fn find(&self, _event: FindEvent, _window: &mut Window, _cx: &mut App) {}
+    /// `/` narrows the grid's rows over source and label.
+    fn find(&self, event: FindEvent, _window: &mut Window, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.find(event, cx))
+    }
 
-    fn deliver(&self, delivery: Delivery, _window: &mut Window, _cx: &mut App) {
+    fn deliver(&self, delivery: Delivery, _window: &mut Window, cx: &mut App) {
         match delivery {
-            // Nothing is asked of the data tier yet, so no answer is this
-            // tile's; one that arrived would answer nothing it asked.
+            // The source column's values, routed by this tile's key; the
+            // tile drops one a later read overtook.
+            Delivery::Distinct(outcome) => self.tile.update(cx, |t, cx| t.on_distinct(outcome, cx)),
+            // The tile asks the data tier for nothing else, so no other
+            // answer is this tile's; one that arrived would answer nothing
+            // it asked.
             Delivery::Query(_) => {}
-            Delivery::Distinct(_) => {}
             Delivery::Price(_) => {}
             Delivery::Series(_) => {}
             Delivery::SeriesFetched { .. } => {}

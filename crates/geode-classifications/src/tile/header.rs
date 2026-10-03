@@ -1,7 +1,8 @@
 //! The tile's header: the classification it shows (a press, or `g c`,
 //! opens the switcher hung beneath it), the source column it maps, how
-//! many values it maps, the layer its definition comes from, and the
-//! shared right cluster with `⋯` and ×.
+//! many source values the grid holds and how many of them are
+//! unclassified, the layer its definition comes from, and the shared right
+//! cluster with `⋯` and ×.
 //!
 //! [`HeaderModel::prepare`] formats every string when the configuration or
 //! the shown classification changes; paint clones prepared strings.
@@ -33,18 +34,26 @@ pub(crate) struct HeaderModel {
     pub name: Option<SharedString>,
     /// The source column it maps.
     pub from: Option<SharedString>,
-    /// `<n> values`: how many source values its map holds.
+    /// `<n> values`: how many source values the grid holds (the map's and
+    /// the data's together).
     pub values: Option<SharedString>,
+    /// `<k> unclassified`, while any value is.
+    pub unclassified: Option<SharedString>,
     /// The layer its winning definition comes from.
     pub layer: Option<&'static str>,
 }
 
 impl HeaderModel {
-    pub(crate) fn prepare(dim: Option<&DerivedDimension>, layer: Option<Layer>) -> Self {
+    /// `counts` is the grid's `(values, unclassified)`.
+    pub(crate) fn prepare(
+        dim: Option<&DerivedDimension>,
+        layer: Option<Layer>,
+        counts: (usize, usize),
+    ) -> Self {
         let Some(dim) = dim else {
             return HeaderModel::default();
         };
-        let n = dim.values.len();
+        let (n, k) = counts;
         HeaderModel {
             name: Some(dim.name.clone().into()),
             from: Some(dim.from.clone().into()),
@@ -56,6 +65,7 @@ impl HeaderModel {
                 }
                 .into(),
             ),
+            unclassified: (k > 0).then(|| format!("{k} unclassified").into()),
             layer: layer.map(Layer::name),
         }
     }
@@ -70,6 +80,7 @@ impl HeaderModel {
         }];
         parts.extend(self.from.iter().map(|f| format!("from {f}")));
         parts.extend(self.values.iter().map(|v| v.to_string()));
+        parts.extend(self.unclassified.iter().map(|v| v.to_string()));
         parts.extend(self.layer.map(str::to_string));
         parts.join(" \u{00b7} ")
     }
@@ -173,7 +184,8 @@ fn switch_control(h: &HeaderModel, c: &mut HeaderChrome, theme: &Theme) -> AnyEl
 /// The layer badge: outlined, monospace, no fill — the object dialog's
 /// layer marker, so one definition reads the same in both places.
 fn layer_badge(layer: &'static str, name: &SharedString, tile_id: u64, theme: &Theme) -> Div {
-    let selector = format!("classifications-layer-{tile_id}-{name}");
+    // Formatted only when a test asks for the selector, not every paint.
+    let name = name.clone();
     div()
         .flex_none()
         .font_family(geode_shell::fonts::MONO)
@@ -183,7 +195,7 @@ fn layer_badge(layer: &'static str, name: &SharedString, tile_id: u64, theme: &T
         .border_color(theme.border)
         .px_1()
         .rounded(theme.radius_tokens().sm)
-        .debug_selector(move || selector.clone())
+        .debug_selector(move || format!("classifications-layer-{tile_id}-{name}"))
         .child(layer)
 }
 
@@ -207,6 +219,15 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> Div
         })
         .when_some(h.values.clone(), |el, values| {
             el.child(div().flex_none().text_color(muted).child(values))
+        })
+        .when_some(h.unclassified.clone(), |el, k| {
+            el.child(
+                div()
+                    .flex_none()
+                    .text_color(muted)
+                    .debug_selector(move || format!("classifications-unclassified-{tile_id}"))
+                    .child(k),
+            )
         })
         .when_some(h.layer.zip(h.name.as_ref()), |el, (layer, name)| {
             el.child(layer_badge(layer, name, tile_id, theme))
@@ -248,20 +269,20 @@ mod tests {
             from: "book".into(),
             values: BTreeMap::from([("B1".into(), "Flow".into()), ("B2".into(), "Flow".into())]),
         };
-        let h = HeaderModel::prepare(Some(&dim), Some(Layer::User));
+        let h = HeaderModel::prepare(Some(&dim), Some(Layer::User), (2, 0));
         assert_eq!(
             h.text(),
             "Classification: desk \u{00b7} from book \u{00b7} 2 values \u{00b7} user"
         );
-        let one = DerivedDimension {
-            values: BTreeMap::from([("B1".into(), "Flow".into())]),
-            ..dim
-        };
         assert!(
-            HeaderModel::prepare(Some(&one), None)
+            HeaderModel::prepare(Some(&dim), None, (1, 0))
                 .text()
                 .ends_with("1 value")
         );
-        assert_eq!(HeaderModel::prepare(None, None).text(), NONE_SHOWN);
+        assert_eq!(
+            HeaderModel::prepare(Some(&dim), None, (3, 1)).text(),
+            "Classification: desk \u{00b7} from book \u{00b7} 3 values \u{00b7} 1 unclassified"
+        );
+        assert_eq!(HeaderModel::prepare(None, None, (0, 0)).text(), NONE_SHOWN);
     }
 }
