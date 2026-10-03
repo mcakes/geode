@@ -38,7 +38,13 @@ ownership. Typed interpretation and merging are I/O-free; its configuration
 loader reads disk documents through `Config::read_docs` and `Config::load`.
 Types shared across a forbidden dependency boundary live there: scopes,
 link groups, schema, query outcomes, snapshots, health, document rows, series
-requests, pricing requests, and vol-slice requests.
+requests, pricing requests, vol-slice requests, and text file requests and
+outcomes (`textfile`). `geode_core::classification` is the pure editing model
+for a classification (a derived dimension a person edits): grid rows, edits
+that return the whole next object with an undo entry, CSV import and export
+planning, and the rules for naming one and choosing its source. It reads and
+writes nothing; the bytes come and go through the data service, and the
+object is written through the shell's config door.
 
 `geode-shell` owns the window and interaction model. It does not depend on the
 data service or on feature modules. `geode-data` owns sources, DuckDB, and
@@ -89,7 +95,11 @@ fetch, pricing, egress, and logging workers communicate through bounded
 channels or explicit sinks. Egress hands each document's rows to a
 per-target worker, which encodes and sends them off the service thread. Every
 long-lived data-service thread is supervised: one that dies is declared once
-to the UI and never restarted. Transport threads standing in for a vendor
+to the UI and never restarted. The text file worker (`geode-files`) is the
+one piece of file I/O `geode-data` performs that is not a source: modules
+never touch the filesystem, so a tile's import or export is a request
+answered by tile key and tag, and a slow path stalls neither the UI nor the
+request loop (see [text files](data-path.md#text-files)). Transport threads standing in for a vendor
 client (the channel adapter's dispatcher, the demo bus) are not.
 
 Submission reports admission or refusal without waiting for queue space; a
@@ -150,7 +160,10 @@ Documents merge recursively with whole-object exceptions and retain
 provenance. Reload retains the active configuration for errors collected
 before its acceptance decision; later typed-reader failures do not roll back
 the whole candidate. Runtime edits write the user layer through an ordered,
-atomic write path. The session file holds layout, occupants, frame state,
+atomic write path. A module never writes configuration itself: it queues
+whole-object edits on the frame (`Frame::queue_config_edits`), and the
+shell folds them into the same debounced, user-layer batch the configuration
+dialogs use (see [the config door](shell.md#the-config-door)). The session file holds layout, occupants, frame state,
 and palette usage, with separate save ordering and recovery rules. See
 [configuration](configuration.md) and [session persistence](shell.md#session-format)
 for those boundaries.

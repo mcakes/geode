@@ -67,7 +67,7 @@ The main configuration documents have distinct owners:
 | `positions.toml` | The one position service: the adapter that takes position commands such as Move LHU |
 | `panels.toml` | Market-data panels: the dataset, document kind, layout, formats, and kind actions of each panel tile kind |
 | `pricer_templates.toml` | Named option-package templates used by the pricer's shorthand |
-| `dimensions.toml` | Derived dimensions used for grouping and scope |
+| `dimensions.toml` | Derived dimensions used for grouping and scope; each entry is what the interface calls a classification |
 | `groupings.toml` | The nine shared grouping slots |
 | `scopes.toml` | Named scopes |
 | `expressions.toml` | Named scope expressions, referenced by name from a saved scope or the frame |
@@ -550,6 +550,17 @@ valid drafts without a Save action, apply them to the shell after a debounce,
 then persist to the user layer. Memory acceptance and disk success are
 separate outcomes. See [configuration dialogs](configuration-dialogs.md) for
 inherited objects, presentation routing, reload interaction, and write failures.
+
+Modules write configuration only through the shell's config door
+(`Frame::queue_config_edits`, see [the config door](shell.md#the-config-door)),
+which joins the object dialogs' pending batch. `dimensions` has a runtime
+writer this way: a classification edited in a tile is written as its whole
+`dimensions.toml` object, never as one changed key, because the document
+replaces whole named objects across layers. Editing a desk or builtin
+classification therefore forks it: the user layer receives the complete
+object, which shadows the lower layer's from then on, including later desk
+changes to it. Removing the object removes only the user layer's copy, which
+reveals the lower layer's again; it cannot delete a desk classification.
 
 An inherited object can be edited by creating a user override. Deleting that
 override reveals the lower-layer value again. `overrides.toml` records accepted

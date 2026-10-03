@@ -869,7 +869,9 @@ feature.
 
 `Delivery` is an exhaustive enum. Adding a new outcome type forces every
 occupant to decide how it handles that variant at compile time. Query, pricing,
-and series outcomes route by tile key. A series fetch completion has no tile
+series, upload, and text file outcomes route by tile key, and so does a
+distinct-values answer under a tile's key (`Delivery::Distinct`); answers
+under the shell's own keys (`shell::is_shell_key`) never reach a tile. A series fetch completion has no tile
 key and is broadcast to visible occupants because several tiles may watch the
 same `(identity, source)` pair.
 
@@ -1306,6 +1308,19 @@ the common door for ordered, atomic edits. Accepted writes to one directory
 run in submission order on the background executor. The target file is parsed
 before editing, temporary files live beside it and do not end in `.toml`, and
 rename exposes either the old or new complete file to the reload poll.
+
+### The config door
+
+A module never writes configuration: it queues whole-object edits on the
+frame with `Frame::queue_config_edits` and notifies. Each `ConfigEdit` names a
+document, an object, and the whole new value, or `None` to remove the user
+layer's object. On its frame observation the shell drains the queue into the
+object dialogs' pending batch, with the same 250 ms debounce, user-layer
+promotion and revert on failure, so a burst of edits from a tile becomes one
+write and one reload, and a later edit to the same object replaces an earlier
+one. The write reaches tiles through the reload it causes; queuing moves no
+frame version. With no writable user directory nothing is queued and the
+refusal shows as the status bar's configuration write error.
 
 Hot reload keeps the last valid configuration when a changed document is
 rejected by the file, modifier, clock, or keymap checks. Later typed readers

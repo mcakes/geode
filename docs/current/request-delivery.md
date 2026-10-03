@@ -33,7 +33,7 @@ cancellation can suppress query outcomes, and UI delivery may coalesce them.
 |---|---|
 | View or document query | `Query`, addressed by key and tag. |
 | Series query | `Series`, addressed by key and tag, including cap/compile errors. |
-| Distinct values | `Distinct`, with key, tag, and requested column. |
+| Distinct values | `Distinct`, with key, tag, and requested column. The key is the picker's, another shell consumer's, or the asking tile's. |
 | Catalog | `Catalog`, read on the service thread and addressed by key/tag. |
 | Reference table | `Reference`, read on the service thread and addressed by key/tag, with the dataset and as-of. |
 | Snapshot poll-now | No dedicated reply. The source reports ordinary poll, health, and publication events; an unchanged snapshot has no publication. |
@@ -42,6 +42,7 @@ cancellation can suppress query outcomes, and UI delivery may coalesce them.
 | Local publish | Storage produces `Published` then `LocalPublished`. Any refusal or failure — the service refusing a dataset that is not local, the writer's validation or store error, a contained panic — produces an error diagnostic and `LocalPublishFailed`. Every admitted local publish answers exactly once. |
 | Local forget | `Forgotten` (including a key that held nothing) or `ForgetFailed`. The service refuses a dataset that is not local or a key of the wrong arity with an error diagnostic and `ForgetFailed`; nothing is queued. |
 | Document upload | `Upload`, addressed by tile key and upload tag; target validation and target-queue refusal (from the service thread), and encoding and transport results (from the target's worker) use the same outcome. |
+| Text file read or write | `TextFile`, addressed by tile key and tag. A full or stopped file queue answers at once with an error outcome, as does a contained panic (a write's as a failed write, a read's as a failed read). |
 | Move LHU | `Command`, addressed by command tag. Service/worker-queue refusal and the position adapter's answer use the same outcome. Acceptance by the position system does not update the grid; a later source snapshot carries the move. |
 | History fetch | `SeriesFetched` identifies the source/identity pair, including zero-row completion. |
 | Identity refresh | Updates a cache read by a later catalog request; worker refusal is logged, with no dedicated completion event. |
@@ -130,6 +131,7 @@ delivery, not applied to a window.
 |---|---|
 | Query, series, distinct, catalog, price, vol slices | One entry per event kind and request key; a lower tag cannot replace a higher one. Equal tags replace. |
 | Upload outcome | One entry per tile key and upload tag. Different uploads from one tile remain distinct; duplicate outcomes for the same pair replace. |
+| Text file outcome | Keyed like an upload, on tile key and tag: a failed export followed by an import from the same tile both arrive, so the failure is not coalesced away behind the later answer. |
 | Publication | One entry per dataset/batch; union affected books and retain the greatest generation ID. |
 | Local-write outcome (saved, save failed, forgotten, forget failed) | Never coalesced: each is keyed by its arrival sequence and every one is delivered, in the writer's order. A writer may be waiting on one exact outcome (a pricer load deferred behind a queued save), so a later outcome for the same document must not replace it. The count is bounded by the writes the app queued, not by a feed's rate. |
 | Position-command outcome | Never coalesced: each answer has its own arrival-sequence key. One command's success cannot hide another's refusal. |
@@ -154,12 +156,17 @@ every event through `window.update`. A closed window ends the drain on its
 next event; while idle, the task can remain awaiting the mailbox. This is
 arrival-driven delivery with no fixed frame-latency guarantee.
 
-Keyed query, series, pricing, vol-slice, and upload results go to the matching
-shell occupant;
+Keyed query, series, pricing, vol-slice, upload, and text file results go to
+the matching shell occupant;
 absent occupants are ignored. Fetch completion broadcasts to visible
 occupants, whose modules decide whether they watch that source/identity.
-Distinct results go to the picker, which checks its current tag, column, and
-open state. If submitting the picker's request fails, the bridge immediately
+Distinct results are routed by key. A shell key (`shell::is_shell_key`: the
+picker, saved scopes, expression suggestions, action values, diagnostics) goes
+to the shell's own consumers, and only the picker's key reaches the picker,
+which checks its current tag, column, and open state; a tile's tag counter can
+equal the picker's, so a tag check alone would let a tile's values fill it.
+Any other key is a tile's and is delivered to that occupant as
+`Delivery::Distinct`. If submitting the picker's request fails, the bridge immediately
 delivers a matching synthetic error rather than leaving it loading: `the data
 service is busy — try again` or `the data service has stopped`.
 
