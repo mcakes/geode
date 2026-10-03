@@ -627,8 +627,9 @@ presentation, dimensions, colors, or value colors. It uses the same
 presentation-aware view loader as startup, updates module factories, and
 offers views/dimensions to the service. The colors it hands the blotter and
 timeseries factories carry the `value_colors` mapping, checked against those
-definitions and the declared dimensions, as startup's do. This is not an atomic update across factories and workers;
-the handle acknowledges retention, not application. See
+definitions and the declared dimensions, as startup's do. This is not an
+atomic update across factories and workers; the handle acknowledges
+retention, not application. See
 [view replacement](request-delivery.md#view-replacement-and-shutdown).
 
 That handler also rereads the factory validation schema. Dataset edits
@@ -639,8 +640,9 @@ own; the pricer reads it in its own revision observer. That observer's key
 also covers `colors` and `value_colors`, so an edit to either alone re-runs
 the pricer's reload and hands its factory colors carrying the mapping; their
 diagnostics are the `ConfigReloaded` handler's to report. Presentation and
-color-reader (including value-color) diagnostics append to the retained data-diagnostics lane; the shell remains
-responsible for replacing the current config-diagnostics batch.
+color-reader (including value-color) diagnostics append to the retained
+data-diagnostics lane; the shell remains responsible for replacing the
+current config-diagnostics batch.
 
 ## Keymaps and actions
 

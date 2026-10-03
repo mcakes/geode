@@ -144,13 +144,78 @@ pub enum Target {
     /// with. `picks[i]` is what declared option `i` does (a row stands for
     /// its pick by position: a color may be named like another row), and
     /// `swatches[i]` the definition its row paints a swatch of. Captured
-    /// at open.
+    /// at open; `resolved` holds them resolved under the theme last painted.
     ValueColor {
         dimension: String,
         value: String,
         picks: Vec<ValuePick>,
         swatches: Vec<Option<Definition>>,
+        resolved: SwatchCache,
     },
+}
+
+/// One value-color row's resolved swatch and its stable selector, or `None`
+/// for a row without a color.
+pub type SwatchRow = Option<(gpui::Hsla, SharedString)>;
+
+/// The value-color list's swatches resolved (OKLCH and contrast seek) under
+/// one theme, keyed on that theme's [`super::colours::theme_signature`], so
+/// a repaint under the same theme reuses them and a theme change while the
+/// list is open resolves them again. A cache, not part of the dialog's
+/// identity: any two compare equal.
+#[derive(Debug, Clone, Default)]
+pub struct SwatchCache(std::cell::RefCell<Option<Box<SwatchMemo>>>);
+
+/// The theme signature a set of swatch rows was resolved under, and the
+/// rows. Boxed in [`SwatchCache`] so the signature does not widen `Target`.
+type SwatchMemo = ([gpui::Hsla; 28], Rc<[SwatchRow]>);
+
+impl PartialEq for SwatchCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl SwatchCache {
+    /// The rows resolved under the theme `key` names: the cached rows when
+    /// `key` is the one they were resolved under, else `resolve`'s, kept.
+    pub fn rows(
+        &self,
+        key: [gpui::Hsla; 28],
+        resolve: impl FnOnce() -> Rc<[SwatchRow]>,
+    ) -> Rc<[SwatchRow]> {
+        let mut slot = self.0.borrow_mut();
+        match slot.as_deref() {
+            Some((k, rows)) if *k == key => rows.clone(),
+            _ => {
+                let rows = resolve();
+                *slot = Some(Box::new((key, rows.clone())));
+                rows
+            }
+        }
+    }
+}
+
+/// Each row's swatch resolved under `anchors` and `tokens`: a color row
+/// with a captured definition gets its color and `valuecolor-swatch-{name}`;
+/// every other row `None`.
+fn resolve_swatches(
+    swatches: &[Option<Definition>],
+    picks: &[ValuePick],
+    anchors: &geode_core::colour::Anchors,
+    tokens: &geode_core::colour::Tokens,
+) -> Rc<[SwatchRow]> {
+    swatches
+        .iter()
+        .zip(picks)
+        .map(|(definition, pick)| match (definition, pick) {
+            (Some(d), ValuePick::Color(name)) => Some((
+                super::colours::to_hsla(geode_core::colour::resolve(d, anchors, tokens)),
+                SharedString::from(format!("valuecolor-swatch-{name}")),
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 /// What one link-chooser row changes about its tile: the group it follows
@@ -625,6 +690,7 @@ impl ChoiceDialogState {
                 value,
                 picks,
                 swatches,
+                resolved: SwatchCache::default(),
             },
         }
     }
@@ -1365,14 +1431,18 @@ fn build(
 }
 
 /// The value-color list's leading elements, by declared row: a swatch for
-/// each color, resolved now from the definition captured at open so a theme
-/// change while the list is open repaints it, and a swatch-wide space for
-/// the rows without one so every name starts on the same spine. Empty for
-/// every other target, and when no row has a swatch. Bounded by the row
-/// count.
+/// each color, resolved from the definition captured at open under the
+/// current theme (cached per theme signature, so a theme change while the
+/// list is open repaints it and an unchanged theme resolves nothing), and a
+/// swatch-wide space for the rows without one so every name starts on the
+/// same spine. Empty for every other target, and when no row has a swatch.
+/// Bounded by the row count.
 fn value_color_leads(target: &Target, cx: &App) -> Vec<Option<AnyElement>> {
     let Target::ValueColor {
-        picks, swatches, ..
+        picks,
+        swatches,
+        resolved,
+        ..
     } = target
     else {
         return Vec::new();
@@ -1381,21 +1451,19 @@ fn value_color_leads(target: &Target, cx: &App) -> Vec<Option<AnyElement>> {
         return Vec::new();
     }
     let theme = cx.theme();
-    let (anchors, tokens) = (
-        super::colours::anchors_from_theme(theme),
-        super::colours::tokens_from_theme(theme),
-    );
-    swatches
-        .iter()
-        .zip(picks)
-        .map(|(definition, pick)| {
-            Some(match (definition, pick) {
-                (Some(d), ValuePick::Color(name)) => dialog::swatch(
-                    super::colours::to_hsla(geode_core::colour::resolve(d, &anchors, &tokens)),
-                    format!("valuecolor-swatch-{name}"),
-                    cx,
-                ),
-                _ => dialog::swatch_space(),
+    let rows = resolved.rows(super::colours::theme_signature(theme), || {
+        resolve_swatches(
+            swatches,
+            picks,
+            &super::colours::anchors_from_theme(theme),
+            &super::colours::tokens_from_theme(theme),
+        )
+    });
+    rows.iter()
+        .map(|row| {
+            Some(match row {
+                Some((colour, selector)) => dialog::swatch(*colour, selector.clone(), cx),
+                None => dialog::swatch_space(),
             })
         })
         .collect()
@@ -1433,6 +1501,36 @@ mod tests {
     use super::*;
     use crate::keymap::{Modifiers, parse_keystroke};
     use geode_core::tile_columns::{TileColumn, TileColumns};
+
+    /// The value-color swatches resolve once per theme: a repaint under the
+    /// same theme signature reuses the resolved rows, a changed signature
+    /// (a theme change while the list is open) resolves them again.
+    #[test]
+    fn value_color_swatches_resolve_once_per_theme() {
+        let cache = SwatchCache::default();
+        let calls = std::cell::Cell::new(0);
+        let resolve = |h: f32| {
+            calls.set(calls.get() + 1);
+            let rows: Rc<[SwatchRow]> =
+                Rc::from(vec![Some((gpui::hsla(h, 0.5, 0.5, 1.0), "s".into())), None]);
+            rows
+        };
+        let light = [gpui::Hsla::default(); 28];
+        let mut dark = light;
+        dark[12] = gpui::hsla(0.0, 0.0, 1.0, 1.0);
+        let first = cache.rows(light, || resolve(0.1));
+        let again = cache.rows(light, || resolve(0.9));
+        assert_eq!(calls.get(), 1, "an unchanged theme resolves nothing");
+        assert!(Rc::ptr_eq(&first, &again));
+        let changed = cache.rows(dark, || resolve(0.6));
+        assert_eq!(calls.get(), 2, "a theme change resolves again");
+        assert_eq!(changed[0].as_ref().map(|(c, _)| c.h), Some(0.6));
+        assert_eq!(
+            SwatchCache::default(),
+            cache,
+            "a cache is not part of the dialog's identity"
+        );
+    }
 
     fn tile() -> TileColumns {
         let c = |name: &str, label: &str, derived: bool| TileColumn {

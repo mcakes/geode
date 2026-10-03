@@ -924,7 +924,8 @@ pub(crate) fn badge(
 /// Swatch for an already-resolved data colour. The caller resolves the definition
 /// against anchors, tokens, and the active theme; this helper paints that value with a
 /// theme border, keeping data colour separate from chrome.
-pub(crate) fn swatch(colour: Hsla, selector: String, cx: &App) -> AnyElement {
+pub(crate) fn swatch(colour: Hsla, selector: impl Into<SharedString>, cx: &App) -> AnyElement {
+    let selector: SharedString = selector.into();
     div()
         .flex_shrink_0()
         .w(scale::design(SWATCH_SIZE))
@@ -933,7 +934,7 @@ pub(crate) fn swatch(colour: Hsla, selector: String, cx: &App) -> AnyElement {
         .border_1()
         .border_color(cx.theme().border)
         .bg(colour)
-        .debug_selector(move || selector.clone())
+        .debug_selector(move || selector.to_string())
         .into_any_element()
 }
 

@@ -85,9 +85,11 @@ impl ShellView {
             &dimension,
             &value,
         );
-        // Decided against the color as painted, from the definitions the
-        // list opened with: a name `colors.toml` no longer defines paints
-        // nothing, so `None` over it is no change. Without this an untouched
+        // Decided against the color as painted, from the mapping and the
+        // `colors.toml` definitions as the config holds them now, at the
+        // pick (a reload while the list was open is honoured): a name
+        // `colors.toml` no longer defines paints nothing, so `None` over it
+        // is no change. Without this an untouched
         // enter would write `none` over a desk entry, masking it even after
         // the desk defines the name again.
         let (named, _) = NamedColours::from_config(&self.services.config);

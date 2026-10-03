@@ -34870,10 +34870,36 @@ run_mutation "pricer: a state paint wins over a value color" \
 # Only an own value is looked up: `mixed` and blank are not values.
 run_mutation "pricer: only an own cell carries a value color" \
   crates/geode-pricer/src/grid.rs \
-  '        let value_color = (t.state == CellState::Own)' \
-  '        let value_color = (true)' \
+  '        let value_color = (t.state == CellState::Own' \
+  '        let value_color = (true' \
   geode-pricer \
   a_group_label_and_a_dimension_cell_carry_their_values_color
+
+# A cell is looked up by the raw value its group label uses, not by its
+# painted text: an `expiry` mapping on `2026-12-18` colors `Z26` cells.
+run_mutation "pricer: a cell matches its raw value, not its painted text" \
+  crates/geode-pricer/src/grid.rs \
+  '        .and_then(|key| self.src.values.get(c.def.name, &key))' \
+  '        .and_then(|_| self.src.values.get(c.def.name, &t.text))' \
+  geode-pricer \
+  an_expiry_mapping_colors_group_labels_and_cells_by_one_raw_value
+
+# A package's aggregating cell matches the value its legs share; the
+# package row itself reads no expiry.
+run_mutation "pricer: a package cell matches its legs' sole raw value" \
+  crates/geode-pricer/src/grid.rs \
+  '                    sole_raw(sheet, sheet.children(r), def.name, clock)' \
+  '                    sole_raw(sheet, [r], def.name, clock)' \
+  geode-pricer \
+  an_expiry_mapping_colors_group_labels_and_cells_by_one_raw_value
+
+# The Color list's swatches resolve once per theme, not on every paint.
+run_mutation "value colors: swatches are cached per theme signature" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            Some((k, rows)) if *k == key => rows.clone(),' \
+  '            Some((k, rows)) if false && *k == key => rows.clone(),' \
+  geode-shell \
+  value_color_swatches_resolve_once_per_theme
 
 # A group row's label is its value: the index carries its color.
 run_mutation "pricer: a group row carries its value color" \

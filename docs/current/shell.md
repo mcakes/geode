@@ -239,7 +239,7 @@ rebuilds them on a configuration reload. A row standing for no single value
 (a grand total) offers none.
 
 Picking it opens a choice list titled `Color · {column} {value}` (see
-[choice lists](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices)):
+[choice lists](input-and-dialogs.md#scope-tile-log-and-column-choices)):
 one row per named color in `colors.toml`, alphabetical, each with its
 swatch, then `None`, then `Follow desk ({name})` only when the user layer
 holds an entry for this value and a lower layer holds a different, colored

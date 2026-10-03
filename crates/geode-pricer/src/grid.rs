@@ -9,16 +9,20 @@
 //! all prepared here. A row's shorthand is also its search key.
 
 use crate::core::columns::{
-    CellState, CellText, ColumnKind, cell_text, group_cell_text, leg_reading, subset_cell_text,
+    CellState, CellText, ColumnDef, ColumnKind, cell_text, group_cell_text, leg_reading,
+    subset_cell_text,
 };
-use crate::core::rollup::{NULL_LABEL, NodeKind, Rollup, legs_under};
+use crate::core::rollup::{self, NULL_LABEL, NodeKind, Rollup, legs_under};
 use crate::core::sheet::{Folded, LineId, RowKind, Sheet};
 use crate::core::shorthand::{render_expiry, render_strike};
 use crate::core::tree::Expansion;
 use crate::core::views::ColumnPlan;
+use crate::core::visibility::SheetRow;
 use geode_core::clock::Clock;
 use geode_core::colour::{Sign, ValueColors};
+use geode_core::document::Value;
 use geode_core::expansion::{Expansion as GroupExpansion, Path};
+use geode_core::scope::RowValues;
 use geode_core::view::Colour;
 use gpui::SharedString;
 use std::collections::HashMap;
@@ -679,6 +683,26 @@ enum RowFold {
     Own,
 }
 
+/// The raw value every one of `rows` reads for column `name`, as
+/// `rollup::text` spells it; `None` when one reads none or two differ.
+fn sole_raw(
+    sheet: &Sheet,
+    rows: impl IntoIterator<Item = usize>,
+    name: &str,
+    clock: Clock,
+) -> Option<String> {
+    let mut sole: Option<String> = None;
+    for row in rows {
+        let v = rollup::text(&SheetRow { sheet, row, clock }.value(name)?);
+        match &sole {
+            None => sole = Some(v),
+            Some(s) if *s != v => return None,
+            Some(_) => {}
+        }
+    }
+    sole
+}
+
 /// One fill pass over some rows. A group row folds its legs only when it is
 /// filled; each leg's readings are memoised for this pass alone (nested
 /// groups read every leg once per level, so each is formatted once).
@@ -749,35 +773,80 @@ impl<'a> CellPass<'a> {
         self.memo = Some((g, fold));
     }
 
-    /// The cells a group row shows for its own and enclosing groups' columns:
-    /// the group's value, not a unanimity its legs agree on by construction.
-    fn grouped_shown(&self, g: usize, name: &str) -> Option<CellText> {
+    /// The grid row of `g` or its nearest enclosing group row grouping
+    /// column `name`, and that group's value.
+    fn grouped_at(&self, g: usize, name: &str) -> Option<(usize, &'a Option<Value>)> {
         let mut at = Some(g);
         while let Some(a) = at {
             if let Some(NodeKind::Group { column, value, .. }) =
                 self.index.node(a).map(|n| &self.src.rollup.nodes[n].kind)
                 && column == name
             {
-                return Some(match value {
-                    None => CellText {
-                        text: String::new(),
-                        state: CellState::Blank,
-                        sign: None,
-                    },
-                    Some(_) => CellText {
-                        text: self
-                            .index
-                            .text(a)
-                            .map(|t| t.to_string())
-                            .unwrap_or_default(),
-                        state: CellState::Own,
-                        sign: None,
-                    },
-                });
+                return Some((a, value));
             }
             at = self.index.parent(a);
         }
         None
+    }
+
+    /// The raw value row `g` stands for in column `def`, spelled as a group
+    /// label spells it (`rollup::text` of the `SheetRow` value), so a
+    /// mapping colors a cell and a group label by one key even where the
+    /// cell paints another spelling (`expiry`: `2026-12-18` paints `Z26`).
+    /// A group row's grouped column is the group's value; a group row's
+    /// other columns, and a package's aggregating columns, the value every
+    /// leg beneath it shares, or `None` where they differ or one has none.
+    fn value_key(&self, g: usize, def: &ColumnDef) -> Option<String> {
+        let (sheet, clock) = (self.src.sheet, self.src.clock);
+        match &self.memo {
+            Some((_, RowFold::Group { legs, .. })) => match self.grouped_at(g, def.name) {
+                Some((_, value)) => value.as_ref().map(rollup::text),
+                None => sole_raw(sheet, legs.iter().copied(), def.name, clock),
+            },
+            Some((_, RowFold::Subset { .. })) => {
+                let r = self.index.sheet_row(g)?;
+                let node = self.index.node(g)?;
+                let NodeKind::Package { legs: shown, .. } = &self.src.rollup.nodes[node].kind
+                else {
+                    return None;
+                };
+                if crate::core::package::aggregates(def.kind) {
+                    sole_raw(sheet, shown.iter().copied(), def.name, clock)
+                } else {
+                    sole_raw(sheet, [r], def.name, clock)
+                }
+            }
+            _ => {
+                let r = self.index.sheet_row(g)?;
+                if sheet.is_package(r) && crate::core::package::aggregates(def.kind) {
+                    sole_raw(sheet, sheet.children(r), def.name, clock)
+                } else {
+                    sole_raw(sheet, [r], def.name, clock)
+                }
+            }
+        }
+    }
+
+    /// The cells a group row shows for its own and enclosing groups' columns:
+    /// the group's value, not a unanimity its legs agree on by construction.
+    fn grouped_shown(&self, g: usize, name: &str) -> Option<CellText> {
+        let (a, value) = self.grouped_at(g, name)?;
+        Some(match value {
+            None => CellText {
+                text: String::new(),
+                state: CellState::Blank,
+                sign: None,
+            },
+            Some(_) => CellText {
+                text: self
+                    .index
+                    .text(a)
+                    .map(|t| t.to_string())
+                    .unwrap_or_default(),
+                state: CellState::Own,
+                sign: None,
+            },
+        })
     }
 
     /// Row `g`'s cell in plan column `col`, formatted through the column
@@ -814,13 +883,15 @@ impl<'a> CellPass<'a> {
             }
             _ => cell_text(sheet, self.index.sheet_row(g)?, c.def, &c.format, clock),
         };
-        // A text dimension's cell shows its value; a mapping holds text
-        // dimensions only, so a measure or date column finds nothing.
-        // `mixed` and blank are not values.
-        let value_color = (t.state == CellState::Own)
-            .then(|| self.src.values.get(c.def.name, &t.text))
-            .flatten()
-            .cloned();
+        // A mapping holds text dimensions only, so a measure column finds
+        // nothing; `mixed` and blank are not values. The lookup key is the
+        // raw value a group label is looked up by, not the painted text.
+        let value_color = (t.state == CellState::Own
+            && self.src.values.dimension(c.def.name).is_some())
+        .then(|| self.value_key(g, c.def))
+        .flatten()
+        .and_then(|key| self.src.values.get(c.def.name, &key))
+        .cloned();
         Some(GridCell {
             text: t.text.into(),
             state: t.state,
@@ -1503,6 +1574,59 @@ mod tests {
             "fixture: the SPX group's option type is mixed"
         );
         assert_eq!(mixed.value_color, None, "`mixed` is not a value");
+    }
+
+    /// `expiry` paints `Z26` while its raw value (what grouping and scope
+    /// read) is `2026-12-18`: a mapping keyed by the raw value colors the
+    /// group label, the group row's own expiry cell, a package's sole
+    /// expiry and a leg's cell alike; one keyed by the painted spelling
+    /// colors none of them.
+    #[test]
+    fn an_expiry_mapping_colors_group_labels_and_cells_by_one_raw_value() {
+        let (s, rollup, plan, groups, packages) = grouped_fixture();
+        for (key, want) in [("2026-12-18", Some("blue")), ("Z26", None)] {
+            let mut values = ValueColors::default();
+            values.insert("expiry", key, "blue");
+            let m = GridIndex::build(
+                &s,
+                &rollup,
+                &groups,
+                &packages,
+                &plan,
+                Clock::utc(),
+                &values,
+            );
+            let z26 = group_row(&m, "Z26");
+            assert_eq!(
+                m.tree(z26).unwrap().value_color.map(|c| &**c),
+                want,
+                "{key}: label"
+            );
+            let src = FillSource {
+                sheet: &s,
+                rollup: &rollup,
+                plan: &plan,
+                clock: Clock::utc(),
+                values: &values,
+            };
+            let mut pass = CellPass::new(src, &m);
+            let exp = col("expiry");
+            let own = pass.cell(z26, exp).expect("the group row's expiry");
+            assert_eq!(&*own.text, "Z26");
+            assert_eq!(own.value_color.as_deref(), want, "{key}: group row cell");
+            let package = (z26 + 1..m.len())
+                .find(|&g| m.sheet_row(g).is_some_and(|r| s.is_package(r)))
+                .expect("the call spread under SPX Z26");
+            let pc = pass.cell(package, exp).expect("the package's expiry");
+            assert_eq!((&*pc.text, pc.state), ("Z26", CellState::Own));
+            assert_eq!(pc.value_color.as_deref(), want, "{key}: package cell");
+            let leg = (z26 + 1..m.len())
+                .find(|&g| m.sheet_row(g).is_some_and(|r| s.is_line(r)))
+                .expect("a line under SPX Z26");
+            let lc = pass.cell(leg, exp).expect("a leg's expiry");
+            assert_eq!(&*lc.text, "Z26");
+            assert_eq!(lc.value_color.as_deref(), want, "{key}: leg cell");
+        }
     }
 
     /// `row_of` names a line's first painted row; a split package paints twice.

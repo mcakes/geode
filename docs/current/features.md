@@ -1484,8 +1484,10 @@ a column says `color = "none"` to opt out.
 A dimension value that `value_colors` maps paints in that value's named
 color: a text dimension's cell showing an own value (`underlying_ref` on a
 line or leg, and a package or group row's agreed value), and a group row's
-label when the sheet is grouped by that dimension. The label matches the
-group's raw value, not the column's formatted spelling of it. Stale, failed,
+label when the sheet is grouped by that dimension. Label and cell both match
+the raw value grouping and scope read, not the painted spelling: an `expiry`
+mapping names `2026-12-18`, which paints `Z26`, and a package or group cell
+matches only the value every leg beneath it shares. Stale, failed,
 inherited, `mixed` and blank cells keep their state paint; otherwise the
 value's color wins over the column's own `color`, which wins over the
 foreground. A value has no sign, so a `tint_sign` color paints its base; on
