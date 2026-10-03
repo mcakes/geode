@@ -921,7 +921,7 @@ impl Diagnostics {
         clears
     }
 
-    /// Queue a poll of every snapshot source filling `dataset`. Explicit, so
+    /// Queue a poll of the snapshot source filling `dataset`. Explicit, so
     /// it is queued whether or not a page is watching; the caller notifies.
     pub fn request_poll(&mut self, dataset: &str) {
         self.pending_poll = Some(dataset.to_string());

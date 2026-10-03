@@ -177,12 +177,10 @@ fn source_row(d: &Diagnostics, name: &str, state: &SourceState, clock: Clock) ->
                 "fetch".to_string(),
                 vec![format!("adapter: {}", spec.adapter), "fetch".to_string()],
             ),
+            // No priority: snapshots are taken ahead of every file.
             SourceShape::Snapshot => (
                 "snapshot".to_string(),
-                vec![
-                    format!("adapter: {}", spec.adapter),
-                    format!("priority: {}", spec.priority),
-                ],
+                vec![format!("adapter: {}", spec.adapter)],
             ),
             SourceShape::Subscribed => (
                 format!("subscribed · {} topics", spec.topics.len()),
@@ -193,6 +191,12 @@ fn source_row(d: &Diagnostics, name: &str, state: &SourceState, clock: Clock) ->
             ),
         },
     };
+    // A snapshot poll reads a table, not ready files: a count would always
+    // read 0 and suggest a source with nothing to load.
+    let counts_files = !state
+        .spec
+        .as_ref()
+        .is_some_and(|s| s.shape == SourceShape::Snapshot);
     let polled = state.last_poll.is_some() || state.next_poll.is_some();
     SourceRow {
         name: name.to_string(),
@@ -209,7 +213,7 @@ fn source_row(d: &Diagnostics, name: &str, state: &SourceState, clock: Clock) ->
             .next_poll
             .map(|t| local_hms(t, clock))
             .unwrap_or_default(),
-        ready: if polled {
+        ready: if polled && counts_files {
             state.last_ready.to_string()
         } else {
             String::new()
@@ -985,6 +989,36 @@ pub(crate) mod tests {
         );
         assert_eq!(row("sub").shape, "subscribed · 2 topics");
         assert_eq!(row("sub").detail[1], "topics: a/>, b");
+    }
+
+    /// A snapshot source has no priority (snapshots are taken ahead of every
+    /// file) and no files to count: its detail is the adapter alone and its
+    /// Ready cell stays blank after a poll, where a directory reads `0`.
+    #[test]
+    fn a_snapshot_source_row_names_no_priority_and_no_ready_count() {
+        use geode_shell::diagnostics::SourceSummary;
+        let mut d = Diagnostics::new(LogLevels::default());
+        let summary = |shape: SourceShape| SourceSummary {
+            dataset: String::new(),
+            paths: Vec::new(),
+            priority: "LatestRisk".into(),
+            readiness: String::new(),
+            adapter: "ADAPTER".into(),
+            topics: Vec::new(),
+            shape,
+        };
+        d.describe_source("dir", summary(SourceShape::Directory));
+        d.describe_source("refdb", summary(SourceShape::Snapshot));
+        let at = SystemTime::UNIX_EPOCH;
+        d.note_polled("dir", 0, at, at + Duration::from_secs(30));
+        d.note_polled("refdb", 0, at, at + Duration::from_secs(30));
+        let rows = source_rows(&d, clock());
+        let row = |name: &str| rows.iter().find(|r| r.name == name).unwrap();
+        assert_eq!(row("refdb").shape, "snapshot");
+        assert_eq!(row("refdb").detail, vec!["adapter: ADAPTER".to_string()]);
+        assert_eq!(row("refdb").ready, "");
+        assert!(!row("refdb").next_poll.is_empty());
+        assert_eq!(row("dir").ready, "0");
     }
 
     #[test]

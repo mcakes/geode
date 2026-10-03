@@ -874,7 +874,13 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 SourceSummary {
                     dataset: source.dataset.clone(),
                     paths: source.paths.clone(),
-                    priority: format!("{:?}", source.priority),
+                    // A snapshot's priority is an unread default: snapshots
+                    // are taken ahead of every file.
+                    priority: if *shape == SourceShape::Snapshot {
+                        String::new()
+                    } else {
+                        format!("{:?}", source.priority)
+                    },
                     readiness: format!("{:?}", source.readiness),
                     adapter: source.adapter.clone(),
                     // Already empty for a directory source — `from_doc`

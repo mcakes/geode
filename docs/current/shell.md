@@ -997,7 +997,7 @@ sets it at attach and it does not change while Geode runs, because the data
 service serves the schema it started with. `request_reference(dataset)` queues
 a read only while a page watches, and the last `unwatch` drops it, so a hidden
 page costs no database read. `request_poll(dataset)` is an explicit poll-now of
-every snapshot source filling that dataset and is queued whether or not a page
+the snapshot source filling that dataset and is queued whether or not a page
 watches. The bridge submits a reference read under `DIAGNOSTICS_KEY` with the
 active frame's as-of and a fresh tag, and stores only the answer carrying the
 latest tag in `reference`; an older answer cannot replace a newer one. It

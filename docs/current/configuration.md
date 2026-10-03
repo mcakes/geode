@@ -258,10 +258,15 @@ publication. `source_time = "document:<field>"` requires a document-level
 string must parse as RFC 3339 with its offset. Schema validation cannot ensure
 that a particular message supplies a valid value.
 
-Snapshot defaults are `poll_interval = "5m"` and `latest_other` priority, since
-reference data is not current risk. A zero interval warns and uses `5m`, because
-it would reread the whole table in a tight loop. A missing or empty `table`
-rejects the source. `table` warns and is ignored on every other shape.
+The snapshot default is `poll_interval = "5m"`. A zero interval warns and uses
+`5m`, because it would reread the whole table in a tight loop. A missing or
+empty `table` rejects the source. `table` warns and is ignored on every other
+shape. A snapshot source has no priority: the ingest runner takes snapshots
+ahead of every file, so `priority` warns as ignored by a snapshot source. A
+reference dataset has at most one snapshot source: a snapshot publishes the
+whole table as one partition, so two sources would replace each other's rows
+on every poll. The second source in file order over a dataset already filled
+is rejected at `sources.<name>.dataset`, naming the first.
 
 Topic patterns use `/`-separated levels. A whole `*` matches one level; a
 final `>` matches one or more trailing levels. Empty patterns, empty pattern

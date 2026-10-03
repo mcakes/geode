@@ -27,13 +27,12 @@ pub const PATH_SEPARATOR: char = ';';
 
 const READINESS: [&str; 2] = ["sentinel", "stable_mtime"];
 const PRIORITY: [&str; 3] = ["latest_risk", "latest_other", "backfill"];
-/// The reader's priority for a snapshot source that sets none.
-const SNAPSHOT_PRIORITY: &str = "latest_other";
 
 /// The browse row's muted second line: how many paths a source watches and which
 /// cold-start priority it claims — the two facts a trader scans the list for. A snapshot
-/// source watches no paths, so its line names the table it reads and the snapshot
-/// priority default instead. Read straight off the raw table, for the reason
+/// source watches no paths and has no priority (snapshots are taken ahead of every
+/// file), so its line names only the table it reads. Read straight off the raw table,
+/// for the reason
 /// `views::summary` and `groupings::summary` both give for doing the same: a malformed
 /// source is exactly the one this dialog exists to fix, and the reader would drop it
 /// from the merged result entirely.
@@ -41,14 +40,13 @@ pub fn summary(config: &Config, value: &toml::Value) -> String {
     let Some(table) = value.as_table() else {
         return "not a table".to_string();
     };
-    let priority = table.get("priority").and_then(|v| v.as_str());
     if is_snapshot(table, &schema_of(config)) {
-        let priority = priority.unwrap_or(SNAPSHOT_PRIORITY);
         return match table.get("table").and_then(|v| v.as_str()) {
-            Some(name) => format!("table {name} · {priority}"),
-            None => format!("no table · {priority}"),
+            Some(name) => format!("table {name}"),
+            None => "no table".to_string(),
         };
     }
+    let priority = table.get("priority").and_then(|v| v.as_str());
     let n = table
         .get("paths")
         .and_then(|v| v.as_array())
@@ -124,8 +122,9 @@ fn choice(options: &[&str], current: &str) -> FieldKind {
 
 /// Build nine fields for directory sources, adding document/topics/coalesce/
 /// source_time for other adapters. A snapshot source (another adapter over a reference
-/// dataset) shows only dataset, priority, poll interval, table and adapter, with the
-/// reader's snapshot defaults (`latest_other`, `DEFAULT_SNAPSHOT_POLL`). Missing
+/// dataset) shows only dataset, poll interval, table and adapter, with the reader's
+/// snapshot poll default (`DEFAULT_SNAPSHOT_POLL`); it has no priority, since snapshots
+/// are taken ahead of every file. Missing
 /// objects use the directory defaults. Dataset and priority are choices; readiness
 /// splits kind from stable poll count. Only the supported paths, duration,
 /// batch-pattern and table text fields are editable; adapter and subscribed-only text
@@ -219,11 +218,6 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     if snapshot {
         return vec![
             field("dataset", "Dataset", choice(&datasets, &current_dataset)),
-            field(
-                "priority",
-                "Priority",
-                choice(&PRIORITY, get_str("priority").unwrap_or(SNAPSHOT_PRIORITY)),
-            ),
             text(
                 "poll_interval",
                 "Poll interval",
@@ -741,9 +735,9 @@ role = "value"
         );
     }
 
-    /// A reference dataset and a snapshot source over it that sets neither priority
-    /// nor poll interval, so the dialog has to spell both defaults. Its hand-written
-    /// `topics` is a key the dialog shows no row for.
+    /// A reference dataset and a snapshot source over it that sets no poll interval,
+    /// so the dialog has to spell the snapshot default. Its hand-written `topics` is a
+    /// key the dialog shows no row for.
     fn snapshot_config() -> Config {
         Config::load(&ConfigSources {
             builtin: vec![
@@ -768,37 +762,30 @@ role = "value"
         })
     }
 
-    /// A snapshot source has no directory rows and no subscription rows; it shows the
-    /// table it reads and the reader's snapshot defaults, not the directory ones.
+    /// A snapshot source has no directory rows, no subscription rows and no priority
+    /// (snapshots are taken ahead of every file); it shows the table it reads and the
+    /// reader's snapshot poll default, not the directory one.
     #[test]
     fn a_snapshot_source_shows_table_and_its_defaults() {
         let fields = fields(&snapshot_config(), Some("refdb"));
         let keys: Vec<&str> = fields.iter().map(|f| f.key.as_str()).collect();
-        assert_eq!(
-            keys,
-            vec!["dataset", "priority", "poll_interval", "table", "adapter"]
-        );
+        assert_eq!(keys, vec!["dataset", "poll_interval", "table", "adapter"]);
         let by_key = |k: &str| fields.iter().find(|f| f.key == k).unwrap();
         assert_eq!(by_key("table").label, "Table");
         assert_eq!(by_key("table").kind, FieldKind::Text("underlyings".into()));
         assert_eq!(by_key("poll_interval").kind, FieldKind::Text("5m".into()));
-        assert!(
-            matches!(&by_key("priority").kind, FieldKind::Choice { options, selected } if options[*selected] == "latest_other"),
-            "{:?}",
-            by_key("priority").kind
-        );
         assert!(text_editable("table"));
         assert!(!help("table").is_empty());
     }
 
-    /// A snapshot source watches no paths; its browse line names the table it reads
-    /// and the snapshot priority default, not `0 paths · latest_risk`.
+    /// A snapshot source watches no paths and has no priority; its browse line names
+    /// the table it reads, not `0 paths · latest_risk`.
     #[test]
-    fn a_snapshot_source_summary_names_its_table_and_snapshot_priority() {
+    fn a_snapshot_source_summary_names_only_its_table() {
         let config = snapshot_config();
         let rows = Domain::Sources.objects(&config);
         let refdb = rows.iter().find(|r| r.name == "refdb").unwrap();
-        assert_eq!(refdb.summary, "table underlyings · latest_other");
+        assert_eq!(refdb.summary, "table underlyings");
     }
 
     #[test]

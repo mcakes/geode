@@ -1250,7 +1250,7 @@ current keyboard workflow using the shell's keycaps.
 
 | Section | Table and toolbar |
 |---|---|
-| Sources | Source, Health (title-case label with the reason), Since (clock time and age), Shape, Last poll, Next poll, Ready, Loading. Worst reported health first by variant then name; unreported sources last, and a source known only from an ingest load gets a "no report yet" row with its loading text. Toolbar: a filter over name and health. Detail: the spec lines by shape and the health history. |
+| Sources | Source, Health (title-case label with the reason), Since (clock time and age), Shape, Last poll, Next poll, Ready (blank for a snapshot source, which reads a table rather than ready files), Loading. Worst reported health first by variant then name; unreported sources last, and a source known only from an ingest load gets a "no report yet" row with its loading text. Toolbar: a filter over name and health. Detail: the spec lines by shape (a snapshot source names only its adapter: it has no priority) and the health history. |
 | Data | One expandable row per dataset with Partitions, Latest gen, Published, Rows, Resolved, Live, and Loaded; a dataset expands to its generations, the one resolved under a historical frame as-of marked. Toolbar: a case-insensitive filter over dataset names and generation fields (partition/book, generation ID, times, row count, live/archive status), a chip reading `Catalog up to date` or `Refreshing catalog`, Refresh catalog, Expand all, Collapse all. A dataset-name match includes all its generations; leaf-only matches retain the dataset heading and hide unmatched siblings. Filtering temporarily reveals collapsed results; clearing it restores stored expansion. Catalog totals are not narrowed by filtering. |
 | Reference | One row per row of the selected reference dataset's generation at the frame's as-of, with the dataset's declared columns; NULL cells read `—`. Toolbar: a case-insensitive filter over every cell; a status chip reading `gen N · <dated source time> · N rows`, `Loading`, `No generation published yet`, `No generation at <dated time>`, a read error, or a refused read or poll (warning-toned); when a source filling the dataset is Degraded or Failed, its reason follows the generation text (` · <reason>`) or, with no table, stands alone, warning-toned; Poll now (`r`); and, when more than one reference dataset is declared, one button per dataset (Tab / Shift+Tab step them). While a new as-of's answer is outstanding the previous rows for the same dataset stay, under `Loading`. The result strip reads "{visible} of {total} rows", both counted from the answer the table shows. The empty state names the status, "No reference datasets declared", or "Filter matches nothing (N rows)". Detail and `y`: one `column: value` line per column, NULL as `—`. |
 | Config | Three full-width views: Current issues (config and data lanes), History (prior batches newest first), and Effective values (expandable documents and their leaves, with Key, Value, and Layer from `Config::explain`). The active view owns row navigation and Copy. Search filters issue text or document keys and values; unmatched documents disappear and matches inside collapsed documents are revealed. Open config directory remains available. |
@@ -1365,8 +1365,8 @@ until the page is opened again from that workspace; the bridge reads
 reference tables at the active frame's as-of, so the Reference chip can
 likewise stay at `Loading`. A rebind on open is the planned fix. A
 reference dataset whose first key column repeats shares cursor identity
-between those rows. Poll now polls every snapshot source filling the dataset, not one
-source.
+between those rows. Poll now polls the dataset's snapshot source; configuration
+allows at most one per reference dataset.
 
 See the [crate guide](../../crates/geode-diagnostics/README.md) for the
 module map and the observer, notification, and allocation contracts.

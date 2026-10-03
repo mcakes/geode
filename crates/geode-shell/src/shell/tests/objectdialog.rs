@@ -6773,10 +6773,10 @@ fn i_on_a_snapshot_sources_table_row_writes_table(cx: &mut gpui::TestAppContext)
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    // The edit opens on `priority`: a one-option dataset choice has no verb, so it is
-    // not a cursor stop. Two rows down is `table` (dataset, priority, poll_interval,
-    // table, adapter).
-    cx.simulate_keystrokes("j j");
+    // The edit opens on `poll_interval`: a one-option dataset choice has no verb, so
+    // it is not a cursor stop. One row down is `table` (dataset, poll_interval, table,
+    // adapter; a snapshot source has no priority).
+    cx.simulate_keystrokes("j");
     cx.simulate_keystrokes("i");
     cx.run_until_parked();
     assert_eq!(
@@ -6793,6 +6793,7 @@ fn i_on_a_snapshot_sources_table_row_writes_table(cx: &mut gpui::TestAppContext)
     assert!(written.contains("table = \"underlyings_v2\""), "{written}");
     assert!(written.contains("poll_interval = \"5m\""), "{written}");
     assert!(!written.contains("paths"), "{written}");
+    assert!(!written.contains("priority"), "{written}");
 }
 
 /// Creating a source seeds its dataset and an available name from the selected row.

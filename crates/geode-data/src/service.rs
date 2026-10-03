@@ -2414,9 +2414,10 @@ impl DataService {
             .is_some_and(|w| w.request(FetchWork::Identities))
     }
 
-    /// Poll every snapshot source filling `dataset` now. Keyed by dataset
-    /// because that is what the asking page shows; never blocks, and a
-    /// poll already running absorbs the ask into one follow-up poll.
+    /// Poll the snapshot source filling `dataset` now; the source reader
+    /// admits at most one per reference dataset. Keyed by dataset because
+    /// that is what the asking page shows; never blocks, and a poll already
+    /// running absorbs the ask into one follow-up poll.
     pub fn poll(&self, dataset: &str) {
         let snapshots = self.snapshots.lock().unwrap_or_else(|e| e.into_inner());
         let mut any = false;

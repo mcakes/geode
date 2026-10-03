@@ -334,6 +334,9 @@ impl SourceSpec {
     pub fn from_doc(doc: &MergedDoc, schema: &SchemaSpec) -> (Vec<SourceSpec>, Vec<Diagnostic>) {
         let mut out = Vec::new();
         let mut diags = Vec::new();
+        // Reference dataset → the accepted snapshot source filling it, in TOML order.
+        let mut claimed: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         for (name, value) in &doc.value {
             if name == "config_version" {
@@ -426,6 +429,21 @@ impl SourceSpec {
                 ));
                 continue;
             }
+            // A snapshot publishes the whole table as one batch named after the
+            // dataset, so a second source would replace the first's rows on every
+            // poll: never unchanged, and an archive growing without bound.
+            if snapshot && let Some(first) = claimed.get(&dataset) {
+                diags.push(diag(
+                    Severity::Error,
+                    name,
+                    Some("dataset"),
+                    format!(
+                        "snapshot source '{first}' already fills the reference dataset \
+                         '{dataset}'; a reference dataset has at most one source"
+                    ),
+                ));
+                continue;
+            }
             // A subscription adapter publishes DocumentRows and requires a document dataset.
             if subscribed
                 && !fetch
@@ -486,6 +504,10 @@ impl SourceSpec {
             }
             if !snapshot {
                 ignored("table", &mut diags);
+            }
+            // Snapshots are taken ahead of every file: priority orders files only.
+            if snapshot {
+                ignored("priority", &mut diags);
             }
 
             let mut paths: Vec<String> = table
@@ -549,15 +571,15 @@ impl SourceSpec {
                 }
             };
 
-            // Reference data is not current risk, so a snapshot defaults behind it.
-            let (default_priority, default_priority_name) = if snapshot {
-                (Priority::LatestOther, "latest_other")
+            // A snapshot's priority is never read: its setting warned above, and
+            // the spec carries the directory default only to have a value.
+            let setting = if snapshot {
+                None
             } else {
-                (Priority::LatestRisk, "latest_risk")
+                table.get("priority")
             };
-            let priority = match table.get("priority").and_then(|v| v.as_str()) {
-                None => default_priority,
-                Some("latest_risk") => Priority::LatestRisk,
+            let priority = match setting.and_then(|v| v.as_str()) {
+                None | Some("latest_risk") => Priority::LatestRisk,
                 Some("latest_other") => Priority::LatestOther,
                 Some("backfill") => Priority::Backfill,
                 Some(other) => {
@@ -565,9 +587,9 @@ impl SourceSpec {
                         Severity::Warning,
                         name,
                         Some("priority"),
-                        format!("unknown priority '{other}'; using \"{default_priority_name}\""),
+                        format!("unknown priority '{other}'; using \"latest_risk\""),
                     ));
-                    default_priority
+                    Priority::LatestRisk
                 }
             };
 
@@ -754,6 +776,9 @@ impl SourceSpec {
                 (None, Vec::new(), DEFAULT_COALESCE, SourceTime::Receive)
             };
 
+            if snapshot {
+                claimed.insert(dataset.clone(), name.clone());
+            }
             out.push(SourceSpec {
                 name: name.clone(),
                 dataset,
@@ -1565,7 +1590,56 @@ table = "underlyings"
         assert_eq!(s.shape(&schema()), SourceShape::Snapshot);
         assert_eq!(s.table.as_deref(), Some("underlyings"));
         assert_eq!(s.poll_interval, DEFAULT_SNAPSHOT_POLL);
-        assert_eq!(s.priority, Priority::LatestOther);
+    }
+
+    /// Snapshots are taken ahead of every file, so a snapshot source has no
+    /// priority: one set warns like any other foreign setting and the typed
+    /// value keeps the directory default.
+    #[test]
+    fn priority_on_a_snapshot_source_warns_as_ignored() {
+        let (specs, diags) = from(
+            "[refdb]\nadapter = \"sql\"\ndataset = \"underlyings\"\ntable = \"t\"\npriority = \"backfill\"\n",
+        );
+        assert_eq!(specs[0].priority, Priority::LatestRisk);
+        let warning = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("sources.refdb.priority"))
+            .unwrap_or_else(|| panic!("{diags:?}"));
+        assert_eq!(warning.severity, Severity::Warning);
+        assert!(
+            warning.message.contains("ignored by a snapshot source"),
+            "{}",
+            warning.message
+        );
+    }
+
+    /// One snapshot publishes the whole table as one batch named after the
+    /// dataset, so a second source over it would replace the first's rows on
+    /// every poll: never unchanged, and the archive grows without bound.
+    #[test]
+    fn a_second_snapshot_source_over_one_reference_dataset_is_refused() {
+        let (specs, diags) = from(
+            r#"
+[refdb]
+adapter = "sql"
+dataset = "underlyings"
+table = "a"
+[refdb2]
+adapter = "sql"
+dataset = "underlyings"
+table = "b"
+"#,
+        );
+        assert_eq!(
+            specs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["refdb"]
+        );
+        let refusal = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("sources.refdb2.dataset"))
+            .unwrap_or_else(|| panic!("{diags:?}"));
+        assert_eq!(refusal.severity, Severity::Error);
+        assert!(refusal.message.contains("'refdb'"), "{}", refusal.message);
     }
 
     #[test]

@@ -340,6 +340,10 @@ the worker thread, inside a panic boundary; it never writes. An interval too
 large to add to the clock leaves no deadline: the worker then polls only on
 demand, and its next poll reads as the last one.
 
+A snapshot source has no priority. The runner takes reference snapshots
+ahead of every file, whatever the source sets; `priority` on a snapshot
+source warns and is never read.
+
 A conformed table goes to the ingest runner as one job, which publishes it
 with `publish_reference` under the source time the poll started at. Health
 is split by where a failure happened, so one kind of success cannot hide the
@@ -379,8 +383,8 @@ shutdown waits for it, so it can delay exit. Reference columns carry codes,
 not schedules: the demo `calendar` column is an exchange calendar code, and
 holiday dates are not modelled.
 
-`DataHandle::poll(dataset)` asks every snapshot source filling that dataset
-to poll now. It is keyed by dataset because the asking page shows datasets,
+`DataHandle::poll(dataset)` asks the snapshot source filling that dataset
+to poll now (configuration allows at most one). It is keyed by dataset because the asking page shows datasets,
 not sources; it has no answer of its own, and a dataset no snapshot source
 fills is logged and ignored. `DataHandle::reference(ReferenceParams)` reads
 one reference table, live or as of an instant, synchronously on the service

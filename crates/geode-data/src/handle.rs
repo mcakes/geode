@@ -70,7 +70,7 @@ pub enum Request {
     /// One reference table, answered synchronously on the service reader
     /// with DataEvent::Reference.
     Reference(ReferenceParams),
-    /// Poll every snapshot source filling `dataset` now. No answer: the
+    /// Poll the snapshot source filling `dataset` now. No answer: the
     /// poll reports through Polled, Health and Published like any other.
     Poll {
         dataset: String,
@@ -262,7 +262,7 @@ impl DataHandle {
         self.send(Request::Reference(params))
     }
 
-    /// Queue a poll of every snapshot source filling `dataset`. `Err(Busy)`
+    /// Queue a poll of the snapshot source filling `dataset`. `Err(Busy)`
     /// means the queue was full and a later submission can succeed;
     /// `Err(Stopped)` means the service can no longer serve. There is no
     /// dedicated answer: the poll's Polled, Health and any Published follow.

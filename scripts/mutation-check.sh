@@ -33174,13 +33174,13 @@ run_mutation "diagnostics reference: a read is asked off the Reference section" 
         let Some(dataset) = self.reference_dataset(cx) else {' \
   geode-diagnostics reference_requests_only_while_the_section_is_shown
 
-# A snapshot source watches no paths; its browse line names its table and
-# the snapshot priority default, not `0 paths · latest_risk`.
+# A snapshot source watches no paths and has no priority; its browse line
+# names its table, not `0 paths · latest_risk`.
 run_mutation "sources: a snapshot source summary reads as a directory" \
   crates/geode-shell/src/shell/objectdialog/sources.rs \
   '    if is_snapshot(table, &schema_of(config)) {' \
   '    if false {' \
-  geode-shell a_snapshot_source_summary_names_its_table_and_snapshot_priority
+  geode-shell a_snapshot_source_summary_names_only_its_table
 
 # A snapshot source's edit starts from the object's own table, so a key
 # the dialog shows no row for (a hand-written `topics`) survives the save.
@@ -33228,6 +33228,72 @@ run_mutation "diagnostics reference: a health change does not rebuild the sectio
   '        Section::Reference => (v.reference, v.sources),' \
   '        Section::Reference => (v.reference, 0),' \
   geode-diagnostics a_source_degrading_rewrites_the_shown_status
+
+# A snapshot publishes the whole table as one batch named after the dataset;
+# two sources over one dataset replace each other's rows on every poll, so
+# no poll is ever unchanged and the archive grows without bound.
+run_mutation "snapshot config: a second source over one reference dataset is kept" \
+  crates/geode-core/src/source_config.rs \
+  '            if snapshot && let Some(first) = claimed.get(&dataset) {' \
+  '            if false && let Some(first) = claimed.get(&dataset) {' \
+  geode-core a_second_snapshot_source_over_one_reference_dataset_is_refused
+
+run_mutation "snapshot config: an accepted snapshot source claims nothing" \
+  crates/geode-core/src/source_config.rs \
+  '                claimed.insert(dataset.clone(), name.clone());' \
+  '                let _ = (&dataset, &claimed);' \
+  geode-core a_second_snapshot_source_over_one_reference_dataset_is_refused
+
+# Snapshots are taken ahead of every file; a priority set on a snapshot
+# source is never read, and saying nothing implies it orders something.
+run_mutation "snapshot config: priority on a snapshot source is silently accepted" \
+  crates/geode-core/src/source_config.rs \
+  '            if snapshot {
+                ignored("priority", &mut diags);
+            }' \
+  '            if false {
+                ignored("priority", &mut diags);
+            }' \
+  geode-core priority_on_a_snapshot_source_warns_as_ignored
+
+run_mutation "snapshot config: a snapshot source reads its priority" \
+  crates/geode-core/src/source_config.rs \
+  '            let setting = if snapshot {
+                None' \
+  '            let setting = if false {
+                None' \
+  geode-core priority_on_a_snapshot_source_warns_as_ignored
+
+# The Sources dialog shows no priority row for a snapshot source: a row
+# would offer a setting the reader warns about and never reads.
+run_mutation "sources: a snapshot source shows a priority row" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '            field("dataset", "Dataset", choice(&datasets, &current_dataset)),
+            text(
+                "poll_interval",
+                "Poll interval",
+                duration("poll_interval", DEFAULT_SNAPSHOT_POLL),
+            ),' \
+  '            field("dataset", "Dataset", choice(&datasets, &current_dataset)),
+            field("priority", "Priority", choice(&PRIORITY, "latest_risk")),
+            text(
+                "poll_interval",
+                "Poll interval",
+                duration("poll_interval", DEFAULT_SNAPSHOT_POLL),
+            ),' \
+  geode-shell a_snapshot_source_shows_table_and_its_defaults
+
+run_mutation "diagnostics sources: a snapshot source row names a priority" \
+  crates/geode-diagnostics/src/model.rs \
+  '                vec![format!("adapter: {}", spec.adapter)],' \
+  '                vec![format!("adapter: {}", spec.adapter), format!("priority: {}", spec.priority)],' \
+  geode-diagnostics a_snapshot_source_row_names_no_priority_and_no_ready_count
+
+run_mutation "diagnostics sources: a snapshot source reads Ready 0" \
+  crates/geode-diagnostics/src/model.rs \
+  '        ready: if polled && counts_files {' \
+  '        ready: if polled {' \
+  geode-diagnostics a_snapshot_source_row_names_no_priority_and_no_ready_count
 
 
 run_mutation "keystroke parser: an uppercase letter parses as the lowercase key" \
