@@ -165,6 +165,9 @@ with another notice behind it:
   pointer.
 - There is no `.` action menu: the header chips are clickable and the
   palette lists every action.
+- A standing `vol request refused` notice is retried by the next state
+  change (a key, a draft edit, a publication), not by a group scope change
+  that keeps the underlying.
 
 ## Invariants
 

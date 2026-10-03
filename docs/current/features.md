@@ -1131,9 +1131,10 @@ tile answers the flip at once, from a show too, rather than holding it
 behind two reads of what is on screen. Documents kept on screen beside a
 failed or refused read do not qualify, so the scope change is their retry.
 A change of the underlying, or of anything else it follows, refetches. A
-change of group, joining or leaving, clears the painted curves and moves the vol tag before asking
-again: the old group's draft, painted or still in flight, would otherwise
-sit dashed under no draft chip, and stay there if the requery failed.
+change of group, joining or leaving, clears the painted curves and moves the
+vol tag before asking again, on show if the tile was hidden: the old group's
+draft, painted or still in flight, would otherwise sit dashed under no draft
+chip, and stay there if the requery failed.
 
 **Data flow.** The CVI document (full key) and the chain (one-part prefix,
 every expiry) are read in sequence under one `FollowingQuery` tag, both
@@ -1193,6 +1194,9 @@ not saved. An unreadable value drops its key with a notice.
 - Keyboard zoom anchors at the view's centre, the wheel at the pointer.
 - There is no `.` action menu; the header chips and the palette carry the
   actions.
+- A standing `vol request refused` notice is retried by the next state
+  change (a key, a draft edit, a publication), not by a group scope change
+  that keeps the underlying.
 
 See the [crate guide](../../crates/geode-volslice/README.md) for the key
 table, session keys and module map.

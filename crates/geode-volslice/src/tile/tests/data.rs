@@ -749,6 +749,47 @@ fn a_refused_read_under_unmoved_versions_is_retried_by_a_scope_change(
     assert_eq!(asked[0].dataset, CVI);
 }
 
+/// A follower whose group changes while it is hidden asks again on show,
+/// even when the new group names the same underlying under the same
+/// as-of: the change cleared the model, so skipping would leave an empty
+/// chart with no request and no notice.
+#[gpui::test]
+fn a_group_change_while_hidden_asks_again_on_show(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_bound(cx, None);
+    h.show(&mut vcx);
+    h.follow_a(&mut vcx);
+    h.post(&mut vcx, scope_of("SPX.Z"));
+    let (doc, chains) = published();
+    let reqs = h.answer_documents(&mut vcx, &doc, &chains);
+    let params = vols(&reqs)[0].clone();
+    h.answer_vol(&mut vcx, &params);
+    h.link(
+        &mut vcx,
+        EMITTER,
+        Membership {
+            follow: None,
+            emit: Some(Group::B),
+        },
+    );
+    h.post(&mut vcx, scope_of("SPX.Z"));
+    h.in_draw(&mut vcx, Some(false), None);
+    h.link(
+        &mut vcx,
+        TileId(TILE),
+        Membership {
+            follow: Some(Group::B),
+            emit: None,
+        },
+    );
+    assert!(docs(&h.requests()).is_empty(), "a hidden tile asks nothing");
+    h.in_draw(&mut vcx, Some(true), None);
+    vcx.run_until_parked();
+    let reqs = h.requests();
+    let asked = docs(&reqs);
+    assert_eq!(asked.len(), 1, "the show asks again: {reqs:?}");
+    assert_eq!(asked[0].dataset, CVI);
+}
+
 /// A follower hidden across a group scope change that keeps its
 /// underlying asks nothing on show, and still answers a flip waiting on
 /// it, from the draw through the deferred door so frame observers hear

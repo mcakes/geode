@@ -32103,6 +32103,15 @@ run_mutation "volslice: a refused read under unmoved versions is retried by a sc
   '        if self.loaded_for.as_deref() == Some(asked) {' \
   geode-volslice a_refused_read_under_unmoved_versions_is_retried_by_a_scope_change
 
+# A group change recorded while hidden cleared the model; the show must ask
+# again rather than skip on documents read for the old group.
+run_mutation "volslice: a group change while hidden asks again on show" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        self.loaded_ok = None;
+        cx.notify();' \
+  '        cx.notify();' \
+  geode-volslice a_group_change_while_hidden_asks_again_on_show
+
 # A show that skips the refetch still answers a waiting flip, from the draw.
 run_mutation "volslice: a show keeping the underlying answers the flip deferred" \
   crates/geode-volslice/src/tile/data.rs \

@@ -531,6 +531,10 @@ impl VolsliceTile {
         self.clear_model();
         self.fetch = Fetch::Idle;
         self.following.reset();
+        // The model is gone, so the documents no longer answer anything on
+        // screen: a hidden tile records this change and shows later, when
+        // only `loaded_ok` decides whether it asks again.
+        self.loaded_ok = None;
         cx.notify();
         true
     }
