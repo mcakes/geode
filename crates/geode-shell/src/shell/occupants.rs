@@ -522,6 +522,49 @@ impl ShellView {
         self.scratch_active_tiles = active;
     }
 
+    /// Focus `tile` for a press on its own header chrome, wherever it sits
+    /// in the active workspace. `false` when the workspace has no such tile.
+    /// Only a change of focused tile dirties the session: the focus methods
+    /// report success even when the requested tile was already focused.
+    fn focus_pressed_tile(&mut self, tile: TileId) -> bool {
+        let ws = self.services.workspaces.active_mut();
+        let was_focused = ws.focused_tile();
+        let moved = match ws.region_of(tile) {
+            Some(crate::tiling::FocusRegion::Main) => ws.focus_main_tile(tile),
+            Some(crate::tiling::FocusRegion::Dock(side)) => ws.focus_dock_tile(side, tile),
+            None => return false,
+        };
+        if moved && was_focused != Some(tile) {
+            self.session_dirty = true;
+        }
+        true
+    }
+
+    /// Open the link group chooser on `tile`, whose header link chip was
+    /// pressed: focus that tile first (a chip on an unfocused tile must
+    /// open THAT tile's chooser), leave any command line, then run the
+    /// action `mod+u` and the status bar's following segment dispatch.
+    /// `Frame::request_link_chooser` queues the press; the frame observer
+    /// calls this door.
+    pub(super) fn open_link_chooser_on(
+        &mut self,
+        tile: TileId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.focus_pressed_tile(tile) {
+            return;
+        }
+        self.leave_command_line(window, cx);
+        self.dispatch(
+            &crate::actions::ActionId("tile::link_group".into()),
+            None,
+            window,
+            cx,
+        );
+        cx.notify();
+    }
+
     /// Open the member list on `tile`: focus that tile first
     /// (a marker click on an unfocused tile must open THAT tile's list),
     /// refuse with the notice if it is not a member, close the palette
@@ -533,17 +576,8 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ws = self.services.workspaces.active_mut();
-        let was_focused = ws.focused_tile();
-        let moved = match ws.region_of(tile) {
-            Some(crate::tiling::FocusRegion::Main) => ws.focus_main_tile(tile),
-            Some(crate::tiling::FocusRegion::Dock(side)) => ws.focus_dock_tile(side, tile),
-            None => return,
-        };
-        // Only a change of focused tile dirties the session. The focus methods
-        // report success even when the requested tile was already focused.
-        if moved && was_focused != Some(tile) {
-            self.session_dirty = true;
+        if !self.focus_pressed_tile(tile) {
+            return;
         }
         let Some((index, _)) = self.services.workspaces.active().stack_position(tile) else {
             self.notice = Some(super::input::NOT_IN_A_STACK.into());

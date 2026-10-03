@@ -742,7 +742,12 @@ status bar's `following` segment) opens the link chooser on the focused tile
 It lists the follow rows for a tile whose module follows and the emit rows
 for one whose module emits. A tile that does neither (a timeseries tile) has
 nothing to choose: no dialog opens and the status bar reads `this tile has
-no link group to join`. The header chip takes no press.
+no link group to join`. A press on a tile's header link chip opens the
+chooser on that tile: the chip queues `Frame::request_link_chooser`, since a
+module never reaches the shell, and the shell's frame observer drains it,
+focuses the chip's tile (it may not have held focus) and dispatches
+`tile::link_group`. The press stops at the chip. The request moves no frame
+version and so opens no flip.
 
 **The chip.** A tile in a group shows a solid chip per group in its header:
 the group's color as the fill, the letter and the role arrows as text floored

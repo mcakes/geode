@@ -21,7 +21,7 @@ use geode_shell::shell::kbd;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
-use geode_tile::header::{Cluster, HealthChip, LinkChip, MenuTrigger, Mode};
+use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Div, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString,
@@ -301,7 +301,7 @@ pub(crate) fn render_header(
     menu_selector: SharedString,
     health: Option<&HealthChip>,
     mode: Mode,
-    links: [Option<LinkChip>; 2],
+    links: TileLinks,
 ) -> impl IntoElement {
     let HeaderPopups {
         menu_open,

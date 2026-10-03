@@ -2037,6 +2037,38 @@ fn notice(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Option<St
     shell.read_with(vcx, |s, _| s.notice.as_ref().map(|n| n.to_string()))
 }
 
+/// A pressed header link chip queues the chooser on its tile through the
+/// frame. The frame observer focuses that tile, even when another tile
+/// held focus, and opens the chooser on it, not on the old focus.
+#[gpui::test]
+fn a_link_chip_request_focuses_its_tile_and_opens_the_chooser(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, frame) = two_tiles(cx);
+    let (focused, other) = focused_and_other(&shell, &vcx);
+    follow(&frame, &mut vcx, other, Some(Group::A));
+    assert!(chooser_tile(&shell, &vcx).is_none());
+
+    frame.update(&mut vcx, |f, cx| {
+        f.request_link_chooser(other);
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    draw(&mut vcx);
+
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.services.workspaces.active().focused_tile()),
+        Some(other),
+        "the chip's tile, not {focused:?}"
+    );
+    assert_eq!(chooser_tile(&shell, &vcx), Some(other));
+    assert!(vcx.debug_bounds("link-choice-list").is_some());
+    assert!(
+        frame
+            .update(&mut vcx, |f, _| f.take_pending_link_chooser())
+            .is_none(),
+        "the observer drained the request"
+    );
+}
+
 /// The keyboard route end to end: the chord opens the chooser on the
 /// focused tile with the filter focused, typed words narrow the rows, and
 /// Enter follows the group the lit row names.

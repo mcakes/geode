@@ -30116,7 +30116,7 @@ run_mutation "link: the chip's fill is the guarded color" \
 
 # One group both ways is one chip; the tooltip names the chooser's action,
 # the only place the chip's keyboard route is shown; the chip is as tall as
-# the chips beside it and takes no press.
+# the chips beside it, and a press on it queues the chooser on its tile.
 run_mutation "link: one group is one chip" \
   crates/geode-tile/src/header.rs \
   '        (Some(follow), Some(emit)) if follow == emit => [Some(chip(follow, LinkRole::Both)), None],' \
@@ -30144,39 +30144,64 @@ run_mutation "link: the chip is as tall as its neighbours" \
         .text_color(paint.text)' \
   geode-tile the_link_chip_paints_in_the_fixed_tail
 
-run_mutation "link: the chip takes no press" \
+run_mutation "link: a chip press queues the chooser" \
   crates/geode-tile/src/header.rs \
-  '        .debug_selector(move || format!("tile-link-{tile}-{letter}-{role}"))
-        .child(letter)' \
-  '        .debug_selector(move || format!("tile-link-{tile}-{letter}-{role}"))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(letter)' \
-  geode-tile a_press_on_the_link_chip_reaches_the_tile
+  '                    f.request_link_chooser(tile);' \
+  '                    let _ = tile;' \
+  geode-tile a_press_on_the_link_chip_queues_the_chooser_on_its_tile
+
+run_mutation "link: a chip press stops at the chip" \
+  crates/geode-tile/src/header.rs \
+  '            move |_, window, cx| {
+                cx.stop_propagation();
+                window.prevent_default();
+                let Some(tile) = frame.tile() else {' \
+  '            move |_, window, cx| {
+                window.prevent_default();
+                let Some(tile) = frame.tile() else {' \
+  geode-tile a_press_on_the_link_chip_queues_the_chooser_on_its_tile
+
+# The shell drains a chip's request: it focuses the chip's tile first, so
+# the chooser opens on that tile and not on the one that held focus.
+run_mutation "link: the frame observer drains a chip request" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            self.open_link_chooser_on(tile, window, cx);' \
+  '            let _ = tile;' \
+  geode-shell a_link_chip_request_focuses_its_tile_and_opens_the_chooser
+
+run_mutation "link: a chip request focuses its tile" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if !self.focus_pressed_tile(tile) {
+            return;
+        }
+        self.leave_command_line(window, cx);' \
+  '        self.leave_command_line(window, cx);' \
+  geode-shell a_link_chip_request_focuses_its_tile_and_opens_the_chooser
 
 # Every module's header passes the frame's answer to the shared cluster;
 # a module that drops the line shows no chip for a group it is in.
 run_mutation "link: the blotter's header shows the chip" \
   crates/geode-blotter/src/tile.rs \
   '        cluster.links = geode_tile::header::link_chips(&self.frame, cx);' \
-  '        cluster.links = [None, None];' \
+  '        cluster.links = Default::default();' \
   geode-blotter the_header_shows_the_link_group_the_tile_follows
 
 run_mutation "link: the pricer's header shows the chip" \
   crates/geode-pricer/src/tile.rs \
   '                links: geode_tile::header::link_chips(&self.frame, cx),' \
-  '                links: [None, None],' \
+  '                links: Default::default(),' \
   geode-pricer the_header_shows_the_link_group_the_tile_follows
 
 run_mutation "link: the market-data header shows the chip" \
   crates/geode-marketdata/src/tile.rs \
   '            geode_tile::header::link_chips(&self.frame, cx),' \
-  '            [None, None],' \
+  '            Default::default(),' \
   geode-marketdata the_header_shows_the_link_group_the_tile_follows
 
 run_mutation "link: the timeseries header shows the chip" \
   crates/geode-timeseries/src/tile/mod.rs \
   '                geode_tile::header::link_chips(&self.frame, cx),' \
-  '                [None, None],' \
+  '                Default::default(),' \
   geode-timeseries the_header_shows_the_link_group_the_tile_follows
 
 # A blotter posts its cursor row's one underlying, can emit before it has

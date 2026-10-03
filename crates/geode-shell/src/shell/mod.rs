@@ -1696,6 +1696,10 @@ impl ShellView {
             })
             .detach();
         }
+        // A pressed header link chip opens the chooser on its own tile.
+        if let Some(tile) = frame.update(cx, |f, _| f.take_pending_link_chooser()) {
+            self.open_link_chooser_on(tile, window, cx);
+        }
         // Reflect external scope changes into an unfocused input. While it is
         // focused, its text remains authoritative; replacing the value would
         // interrupt the user's caret and selection.
