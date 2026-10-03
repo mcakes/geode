@@ -133,9 +133,10 @@ pub struct Restored {
     pub warnings: Vec<String>,
 }
 
-/// Restorable frame state: scope, active grouping slot, and as-of. The shell
-/// applies it to the new frame and clears scope history so restoration does not
-/// create an undo step back to the initial empty scope.
+/// Restorable frame state: scope, grouping (active slot, or the ad hoc chain),
+/// and as-of. The shell applies it to the new frame and clears scope history
+/// so restoration does not create an undo step back to the initial empty
+/// scope.
 ///
 /// Undo/redo history and recent publishes are transient. Saved scopes come from
 /// configuration. These are not part of the session record.
@@ -143,6 +144,11 @@ pub struct Restored {
 pub struct FrameRecord {
     pub scope: Scope,
     pub active_slot: Option<u8>,
+    /// The lane's stored ad hoc chain, whether or not it is the choice.
+    pub ad_hoc: Option<Vec<String>>,
+    /// Whether the ad hoc chain is the lane's choice. When set, `ad_hoc` is
+    /// `Some` and `active_slot` is `None`.
+    pub ad_hoc_active: bool,
     pub as_of: AsOf,
 }
 
@@ -321,12 +327,22 @@ fn links_from_toml(value: Option<&toml::Value>, warnings: &mut Vec<String>) -> G
 
 impl FrameRecord {
     /// Serialize frame fields, omitting empty dimension selections, an unset
-    /// slot, and live as-of. The caller decides whether to include `[frame]`.
+    /// slot, an absent ad hoc chain, and live as-of. The caller decides
+    /// whether to include `[frame]`.
     pub fn to_toml(&self) -> toml::Table {
         let mut t = toml::Table::new();
         scope_to_toml(&self.scope, &mut t);
         if let Some(n) = self.active_slot {
             t.insert("slot".into(), toml::Value::Integer(n as i64));
+        }
+        if let Some(chain) = &self.ad_hoc {
+            t.insert(
+                "ad_hoc".into(),
+                toml::Value::Array(chain.iter().cloned().map(toml::Value::String).collect()),
+            );
+            if self.ad_hoc_active {
+                t.insert("grouping".into(), toml::Value::String("ad_hoc".into()));
+            }
         }
         if let AsOf::At(at) = &self.as_of {
             t.insert("as_of".into(), toml::Value::String(at.to_rfc3339()));
@@ -338,6 +354,8 @@ impl FrameRecord {
     /// slots, expression syntax, date strings, and non-array dimension entries
     /// warn; other wrong-type fields and non-string dimension values are ignored.
     /// Unknown column names remain, and `Scope::impossible` resets to false.
+    /// A malformed `ad_hoc` warns and is ignored; `grouping = "ad_hoc"`
+    /// without a usable chain warns and falls back to the slot.
     pub fn from_toml(t: &toml::Table, warnings: &mut Vec<String>) -> FrameRecord {
         let scope = scope_from_toml(t, "frame", warnings);
         let active_slot = match t.get("slot") {
@@ -350,6 +368,58 @@ impl FrameRecord {
                 }
             },
         };
+        // A chain naming a column twice is refused whole rather than
+        // deduplicated: narrowing a stored chain could restore a grouping the
+        // user never chose.
+        let ad_hoc = match t.get("ad_hoc") {
+            None => None,
+            Some(value) => {
+                let names: Option<Vec<String>> = value.as_array().and_then(|a| {
+                    a.iter()
+                        .map(|v| v.as_str().map(str::to_string))
+                        .collect::<Option<Vec<String>>>()
+                });
+                match names {
+                    Some(names)
+                        if !names.is_empty()
+                            && names
+                                .iter()
+                                .enumerate()
+                                .all(|(i, n)| !names[..i].contains(n)) =>
+                    {
+                        Some(names)
+                    }
+                    _ => {
+                        warnings.push(
+                            "frame: ad_hoc is not a non-empty list of distinct column names; ignored"
+                                .to_string(),
+                        );
+                        None
+                    }
+                }
+            }
+        };
+        let ad_hoc_active = match t.get("grouping") {
+            None => false,
+            Some(value) => match value.as_str() {
+                Some("ad_hoc") if ad_hoc.is_some() => true,
+                Some("ad_hoc") => {
+                    warnings.push(
+                        "frame: grouping is ad_hoc but no ad_hoc chain was restored; ignored"
+                            .to_string(),
+                    );
+                    false
+                }
+                _ => {
+                    warnings.push(format!(
+                        "frame: grouping {value} is not \"ad_hoc\"; ignored"
+                    ));
+                    false
+                }
+            },
+        };
+        // The record's invariant: an active ad hoc chain has no slot beside it.
+        let active_slot = if ad_hoc_active { None } else { active_slot };
         let as_of = match t.get("as_of").and_then(|v| v.as_str()) {
             None => AsOf::Live,
             Some(s) => match chrono::DateTime::parse_from_rfc3339(s) {
@@ -363,6 +433,8 @@ impl FrameRecord {
         FrameRecord {
             scope,
             active_slot,
+            ad_hoc,
+            ad_hoc_active,
             as_of,
         }
     }
@@ -1572,6 +1644,8 @@ mod tests {
         let as_frame = FrameRecord {
             scope: links[Group::C.index()].clone(),
             active_slot: None,
+            ad_hoc: None,
+            ad_hoc_active: false,
             as_of: AsOf::Live,
         }
         .to_toml();
@@ -3054,12 +3128,101 @@ members = [1, -4]
                 named: Vec::new(),
             },
             active_slot: Some(3),
+            ad_hoc: None,
+            ad_hoc_active: false,
             as_of: AsOf::At(
                 chrono::DateTime::parse_from_rfc3339("2026-09-05T14:05:00Z")
                     .unwrap()
                     .with_timezone(&chrono::Utc),
             ),
         }
+    }
+
+    #[test]
+    fn an_active_ad_hoc_chain_round_trips_and_writes_no_slot() {
+        let mut record = sample_frame_record();
+        record.active_slot = None;
+        record.ad_hoc = Some(vec!["underlying_ref".into(), "expiry".into()]);
+        record.ad_hoc_active = true;
+        let table = record.to_toml();
+        assert!(!table.contains_key("slot"), "{table:?}");
+        assert_eq!(table["grouping"].as_str(), Some("ad_hoc"));
+        let mut warnings = Vec::new();
+        let restored = FrameRecord::from_toml(&table, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(restored, record);
+    }
+
+    #[test]
+    fn a_stored_but_inactive_ad_hoc_chain_round_trips_beside_the_slot() {
+        let mut record = sample_frame_record();
+        record.active_slot = Some(3);
+        record.ad_hoc = Some(vec!["book".into()]);
+        record.ad_hoc_active = false;
+        let table = record.to_toml();
+        assert_eq!(table["slot"].as_integer(), Some(3));
+        assert!(!table.contains_key("grouping"), "{table:?}");
+        let mut warnings = Vec::new();
+        let restored = FrameRecord::from_toml(&table, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(restored, record);
+    }
+
+    #[test]
+    fn a_record_without_the_ad_hoc_keys_reads_as_it_always_did() {
+        let table: toml::Table = toml::from_str("slot = 2\ntext = \"spx\"").unwrap();
+        let mut warnings = Vec::new();
+        let restored = FrameRecord::from_toml(&table, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(restored.active_slot, Some(2));
+        assert_eq!(restored.ad_hoc, None);
+        assert!(!restored.ad_hoc_active);
+    }
+
+    #[test]
+    fn ad_hoc_active_without_a_chain_warns_and_falls_back_to_the_slot() {
+        let table: toml::Table = toml::from_str("slot = 2\ngrouping = \"ad_hoc\"").unwrap();
+        let mut warnings = Vec::new();
+        let restored = FrameRecord::from_toml(&table, &mut warnings);
+        assert!(!restored.ad_hoc_active);
+        assert_eq!(restored.active_slot, Some(2), "the slot is the fallback");
+        assert!(
+            warnings.iter().any(|w| w.contains("grouping")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_ad_hoc_chain_warns_and_is_ignored() {
+        for text in [
+            "ad_hoc = \"book\"",
+            "ad_hoc = []",
+            "ad_hoc = [\"book\", 3]",
+            "ad_hoc = [\"book\", \"book\"]",
+        ] {
+            let table: toml::Table = toml::from_str(text).unwrap();
+            let mut warnings = Vec::new();
+            let restored = FrameRecord::from_toml(&table, &mut warnings);
+            assert_eq!(restored.ad_hoc, None, "{text}");
+            assert!(
+                warnings.iter().any(|w| w.contains("ad_hoc")),
+                "{text}: {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_grouping_value_warns_and_is_ignored() {
+        let table: toml::Table =
+            toml::from_str("ad_hoc = [\"book\"]\ngrouping = \"slot\"").unwrap();
+        let mut warnings = Vec::new();
+        let restored = FrameRecord::from_toml(&table, &mut warnings);
+        assert_eq!(restored.ad_hoc, Some(vec!["book".to_string()]));
+        assert!(!restored.ad_hoc_active);
+        assert!(
+            warnings.iter().any(|w| w.contains("grouping")),
+            "{warnings:?}"
+        );
     }
 
     #[test]
@@ -3177,6 +3340,8 @@ members = [1, -4]
         let record = FrameRecord {
             scope: Scope::default(),
             active_slot: None,
+            ad_hoc: None,
+            ad_hoc_active: false,
             as_of: AsOf::Live,
         };
         let table = record.to_toml();
