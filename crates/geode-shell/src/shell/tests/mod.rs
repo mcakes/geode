@@ -664,7 +664,6 @@ mod dock;
 mod drag;
 mod edit_column;
 mod flip;
-mod grouping;
 mod grouping_dialog;
 mod input;
 mod keybindings_dialog;

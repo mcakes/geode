@@ -780,9 +780,9 @@ pub struct ShellView {
     /// State for the open scope expression dialog. Created by
     /// [`scope_expr_view::open`] and cleared when its kind pops.
     scope_expr_dialog: Option<scope_expr_view::ScopeExprState>,
-    /// State for the open grouping or tile-kind picker. Created by
-    /// `choicedialog::open_grouping` or `open_tile_kinds`, and cleared when its
-    /// kind pops.
+    /// State for the open choice dialog: the scope, tile-kind, column,
+    /// log-level, action-value or link-group picker. Created by one of
+    /// `choicedialog`'s `open_*` doors, and cleared when its kind pops.
     choice_dialog: Option<choicedialog::ChoiceDialogState>,
     /// Scroll state for the choice dialog's row list
     /// (`dialog::choice_rows`'s viewport) — the `settings_scroll` split,

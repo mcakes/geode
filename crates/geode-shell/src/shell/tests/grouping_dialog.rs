@@ -8,7 +8,7 @@ use crate::frame::GroupingChoice;
 use crate::shell::objectdialog;
 
 /// The action that opens the dialog. One place, so the door can change.
-pub(super) const DOOR: &str = "config::groupings";
+pub(super) const DOOR: &str = "frame::grouping";
 
 /// `book`, `lhu` and `position_ref` are groupable (the position-grain
 /// measure declares the grain that carries them). Slot 1 is `book / lhu`
@@ -1503,4 +1503,89 @@ fn a_row_control_click_under_the_save_prompt_is_ignored(cx: &mut gpui::TestAppCo
         "a question owns the pointer as well as the keys"
     );
     assert_eq!(choice(&shell, &cx), GroupingChoice::AdHoc);
+}
+
+#[gpui::test]
+fn mod_g_then_a_digit_switches_the_grouping(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    cx.simulate_keystrokes("alt-g");
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.object_dialog.is_some()));
+    assert!(
+        shell.read_with(&cx, |s, _| s.choice_dialog.is_none()),
+        "the picker is gone"
+    );
+    cx.simulate_keystrokes("3");
+    cx.run_until_parked();
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(3));
+    assert!(!is_open(&shell, &cx));
+}
+
+#[gpui::test]
+fn clicking_the_readout_opens_the_dialog_and_a_typed_key_reaches_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    let readout = cx
+        .debug_bounds("scope-grouping")
+        .expect("the readout is painted");
+    cx.simulate_click(readout.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.object_dialog.is_some()));
+    // A state assertion cannot see focus loss after a mouse-down: type.
+    cx.simulate_keystrokes("1");
+    cx.run_until_parked();
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(1));
+    assert!(!is_open(&shell, &cx));
+}
+
+#[gpui::test]
+fn the_readout_reads_open_while_the_dialog_is_up(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    assert!(cx.debug_bounds("scope-grouping-chevron").is_some());
+    assert!(cx.debug_bounds("scope-grouping-open").is_none());
+    cx.simulate_keystrokes("alt-g");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("scope-grouping-open").is_some());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!is_open(&shell, &cx));
+    assert!(cx.debug_bounds("scope-grouping-open").is_none());
+}
+
+#[gpui::test]
+fn hovering_the_readout_names_the_chord(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_window, mut cx) = open_shell_with_user_dir(cx, services(), dir.path());
+    let readout = cx.debug_bounds("scope-grouping").expect("readout painted");
+    cx.simulate_mouse_move(
+        readout.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("tip-scope-grouping").is_some());
+    assert!(
+        cx.debug_bounds("tip-scope-grouping-chord-mod+g").is_some()
+            || cx.debug_bounds("tip-scope-grouping-chord-alt+g").is_some()
+    );
+}
+
+#[gpui::test]
+fn the_palettes_edit_groupings_row_opens_the_same_dialog(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    dispatch_action(&shell, "config::groupings", &mut cx);
+    cx.run_until_parked();
+    assert_eq!(
+        row_names(&shell, &cx),
+        ["0", "*", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+    );
 }
