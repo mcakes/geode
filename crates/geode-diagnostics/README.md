@@ -68,8 +68,10 @@ step the dataset. `reference_table` lays out one row per reference row with
 the dataset's declared columns, NULL cells as `—`, the first column's text
 as the row key, and a case-insensitive filter over every cell; the detail
 and `y` give one `column: value` line per column. The toolbar holds the
-filter, a status chip from `reference_status` (warning-toned for a refusal
-or an error), and Poll now. `r` and Poll now queue both `request_poll` and
+filter, a status chip from `reference_status` (warning-toned for a refusal,
+an error, or an unhealthy source filling the dataset: a Degraded or Failed
+source's reason follows the generation text, or stands alone when there is
+no table), and Poll now. `r` and Poll now queue both `request_poll` and
 `request_reference`: an unchanged poll publishes nothing, so the read is
 what retries a refused one. While a new as-of's answer is outstanding the
 previous rows for the same dataset stay under `Loading`; the result strip's
@@ -133,7 +135,8 @@ cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing --noca
 ## Rules this crate pins
 
 - Observers compare only the selected section's inputs: its `DiagVersions`
-  counter, plus the frame as-of for Data and Reference, the frame config version for
+  counter (Reference also the sources counter, for its status chip's source
+  reason), plus the frame as-of for Data and Reference, the frame config version for
   Config, or new ring records for Log. Clock changes and local section,
   filter, or expansion changes also rebuild. A perf tick never walks the
   config documents. Badges and header chips refresh on any counter change

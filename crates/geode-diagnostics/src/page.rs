@@ -57,14 +57,16 @@ const AGES_TICK: Duration = Duration::from_secs(1);
 /// this counter keeps an unrelated change, such as a perf tick, from
 /// rebuilding the config rows. The log observer also asks the tail whether
 /// the ring has new records, because the ring lives outside `Diagnostics`.
-fn diag_version_for(section: Section, v: DiagVersions) -> u64 {
+/// Reference also reads source health: its status chip carries a failing
+/// source's reason, which changes between answers.
+fn diag_version_for(section: Section, v: DiagVersions) -> (u64, u64) {
     match section {
-        Section::Sources => v.sources,
-        Section::Data => v.data,
-        Section::Reference => v.reference,
-        Section::Config => v.config,
-        Section::Log => v.log_levels,
-        Section::Perf => v.perf,
+        Section::Sources => (v.sources, 0),
+        Section::Data => (v.data, 0),
+        Section::Reference => (v.reference, v.sources),
+        Section::Config => (v.config, 0),
+        Section::Log => (v.log_levels, 0),
+        Section::Perf => (v.perf, 0),
     }
 }
 

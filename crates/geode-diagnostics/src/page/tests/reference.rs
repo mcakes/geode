@@ -359,3 +359,34 @@ fn the_reference_section_name_persists(cx: &mut gpui::TestAppContext) {
         Some("reference")
     );
 }
+
+/// A source's health change reaches the shown chip without a new answer:
+/// the worker degrades between publishes, and the chip must say so then.
+#[gpui::test]
+fn a_source_degrading_rewrites_the_shown_status(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    shown_with(&h, &mut vcx, &["underlyings"]);
+    key(&h, &mut vcx, "g r");
+    answer(&h, &mut vcx, "underlyings", &["SPX"]);
+    assert!(!status(&h, &vcx).contains("refused"));
+    h.diagnostics.update(&mut vcx, |d, cx| {
+        let mut summary = geode_shell::diagnostics::SourceSummary::for_dataset("underlyings");
+        summary.shape = geode_shell::diagnostics::SourceShape::Snapshot;
+        d.describe_source("refdb", summary);
+        d.note_health(
+            "refdb",
+            geode_core::health::Health::Degraded {
+                reason: "connection refused".into(),
+            },
+            String::new(),
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert!(
+        status(&h, &vcx).ends_with(" · connection refused"),
+        "{}",
+        status(&h, &vcx)
+    );
+}

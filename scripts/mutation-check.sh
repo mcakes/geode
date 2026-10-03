@@ -33207,6 +33207,28 @@ run_mutation "demo refdb: a failed query counts as a poll" \
             return Err(AdapterError { message });' \
   geode-app fail_next_fails_exactly_one_query
 
+# A degraded snapshot source keeps the last generation live; a chip that
+# never reads source health shows those rows as healthy and current.
+run_mutation "diagnostics reference: the status chip ignores source health" \
+  crates/geode-diagnostics/src/model.rs \
+  '    let unhealthy = reference_source_reason(d, dataset);' \
+  '    let unhealthy: Option<String> = None;' \
+  geode-diagnostics reference_status_appends_a_degraded_sources_reason_to_the_table
+
+run_mutation "diagnostics reference: no table hides the source reason" \
+  crates/geode-diagnostics/src/model.rs \
+  '        (Ok(None), Some(reason)) => (reason, Tone::Warn),' \
+  '        (Ok(None), Some(_)) => ("No generation published yet".into(), Tone::Muted),' \
+  geode-diagnostics reference_status_shows_a_failed_sources_reason_when_there_is_no_table
+
+# Health changes bump the sources counter, not the reference one; the
+# section must rebuild on both or the chip lags until the next answer.
+run_mutation "diagnostics reference: a health change does not rebuild the section" \
+  crates/geode-diagnostics/src/page.rs \
+  '        Section::Reference => (v.reference, v.sources),' \
+  '        Section::Reference => (v.reference, 0),' \
+  geode-diagnostics a_source_degrading_rewrites_the_shown_status
+
 
 run_mutation "keystroke parser: an uppercase letter parses as the lowercase key" \
   crates/geode-shell/src/keymap/keystroke.rs \

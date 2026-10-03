@@ -748,17 +748,61 @@ pub fn reference_status(
     {
         return (refusal.reason.clone(), Tone::Warn);
     }
+    // A failing source keeps the last generation live, so a healthy-looking
+    // chip over its table would hide that the rows may be stale.
+    let unhealthy = reference_source_reason(d, dataset);
     let Some(answer) = reference_answer(d, dataset, as_of) else {
-        return ("Loading".into(), Tone::Muted);
+        return match unhealthy {
+            Some(reason) => (reason, Tone::Warn),
+            None => ("Loading".into(), Tone::Muted),
+        };
     };
-    match &answer.table {
-        Err(e) => (e.clone(), Tone::Warn),
-        Ok(None) => match as_of {
+    match (&answer.table, unhealthy) {
+        (Err(e), _) => (e.clone(), Tone::Warn),
+        (Ok(Some(t)), Some(reason)) => (
+            format!("{} · {reason}", reference_summary(t, *clock)),
+            Tone::Warn,
+        ),
+        (Ok(Some(t)), None) => (reference_summary(t, *clock), Tone::Normal),
+        (Ok(None), Some(reason)) => (reason, Tone::Warn),
+        (Ok(None), None) => match as_of {
             AsOf::Live => ("No generation published yet".into(), Tone::Muted),
             AsOf::At(t) => (format!("No generation at {}", clock.full(*t)), Tone::Muted),
         },
-        Ok(Some(t)) => (reference_summary(t, *clock), Tone::Normal),
     }
+}
+
+/// The reason of the worst unhealthy source filling `dataset`: Degraded or
+/// Failed always (falling back to the source's detail when the health has
+/// no reason), a pending source only when it has something to say. `None`
+/// when every such source is healthy or silent.
+fn reference_source_reason(d: &Diagnostics, dataset: &str) -> Option<String> {
+    d.sources
+        .values()
+        .filter(|s| s.spec.as_ref().is_some_and(|spec| spec.dataset == dataset))
+        .filter_map(|s| {
+            let health = s.health.as_ref()?;
+            let reason = match health {
+                Health::Degraded { reason } | Health::Failed { reason } if !reason.is_empty() => {
+                    reason.clone()
+                }
+                Health::Degraded { .. } | Health::Failed { .. } => s.detail.clone(),
+                Health::Pending | Health::PendingTooLong if !s.detail.is_empty() => {
+                    s.detail.clone()
+                }
+                _ => return None,
+            };
+            Some((health.severity(), reason))
+        })
+        // Worst by severity; the first source in name order wins a tie.
+        .fold(
+            None,
+            |worst: Option<(u8, String)>, (rank, reason)| match worst {
+                Some((w, _)) if w >= rank => worst,
+                _ => Some((rank, reason)),
+            },
+        )
+        .map(|(_, reason)| reason)
 }
 
 /// The stored answer when it answers `dataset` at `as_of`; any other is
@@ -1050,6 +1094,104 @@ pub(crate) mod tests {
         assert_eq!(
             reference_status(&d, None, &AsOf::Live, &Clock::utc()),
             ("No reference datasets declared".to_string(), Tone::Muted)
+        );
+    }
+
+    fn describe_snapshot(d: &mut Diagnostics, source: &str, dataset: &str) {
+        let mut summary = geode_shell::diagnostics::SourceSummary::for_dataset(dataset);
+        summary.shape = SourceShape::Snapshot;
+        d.describe_source(source, summary);
+    }
+
+    /// A degraded source keeps the last table on screen, so the chip keeps
+    /// its generation and says why it may be stale, warning-toned.
+    #[test]
+    fn reference_status_appends_a_degraded_sources_reason_to_the_table() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        describe_snapshot(&mut d, "refdb", "u");
+        d.note_health(
+            "refdb",
+            Health::Degraded {
+                reason: "query failed: connection refused".into(),
+            },
+            String::new(),
+            SystemTime::UNIX_EPOCH,
+        );
+        d.set_reference(reference_answer(AsOf::Live, Ok(Some(ref_table()))));
+        assert_eq!(
+            reference_status(&d, Some("u"), &AsOf::Live, &Clock::utc()),
+            (
+                "gen 7 · 1970-01-01 00:00:00 UTC · 2 rows · query failed: connection refused"
+                    .to_string(),
+                Tone::Warn
+            )
+        );
+    }
+
+    /// With nothing published, the source's reason is the whole chip: the
+    /// page would otherwise read "No generation published yet" as if
+    /// nothing were wrong.
+    #[test]
+    fn reference_status_shows_a_failed_sources_reason_when_there_is_no_table() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        describe_snapshot(&mut d, "refdb", "u");
+        describe_snapshot(&mut d, "other", "v");
+        d.note_health(
+            "other",
+            Health::Failed {
+                reason: "another dataset's failure".into(),
+            },
+            String::new(),
+            SystemTime::UNIX_EPOCH,
+        );
+        d.note_health(
+            "refdb",
+            Health::Failed {
+                reason: "adapter has no snapshot capability".into(),
+            },
+            String::new(),
+            SystemTime::UNIX_EPOCH,
+        );
+        d.set_reference(reference_answer(AsOf::Live, Ok(None)));
+        assert_eq!(
+            reference_status(&d, Some("u"), &AsOf::Live, &Clock::utc()),
+            ("adapter has no snapshot capability".to_string(), Tone::Warn)
+        );
+        // Before any answer, the reason still stands over Loading.
+        d.set_reference(reference_answer(
+            AsOf::At(chrono::DateTime::from_timestamp(100, 0).unwrap()),
+            Ok(None),
+        ));
+        assert_eq!(
+            reference_status(&d, Some("u"), &AsOf::Live, &Clock::utc()).0,
+            "adapter has no snapshot capability"
+        );
+    }
+
+    /// A healthy source, or a pending one with nothing to say, changes
+    /// nothing.
+    #[test]
+    fn reference_status_ignores_a_healthy_source() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        describe_snapshot(&mut d, "refdb", "u");
+        d.note_health("refdb", Health::Ok, String::new(), SystemTime::UNIX_EPOCH);
+        d.set_reference(reference_answer(AsOf::Live, Ok(Some(ref_table()))));
+        assert_eq!(
+            reference_status(&d, Some("u"), &AsOf::Live, &Clock::utc()),
+            (
+                "gen 7 · 1970-01-01 00:00:00 UTC · 2 rows".to_string(),
+                Tone::Normal
+            )
+        );
+        d.note_health(
+            "refdb",
+            Health::Pending,
+            String::new(),
+            SystemTime::UNIX_EPOCH,
+        );
+        assert_eq!(
+            reference_status(&d, Some("u"), &AsOf::Live, &Clock::utc()).1,
+            Tone::Normal
         );
     }
 
