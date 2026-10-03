@@ -35561,6 +35561,113 @@ run_mutation "events: text-file outcomes key by tile and tag" \
   geode-app \
   two_text_file_outcomes_for_the_same_tile_are_both_delivered
 
+# Classifications: the label history, the editor and the tile's notices.
+
+# Two edits before a reload must compose: the second over the pending
+# object, or it reverts the first.
+run_mutation "classifications: a verb works over the pending object" \
+  crates/geode-classifications/src/core/history.rs \
+  '        self.pending.as_ref().unwrap_or(config)' \
+  '        config' \
+  geode-classifications \
+  two_quick_edits_compose_and_undo_reverts_only_the_second
+
+# The label loop: the cursor keeps its shown index after a verb.
+run_mutation "classifications: a relabel keeps the cursor index (grid)" \
+  crates/geode-classifications/src/core/grid.rs \
+  '            self.place(at.min(self.visible.len() - 1));' \
+  '            let _ = at;' \
+  geode-classifications \
+  a_relabel_rebuild_keeps_the_cursor_index_even_when_put
+
+run_mutation "classifications: a relabel keeps the cursor index (tile)" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if relabelled {' \
+  '        if false {' \
+  geode-classifications \
+  labelling_the_top_unclassified_row_leaves_the_cursor_on_the_next
+
+# A selection whose cursor row vanished would re-span to rows nobody chose.
+run_mutation "classifications: losing the cursor row ends a selection" \
+  crates/geode-classifications/src/core/grid.rs \
+  '            && (lost(self.anchor.as_deref()) || lost(self.cursor_source.as_deref()))' \
+  '            && lost(self.anchor.as_deref())' \
+  geode-classifications \
+  a_rebuild_removing_the_cursor_row_ends_a_selection
+
+run_mutation "classifications: the session saves a filter-hidden cursor row" \
+  crates/geode-classifications/src/core/grid.rs \
+  '            .or(self.hidden.as_deref())' \
+  '            .or(None)' \
+  geode-classifications \
+  the_saved_cursor_prefers_seed_then_hidden_then_cursor
+
+# `tech` typed over `Tech` must not make a second label.
+run_mutation "classifications: a case variant takes the existing label" \
+  crates/geode-classifications/src/tile/editor.rs \
+  '            .is_some_and(|h| h.eq_ignore_ascii_case(typed));' \
+  '            .is_some_and(|h| h == typed);' \
+  geode-classifications \
+  typing_a_case_variant_of_an_existing_label
+
+run_mutation "classifications: a moved highlight is what enter takes" \
+  crates/geode-classifications/src/tile/editor.rs \
+  '    let take = moved' \
+  '    let take = false' \
+  geode-classifications \
+  a_moved_highlight_or_a_row_press_picks_the_label
+
+# A mixed selection prefilled with one label would write it across all.
+run_mutation "classifications: only a unanimous label prefills" \
+  crates/geode-classifications/src/tile/editor.rs \
+  '    labels.all(|l| l == Some(first)).then_some(first)' \
+  '    Some(first)' \
+  geode-classifications \
+  editing_a_selection_prefills_only_a_unanimous_label
+
+# The config door writes even when the reload then rejects the object.
+run_mutation "classifications: an invalid source is never written" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            validate_source(&config_dim.from, &config.schema, &config.dims)' \
+  '            Ok::<(), String>(())' \
+  geode-classifications \
+  an_invalid_source_classification_is_never_written
+
+run_mutation "classifications: the tile takes its shell notices" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            .update(cx, |f, _| f.take_tile_notices(id));' \
+  '            .update(cx, |_, _| Vec::<TileNotice>::new());' \
+  geode-classifications \
+  a_fork_notice_from_the_shell_shows_once
+
+run_mutation "classifications: a refusal drops the optimistic edit" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            self.history.reloaded();' \
+  '            let _ = &self.history;' \
+  geode-classifications \
+  a_refusal_notice_drops_the_optimistic_edit
+
+run_mutation "classifications: the switcher opens only on first or gone" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            _ if !shown && (first || gone) => {' \
+  '            _ if !shown => {' \
+  geode-classifications \
+  a_closed_switcher_stays_closed_across_an_unrelated_reload
+
+run_mutation "classifications: the switcher refusal clears when it no longer holds" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if self.notices.nothing_to_switch && !self.switch_rows().is_empty() {' \
+  '        if false {' \
+  geode-classifications \
+  the_nothing_to_switch_to_refusal_clears_once_there_is
+
+run_mutation "classifications: a restore notice clears on the first action" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            self.notices.restore.clear();' \
+  '            let _ = &self.notices.restore;' \
+  geode-classifications \
+  a_restore_notice_clears_on_the_first_action
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
