@@ -165,6 +165,8 @@ impl TileContent for BlotterContent {
             Delivery::Upload(_) => {}
             // This tile asks for no distinct values; an outcome addressed here is a routing bug.
             Delivery::Distinct(_) => {}
+            // This tile reads and writes no files.
+            Delivery::TextFile(_) => {}
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {

@@ -21,6 +21,7 @@ use geode_core::context::DimensionContext;
 use geode_core::pricing::PriceOutcome;
 use geode_core::query::{DistinctOutcome, QueryKey, QueryOutcome};
 use geode_core::series::SeriesOutcome;
+use geode_core::textfile::TextFileOutcome;
 use geode_core::tile_columns::TileColumns;
 use geode_core::vol::VolSliceOutcome;
 use gpui::{AnyView, App, Entity, SharedString, Window};
@@ -65,6 +66,8 @@ pub enum Delivery {
     /// A distinct-values answer for a tile that asked for one, routed by tile
     /// key. Shell-owned keys (`shell::is_shell_key`) never arrive here.
     Distinct(DistinctOutcome),
+    /// A text file read or write this tile asked for, routed by tile key.
+    TextFile(TextFileOutcome),
 }
 
 /// [`Delivery::Upload`]'s fields, mirroring `geode_data::egress::
@@ -94,6 +97,7 @@ impl Delivery {
             Delivery::SeriesFetched { .. } => None,
             Delivery::Upload(u) => Some(u.key),
             Delivery::Distinct(outcome) => Some(outcome.key),
+            Delivery::TextFile(o) => Some(o.key),
         }
     }
 }
@@ -1027,6 +1031,8 @@ pub mod placeholder {
                 Delivery::Upload(_) => {}
                 // This tile has no module; nothing is ever addressed here.
                 Delivery::Distinct(_) => {}
+                // This tile has no module; nothing is ever addressed here.
+                Delivery::TextFile(_) => {}
             }
         }
         fn set_visible(&self, _: bool, _: &mut App) {}
@@ -1605,6 +1611,12 @@ pub mod recording {
                     self.log
                         .borrow_mut()
                         .push(Recorded::Delivered(self.tile, outcome.tag));
+                }
+                // Recorded like an `Upload`: the tag tells them apart.
+                Delivery::TextFile(o) => {
+                    self.log
+                        .borrow_mut()
+                        .push(Recorded::Delivered(self.tile, o.tag));
                 }
             }
         }

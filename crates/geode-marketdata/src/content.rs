@@ -218,6 +218,8 @@ impl TileContent for MarketDataContent {
             Delivery::Upload(u) => self.tile.update(cx, |t, cx| t.deliver_upload(u, cx)),
             // This tile asks for no distinct values.
             Delivery::Distinct(_) => {}
+            // This tile reads and writes no files.
+            Delivery::TextFile(_) => {}
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {

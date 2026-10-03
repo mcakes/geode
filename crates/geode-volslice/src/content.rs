@@ -171,6 +171,8 @@ impl TileContent for VolsliceContent {
             Delivery::Upload(_) => {}
             // This tile asks for no distinct values.
             Delivery::Distinct(_) => {}
+            // This tile reads and writes no files.
+            Delivery::TextFile(_) => {}
         }
     }
 

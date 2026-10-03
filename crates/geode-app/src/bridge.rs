@@ -1486,6 +1486,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             )
                         });
                     }
+                    // Routed by the requesting tile's key, like an upload.
+                    DataEvent::TextFile(outcome) => {
+                        shell.update(cx, |s, cx| s.deliver(Delivery::TextFile(outcome), window, cx));
+                    }
                     DataEvent::Query(outcome) => {
                         shell.update(cx, |s, cx| {
                             s.deliver(Delivery::Query(outcome), window, cx)

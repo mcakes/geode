@@ -422,6 +422,8 @@ impl TileContent for PricerContent {
             Delivery::Upload(_) => {}
             // The pricer asks for no distinct values.
             Delivery::Distinct(_) => {}
+            // This tile reads and writes no files.
+            Delivery::TextFile(_) => {}
         }
     }
 
