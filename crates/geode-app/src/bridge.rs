@@ -10,7 +10,7 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::DocumentKind;
 use geode_core::egress_config;
 use geode_core::panel::{KindActionRegistry, PANELS_DOC, PanelSpec, load_panels, refusal};
-use geode_core::query::{CatalogParams, DistinctOutcome};
+use geode_core::query::{CatalogParams, DistinctOutcome, ReferenceParams};
 use geode_core::schema::SchemaSpec;
 use geode_core::source_config::{SourceShape, parse_duration};
 use geode_core::view::ViewSpec;
@@ -598,6 +598,10 @@ pub struct Bridge {
     /// Diagnostics describe the running service even when edited source config
     /// awaits restart.
     sources: Vec<(SourceSpec, SourceShape)>,
+    /// Reference-family dataset names in startup-schema declaration order,
+    /// handed to diagnostics at attach. Fixed for the run like `sources`:
+    /// the service serves the schema it started with.
+    reference_datasets: Vec<String>,
     /// Local dataset names used to exclude autosave from frame publication updates.
     pub local_datasets: Rc<HashSet<String>>,
     /// The config key the pricer factory was built from; seeds the reload
@@ -664,6 +668,12 @@ pub fn start(
     let dimensions = setup.dimensions.clone();
     let pricer_dims = setup.dimensions.clone();
     let sources = source_shapes(&setup.config.sources, &schema);
+    let reference_datasets = schema
+        .datasets
+        .iter()
+        .filter(|ds| ds.is_reference())
+        .map(|ds| ds.name.clone())
+        .collect();
     let local_datasets = Rc::new(setup.local_datasets);
     let panels = setup.panels;
     // Target names and accepted documents in `egress.toml` order. Every panel
@@ -737,6 +747,7 @@ pub fn start(
         events: rx,
         dropped,
         sources,
+        reference_datasets,
         local_datasets,
         pricer_key: Some(pricer_key),
         positions_configured,
@@ -819,6 +830,23 @@ impl CatalogRefresh {
     }
 }
 
+/// The diagnostics page's reference reads. Only the latest submission's
+/// answer is stored, so a slow answer for an older as-of cannot replace a
+/// newer one. No retry: the page re-asks on as-of change or publication, and
+/// a refusal is shown with its reason.
+#[derive(Default)]
+struct ReferenceRefresh {
+    tag: Cell<u64>,
+}
+
+/// What the page says when a reference or poll submission was refused.
+fn reference_refusal_reason(refusal: Refusal) -> &'static str {
+    match refusal {
+        Refusal::Busy => "the data service is busy — press r to retry",
+        Refusal::Stopped => "the data service has stopped",
+    }
+}
+
 /// Route mailbox events through the window and forward reloads. Awaiting the
 /// receiver wakes the foreground task on arrival; scheduling and UI work still
 /// determine delivery latency. The task checks window liveness on each event.
@@ -859,6 +887,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 },
             );
         }
+        // Fixed for the run: the service serves its startup schema.
+        d.set_reference_datasets(bridge.reference_datasets.clone());
         cx.notify();
     });
 
@@ -896,6 +926,43 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // Nothing will serve a retry, and the stopped segment already
                 // says why: keeping the demand would re-ask on every notify.
                 Err(Refusal::Stopped) => {}
+            }
+        }
+    })
+    .detach();
+
+    // Reference reads and poll-now requests drain independently of the
+    // catalog lane: a catalog read in flight must not hold a page's table.
+    let reference_refresh = Rc::new(ReferenceRefresh::default());
+    cx.observe(&diagnostics, {
+        let handle = handle.clone();
+        let diagnostics = diagnostics.clone();
+        let shell = shell.clone();
+        let refresh = reference_refresh.clone();
+        move |_entity, cx| {
+            if let Some(dataset) = diagnostics.update(cx, |d, _| d.take_reference_request()) {
+                let tag = refresh.tag.get() + 1;
+                refresh.tag.set(tag);
+                let as_of = shell.read(cx).active_frame().read(cx).as_of().clone();
+                if let Err(refusal) = handle.reference(ReferenceParams {
+                    key: DIAGNOSTICS_KEY,
+                    tag,
+                    dataset: dataset.clone(),
+                    as_of,
+                }) {
+                    diagnostics.update(cx, |d, cx| {
+                        d.note_reference_refused(&dataset, reference_refusal_reason(refusal));
+                        cx.notify();
+                    });
+                }
+            }
+            if let Some(dataset) = diagnostics.update(cx, |d, _| d.take_poll_request())
+                && let Err(refusal) = handle.poll(dataset.clone())
+            {
+                diagnostics.update(cx, |d, cx| {
+                    d.note_reference_refused(&dataset, reference_refusal_reason(refusal));
+                    cx.notify();
+                });
             }
         }
     })
@@ -1113,6 +1180,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     // The handle's `Busy` refusal total, read once per drained event.
     let refused_handle = handle.clone();
     let catalog_refresh_for_drain = catalog_refresh.clone();
+    let reference_refresh_for_drain = reference_refresh.clone();
     // Retain local dataset names for the drain task after attach's borrow ends.
     let local_datasets = Rc::clone(&bridge.local_datasets);
     // The pricer's sheet writes are answered through the drain.
@@ -1120,6 +1188,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         let diagnostics = diagnostics_for_drain;
         let catalog_refresh = catalog_refresh_for_drain;
+        let reference_refresh = reference_refresh_for_drain;
         let catalog_window = window;
         let mut last_dropped = 0u64;
         let mut last_refused = 0u64;
@@ -1394,9 +1463,20 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::VolSlices(outcome), window, cx)
                         });
                     }
-                    // No surface asks for a reference table yet; an answer
-                    // nobody is waiting for is dropped.
-                    DataEvent::Reference(_) => {}
+                    // Only the latest submission's answer counts. The page
+                    // compares its as-of with the frame and re-asks itself;
+                    // the bridge does not.
+                    DataEvent::Reference(outcome) => {
+                        if outcome.key != DIAGNOSTICS_KEY
+                            || outcome.tag != reference_refresh.tag.get()
+                        {
+                            return;
+                        }
+                        diagnostics.update(cx, |d, cx| {
+                            d.set_reference(outcome);
+                            cx.notify();
+                        });
+                    }
                     // A position command's answer becomes the status notice;
                     // `geode_data::positions` already logs it under
                     // `geode::ingest`.
@@ -1434,7 +1514,9 @@ mod tests {
     use super::*;
     use geode_core::config::{ConfigSources, LayerDoc};
     use geode_core::log::Ring;
-    use geode_core::query::{AsOf, CatalogOutcome, CatalogSnapshot, QueryKey};
+    use geode_core::query::{
+        AsOf, CatalogOutcome, CatalogSnapshot, QueryKey, ReferenceOutcome, ReferenceParams,
+    };
     use geode_data::source::SourceSpec;
     use geode_diagnostics::DiagnosticsPageFactory;
     use geode_marketdata::core::builtin_panel;
@@ -1795,6 +1877,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings,
         }
     }
@@ -5161,6 +5244,7 @@ role = "key"
             local_datasets: Rc::new(["pricer_sheets".to_string()].into_iter().collect()),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5268,6 +5352,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5367,6 +5452,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
 
@@ -5485,6 +5571,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5545,6 +5632,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5605,6 +5693,7 @@ role = "key"
             pricer: test_pricer(&handle),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
             handle,
             factory,
@@ -5670,6 +5759,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
 
@@ -5762,6 +5852,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5833,6 +5924,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5907,6 +5999,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -5983,6 +6076,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6082,6 +6176,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6177,6 +6272,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6239,6 +6335,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6386,6 +6483,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -6450,6 +6548,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets: Vec::new(),
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -7125,6 +7224,15 @@ role = "key"
     }
 
     fn catalog_fixture(cx: &mut gpui::TestAppContext) -> CatalogFixture {
+        fixture_with_reference(cx, Vec::new())
+    }
+
+    /// The catalog fixture over a startup schema declaring these reference
+    /// datasets.
+    fn fixture_with_reference(
+        cx: &mut gpui::TestAppContext,
+        reference_datasets: Vec<String>,
+    ) -> CatalogFixture {
         let window = open_test_window(cx, test_shell_services());
         let (handle, requests) = DataHandle::for_tests();
         let factory = Rc::new(BlotterFactory::new(
@@ -7153,6 +7261,7 @@ role = "key"
             local_datasets: Default::default(),
             pricer_key: None,
             positions_configured: false,
+            reference_datasets,
             underlyings: Default::default(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -7184,6 +7293,142 @@ role = "key"
                 }),
             }))
             .unwrap();
+    }
+
+    /// The next reference read on the wire, skipping the catalog reads a
+    /// watch also queues.
+    fn next_reference(f: &CatalogFixture) -> ReferenceParams {
+        loop {
+            match f.requests.try_recv().expect("reference request") {
+                geode_data::Request::Reference(params) => return params,
+                geode_data::Request::Catalog(_) => continue,
+                other => panic!("expected reference, got {other:?}"),
+            }
+        }
+    }
+
+    fn reference_answer(params: &ReferenceParams) -> DataEvent {
+        DataEvent::Reference(ReferenceOutcome {
+            key: params.key,
+            tag: params.tag,
+            dataset: params.dataset.clone(),
+            as_of: params.as_of.clone(),
+            table: Ok(None),
+        })
+    }
+
+    fn fixture_diagnostics(
+        f: &CatalogFixture,
+        vcx: &mut gpui::VisualTestContext,
+    ) -> (Entity<ShellView>, Entity<Diagnostics>) {
+        let shell = f.window.root(vcx).unwrap().read_with(vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(vcx, |s, _| s.diagnostics().clone());
+        (shell, diagnostics)
+    }
+
+    #[gpui::test]
+    fn attach_hands_diagnostics_the_reference_datasets(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let (_, diagnostics) = fixture_diagnostics(&f, &mut vcx);
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.reference_datasets.clone()),
+            vec!["underlyings".to_string()]
+        );
+    }
+
+    /// The page's demand reaches the handle through the real observer,
+    /// carrying the frame's as-of; only the latest tag's answer is stored.
+    #[gpui::test]
+    fn a_watched_reference_request_reaches_the_handle_and_its_answer_is_stored(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let (shell, diagnostics) = fixture_diagnostics(&f, &mut vcx);
+        let at = chrono::Utc::now() - chrono::Duration::days(3);
+        let frame = shell.read_with(&vcx, |s, _| s.active_frame().clone());
+        frame.update(&mut vcx, |fr, cx| {
+            fr.shared_mut().set_as_of(AsOf::At(at));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            d.request_reference("underlyings");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let first = next_reference(&f);
+        assert_eq!(first.key, DIAGNOSTICS_KEY);
+        assert_eq!(first.dataset, "underlyings");
+        assert_eq!(first.as_of, AsOf::At(at), "the frame's as-of is carried");
+
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.request_reference("underlyings");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let second = next_reference(&f);
+        assert!(second.tag > first.tag);
+
+        // The first answer is superseded; only the latest request's counts.
+        f.events.try_send(reference_answer(&first)).unwrap();
+        vcx.run_until_parked();
+        assert!(diagnostics.read_with(&vcx, |d, _| d.reference.is_none()));
+
+        f.events.try_send(reference_answer(&second)).unwrap();
+        vcx.run_until_parked();
+        let stored = diagnostics.read_with(&vcx, |d, _| d.reference.clone());
+        assert_eq!(stored.map(|o| o.tag), Some(second.tag));
+    }
+
+    #[gpui::test]
+    fn a_busy_handle_refuses_a_reference_read_on_the_page(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let (_, diagnostics) = fixture_diagnostics(&f, &mut vcx);
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            d.request_reference("underlyings");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        next_reference(&f);
+
+        f.bridge.handle.fill_for_tests();
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.request_reference("underlyings");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.reference_refusal.clone()),
+            Some((
+                "underlyings".to_string(),
+                "the data service is busy — press r to retry".to_string()
+            ))
+        );
+    }
+
+    /// Poll-now is explicit: it reaches the handle with no page watching.
+    #[gpui::test]
+    fn a_poll_request_reaches_the_handle(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let (_, diagnostics) = fixture_diagnostics(&f, &mut vcx);
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.request_poll("underlyings");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        match f.requests.try_recv() {
+            Ok(geode_data::Request::Poll { dataset }) => assert_eq!(dataset, "underlyings"),
+            other => panic!("expected a poll, got {other:?}"),
+        }
     }
 
     #[gpui::test]

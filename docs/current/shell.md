@@ -936,6 +936,8 @@ section does not read:
 | `config` | Current config-load batch, batch history, retained data conditions |
 | `log_levels` | Target-level settings |
 | `perf` | Copied frame histogram, copied process memory reading, dropped-event count, and the mirrored overlay value |
+| `reference` | A stored reference answer, a reference or poll refusal, or a changed reference-dataset list |
+| `reference_published` | A publication of a dataset in `reference_datasets` (the page re-asks for the table it shows) |
 
 Equal snapshots leave their counters unchanged; loading and publication events
 always advance theirs. Frame as-of/config versions and log ring sequences are
@@ -988,6 +990,23 @@ refreshes. The last `unwatch` clears that pending demand. `request_catalog`
 records an explicit consumer's request, which survives diagnostics hiding.
 When both are pending, `take_catalog_request` consumes them together as
 explicit demand, preserving its retry policy.
+
+Reference demand has the same two lifetimes. `reference_datasets` lists the
+startup schema's reference-family datasets in declaration order; the bridge
+sets it at attach and it does not change while Geode runs, because the data
+service serves the schema it started with. `request_reference(dataset)` queues
+a read only while a page watches, and the last `unwatch` drops it, so a hidden
+page costs no database read. `request_poll(dataset)` is an explicit poll-now of
+every snapshot source filling that dataset and is queued whether or not a page
+watches. The bridge submits a reference read under `DIAGNOSTICS_KEY` with the
+active frame's as-of and a fresh tag, and stores only the answer carrying the
+latest tag in `reference`; an older answer cannot replace a newer one. It
+neither retries nor re-asks: the page compares the stored answer's `as_of`
+with the frame and asks again on as-of change or a `reference_published` bump.
+A refused reference or poll submission sets `reference_refusal` to the dataset
+and a reason (`Busy` names `r` to retry; `Stopped` says the service stopped),
+so the page shows why nothing arrived. An answer for the same dataset clears
+it.
 
 Two request channels let the page change application state without
 holding `ShellView`. `request_level` queues a target and level; the shell

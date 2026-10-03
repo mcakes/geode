@@ -40,7 +40,7 @@ GPUI globals or provide rendering helpers.
 | `theme`, `fonts`, `fontsize`, `linenumbers`, `tileadd`, `tips` | Settings and their pure resolution rules: the bundled gpui-component themes, the bundled Inter and JetBrains Mono faces, the rem scale knob, `[ui] line_numbers`, the add-tile direction, tooltip text from the live keymap (a backtick-quoted key in a tooltip's detail line paints as a key chip). |
 | `config_write`, `keymap_edit`, `log_persist`, `reload` | Ordered user-layer writes, comment-preserving keyed edits, log-level persistence, and reload detection/rejection. See the [configuration contract](../../docs/current/configuration.md#runtime-edits) for write guarantees and the limits of keep-last-good. |
 | `session` | Session encoding, local recovery, and atomic file replacement. Shell integration owns periodic snapshots and shutdown saves. See [session persistence](../../docs/current/shell.md#session-format) for recovery boundaries, unavailable modules, and write-failure behavior. |
-| `diagnostics` | Source health, generations, independent config/data diagnostics, stopped data threads (`StoppedThread`, `thread_label`) and the prepared `StoppedSegment`, the `Busy`-refusal total, section versions, cached status summary, and watched/explicit catalog demand. See the [diagnostics contract](../../docs/current/shell.md#diagnostics-state-and-demand). |
+| `diagnostics` | Source health, generations, independent config/data diagnostics, stopped data threads (`StoppedThread`, `thread_label`) and the prepared `StoppedSegment`, the `Busy`-refusal total, section versions, cached status summary, watched/explicit catalog demand, and reference demand (`reference_datasets`, watched `request_reference`, explicit `request_poll`, the latest stored `reference` answer and a `reference_refusal`). See the [diagnostics contract](../../docs/current/shell.md#diagnostics-state-and-demand). |
 | `colfit` | The pure column-fit measure behind `:autosize` and `tile::autosize_columns`: `FitMetrics` (mono advance at `text_sm`, the `XSmall` cell padding and cursor border at the window's rem, clamped to 2.5–40 rem), the `FittedWidths` map by stable column key, and its lenient `column_widths` session read/write, which clamps a restored width to 25–560 px. `NO_TABLE` and `NOTHING_TO_FIT` are the two refusals. See [autosized columns](../../docs/current/features.md#autosized-columns). |
 | `perf` | The always-compiled frame-time histogram. |
 | `memory` | The process memory sampler (macOS physical footprint via `task_vm_info`, Windows private bytes via `GetProcessMemoryInfo`, `None` elsewhere), the pure `MemoryTracker` deciding what logs on `geode::memory`, `current_hysteresis` (how far current must move before `Diagnostics::refresh_memory` copies it), and `format_bytes`, whose peak text change also copies. See [memory instrumentation](../../docs/current/performance.md#memory). |
@@ -178,9 +178,10 @@ change most often hits:
   "The pinned rev" in a comment means those versions, read from the
   registry source.
 - Diagnostics request methods cannot notify observers themselves. Visibility
-  and catalog-demand changes require a caller notification even though they
-  leave diagnostic data versions unchanged. Explicit catalog demand survives
-  the diagnostics page hiding.
+  and catalog- and reference-demand changes require a caller notification even
+  though they leave diagnostic data versions unchanged. Explicit catalog demand
+  and poll-now requests survive the diagnostics page hiding; a reference read
+  does not.
 - A stopped data thread is recorded once and never cleared: nothing restarts
   it, so its status segment stays until Geode restarts. The segment's text and
   tooltip are built in `note_thread_stopped`, not at paint. See

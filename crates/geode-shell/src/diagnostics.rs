@@ -18,7 +18,7 @@ use std::time::SystemTime;
 use geode_core::config::{Diagnostic, Severity};
 pub use geode_core::health::Health;
 use geode_core::log::{Level, LogLevels};
-use geode_core::query::{CatalogSnapshot, DatasetCatalog};
+use geode_core::query::{CatalogSnapshot, DatasetCatalog, ReferenceOutcome};
 pub use geode_core::source_config::SourceShape;
 use gpui::SharedString;
 
@@ -276,6 +276,8 @@ pub fn trim_keeping_errors<T>(
 /// - `log_levels`: target-level settings.
 /// - `perf`: the copied frame histogram, process memory reading, and
 ///   dropped-event count.
+/// - `reference`: a reference answer, refusal or the dataset list changed.
+/// - `reference_published`: a reference dataset published (the page re-asks).
 ///
 /// Frame as-of/config versions and the log ring sequence are separate inputs
 /// observed by the tile. Performance rows also read frame requery statistics
@@ -289,6 +291,8 @@ pub struct DiagVersions {
     pub config: u64,
     pub log_levels: u64,
     pub perf: u64,
+    pub reference: u64,
+    pub reference_published: u64,
 }
 
 /// What a tile's header chip shows: the worst unhealthy source among those
@@ -356,6 +360,16 @@ pub struct Diagnostics {
     /// When `catalog` was stored, as the caller of [`Self::set_catalog`]
     /// supplied it. `None` until the first snapshot.
     pub catalog_at: Option<SystemTime>,
+    /// Reference-family dataset names in declaration order, set by the
+    /// bridge from the schema at attach.
+    pub reference_datasets: Vec<String>,
+    /// The latest reference answer the bridge accepted. Its `as_of` may
+    /// trail the frame's; the page compares and asks again.
+    pub reference: Option<ReferenceOutcome>,
+    /// `(dataset, reason)` when the last reference or poll submission was
+    /// refused, so the page can say why nothing arrived. An answer for the
+    /// same dataset clears it.
+    pub reference_refusal: Option<(String, String)>,
     pub levels: LogLevels,
     /// Visible diagnostics page count, maintained by `watch`/`unwatch`.
     /// Watched catalog refreshes and histogram copies require at least one
@@ -374,6 +388,11 @@ pub struct Diagnostics {
     overlay_visible: bool,
     pending_catalog_request: bool,
     pending_explicit_catalog: bool,
+    /// A watched page's reference read; cleared by the last unwatch so a
+    /// hidden page costs no database read.
+    pending_reference: Option<String>,
+    /// An explicit poll-now; survives hiding because the user asked for it.
+    pending_poll: Option<String>,
     /// Status summary cached by combined version. A cache hit shares the
     /// `SharedString` allocation, avoiding formatting and buffer copies during paint.
     summary_cache: RefCell<(u64, SharedString)>,
@@ -403,6 +422,9 @@ impl Diagnostics {
             memory_stale: false,
             catalog: None,
             catalog_at: None,
+            reference_datasets: Vec::new(),
+            reference: None,
+            reference_refusal: None,
             levels,
             watchers: 0,
             version: 0,
@@ -413,6 +435,8 @@ impl Diagnostics {
             overlay_visible: false,
             pending_catalog_request: false,
             pending_explicit_catalog: false,
+            pending_reference: None,
+            pending_poll: None,
             summary_cache: RefCell::new((u64::MAX, SharedString::default())),
         }
     }
@@ -566,10 +590,15 @@ impl Diagnostics {
     /// Record a publication: retain the dataset name and always advance the data
     /// version. Queue a catalog refresh only while diagnostics is watched; a
     /// hidden surface does not need a database read for each publication.
+    /// A reference dataset's publication also advances `reference_published`
+    /// so the page re-reads the table it shows.
     pub fn note_published(&mut self, dataset: &str) {
         self.datasets.entry(dataset.to_string()).or_default();
         if self.watchers > 0 {
             self.pending_catalog_request = true;
+        }
+        if self.reference_datasets.iter().any(|d| d == dataset) {
+            self.versions.reference_published += 1;
         }
         self.version += 1;
         self.versions.data += 1;
@@ -779,6 +808,7 @@ impl Diagnostics {
         self.watchers = self.watchers.saturating_sub(1);
         if self.watchers == 0 {
             self.pending_catalog_request = false;
+            self.pending_reference = None;
         }
     }
 
@@ -799,6 +829,63 @@ impl Diagnostics {
     /// As with `request_catalog`, the caller must notify to wake the bridge.
     pub fn request_catalog_refresh(&mut self) {
         self.pending_catalog_request |= self.watchers > 0;
+    }
+
+    /// Replace the reference-family dataset names. An equal list leaves
+    /// versions unchanged.
+    pub fn set_reference_datasets(&mut self, names: Vec<String>) {
+        if self.reference_datasets == names {
+            return;
+        }
+        self.reference_datasets = names;
+        self.version += 1;
+        self.versions.reference += 1;
+    }
+
+    /// Queue a read of one reference dataset at the frame's as-of, for a
+    /// visible page only; the last unwatch cancels it. Like the catalog
+    /// demand calls this moves no version, so the caller must notify.
+    pub fn request_reference(&mut self, dataset: &str) {
+        if self.watchers > 0 {
+            self.pending_reference = Some(dataset.to_string());
+        }
+    }
+
+    pub fn take_reference_request(&mut self) -> Option<String> {
+        self.pending_reference.take()
+    }
+
+    /// Store the bridge's latest accepted answer. It clears a refusal for
+    /// the same dataset, since the read it stood in for has now arrived.
+    pub fn set_reference(&mut self, outcome: ReferenceOutcome) {
+        if self
+            .reference_refusal
+            .as_ref()
+            .is_some_and(|(dataset, _)| *dataset == outcome.dataset)
+        {
+            self.reference_refusal = None;
+        }
+        self.reference = Some(outcome);
+        self.version += 1;
+        self.versions.reference += 1;
+    }
+
+    /// Record that a reference or poll submission was refused, so the page
+    /// says why no answer came rather than waiting silently.
+    pub fn note_reference_refused(&mut self, dataset: &str, reason: &str) {
+        self.reference_refusal = Some((dataset.to_string(), reason.to_string()));
+        self.version += 1;
+        self.versions.reference += 1;
+    }
+
+    /// Queue a poll of every snapshot source filling `dataset`. Explicit, so
+    /// it is queued whether or not a page is watching; the caller notifies.
+    pub fn request_poll(&mut self, dataset: &str) {
+        self.pending_poll = Some(dataset.to_string());
+    }
+
+    pub fn take_poll_request(&mut self) -> Option<String> {
+        self.pending_poll.take()
     }
 
     /// Apply one target-level setting and queue its persistence for
@@ -1047,6 +1134,7 @@ pub fn fnv1a(s: &str) -> u64 {
 mod tests {
     use super::*;
     use geode_core::config::{Diagnostic, Layer};
+    use geode_core::query::{AsOf, QueryKey};
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -1418,6 +1506,111 @@ mod tests {
         d.watch();
         d.unwatch();
         assert!(d.take_pending_catalog_request());
+    }
+
+    fn reference_answer(dataset: &str) -> ReferenceOutcome {
+        ReferenceOutcome {
+            key: QueryKey(1),
+            tag: 1,
+            dataset: dataset.into(),
+            as_of: AsOf::Live,
+            table: Ok(None),
+        }
+    }
+
+    #[test]
+    fn a_reference_request_needs_a_watcher() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.request_reference("underlyings");
+        assert_eq!(
+            d.take_reference_request(),
+            None,
+            "a hidden page asks nothing"
+        );
+        d.watch();
+        d.request_reference("underlyings");
+        assert_eq!(d.take_reference_request(), Some("underlyings".to_string()));
+        assert_eq!(d.take_reference_request(), None);
+    }
+
+    #[test]
+    fn unwatching_drops_a_pending_reference_request() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.watch();
+        d.request_reference("underlyings");
+        d.unwatch();
+        assert_eq!(d.take_reference_request(), None);
+    }
+
+    /// Demand moves no counter: the caller notifies to wake the bridge.
+    #[test]
+    fn reference_and_poll_requests_leave_versions_alone() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.watch();
+        let before = (d.version(), d.versions());
+        d.request_reference("underlyings");
+        d.request_poll("underlyings");
+        assert_eq!((d.version(), d.versions()), before);
+    }
+
+    #[test]
+    fn a_publish_of_a_reference_dataset_bumps_its_counter_only() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.set_reference_datasets(vec!["underlyings".into()]);
+        let before = d.versions();
+        d.note_published("risk_snapshot");
+        assert_eq!(d.versions().reference_published, before.reference_published);
+        d.note_published("underlyings");
+        assert_eq!(
+            d.versions().reference_published,
+            before.reference_published + 1
+        );
+    }
+
+    #[test]
+    fn the_reference_dataset_list_bumps_only_when_it_changes() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.set_reference_datasets(vec!["underlyings".into()]);
+        let v = d.versions().reference;
+        assert!(v > 0);
+        d.set_reference_datasets(vec!["underlyings".into()]);
+        assert_eq!(d.versions().reference, v);
+        assert_eq!(d.reference_datasets, vec!["underlyings".to_string()]);
+    }
+
+    #[test]
+    fn storing_an_answer_clears_its_refusal() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_reference_refused("underlyings", "the data service is busy — press r to retry");
+        assert_eq!(
+            d.reference_refusal,
+            Some((
+                "underlyings".to_string(),
+                "the data service is busy — press r to retry".to_string()
+            ))
+        );
+        let v = d.versions().reference;
+        d.set_reference(reference_answer("underlyings"));
+        assert!(d.reference_refusal.is_none());
+        assert_eq!(d.reference, Some(reference_answer("underlyings")));
+        assert!(d.versions().reference > v);
+    }
+
+    /// An answer for one dataset says nothing about another's refusal.
+    #[test]
+    fn an_answer_keeps_another_datasets_refusal() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_reference_refused("underlyings", "the data service has stopped");
+        d.set_reference(reference_answer("issuers"));
+        assert!(d.reference_refusal.is_some());
+    }
+
+    #[test]
+    fn a_poll_request_is_explicit() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.request_poll("underlyings");
+        assert_eq!(d.take_poll_request(), Some("underlyings".to_string()));
+        assert_eq!(d.take_poll_request(), None);
     }
 
     #[test]
