@@ -2689,3 +2689,22 @@ sheet blank in one batch with one package fold at its end (setup, which
 reloads the blank sheet from rows, is excluded). The same batch folding
 after each filled line measured 13.7 ms: each fold walks every package and
 formats the needs-currency failure for each one with a blank leg.
+
+**Publish with live comparison** (`cargo bench -p geode-data --bench
+publish_document`, Apple M5 Pro, 18 cores, shared machine at load average
+16 to 40). `publish_document` gained a compare-first path for recovered
+documents; the bench times the ordinary path, which still reserves, stages
+and publishes in the same order. The bench grid now carries the demo
+declaration's per-slice `forward`, `atm` and `skew` values: without them
+every document failed validation. Runs alternate the parent commit (with
+the same grid fix) and the change:
+
+| Benchmark | Before | After |
+|---|---|---|
+| `publish_document/20x30` | 7.21, 7.63 ms | 6.68, 7.06, 6.44 ms |
+| `publish_document/200x300` | 157.8, 182.2 ms | 178.7, 213.3, 199.7 ms |
+
+The small shape reads unchanged. The large shape reads 10 to 15 percent
+slower on the means, but two runs of the same build differ by 19 percent
+at this load and the ordinary path's per-row work is unchanged, so this is
+not resolved as a regression; a quiet-machine rerun should settle it.
