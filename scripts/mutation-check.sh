@@ -4931,8 +4931,8 @@ run_mutation "palette: out-of-order words claim distinct characters" \
 
 run_mutation "palette: selecting a saved scope loads it" \
   crates/geode-shell/src/shell/palette_ctl.rs \
-  '                    if let Ok(true) = f.load_scope(&name) {' \
-  '                    if let Ok(true) = f.load_scope("no-such-scope") {' \
+  '                let _ = self.load_saved_scope(&name, cx);' \
+  '                let _ = self.load_saved_scope("no-such-scope", cx);' \
   geode-shell a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it
 
 # Category matches have a lower weight than title matches. Without the
@@ -18274,6 +18274,167 @@ run_mutation "scope-picker: an empty set's footer drops enter" \
   geode-shell \
   with_no_saved_scopes_the_picker_says_how_to_save_one
 
+# ---- Scope dialog: lane provenance, rows, saved rows and layers ----
+
+# A load of the scope already in force must still name its source, or the
+# dialog title says "unsaved" right after a load.
+run_mutation "scope dialog: a load records its source" \
+  crates/geode-shell/src/frame.rs \
+  '        self.set_loaded_from(Some(name.to_string()));
+        Ok(changed)' \
+  '        Ok(changed)' \
+  geode-shell \
+  loading_the_scope_already_in_force_still_records_its_name
+
+# Clearing a followed group's scope must not forget the lane's source.
+run_mutation "scope dialog: clearing a group keeps the lane's source" \
+  crates/geode-shell/src/frame.rs \
+  '        if following.is_none() {
+            self.set_loaded_from(None);
+        }' \
+  '        self.set_loaded_from(None);' \
+  geode-shell \
+  clearing_through_a_followers_view_keeps_the_lanes_provenance
+
+# A new source must reach the session file even when no scope changed.
+run_mutation "scope dialog: a new source dirties the session" \
+  crates/geode-shell/src/frame.rs \
+  '            self.lane().loaded_from = name;
+            fresh(&mut self.frame.generation);' \
+  '            self.lane().loaded_from = name;' \
+  geode-shell \
+  loading_the_scope_already_in_force_still_records_its_name_and_advances_the_generation
+
+# Restore refuses a name no saved scope has.
+run_mutation "scope dialog: restore refuses an unknown source" \
+  crates/geode-shell/src/frame.rs \
+  '            .is_none_or(|n| self.frame.saved_scopes.contains_key(n));' \
+  '            .is_none_or(|_| true);' \
+  geode-shell \
+  restoring_provenance_refuses_a_name_no_saved_scope_has
+
+# A pinned record without provenance must clear the copy pin took from the
+# shared lane, or the pinned lane reads "from <shared's scope>".
+run_mutation "scope dialog: restoring none clears a pinned copy" \
+  crates/geode-shell/src/frame.rs \
+  '        self.set_loaded_from(name.filter(|_| known));' \
+  '        if name.is_some() {
+            self.set_loaded_from(name.filter(|_| known));
+        }' \
+  geode-shell \
+  a_pinned_record_without_provenance_does_not_inherit_the_shared_lanes
+
+# The shared lane's provenance must be written to the session.
+run_mutation "scope dialog: the session writes the source" \
+  crates/geode-shell/src/session.rs \
+  '            t.insert("loaded_from".into(), toml::Value::String(name.clone()));' \
+  '' \
+  geode-shell \
+  provenance_round_trips
+
+# Two equal terms need two identities, or the cursor and d act on the wrong one.
+run_mutation "scope dialog: equal terms are distinct rows" \
+  crates/geode-shell/src/shell/scopedialog/rows.rs \
+  '                let occurrence = seen.iter().filter(|t| **t == text).count();' \
+  '                let occurrence = 0;' \
+  geode-shell \
+  identical_terms_get_distinct_identities
+
+# A deleted source must not read as "changed".
+run_mutation "scope dialog: a deleted source reads unsaved" \
+  crates/geode-shell/src/shell/scopedialog/rows.rs \
+  '        None => Provenance::Unsaved,' \
+  '        None => Provenance::Changed(loaded_from.unwrap_or_default().to_string()),' \
+  geode-shell \
+  provenance_reads_equal_changed_unsaved_or_nothing
+
+# The cursor follows its row by identity, not by index.
+run_mutation "scope dialog: the cursor keeps its row" \
+  crates/geode-shell/src/shell/scopedialog/rows.rs \
+  '            && let Some(i) = self.rows.iter().position(|r| &r.id == id)' \
+  '            && let Some(i) = self.rows.iter().position(|r| &r.id == id).filter(|_| false)' \
+  geode-shell \
+  the_cursor_keeps_its_row_by_identity_else_its_index_clamped
+
+# Inlining a broken reference must refuse, not drop it and widen the scope.
+run_mutation "scope dialog: inlining a missing name refuses" \
+  crates/geode-shell/src/frame.rs \
+  "            None => return Err(format!(\"named expression '{name}' is missing\"))," \
+  "            None => {
+                s.named.retain(|n| n != name);
+                return Ok(self.set_lane_scope(s));
+            }" \
+  geode-shell \
+  inlining_a_broken_reference_refuses_and_changes_nothing
+
+# Toggle removes an applied name rather than adding it twice.
+run_mutation "scope dialog: toggle removes an applied name" \
+  crates/geode-shell/src/frame.rs \
+  '        let applied = s.named.iter().any(|n| n == name);' \
+  '        let applied = false;' \
+  geode-shell \
+  toggling_a_name_adds_it_then_removes_it_each_one_undo_step
+
+# The applied tag is what tells enter's toggle which way it will go.
+run_mutation "scope dialog: saved expressions show applied" \
+  crates/geode-shell/src/shell/scopedialog/saved.rs \
+  '                applied: current.named.iter().any(|n| n == name),' \
+  '                applied: false,' \
+  geode-shell \
+  scopes_then_expressions_each_in_name_order_with_applied_and_broken
+
+# A one-shot door's step must close the dialog, not leave an empty modal.
+run_mutation "scope dialog: an emptied stack closes" \
+  crates/geode-shell/src/shell/scopedialog/state.rs \
+  '        if self.layers.is_empty() {' \
+  '        if false {' \
+  geode-shell \
+  a_one_shot_step_closes_on_commit_and_on_escape
+
+# A successful save makes the saved name the lane's source.
+run_mutation "scope dialog: a save records its name" \
+  crates/geode-shell/src/frame.rs \
+  '        self.set_loaded_from(Some(name.to_string()));
+        Ok(())' \
+  '        Ok(())' \
+  geode-shell \
+  loading_and_saving_a_scope_record_its_name_and_clearing_forgets_it
+
+# Clearing the lane forgets its source.
+run_mutation "scope dialog: clearing the lane forgets its source" \
+  crates/geode-shell/src/frame.rs \
+  '        if following.is_none() {
+            self.set_loaded_from(None);
+        }' \
+  '' \
+  geode-shell \
+  loading_and_saving_a_scope_record_its_name_and_clearing_forgets_it
+
+# A pinned lane starts from the shared lane's source.
+run_mutation "scope dialog: pinning copies the source" \
+  crates/geode-shell/src/frame.rs \
+  '            loaded_from: self.loaded_from.clone(),' \
+  '            loaded_from: None,' \
+  geode-shell \
+  pinning_copies_the_provenance_and_the_lanes_then_diverge
+
+# A load that changes only the source must still notify the frame's
+# observers, or the Grouping dialog's prepared rows go stale under it.
+run_mutation "scope dialog: a source-only load notifies" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            if f.generation() != before {' \
+  '            if false {' \
+  geode-shell \
+  loading_the_scope_in_force_notifies_the_frames_observers
+
+# Clearing an empty scope that still names a source must notify.
+run_mutation "scope dialog: a source-only clear notifies" \
+  crates/geode-shell/src/shell/input.rs \
+  '                if f.generation() != before {' \
+  '                if false {' \
+  geode-shell \
+  clearing_an_empty_scope_with_a_source_notifies_the_frames_observers
+
 # ---- Tile picker: placeholder double-click, tile::add and mod-n ----
 
 # Only a PLACEHOLDER's double-click is the door — a real tile's may
@@ -31163,8 +31324,8 @@ run_mutation "link: set_scope on a follower writes the group" \
 # lane's own fields and have no group route to take.
 run_mutation "link: loading a saved scope edits the lane through a follower's view" \
   crates/geode-shell/src/frame.rs \
-  '        Ok(self.set_lane_scope(scope))' \
-  '        Ok(self.set_scope(scope))' \
+  '        let changed = self.set_lane_scope(scope);' \
+  '        let changed = self.set_scope(scope);' \
   geode-shell the_scope_bars_other_verbs_edit_the_lane_through_a_followers_view
 
 run_mutation "link: dropping a dimension edits the lane through a follower's view" \

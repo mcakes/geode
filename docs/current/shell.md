@@ -502,6 +502,12 @@ toolbar's grouping readout reads `n · chain` for a slot, `* · chain` for an
 ad hoc chain, and `view default` otherwise; a click on it opens the
 Grouping dialog on the lane (see
 [configuration dialogs](configuration-dialogs.md#the-grouping-dialog)).
+A lane also remembers the saved scope its scope was last loaded from or saved
+as (`loaded_from`). Every load of a saved scope sets it, even when the scope
+was already current, and so does a successful save; clearing the scope forgets
+it; every other edit keeps it, and undo and redo leave it alone. Clearing a
+followed link group's scope leaves the lane's provenance alone. A pinned
+workspace's lane starts with a copy of the shared lane's.
 The frame holds one shared lane and one lane per pinned workspace. An
 unpinned workspace reads and writes the shared lane; a pinned one reads and
 writes only its own. Definitions
@@ -1219,7 +1225,7 @@ The writer emits `config_version = 1` and these records:
 | `workspaces.N` | Main tree, focused tile, optional fullscreen tile, and focused region |
 | `workspaces.N.docks.<side>` | Left, right, or bottom dock tree, focused tile, visibility, and size |
 | `workspaces.N.tiles.<id>` | Module name, its opaque state table, and the link groups the tile is in: `follow` and `emit`, each a group letter `"a"` to `"d"`, written only when set |
-| `frame` | Dimension selections, named-expression references, text/expression scope, grouping (`slot`, or `ad_hoc` with `grouping = "ad_hoc"` while the ad hoc chain is active), and as-of |
+| `frame` | Dimension selections, named-expression references, text/expression scope, grouping (`slot`, or `ad_hoc` with `grouping = "ad_hoc"` while the ad hoc chain is active), as-of, and `loaded_from`, the saved scope the lane's scope was last loaded from or saved as |
 | `workspaces.N.frame` | Pinned lane for workspace N (same fields as `frame`); present iff workspace N is pinned |
 | `links.<letter>` | One link group's scope, under `scope`, in the encoding `frame` uses for its own (dimension selections, text, expression, named-expression references); written only for a group whose scope is not empty, and an absent table reads as an empty scope |
 | `palette.usage` | Per-row usage count and last-used timestamp |
@@ -1232,6 +1238,11 @@ back to `slot` when one is present, else to each view's own grouping. A
 restored chain is checked against the groupable columns like a reloaded
 one. Each pinned workspace's record restores its own ad hoc chain, or none;
 a pin made at runtime copies the shared lane's.
+
+`loaded_from` is restored only when a saved scope of that name still exists;
+otherwise it is dropped with a `geode::session` trace. A value that is not a
+non-blank string warns and is ignored. A pinned workspace's record restores
+its own provenance, or none, never the shared lane's.
 
 Trees use recursive `leaf`, `split`, and `stack` nodes. Splits store orientation,
 children, and ratios; stacks store tile IDs and the active member index. All

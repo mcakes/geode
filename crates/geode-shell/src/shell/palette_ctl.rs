@@ -117,13 +117,10 @@ impl ShellView {
                 self.persist_theme(cx);
             }
             PaletteItem::Scope(name) => {
-                // Load the live saved scope, notifying only when the frame changed.
+                // The `scope::<name>` actions' own path, notifying whenever
+                // the frame changed (provenance included).
                 let name = name.clone();
-                self.target_frame().update(cx, |f, cx| {
-                    if let Ok(true) = f.load_scope(&name) {
-                        cx.notify();
-                    }
-                });
+                let _ = self.load_saved_scope(&name, cx);
             }
         }
     }

@@ -681,6 +681,7 @@ mod pin;
 mod reload;
 mod row_menu;
 mod scope_expr;
+mod scope_provenance;
 mod scopebar;
 mod scopepicker;
 mod session;
