@@ -20539,6 +20539,45 @@ run_mutation "chart: the palette skips the floor" \
   geode-chart \
   a_faint_chart_colour_is_floored_and_a_clear_one_kept
 
+# Neighbouring expiries must be far apart in hue; a five-step wheel puts
+# them 72 degrees apart and repeats every five.
+run_mutation "chart: hue palette neighbours are a golden angle apart" \
+  crates/geode-chart/src/core/palette.rs \
+  '        let turns = (index as f64 * GOLDEN_ANGLE as f64).rem_euclid(360.0) as f32;' \
+  '        let turns = (index as f64 * 72.0).rem_euclid(360.0) as f32;' \
+  geode-chart neighbours_are_a_golden_angle_apart_and_never_repeat
+
+run_mutation "chart: a hue palette companion differs from its color" \
+  crates/geode-chart/src/core/palette.rs \
+  '        to_hsla(self.readable(self.shifted(index, target)))' \
+  '        let _ = target;
+        self.color(index)' \
+  geode-chart neighbours_are_a_golden_angle_apart_and_never_repeat
+
+run_mutation "chart: a hue palette color is floored to readable" \
+  crates/geode-chart/src/core/palette.rs \
+  '        self.readable(to_srgb_in_gamut(Lch {
+            l: self.lightness,' \
+  '        (to_srgb_in_gamut(Lch {
+            l: self.lightness,' \
+  geode-chart faint_chart_colors_are_floored_to_readable
+
+run_mutation "chart: a hue palette floors its chroma" \
+  crates/geode-chart/src/core/palette.rs \
+  '            chroma: chromas[chromas.len() / 2].max(MIN_CHROMA),' \
+  '            chroma: chromas[chromas.len() / 2],' \
+  geode-chart a_grey_theme_still_gets_distinct_hues
+
+# The companion direction is the palette's: chosen per index, a light
+# theme's chart mixes paler and darker companions.
+run_mutation "chart: a hue palette's companions go one way" \
+  crates/geode-chart/src/core/palette.rs \
+  '        let target = if self.toward_background {' \
+  '        let target = if contrast_ratio(self.shifted(index, self.background), self.background)
+            >= READABLE_RATIO
+        {' \
+  geode-chart every_bundled_themes_hue_palette_is_readable_and_separated
+
 # The four cache entries. A path cache key that is missing a term does
 # not fail, it SERVES — last frame's path at this frame's coordinates —
 # so each of these is only visible through `rebuilds()`/`chrome_rebuilds()`.
@@ -33892,31 +33931,37 @@ run_mutation "volslice: a hidden kind asks no curve" \
 # Curve minus curve is at equal strike: the subtrahend at the minuend's.
 run_mutation "volslice: a curve difference evaluates at the minuend's strikes" \
   crates/geode-volslice/src/core/build.rs \
-  '                request: slice(expiry, Grid::Job(of), false),' \
-  '                request: slice(expiry, Grid::Dense { n: GRID_N, cover: None }, false),' \
+  '                    Some(of) => Grid::Job(of),' \
+  '                    Some(_) => Grid::Dense { n: GRID_N, cover: None },' \
   geode-volslice curve_minus_curve_evaluates_the_subtrahend_at_the_minuends_strikes
 
 # Each expiry's difference names its own expiry's minuend job; found by
 # kind alone it would take the first expiry's strikes.
 run_mutation "volslice: each expiry's difference names its own minuend" \
   crates/geode-volslice/src/core/build.rs \
-  '                dense_job[pair.minuend.index()],' \
-  '                roles.iter().position(|r| matches!(r, Role::Curve { kind, .. } if *kind == pair.minuend)),' \
+  '                (minuend, _) => match dense_job[minuend.index()] {' \
+  '                (minuend, _) => match roles.iter().position(|r| matches!(r, Role::Curve { kind, .. } if *kind == minuend)) {' \
   geode-volslice each_expirys_difference_names_its_own_minuend_and_a_hidden_subtrahend_still_gets_one
 
 # A hidden subtrahend still gets its difference job: hiding a kind to read
 # the difference is a use.
 run_mutation "volslice: a hidden subtrahend still gets its difference" \
   crates/geode-volslice/src/core/build.rs \
-  '                doc_of[pair.subtrahend.index()],' \
-  '                doc_of[pair.subtrahend.index()].filter(|_| state.visible(loaded, pair.subtrahend)),' \
+  '            let Some(document) = doc_of[kind.index()] else {
+                continue;
+            };
+            if asked' \
+  '            let Some(document) = doc_of[kind.index()].filter(|_| state.visible(loaded, kind)) else {
+                continue;
+            };
+            if asked' \
   geode-volslice each_expirys_difference_names_its_own_minuend_and_a_hidden_subtrahend_still_gets_one
 
 # Curve minus chain is at the chain's strikes, placed at the chain's x.
 run_mutation "volslice: a curve-chain difference evaluates at the chain strikes" \
   crates/geode-volslice/src/core/build.rs \
-  '                request: slice(expiry, Grid::At(c.strikes.clone()), false),' \
-  '                request: slice(expiry, Grid::Dense { n: GRID_N, cover: None }, false),' \
+  '                (Kind::Chain, Some(c)) => Grid::At(c.strikes.clone()),' \
+  '                (Kind::Chain, Some(_)) => Grid::Dense { n: GRID_N, cover: None },' \
   geode-volslice curve_minus_chain_evaluates_the_curve_at_the_chain_strikes
 
 # A chain expiry's curves reach its listed strikes, so a curve is drawn
@@ -33959,16 +34004,22 @@ run_mutation "volslice: a dense curve has enough points for a smooth density" \
 
 run_mutation "volslice: a chain-first difference is negated" \
   crates/geode-volslice/src/core/build.rs \
-  '                    let sign = if pair.minuend == kind { 1.0 } else { -1.0 };' \
-  '                    let sign = 1.0;' \
+  '                if pair.minuend == Kind::Chain {
+                    q - p.vol' \
+  '                if false {
+                    q - p.vol' \
   geode-volslice swapping_a_curve_chain_pair_negates_the_difference
 
 # Curve minus chain is the curve's vol less the mid: a sign inverted in
 # both orders still negates on a swap.
 run_mutation "volslice: curve minus chain is the curve less the mid" \
   crates/geode-volslice/src/core/build.rs \
-  '                    let sign = if pair.minuend == kind { 1.0 } else { -1.0 };' \
-  '                    let sign = if pair.minuend == kind { -1.0 } else { 1.0 };' \
+  '                } else {
+                    p.vol - q
+                }' \
+  '                } else {
+                    q - p.vol
+                }' \
   geode-volslice a_curve_minus_chain_difference_is_the_curve_vol_less_the_mid
 
 # An outcome shorter than its plan (a cancelled batch) builds nothing:
@@ -34031,8 +34082,8 @@ run_mutation "volslice: the draft curve is dashed" \
 # other expiries come and go from the active set.
 run_mutation "volslice: an expiry's color is its strip position's" \
   crates/geode-volslice/src/core/build.rs \
-  '            .map_or_else(|| palette.colour(0), |(pos, _)| palette.colour(*pos));' \
-  '            .map_or_else(|| palette.colour(0), |_| palette.colour(0));' \
+  '        .map(|&(pos, _)| (palette.color(pos), palette.companion(pos)))' \
+  '        .map(|_| (palette.color(0), palette.companion(0)))' \
   geode-volslice curves_and_chains_become_slots_by_kind_style_and_expiry_color
 
 run_mutation "volslice: the narrowest view is per coordinate" \
@@ -34043,8 +34094,8 @@ run_mutation "volslice: the narrowest view is per coordinate" \
 
 run_mutation "volslice: the session writes the difference" \
   crates/geode-volslice/src/core/session.rs \
-  '    if let Some(p) = state.diff {' \
-  '    if let Some(p) = state.diff.filter(|_| false) {' \
+  '    if !state.diffs.is_empty() {' \
+  '    if false {' \
   geode-volslice a_state_round_trips_through_its_table
 
 # The saved split is clamped to the chart's own bounds, so the saved and
@@ -34151,9 +34202,15 @@ run_mutation "volslice: a drag pans by the axis's sign" \
 # focused: the press that focuses a tile changes nothing else.
 run_mutation "volslice: a strip press is gated on focus" \
   crates/geode-volslice/src/tile/pointer.rs \
-  '        if !self.focused {' \
-  '        if false {' \
-  geode-volslice a_click_on_a_strip_row_solos_and_ctrl_click_toggles_when_focused
+  '        if !self.focused {
+            return;
+        }
+        let right' \
+  '        if false {
+            return;
+        }
+        let right' \
+  geode-volslice a_click_on_a_strip_row_solos_and_ctrl_or_shift_click_adds_when_focused
 
 run_mutation "volslice: a kind chip dispatches its own digit's action" \
   crates/geode-volslice/src/header.rs \
@@ -34170,9 +34227,197 @@ run_mutation "volslice: the draft chip names its mark" \
 # The diff chooser opens on the pair in force.
 run_mutation "volslice: the diff chooser opens on the pair in force" \
   crates/geode-volslice/src/tile/picker.rs \
-  '        list.place(current.as_deref());' \
-  '        let _ = current;' \
+  '        list.place(first.as_deref());' \
+  '        let _ = first;' \
+  geode-volslice the_done_state_in_one_frame
+
+# A difference with the chain carries the quote's bid and ask as its bar:
+# curve minus chain from curve - ask to curve - bid.
+run_mutation "volslice: a curve-chain difference has the quote's spread as whiskers" \
+  crates/geode-volslice/src/core/build.rs \
+  '        (at(&chain.ask), at(&chain.bid))' \
+  '        (mid.clone(), mid.clone())' \
+  geode-volslice a_curve_minus_chain_difference_is_the_curve_vol_less_the_mid
+
+run_mutation "volslice: a chain-curve difference has the quote's spread as whiskers" \
+  crates/geode-volslice/src/core/build.rs \
+  '        (at(&chain.bid), at(&chain.ask))' \
+  '        (mid.clone(), mid.clone())' \
+  geode-volslice a_curve_minus_chain_difference_sits_at_the_chain_x
+
+# The chain and the published curve share the expiry's hue and differ by
+# tint: painted in the full color, the two read as one trace.
+run_mutation "volslice: the chain paints in its expiry's companion" \
+  crates/geode-volslice/src/core/build.rs \
+  '                    format!("chain {expiry}"),
+                    companion,' \
+  '                    format!("chain {expiry}"),
+                    color,' \
+  geode-volslice curves_and_chains_become_slots_by_kind_style_and_expiry_color
+
+# Two pairs with the chain at one expiry share a mark; the draft's takes
+# the companion so the two are told apart.
+run_mutation "volslice: the draft's chain pair takes the companion" \
+  crates/geode-volslice/src/core/build.rs \
+  '    if pair.has_chain() && pair.curve() == Kind::Draft {' \
+  '    if false {' \
+  geode-volslice several_pairs_share_their_jobs_and_paint_in_turn_on_order
+
+run_mutation "volslice: a shared evaluation is asked once" \
+  crates/geode-volslice/src/core/build.rs \
+  '            if asked.contains(&(kind, at)) {' \
+  '            if false {' \
+  geode-volslice a_pair_and_its_reverse_share_one_evaluation
+
+# The not-loaded notice is per pair: said for the first pair only, a
+# second pair naming a missing kind paints nothing and says nothing.
+run_mutation "volslice: an unloaded kind is said for every pair" \
+  crates/geode-volslice/src/core/build.rs \
+  '    for pair in &plan.diffs {
+        if let Some(k)' \
+  '    for pair in plan.diffs.iter().take(1) {
+        if let Some(k)' \
+  geode-volslice a_pair_naming_an_unloaded_kind_says_so
+
+run_mutation "volslice: turning a pair on turns its reverse off" \
+  crates/geode-volslice/src/core/model.rs \
+  '        pairs.retain(|p| *p != pair.reverse());' \
+  '        let _ = pair.reverse();' \
+  geode-volslice toggling_a_pair_keeps_order_and_turns_its_reverse_off
+
+run_mutation "volslice: an older session's single diff restores" \
+  crates/geode-volslice/src/core/session.rs \
+  '        read(table, "diff", &mut notices, read_legacy_diff)' \
+  '        None::<Vec<Pair>>' \
+  geode-volslice an_older_sessions_single_diff_restores_as_one_pair
+
+run_mutation "volslice: a saved pair and its reverse are refused" \
+  crates/geode-volslice/src/core/session.rs \
+  '        if pairs.iter().any(|q| *q == p || *q == p.reverse()) {' \
+  '        if pairs.iter().any(|q| *q == p) {' \
+  geode-volslice bad_values_are_dropped_with_a_notice
+
+# alt and cmd are the shell's: one is its tile-drag mod.
+run_mutation "volslice: a modified strip press is the shell's" \
+  crates/geode-volslice/src/tile/pointer.rs \
+  '        if !right && (modifiers.alt || modifiers.platform) {' \
+  '        if false {' \
+  geode-volslice a_click_on_a_strip_row_solos_and_ctrl_or_shift_click_adds_when_focused
+
+run_mutation "volslice: a shift press adds the row" \
+  crates/geode-volslice/src/tile/pointer.rs \
+  '        let add = right || modifiers.control || modifiers.shift;' \
+  '        let add = right || modifiers.control;' \
+  geode-volslice a_click_on_a_strip_row_solos_and_ctrl_or_shift_click_adds_when_focused
+
+run_mutation "volslice: space solos the cursor's expiry" \
+  crates/geode-volslice/src/content.rs \
+  '"space" = "volslice::solo"' \
+  '"space" = "volslice::toggle_expiry"' \
+  geode-volslice space_solos_and_ctrl_or_shift_space_adds_or_removes
+
+run_mutation "volslice: shift+space adds the cursor's expiry" \
+  crates/geode-volslice/src/content.rs \
+  '"shift+space" = "volslice::toggle_expiry"' \
+  '"shift+space" = "volslice::solo"' \
+  geode-volslice space_solos_and_ctrl_or_shift_space_adds_or_removes
+
+run_mutation "volslice: ctrl+space adds the cursor's expiry" \
+  crates/geode-volslice/src/content.rs \
+  '"ctrl+space" = "volslice::toggle_expiry"' \
+  '"ctrl+space" = "volslice::solo"' \
+  geode-volslice space_solos_and_ctrl_or_shift_space_adds_or_removes
+
+run_mutation "volslice: space ticks in the chooser" \
+  crates/geode-volslice/src/content.rs \
+  '"space" = "volslice::tick"' \
+  '"space" = "volslice::cancel"' \
   geode-volslice d_chooses_a_pair_and_the_batch_carries_its_diff_jobs
+
+run_mutation "volslice: the chooser opens with the shown pairs ticked" \
+  crates/geode-volslice/src/tile/picker.rs \
+  '            ticked: self.state.diffs.clone(),' \
+  '            ticked: Vec::new(),' \
+  geode-volslice d_chooses_a_pair_and_the_batch_carries_its_diff_jobs
+
+run_mutation "volslice: an untouched empty chooser applies the highlight" \
+  crates/geode-volslice/src/tile/picker.rs \
+  '        if self.touched || !self.ticked.is_empty() {' \
+  '        if true {' \
+  geode-volslice d_chooses_a_pair_and_the_batch_carries_its_diff_jobs
+
+run_mutation "volslice: a touched chooser applies its ticks" \
+  crates/geode-volslice/src/tile/picker.rs \
+  '        if self.touched || !self.ticked.is_empty() {' \
+  '        if !self.ticked.is_empty() {' \
+  geode-volslice d_chooses_a_pair_and_the_batch_carries_its_diff_jobs
+
+run_mutation "volslice: a chooser row click ticks" \
+  crates/geode-volslice/src/tile/picker.rs \
+  '                if d.list.set_highlighted(row) {
+                    d.tick();' \
+  '                if d.list.set_highlighted(row) {
+                    let _ = 0;' \
+  geode-volslice a_chooser_row_click_ticks_and_apply_applies
+
+run_mutation "volslice: the strip dot is its expiry's color" \
+  crates/geode-volslice/src/strip.rs \
+  '            color: palette.color(i),' \
+  '            color: palette.color(0),' \
+  geode-volslice rows_carry_their_date_color_activity_and_kind_marks
+
+run_mutation "volslice: the diff chip names every pair" \
+  crates/geode-volslice/src/header.rs \
+  '    format!("diff: {}", labels.join(", "))' \
+  '    format!("diff: {}", labels[0])' \
+  geode-volslice the_header_names_each_loaded_kind_with_its_digit_and_the_mark
+
+run_mutation "volslice: :diff off clears" \
+  crates/geode-volslice/src/commands.rs \
+  '    if OFF.contains(&rest) {' \
+  '    if rest == "none" {' \
+  geode-volslice parse_reads_every_command_and_both_minus_spellings
+
+run_mutation "volslice: turning a pair off is never refused" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '                if !self.state.diffs.contains(&p) {' \
+  '                if true {' \
+  geode-volslice an_unloaded_pair_is_noticed_alone_and_can_be_turned_off
+
+# macOS delivers ctrl+click as a right press with control cleared: the
+# right press must add or remove, or ctrl+click does nothing there.
+run_mutation "volslice: a right press adds the row" \
+  crates/geode-volslice/src/tile/pointer.rs \
+  '        let add = right || modifiers.control || modifiers.shift;' \
+  '        let add = modifiers.control || modifiers.shift;' \
+  geode-volslice a_right_press_on_a_strip_row_adds_or_removes_it
+
+run_mutation "volslice: the strip row listens for a right press" \
+  crates/geode-volslice/src/strip.rs \
+  '        for button in [MouseButton::Left, MouseButton::Right] {' \
+  '        for button in [MouseButton::Left] {' \
+  geode-volslice a_right_press_on_a_strip_row_adds_or_removes_it
+
+run_mutation "volslice: ctrl+x clears the chooser's ticks" \
+  crates/geode-volslice/src/content.rs \
+  '"ctrl+x" = "volslice::clear_ticks"' \
+  '"ctrl+x" = "volslice::cancel"' \
+  geode-volslice d_chooses_a_pair_and_the_batch_carries_its_diff_jobs
+
+# The shell picker's ctrl+x: a touch even on an empty set, so enter shows
+# none rather than falling back to the highlight.
+run_mutation "volslice: a chooser clear counts as a touch" \
+  crates/geode-volslice/src/tile/picker.rs \
+  '        self.ticked.clear();
+        self.touched = true;' \
+  '        self.ticked.clear();' \
+  geode-volslice d_chooses_a_pair_and_the_batch_carries_its_diff_jobs
+
+run_mutation "volslice: the diff chip counts past two pairs" \
+  crates/geode-volslice/src/header.rs \
+  '    if pairs.len() > DIFF_CHIP_NAMED {' \
+  '    if false {' \
+  geode-volslice the_header_names_each_loaded_kind_with_its_digit_and_the_mark
 
 # The picker lists the two datasets' underlyings, nothing else's.
 run_mutation "volslice: the picker lists only the two datasets' underlyings" \
