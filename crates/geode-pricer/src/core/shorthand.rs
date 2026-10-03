@@ -526,6 +526,25 @@ pub fn render_package(def: &TemplateDef, legs: &[(i64, &Instrument)]) -> Option<
     ))
 }
 
+/// The template `legs` form, by [`render_package`]'s fit: `current` while
+/// they still fit its table, so a name sharing a table with an earlier one
+/// keeps itself; else the first table in `templates` they fit; else
+/// [`Template::CUSTOM`].
+pub fn identify(
+    templates: &TemplateSet,
+    current: Template,
+    legs: &[(i64, &Instrument)],
+) -> Template {
+    let fits = |def: &TemplateDef| render_package(def, legs).is_some();
+    if templates.resolve(current.token()).is_some_and(fits) {
+        return current;
+    }
+    templates
+        .iter()
+        .find(|def| fits(def))
+        .map_or(Template::CUSTOM, |def| Template::named(&def.name))
+}
+
 /// `parse` against the built-in tables, for tests. `TemplateSet::builtin`
 /// parses TOML, so each test thread builds it once.
 #[cfg(test)]

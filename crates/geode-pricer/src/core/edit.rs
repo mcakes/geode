@@ -53,12 +53,28 @@ pub enum Edit {
     Ungroup {
         row: usize,
     },
+    /// Name a package without reading its legs: undo's, restoring the
+    /// name a leg edit replaced.
+    SetTemplate {
+        row: usize,
+        template: Template,
+    },
     SetSheetShift(OwnShifts),
     /// `None` clears.
     SetSpotOverride {
         underlying: String,
         level: Option<f64>,
     },
+}
+
+/// The package an edit may reshape, so `apply` can rename it after.
+enum Reshaped {
+    None,
+    /// A leg changed, arrived, left or moved; the package by id, since
+    /// the edit may move its row.
+    Legs(LineId),
+    /// A fresh `Group`'s package, at its `first` row.
+    Grouped(usize),
 }
 
 /// The inverse of one `apply`, in the order to apply it.
@@ -122,7 +138,9 @@ impl Sheet {
             .iter()
             .map(|id| (*id, self.index_of(*id).and_then(|r| self.request(r))))
             .collect();
-        let undo = self.apply_inner(edit)?;
+        let reshaped = self.reshaped_by(&edit);
+        let mut undo = self.apply_inner(edit)?;
+        self.reidentify(reshaped, &mut undo);
         for (id, old) in before {
             if let Some(row) = self.index_of(id)
                 && self.request(row) != old
@@ -154,7 +172,61 @@ impl Sheet {
             | Edit::Move { .. }
             | Edit::Group { .. }
             | Edit::Ungroup { .. }
+            | Edit::SetTemplate { .. }
             | Edit::SetSpotOverride { .. } => Vec::new(),
+        }
+    }
+
+    /// The package whose leg set `edit` may reshape. Restore, root inserts
+    /// and `SetTemplate` reshape nothing: a loaded or typed package keeps
+    /// the name it carries.
+    fn reshaped_by(&self, edit: &Edit) -> Reshaped {
+        let parent_of = |row: usize| {
+            (row < self.len())
+                .then(|| self.parent(row))
+                .flatten()
+                .map_or(Reshaped::None, |p| Reshaped::Legs(self.id(p)))
+        };
+        match edit {
+            Edit::SetInstrument { row, .. } | Edit::SetQty { row, .. } | Edit::Move { row, .. } => {
+                parent_of(*row)
+            }
+            Edit::Remove { at } => parent_of(*at),
+            Edit::Insert {
+                place: Place::Leg { package, .. },
+                ..
+            } if *package < self.len() => Reshaped::Legs(self.id(*package)),
+            Edit::Group {
+                first, id: None, ..
+            } => Reshaped::Grouped(*first),
+            _ => Reshaped::None,
+        }
+    }
+
+    /// Rename a reshaped package to the template its legs now form. A leg
+    /// edit's undo restores the replaced name after its own inverse, which
+    /// re-identifies first: that keeps a name no table fits any more (a
+    /// reload redefined it) through an undo. A fresh group's undo is its
+    /// `Ungroup`, which needs no name.
+    fn reidentify(&mut self, reshaped: Reshaped, undo: &mut Undo) {
+        let (row, record) = match reshaped {
+            Reshaped::None => return,
+            Reshaped::Legs(id) => match self.index_of(id) {
+                Some(row) => (row, true),
+                None => return,
+            },
+            Reshaped::Grouped(row) => (row, false),
+        };
+        let (RowKind::Package { template: old }, Some(new)) =
+            (self.kind(row), self.identified_template(row))
+        else {
+            return;
+        };
+        if new != old {
+            self.set_template(row, new);
+            if record {
+                undo.inverse.push(Edit::SetTemplate { row, template: old });
+            }
         }
     }
 
@@ -213,6 +285,16 @@ impl Sheet {
                 id,
             } => self.group(first, count, template, id),
             Edit::Ungroup { row } => self.ungroup(row),
+            Edit::SetTemplate { row, template } => {
+                self.row_exists(row)?;
+                let RowKind::Package { template: old } = self.kind(row) else {
+                    return Err(EditError::NotAPackage(row));
+                };
+                self.set_template(row, template);
+                Ok(Undo {
+                    inverse: vec![Edit::SetTemplate { row, template: old }],
+                })
+            }
             Edit::SetSheetShift(shift) => {
                 let old = self.sheet_shift;
                 self.sheet_shift = shift;
@@ -939,7 +1021,15 @@ mod tests {
         assert_eq!(s.children(0), 1..5);
         assert_eq!(
             undo.inverse,
-            vec![Edit::Remove { at: 2 }, Edit::Remove { at: 2 }]
+            vec![
+                Edit::Remove { at: 2 },
+                Edit::Remove { at: 2 },
+                // Four legs fit no table: the name comes back after.
+                Edit::SetTemplate {
+                    row: 0,
+                    template: Template::CS
+                }
+            ]
         );
         for e in undo.inverse {
             s.apply(e).unwrap();
@@ -1209,7 +1299,8 @@ mod tests {
             },
             "the template survives the round trip"
         );
-        // An empty package ungroups to nothing, and undo restores it.
+        // An empty package ungroups to nothing, and undo restores it
+        // (CUSTOM since its legs left: no legs are no structure).
         s.apply(Edit::Remove { at: 2 }).unwrap();
         s.apply(Edit::Remove { at: 2 }).unwrap();
         let undo = s.apply(Edit::Ungroup { row: 1 }).unwrap();
@@ -1220,11 +1311,199 @@ mod tests {
         assert_eq!(
             s.kind(1),
             RowKind::Package {
-                template: Template::CS
+                template: Template::CUSTOM
             }
         );
         assert_eq!(s.children(1), 2..2, "still no legs");
         assert_eq!(redo.inverse, vec![Edit::Remove { at: 1 }]);
+    }
+
+    fn tag(s: &Sheet, row: usize) -> Template {
+        match s.kind(row) {
+            RowKind::Package { template } => template,
+            k => panic!("row {row} is {k:?}, not a package"),
+        }
+    }
+
+    fn sheet_of(text: &str) -> Sheet {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![crate::core::shorthand::parse_builtin(text).unwrap()],
+        );
+        s
+    }
+
+    /// The builtin tables with `extra` (config TOML) layered over them.
+    fn templates_with(extra: &str) -> std::sync::Arc<crate::core::template::TemplateSet> {
+        use crate::core::template::{BUILTIN_TEMPLATES, PRICER_TEMPLATES_DOC, TemplateSet};
+        use geode_core::config::{LayerDoc, merge_docs};
+        let builtin = LayerDoc::builtin(PRICER_TEMPLATES_DOC, BUILTIN_TEMPLATES).unwrap();
+        let user = LayerDoc::builtin(PRICER_TEMPLATES_DOC, extra).unwrap();
+        std::sync::Arc::new(
+            TemplateSet::from_doc(&merge_docs(PRICER_TEMPLATES_DOC, &[builtin, user])).0,
+        )
+    }
+
+    #[test]
+    fn a_leg_edit_renames_the_package_to_the_structure_its_legs_now_form() {
+        // RR: -1 4800 P, +1 5200 C. The put leg turned call: -1 4800 C,
+        // +1 5200 C is a short call spread.
+        let mut s = sheet_of("SPX Z26 4800/5200 RR");
+        assert_eq!(tag(&s, 0), Template::RR);
+        let undo = s
+            .apply(Edit::SetInstrument {
+                row: 1,
+                instrument: spx(4800.0, OptionKind::Call),
+            })
+            .unwrap();
+        assert_eq!(tag(&s, 0), Template::CS);
+        assert_eq!(s.shorthand(0), "-1 SPX Z26 4800/5200 CS");
+        let redo = s.undo(&undo).unwrap();
+        assert_eq!(tag(&s, 0), Template::RR, "undo restores the name");
+        s.undo(&redo).unwrap();
+        assert_eq!(tag(&s, 0), Template::CS, "redo renames again");
+    }
+
+    #[test]
+    fn legs_that_fit_no_table_make_the_package_custom() {
+        let mut s = sheet_of("SPX Z26 4800/5200 CS");
+        // A 1x2: no table's weights.
+        let undo = s.apply(Edit::SetQty { row: 2, qty: -2 }).unwrap();
+        assert_eq!(tag(&s, 0), Template::CUSTOM);
+        s.undo(&undo).unwrap();
+        assert_eq!(tag(&s, 0), Template::CS);
+        // A leg removed, then put back by undo.
+        let undo = s.apply(Edit::Remove { at: 2 }).unwrap();
+        assert_eq!(tag(&s, 0), Template::CUSTOM, "one leg is no structure");
+        s.undo(&undo).unwrap();
+        assert_eq!(tag(&s, 0), Template::CS);
+        // A third leg inserted.
+        s.apply(Edit::Insert {
+            place: Place::Leg { package: 0, leg: 2 },
+            rows: vec![line(spx(5600.0, OptionKind::Call), 1)],
+        })
+        .unwrap();
+        assert_eq!(tag(&s, 0), Template::CUSTOM);
+    }
+
+    #[test]
+    fn a_leg_edit_that_completes_a_structure_names_it_and_moving_legs_rereads() {
+        // A custom package whose put leg turns call becomes a call spread.
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![
+                line(spx(4800.0, OptionKind::Call), 1),
+                line(spx(5200.0, OptionKind::Put), -1),
+            ],
+        );
+        s.apply(Edit::Group {
+            first: 0,
+            count: 2,
+            template: Template::CUSTOM,
+            id: None,
+        })
+        .unwrap();
+        assert_eq!(tag(&s, 0), Template::CUSTOM);
+        s.apply(Edit::SetInstrument {
+            row: 2,
+            instrument: spx(5200.0, OptionKind::Call),
+        })
+        .unwrap();
+        assert_eq!(tag(&s, 0), Template::CS);
+        // Legs read in sheet order, as the shorthand prints them: a risk
+        // reversal with its call first fits no table.
+        let mut s = sheet_of("SPX Z26 4800/5200 RR");
+        s.apply(Edit::Move { row: 1, delta: 1 }).unwrap();
+        assert_eq!(tag(&s, 0), Template::CUSTOM);
+        s.apply(Edit::Move { row: 1, delta: 1 }).unwrap();
+        assert_eq!(tag(&s, 0), Template::RR);
+    }
+
+    #[test]
+    fn grouping_lines_that_form_a_structure_names_it() {
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![
+                line(spx(4800.0, OptionKind::Put), -1),
+                line(spx(5200.0, OptionKind::Call), 1),
+            ],
+        );
+        let undo = s
+            .apply(Edit::Group {
+                first: 0,
+                count: 2,
+                template: Template::CUSTOM,
+                id: None,
+            })
+            .unwrap();
+        assert_eq!(tag(&s, 0), Template::RR);
+        assert_eq!(undo.inverse, vec![Edit::Ungroup { row: 0 }]);
+        let redo = s.undo(&undo).unwrap();
+        assert_eq!(
+            redo.inverse,
+            vec![Edit::Group {
+                first: 0,
+                count: 2,
+                template: Template::RR,
+                id: Some(LineId(3))
+            }]
+        );
+    }
+
+    #[test]
+    fn a_name_the_legs_still_fit_is_kept_over_an_identical_earlier_table() {
+        // RISKREV repeats RR's table after it: a package typed RISKREV
+        // stays RISKREV through a strike change.
+        let set = templates_with(
+            "[RISKREV]\nlegs = [ { weight = -1, strike = 1, kind = \"P\" }, { weight = 1, strike = 2, kind = \"C\" } ]\n",
+        );
+        let mut s = Sheet::new("t");
+        s.set_templates(set.clone());
+        push(
+            &mut s,
+            vec![crate::core::shorthand::parse("SPX Z26 4800/5200 RISKREV", &set).unwrap()],
+        );
+        s.apply(Edit::SetInstrument {
+            row: 2,
+            instrument: spx(5300.0, OptionKind::Call),
+        })
+        .unwrap();
+        assert_eq!(tag(&s, 0), Template::named("RISKREV"));
+    }
+
+    #[test]
+    fn a_stale_name_survives_until_a_leg_edit_and_comes_back_on_undo() {
+        // A reload redefines RR as long both legs: the stored RR no longer
+        // fits it, and keeps its name until its legs change.
+        let mut s = sheet_of("SPX Z26 4800/5200 RR");
+        s.set_templates(templates_with(
+            "[RR]\nlegs = [ { weight = 1, strike = 1, kind = \"P\" }, { weight = 1, strike = 2, kind = \"C\" } ]\n",
+        ));
+        s.apply(Edit::SetShift {
+            row: 1,
+            shift: OwnShifts {
+                spot_pct: Some(1.0),
+                vol_pts: None,
+            },
+        })
+        .unwrap();
+        assert_eq!(tag(&s, 0), Template::RR, "a shift leaves the legs' shape");
+        let undo = s
+            .apply(Edit::SetInstrument {
+                row: 1,
+                instrument: spx(4800.0, OptionKind::Call),
+            })
+            .unwrap();
+        assert_eq!(tag(&s, 0), Template::CS);
+        let redo = s.undo(&undo).unwrap();
+        assert_eq!(tag(&s, 0), Template::RR, "undo restores the stored name");
+        let undo = s.undo(&redo).unwrap();
+        assert_eq!(tag(&s, 0), Template::CS);
+        s.undo(&undo).unwrap();
+        assert_eq!(tag(&s, 0), Template::RR);
     }
 
     /// Each edit and its inverse restore row contents; request changes still advance revisions.

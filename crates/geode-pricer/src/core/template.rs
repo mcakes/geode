@@ -1,7 +1,8 @@
 //! Configurable package templates define each leg's weight, strike and expiry index,
 //! and option kind. The `pricer_templates` document supplies the tables, with seven
 //! templates in its builtin layer. Packages retain their template names independently
-//! of the configured tables. Parsing expands the resolved table over typed values;
+//! of the configured tables until a leg edit renames them (`shorthand::identify`).
+//! Parsing expands the resolved table over typed values;
 //! shorthand rendering uses the name only while the legs still match its current
 //! table, otherwise printing each leg on a separate line.
 

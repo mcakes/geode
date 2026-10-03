@@ -761,23 +761,21 @@ mod tests {
         // it still prints as a CS, now long the higher strike).
         assert_eq!(apply(&mut s, 0, "strike", "7800/7400"), Ok(2));
         assert_eq!(s.shorthand(0), "-5 SPX Z26 7800/7400 CS");
-        // A change that breaks the table keeps the name and prints the legs.
+        // A change that leaves the CS table renames the package to the
+        // table the legs now fit.
         assert_eq!(
             apply(&mut s, 0, "option_type", "P/C"),
             Err("1 value: C".into()),
             "one type shown: one value or refused"
         );
         assert_eq!(apply(&mut s, 0, "option_type", "P"), Ok(2));
-        assert!(
-            s.shorthand(0).contains('\n'),
-            "puts no longer fit CS: legs one per line"
-        );
+        assert_eq!(s.shorthand(0), "-5 SPX Z26 7800/7400 PS");
         assert_eq!(
             s.kind(0),
             crate::core::sheet::RowKind::Package {
-                template: Template::CS
+                template: Template::PS
             },
-            "keeps its name"
+            "two puts are a put spread"
         );
     }
 

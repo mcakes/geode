@@ -1423,7 +1423,9 @@ package's last leg the line stops at its stub. The lines take the `border`
 token floored to 3:1 non-text contrast on the leg's own, hover and selected
 grounds. The leg's full shorthand paints in muted text; a bare line shows
 its full shorthand. Every row reserves the slot, so roots share one
-leading edge, and a leg's text starts where its package's chip starts. Every
+leading edge. A leg's connector sits one and a half depth steps right of its
+package's chevron, under the chip's leading glyph, and its text starts as far
+right of the chip, so the legs read as nested inside the package. Every
 leg of a package, the last included, sits on a faint tint that marks it as
 inside its package; bare lines and package rows keep the table's ground. The
 tint is the theme's stripe token (`table_even`) where it reads at least 1.04:1
@@ -1520,12 +1522,23 @@ first and then the templates in document order (`unknown type 'X': C P CS PS
 …`). A reload reaches every open tile: the entry bar parses against the new
 set at once.
 
+A package's template chip follows its legs. An edit that changes, adds,
+removes or moves a leg renames the package to the table its legs now fit —
+the current name while it still fits, otherwise the first fitting table in
+document order — or `CUSTOM` when none fits. A risk reversal whose put leg
+becomes a call is a (short) `CS`; a call spread given a third leg is
+`CUSTOM`; grouping two lines that form a risk reversal (`g p`) makes an `RR`.
+Legs are read in sheet order, as the shorthand prints them, so a risk
+reversal moved to call-first fits no table. Undo restores the previous name.
+A typed package keeps the type it was typed as.
+
 A stored package keeps its template's name whatever the configuration later
-says. When that template is removed, or redefined so the package's legs no
-longer fit its table, the package still loads with its name as its tag, and
-its shorthand (for `y y` and find) prints its legs one per line instead of
-the template form. Its legs, quantities, and prices are unchanged; only a
-package typed after the change uses the new table.
+says, until one of its legs is edited. When that template is removed, or
+redefined so the package's legs no longer fit its table, the package still
+loads with its name as its tag, and its shorthand (for `y y` and find)
+prints its legs one per line instead of the template form. Its legs,
+quantities, and prices are unchanged; only a package typed after the change
+uses the new table.
 
 Normal-mode keys:
 

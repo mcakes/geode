@@ -7965,8 +7965,9 @@ pub(crate) mod tests {
     /// a 1 px vertical line through its slot's centre, the full row height
     /// (top to mid-height on the package's last leg), and a stub at
     /// mid-height from the line to the slot's right edge; consecutive legs'
-    /// lines meet with no gap. The lines sit in the package chevron's lane
-    /// and the legs' text starts where the chip starts, with line numbers
+    /// lines meet with no gap. The lines sit `LEG_SHIFT` right of the
+    /// package's chevron and the legs' text as far right of the chip, while
+    /// a bare line's text starts where the chip starts, with line numbers
     /// off or on; every part centres on its row. That no row paints a
     /// ground is structural (`render_tr` paints none) and not asserted here.
     #[gpui::test]
@@ -8031,6 +8032,9 @@ pub(crate) mod tests {
             };
             let near = |a: gpui::Pixels, b: gpui::Pixels| (a - b).abs() < gpui::px(0.5);
             let chevron = bounds(vcx, "pricer-chevron-1");
+            let shift = gpui::px(vcx.update(|window, _| {
+                geode_shell::shell::scale::design_px(crate::delegate::LEG_SHIFT, window.rem_size())
+            }));
             let (top1, bottom1) = row(vcx, 1);
             let mid1 = (top1 + bottom1) / 2.0;
             let mut parts = vec![
@@ -8078,14 +8082,14 @@ pub(crate) mod tests {
                     "row {r}: the stub sits at mid-height ({lane}): {stub:?} vs {mid:?}"
                 );
                 assert!(
-                    near(stub.left(), line.left()) && near(stub.right(), chevron.right()),
+                    near(stub.left(), line.left()) && near(stub.right(), chevron.right() + shift),
                     "row {r}: the stub runs from the line to the slot's right edge \
                      ({lane}): {stub:?} {line:?} {chevron:?}"
                 );
                 assert!(
-                    (line.center().x - chevron.center().x).abs() < gpui::px(1.0),
-                    "row {r}: the line sits in the package chevron's lane ({lane}): \
-                     {line:?} vs {chevron:?}"
+                    (line.center().x - (chevron.center().x + shift)).abs() < gpui::px(1.0),
+                    "row {r}: the line sits LEG_SHIFT right of the package chevron \
+                     ({lane}): {line:?} vs {chevron:?}"
                 );
                 ends.push((line.top(), line.bottom()));
             }
@@ -8093,11 +8097,14 @@ pub(crate) mod tests {
                 near(ends[0].1, ends[1].0),
                 "leg 1's line meets leg 2's with no gap ({lane}): {ends:?}"
             );
-            for row in ["pricer-tree-text-2", "pricer-tree-text-0"] {
+            for (row, by) in [
+                ("pricer-tree-text-2", shift),
+                ("pricer-tree-text-0", gpui::px(0.)),
+            ] {
                 let t = bounds(vcx, row);
                 assert!(
-                    (t.left() - chip.left()).abs() < gpui::px(1.0),
-                    "{row} starts where the chip starts ({lane}): {t:?} vs {chip:?}"
+                    (t.left() - (chip.left() + by)).abs() < gpui::px(1.0),
+                    "{row} starts {by:?} right of the chip ({lane}): {t:?} vs {chip:?}"
                 );
             }
         };
@@ -11693,7 +11700,8 @@ pub(crate) mod tests {
             h.tree(&vcx),
             vec![
                 "SPX Z26 5000 C".to_string(),
-                "CS SPX Z26 5000/4800/5200".to_string(),
+                // A third leg leaves the CS table.
+                "CUSTOM SPX Z26 5000/4800/5200".to_string(),
                 "SPX Z26 5000 C".to_string(),
                 "-5 SPX Z26 4800 C".to_string(),
                 "5 SPX Z26 5200 C".to_string(),
@@ -11707,6 +11715,26 @@ pub(crate) mod tests {
             Some(2),
             "the cursor lands on the new leg, not wherever it fell back to"
         );
+    }
+
+    /// The package chip follows its legs: an RR whose put leg turns call
+    /// is a call spread, and undo brings the RR back.
+    #[gpui::test]
+    fn a_type_edit_on_a_leg_renames_the_package_chip(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4800/5200 RR"]);
+        h.dispatch(&mut vcx, "toggle", None);
+        h.motion(&mut vcx, "down", None); // the short put leg
+        h.motion(&mut vcx, "right", Some(4)); // type
+        h.dispatch(&mut vcx, "edit", None);
+        vcx.simulate_input("c");
+        h.draw(&mut vcx);
+        h.dispatch(&mut vcx, "commit", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.cell(&vcx, 1, "option_type"), "C");
+        assert_eq!(h.tags(&vcx)[0], "CS");
+        h.dispatch(&mut vcx, "undo", None);
+        h.draw(&mut vcx);
+        assert_eq!(h.tags(&vcx)[0], "RR");
     }
 
     /// Menu rows paint above the table and receive clicks without table occlusion.

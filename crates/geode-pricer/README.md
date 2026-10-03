@@ -233,6 +233,13 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   count, and its find key is its template form (a custom package's is its
   template token, underlyings and that summary). Loading accepts unresolved
   template names because stored instruments remain sufficient for repricing.
+- `Sheet::apply` renames a package whose leg set an edit reshapes
+  (`SetInstrument`/`SetQty`/`Move` on a leg, a leg `Insert` or `Remove`, a
+  fresh `Group`) to `shorthand::identify`: its current name while the legs
+  still fit that table, else the first fitting table, else `CUSTOM`. The
+  leg edit's inverse ends with `SetTemplate` restoring the replaced name, so
+  a stale name no table fits survives an undo. Root inserts, `Restore`
+  (undo and loading) and `SetTemplate` never rename.
 - `TemplateSet::from_doc_over` keeps the last valid definition per name.
   An entry dropped with an error keeps the previous set's definition of
   its name, in the entry's own position. A name absent from the document
@@ -448,8 +455,10 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   horizontal padding only) so the slot spans the row, and a leg that is not
   its package's last drops the row separator, so consecutive legs' lines
   join with no gap.
-- A leg's connector sits in its package's chevron lane and its text starts
-  where the package's chip starts, the edge a bare line's text shares. The
+- A leg's connector sits `delegate::LEG_SHIFT` (one and a half depth steps)
+  right of its package's chevron, under the chip's leading glyph, so the
+  legs read as nested; their text starts as far right of the chip. A bare
+  line's text starts where a package's chip starts. The
   tree cell lays out slot, chip, text and note with one `TREE_GAP` between
   each (`delegate::tree_gaps`); `fit_columns` and the `TREE_WIDTH` test
   measure the same parts. `TREE_WIDTH` fits `▾ CS Z26 4800/5200 · 2 legs` at
