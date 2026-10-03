@@ -6,9 +6,11 @@
 //!
 //! The chooser ticks as the shell's dimension picker does: it opens with
 //! the shown pairs ticked, `space` (or a row click) ticks or unticks the
-//! highlighted pair, and `enter` (or the Apply row) applies the ticks. An
-//! untouched, empty tick set applies the highlighted pair alone, so `d`,
-//! a step and `enter` still shows one pair. `escape` and a click outside
+//! highlighted pair, `ctrl+x` unticks every pair, and `enter` (or the
+//! Apply row) applies the ticks. An untouched, empty tick set applies the
+//! highlighted pair alone, so `d`, a step and `enter` still shows one pair;
+//! `ctrl+x` counts as a touch even on an empty set, so `ctrl+x enter`
+//! shows none. `escape` and a click outside
 //! discard the ticks. Ticking a pair unticks its reverse
 //! ([`toggle_pair`]).
 //!
@@ -63,8 +65,9 @@ pub(crate) struct DiffState {
     pub(crate) ticked: Vec<Pair>,
     /// Whether a tick changed since the chooser opened.
     pub(crate) touched: bool,
-    /// The Apply row's keys, parsed once at open: paint parses nothing.
-    pub(crate) keys: [Keystroke; 2],
+    /// The Apply row's keys (`space`, `ctrl+x`, `enter`), parsed once at
+    /// open: paint parses nothing.
+    pub(crate) keys: [Keystroke; 3],
 }
 
 impl DiffState {
@@ -78,6 +81,14 @@ impl DiffState {
             .highlighted_option()
             .map(|i| vec![self.pairs[i]])
             .unwrap_or_default()
+    }
+
+    /// Untick every pair, listed or not (the shell picker's `ctrl+x`). A
+    /// touch even when nothing was ticked: the trader said "none here", so
+    /// `enter` must not fall back to the highlight.
+    fn clear(&mut self) {
+        self.ticked.clear();
+        self.touched = true;
     }
 
     /// Tick or untick the highlighted pair. `false` with no row.
@@ -198,9 +209,17 @@ impl VolsliceTile {
             pairs,
             ticked: self.state.diffs.clone(),
             touched: false,
-            keys: [key("space"), key("enter")],
+            keys: [key("space"), key("ctrl+x"), key("enter")],
         }));
         cx.notify();
+    }
+
+    /// `ctrl+x` in the chooser: untick every pair.
+    pub(super) fn clear_popup_ticks(&mut self, cx: &mut Context<Self>) {
+        if let Some(Popup::Diff(d)) = &mut self.popup {
+            d.clear();
+            cx.notify();
+        }
     }
 
     /// `space` in the chooser: tick or untick the highlighted pair.
@@ -488,6 +507,8 @@ pub(crate) fn render_popup(
                             .child(kbd::chip(&d.keys[0]))
                             .child("tick")
                             .child(kbd::chip(&d.keys[1]))
+                            .child("clear")
+                            .child(kbd::chip(&d.keys[2]))
                             .child("apply"),
                     ),
                 ),

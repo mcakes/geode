@@ -351,8 +351,9 @@ measure already reads. Re-measure on an idle machine before quoting them.
   expiries with the published CVI, a draft and a 60-strike chain at each,
   densities on and two differences (`cvi draft − chain` and `cvi − cvi
   draft`), in moneyness, the batch answered once by the stand-in model
-  outside the timed loop. Each slot's color is resolved there through
-  `HuePalette` (an OKLCH conversion and a contrast bisection per call). Its target is under 1 ms. The delta coordinate
+  outside the timed loop. Each active expiry's color and companion are
+  resolved there once through `HuePalette` (an OKLCH conversion and a
+  contrast bisection each). Its target is under 1 ms. The delta coordinate
   (reversed, with NaN density gaps) is not benchmarked.
 - The pricer's `/` cells read the live sheet through the index `/` built. A
   price-only delivery (the refill-only path) drops them and has the table

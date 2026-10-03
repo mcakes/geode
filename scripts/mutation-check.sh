@@ -20324,8 +20324,9 @@ run_mutation "chart: hue palette neighbours are a golden angle apart" \
 
 run_mutation "chart: a hue palette companion differs from its color" \
   crates/geode-chart/src/core/palette.rs \
-  '        let pale = toward(self.background);' \
-  '        let pale = self.full(index);' \
+  '        to_hsla(self.readable(self.shifted(index, target)))' \
+  '        let _ = target;
+        self.color(index)' \
   geode-chart neighbours_are_a_golden_angle_apart_and_never_repeat
 
 run_mutation "chart: a hue palette color is floored to readable" \
@@ -20338,9 +20339,19 @@ run_mutation "chart: a hue palette color is floored to readable" \
 
 run_mutation "chart: a hue palette floors its chroma" \
   crates/geode-chart/src/core/palette.rs \
-  '            chroma: (lch.iter().map(|c| c.c).sum::<f32>() / n).max(MIN_CHROMA),' \
-  '            chroma: lch.iter().map(|c| c.c).sum::<f32>() / n,' \
+  '            chroma: chromas[chromas.len() / 2].max(MIN_CHROMA),' \
+  '            chroma: chromas[chromas.len() / 2],' \
   geode-chart a_grey_theme_still_gets_distinct_hues
+
+# The companion direction is the palette's: chosen per index, a light
+# theme's chart mixes paler and darker companions.
+run_mutation "chart: a hue palette's companions go one way" \
+  crates/geode-chart/src/core/palette.rs \
+  '        let target = if self.toward_background {' \
+  '        let target = if contrast_ratio(self.shifted(index, self.background), self.background)
+            >= READABLE_RATIO
+        {' \
+  geode-chart every_bundled_themes_hue_palette_is_readable_and_separated
 
 # The four cache entries. A path cache key that is missing a term does
 # not fail, it SERVES — last frame's path at this frame's coordinates —
@@ -33846,8 +33857,8 @@ run_mutation "volslice: the draft curve is dashed" \
 # other expiries come and go from the active set.
 run_mutation "volslice: an expiry's color is its strip position's" \
   crates/geode-volslice/src/core/build.rs \
-  '            .map_or(0, |(pos, _)| *pos);' \
-  '            .map_or(0, |_| 0);' \
+  '        .map(|&(pos, _)| (palette.color(pos), palette.companion(pos)))' \
+  '        .map(|_| (palette.color(0), palette.companion(0)))' \
   geode-volslice curves_and_chains_become_slots_by_kind_style_and_expiry_color
 
 run_mutation "volslice: the narrowest view is per coordinate" \
@@ -33966,8 +33977,14 @@ run_mutation "volslice: a drag pans by the axis's sign" \
 # focused: the press that focuses a tile changes nothing else.
 run_mutation "volslice: a strip press is gated on focus" \
   crates/geode-volslice/src/tile/pointer.rs \
-  '        if !self.focused || modifiers.alt || modifiers.platform {' \
-  '        if modifiers.alt || modifiers.platform {' \
+  '        if !self.focused {
+            return;
+        }
+        let right' \
+  '        if false {
+            return;
+        }
+        let right' \
   geode-volslice a_click_on_a_strip_row_solos_and_ctrl_or_shift_click_adds_when_focused
 
 run_mutation "volslice: a kind chip dispatches its own digit's action" \
@@ -34007,8 +34024,10 @@ run_mutation "volslice: a chain-curve difference has the quote's spread as whisk
 # tint: painted in the full color, the two read as one trace.
 run_mutation "volslice: the chain paints in its expiry's companion" \
   crates/geode-volslice/src/core/build.rs \
-  '                    palette.companion(pos),' \
-  '                    palette.color(pos),' \
+  '                    format!("chain {expiry}"),
+                    companion,' \
+  '                    format!("chain {expiry}"),
+                    color,' \
   geode-volslice curves_and_chains_become_slots_by_kind_style_and_expiry_color
 
 # Two pairs with the chain at one expiry share a mark; the draft's takes
@@ -34056,14 +34075,14 @@ run_mutation "volslice: a saved pair and its reverse are refused" \
 # alt and cmd are the shell's: one is its tile-drag mod.
 run_mutation "volslice: a modified strip press is the shell's" \
   crates/geode-volslice/src/tile/pointer.rs \
-  '        if !self.focused || modifiers.alt || modifiers.platform {' \
-  '        if !self.focused {' \
+  '        if !right && (modifiers.alt || modifiers.platform) {' \
+  '        if false {' \
   geode-volslice a_click_on_a_strip_row_solos_and_ctrl_or_shift_click_adds_when_focused
 
 run_mutation "volslice: a shift press adds the row" \
   crates/geode-volslice/src/tile/pointer.rs \
-  '        let add = modifiers.control || modifiers.shift;' \
-  '        let add = modifiers.control;' \
+  '        let add = right || modifiers.control || modifiers.shift;' \
+  '        let add = right || modifiers.control;' \
   geode-volslice a_click_on_a_strip_row_solos_and_ctrl_or_shift_click_adds_when_focused
 
 run_mutation "volslice: space solos the cursor's expiry" \
@@ -34139,6 +34158,41 @@ run_mutation "volslice: turning a pair off is never refused" \
   '                if !self.state.diffs.contains(&p) {' \
   '                if true {' \
   geode-volslice an_unloaded_pair_is_noticed_alone_and_can_be_turned_off
+
+# macOS delivers ctrl+click as a right press with control cleared: the
+# right press must add or remove, or ctrl+click does nothing there.
+run_mutation "volslice: a right press adds the row" \
+  crates/geode-volslice/src/tile/pointer.rs \
+  '        let add = right || modifiers.control || modifiers.shift;' \
+  '        let add = modifiers.control || modifiers.shift;' \
+  geode-volslice a_right_press_on_a_strip_row_adds_or_removes_it
+
+run_mutation "volslice: the strip row listens for a right press" \
+  crates/geode-volslice/src/strip.rs \
+  '        for button in [MouseButton::Left, MouseButton::Right] {' \
+  '        for button in [MouseButton::Left] {' \
+  geode-volslice a_right_press_on_a_strip_row_adds_or_removes_it
+
+run_mutation "volslice: ctrl+x clears the chooser's ticks" \
+  crates/geode-volslice/src/content.rs \
+  '"ctrl+x" = "volslice::clear_ticks"' \
+  '"ctrl+x" = "volslice::cancel"' \
+  geode-volslice d_chooses_a_pair_and_the_batch_carries_its_diff_jobs
+
+# The shell picker's ctrl+x: a touch even on an empty set, so enter shows
+# none rather than falling back to the highlight.
+run_mutation "volslice: a chooser clear counts as a touch" \
+  crates/geode-volslice/src/tile/picker.rs \
+  '        self.ticked.clear();
+        self.touched = true;' \
+  '        self.ticked.clear();' \
+  geode-volslice d_chooses_a_pair_and_the_batch_carries_its_diff_jobs
+
+run_mutation "volslice: the diff chip counts past two pairs" \
+  crates/geode-volslice/src/header.rs \
+  '    if pairs.len() > DIFF_CHIP_NAMED {' \
+  '    if false {' \
+  geode-volslice the_header_names_each_loaded_kind_with_its_digit_and_the_mark
 
 # The picker lists the two datasets' underlyings, nothing else's.
 run_mutation "volslice: the picker lists only the two datasets' underlyings" \

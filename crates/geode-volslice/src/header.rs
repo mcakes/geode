@@ -68,8 +68,9 @@ pub(crate) struct HeaderModel {
     pub underlying: SharedString,
     pub coordinate: SharedString,
     pub chips: Vec<KindChip>,
-    /// `diff: <minuend> \u{2212} <subtrahend>`, every shown pair in its
-    /// order and parted by commas, or `diff` with none shown.
+    /// `diff: <minuend> \u{2212} <subtrahend>`, one or two shown pairs in
+    /// their order and parted by commas; `diff \u{00b7} N pairs` past two,
+    /// so the chip stays short; `diff` with none shown.
     pub diff: SharedString,
     pub diff_set: bool,
 }
@@ -128,7 +129,13 @@ impl HeaderModel {
     }
 }
 
+/// The most pairs the diff chip names one by one.
+const DIFF_CHIP_NAMED: usize = 2;
+
 fn diff_text(pairs: &[Pair]) -> String {
+    if pairs.len() > DIFF_CHIP_NAMED {
+        return format!("diff \u{00b7} {} pairs", pairs.len());
+    }
     let labels: Vec<String> = pairs.iter().map(|p| p.label()).collect();
     format!("diff: {}", labels.join(", "))
 }
@@ -410,6 +417,15 @@ mod tests {
             h.diff.as_ref(),
             "diff: cvi draft \u{2212} cvi, cvi \u{2212} chain",
             "every shown pair, in order"
+        );
+        state
+            .diffs
+            .push(Pair::new(Kind::Draft, Kind::Chain).unwrap());
+        let h3 = HeaderModel::prepare(Some("SPX.Z"), &state, &fixture());
+        assert_eq!(
+            (h3.diff.as_ref(), h3.diff_set),
+            ("diff \u{00b7} 3 pairs", true),
+            "past two pairs, a count"
         );
         loaded.draft = None;
         let h = HeaderModel::prepare(None, &State::default(), &loaded);

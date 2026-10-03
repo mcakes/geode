@@ -70,11 +70,17 @@ pub const COMPANION_LIGHTNESS: f32 = 0.14;
 /// The share of its color's chroma a companion keeps.
 pub const COMPANION_CHROMA: f32 = 0.45;
 
+/// How many indices decide a [`HuePalette`]'s companion direction: the
+/// companions go toward the background only if every one of these can.
+pub const DIRECTION_SPAN: usize = 24;
+
 /// An unbounded sequence of series colors for series that sit side by side
 /// in position, such as expiries in date order: index `i` has the OKLCH hue
 /// of the theme's first chart color plus `i` golden angles, at the mean
-/// lightness and chroma of the theme's five chart colors (chroma at least
-/// [`MIN_CHROMA`], clipped to the display gamut per hue). Neighbouring
+/// lightness and the median chroma of the theme's five chart colors (the
+/// median, because a theme often carries one near-grey chart color that
+/// would drag a mean down; at least [`MIN_CHROMA`], clipped to the display
+/// gamut per hue). Neighbouring
 /// indices are therefore about 137.5° apart in hue and no two indices share
 /// one. Indices 8, 13 and 21 apart (Fibonacci numbers) come closest, about
 /// 20°, 12° and 8° apart.
@@ -85,10 +91,12 @@ pub const COMPANION_CHROMA: f32 = 0.45;
 /// returned without a contrast guarantee.
 ///
 /// [`HuePalette::companion`] is the same hue at [`COMPANION_CHROMA`] of the
-/// chroma and [`COMPANION_LIGHTNESS`] away in lightness: toward the
-/// background (paler) when that still meets the ratio, toward the
-/// foreground otherwise, and then through [`readable_on`] too. It reads as
-/// the same series, plainly told apart from its color.
+/// chroma and [`COMPANION_LIGHTNESS`] away in lightness, a lighter-weight
+/// shade of the series. The direction is the palette's, not the index's:
+/// toward the background when every one of the first [`DIRECTION_SPAN`]
+/// indices still meets the ratio that way, toward the foreground for every
+/// index otherwise, so one chart never mixes paler and darker companions.
+/// It then passes through [`readable_on`] too.
 ///
 /// Each call converts and bisects; callers prepare colors when the theme
 /// or the indices change, never per frame.
@@ -100,19 +108,29 @@ pub struct HuePalette {
     chroma: f32,
     background: Rgb,
     foreground: Rgb,
+    /// Whether companions move toward the background (decided once).
+    toward_background: bool,
 }
 
 impl HuePalette {
     pub fn from_theme(chart: [Hsla; 5], background: Hsla, foreground: Hsla) -> Self {
         let lch = chart.map(|c| lab_to_lch(srgb_to_oklab(to_rgb(c))));
         let n = lch.len() as f32;
-        Self {
+        let mut chromas = lch.map(|c| c.c);
+        chromas.sort_by(f32::total_cmp);
+        let mut palette = Self {
             base_hue: lch[0].h,
             lightness: lch.iter().map(|c| c.l).sum::<f32>() / n,
-            chroma: (lch.iter().map(|c| c.c).sum::<f32>() / n).max(MIN_CHROMA),
+            chroma: chromas[chromas.len() / 2].max(MIN_CHROMA),
             background: to_rgb(background),
             foreground: to_rgb(foreground),
-        }
+            toward_background: false,
+        };
+        palette.toward_background = (0..DIRECTION_SPAN).all(|i| {
+            let pale = palette.shifted(i, palette.background);
+            contrast_ratio(pale, palette.background) >= READABLE_RATIO
+        });
+        palette
     }
 
     /// The hue of `index`, in radians.
@@ -139,25 +157,28 @@ impl HuePalette {
         to_hsla(self.full(index))
     }
 
-    /// The paler companion of [`HuePalette::color`] for the same index.
-    pub fn companion(&self, index: usize) -> Hsla {
+    /// `index`'s color moved a companion step toward `target`'s lightness,
+    /// its chroma cut to the companion's share.
+    fn shifted(&self, index: usize, target: Rgb) -> Rgb {
         let full = lab_to_lch(srgb_to_oklab(self.full(index)));
-        let toward = |target: Rgb| {
-            let target_l = lab_to_lch(srgb_to_oklab(target)).l;
-            let step = COMPANION_LIGHTNESS.copysign(target_l - full.l);
-            to_srgb_in_gamut(Lch {
-                l: (full.l + step).clamp(0.0, 1.0),
-                c: full.c * COMPANION_CHROMA,
-                h: full.h,
-            })
-        };
-        let pale = toward(self.background);
-        let rgb = if contrast_ratio(pale, self.background) >= READABLE_RATIO {
-            pale
+        let target_l = lab_to_lch(srgb_to_oklab(target)).l;
+        let step = COMPANION_LIGHTNESS.copysign(target_l - full.l);
+        to_srgb_in_gamut(Lch {
+            l: (full.l + step).clamp(0.0, 1.0),
+            c: full.c * COMPANION_CHROMA,
+            h: full.h,
+        })
+    }
+
+    /// The companion of [`HuePalette::color`] for the same index: a
+    /// lighter-weight shade of it, moved the palette's one way.
+    pub fn companion(&self, index: usize) -> Hsla {
+        let target = if self.toward_background {
+            self.background
         } else {
-            self.readable(toward(self.foreground))
+            self.foreground
         };
-        to_hsla(rgb)
+        to_hsla(self.readable(self.shifted(index, target)))
     }
 }
 
@@ -294,6 +315,14 @@ mod tests {
                 failures.push(format!("{name}: {i}'s companion only {d:.3} from it"));
             }
         }
+        // One direction for the whole palette: a chart never mixes paler
+        // and darker companions.
+        let lighter: Vec<bool> = (0..SHOWN)
+            .map(|i| relative(p.companion(i)) > relative(p.color(i)))
+            .collect();
+        if lighter.iter().any(|l| *l != lighter[0]) {
+            failures.push(format!("{name}: companions go both ways: {lighter:?}"));
+        }
         failures
     }
 
@@ -323,6 +352,26 @@ mod tests {
             relative(on_dark.companion(0)) > relative(on_dark.color(0)),
             "on a dark ground the companion is lighter"
         );
+    }
+
+    /// One near-grey chart color must not drag the series' chroma down:
+    /// the chroma is the median of the five, not the mean.
+    #[test]
+    fn the_chroma_is_the_chart_colors_median() {
+        let c = |x: u32| -> Hsla { rgb(x).into() };
+        let chart = [
+            c(0x2563eb),
+            c(0x16a34a),
+            c(0xdc2626),
+            c(0x9333ea),
+            c(0x777777),
+        ];
+        let lch = chart.map(|h| lab_to_lch(srgb_to_oklab(to_rgb(h))).c);
+        let mut sorted = lch;
+        sorted.sort_by(f32::total_cmp);
+        let p = HuePalette::from_theme(chart, hsla(0.0, 0.0, 1.0, 1.0), hsla(0.0, 0.0, 0.0, 1.0));
+        assert_eq!(p.chroma, sorted[2]);
+        assert!(p.chroma > lch.iter().sum::<f32>() / 5.0, "above the mean");
     }
 
     /// Grey chart colors still give hues that read apart: chroma is floored.

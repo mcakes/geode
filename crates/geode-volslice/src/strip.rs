@@ -120,16 +120,21 @@ pub(crate) fn render_strip(
                     .children(mark),
             );
         }
-        // A press on the row: solo, or add/remove with ctrl or shift. The
-        // shell's own tile handler runs after this one and focuses the
-        // tile; the tile acts only when it was already focused, so the
-        // press that focuses it does nothing else.
-        el = el.on_mouse_down(MouseButton::Left, {
-            let tile = tile.clone();
-            move |event: &MouseDownEvent, _window, cx| {
-                tile.update(cx, |t, cx| t.strip_pressed(expiry, event.modifiers, cx));
-            }
-        });
+        // A press on the row: a left press solos, or adds/removes with ctrl
+        // or shift; a right press adds/removes (macOS delivers ctrl+click
+        // as a right press with control cleared). The shell's own tile
+        // handlers focus the tile; the tile acts only when it was already
+        // focused, so the press that focuses it does nothing else.
+        for button in [MouseButton::Left, MouseButton::Right] {
+            el = el.on_mouse_down(button, {
+                let tile = tile.clone();
+                move |event: &MouseDownEvent, _window, cx| {
+                    tile.update(cx, |t, cx| {
+                        t.strip_pressed(expiry, event.button, event.modifiers, cx)
+                    });
+                }
+            });
+        }
         column = column.child(el);
     }
     column

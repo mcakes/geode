@@ -212,25 +212,34 @@ impl VolsliceTile {
         }
     }
 
-    /// A left press on a strip row. A press that only focuses the tile does
+    /// A press on a strip row. A press that only focuses the tile does
     /// nothing else: the row would otherwise change under a click meant to
-    /// pick the tile. Focused, a plain press solos the row (`space`) and a
-    /// ctrl or shift press adds or removes it (`ctrl+space`,
-    /// `shift+space`). Control on every platform, macOS included, where cmd
-    /// is not control. A press holding alt or cmd is the shell's: one of
-    /// them is its `mod`, which drags the tile and with a double click
-    /// toggles fullscreen, so the row leaves such a press alone. The cursor
-    /// moves to the row either way, so the keyboard carries on from it.
+    /// pick the tile. Focused, a plain left press solos the row (`space`);
+    /// a ctrl or shift left press, or a right press, adds or removes it
+    /// (`ctrl+space`, `shift+space`). The right press is how ctrl+click
+    /// arrives on macOS: the platform layer turns a ctrl+left press into a
+    /// right press with control cleared. The tile answers no
+    /// `press_context`, so the shell's right-press route only focuses the
+    /// tile and opens no menu over the row. A left press holding alt or cmd
+    /// is the shell's: one of them is its `mod`, which drags the tile and
+    /// with a double click toggles fullscreen, so the row leaves such a
+    /// press alone. The cursor moves to the row either way, so the keyboard
+    /// carries on from it.
     pub(crate) fn strip_pressed(
         &mut self,
         expiry: NaiveDate,
+        button: MouseButton,
         modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
-        if !self.focused || modifiers.alt || modifiers.platform {
+        if !self.focused {
             return;
         }
-        let add = modifiers.control || modifiers.shift;
+        let right = button == MouseButton::Right;
+        if !right && (modifiers.alt || modifiers.platform) {
+            return;
+        }
+        let add = right || modifiers.control || modifiers.shift;
         let Some(row) = self.strip.iter().position(|r| r.expiry == expiry) else {
             return;
         };

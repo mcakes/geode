@@ -65,8 +65,11 @@ Each expiry takes the `HuePalette` color of its strip position: the theme's
 first chart color's hue plus one golden angle (about 137.5°) per position,
 so neighbouring expiries are far apart in hue and no hue repeats. The
 published curve and the draft paint in that color (the draft dashed); the
-chain paints in the position's companion, the same hue paler (or, where
-the theme leaves no contrast room, shifted the other way and desaturated).
+chain paints in the position's companion, a lighter-weight shade of the
+same hue, moved the same way for every expiry of a theme (paler where all
+the first 24 can stay readable that way, otherwise toward the foreground).
+`core::build::model` resolves each active expiry's color and companion
+once per build.
 `shift+d`
 adds each visible curve's density on the right axis at `DENSITY_ALPHA` of
 the expiry color, shaded down to zero (a filled xy line, so a negative lobe
@@ -124,12 +127,15 @@ data returns.
 In the picker, `enter` commits, `escape` cancels, `up`/`down` step and every
 other bare key types; `tab` completes. In the chooser the shared `j`/`k` or
 arrows step, `space` ticks or unticks the highlighted pair (unticking its
-reverse), `enter` applies the ticks and `escape` discards them; it opens
+reverse), `ctrl+x` unticks every pair (a touch, so `ctrl+x enter` shows
+none), `enter` applies the ticks and `escape` discards them; it opens
 with the shown pairs ticked, and an untouched, empty tick set applies the
 highlighted pair alone, as the shell's dimension picker does. A row click
 is `space` and the Apply row `enter`. A strip click solos its row and a
-ctrl+click or shift+click adds or removes it, on a focused tile (a press
-holding alt or cmd is the shell's); a kind chip click is its digit and the
+ctrl+click, shift+click or right press adds or removes it, on a focused
+tile (macOS delivers ctrl+click as a right press with control cleared; the
+tile answers no `press_context`, so the shell's right-press route only
+focuses; a left press holding alt or cmd is the shell's); a kind chip click is its digit and the
 diff chip `d`; the wheel zooms about the pointer or pans, a plot drag pans
 and a divider drag sets the split.
 
@@ -273,7 +279,8 @@ with another notice behind it:
   child of the shell's.
 - Every pointer action has its key: a strip press is `space` (ctrl or
   shift: `ctrl+space`/`shift+space`), a kind chip its digit, the diff chip
-  `d`, a chooser row `space` and its Apply row `enter`, the wheel `=`/`-`
+  `d`, a chooser row `space` and its Apply row `enter`, a strip right press
+  `ctrl+space`, the wheel `=`/`-`
   and `h`/`l`, a drag `h`/`l`, the divider `[`/`]`. A strip press acts only on a tile the
   shell had already told it is focused (`TileContent::set_focused`), so the
   press that focuses a tile changes nothing else.

@@ -1154,10 +1154,13 @@ the followed group's board draft for the underlying, read now whatever the
 as-of; and `chain` (`3`), the option chain's mid vols as points with the
 bid-ask range as a bar. A one-sided quote (an absent side is NaN) paints as
 a half bar. The published curve is solid and the draft dashed, both in the
-expiry's color; the chain takes the expiry's companion, the same hue paler
-(or, where the theme leaves no contrast room for paler, shifted the other
-way and desaturated), so the published curve and the quotes are told apart
-at a glance. A chip per
+expiry's color; the chain takes the expiry's companion, a lighter-weight
+shade of the same hue (less chroma, a step of lightness away), so the
+published curve and the quotes are told apart at a glance. The step goes
+toward the background (paler) on a theme where every one of the first 24
+expiries can keep its contrast that way, and toward the foreground for
+every expiry otherwise (darker on most light themes, lighter on dark
+ones): one chart never mixes the two. A chip per
 loaded kind sits in the header; a hidden kind's chip is muted and its own
 jobs leave the batch. Source identity is absent from the chain's rows, so
 there is one chain kind however many sources publish chains.
@@ -1168,18 +1171,22 @@ have it and a dot in its color, filled when the expiry is active.
 `j`/`k` move the cursor; `space` (or `enter`) solos the cursor's row, and
 `ctrl+space` or `shift+space` adds it to the shown set or takes it out; the
 last active expiry cannot be taken out, and the refused key asks nothing.
-On a focused tile a click solos a row and a ctrl+click or shift+click adds
-or removes it; a press holding alt or cmd is left to the shell (its `mod`
-drags tiles), and the click that merely focuses the tile changes nothing
-else (`TileContent::set_focused`). The first strip, and a restored set
+On a focused tile a click solos a row and a ctrl+click, shift+click or
+right-click adds or removes it. On macOS the platform delivers ctrl+click as
+a right press with control cleared, so the right press is what makes
+ctrl+click work there; the tile offers no row menu, so the shell's
+right-press route only focuses. A left press holding alt or cmd is left to
+the shell (its `mod` drags tiles), and the click that merely focuses the
+tile changes nothing else (`TileContent::set_focused`). The first strip, and a restored set
 naming no listed expiry, front the first row.
 
 **Expiry colors.** An expiry's color comes from its strip position, so it
 keeps its color as others are toggled. Neighbouring expiries, the ones that
 look most alike as curves, are made to look least alike in color: position
 `p` takes the OKLCH hue of the theme's first chart color plus `p` golden
-angles (about 137.5°), at the mean lightness and chroma of the theme's five
-chart colors (chroma floored at 0.10), each passed through the readable
+angles (about 137.5°), at the mean lightness and the median chroma of the
+theme's five chart colors (chroma floored at 0.10), each passed through the
+readable
 floor against the background (`geode_chart::core::palette::HuePalette`).
 Adjacent expiries are about 137.5° apart and no hue repeats; positions 8, 13
 and 21 apart come closest (about 20°, 12° and 8°).
@@ -1215,9 +1222,11 @@ in a lower pane under the vol pane, its split stepped with
 one on turns the other off. `d` opens a ticked chooser of every ordered
 pair, following the shell's dimension picker: it opens with the shown pairs
 ticked, `space` or a row click ticks or unticks the highlighted pair,
-`enter` or the Apply row applies the ticks, and `escape` or a click outside
-discards them. An untouched, empty tick set applies the highlighted pair
-alone. `:diff <kind> - <kind>` toggles one pair and `:diff off` turns every
+`ctrl+x` unticks every pair, `enter` or the Apply row applies the ticks,
+and `escape` or a click outside discards them. An untouched, empty tick set
+applies the highlighted pair alone; `ctrl+x` counts as a touch, so
+`ctrl+x enter` shows none. The header chip names one or two pairs and reads
+`diff · N pairs` past two. `:diff <kind> - <kind>` toggles one pair and `:diff off` turns every
 pair off (`none` is read as `off`). Pairs paint, and list in the legend and
 tooltip, expiry by expiry in the order they were turned on, each labelled
 `<pair> <expiry>`.

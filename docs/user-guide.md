@@ -324,13 +324,14 @@ using it on live market data.
 Add a **Volslice** tile and choose SPX in the underlying picker that opens.
 Press `u` to reopen that picker later. The viewer shows the
 published CVI curves and option-chain marks for the selected expiries, each
-expiry in its own color and the chain in a paler shade of it. Use `j`/`k` to
+expiry in its own color and the chain in a lighter-weight shade of it. Use `j`/`k` to
 move through expiries and Space to show only that one; `shift+space` (or
 `ctrl+space`) adds it to the expiries shown or takes it out. With the mouse,
-click an expiry to show only it, and shift-click or ctrl-click to add it.
+click an expiry to show only it, and shift-click, ctrl-click or right-click
+to add it.
 The `1`, `2`, and `3` keys toggle published CVI, a linked CVI draft, and the
 chain. `d` chooses differences to plot below them: Space ticks each one you
-want, Enter shows them. A difference against the chain carries the quote's
+want, `ctrl+x` clears the ticks, Enter shows them. A difference against the chain carries the quote's
 bid-ask spread as a bar.
 
 To compare an edit before uploading it, focus the SPX CVI panel, press

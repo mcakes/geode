@@ -101,6 +101,27 @@ fn click(vcx: &mut gpui::VisualTestContext, selector: &str, modifiers: Modifiers
     vcx.run_until_parked();
 }
 
+/// A right press and release on a painted element: what a ctrl+click is
+/// on macOS, where the platform turns it into a right press with control
+/// cleared.
+fn right_click(vcx: &mut gpui::VisualTestContext, selector: &str) {
+    let at = bounds(vcx, selector).center();
+    vcx.simulate_event(gpui::MouseDownEvent {
+        position: at,
+        modifiers: Modifiers::default(),
+        button: MouseButton::Right,
+        click_count: 1,
+        first_mouse: false,
+    });
+    vcx.simulate_event(gpui::MouseUpEvent {
+        position: at,
+        modifiers: Modifiers::default(),
+        button: MouseButton::Right,
+        click_count: 1,
+    });
+    vcx.run_until_parked();
+}
+
 fn wheel(vcx: &mut gpui::VisualTestContext, at: Point<Pixels>, dx: f32, dy: f32) {
     vcx.simulate_event(gpui::ScrollWheelEvent {
         position: at,
@@ -171,6 +192,32 @@ fn a_click_on_a_strip_row_solos_and_ctrl_or_shift_click_adds_when_focused(
     // A plain press on an active row in a set of two solos it.
     click(&mut vcx, &row("2026-11-20"), Modifiers::default());
     assert_eq!(h.active(&vcx), ["2026-11-20"]);
+}
+
+/// A right press on a strip row adds or removes it, as ctrl+click does
+/// elsewhere: on macOS that is what a ctrl+click arrives as. Unfocused it
+/// only focuses, like a left press.
+#[gpui::test]
+fn a_right_press_on_a_strip_row_adds_or_removes_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = loaded(cx);
+    right_click(&mut vcx, &row("2026-12-18"));
+    assert_eq!(h.active(&vcx), ["2026-10-16"], "unfocused: it only focuses");
+    assert!(h.requests().is_empty());
+    h.focus(&mut vcx);
+    right_click(&mut vcx, &row("2026-12-18"));
+    assert_eq!(h.active(&vcx), ["2026-10-16", "2026-12-18"]);
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.state().cursor), 2);
+    h.answer_last(&mut vcx).expect("an add resubmits");
+    right_click(&mut vcx, &row("2026-10-16"));
+    assert_eq!(
+        h.active(&vcx),
+        ["2026-12-18"],
+        "and takes an active row out"
+    );
+    h.answer_last(&mut vcx).expect("a removal resubmits");
+    right_click(&mut vcx, &row("2026-12-18"));
+    assert_eq!(h.active(&vcx), ["2026-12-18"], "the last active row stays");
+    assert!(h.requests().is_empty());
 }
 
 #[gpui::test]

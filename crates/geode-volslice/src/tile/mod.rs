@@ -461,7 +461,10 @@ impl VolsliceTile {
         };
         #[cfg(test)]
         self.dispatch_log.push(action.clone());
-        if !matches!(verb, "commit" | "cancel" | "list_down" | "list_up" | "tick") {
+        if !matches!(
+            verb,
+            "commit" | "cancel" | "list_down" | "list_up" | "tick" | "clear_ticks"
+        ) {
             self.close_popup(window, cx);
         }
         match verb {
@@ -506,6 +509,7 @@ impl VolsliceTile {
             "split_grow" => self.step_split(SPLIT_STEP, cx),
             "commit" => self.commit_popup(window, cx),
             "tick" => self.tick_popup(cx),
+            "clear_ticks" => self.clear_popup_ticks(cx),
             "cancel" => self.close_popup(window, cx),
             "list_down" => {
                 self.step_popup(1, cx);

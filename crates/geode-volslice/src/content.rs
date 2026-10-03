@@ -49,8 +49,9 @@ pub const ACTIONS: &[(&str, &str)] = &[
     // them and the palette lists them.
     ("volslice::commit", "Commit"),
     ("volslice::cancel", "Cancel"),
-    // The diff chooser's tick: `space` while it is up.
+    // The diff chooser's tick and clear: `space` and `ctrl+x` while it is up.
     ("volslice::tick", "Tick/untick this difference"),
+    ("volslice::clear_ticks", "Untick every difference"),
     // The underlying picker's row steps. Its field types every bare key,
     // so the shared `j`/`k` list steps cannot reach it; the arrows can.
     ("volslice::list_down", "Next row"),
@@ -127,6 +128,7 @@ context = "volslice && mode == insert"
 context = "volslice && mode == menu"
 [bindings.keys]
 "space" = "volslice::tick"
+"ctrl+x" = "volslice::clear_ticks"
 "enter" = "volslice::commit"
 "escape" = "volslice::cancel"
 "#;
@@ -329,7 +331,7 @@ mod tests {
                 bound += 1;
             }
         }
-        assert_eq!(bound, 35);
+        assert_eq!(bound, 36);
         // And the registry the app builds accepts every binding.
         let (data, _rx) = DataHandle::for_tests();
         let mut registry = ActionRegistry::default();

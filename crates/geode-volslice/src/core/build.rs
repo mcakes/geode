@@ -330,16 +330,21 @@ fn failure(role: &Role, e: &str) -> String {
     }
 }
 
-/// The color a difference paints in at the expiry whose palette index is
-/// `pos`: the expiry's color, except that a pair of the draft with the
-/// chain takes the expiry's companion. Pairs at one expiry are told apart
-/// by their mark first (two curves are a line, anything with the chain
-/// points with bars) and, of the two pairs with the chain, by this color.
-pub fn diff_color(pair: Pair, palette: &HuePalette, pos: usize) -> Hsla {
+/// An expiry's color and its companion ([`HuePalette`]), resolved once
+/// per model build.
+pub type Shades = (Hsla, Hsla);
+
+/// The color a difference paints in at an expiry with `shades`: the
+/// expiry's color, except that a pair of the draft with the chain takes
+/// the companion. Pairs at one expiry are told apart by their mark first
+/// (two curves are a line, anything with the chain points with bars) and,
+/// of the two pairs with the chain, by this color.
+pub fn diff_color(pair: Pair, shades: Shades) -> Hsla {
+    let (color, companion) = shades;
     if pair.has_chain() && pair.curve() == Kind::Draft {
-        palette.companion(pos)
+        companion
     } else {
-        palette.color(pos)
+        color
     }
 }
 
@@ -365,6 +370,19 @@ pub fn model(
     if outcome.results.len() < n || plan.roles.len() < n {
         return None;
     }
+    // Each active expiry's two shades, once: a palette color costs a
+    // conversion and a contrast bisection.
+    let shades: Vec<Shades> = plan
+        .active
+        .iter()
+        .map(|&(pos, _)| (palette.color(pos), palette.companion(pos)))
+        .collect();
+    let shades_of = |expiry: NaiveDate| -> Shades {
+        plan.active
+            .iter()
+            .position(|(_, e)| *e == expiry)
+            .map_or_else(|| (palette.color(0), palette.companion(0)), |i| shades[i])
+    };
     let results = &outcome.results[..n];
     let slice = |i: usize| match &results[i] {
         Ok(VolResult::Slice(s)) => Some(s),
@@ -437,12 +455,7 @@ pub fn model(
             }
             continue;
         }
-        let pos = plan
-            .active
-            .iter()
-            .find(|(_, e)| *e == expiry)
-            .map_or(0, |(pos, _)| *pos);
-        let color = palette.color(pos);
+        let (color, companion) = shades_of(expiry);
         match *role {
             Role::Curve { kind, trace, .. } => {
                 let Some(s) = slice(i) else { continue };
@@ -507,7 +520,7 @@ pub fn model(
                 push(
                     &mut slots,
                     format!("chain {expiry}"),
-                    palette.companion(pos),
+                    companion,
                     Axis::Left,
                     Style::Solid,
                     SlotKind::Points {
@@ -523,10 +536,10 @@ pub fn model(
         }
     }
 
-    for &(pos, expiry) in &plan.active {
+    for (&(_, expiry), &shade) in plan.active.iter().zip(&shades) {
         for &pair in &plan.diffs {
             let label = format!("{} {expiry}", pair.label());
-            let color = diff_color(pair, palette, pos);
+            let color = diff_color(pair, shade);
             if !pair.has_chain() {
                 // Equal strikes: the subtrahend was evaluated at the
                 // minuend's, so the points pair by position.

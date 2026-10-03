@@ -280,6 +280,23 @@ fn d_chooses_a_pair_and_the_batch_carries_its_diff_jobs(cx: &mut gpui::TestAppCo
     // touched, so the highlight is not a fallback.
     vcx.simulate_keystrokes("d space enter");
     assert_eq!(h.state(&vcx).diffs, []);
+    // `ctrl+x` unticks everything and counts as a touch: `enter` then
+    // shows none rather than falling back to the highlight.
+    h.command(&mut vcx, "diff cvi - chain").unwrap();
+    vcx.simulate_keystrokes("d ctrl-x");
+    assert_eq!(h.chooser_ticks(&vcx), Some(vec![]));
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(h.state(&vcx).diffs, []);
+    vcx.simulate_keystrokes("d ctrl-x enter");
+    assert_eq!(
+        h.state(&vcx).diffs,
+        [],
+        "on an empty set too: no fallback to the highlight"
+    );
+    assert!(
+        h.dispatched(&vcx)
+            .contains(&"volslice::clear_ticks".to_string())
+    );
 }
 
 /// Several pairs at once, through the keys: each `space` ticks a pair in
