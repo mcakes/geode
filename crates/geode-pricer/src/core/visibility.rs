@@ -201,7 +201,12 @@ impl RowValues for SheetRow<'_> {
                     Expiry::Tenor(t) => t.clone(),
                 })
             }),
-            ColumnKind::Status if matches!(sheet.state(row), LineState::Fresh) => {
+            // A line without a currency paints `needs currency` whatever
+            // its state (`cell_text`), so it must not scope as `fresh`.
+            ColumnKind::Status
+                if matches!(sheet.state(row), LineState::Fresh)
+                    && !(sheet.is_line(row) && sheet.currency(row).is_none()) =>
+            {
                 Some(Value::Utf8("fresh".into()))
             }
             ColumnKind::SheetName
@@ -451,6 +456,27 @@ mod tests {
         assert!(v.is_shown(4), "the unpriced NDX line is pricing");
     }
 
+    /// The status cell reads `needs currency` ahead of the state, so a
+    /// blank line the sheet holds as `Fresh` scopes as it paints, never as
+    /// `fresh`; a package (which has no currency of its own) still does.
+    #[test]
+    fn a_fresh_line_without_a_currency_scopes_as_needs_currency() {
+        let mut s = sheet();
+        push(&mut s, vec![parse_builtin("SPX Z26 4400 P").unwrap()]);
+        let blank = s.len() - 1;
+        price_all(&mut s, 1.0);
+        assert_eq!(s.currency(blank), None);
+        assert_eq!(s.state(blank), &LineState::Fresh);
+        let v = apply(&s, &expr("status = 'fresh'")).unwrap();
+        assert!(!v.is_shown(blank), "a blank line is not fresh");
+        assert!(
+            v.is_shown(0) && v.is_shown(1),
+            "priced lines and packages are"
+        );
+        let v = apply(&s, &expr("status = 'needs currency'")).unwrap();
+        assert_eq!(shown(&s, &v), vec![blank]);
+    }
+
     /// `position_ref` and `instrument_ref` are the sheet's own `p<id>` /
     /// `i<id>`, never a desk reference: a selection on them is dropped
     /// (as a column the pricer lacks) and an expression naming them
@@ -551,8 +577,24 @@ mod tests {
             vol_pts: None,
         }))
         .unwrap();
+        // A line priced in USD then moved to EUR (its local figures are
+        // gaps), and a priced line without a currency (`needs currency`).
+        push(
+            &mut s,
+            vec![
+                in_usd(parse_builtin("NDX Z26 4000 P").unwrap()),
+                parse_builtin("NDX Z26 4400 P").unwrap(),
+            ],
+        );
         price_all(&mut s, 1.5);
-        let failed = s.len() - 1;
+        let moved = s.len() - 2;
+        s.apply(crate::core::edit::Edit::SetCurrency {
+            row: moved,
+            currency: Some(geode_core::pricing::Currency::parse("EUR").unwrap()),
+        })
+        .unwrap();
+        assert!(s.shown_result(moved).unwrap().currency.is_mixed());
+        let failed = s.len() - 3;
         s.deliver_all(
             vec![(s.id(failed), s.revision(failed), Err("no vol".into()))],
             at(1),
@@ -572,7 +614,10 @@ mod tests {
                     ColumnKind::Template => {} // a leg reads its package's; tested above
                     // A fresh status paints blank but scopes as `fresh`
                     // (`status_fresh_...`); stale and failed match below.
-                    ColumnKind::Status if matches!(s.state(row), LineState::Fresh) => {
+                    ColumnKind::Status
+                        if matches!(s.state(row), LineState::Fresh)
+                            && s.currency(row).is_some() =>
+                    {
                         assert_eq!(got, Some(Value::Utf8("fresh".into())), "{ctx}")
                     }
                     // The cell paints `Z26`; the scope value is the ISO
@@ -591,8 +636,9 @@ mod tests {
                         assert_eq!(got, want, "{ctx}");
                     }
                     ColumnKind::Measure { measure, usd } => {
-                        let want = match (s.state(row), s.result(row)) {
+                        let want = match (s.state(row), s.shown_result(row)) {
                             (LineState::Failed(_), _) | (_, None) => None,
+                            (_, Some(r)) if !usd && r.currency.is_mixed() => None,
                             (_, Some(r)) => {
                                 Some(Value::F64(r.get(measure, usd) * s.qty(row) as f64))
                             }
