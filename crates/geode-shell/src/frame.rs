@@ -511,9 +511,11 @@ impl Frame {
         links.post(tile, emission, generation)
     }
 
-    /// Drop a closed tile's membership and what it posted. `true`, and the
-    /// generation advances, when it was in a group.
+    /// Drop a closed tile's membership, what it posted, and the notices it
+    /// will never take. `true`, and the generation advances, when it was in
+    /// a group; the notices alone change nothing an observer reads.
     pub(crate) fn forget_tile(&mut self, tile: TileId) -> bool {
+        self.tile_notices.retain(|(t, _)| *t != tile);
         let changed = self.links.forget(tile);
         if changed {
             fresh(&mut self.generation);
@@ -3630,6 +3632,23 @@ mod tests {
         assert_eq!(f.generation(), settled, "nothing dropped, nothing to save");
         assert!(f.forget_tile(emitter));
         assert!(f.generation() > settled);
+    }
+
+    /// A closed tile never takes its notices, so forgetting it drops them:
+    /// otherwise they accumulate, and a later occupant under the same id
+    /// would hear about an edit it never asked for.
+    #[test]
+    fn forgetting_a_tile_drops_its_pending_notices() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let (closed, open) = (TileId(1), TileId(2));
+        f.post_tile_notice(closed, TileNotice::Refused("no".into()));
+        f.post_tile_notice(open, TileNotice::Forked("desk".into()));
+        f.forget_tile(closed);
+        assert!(f.take_tile_notices(closed).is_empty());
+        assert_eq!(
+            f.take_tile_notices(open),
+            [TileNotice::Forked("desk".into())]
+        );
     }
 
     /// The shell pulls an emitter again on every notify. A repeat of its

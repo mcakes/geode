@@ -231,15 +231,13 @@ impl ShellView {
 impl ShellView {
     /// A tile is gone for good: stop listening to it and drop its
     /// membership, so its drafts leave the board and a later occupant under
-    /// the same id starts in no group. Touches the frame only when the tile
-    /// was in a group. Call it after `TileContent::closed`: a closing
-    /// follower answers the flip barrier under its group's identity, which
-    /// it reads only while still a member.
+    /// the same id starts in no group, and drop the config-door notices it
+    /// will never take. Notifies the frame only when the tile was in a
+    /// group. Call it after `TileContent::closed`: a closing follower
+    /// answers the flip barrier under its group's identity, which it reads
+    /// only while still a member.
     pub(super) fn unlink_tile(&mut self, tile: TileId, cx: &mut Context<Self>) {
         self.emit_subs.remove(&tile);
-        if self.frame.read(cx).membership(tile).is_empty() {
-            return;
-        }
         self.frame.update(cx, |f, cx| {
             if f.forget_tile(tile) {
                 cx.notify();

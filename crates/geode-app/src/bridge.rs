@@ -34,12 +34,13 @@ use geode_shell::diagnostics::{CatalogRequest, Diagnostics, ReferenceLane, Sourc
 use geode_shell::module::placeholder::PLACEHOLDER_KIND;
 use geode_shell::module::{Delivery, UploadDelivery};
 use geode_shell::reference::ReferenceGlobal;
+use geode_shell::shell::objectdialog::shadow_of;
 use geode_shell::shell::{DIAGNOSTICS_KEY, REFERENCE_KEY, ShellEvent, ShellView, is_shell_key};
 use geode_shell::vimfind::FindStyle;
 use gpui::{App, AsyncApp, Entity, WindowHandle};
 use gpui_component::Root;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -73,6 +74,10 @@ pub struct DataSetup {
     /// Error per refused panel for the shell's config section.
     pub panels: Vec<PanelSpec>,
     pub panel_diagnostics: Vec<Diagnostic>,
+    /// Each classification's winning layer and the ones a user copy
+    /// shadows, for the classifications factory's startup snapshot.
+    pub classification_layers: BTreeMap<String, Layer>,
+    pub classification_shadowed: BTreeSet<String>,
 }
 
 /// Tile and page kinds other modules own. A panel of one of these names
@@ -83,6 +88,7 @@ pub(crate) const MODULE_KINDS: &[&str] = &[
     "blotter",
     "timeseries",
     "volslice",
+    "classifications",
     "pricer",
     "diagnostics",
     "guide",
@@ -252,6 +258,8 @@ pub fn data_setup(
         .filter(|d| d.local)
         .map(|d| d.name.clone())
         .collect();
+    let (classification_layers, classification_shadowed) =
+        classification_provenance(config, &dimensions);
     Some(DataSetup {
         config: DataServiceConfig {
             db_path,
@@ -286,7 +294,35 @@ pub fn data_setup(
         pricer_key: pricer_config_key(config),
         panels,
         panel_diagnostics,
+        classification_layers,
+        classification_shadowed,
     })
+}
+
+/// Each classification's winning layer, and the classifications whose user
+/// copy shadows a definition in a lower layer: the ones a revert would
+/// restore. Read from the layered `dimensions` documents, the same
+/// provenance the object dialog badges.
+fn classification_provenance(
+    config: &Config,
+    dims: &DerivedDimensions,
+) -> (BTreeMap<String, Layer>, BTreeSet<String>) {
+    let layers: BTreeMap<String, Layer> = dims
+        .all()
+        .filter_map(|d| {
+            config
+                .explain(DIMENSIONS_DOC, &d.name)
+                .map(|l| (d.name.clone(), l))
+        })
+        .collect();
+    let shadowed = layers
+        .iter()
+        .filter(|(name, layer)| {
+            **layer == Layer::User && shadow_of(config, DIMENSIONS_DOC, name).is_some()
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    (layers, shadowed)
 }
 
 /// Keep the app's own datasets exactly as it declares them. `pricer_sheets`
@@ -663,6 +699,9 @@ pub struct Bridge {
     /// The vol slice viewer's factory, sharing the data handle. Its expiry
     /// colors come from the theme, so no reload reaches it.
     pub volslice: Rc<geode_volslice::VolsliceFactory>,
+    /// The classifications factory, sharing the handle. Retained so every
+    /// reload pushes it the dimensions, schema, views and layers it reads.
+    pub classifications: Rc<geode_classifications::ClassificationsFactory>,
     /// The line pricer's factory, sharing the handle. Retained so a reload
     /// reaches its views and settings.
     pub pricer: Rc<PricerFactory>,
@@ -737,7 +776,7 @@ pub fn start(
     setup: DataSetup,
     find_style: FindStyle,
     stale_after: Duration,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> Bridge {
     for d in &setup.diagnostics {
         tracing::warn!(target: "geode::query", "{d}");
@@ -784,6 +823,21 @@ pub fn start(
         setup.colours.clone(),
     ));
     let volslice = Rc::new(geode_volslice::VolsliceFactory::new(handle.clone()));
+    // Pushed its startup snapshot now, before any tile is restored; every
+    // reload pushes the next one.
+    let classifications = Rc::new(geode_classifications::ClassificationsFactory::new(
+        handle.clone(),
+    ));
+    classifications.set_config(
+        geode_classifications::ClassificationsConfig {
+            dims: setup.dimensions.clone(),
+            schema: startup_schema.clone(),
+            views: setup.views.clone(),
+            layers: setup.classification_layers,
+            shadowed: setup.classification_shadowed,
+        },
+        cx,
+    );
     let factory = Rc::new(BlotterFactory::new(
         handle.clone(),
         setup.views,
@@ -824,6 +878,7 @@ pub fn start(
         panels,
         timeseries,
         volslice,
+        classifications,
         pricer,
         underlyings,
         handle,
@@ -1223,6 +1278,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let factory = factory.clone();
         let panels = panels.clone();
         let timeseries = timeseries.clone();
+        let classifications = bridge.classifications.clone();
+        let startup_schema = bridge.schema.clone();
         let diagnostics = diagnostics.clone();
         move |shell, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
@@ -1261,12 +1318,25 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // edits require restart and do not emit ConfigReloaded; a later eligible
                 // reload can update this factory before the service's schema is rebuilt.
                 let mut pin_diags = Vec::new();
+                let mut pinned = None;
                 if let Some(mut schema) = config.doc("datasets").map(|d| SchemaSpec::from_doc(d).0)
                 {
                     pin_diags.extend(pin_app_datasets(&mut schema, config));
+                    pinned = Some(Rc::new(schema.clone()));
                     factory.set_schema(schema);
                 }
                 factory.set_dims(dims.clone());
+                // The classifications snapshot, from the same dims, pinned
+                // schema (the startup one when no datasets doc loaded) and
+                // views; pushed once the config borrow has ended.
+                let (layers, shadowed) = classification_provenance(config, &dims);
+                let classification_config = geode_classifications::ClassificationsConfig {
+                    dims: dims.clone(),
+                    schema: pinned.unwrap_or_else(|| startup_schema.clone()),
+                    views: views.clone(),
+                    layers,
+                    shadowed,
+                };
                 // A refused hand-off leaves the service on the old views while
                 // the factory builds tiles against the new ones: say so.
                 let handoff = match handle.replace_views(views, dims) {
@@ -1284,7 +1354,9 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         path: None,
                     }),
                 };
-                // The config borrow has ended; diagnostics can now be updated through cx.
+                // The config borrow has ended; the factory's tiles and the
+                // diagnostics can now be updated through cx.
+                classifications.set_config(classification_config, cx);
                 let reload_diags: Vec<Diagnostic> = presentation_diags
                     .into_iter()
                     .chain(colour_diags)
@@ -2136,6 +2208,9 @@ role = "key"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer,
             handle,
             events: rx,
@@ -2834,6 +2909,106 @@ role = "attribute"
                 .get("region", "US")
                 .map(|c| &**c),
             Some("blue")
+        );
+    }
+
+    /// Builtin `desk` and `region`; the user layer redefines `desk` and adds
+    /// `sector`.
+    const BUILTIN_DIMS: &str = "[desk]\nfrom = \"book\"\n[region]\nfrom = \"underlying_ref\"\n";
+    const USER_DIMS: &str = "[desk]\nfrom = \"book\"\n[sector]\nfrom = \"book\"\n";
+
+    fn assert_classifications_snapshot(config: &geode_classifications::ClassificationsConfig) {
+        let names: Vec<&str> = config.dims.all().map(|d| d.name.as_str()).collect();
+        assert_eq!(names.len(), 3, "{names:?}");
+        for name in ["desk", "region", "sector"] {
+            assert!(names.contains(&name), "{names:?}");
+        }
+        assert_eq!(
+            config.layers,
+            BTreeMap::from([
+                ("desk".to_string(), Layer::User),
+                ("region".to_string(), Layer::Builtin),
+                ("sector".to_string(), Layer::User),
+            ])
+        );
+        // Only the user copy with a lower definition beneath it shadows one.
+        assert_eq!(config.shadowed, BTreeSet::from(["desk".to_string()]));
+    }
+
+    /// The classifications factory holds its snapshot from startup, before
+    /// any tile is restored and before any reload.
+    #[gpui::test]
+    fn startup_pushes_the_classifications_snapshot(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("dimensions.toml"), USER_DIMS).unwrap();
+        let mut builtin = crate::builtin_layer(Some(dir.path()));
+        builtin.push(LayerDoc::builtin("dimensions", BUILTIN_DIMS).unwrap());
+        let config = Config::load(&ConfigSources {
+            builtin,
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        let setup = data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .unwrap();
+        let views = setup.views.len();
+        let bridge =
+            cx.update(|cx| start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let snapshot = bridge.classifications.config().expect("pushed at startup");
+        assert_classifications_snapshot(&snapshot);
+        assert_eq!(snapshot.views.len(), views);
+        assert!(
+            Rc::ptr_eq(&snapshot.schema, &bridge.schema),
+            "the startup schema"
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// The `ConfigReloaded` observer pushes the classifications factory the
+    /// reloaded dimensions with their layers.
+    #[gpui::test]
+    fn a_config_reload_pushes_the_classifications_snapshot(cx: &mut gpui::TestAppContext) {
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("dimensions.toml"), USER_DIMS).unwrap();
+        let services = test_shell_services_with_sources(ConfigSources {
+            // The observer refreshes factories only when a `views` doc exists.
+            builtin: vec![
+                LayerDoc::builtin("views", SLIM_VIEW).unwrap(),
+                LayerDoc::builtin("dimensions", BUILTIN_DIMS).unwrap(),
+            ],
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        assert!(
+            bridge.classifications.config().is_none(),
+            "fixture: built with no snapshot"
+        );
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        let snapshot = bridge.classifications.config().expect("pushed on reload");
+        assert_classifications_snapshot(&snapshot);
+        assert!(
+            snapshot.views.iter().any(|v| v.name == "slim"),
+            "the reloaded views"
         );
     }
 
@@ -5870,6 +6045,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -5979,6 +6157,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6080,6 +6261,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6200,6 +6384,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6262,6 +6449,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6330,6 +6520,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             pricer_key: None,
             positions_configured: false,
@@ -6391,6 +6584,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6485,6 +6681,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6558,6 +6757,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6634,6 +6836,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory: factory.clone(),
@@ -6712,6 +6917,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory: factory.clone(),
@@ -6813,6 +7021,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6910,6 +7121,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6974,6 +7188,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -7117,6 +7334,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -7186,6 +7406,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -7903,6 +8126,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,

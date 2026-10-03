@@ -1,0 +1,27 @@
+[package]
+name = "geode-classifications"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+# The classification model (`geode_core::classification`) and the derived
+# dimensions it edits live in geode-core; geode-shell supplies hosting and
+# the config door, geode-tile the header, menus and notices, and DataHandle
+# is the module's interface to geode-data.
+[dependencies]
+geode-core.workspace = true
+geode-shell.workspace = true
+geode-tile.workspace = true
+geode-data = { path = "../geode-data" }
+gpui.workspace = true
+gpui-component.workspace = true
+toml = "1.1.4"
+
+[dev-dependencies]
+geode-core = { workspace = true, features = ["test-support"] }
+geode-shell = { workspace = true, features = ["test-support"] }
+geode-data = { path = "../geode-data", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }

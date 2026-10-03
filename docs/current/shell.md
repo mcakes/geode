@@ -1400,7 +1400,9 @@ config — r restores the desk copy`), and a refusal posts
 `TileNotice::Refused` once per tile per drain. The shell posts from a deferred
 update and then notifies the frame once; the tile drains its own notices with
 `Frame::take_tile_notices` on that notification. Notices live on the frame,
-not a lane, so a pin or unpin keeps them. An edit with no origin forks the
+not a lane, so a pin or unpin keeps them; closing the tile drops the ones it
+never took, so they neither accumulate nor reach a later occupant under the
+same id. An edit with no origin forks the
 same way but tells no one. With no writable user directory nothing is queued
 and the refusal also shows as the status bar's configuration write error.
 
