@@ -38,6 +38,20 @@ chrono = "0.4.42"
 # Logging macros; geode-core owns the subscriber and ring buffer.
 tracing.workspace = true
 
+# Process memory sampling (`memory::sample`): macOS reads `task_vm_info`
+# through mach2, Windows `GetProcessMemoryInfo` through windows-sys. Both
+# versions are already in the lock through other dependencies.
+[target.'cfg(target_os = "macos")'.dependencies]
+mach2 = "0.5.0"
+
+[target.'cfg(windows)'.dependencies]
+# `Win32_Foundation` supplies the HANDLE both calls name.
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 # Match the test-support feature enabled by downstream hosting tests,
 # so crate-only and workspace tests share the same feature configuration.

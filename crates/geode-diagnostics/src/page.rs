@@ -453,70 +453,70 @@ impl DiagnosticsPage {
         // version. Both tables are retained across view switches.
         let mut diag_prepared = None;
         let mut source_since = Vec::new();
-        let prepared = {
-            let d = self.diagnostics.read(cx);
-            let frame = self.frame.read(cx);
-            match self.section {
-                Section::Sources => {
-                    let (table, since) =
-                        prepared::sources_table(&model::source_rows(d, clock), now, &filter);
-                    source_since = since;
-                    table
-                }
-                Section::Data => {
-                    self.catalog_matches = model::catalog_matches_frame(d, frame.as_of());
-                    prepared::data_table(
-                        &model::dataset_rows(d, frame.as_of(), clock),
-                        &self.collapsed_datasets,
-                        &filter,
-                    )
-                }
-                Section::Config => {
-                    let diags = if self.config_history {
-                        model::history_diagnostics(d, clock)
-                    } else {
-                        model::current_diagnostics(d)
-                    };
-                    self.issue_count = diags.len();
-                    let mut issues = prepared::diagnostics_table(&diags, self.config_history);
-                    let query = filter.to_lowercase();
-                    if !query.is_empty() {
-                        issues.rows.retain(|r| {
-                            r.cells
-                                .iter()
-                                .any(|c| c.text.to_lowercase().contains(&query))
-                                || r.detail.iter().any(|s| s.to_lowercase().contains(&query))
-                        });
+        let prepared =
+            {
+                let d = self.diagnostics.read(cx);
+                let frame = self.frame.read(cx);
+                match self.section {
+                    Section::Sources => {
+                        let (table, since) =
+                            prepared::sources_table(&model::source_rows(d, clock), now, &filter);
+                        source_since = since;
+                        table
                     }
-                    diag_prepared = Some(issues);
-                    let expanded_docs = BTreeSet::new();
-                    prepared::config_table(
-                        &model::config_docs(&self.config.borrow(), &filter),
-                        if filter.is_empty() {
-                            &self.collapsed_docs
+                    Section::Data => {
+                        self.catalog_matches = model::catalog_matches_frame(d, frame.as_of());
+                        prepared::data_table(
+                            &model::dataset_rows(d, frame.as_of(), clock),
+                            &self.collapsed_datasets,
+                            &filter,
+                        )
+                    }
+                    Section::Config => {
+                        let diags = if self.config_history {
+                            model::history_diagnostics(d, clock)
                         } else {
-                            &expanded_docs
-                        },
-                    )
+                            model::current_diagnostics(d)
+                        };
+                        self.issue_count = diags.len();
+                        let mut issues = prepared::diagnostics_table(&diags, self.config_history);
+                        let query = filter.to_lowercase();
+                        if !query.is_empty() {
+                            issues.rows.retain(|r| {
+                                r.cells
+                                    .iter()
+                                    .any(|c| c.text.to_lowercase().contains(&query))
+                                    || r.detail.iter().any(|s| s.to_lowercase().contains(&query))
+                            });
+                        }
+                        diag_prepared = Some(issues);
+                        let expanded_docs = BTreeSet::new();
+                        prepared::config_table(
+                            &model::config_docs(&self.config.borrow(), &filter),
+                            if filter.is_empty() {
+                                &self.collapsed_docs
+                            } else {
+                                &expanded_docs
+                            },
+                        )
+                    }
+                    Section::Log => {
+                        // The one input is the log's message filter.
+                        self.log_filter.text = filter;
+                        self.level_rows = Rc::new(levels::level_rows(&d.levels));
+                        prepared::log_table(
+                            &model::log_rows(self.log.records(), &self.log_filter, clock),
+                            self.log.lost(),
+                        )
+                    }
+                    Section::Perf => {
+                        self.perf = Some(crate::perf_view::PerformanceView::new(
+                            &model::perf_model(d, &frame.requery, clock),
+                        ));
+                        PreparedTable::empty()
+                    }
                 }
-                Section::Log => {
-                    // The one input is the log's message filter.
-                    self.log_filter.text = filter;
-                    self.level_rows = Rc::new(levels::level_rows(&d.levels));
-                    prepared::log_table(
-                        &model::log_rows(self.log.records(), &self.log_filter, clock),
-                        self.log.lost(),
-                    )
-                }
-                Section::Perf => {
-                    self.perf = Some(crate::perf_view::PerformanceView::new(&model::perf_model(
-                        d,
-                        &frame.requery,
-                    )));
-                    PreparedTable::empty()
-                }
-            }
-        };
+            };
         self.prepared = Rc::new(prepared);
         self.source_since = source_since;
         let len = self.prepared.rows.len();
@@ -1896,6 +1896,9 @@ mod tests {
             used_blocks: 0,
             block_size: 0,
             memory_bytes: 0,
+            memory_limit_bytes: 0,
+            temp_bytes: 0,
+            memory_top: Vec::new(),
             threads: 1,
             identities: Vec::new(),
         }

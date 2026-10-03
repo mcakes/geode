@@ -272,6 +272,10 @@ pub struct Frame {
     /// Latest saved slot awaiting persistence to user `groupings.toml`.
     /// The shell drains it on frame notification and writes off the UI thread.
     pending_persist: Option<(u8, Vec<String>)>,
+    /// A tile whose header link chip was pressed, awaiting the shell's link
+    /// group chooser. A module reaches the frame and never `ShellView`, so
+    /// the press queues here and the shell's frame observer drains it.
+    pending_link_chooser: Option<TileId>,
     /// Lazy model cache keyed by versions excluding flip, clock, and local date.
     /// `Rc` makes a hit cheap; interior mutability permits caching through `&self`.
     /// Lane generations are unique across lanes, so one cache serves them all.
@@ -297,6 +301,7 @@ impl Frame {
             requery: RequeryStats::new(),
             user_dir,
             pending_persist: None,
+            pending_link_chooser: None,
             bar_cache: RefCell::new(None),
             barrier: None,
         }
@@ -602,6 +607,18 @@ impl Frame {
         }
         self.pending_persist = Some((slot, persisted));
         Ok(())
+    }
+
+    /// Ask the shell to open the link group chooser on `tile`. Moves no
+    /// version: the request is not frame state, and a notification carrying
+    /// it opens no flip. A later request replaces an undrained one.
+    pub fn request_link_chooser(&mut self, tile: TileId) {
+        self.pending_link_chooser = Some(tile);
+    }
+
+    /// Drain the pending link chooser request for the shell's frame observer.
+    pub fn take_pending_link_chooser(&mut self) -> Option<TileId> {
+        self.pending_link_chooser.take()
     }
 
     /// Drain the latest pending slot write for the shell's background writer.

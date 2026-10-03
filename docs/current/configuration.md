@@ -648,7 +648,9 @@ presets. Displayed times use `geode_core::clock::Clock`; crates do not read
 `chrono::Local` directly. Log and crash filenames still roll by UTC date so
 filesystem naming is stable across configured display zones.
 
-`[log]` controls the `geode::*` target levels. Third-party targets remain
+`[log]` controls the `geode::*` target levels, keyed by suffix: `ingest`,
+`query`, `config`, `session`, `shell`, `theme`, `pricing`, `vol`, and
+`memory`, plus `default`. Third-party targets remain
 capped at `warn`. Runtime level changes persist through the same ordered user
 configuration write path.
 

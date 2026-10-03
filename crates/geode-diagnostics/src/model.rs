@@ -569,10 +569,36 @@ pub struct PerfModel {
     pub block_size: String,
     pub memory: String,
     pub threads: String,
+    /// DuckDB's memory limit, or [`UNLIMITED`]; empty without a catalog or
+    /// when unknown.
+    pub memory_limit: String,
+    /// DuckDB's spilled temporary files; empty without a catalog.
+    pub temp: String,
+    /// The largest DuckDB memory tags as `(tag, size)`, largest first.
+    pub memory_top: Vec<(String, String)>,
+    /// The sampled process memory; `None` before the first copy or where
+    /// the platform cannot be sampled.
+    pub process: Option<ProcessMemoryModel>,
     pub overlay: bool,
 }
 
-pub fn perf_model(d: &Diagnostics, requery: &RequeryStats) -> PerfModel {
+/// The process memory readout, formatted for the Performance page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessMemoryModel {
+    pub current: String,
+    pub peak: String,
+    /// When the peak was first seen, in the app clock's zone.
+    pub peak_at: String,
+}
+
+/// A DuckDB memory limit at or above this (1 PiB) is read as unlimited:
+/// `memory_limit = '-1'` reads back as 16383.9 PiB, not a real budget.
+pub const UNLIMITED_LIMIT_BYTES: u64 = 1 << 50;
+
+/// `PerfModel::memory_limit` for a limit at or above [`UNLIMITED_LIMIT_BYTES`].
+pub const UNLIMITED: &str = "unlimited";
+
+pub fn perf_model(d: &Diagnostics, requery: &RequeryStats, clock: Clock) -> PerfModel {
     let h = &d.frame_hist;
     let mut buckets: Vec<(u64, u32)> = BUCKET_UPPER_BOUNDS_MICROS
         .iter()
@@ -596,6 +622,28 @@ pub fn perf_model(d: &Diagnostics, requery: &RequeryStats) -> PerfModel {
             String::new(),
         ),
     };
+    let (memory_limit, temp, memory_top) = match &d.catalog {
+        Some(c) => (
+            if c.memory_limit_bytes == 0 {
+                String::new()
+            } else if c.memory_limit_bytes >= UNLIMITED_LIMIT_BYTES {
+                UNLIMITED.to_string()
+            } else {
+                format_bytes(c.memory_limit_bytes)
+            },
+            format_bytes(c.temp_bytes),
+            c.memory_top
+                .iter()
+                .map(|(tag, bytes)| (tag.clone(), format_bytes(*bytes)))
+                .collect(),
+        ),
+        None => (String::new(), String::new(), Vec::new()),
+    };
+    let process = d.memory.as_ref().map(|m| ProcessMemoryModel {
+        current: format_bytes(m.current_bytes),
+        peak: format_bytes(m.peak_bytes),
+        peak_at: local_hms(m.peak_at, clock),
+    });
     PerfModel {
         frame: percentiles(h),
         frame_count: h.count(),
@@ -610,28 +658,17 @@ pub fn perf_model(d: &Diagnostics, requery: &RequeryStats) -> PerfModel {
         block_size,
         memory,
         threads,
+        memory_limit,
+        temp,
+        memory_top,
+        process,
         overlay: d.overlay_visible(),
     }
 }
 
-/// A plain binary-unit byte count with at most one decimal place — a
-/// diagnostics readout, not a figure a trader reads regularly, so no
-/// humanize crate.
-pub fn format_bytes(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    let b = bytes as f64;
-    if b >= GB {
-        format!("{:.1}GB", b / GB)
-    } else if b >= MB {
-        format!("{:.1}MB", b / MB)
-    } else if b >= KB {
-        format!("{:.1}KB", b / KB)
-    } else {
-        format!("{bytes}B")
-    }
-}
+/// The shell's byte formatter, shared so the Performance page shows the
+/// peak at exactly the text `Diagnostics::refresh_memory` compares.
+pub use geode_shell::memory::format_bytes;
 
 // ------------------------------------------------------------ Badges and header
 
@@ -879,6 +916,9 @@ pub(crate) mod tests {
                 used_blocks: 0,
                 block_size: 0,
                 memory_bytes: 0,
+                memory_limit_bytes: 0,
+                temp_bytes: 0,
+                memory_top: Vec::new(),
                 threads: 1,
                 identities: Vec::new(),
             },
@@ -1027,7 +1067,7 @@ pub(crate) mod tests {
     fn perf_model_carries_the_refused_request_total() {
         let mut d = Diagnostics::new(LogLevels::default());
         d.note_refused(7);
-        assert_eq!(perf_model(&d, &RequeryStats::new()).refused, 7);
+        assert_eq!(perf_model(&d, &RequeryStats::new(), clock()).refused, 7);
     }
 
     #[test]
@@ -1039,7 +1079,7 @@ pub(crate) mod tests {
         hist.record_micros(200_000);
         d.refresh_frame_hist(&hist);
         d.set_overlay_visible(true);
-        let m = perf_model(&d, &RequeryStats::new());
+        let m = perf_model(&d, &RequeryStats::new(), clock());
         assert_eq!(m.frame_count, 2);
         assert_eq!(m.buckets.len(), BUCKET_UPPER_BOUNDS_MICROS.len() + 1);
         assert_eq!(m.buckets.iter().map(|(_, n)| *n as u64).sum::<u64>(), 2);
@@ -1065,16 +1105,81 @@ pub(crate) mod tests {
                 used_blocks: 4,
                 block_size: 256 * 1024,
                 memory_bytes: 512,
+                memory_limit_bytes: 0,
+                temp_bytes: 0,
+                memory_top: Vec::new(),
                 threads: 8,
                 identities: Vec::new(),
             },
             SystemTime::now(),
         );
-        let m = perf_model(&d, &RequeryStats::new());
+        let m = perf_model(&d, &RequeryStats::new(), clock());
         assert_eq!(m.database, "3.0GB");
         assert_eq!(m.used, "1.0MB");
         assert_eq!(m.block_size, "256.0KB");
         assert_eq!(m.memory, "512B");
         assert_eq!(m.threads, "8");
+        assert_eq!(m.memory_limit, "", "an unreadable limit stays empty");
+    }
+
+    #[test]
+    fn perf_model_formats_process_memory_and_duckdb_memory_detail() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let mut d = Diagnostics::new(LogLevels::default());
+        let m = perf_model(&d, &RequeryStats::new(), clock());
+        assert_eq!(m.process, None, "no reading yet");
+        assert_eq!((m.memory_limit.as_str(), m.temp.as_str()), ("", ""));
+        assert!(m.memory_top.is_empty());
+
+        d.watch();
+        d.refresh_memory(&geode_shell::memory::MemoryReading {
+            current_bytes: 3 * GIB,
+            peak_bytes: 7 * GIB + GIB / 10,
+            peak_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3_723),
+        });
+        d.set_catalog(
+            CatalogSnapshot {
+                memory_bytes: 2 * GIB,
+                memory_limit_bytes: 38 * GIB,
+                temp_bytes: 512 * 1024 * 1024,
+                memory_top: vec![("BASE_TABLE".into(), GIB), ("HASH_TABLE".into(), 1024)],
+                ..CatalogSnapshot::default()
+            },
+            SystemTime::now(),
+        );
+        let m = perf_model(&d, &RequeryStats::new(), clock());
+        assert_eq!(
+            m.process,
+            Some(ProcessMemoryModel {
+                current: "3.0GB".into(),
+                peak: "7.1GB".into(),
+                peak_at: "01:02:03".into(),
+            }),
+            "the peak time reads in the app clock's zone (UTC here)"
+        );
+        assert_eq!(m.memory, "2.0GB");
+        assert_eq!(m.memory_limit, "38.0GB");
+        let mut unlimited = d.catalog.clone().unwrap();
+        unlimited.memory_limit_bytes = (16383.9 * (1u64 << 50) as f64) as u64;
+        d.set_catalog(unlimited, SystemTime::now());
+        assert_eq!(
+            perf_model(&d, &RequeryStats::new(), clock()).memory_limit,
+            "unlimited"
+        );
+        let mut huge = d.catalog.clone().unwrap();
+        huge.memory_limit_bytes = (1 << 50) - 1; // a literal, so the constant is pinned
+        d.set_catalog(huge, SystemTime::now());
+        assert_eq!(
+            perf_model(&d, &RequeryStats::new(), clock()).memory_limit,
+            "1024.0TB"
+        );
+        assert_eq!(m.temp, "512.0MB");
+        assert_eq!(
+            m.memory_top,
+            vec![
+                ("BASE_TABLE".to_string(), "1.0GB".to_string()),
+                ("HASH_TABLE".to_string(), "1.0KB".to_string())
+            ]
+        );
     }
 }

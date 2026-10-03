@@ -27,6 +27,7 @@ pub mod linenumbers;
 pub mod link;
 pub mod listfilter;
 pub mod log_persist;
+pub mod memory;
 pub mod menu;
 pub mod module;
 pub mod palette;

@@ -23,7 +23,7 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_tile::confirm::{self, Confirm};
-use geode_tile::header::{Cluster, HealthChip, LinkChip, MenuTrigger, Mode, TimeRun};
+use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks, TimeRun};
 use geode_tile::notice::Notice;
 use gpui::prelude::*;
 use gpui::{
@@ -316,7 +316,7 @@ pub(crate) struct HeaderChrome<'a> {
     /// (`PricerTile::mode`), painted as the cluster's mode icon.
     pub mode: Mode,
     /// The tile's link groups, read from its frame handle at paint.
-    pub links: [Option<LinkChip>; 2],
+    pub links: TileLinks,
     /// The sheet name's tooltip selector, built once with the tile.
     pub name_tip: SharedString,
     /// The open rename field, painted in the sheet name's place.

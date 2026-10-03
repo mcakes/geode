@@ -742,7 +742,12 @@ status bar's `following` segment) opens the link chooser on the focused tile
 It lists the follow rows for a tile whose module follows and the emit rows
 for one whose module emits. A tile that does neither (a timeseries tile) has
 nothing to choose: no dialog opens and the status bar reads `this tile has
-no link group to join`. The header chip takes no press.
+no link group to join`. A press on a tile's header link chip opens the
+chooser on that tile: the chip queues `Frame::request_link_chooser`, since a
+module never reaches the shell, and the shell's frame observer drains it,
+focuses the chip's tile (it may not have held focus) and dispatches
+`tile::link_group`. The press stops at the chip. The request moves no frame
+version and so opens no flip.
 
 **The chip.** A tile in a group shows a solid chip per group in its header:
 the group's color as the fill, the letter and the role arrows as text floored
@@ -930,13 +935,21 @@ section does not read:
 | `data` | Publication events and catalog snapshots |
 | `config` | Current config-load batch, batch history, retained data conditions |
 | `log_levels` | Target-level settings |
-| `perf` | Copied frame histogram, dropped-event count, and the mirrored overlay value |
+| `perf` | Copied frame histogram, copied process memory reading, dropped-event count, and the mirrored overlay value |
 
 Equal snapshots leave their counters unchanged; loading and publication events
 always advance theirs. Frame as-of/config versions and log ring sequences are
 separate inputs observed by the page. Catalog resource metrics and frame
 requery statistics have no dedicated perf invalidation, so they appear on the
 next perf-section rebuild.
+
+The reload poll copies the frame histogram and the process memory reading only
+while a page watches. The histogram copies when its count or maximum changes.
+Memory copies on the first refresh after the page becomes watched, when
+current moves past a hysteresis (the larger of 128 MiB and 5% of the copied
+value), or when the displayed peak text changes; idle jitter under the
+hysteresis never notifies. Memory is sampled and logged on every tick
+regardless; see [memory instrumentation](performance.md#memory).
 
 `set_catalog` stores the snapshot together with the arrival time its caller
 supplies, `catalog_at`. An equal snapshot changes neither the counters nor

@@ -22,6 +22,7 @@ use geode_core::query::{CatalogSnapshot, DatasetCatalog};
 pub use geode_core::source_config::SourceShape;
 use gpui::SharedString;
 
+use crate::memory::{self, MemoryReading};
 use crate::perf::FrameHistogram;
 
 /// The request loop's thread name as the data layer spawns it. The shell
@@ -273,7 +274,8 @@ pub fn trim_keeping_errors<T>(
 /// - `data`: publications and catalog snapshots.
 /// - `config`: current config diagnostics, their history, and data diagnostics.
 /// - `log_levels`: target-level settings.
-/// - `perf`: the copied frame histogram and dropped-event count.
+/// - `perf`: the copied frame histogram, process memory reading, and
+///   dropped-event count.
 ///
 /// Frame as-of/config versions and the log ring sequence are separate inputs
 /// observed by the tile. Performance rows also read frame requery statistics
@@ -342,6 +344,13 @@ pub struct Diagnostics {
     /// on the reload-poll tick — see that method's own doc comment for
     /// why this is a copy rather than the histogram itself.
     pub frame_hist: FrameHistogram,
+    /// The process memory reading as last copied by [`Self::refresh_memory`]
+    /// on the reload-poll tick. `None` before the first copy, while never
+    /// watched, and on a platform the sampler cannot read.
+    pub memory: Option<MemoryReading>,
+    /// Set when the page becomes watched, so the next `refresh_memory`
+    /// copies whatever changed while it was hidden.
+    memory_stale: bool,
     /// The latest catalog outcome, including its as-of and resource metrics.
     pub catalog: Option<CatalogSnapshot>,
     /// When `catalog` was stored, as the caller of [`Self::set_catalog`]
@@ -390,6 +399,8 @@ impl Diagnostics {
             stopped_segment: None,
             restart_required: None,
             frame_hist: FrameHistogram::new(),
+            memory: None,
+            memory_stale: false,
             catalog: None,
             catalog_at: None,
             levels,
@@ -715,12 +726,47 @@ impl Diagnostics {
         true
     }
 
+    /// Copy the process memory reading while watched when it is the first
+    /// refresh since the page became watched, when current has moved at least
+    /// [`memory::current_hysteresis`] from the copied value, or when the
+    /// displayed peak text changes. Return `true` and advance the perf version
+    /// only after copying.
+    ///
+    /// The poll samples every tick and an idle footprint jitters by tens of
+    /// megabytes, which crosses one-decimal display steps; comparing current
+    /// at display granularity would notify on irregular idle ticks. The peak
+    /// never falls, so its text changes only on growth and cannot alternate.
+    /// The page can therefore show a current up to the hysteresis away from
+    /// the live value, and a peak rise too small to change the displayed peak
+    /// leaves the older peak time shown.
+    pub fn refresh_memory(&mut self, reading: &MemoryReading) -> bool {
+        if self.watchers == 0 {
+            return false;
+        }
+        if let Some(shown) = &self.memory
+            && !self.memory_stale
+            && shown.current_bytes.abs_diff(reading.current_bytes)
+                < memory::current_hysteresis(shown.current_bytes)
+            && memory::format_bytes(shown.peak_bytes) == memory::format_bytes(reading.peak_bytes)
+        {
+            return false;
+        }
+        self.memory_stale = false;
+        self.memory = Some(*reading);
+        self.version += 1;
+        self.versions.perf += 1;
+        true
+    }
+
     /// Register a visible tile and queue its initial catalog refresh, returning
     /// `true`. This changes demand, not diagnostic data, so versions stay put.
     /// The caller must `cx.notify()` in the same entity update; otherwise the
     /// bridge cannot observe the queued request until another mutation notifies.
     /// Each visibility transition must have a matching `unwatch`.
     pub fn watch(&mut self) -> bool {
+        if self.watchers == 0 {
+            self.memory_stale = true;
+        }
         self.watchers += 1;
         self.pending_catalog_request = true;
         true
@@ -1399,6 +1445,97 @@ mod tests {
             "identical histogram, no copy, no bump"
         );
         assert_eq!(d.version(), v);
+    }
+
+    fn reading(current: u64, peak: u64, at_secs: u64) -> MemoryReading {
+        MemoryReading {
+            current_bytes: current,
+            peak_bytes: peak,
+            peak_at: SystemTime::UNIX_EPOCH + Duration::from_secs(at_secs),
+        }
+    }
+
+    #[test]
+    fn the_memory_reading_is_copied_only_while_watched() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let r = reading(1 << 30, 2 << 30, 5);
+        assert!(!d.refresh_memory(&r));
+        assert_eq!(d.memory, None);
+        d.watch();
+        let perf = d.versions().perf;
+        assert!(d.refresh_memory(&r));
+        assert_eq!(d.memory, Some(r));
+        assert_eq!(d.versions().perf, perf + 1);
+    }
+
+    /// The poll samples every 500 ms; a change too small to alter the
+    /// displayed text must not notify, or an idle page repaints forever.
+    #[test]
+    fn refresh_memory_copies_only_past_the_hysteresis_or_a_peak_change() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.watch();
+        let gib = 1u64 << 30;
+        let mib = 1u64 << 20;
+        assert!(d.refresh_memory(&reading(gib, 2 * gib, 5)));
+        let v = d.version();
+        // 1 MiB on 1 GiB: nothing copied, nothing bumped.
+        assert!(!d.refresh_memory(&reading(gib + mib, 2 * gib, 5)));
+        assert_eq!(d.version(), v);
+        assert_eq!(d.memory.unwrap().current_bytes, gib);
+        // Under the 128 MiB floor in either direction: nothing.
+        assert!(!d.refresh_memory(&reading(gib + 127 * mib, 2 * gib, 5)));
+        assert!(!d.refresh_memory(&reading(gib - 127 * mib, 2 * gib, 5)));
+        // At the floor, current copies.
+        assert!(d.refresh_memory(&reading(gib + 128 * mib, 2 * gib, 5)));
+        // A peak whose displayed text changes copies on its own.
+        assert!(d.refresh_memory(&reading(gib + 128 * mib, 3 * gib, 9)));
+        assert_eq!(d.memory.unwrap().peak_at, reading(0, 0, 9).peak_at);
+    }
+
+    /// An idle footprint jitters by tens of megabytes between ticks. Across
+    /// a one-decimal display boundary (2.5GB / 2.6GB here) that alternation
+    /// must not copy, or an open page repaints on idle ticks.
+    #[test]
+    fn idle_jitter_across_a_display_boundary_does_not_copy() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.watch();
+        let mb = 1_000_000u64;
+        let peak = 3u64 << 30;
+        let low = (2.54 * (1u64 << 30) as f64) as u64;
+        assert!(d.refresh_memory(&reading(low, peak, 5)));
+        let v = d.version();
+        for i in 0..20 {
+            let current = if i % 2 == 0 { low + 90 * mb } else { low };
+            assert!(!d.refresh_memory(&reading(current, peak, 5)), "tick {i}");
+        }
+        assert_ne!(
+            memory::format_bytes(low),
+            memory::format_bytes(low + 90 * mb),
+            "the fixture alternates across a displayed step"
+        );
+        assert_eq!(d.version(), v);
+    }
+
+    /// Reopening the page copies on its first refresh even when the change
+    /// is under the hysteresis, so it never shows the reading (and peak
+    /// time) it had when it was hidden.
+    #[test]
+    fn the_first_refresh_after_rewatching_always_copies() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let gib = 1u64 << 30;
+        d.watch();
+        assert!(d.refresh_memory(&reading(gib, 2 * gib, 5)));
+        d.unwatch();
+        d.watch();
+        assert!(d.refresh_memory(&reading(gib + (1 << 20), 2 * gib, 5)));
+        assert_eq!(d.memory.unwrap().current_bytes, gib + (1 << 20));
+        assert!(
+            !d.refresh_memory(&reading(gib + (2 << 20), 2 * gib, 5)),
+            "only the first refresh after the watch"
+        );
+        // A second page opening while one already watches is not a reopen.
+        d.watch();
+        assert!(!d.refresh_memory(&reading(gib + (3 << 20), 2 * gib, 5)));
     }
 
     #[test]

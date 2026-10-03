@@ -6189,10 +6189,12 @@ run_mutation "diagnostics: refresh_frame_hist copies the histogram while unwatch
   crates/geode-shell/src/diagnostics.rs \
   '        if self.watchers == 0 {
             return false;
-        }' \
+        }
+        if self.frame_hist.count() == hist.count()' \
   '        if false {
             return false;
-        }' \
+        }
+        if self.frame_hist.count() == hist.count()' \
   geode-shell the_frame_histogram_is_copied_only_while_watched
 
 run_mutation "bridge: a stale Catalog outcome's tag check is disabled" \
@@ -6241,6 +6243,226 @@ run_mutation "diagnostics: MAJ-3 — refresh_frame_hist copies an unchanged hist
   '        if false {
             return false;' \
   geode-shell refresh_frame_hist_is_a_no_op_when_the_histogram_is_unchanged
+
+run_mutation "memory: the 256 MiB peak step is dropped" \
+  crates/geode-shell/src/memory.rs \
+  'rise > 0 && (rise >= PEAK_STEP_BYTES || rise.saturating_mul(PEAK_STEP_DIVISOR) >= logged)' \
+  'rise > 0 && (rise.saturating_mul(PEAK_STEP_DIVISOR) >= logged)' \
+  geode-shell a_peak_rise_of_256_mib_logs_at_info_even_below_a_quarter
+
+run_mutation "memory: the peak step is 512 MiB, not 256" \
+  crates/geode-shell/src/memory.rs \
+  'pub const PEAK_STEP_BYTES: u64 = 256 * MIB;' \
+  'pub const PEAK_STEP_BYTES: u64 = 512 * MIB;' \
+  geode-shell a_peak_rise_of_256_mib_logs_at_info_even_below_a_quarter
+
+run_mutation "memory: the 25% peak step is dropped" \
+  crates/geode-shell/src/memory.rs \
+  'rise > 0 && (rise >= PEAK_STEP_BYTES || rise.saturating_mul(PEAK_STEP_DIVISOR) >= logged)' \
+  'rise > 0 && (rise >= PEAK_STEP_BYTES)' \
+  geode-shell a_peak_rise_of_a_quarter_logs_at_info_even_below_256_mib
+
+run_mutation "memory: the relative peak step is a third, not a quarter" \
+  crates/geode-shell/src/memory.rs \
+  'pub const PEAK_STEP_DIVISOR: u64 = 4;' \
+  'pub const PEAK_STEP_DIVISOR: u64 = 3;' \
+  geode-shell a_peak_rise_of_a_quarter_logs_at_info_even_below_256_mib
+
+run_mutation "memory: an unchanged zero peak counts as a 25% rise" \
+  crates/geode-shell/src/memory.rs \
+  'rise > 0 && (rise >= PEAK_STEP_BYTES' \
+  '(rise >= PEAK_STEP_BYTES' \
+  geode-shell an_unchanged_peak_logs_nothing_at_info
+
+run_mutation "memory: the step is measured from the last sample, not the last logged peak" \
+  crates/geode-shell/src/memory.rs \
+  'let peak = peak_rose_enough(self.logged_peak, peak_bytes)' \
+  'let peak = peak_rose_enough(prev.peak_bytes, peak_bytes)' \
+  geode-shell the_threshold_is_measured_from_the_last_logged_peak
+
+run_mutation "memory: a logged rise does not move the logged peak" \
+  crates/geode-shell/src/memory.rs \
+  '            let from_bytes = self.logged_peak;
+            self.logged_peak = peak_bytes;' \
+  '            let from_bytes = self.logged_peak;' \
+  geode-shell the_threshold_is_measured_from_the_last_logged_peak
+
+run_mutation "memory: the baseline is not logged" \
+  crates/geode-shell/src/memory.rs \
+  '                peak: Some(PeakLog::Baseline),' \
+  '                peak: None,' \
+  geode-shell the_first_sample_logs_the_baseline_once_and_no_debug
+
+run_mutation "memory: the baseline does not start the debug cadence" \
+  crates/geode-shell/src/memory.rs \
+  '            self.logged_peak = seen;
+            self.last_debug = Some(now);' \
+  '            self.logged_peak = seen;' \
+  geode-shell debug_logs_at_most_once_per_interval
+
+run_mutation "memory: a periodic debug does not restart the cadence" \
+  crates/geode-shell/src/memory.rs \
+  '        if periodic {
+            self.last_debug = Some(now);
+        }' \
+  '        if false {
+            self.last_debug = Some(now);
+        }' \
+  geode-shell debug_logs_at_most_once_per_interval
+
+run_mutation "memory: the debug interval is exclusive" \
+  crates/geode-shell/src/memory.rs \
+  'now.saturating_duration_since(last) >= DEBUG_INTERVAL' \
+  'now.saturating_duration_since(last) > DEBUG_INTERVAL' \
+  geode-shell debug_logs_at_most_once_per_interval
+
+run_mutation "memory: a peak rise keeps the old peak time" \
+  crates/geode-shell/src/memory.rs \
+  '        let (peak_bytes, peak_at) = if seen > prev.peak_bytes {
+            (seen, wall)' \
+  '        let (peak_bytes, peak_at) = if seen > prev.peak_bytes {
+            (seen, prev.peak_at)' \
+  geode-shell the_peak_never_falls_and_keeps_the_time_it_was_reached
+
+run_mutation "memory: the peak follows a falling sample" \
+  crates/geode-shell/src/memory.rs \
+  'let seen = sample.peak_bytes.max(sample.current_bytes);' \
+  'let seen = sample.peak_bytes;' \
+  geode-shell the_peak_never_falls_and_keeps_the_time_it_was_reached
+
+run_mutation "diagnostics: refresh_memory copies while unwatched" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.watchers == 0 {
+            return false;
+        }
+        if let Some(shown) = &self.memory' \
+  '        if false {
+            return false;
+        }
+        if let Some(shown) = &self.memory' \
+  geode-shell the_memory_reading_is_copied_only_while_watched
+
+run_mutation "diagnostics: refresh_memory compares current at display granularity, not the hysteresis" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            && shown.current_bytes.abs_diff(reading.current_bytes)
+                < memory::current_hysteresis(shown.current_bytes)' \
+  '            && memory::format_bytes(shown.current_bytes) == memory::format_bytes(reading.current_bytes)' \
+  geode-shell idle_jitter_across_a_display_boundary_does_not_copy
+
+run_mutation "diagnostics: refresh_memory copies on any change of current" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            && shown.current_bytes.abs_diff(reading.current_bytes)
+                < memory::current_hysteresis(shown.current_bytes)' \
+  '            && shown.current_bytes == reading.current_bytes' \
+  geode-shell refresh_memory_copies_only_past_the_hysteresis_or_a_peak_change
+
+run_mutation "diagnostics: refresh_memory ignores a peak-only change" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            && memory::format_bytes(shown.peak_bytes) == memory::format_bytes(reading.peak_bytes)' \
+  '            && true' \
+  geode-shell refresh_memory_copies_only_past_the_hysteresis_or_a_peak_change
+
+run_mutation "diagnostics: refresh_memory ignores the stale mark after a rewatch" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            && !self.memory_stale
+' \
+  '' \
+  geode-shell the_first_refresh_after_rewatching_always_copies
+
+run_mutation "diagnostics: watch never marks the memory copy stale" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.watchers == 0 {
+            self.memory_stale = true;' \
+  '        if false {
+            self.memory_stale = true;' \
+  geode-shell the_first_refresh_after_rewatching_always_copies
+
+run_mutation "diagnostics: every watch marks the memory copy stale, not only the first" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.watchers == 0 {
+            self.memory_stale = true;' \
+  '        if true {
+            self.memory_stale = true;' \
+  geode-shell the_first_refresh_after_rewatching_always_copies
+
+run_mutation "diagnostics: a copy leaves the stale mark set" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        self.memory_stale = false;
+        self.memory = Some(*reading);' \
+  '        self.memory = Some(*reading);' \
+  geode-shell the_first_refresh_after_rewatching_always_copies
+
+run_mutation "memory: the current hysteresis floor is 64 MiB" \
+  crates/geode-shell/src/memory.rs \
+  'pub const CURRENT_HYSTERESIS_BYTES: u64 = 128 * MIB;' \
+  'pub const CURRENT_HYSTERESIS_BYTES: u64 = 64 * MIB;' \
+  geode-shell refresh_memory_copies_only_past_the_hysteresis_or_a_peak_change
+
+run_mutation "memory: the current hysteresis is a tenth, not a twentieth" \
+  crates/geode-shell/src/memory.rs \
+  'pub const CURRENT_HYSTERESIS_DIVISOR: u64 = 20;' \
+  'pub const CURRENT_HYSTERESIS_DIVISOR: u64 = 10;' \
+  geode-shell the_current_hysteresis_is_128_mib_or_a_twentieth
+
+run_mutation "memory: the current hysteresis takes the smaller bound" \
+  crates/geode-shell/src/memory.rs \
+  'CURRENT_HYSTERESIS_BYTES.max(copied / CURRENT_HYSTERESIS_DIVISOR)' \
+  'CURRENT_HYSTERESIS_BYTES.min(copied / CURRENT_HYSTERESIS_DIVISOR)' \
+  geode-shell the_current_hysteresis_is_128_mib_or_a_twentieth
+
+run_mutation "memory: format_bytes has no terabyte unit" \
+  crates/geode-shell/src/memory.rs \
+  '    if b >= TB {' \
+  '    if false {' \
+  geode-shell format_bytes_uses_binary_units_with_one_decimal
+
+run_mutation "perf model: an unlimited DuckDB limit reads as a byte figure" \
+  crates/geode-diagnostics/src/model.rs \
+  '            } else if c.memory_limit_bytes >= UNLIMITED_LIMIT_BYTES {' \
+  '            } else if false {' \
+  geode-diagnostics perf_model_formats_process_memory_and_duckdb_memory_detail
+
+run_mutation "perf model: a limit just under a petabyte reads as unlimited" \
+  crates/geode-diagnostics/src/model.rs \
+  'pub const UNLIMITED_LIMIT_BYTES: u64 = 1 << 50;' \
+  'pub const UNLIMITED_LIMIT_BYTES: u64 = (1 << 50) - 1;' \
+  geode-diagnostics perf_model_formats_process_memory_and_duckdb_memory_detail
+
+run_mutation "shell: the reload poll never copies process memory into diagnostics" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                                if d.refresh_memory(&reading) {' \
+  '                                if false {' \
+  geode-shell the_reload_poll_copies_process_memory_only_while_watched
+
+run_mutation "shell: the reload poll logs process memory only while watched" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                        crate::memory::emit(log, &reading);' \
+  '                        if watched { crate::memory::emit(log, &reading); }' \
+  geode-shell the_reload_poll_copies_process_memory_only_while_watched
+
+run_mutation "catalog: a GiB memory limit reads as GB" \
+  crates/geode-data/src/query/catalog.rs \
+  '        "gib" => 1024f64.powi(3),' \
+  '        "gib" => 1e9,' \
+  geode-data duckdb_size_text_parses_in_every_form_duckdb_writes
+
+run_mutation "catalog: an unlimited memory limit (PiB) is unreadable" \
+  crates/geode-data/src/query/catalog.rs \
+  '        "pib" => 1024f64.powi(5),' \
+  '        "pib" => return None,' \
+  geode-data the_catalog_reads_a_configured_memory_limit
+
+run_mutation "catalog: the memory limit is not read" \
+  crates/geode-data/src/query/catalog.rs \
+  '    let memory_limit_bytes = memory_limit_bytes(conn)?;' \
+  '    let memory_limit_bytes = 0;' \
+  geode-data the_catalog_reads_a_configured_memory_limit
+
+run_mutation "catalog: zero-byte memory tags are kept" \
+  crates/geode-data/src/query/catalog.rs \
+  'where memory_usage_bytes > 0' \
+  'where true' \
+  geode-data the_catalog_lists_every_partitions_generations_with_the_live_one_marked
 
 run_mutation "diagnostics: MAJ-4 — restart_required re-embedded in the summary" \
   crates/geode-shell/src/diagnostics.rs \
@@ -30167,7 +30389,7 @@ run_mutation "link: the chip's fill is the guarded color" \
 
 # One group both ways is one chip; the tooltip names the chooser's action,
 # the only place the chip's keyboard route is shown; the chip is as tall as
-# the chips beside it and takes no press.
+# the chips beside it, and a press on it queues the chooser on its tile.
 run_mutation "link: one group is one chip" \
   crates/geode-tile/src/header.rs \
   '        (Some(follow), Some(emit)) if follow == emit => [Some(chip(follow, LinkRole::Both)), None],' \
@@ -30195,39 +30417,64 @@ run_mutation "link: the chip is as tall as its neighbours" \
         .text_color(paint.text)' \
   geode-tile the_link_chip_paints_in_the_fixed_tail
 
-run_mutation "link: the chip takes no press" \
+run_mutation "link: a chip press queues the chooser" \
   crates/geode-tile/src/header.rs \
-  '        .debug_selector(move || format!("tile-link-{tile}-{letter}-{role}"))
-        .child(letter)' \
-  '        .debug_selector(move || format!("tile-link-{tile}-{letter}-{role}"))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(letter)' \
-  geode-tile a_press_on_the_link_chip_reaches_the_tile
+  '                    f.request_link_chooser(tile);' \
+  '                    let _ = tile;' \
+  geode-tile a_press_on_the_link_chip_queues_the_chooser_on_its_tile
+
+run_mutation "link: a chip press stops at the chip" \
+  crates/geode-tile/src/header.rs \
+  '            move |_, window, cx| {
+                cx.stop_propagation();
+                window.prevent_default();
+                let Some(tile) = frame.tile() else {' \
+  '            move |_, window, cx| {
+                window.prevent_default();
+                let Some(tile) = frame.tile() else {' \
+  geode-tile a_press_on_the_link_chip_queues_the_chooser_on_its_tile
+
+# The shell drains a chip's request: it focuses the chip's tile first, so
+# the chooser opens on that tile and not on the one that held focus.
+run_mutation "link: the frame observer drains a chip request" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            self.open_link_chooser_on(tile, window, cx);' \
+  '            let _ = tile;' \
+  geode-shell a_link_chip_request_focuses_its_tile_and_opens_the_chooser
+
+run_mutation "link: a chip request focuses its tile" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if !self.focus_pressed_tile(tile) {
+            return;
+        }
+        self.leave_command_line(window, cx);' \
+  '        self.leave_command_line(window, cx);' \
+  geode-shell a_link_chip_request_focuses_its_tile_and_opens_the_chooser
 
 # Every module's header passes the frame's answer to the shared cluster;
 # a module that drops the line shows no chip for a group it is in.
 run_mutation "link: the blotter's header shows the chip" \
   crates/geode-blotter/src/tile.rs \
   '        cluster.links = geode_tile::header::link_chips(&self.frame, cx);' \
-  '        cluster.links = [None, None];' \
+  '        cluster.links = Default::default();' \
   geode-blotter the_header_shows_the_link_group_the_tile_follows
 
 run_mutation "link: the pricer's header shows the chip" \
   crates/geode-pricer/src/tile.rs \
   '                links: geode_tile::header::link_chips(&self.frame, cx),' \
-  '                links: [None, None],' \
+  '                links: Default::default(),' \
   geode-pricer the_header_shows_the_link_group_the_tile_follows
 
 run_mutation "link: the market-data header shows the chip" \
   crates/geode-marketdata/src/tile.rs \
   '            geode_tile::header::link_chips(&self.frame, cx),' \
-  '            [None, None],' \
+  '            Default::default(),' \
   geode-marketdata the_header_shows_the_link_group_the_tile_follows
 
 run_mutation "link: the timeseries header shows the chip" \
   crates/geode-timeseries/src/tile/mod.rs \
   '                geode_tile::header::link_chips(&self.frame, cx),' \
-  '                [None, None],' \
+  '                Default::default(),' \
   geode-timeseries the_header_shows_the_link_group_the_tile_follows
 
 # A blotter posts its cursor row's one underlying, can emit before it has

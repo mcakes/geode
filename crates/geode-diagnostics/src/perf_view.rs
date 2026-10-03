@@ -2,6 +2,7 @@
 //! the UI work budget is guidance, not a threshold for coloring those intervals.
 
 use geode_shell::fonts;
+use geode_shell::memory;
 use geode_shell::perf::format_ms;
 use geode_shell::shell::{chip, scale};
 use gpui::prelude::*;
@@ -14,6 +15,9 @@ use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use crate::model::{Percentiles, PerfModel};
 use crate::page::DiagnosticsPage;
 use crate::page_chrome::probed;
+
+/// Help suffix on every row read from the catalog rather than sampled.
+const FROM_SNAPSHOT: &str = "from the last catalog snapshot";
 
 /// Histogram height in design pixels; all bar heights follow the rem scale.
 const HISTOGRAM_HEIGHT: f32 = 64.0;
@@ -55,7 +59,8 @@ pub(crate) struct PerformanceView {
     timings: [Timing; 3],
     bars: Vec<Bar>,
     histogram_summary: SharedString,
-    resources: [(&'static str, SharedString, SharedString); 4],
+    memory: [(&'static str, SharedString, SharedString); 4],
+    resources: [(&'static str, SharedString, SharedString); 3],
     has_samples: bool,
     dropped: bool,
     refused: bool,
@@ -70,10 +75,17 @@ impl PerformanceView {
 
     #[cfg(test)]
     pub(crate) fn resource(&self, label: &str) -> Option<&str> {
-        self.resources
+        self.metric(label).map(|(value, _)| value)
+    }
+
+    /// A Memory or Storage row's `(value, help)` by label.
+    #[cfg(test)]
+    pub(crate) fn metric(&self, label: &str) -> Option<(&str, &str)> {
+        self.memory
             .iter()
+            .chain(&self.resources)
             .find(|(l, _, _)| *l == label)
-            .map(|(_, value, _)| value.as_ref())
+            .map(|(_, value, help)| (value.as_ref(), help.as_ref()))
     }
 
     pub(crate) fn new(m: &PerfModel) -> Self {
@@ -113,6 +125,78 @@ impl PerformanceView {
             })
             .collect();
         let unavailable = || SharedString::from("Not available");
+        let waiting = || SharedString::from("Waiting for a catalog snapshot");
+        let snapshot = |text: String| SharedString::from(format!("{text} · {FROM_SNAPSHOT}"));
+        let catalog = !m.threads.is_empty();
+        let memory = [
+            match &m.process {
+                Some(p) => (
+                    "Process memory",
+                    p.current.clone().into(),
+                    format!("Peak {} at {} · {}", p.peak, p.peak_at, memory::MEASURE).into(),
+                ),
+                None => (
+                    "Process memory",
+                    unavailable(),
+                    if memory::SUPPORTED {
+                        "Waiting for the first sample".into()
+                    } else {
+                        "Not measured on this platform".into()
+                    },
+                ),
+            },
+            (
+                "DuckDB memory",
+                if !catalog {
+                    unavailable()
+                } else if m.memory_limit.is_empty() {
+                    format!("{} of unknown limit", m.memory).into()
+                } else if m.memory_limit == crate::model::UNLIMITED {
+                    format!("{} · no limit", m.memory).into()
+                } else {
+                    format!("{} of {}", m.memory, m.memory_limit).into()
+                },
+                if catalog {
+                    snapshot(format!("{} threads", m.threads))
+                } else {
+                    waiting()
+                },
+            ),
+            (
+                "Temporary files",
+                if catalog {
+                    m.temp.clone().into()
+                } else {
+                    unavailable()
+                },
+                if catalog {
+                    snapshot("Spilled to disk".into())
+                } else {
+                    waiting()
+                },
+            ),
+            (
+                "Largest DuckDB tags",
+                match m.memory_top.first() {
+                    _ if !catalog => unavailable(),
+                    Some((tag, _)) => tag.clone().into(),
+                    None => "None".into(),
+                },
+                if !catalog {
+                    waiting()
+                } else if m.memory_top.is_empty() {
+                    snapshot("No tag holds memory".into())
+                } else {
+                    snapshot(
+                        m.memory_top
+                            .iter()
+                            .map(|(tag, size)| format!("{tag} {size}"))
+                            .collect::<Vec<_>>()
+                            .join(" · "),
+                    )
+                },
+            ),
+        ];
         Self {
             timings: [
                 Timing::new(
@@ -132,6 +216,7 @@ impl PerformanceView {
                 ),
             ],
             bars,
+            memory,
             histogram_summary: format!("{} samples · {} above 100 ms", m.frame_count, m.overflow)
                 .into(),
             resources: [
@@ -143,22 +228,9 @@ impl PerformanceView {
                         m.database.clone().into()
                     },
                     if m.database.is_empty() {
-                        "Waiting for a catalog snapshot".into()
+                        waiting()
                     } else {
                         format!("{} used · {} blocks", m.used, m.block_size).into()
-                    },
-                ),
-                (
-                    "DuckDB memory",
-                    if m.memory.is_empty() {
-                        unavailable()
-                    } else {
-                        m.memory.clone().into()
-                    },
-                    if m.threads.is_empty() {
-                        "Waiting for a catalog snapshot".into()
-                    } else {
-                        format!("{} threads · from the last catalog snapshot", m.threads).into()
                     },
                 ),
                 (
@@ -291,7 +363,7 @@ pub(crate) fn render(
                     )
                 }))
         }));
-    let resources = m.resources.iter().map(|(label, value, help)| {
+    let metric = |(label, value, help): &(&'static str, SharedString, SharedString)| {
         v_flex()
             .py_2()
             .gap_1()
@@ -321,7 +393,7 @@ pub(crate) fn render(
                     .text_color(theme.muted_foreground)
                     .child(help.clone()),
             )
-    });
+    };
     let explanation = div()
         .text_xs()
         .text_color(theme.muted_foreground)
@@ -383,8 +455,10 @@ pub(crate) fn render(
                 .child(v_flex().children(timings))
                 .child(budgets)
                 .child(distribution)
+                .child(heading("Memory"))
+                .children(m.memory.iter().map(metric))
                 .child(heading("Storage and delivery"))
-                .children(resources),
+                .children(m.resources.iter().map(metric)),
         )
         .overflow_y_scrollbar()
         .into_any_element()
@@ -393,9 +467,13 @@ pub(crate) fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geode_core::clock::Clock;
     use geode_core::log::LogLevels;
+    use geode_core::query::CatalogSnapshot;
     use geode_shell::diagnostics::Diagnostics;
+    use geode_shell::memory::MemoryReading;
     use geode_shell::perf::{FrameHistogram, RequeryStats};
+    use std::time::{Duration, SystemTime};
 
     #[test]
     fn performance_readouts_keep_sample_counts_and_overflow_separate() {
@@ -409,7 +487,7 @@ mod tests {
         requery.record_submit_to_snapshot(2_000);
         requery.record_snapshot_to_paint(3_000);
         requery.record_snapshot_to_paint(4_000);
-        let view = PerformanceView::new(&crate::model::perf_model(&d, &requery));
+        let view = PerformanceView::new(&crate::model::perf_model(&d, &requery, Clock::utc()));
         assert_eq!(view.timings[0].values[3].as_ref(), "5");
         assert_eq!(view.timings[1].values[3].as_ref(), "1");
         assert_eq!(view.timings[2].values[3].as_ref(), "2");
@@ -425,6 +503,7 @@ mod tests {
         let empty = PerformanceView::new(&crate::model::perf_model(
             &Diagnostics::new(LogLevels::default()),
             &RequeryStats::new(),
+            Clock::utc(),
         ));
         assert!(!empty.has_samples);
         assert_eq!(
@@ -438,9 +517,100 @@ mod tests {
     fn the_refused_requests_row_reads_the_status_bar_counter() {
         let mut d = Diagnostics::new(LogLevels::default());
         d.note_refused(3);
-        let view = PerformanceView::new(&crate::model::perf_model(&d, &RequeryStats::new()));
+        let view = PerformanceView::new(&crate::model::perf_model(
+            &d,
+            &RequeryStats::new(),
+            Clock::utc(),
+        ));
         assert_eq!(view.resource("Refused requests"), Some("3"));
         assert!(view.refused);
         assert_eq!(view.resource("Dropped events"), Some("0"));
+    }
+
+    #[test]
+    fn the_memory_rows_wait_then_read_the_sample_and_the_catalog() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let mut d = Diagnostics::new(LogLevels::default());
+        let view = PerformanceView::new(&crate::model::perf_model(
+            &d,
+            &RequeryStats::new(),
+            Clock::utc(),
+        ));
+        let waiting_sample = if memory::SUPPORTED {
+            "Waiting for the first sample"
+        } else {
+            "Not measured on this platform"
+        };
+        assert_eq!(
+            view.metric("Process memory"),
+            Some(("Not available", waiting_sample))
+        );
+        for label in ["DuckDB memory", "Temporary files", "Largest DuckDB tags"] {
+            assert_eq!(
+                view.metric(label),
+                Some(("Not available", "Waiting for a catalog snapshot")),
+                "{label}"
+            );
+        }
+
+        d.watch();
+        d.refresh_memory(&MemoryReading {
+            current_bytes: 3 * GIB,
+            peak_bytes: 7 * GIB,
+            peak_at: SystemTime::UNIX_EPOCH + Duration::from_secs(3_723),
+        });
+        d.set_catalog(
+            CatalogSnapshot {
+                memory_bytes: 2 * GIB,
+                memory_limit_bytes: 38 * GIB,
+                temp_bytes: 0,
+                memory_top: vec![("BASE_TABLE".into(), GIB), ("HASH_TABLE".into(), GIB / 2)],
+                threads: 8,
+                ..CatalogSnapshot::default()
+            },
+            SystemTime::now(),
+        );
+        let view = PerformanceView::new(&crate::model::perf_model(
+            &d,
+            &RequeryStats::new(),
+            Clock::utc(),
+        ));
+        let peak_help = format!("Peak 7.0GB at 01:02:03 · {}", memory::MEASURE);
+        assert_eq!(
+            view.metric("Process memory"),
+            Some(("3.0GB", peak_help.as_str()))
+        );
+        assert_eq!(
+            view.metric("DuckDB memory"),
+            Some((
+                "2.0GB of 38.0GB",
+                "8 threads · from the last catalog snapshot"
+            ))
+        );
+        let mut unlimited = d.catalog.clone().unwrap();
+        unlimited.memory_limit_bytes = u64::MAX;
+        d.set_catalog(unlimited, SystemTime::now());
+        let unlimited_view = PerformanceView::new(&crate::model::perf_model(
+            &d,
+            &RequeryStats::new(),
+            Clock::utc(),
+        ));
+        assert_eq!(
+            unlimited_view
+                .metric("DuckDB memory")
+                .map(|(value, _)| value),
+            Some("2.0GB · no limit")
+        );
+        assert_eq!(
+            view.metric("Temporary files"),
+            Some(("0B", "Spilled to disk · from the last catalog snapshot"))
+        );
+        assert_eq!(
+            view.metric("Largest DuckDB tags"),
+            Some((
+                "BASE_TABLE",
+                "BASE_TABLE 1.0GB · HASH_TABLE 512.0MB · from the last catalog snapshot"
+            ))
+        );
     }
 }

@@ -33,6 +33,71 @@ snapshot-to-paint, and combined requery latency. It has no timer and therefore
 does not wake an idle application merely to repaint statistics. `perf::reset`
 clears the counters.
 
+### Memory
+
+`geode_shell::memory::sample` reads this process's memory from the operating
+system on every 500 ms reload-poll tick, whether or not diagnostics is open:
+
+- macOS: `task_vm_info.phys_footprint` and its lifetime peak
+  (`ledger_phys_footprint_peak`). This is Activity Monitor's Memory column.
+  Unlike resident size it counts dirty pages that were compressed or
+  swapped out, so it does not fall merely because the system is under
+  memory pressure.
+- Windows: `PROCESS_MEMORY_COUNTERS_EX.PrivateUsage` (private bytes) and
+  `PeakPagefileUsage` (peak private commit). Private bytes count committed
+  memory whether resident or paged out; the working set is not used.
+- Other platforms read nothing; the page shows the process row as not
+  available.
+- A failed read is skipped silently and the tick does nothing else with
+  memory. Before any success the page shows the row as not available. After
+  one, the page keeps showing the last copied reading with no stale marker,
+  the tracker is not advanced, and the debug cadence pauses: the next
+  successful sample is compared with the last successful one, and logs its
+  debug line if a minute has passed since the last.
+
+A pure `MemoryTracker` keeps current, a peak that never falls, and the wall
+time of the tick that first saw the peak (the first sample's peak may predate
+it, since the operating system's peak covers the whole process). It logs on
+the `geode::memory` target (`[log] memory = "debug"`):
+
+- `info` once at the first sample as the baseline;
+- `info` when the peak rises at least 256 MiB, or at least 25%, above the
+  last *logged* peak, so slow growth logs once it accumulates;
+- `debug` with current and peak at most once a minute, the first a minute
+  after the baseline.
+
+The poll copies the reading into `Diagnostics` only while the page is
+watched, and then only when one of these holds:
+
+- it is the first refresh since the page became watched (so a reopened page
+  never shows the reading and peak time it had when hidden);
+- current has moved from the copied value by at least
+  `memory::current_hysteresis`: the larger of 128 MiB and 5% of the copied
+  value;
+- the displayed peak text (`memory::format_bytes`, one decimal of the largest
+  binary unit) changes.
+
+An idle macOS footprint was measured moving about 90 MB between ticks, which
+crosses one-decimal display steps on irregular ticks; comparing current at
+display granularity would repaint an idle page. Under the hysteresis such
+jitter copies nothing. The peak never falls, so its text changes only on
+growth and cannot alternate. The guarantee is therefore: a footprint that
+moves less than the hysteresis around its last copied value, under a steady
+peak, never notifies, preserving the `IDLE_CUTOFF` guarantee that a
+poll-spaced redraw cannot sustain a repaint loop. Real growth or release past
+the hysteresis notifies once per crossing. The cost is accuracy: the page can
+show a current up to the hysteresis away from the live value, and a peak rise
+too small to change the displayed peak leaves the previous peak time shown.
+
+DuckDB's figures come from the catalog snapshot instead: `duckdb_memory()`
+in use and its three largest non-zero tags, `duckdb_temporary_files()` spill
+bytes, and the `memory_limit` setting. DuckDB reports the limit only as text
+with one truncated decimal (`"38.3 GiB"`), so the parsed figure can be up to
+a tenth of a unit low; unreadable text warns on `geode::query` and shows as
+an unknown limit. Geode does not set `memory_limit`; DuckDB's default is 80%
+of physical memory. A limit of 1 PiB or more, which is how DuckDB reports
+`memory_limit = '-1'` (16383.9 PiB), shows as no limit.
+
 The optional `profiling` feature enables GPUI's profiler, frame overlay, input
 latency histograms, and hang detection:
 
@@ -251,6 +316,10 @@ measure already reads. Re-measure on an idle machine before quoting them.
   generation of every sheet (up to 201 each), and the diagnostics entity
   compares the new snapshot whole on the UI thread. Unmeasured; with hundreds of sheets it may need
   a narrower catalog read.
+- The process memory peak time shows hours, minutes and seconds only; a peak
+  reached on an earlier day reads as that time of day. The DuckDB memory rows
+  are as fresh as the last catalog snapshot, which is read on publication
+  while the page is visible, not on the memory poll.
 - Diagnostics perf rows sample requery and catalog resource metrics on their
   next rebuild; those inputs have no dedicated perf invalidation. Histogram
   copying compares sample count and maximum, so idle-only changes and a
