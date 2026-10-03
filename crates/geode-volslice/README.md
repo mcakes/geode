@@ -103,6 +103,8 @@ reverse are never both on.
 
 The strip is the sorted union of every loaded kind's expiries, with none
 before today, each row marked with the digits of the kinds that have it.
+A curve paints at every strip expiry, not only at its document's terms: the
+vol model interpolates between terms and extrapolates past them.
 The first strip fronts its first row; a restored set that names no listed
 expiry fronts the first row too, and an empty strip keeps the set for when
 data returns.

@@ -1012,7 +1012,40 @@ mod tests {
     }
 
     fn answer(plan: &Plan) -> VolSliceOutcome {
-        let config = VolConfig::with(Arc::new(geode_pricing::DemoVolModel));
+        answer_by(plan, Arc::new(geode_pricing::DemoVolModel))
+    }
+
+    /// The stand-in, except that it refuses `REFUSED`: the per-expiry
+    /// failure the notice tests need, now that the stand-in itself
+    /// extrapolates to any expiry.
+    struct Refusing;
+    const REFUSED: &str = "2027-06-18";
+    impl geode_core::vol::VolModel for Refusing {
+        fn name(&self) -> &str {
+            "refusing"
+        }
+        fn kind(&self) -> &str {
+            "cvi_params"
+        }
+        fn slice(
+            &self,
+            doc: &DocumentRows,
+            req: &SliceRequest,
+        ) -> Result<geode_core::vol::SliceResult, geode_core::vol::VolError> {
+            if req.expiry == d(REFUSED) {
+                return Err(geode_core::vol::VolError(format!(
+                    "no params for {REFUSED}"
+                )));
+            }
+            geode_pricing::DemoVolModel.slice(doc, req)
+        }
+        fn coordinates(&self, req: &MapRequest) -> Result<Vec<f64>, geode_core::vol::VolError> {
+            geode_pricing::DemoVolModel.coordinates(req)
+        }
+    }
+
+    fn answer_by(plan: &Plan, model: Arc<dyn geode_core::vol::VolModel>) -> VolSliceOutcome {
+        let config = VolConfig::with(model);
         let params = plan.params(QueryKey(1), 1, Instant::now());
         VolSliceOutcome {
             key: params.key,
@@ -1028,6 +1061,32 @@ mod tests {
         state.reconcile(&s);
         let p = batch(state, &l, &s);
         model(&p, &answer(&p), &l, &palette(), state.split, 7).unwrap()
+    }
+
+    /// `built`, answered by a model that refuses `REFUSED`.
+    fn built_refusing(state: &mut State) -> Built {
+        let l = fixture();
+        let s = strip(&l, d(TODAY));
+        state.reconcile(&s);
+        let p = batch(state, &l, &s);
+        let o = answer_by(&p, Arc::new(Refusing));
+        model(&p, &o, &l, &palette(), state.split, 7).unwrap()
+    }
+
+    /// 2027-06-18 lies past the fixture CVI's last term: the stand-in
+    /// extrapolates, so both curves paint there beside the chain.
+    #[test]
+    fn an_expiry_past_the_last_term_paints_its_curves() {
+        let mut st = State {
+            active: Some([d("2027-06-18")].into()),
+            ..State::default()
+        };
+        let b = built(&mut st);
+        assert!(b.notices.is_empty(), "{:?}", b.notices);
+        let labels: Vec<&str> = b.model.slots.iter().map(|s| s.label.as_ref()).collect();
+        for want in ["cvi 2027-06-18", "cvi draft 2027-06-18", "chain 2027-06-18"] {
+            assert!(labels.contains(&want), "{want}: {labels:?}");
+        }
     }
 
     #[test]
@@ -1369,18 +1428,18 @@ mod tests {
 
     #[test]
     fn failed_jobs_become_deduplicated_notices() {
-        // 2027-06-18 is past the last term: both curves refuse there, and
-        // the cvi's evaluation at the chain strikes for the difference
-        // refuses with the very same words as its dense curve.
+        // The model refuses 2027-06-18: both curves fail there, and the
+        // cvi's evaluation at the chain strikes for the difference fails
+        // with the very same words as its dense curve.
         let mut st = State {
-            active: Some([d("2026-10-16"), d("2027-06-18")].into()),
+            active: Some([d("2026-10-16"), d(REFUSED)].into()),
             diffs: Pair::new(Kind::Cvi, Kind::Chain).into_iter().collect(),
             ..State::default()
         };
-        let b = built(&mut st);
+        let b = built_refusing(&mut st);
         assert_eq!(b.notices.len(), 2, "one per kind: {:?}", b.notices);
-        assert!(
-            b.notices[0].starts_with("no cvi curve at 2027-06-18: expiry 2027-06-18 is outside"),
+        assert_eq!(
+            b.notices[0], "no cvi curve at 2027-06-18: no params for 2027-06-18",
             "{:?}",
             b.notices
         );
@@ -1393,17 +1452,17 @@ mod tests {
         );
     }
 
-    /// Past the last term both dense curves refuse, and the difference
+    /// Where the model refuses, both dense curves fail, and the difference
     /// reading the minuend's strikes fails because its source did: the two
     /// curves' notices say why, and the difference adds none.
     #[test]
     fn a_difference_whose_strikes_failed_adds_no_notice() {
         let mut st = State {
-            active: Some([d("2027-06-18")].into()),
+            active: Some([d(REFUSED)].into()),
             diffs: Pair::new(Kind::Draft, Kind::Cvi).into_iter().collect(),
             ..State::default()
         };
-        let b = built(&mut st);
+        let b = built_refusing(&mut st);
         assert_eq!(b.notices.len(), 2, "{:?}", b.notices);
         assert!(
             b.notices.iter().all(|n| !n.contains("job")),

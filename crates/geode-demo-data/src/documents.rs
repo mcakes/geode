@@ -1107,6 +1107,7 @@ pub mod chain {
     }
 
     /// The CVI's term dates.
+    #[cfg(test)]
     fn terms(cvi: &DocumentRows) -> Option<&[NaiveDate]> {
         cvi.axes.iter().find_map(|(n, c)| match c {
             Column::Date(d) if n == "term" => Some(d.as_slice()),
@@ -1114,12 +1115,8 @@ pub mod chain {
         })
     }
 
-    /// The CVI's first term, for expiries before its range.
-    fn first_term(cvi: &DocumentRows) -> Option<NaiveDate> {
-        terms(cvi)?.iter().min().copied()
-    }
-
-    /// The CVI's last term, for expiries past its range.
+    /// The CVI's last term.
+    #[cfg(test)]
     fn last_term(cvi: &DocumentRows) -> Option<NaiveDate> {
         terms(cvi)?.iter().max().copied()
     }
@@ -1170,23 +1167,20 @@ pub mod chain {
             state.next = (state.next + 1) % EXPIRIES;
             let expiry = self.expiries[idx];
 
-            let first = first_term(cvi).expect("a demo CVI document has terms");
-            let last = last_term(cvi).expect("a demo CVI document has terms");
-            // The model refuses a date outside the terms: an expiry beyond
-            // either end takes that end's smile.
-            let curve_date = expiry.clamp(first, last);
+            // The model extrapolates past either end of the terms, so a
+            // chain beyond them is priced off the curve a viewer paints.
             let slice = |grid: Grid| {
                 DemoVolModel
                     .slice(
                         cvi,
                         &SliceRequest {
-                            expiry: curve_date,
+                            expiry,
                             coordinate: Coordinate::Strike,
                             grid,
                             density: false,
                         },
                     )
-                    .expect("the demo CVI slices at any date within its terms")
+                    .expect("the demo CVI slices at any date")
             };
             // An empty grid returns the forward alone.
             let forward = slice(Grid::Dense { n: 0, cover: None }).forward;
@@ -1441,7 +1435,7 @@ pub mod chain {
         }
 
         #[test]
-        fn an_expiry_beyond_the_cvi_takes_its_last_term() {
+        fn an_expiry_beyond_the_cvi_still_publishes() {
             // The demo CVI has eight terms from the anchor month; the chain's
             // last expiries lie past them and must still publish.
             let mut g = ChainGenerator::new(1, vec!["SPX".into()], anchor());
@@ -1504,8 +1498,8 @@ pub mod chain {
 
         #[test]
         fn an_expiry_past_the_cvi_prices_at_its_own_time_to_expiry() {
-            // The last expiry lies past the CVI's terms: its smile is the
-            // last term's, but its time to expiry is its own.
+            // The last expiry lies past the CVI's terms: the model
+            // extrapolates, and the time to expiry is the expiry's own.
             let mut g = ChainGenerator::new(1, vec!["SPX".into()], anchor());
             let cvi = cvi();
             let doc = (0..EXPIRIES)

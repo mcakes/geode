@@ -1160,7 +1160,11 @@ published curve and the quotes are told apart at a glance. The step goes
 toward the background (paler) on a theme where every one of the first 24
 expiries can keep its contrast that way, and toward the foreground for
 every expiry otherwise (darker on most light themes, lighter on dark
-ones): one chart never mixes the two. A chip per
+ones): one chart never mixes the two. Both curves are the vol model's
+slices at the expiry, whether or not the document has params there: the
+model interpolates between terms and extrapolates past them, so every
+strip expiry has a curve (the strip's kind digits still mark where each
+document has its own terms). A chip per
 loaded kind sits in the header; a hidden kind's chip is muted and its own
 jobs leave the batch. Source identity is absent from the chain's rows, so
 there is one chain kind however many sources publish chains.

@@ -8,7 +8,12 @@
 //! `atm + skew·k + param/100`; the smile is the natural cubic spline
 //! through a term's knots; between terms total variance is linear in
 //! time at equal `k` and the forward log-linear. Outside the term range
-//! it refuses rather than extrapolating; past a term's node ladder in
+//! the nearest term's smile holds flat in vol at equal `k` (total
+//! variance grows with time and never turns down), and the forward keeps
+//! the nearest pair's log-linear carry: before the first term that pair
+//! is the document's `spot_ref` at time zero and the first term, past
+//! the last it is the last two terms, and with no pair the end term's
+//! forward holds. Past a term's node ladder in
 //! strike the smile continues the spline's end slope, and a vol never
 //! goes below `VOL_FLOOR`. A dense grid spans the ladder, widened to a
 //! request's cover, its points packed toward the forward.
@@ -49,6 +54,10 @@ struct Term {
 struct Surface {
     /// Sorted by date.
     terms: Vec<Term>,
+    anchor: NaiveDate,
+    /// The `spot_ref` attribute when it is a positive number: the forward
+    /// at time zero, which the carry before the first term runs from.
+    spot: Option<f64>,
 }
 
 /// What a slice at one expiry evaluates through: a forward and a vol
@@ -191,16 +200,22 @@ impl Surface {
                 pair[0].date, pair[1].date
             )));
         }
-        Ok(Surface { terms: out })
+        let spot = match doc.attributes.iter().find(|(n, _)| n == "spot_ref") {
+            Some((_, Value::F64(v))) if positive(*v) => Some(*v),
+            _ => None,
+        };
+        Ok(Surface {
+            terms: out,
+            anchor,
+            spot,
+        })
     }
 
     fn curve_at(self, expiry: NaiveDate) -> Result<Curve, VolError> {
         let first = self.terms[0].date;
         let last = self.terms[self.terms.len() - 1].date;
         if expiry < first || expiry > last {
-            return Err(VolError(format!(
-                "expiry {expiry} is outside the document's terms {first}..{last}"
-            )));
+            return Ok(self.extrapolated(expiry));
         }
         let mut terms = self.terms;
         if let Some(i) = terms.iter().position(|t| t.date == expiry) {
@@ -240,6 +255,47 @@ impl Surface {
                 ((wa + (wb - wa) * w) / t).sqrt().max(VOL_FLOOR)
             }),
         })
+    }
+}
+
+impl Surface {
+    /// An expiry before the first term or after the last: the end term's
+    /// smile flat in vol at equal `k` over its own ladder, and the forward
+    /// carried log-linearly in time from the nearest pair (module doc).
+    fn extrapolated(mut self, expiry: NaiveDate) -> Curve {
+        let t = year_fraction(self.anchor, expiry);
+        let before = expiry < self.terms[0].date;
+        // The pair the carry runs through, as (t, forward) at each end.
+        let pair = if before {
+            let first = &self.terms[0];
+            self.spot.map(|s| ((0.0, s), (first.t, first.forward)))
+        } else {
+            let n = self.terms.len();
+            (n >= 2).then(|| {
+                let (a, b) = (&self.terms[n - 2], &self.terms[n - 1]);
+                ((a.t, a.forward), (b.t, b.forward))
+            })
+        };
+        let end = if before {
+            self.terms.swap_remove(0)
+        } else {
+            self.terms.pop().expect("a surface has terms")
+        };
+        let forward = match pair {
+            Some(((ta, fa), (tb, fb))) => {
+                let carry = (fb.ln() - fa.ln()) / (tb - ta);
+                (end.forward.ln() + carry * (t - end.t)).exp()
+            }
+            None => end.forward,
+        };
+        let smile = end.smile;
+        Curve {
+            t,
+            forward,
+            k_min: end.k_min,
+            k_max: end.k_max,
+            vol: Box::new(move |k| smile.eval(k).max(VOL_FLOOR)),
+        }
     }
 }
 
@@ -602,15 +658,71 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_expiry_outside_the_terms_is_refused_naming_the_range() {
-        let doc = flat(0.2);
-        for e in ["2026-09-15", "2028-01-01"] {
-            let err = DemoVolModel.slice(&doc, &at(e, &[100.0])).unwrap_err();
-            assert_eq!(
-                err.0,
-                format!("expiry {e} is outside the document's terms 2026-10-16..2027-04-16")
-            );
+    fn outside_the_terms_the_end_smile_holds_flat_in_vol_at_equal_k() {
+        // Terms 2026-10-01 and 2026-12-01 with different smiles: before the
+        // first, the first's vols at equal k; past the last, the last's.
+        let doc = cvi_doc(
+            "2026-09-01",
+            &[
+                ("2026-10-01", 100.0, 0.20, -0.8),
+                ("2026-12-01", 104.0, 0.30, -0.4),
+            ],
+            |n, ti| 0.3 * n.abs() + ti as f64,
+        );
+        for (expiry, term) in [("2026-09-10", "2026-10-01"), ("2027-06-01", "2026-12-01")] {
+            let ks = [-0.2, -0.05, 0.0, 0.05];
+            let out = DemoVolModel.slice(&doc, &at(expiry, &[1.0])).unwrap();
+            let end = DemoVolModel.slice(&doc, &at(term, &[1.0])).unwrap();
+            let strikes = |f: f64| ks.iter().map(|k| f * (1.0 + k)).collect::<Vec<_>>();
+            let out = DemoVolModel
+                .slice(&doc, &at(expiry, &strikes(out.forward)))
+                .unwrap();
+            let end = DemoVolModel
+                .slice(&doc, &at(term, &strikes(end.forward)))
+                .unwrap();
+            for (o, e) in out.points.iter().zip(&end.points) {
+                assert!((o.vol - e.vol).abs() < 1e-9, "{expiry}: {o:?} vs {e:?}");
+            }
         }
+    }
+
+    #[test]
+    fn outside_the_terms_the_forward_keeps_the_nearest_carry() {
+        let doc = cvi_doc(
+            "2026-09-01",
+            &[
+                ("2026-10-01", 102.0, 0.2, 0.0),
+                ("2026-12-01", 110.0, 0.2, 0.0),
+            ],
+            |_, _| 0.0,
+        );
+        let t = |d: &str| (date(d) - date("2026-09-01")).num_days() as f64 / 365.0;
+        let fwd = |e: &str| DemoVolModel.slice(&doc, &at(e, &[100.0])).unwrap().forward;
+        // Past the last term: the last two terms' carry continues.
+        let carry = (110.0f64 / 102.0).ln() / (t("2026-12-01") - t("2026-10-01"));
+        let expected = 110.0 * (carry * (t("2027-03-01") - t("2026-12-01"))).exp();
+        assert!((fwd("2027-03-01") - expected).abs() < 1e-9);
+        // Before the first: from spot_ref (100) at the anchor to the first.
+        let carry = (102.0f64 / 100.0).ln() / t("2026-10-01");
+        let expected = 100.0 * (carry * t("2026-09-15")).exp();
+        assert!((fwd("2026-09-15") - expected).abs() < 1e-9);
+        // With no spot_ref the first term's forward holds before it.
+        let mut bare = doc.clone();
+        bare.attributes.retain(|(n, _)| n != "spot_ref");
+        let r = DemoVolModel
+            .slice(&bare, &at("2026-09-15", &[100.0]))
+            .unwrap();
+        assert_eq!(r.forward, 102.0);
+    }
+
+    #[test]
+    fn a_one_term_document_holds_its_forward_past_the_term() {
+        let doc = cvi_doc("2026-09-01", &[("2026-10-01", 102.0, 0.2, 0.0)], |_, _| 0.0);
+        let r = DemoVolModel
+            .slice(&doc, &at("2027-01-15", &[100.0]))
+            .unwrap();
+        assert_eq!(r.forward, 102.0);
+        assert!((r.points[0].vol - 0.2).abs() < 1e-9);
     }
 
     #[test]

@@ -17043,11 +17043,35 @@ run_mutation "service: cancel does not reach the pricing worker" \
 
 # ---- Vol slice door: demo model, worker and routing ----
 
-run_mutation "vol: an expiry outside the terms is refused" \
+run_mutation "vol: outside the terms the end smile holds flat in vol" \
   crates/geode-pricing/src/demo_vol.rs \
-  '        if expiry < first || expiry > last {' \
-  '        if false {' \
-  geode-pricing an_expiry_outside_the_terms_is_refused_naming_the_range
+  '            vol: Box::new(move |k| smile.eval(k).max(VOL_FLOOR)),
+        }
+    }
+}' \
+  '            vol: Box::new(move |k| (smile.eval(k) * (end.t / t).sqrt()).max(VOL_FLOOR)),
+        }
+    }
+}' \
+  geode-pricing outside_the_terms_the_end_smile_holds_flat_in_vol_at_equal_k
+
+run_mutation "vol: past the last term the forward keeps the last pair's carry" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '                (end.forward.ln() + carry * (t - end.t)).exp()' \
+  '                end.forward' \
+  geode-pricing outside_the_terms_the_forward_keeps_the_nearest_carry
+
+run_mutation "vol: before the first term the carry runs from spot_ref" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '            self.spot.map(|s| ((0.0, s), (first.t, first.forward)))' \
+  '            None::<((f64, f64), (f64, f64))>' \
+  geode-pricing outside_the_terms_the_forward_keeps_the_nearest_carry
+
+run_mutation "volslice: an expiry past the last term paints its curves" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '            return Ok(self.extrapolated(expiry));' \
+  '            return Err(VolError(format!("expiry {expiry} is outside the terms")));' \
+  geode-volslice an_expiry_past_the_last_term_paints
 
 run_mutation "vol: total variance, not vol, is linear between terms" \
   crates/geode-pricing/src/demo_vol.rs \

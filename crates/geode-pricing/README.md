@@ -28,8 +28,11 @@ covers every currency the demo reference data names.
 documents. It is a stand-in, not a model: a natural cubic spline in
 moneyness through knots the node ladder places (`node/100`), lifted by
 `atm + skew·k + param/100`, total variance linear in time between terms,
-the forward log-linear. It refuses an expiry outside the document's
-terms rather than extrapolating, floors vol at `0.01`, places points by
+the forward log-linear. Outside the document's terms it extrapolates:
+the end term's smile holds flat in vol at equal moneyness, and the forward
+keeps the nearest pair's log-linear carry (from `spot_ref` at time zero to
+the first term before it, the last two terms past it, the end term's
+forward when there is no pair). It floors vol at `0.01`, places points by
 Black call delta and returns a Breeden–Litzenberger density unclamped,
 per unit of the requested coordinate (`NaN` where delta saturates). A
 `Grid::Dense` spans a term's node ladder (between terms, the union of the
