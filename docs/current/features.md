@@ -521,11 +521,18 @@ differing delivery. `:auto` selects how unsent edits handle the transition:
 | Rebase | Move edits by row and column labels, reporting labels that cannot be resolved |
 | Replace | Discard edits and report how much unsent work was replaced |
 
+A Behind draft whose base is retained stays editable: cell, attribute, row,
+step and bump edits land against the painted base, the draft stays Behind,
+and `:rebase` later carries every edit onto the delivered generation by label.
+Upload still refuses until the delivery is resolved.
+
 Changing policy does not retroactively apply it to a held delivery. Redelivery
 of the same generation does not trigger it, and the first usable delivery
 after session restoration uses Hold. If the saved base is unavailable, a
 restored Behind draft paints the delivered grid while withholding unresolved
-cell edits. Automatic rebase also holds when the
+cell edits, and every edit route refuses (`the draft's base is gone — :rebase
+or :revert first`) because the painted grid is not the one those edits were
+keyed to. Automatic rebase also holds when the
 incoming document has no rows. Sent drafts follow the separate echo rules
 below. A snapshot that cannot build a valid grid leaves the last usable model
 and draft unchanged and reports the error.
@@ -706,7 +713,8 @@ integer column, and is never rounded to the painted grid: snapping would
 silently rewrite each cell's unpainted decimals. Empty, deleted, and
 non-number cells are skipped and counted. Each press is all-or-nothing: if
 any cell refuses (an overflow), nothing is written. A step refuses while the
-draft is Behind or its upload echo differs, as every edit does.
+draft is Behind with its base gone or its upload echo differs, as every edit
+does.
 
 - `enter` on the untouched text keeps the steps and the selection.
 - `escape` restores the draft exactly as `i` found it, provided the steps are
