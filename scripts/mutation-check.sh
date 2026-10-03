@@ -7145,21 +7145,78 @@ run_mutation "diagnostics fuzzy: issues stop matching their full text" \
   geode-diagnostics the_issue_filter_matches_cells_and_detail_and_marks_cells_only
 
 run_mutation "diagnostics fuzzy: the Log stops matching time and level" \
-  crates/geode-diagnostics/src/model.rs \
-  '            let marks = narrow.row(&[&hms_millis, r.level.as_str(), r.target, &r.message])?;' \
-  '            let marks = narrow.row(&["", "", r.target, &r.message])?;' \
-  geode-diagnostics log_rows_narrow_fuzzily_over_every_column_after_level_and_target
+  crates/geode-diagnostics/src/log_cache.rs \
+  '        narrow.row_lowered(&columns)' \
+  '        narrow.row_lowered(&columns[2..])' \
+  geode-diagnostics the_log_narrows_fuzzily_over_every_column_after_level_and_target
 
-run_mutation "diagnostics fuzzy: key marks keep the hidden document prefix" \
+run_mutation "diagnostics fuzzy: the Log ignores its level and target gates" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '        if !filter.gates(e.level, e.target) {' \
+  '        if false {' \
+  geode-diagnostics the_log_narrows_fuzzily_over_every_column_after_level_and_target
+
+# A record the held narrowing has not answered for must wait for its pass,
+# not show unfiltered under the query.
+run_mutation "diagnostics fuzzy: unanswered records show unfiltered" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '            Some(_) => continue,' \
+  '            Some(_) => None,' \
+  geode-diagnostics new_records_are_narrowed_alone_and_appended
+
+run_mutation "diagnostics fuzzy: a narrowing takes in a stretch it already answered" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '        if more.query != self.query || more.through <= self.through {' \
+  '        if more.query != self.query {' \
+  geode-diagnostics new_records_are_narrowed_alone_and_appended
+
+run_mutation "diagnostics fuzzy: a narrowing keeps entries the tail dropped" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '        self.kept.retain(|seq, _| *seq >= first);' \
+  '        self.kept.retain(|_, _| true);' \
+  geode-diagnostics new_records_are_narrowed_alone_and_appended
+
+run_mutation "diagnostics fuzzy: the cache keeps records the tail dropped" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '                while self.entries.front().is_some_and(|e| e.seq < first) {' \
+  '                while self.entries.front().is_some_and(|_| false) {' \
+  geode-diagnostics the_cache_formats_only_new_records_and_follows_the_tail
+
+run_mutation "diagnostics fuzzy: a clock change keeps the old time text" \
+  crates/geode-diagnostics/src/log_cache.rs \
+  '        if self.clock != Some(clock) {' \
+  '        if self.clock.is_none() {' \
+  geode-diagnostics the_cache_formats_only_new_records_and_follows_the_tail
+
+run_mutation "diagnostics fuzzy: a pass for a query the input dropped still applies" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if narrowed.query() != self.log_filter.text {
+            return;
+        }' \
+  '        if false {
+            return;
+        }' \
+  geode-diagnostics records_arriving_under_a_filter_are_narrowed_and_stale_passes_dropped
+
+run_mutation "diagnostics fuzzy: spaces force collapsed documents open" \
+  crates/geode-diagnostics/src/page.rs \
+  '                            if filter.trim().is_empty() {' \
+  '                            if filter.is_empty() {' \
+  geode-diagnostics a_blank_filter_leaves_collapsed_documents_collapsed
+
+# A leaf's document name is a column of its own; joined to the path as a
+# prefix, `keys` aligns through "keymap" and the `s` of "bindings".
+run_mutation "diagnostics fuzzy: a leaf matches through its document prefix" \
   crates/geode-diagnostics/src/model.rs \
-  '                        (shift_marks(marks.take(0), prefix), marks.take(1))' \
-  '                        (marks.take(0), marks.take(1))' \
+  '                        let mut marks = narrow.row(&[doc_name, &path, &value])?;' \
+  '                        let full = format!("{doc_name}.{path}");
+                        let mut marks = narrow.row(&["", &full, &value])?;' \
   geode-diagnostics config_docs_narrow_fuzzily_and_mark_keys_values_and_documents
 
 run_mutation "diagnostics fuzzy: a matching document name is not marked" \
   crates/geode-diagnostics/src/model.rs \
-  '                .row(&[doc_name])' \
-  '                .row(&[""])' \
+  '                            name_hits[r.clone()].fill(true);' \
+  '                            let _ = r;' \
   geode-diagnostics config_docs_narrow_fuzzily_and_mark_keys_values_and_documents
 
 # The typed text must reach the Log's narrowing through the input route.
@@ -7181,11 +7238,11 @@ run_mutation "diagnostics fuzzy: matches paint in raw primary" \
   '            let accent = theme.primary;' \
   geode-diagnostics match_runs_take_the_table_accent
 
-run_mutation "diagnostics fuzzy: the accent memo ignores a theme change" \
-  crates/geode-diagnostics/src/table.rs \
+run_mutation "listrow: the table accent memo ignores a theme change" \
+  crates/geode-shell/src/shell/listrow.rs \
   '            Some((k, accent)) if k == key => accent,' \
   '            Some((_, accent)) => accent,' \
-  geode-diagnostics the_accent_memo_follows_the_theme
+  geode-shell the_table_accent_memo_follows_the_theme
 
 # ---- shell: order-keeping table narrowing and the table accent
 
@@ -7221,8 +7278,8 @@ run_mutation "narrow: a word matching nowhere keeps the row" \
 
 run_mutation "narrow: ASCII columns keep their case" \
   crates/geode-shell/src/listfilter.rs \
-  '                    lowered.push(ch.to_ascii_lowercase());' \
-  '                    lowered.push(ch);' \
+  '            out.push(ch.to_ascii_lowercase());' \
+  '            out.push(ch);' \
   geode-shell narrow_is_case_insensitive_both_ways
 
 run_mutation "narrow: placements leak into the next row" \
@@ -7235,11 +7292,21 @@ run_mutation "narrow: a blank query still builds per-column marks" \
   crates/geode-shell/src/listfilter.rs \
   '        if self.words.is_empty() {
             return Some(ColumnMarks::default());
-        }' \
+        }
+        let mut lowered' \
   '        if false {
             return Some(ColumnMarks::default());
-        }' \
+        }
+        let mut lowered' \
   geode-shell narrow_with_a_blank_query_keeps_every_row_unmarked
+
+# The column at the window's start has no predecessor below row 0; scoring
+# one there indexes left of the window.
+run_mutation "palette: the window's first column looks left for a predecessor" \
+  crates/geode-shell/src/palette.rs \
+  '                } else if j > lo {' \
+  '                } else {' \
+  geode-shell the_scoring_window_ends_at_the_last_char_s_last_occurrence
 
 run_mutation "palette: the scoring window ends at the last char's first occurrence" \
   crates/geode-shell/src/palette.rs \
@@ -7389,8 +7456,7 @@ run_mutation "diagnostics log: loss gap is never measured" \
 
 run_mutation "diagnostics log: the filter ignores level and target" \
   crates/geode-diagnostics/src/log.rs \
-  '        self.levels[Self::level_index(r.level)]
-            && self.target.as_deref().is_none_or(|t| t == r.target)' \
+  '        self.levels[Self::level_index(level)] && self.target.as_deref().is_none_or(|t| t == target)' \
   '        true' \
   geode-diagnostics \
   the_filter_gates_on_level_and_target
@@ -31657,19 +31723,25 @@ run_mutation "pricer tile: a double-click on a group row toggles it" \
   '                let group = false;' \
   geode-pricer a_double_click_on_a_group_row_toggles_it
 
-# The pricer's and market data's find tables highlight the match run in the
-# list-row accent, as every other fuzzy surface does.
-run_mutation "find-window: pricer match run takes the list-row accent" \
+# The blotter's, pricer's and market data's find tables highlight the match
+# run in the table accent every table's match highlights share.
+run_mutation "find-window: pricer match run takes the table accent" \
   crates/geode-pricer/src/delegate.rs \
-  '                            geode_shell::shell::listrow::row_paint(cx.theme()).accent,' \
+  '                            self.find_accent.get(cx.theme()),' \
   '                            cx.theme().foreground,' \
-  geode-pricer find_highlights_take_the_list_row_accent
+  geode-pricer find_highlights_take_the_table_accent
 
-run_mutation "find-window: market data match run takes the list-row accent" \
+run_mutation "find-window: market data match run takes the table accent" \
   crates/geode-marketdata/src/delegate.rs \
-  '                    geode_shell::shell::listrow::row_paint(cx.theme()).accent,' \
+  '                    self.find_accent.get(cx.theme()),' \
   '                    cx.theme().foreground,' \
-  geode-marketdata find_highlights_take_the_list_row_accent
+  geode-marketdata find_highlights_take_the_table_accent
+
+run_mutation "find-window: blotter match run takes the table accent" \
+  crates/geode-blotter/src/delegate.rs \
+  '                self.find_accent.get(theme),' \
+  '                geode_shell::shell::listrow::row_paint(theme).accent,' \
+  geode-blotter find_highlights_take_the_table_accent
 
 # ---- pricer column sort
 
