@@ -7,9 +7,9 @@ pub mod oklab;
 pub mod values;
 
 pub use values::{
-    DimensionColors, DimensionKind, NO_COLOR, ValueColorState, ValueColors, ValuePick, ValueWrite,
-    check_value_colors, dimension_kind, inline_key, read_inline, text_dimensions,
-    value_color_state, value_write,
+    DimensionColors, DimensionKind, NO_COLOR, PRESETS, ValueColorState, ValueColors, ValueEntry,
+    ValuePick, ValueWrite, check_value_colors, dimension_kind, inline_key, inline_label, preset_of,
+    read_inline, text_dimensions, value_color_state, value_write,
 };
 
 use crate::config::{Diagnostic, MergedDoc, Severity, check_object_name};

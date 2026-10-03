@@ -310,7 +310,10 @@ derived dimension declares, a declared dimension that is never text (a numeric
 `colors.toml` does not define, which paints without a color. Inline entries
 take the two dimension checks and skip the unknown-name check, since they
 name no `colors.toml` color; a pruned dimension drops its inline definitions
-with it. What survives is
+with it. A value is inline only when its color key is its own
+`inline {dimension}.{value}`: a string entry spelled like another value's
+inline key borrows nothing, takes the unknown-name warning, and is pruned.
+What survives is
 exactly what a tile may look up, so paint performs no second validity check.
 `NamedColours::from_config` returns the color definitions together with the
 checked mapping (`NamedColours::values`), so one `Arc<NamedColours>` never

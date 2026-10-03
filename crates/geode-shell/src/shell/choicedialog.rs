@@ -51,7 +51,9 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Focusable as _, SharedString, Window, div};
 use gpui_component::{ActiveTheme as _, v_flex};
 
-use geode_core::colour::{Definition, NamedColours, ValueColorState, ValuePick, value_color_state};
+use geode_core::colour::{
+    Definition, NamedColours, ValueColorState, ValueEntry, ValuePick, value_color_state,
+};
 use geode_core::config::VALUE_COLORS_DOC;
 use geode_core::context::DimensionContext;
 use geode_core::link::{Group, Membership};
@@ -667,19 +669,17 @@ impl ChoiceDialogState {
         picks.push(ValuePick::None);
         swatches.push(None);
         if let Some(lower) = state.follow_desk() {
-            options.push(format!("Follow desk ({lower})"));
+            options.push(format!("Follow desk ({})", lower.label()));
             picks.push(ValuePick::FollowDesk);
             swatches.push(None);
         }
-        let opening = state
-            .effective
-            .as_deref()
-            .and_then(|name| {
-                picks
-                    .iter()
-                    .position(|p| matches!(p, ValuePick::Color(n) if n == name))
-            })
-            .unwrap_or(no_color);
+        let opening = match state.effective.as_ref() {
+            Some(ValueEntry::Named(name)) => picks
+                .iter()
+                .position(|p| matches!(p, ValuePick::Color(n) if n == name)),
+            _ => None,
+        }
+        .unwrap_or(no_color);
         let mut list = ChoiceList::new(options, choice::DEFAULT_CAP);
         // Unfiltered, ranked order is declared order.
         list.set_ranked_highlighted(opening);
@@ -1279,7 +1279,7 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
             pick,
         } => {
             shell.close_modal(window, cx);
-            shell.set_value_color(dimension, value, pick, cx);
+            shell.set_value_color(dimension, value, pick, None, cx);
         }
     }
 }
@@ -2133,7 +2133,9 @@ mod tests {
         );
     }
 
-    use geode_core::colour::{Definition, NamedColours, Tone, ValueColorState, ValuePick};
+    use geode_core::colour::{
+        Definition, NamedColours, Tone, ValueColorState, ValueEntry, ValuePick,
+    };
 
     fn named(names: &[&str]) -> NamedColours {
         let mut out = NamedColours::default();
@@ -2144,16 +2146,27 @@ mod tests {
     }
 
     fn value_state(desk: Option<&str>, user: Option<&str>) -> ValueColorState {
-        let lower = desk.map(str::to_string);
-        let user = user.map(str::to_string);
+        let lower = desk.map(ValueEntry::from);
+        let user = user.map(ValueEntry::from);
         ValueColorState {
             effective: user
                 .clone()
                 .or_else(|| lower.clone())
-                .filter(|c| c != "none"),
+                .filter(|c| !c.is_cleared()),
             user,
             lower,
         }
+    }
+
+    #[test]
+    fn follow_desk_names_an_inline_desk_entry_by_its_hue() {
+        let mut state = value_state(None, Some("blue"));
+        state.lower = Some(ValueEntry::Inline(Definition::hue(210.0, Tone::Normal)));
+        let list = value_list(&["blue"], &state);
+        assert_eq!(
+            list.list.options().last().map(String::as_str),
+            Some("Follow desk (hue 210)")
+        );
     }
 
     fn value_list(names: &[&str], state: &ValueColorState) -> ChoiceDialogState {

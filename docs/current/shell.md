@@ -241,9 +241,10 @@ rebuilds them on a configuration reload. A row standing for no single value
 Picking it opens a choice list titled `Color · {column} {value}` (see
 [choice lists](input-and-dialogs.md#scope-tile-log-and-column-choices)):
 one row per named color in `colors.toml`, alphabetical, each with its
-swatch, then `None`, then `Follow desk ({name})` only when the user layer
+swatch, then `None`, then `Follow desk ({label})` only when the user layer
 holds an entry for this value and a lower layer holds a different, colored
-one. It opens on the value's current color, or on `None` when it has none or
+one. The label is the lower entry's color name, or for an inline entry
+`hue 210`, `hue 30 light`, or the token's name. It opens on the value's current color, or on `None` when it has none or
 its color is no longer defined, so `enter` on an untouched list changes
 nothing. A row stands for its pick by position, so a color named `None` is
 still that color. With no named color the list holds only `None` and a muted
@@ -255,6 +256,7 @@ A pick writes only the user layer's `value_colors.toml`, through
 | Pick | User-layer write |
 |---|---|
 | A color | `{dimension}.{value} = "{name}"`, the value one quoted key whatever its text (`"BRK.B"`) |
+| An inline color (a preset, typed hue, or the hue stage) | `{dimension}.{value} = { hue = n }` (`tone = "light"` only when light), one quoted key holding an inline table, replacing a string or another table in place |
 | `None`, a lower layer colors the value | `{dimension}.{value} = "none"` |
 | `None`, no lower entry | the key removed, and the dimension table with it when that empties it |
 | `Follow desk` | the key removed, and an emptied dimension table |
@@ -263,8 +265,9 @@ A pick equal to the color as painted writes nothing and says nothing; a
 name `colors.toml` no longer defines paints nothing, so `None` over it
 writes nothing either (a dangling user entry with no lower one is not
 cleared this way).
-After a write the status bar reads `SPX colored blue`, `SPX color cleared`
-or `SPX follows the desk`; the ordinary reload repaints. A failed write (a
+After a write the status bar reads `SPX colored blue`, `SPX colored hue 210`,
+`SPX colored hue 30 light`, `SPX colored warning`, `SPX colored blue preset`,
+`SPX color cleared` or `SPX follows the desk`; the ordinary reload repaints. A failed write (a
 dimension entry that is not a table, an unreadable file) shows the writer's
 error as the notice and leaves the file untouched. With no user
 configuration directory the notice reads `no user configuration directory:

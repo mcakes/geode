@@ -35112,7 +35112,7 @@ run_mutation "value colors: sign is refused" \
 # The check prunes an unknown color: a pruned value must not reach paint.
 run_mutation "value colors: an unknown color is pruned" \
   crates/geode-core/src/colour/values.rs \
-  '            if values.inline_definition(color).is_none() && named.get(color).is_none() {' \
+  '            if inline.is_none() && named.get(color).is_none() {' \
   '            if false {' \
   geode-core \
   the_check_prunes_what_cannot_paint_and_says_why
@@ -35129,7 +35129,7 @@ run_mutation "value colors: a non-text dimension is ignored" \
 # would let the desk's color show again.
 run_mutation "value colors: None over a desk color writes none" \
   crates/geode-core/src/colour/values.rs \
-  '            } else if state.lower.as_deref().is_some_and(|c| c != NO_COLOR) {' \
+  '            } else if state.lower.as_ref().is_some_and(|c| !c.is_cleared()) {' \
   '            } else if false {' \
   geode-core \
   a_pick_becomes_the_smallest_user_layer_write
@@ -35137,7 +35137,7 @@ run_mutation "value colors: None over a desk color writes none" \
 # A user `none` over a desk color is no color, not the desk's.
 run_mutation "value colors: a user none clears the effective color" \
   crates/geode-core/src/colour/values.rs \
-  '        .filter(|c| c != NO_COLOR);' \
+  '        .filter(|c| !c.is_cleared());' \
   '        ;' \
   geode-core \
   the_state_separates_the_user_entry_from_the_layers_below
@@ -35329,8 +35329,8 @@ run_mutation "pricer: a line's context owns its underlying" \
 # A dimension entry that is not a table refuses the write.
 run_mutation "value colors: a non-table dimension refuses the write" \
   crates/geode-shell/src/shell/value_color.rs \
-  '                let entry = doc.entry(dimension).or_insert(toml_edit::table());' \
-  '                doc.remove(dimension); let entry = doc.entry(dimension).or_insert(toml_edit::table());' \
+  '                let colors = doc.entry(dimension).or_insert(toml_edit::table());' \
+  '                doc.remove(dimension); let colors = doc.entry(dimension).or_insert(toml_edit::table());' \
   geode-shell \
   a_write_into_a_non_table_dimension_is_refused_and_leaves_the_file
 
@@ -35345,8 +35345,8 @@ run_mutation "value colors: an emptied dimension table is removed" \
 # A value is one key, never split on a dot into nested tables.
 run_mutation "value colors: a dotted value is one key" \
   crates/geode-shell/src/shell/value_color.rs \
-  '                table.insert(value, toml_edit::value(name.as_str()));' \
-  '                table.insert(value.split(".").next().unwrap_or(value), toml_edit::value(name.as_str()));' \
+  '                table.insert(value, entry_item(entry));' \
+  '                table.insert(value.split(".").next().unwrap_or(value), entry_item(entry));' \
   geode-shell \
   a_dotted_value_is_written_as_one_quoted_key
 
@@ -35361,8 +35361,8 @@ run_mutation "value colors: an unchanged pick writes nothing" \
 # The write is decided against the color as painted: an undefined name is none.
 run_mutation "value colors: an undefined color in force is no color to clear" \
   crates/geode-shell/src/shell/value_color.rs \
-  '        state.effective = state.effective.filter(|name| named.get(name).is_some());' \
-  '        let _ = &named;' \
+  '            ValueEntry::Named(name) => named.get(name).is_some(),' \
+  '            ValueEntry::Named(_) => true,' \
   geode-shell \
   enter_over_an_undefined_desk_color_writes_nothing
 
@@ -35417,7 +35417,7 @@ run_mutation "value colors: no named colors shows the muted line" \
 # A desk entry of none offers no Follow desk row beside None.
 run_mutation "value colors: a desk none is nothing to follow" \
   crates/geode-core/src/colour/values.rs \
-  '            (Some(user), Some(lower)) if user != lower && lower != NO_COLOR => Some(lower),' \
+  '            (Some(user), Some(lower)) if user != lower && !lower.is_cleared() => Some(lower),' \
   '            (Some(user), Some(lower)) if user != lower => Some(lower),' \
   geode-core \
   the_state_separates_the_user_entry_from_the_layers_below
@@ -35576,7 +35576,7 @@ run_mutation "events: text-file outcomes key by tile and tag" \
 # not prune it.
 run_mutation "value colors: the check keeps an inline entry" \
   crates/geode-core/src/colour/values.rs \
-  '            if values.inline_definition(color).is_none() && named.get(color).is_none() {' \
+  '            if inline.is_none() && named.get(color).is_none() {' \
   '            if named.get(color).is_none() {' \
   geode-core \
   the_check_keeps_an_inline_entry_and_prunes_its_dimension_by_kind
@@ -35620,6 +35620,65 @@ run_mutation "colour: to_table writes tone only when light" \
   '                if true {' \
   geode-core \
   to_table_round_trips_through_from_table
+
+# A name spelled like another value's inline key borrows nothing: only a
+# value's own inline key reads as inline.
+run_mutation "value colors: only a value's own inline key is inline" \
+  crates/geode-core/src/colour/values.rs \
+  '                .filter(|_| **color == *inline_key(dimension, value));' \
+  '                .filter(|_| true);' \
+  geode-core \
+  a_name_spelled_like_another_values_inline_key_borrows_nothing
+
+# A table entry in a layer reads as an inline entry of the layer state.
+run_mutation "value colors: the layer state reads an inline entry" \
+  crates/geode-core/src/colour/values.rs \
+  '        toml::Value::Table(table) => read_inline(' \
+  '        toml::Value::Table(table) if false => read_inline(' \
+  geode-core \
+  an_inline_entry_reads_into_the_layer_state
+
+# An inline pick equal to the entry in force writes nothing.
+run_mutation "value colors: an inline entry compares by definition" \
+  crates/geode-core/src/colour/values.rs \
+  '    if state.effective.as_ref() == Some(&entry) {' \
+  '    if false {' \
+  geode-core \
+  an_inline_pick_writes_unless_it_is_the_entry_in_force
+
+# A light hue is not a preset.
+run_mutation "value colors: a preset is tone normal" \
+  crates/geode-core/src/colour/values.rs \
+  '        tone: Tone::Normal,
+    } = &definition.base' \
+  '        tone: _,
+    } = &definition.base' \
+  geode-core \
+  preset_matching_is_hue_and_normal_tone_only
+
+# An inline entry is written as an inline table, read back as inline.
+run_mutation "value colors: an inline entry is written as an inline table" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '            toml_edit::value(inline)' \
+  '            toml_edit::value(inline.to_string())' \
+  geode-shell \
+  an_inline_entry_is_one_quoted_key_and_reads_back
+
+# A preset pick says preset.
+run_mutation "value colors: a preset pick's notice names the preset" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '        (ValuePick::Inline(_), Some(preset)) => format!("{value} colored {preset} preset"),' \
+  '        (ValuePick::Inline(_), Some(_)) => format!("{value} colored"),' \
+  geode-shell \
+  the_notice_says_what_the_pick_did
+
+# Follow desk names an inline desk entry by its label.
+run_mutation "value colors: follow desk labels an inline entry" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            options.push(format!("Follow desk ({})", lower.label()));' \
+  '            options.push(format!("Follow desk ({lower:?})"));' \
+  geode-shell \
+  follow_desk_names_an_inline_desk_entry_by_its_hue
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

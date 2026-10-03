@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use geode_core::colour::{NamedColours, ValuePick, ValueWrite, value_color_state, value_write};
+use geode_core::colour::{
+    NamedColours, ValueEntry, ValuePick, ValueWrite, inline_label, value_color_state, value_write,
+};
 use geode_core::config::{Layer, VALUE_COLORS_DOC};
 use gpui::Context;
 
@@ -28,14 +30,14 @@ pub(crate) fn persist(
     crate::config_write::try_edit(user_dir, Layer::User, VALUE_COLORS_DOC, |doc| {
         match write {
             ValueWrite::Nothing => {}
-            ValueWrite::Set(name) => {
-                let entry = doc.entry(dimension).or_insert(toml_edit::table());
-                let Some(table) = entry.as_table_like_mut() else {
+            ValueWrite::Set(entry) => {
+                let colors = doc.entry(dimension).or_insert(toml_edit::table());
+                let Some(table) = colors.as_table_like_mut() else {
                     return Err(not_a_table());
                 };
                 // One key whatever the value's text: the key is quoted when
                 // it is not bare, never split on a dot into nested tables.
-                table.insert(value, toml_edit::value(name.as_str()));
+                table.insert(value, entry_item(entry));
             }
             ValueWrite::Remove => {
                 let emptied = match doc.get_mut(dimension) {
@@ -57,12 +59,41 @@ pub(crate) fn persist(
     })
 }
 
-/// What the status bar says once `pick` is saved for `value`.
-pub(crate) fn notice(value: &str, pick: &ValuePick) -> String {
-    match pick {
-        ValuePick::Color(name) => format!("{value} colored {name}"),
-        ValuePick::None => format!("{value} color cleared"),
-        ValuePick::FollowDesk => format!("{value} follows the desk"),
+/// `entry` as it is written: a name as a string, an inline definition as
+/// one inline table (`{ hue = 210 }`, `tone` only when light), never a
+/// `[dimension.value]` section a dotted value would split.
+fn entry_item(entry: &ValueEntry) -> toml_edit::Item {
+    match entry {
+        ValueEntry::Named(name) => toml_edit::value(name.as_str()),
+        ValueEntry::Inline(definition) => {
+            let mut inline = toml_edit::InlineTable::new();
+            for (key, value) in definition.to_table() {
+                let value: toml_edit::Value = match value {
+                    toml::Value::Integer(i) => i.into(),
+                    toml::Value::Float(f) => f.into(),
+                    toml::Value::Boolean(b) => b.into(),
+                    toml::Value::String(s) => s.as_str().into(),
+                    _ => continue,
+                };
+                inline.insert(key.as_str(), value);
+            }
+            toml_edit::value(inline)
+        }
+    }
+}
+
+/// What the status bar says once `pick` is saved for `value`. `preset` names
+/// the preset row an inline pick came from: a preset says so even though
+/// the same hue typed or set on the hue stage says `hue {n}`.
+pub(crate) fn notice(value: &str, pick: &ValuePick, preset: Option<&str>) -> String {
+    match (pick, preset) {
+        (ValuePick::Color(name), _) => format!("{value} colored {name}"),
+        (ValuePick::Inline(_), Some(preset)) => format!("{value} colored {preset} preset"),
+        (ValuePick::Inline(definition), None) => {
+            format!("{value} colored {}", inline_label(definition))
+        }
+        (ValuePick::None, _) => format!("{value} color cleared"),
+        (ValuePick::FollowDesk, _) => format!("{value} follows the desk"),
     }
 }
 
@@ -72,12 +103,14 @@ impl ShellView {
     /// order through the directory FIFO, and runs off the UI thread; the
     /// notice follows its result (the writer's error on failure, the file
     /// unchanged), and the ordinary reload repaints. A pick that changes
-    /// nothing writes nothing and says nothing.
+    /// nothing writes nothing and says nothing. `preset` names the preset
+    /// row the pick came from, for the notice.
     pub(crate) fn set_value_color(
         &mut self,
         dimension: String,
         value: String,
         pick: ValuePick,
+        preset: Option<&'static str>,
         cx: &mut Context<Self>,
     ) {
         let mut state = value_color_state(
@@ -93,7 +126,10 @@ impl ShellView {
         // enter would write `none` over a desk entry, masking it even after
         // the desk defines the name again.
         let (named, _) = NamedColours::from_config(&self.services.config);
-        state.effective = state.effective.filter(|name| named.get(name).is_some());
+        state.effective = state.effective.filter(|entry| match entry {
+            ValueEntry::Named(name) => named.get(name).is_some(),
+            ValueEntry::Inline(_) => true,
+        });
         let write = value_write(&state, &pick);
         if write == ValueWrite::Nothing {
             return;
@@ -103,7 +139,7 @@ impl ShellView {
             cx.notify();
             return;
         };
-        let done = notice(&value, &pick);
+        let done = notice(&value, &pick, preset);
         let task = crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             persist(&dir, &dimension, &value, &write)
         });
@@ -124,7 +160,7 @@ impl ShellView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geode_core::colour::{ValueColors, ValueWrite};
+    use geode_core::colour::{Definition, Token, Tone, ValueColors, ValueEntry, ValueWrite};
     use geode_core::config::{Layer, LayerDoc, VALUE_COLORS_DOC, merge_docs};
 
     fn read(dir: &std::path::Path) -> String {
@@ -268,10 +304,87 @@ mod tests {
     }
 
     #[test]
+    fn an_inline_entry_is_one_quoted_key_and_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let hue = ValueWrite::Set(ValueEntry::Inline(Definition::hue(210.0, Tone::Normal)));
+        for value in ["BRK.B", "SX5E Index"] {
+            persist(dir.path(), "underlying_ref", value, &hue).unwrap();
+        }
+        let text = read(dir.path());
+        assert!(text.contains("\"BRK.B\" = { hue = 210 }"), "{text}");
+        assert!(text.contains("\"SX5E Index\" = { hue = 210 }"), "{text}");
+        let read = colors(&text);
+        for value in ["BRK.B", "SX5E Index"] {
+            let key = read.get("underlying_ref", value).expect(value);
+            assert_eq!(
+                read.inline_definition(key),
+                Some(&Definition::hue(210.0, Tone::Normal)),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            read.get("underlying_ref", "BRK"),
+            None,
+            "not a nested table"
+        );
+    }
+
+    #[test]
+    fn inline_and_named_entries_replace_each_other_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("value_colors.toml");
+        std::fs::write(
+            &path,
+            "config_version = 1\n[underlying_ref]\nSPX = \"blue\"\nNDX = \"amber\"\n",
+        )
+        .unwrap();
+        let set = |entry: ValueEntry| {
+            persist(dir.path(), "underlying_ref", "SPX", &ValueWrite::Set(entry)).unwrap();
+            read(dir.path())
+        };
+        let text = set(ValueEntry::Inline(Definition::hue(30.0, Tone::Light)));
+        assert!(
+            text.contains("SPX = { hue = 30, tone = \"light\" }"),
+            "{text}"
+        );
+        assert!(
+            text.find("SPX").unwrap() < text.find("NDX").unwrap(),
+            "in place: {text}"
+        );
+        let text = set(ValueEntry::Inline(Definition::token(Token::Warning)));
+        assert!(text.contains("SPX = { token = \"warning\" }"), "{text}");
+        let text = set("teal".into());
+        assert!(
+            text.contains("SPX = \"teal\"") && text.contains("NDX = \"amber\""),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn the_notice_says_what_the_pick_did() {
         use geode_core::colour::ValuePick as P;
-        assert_eq!(notice("SPX", &P::Color("blue".into())), "SPX colored blue");
-        assert_eq!(notice("SPX", &P::None), "SPX color cleared");
-        assert_eq!(notice("SPX", &P::FollowDesk), "SPX follows the desk");
+        let hue = |d: f32, tone| P::Inline(Definition::hue(d, tone));
+        assert_eq!(
+            notice("SPX", &P::Color("blue".into()), None),
+            "SPX colored blue"
+        );
+        assert_eq!(
+            notice("SPX", &hue(210.0, Tone::Normal), None),
+            "SPX colored hue 210"
+        );
+        assert_eq!(
+            notice("SPX", &hue(30.0, Tone::Light), None),
+            "SPX colored hue 30 light"
+        );
+        assert_eq!(
+            notice("SPX", &P::Inline(Definition::token(Token::Warning)), None),
+            "SPX colored warning"
+        );
+        assert_eq!(
+            notice("SPX", &hue(240.0, Tone::Normal), Some("blue")),
+            "SPX colored blue preset"
+        );
+        assert_eq!(notice("SPX", &P::None, None), "SPX color cleared");
+        assert_eq!(notice("SPX", &P::FollowDesk, None), "SPX follows the desk");
     }
 }
