@@ -7667,6 +7667,26 @@ pub(crate) mod tests {
             "SPX's label: its color floored on the group ground"
         );
         assert_eq!(label(&mut vcx, 0), group.own, "NDX's label is unmapped");
+
+        // The group ground made blue itself (`secondary` feeds neither the
+        // color anchors nor the tokens, so blue resolves the same): the
+        // label must move off it. Through the theme global, so the tile's
+        // own observer re-derives the paints.
+        vcx.update(|_, cx| {
+            gpui_component::Theme::global_mut(cx).secondary = blue;
+            cx.refresh_windows();
+        });
+        vcx.run_until_parked();
+        let group = h
+            .tile
+            .read_with(&vcx, |t, cx| t.table.read(cx).delegate().paints.group);
+        assert_eq!(group.ground, blue, "fixture: the ground is blue");
+        assert_ne!(group.floor(blue), blue, "fixture: blue moves");
+        assert_eq!(
+            label(&mut vcx, 1),
+            group.floor(blue),
+            "floored on the group ground as a named column color is"
+        );
     }
 
     /// The shell's `Edit column in view…` reads the tile's columns: the
