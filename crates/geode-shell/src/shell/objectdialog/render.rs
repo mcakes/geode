@@ -2473,7 +2473,7 @@ fn armed_confirm(shell: &ShellView) -> Option<Confirm> {
 /// Whether a question (a confirm or the save prompt) owns input. A pointer
 /// handler returns early on it: a click behind the question would act on
 /// the rows the question is about.
-fn question_up(shell: &ShellView) -> bool {
+pub(super) fn question_up(shell: &ShellView) -> bool {
     shell
         .object_dialog
         .as_ref()
@@ -3236,6 +3236,12 @@ fn build(
     // Read once per build: which row stands for the lane's choice.
     let active_row = one_line
         .then(|| super::grouping_list::active_row(shell.target_frame().read(cx).grouping_choice()));
+    // Which rows offer `save`: the frame's answer, as `s` reads it.
+    let held = if one_line {
+        super::grouping_list::HeldChains::of(&shell.target_frame().read(cx))
+    } else {
+        super::grouping_list::HeldChains::default()
+    };
     let theme = cx.theme();
     // Copied out so the row closures below don't hold the `theme` borrow.
     let row_paint = super::super::listrow::row_paint(theme);
@@ -3280,7 +3286,9 @@ fn build(
             .gap_3()
             .px_2()
             .py_1()
-            .rounded(theme.radius);
+            .rounded(theme.radius)
+            // The hover group the trailing `edit`/`save` controls reveal on.
+            .when(one_line, |el| el.group("objectdialog-row"));
         let row_el = super::super::listrow::paint_row(row_el, row_paint, is_selected);
 
         // A prefixed row paints `<prefix> · ` muted ahead of the name: one shared
@@ -3412,13 +3420,25 @@ fn build(
                 dialog::swatch(hsla, format!("objectdialog-swatch-{}", row.name), cx)
             });
 
+        let controls = one_line
+            .then(|| super::grouping_list::row_controls(row, is_selected, &held, entity))
+            .flatten();
+
         let entity_for_row = entity.clone();
         let clicked = row.name.clone();
         let selector_name = row.name.clone();
         let row_el = row_el
             .children(swatch)
             .child(label)
-            .child(markers)
+            // One trailing group, so `justify_between` keeps the label left
+            // and the controls beside the markers at the right.
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .children(controls)
+                    .child(markers),
+            )
             // Keyed by the object's own name, not its index: the list is
             // re-ranked under the cursor by every keystroke, so a
             // position-keyed selector (or click handler) would name a

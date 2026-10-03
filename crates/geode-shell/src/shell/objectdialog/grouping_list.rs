@@ -876,6 +876,151 @@ pub(super) fn save_prompt(
 /// What each kind of target slot does with a save.
 pub const SAVE_NOTE: &str = "an empty slot is filled · a desk or builtin slot is copied to your config · your own slot asks first";
 
+/// A row's two pointer verbs: the pointer forms of `e` and `s`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowVerb {
+    Edit,
+    Save,
+}
+
+impl RowVerb {
+    fn word(self) -> &'static str {
+        match self {
+            RowVerb::Edit => "edit",
+            RowVerb::Save => "save",
+        }
+    }
+}
+
+/// Which rows the lane holds a non-empty chain for, read from the frame once
+/// per paint. This is the same answer `chain_of` gives `s`: a slot the
+/// configuration defines but the reader dropped holds nothing, so offering
+/// `save` there would offer a press that `s` refuses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HeldChains {
+    slots: [bool; 10],
+    ad_hoc: bool,
+}
+
+impl HeldChains {
+    pub fn of(frame: &FrameView<'_>) -> Self {
+        let mut held = Self {
+            ad_hoc: frame.ad_hoc().is_some_and(|chain| !chain.is_empty()),
+            ..Self::default()
+        };
+        for n in 1..=9u8 {
+            held.slots[n as usize] = frame.slots().get(n).is_some_and(|chain| !chain.is_empty());
+        }
+        held
+    }
+
+    fn holds(&self, kind: RowKind) -> bool {
+        match kind {
+            RowKind::Slot(n) => self.slots.get(n as usize).copied().unwrap_or(false),
+            RowKind::AdHoc => self.ad_hoc,
+            RowKind::ViewDefault => false,
+        }
+    }
+}
+
+/// The pointer form of `e` and `s` on the row named `name`: move the cursor
+/// there, then take the key's own path. Opens no modal, so the caller syncs
+/// the dialog text afterwards, as the key path does.
+pub(super) fn press_row_control(
+    shell: &mut ShellView,
+    name: &str,
+    verb: RowVerb,
+    cx: &mut Context<ShellView>,
+) {
+    if let Some(state) = shell.object_dialog.as_mut()
+        && state.notice.take().is_some()
+    {
+        cx.notify();
+    }
+    // A question owns the pointer as well as the keys: a press behind the
+    // save prompt or a confirm would act on rows the question is about.
+    if render::question_up(shell) {
+        return;
+    }
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    let Some(ix) = state.rows.position(|row| row.name == name) else {
+        return;
+    };
+    state.selected = ix;
+    match verb {
+        RowVerb::Edit => {
+            edit(shell, kind_of(name), cx);
+            // The tick list paints where the list was: a double-click's
+            // second half would otherwise tick whichever row now sits under
+            // the pointer.
+            if let Some(state) = shell.object_dialog.as_mut()
+                && matches!(&state.stage, super::Stage::Edit { object } if object == name)
+            {
+                state.click_opened_stage = true;
+            }
+        }
+        RowVerb::Save => arm_save(shell, cx),
+    }
+    cx.notify();
+}
+
+/// The trailing `edit` and `save` controls of a slot or ad hoc row: `edit`
+/// on every such row, `save` only where the lane holds a chain. Each sits in
+/// an occluding wrapper: the row applies itself on mouse-down, so without
+/// it a press on a control would also apply the row and close the dialog.
+/// `shown` is whether the controls are visible at rest (the cursor row);
+/// other rows reveal them through the row's `objectdialog-row` hover group.
+pub(super) fn row_controls(
+    row: &ObjectRow,
+    shown: bool,
+    held: &HeldChains,
+    entity: &Entity<ShellView>,
+) -> Option<AnyElement> {
+    let kind = kind_of(&row.name)?;
+    if kind == RowKind::ViewDefault {
+        return None;
+    }
+    let control = |verb: RowVerb| {
+        let entity = entity.clone();
+        let name = row.name.clone();
+        let selector = format!("objectdialog-row-{}-{}", verb.word(), row.name);
+        div()
+            .occlude()
+            .debug_selector({
+                let selector = selector.clone();
+                move || selector
+            })
+            .child(
+                Button::new(gpui::SharedString::from(format!("{selector}-button")))
+                    .ghost()
+                    .xsmall()
+                    .label(verb.word())
+                    .on_click(move |_event, window, cx| {
+                        entity.update(cx, |shell, cx| {
+                            press_row_control(shell, &name, verb, cx);
+                            shell.refresh_dialog_rows(cx);
+                            sync_dialog_text(shell, window, cx);
+                        });
+                    }),
+            )
+    };
+    let mut controls = h_flex().gap_1().items_center();
+    if !shown {
+        // Invisible rather than absent, so the row's layout does not shift
+        // under the pointer and the controls keep their hit area.
+        controls = controls
+            .opacity(0.)
+            .group_hover("objectdialog-row", |style| style.opacity(1.));
+    }
+    controls = controls.child(control(RowVerb::Edit));
+    if held.holds(kind) {
+        controls = controls.child(control(RowVerb::Save));
+    }
+    Some(controls.into_any_element())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

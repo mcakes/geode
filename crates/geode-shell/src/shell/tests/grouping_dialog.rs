@@ -1374,3 +1374,133 @@ fn escape_from_a_mod_s_prompt_returns_to_the_chain_field(cx: &mut gpui::TestAppC
     flush_config_write(&mut cx);
     assert_eq!(written(&dir), "");
 }
+
+#[gpui::test]
+fn the_edit_control_opens_that_rows_editor_without_applying_it(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    let edit = cx
+        .debug_bounds("objectdialog-row-edit-3")
+        .expect("slot 3's edit control is painted");
+    cx.simulate_click(edit.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(is_open(&shell, &cx));
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "3".to_string()
+        }
+    );
+    assert_eq!(
+        choice(&shell, &cx),
+        GroupingChoice::ViewDefault,
+        "the press reached the control, not the row beneath it"
+    );
+    // A stage opened by the mouse still takes keys.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+}
+
+#[gpui::test]
+fn the_save_control_asks_for_a_slot_for_that_rows_chain(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    let save = cx
+        .debug_bounds("objectdialog-row-save-1")
+        .expect("slot 1's save control is painted");
+    cx.simulate_click(save.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(is_open(&shell, &cx));
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s
+            .save
+            .as_ref()
+            .map(|save| save.chain.clone())),
+        Some(chain(&["book", "lhu"]))
+    );
+    cx.simulate_keystrokes("9");
+    cx.run_until_parked();
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(9));
+}
+
+#[gpui::test]
+fn rows_without_a_chain_offer_no_save_and_the_view_default_offers_neither(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_shell, mut cx, _dir) = open_dialog(cx);
+    assert!(cx.debug_bounds("objectdialog-row-edit-0").is_none());
+    assert!(cx.debug_bounds("objectdialog-row-save-0").is_none());
+    assert!(
+        cx.debug_bounds("objectdialog-row-edit-2").is_some(),
+        "an empty slot can be edited"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-row-save-2").is_none(),
+        "but has no chain to save"
+    );
+    assert!(cx.debug_bounds("objectdialog-row-edit-*").is_some());
+    assert!(cx.debug_bounds("objectdialog-row-save-*").is_none());
+}
+
+#[gpui::test]
+fn a_slot_the_reader_dropped_offers_edit_but_no_save(cx: &mut gpui::TestAppContext) {
+    // Slot 4 is defined in the user layer with a column no dataset declares:
+    // the row has a layer, but the frame holds no chain for it, so `s`
+    // would refuse and the pointer must not offer it either.
+    let mut services = services();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "groupings".to_string(),
+        file: "<test:user>".into(),
+        table: "4 = [\"nope\"]\n".parse().unwrap(),
+    };
+    let mut docs = services.builtin.clone();
+    docs.push(user);
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: docs,
+        desk: None,
+        user: None,
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services, dir.path());
+    let shell = shell_of(&window, &mut cx);
+    dispatch_action(&shell, DOOR, &mut cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        dialog_state(&shell, &cx, |s| s
+            .rows
+            .rows()
+            .iter()
+            .any(|r| r.name == "4" && r.layer == Some(Layer::User))),
+        "the configuration defines slot 4"
+    );
+    assert!(cx.debug_bounds("objectdialog-row-edit-4").is_some());
+    assert!(cx.debug_bounds("objectdialog-row-save-4").is_none());
+}
+
+#[gpui::test]
+fn a_row_control_click_under_the_save_prompt_is_ignored(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+    });
+    cx.simulate_keystrokes("s");
+    cx.run_until_parked();
+    let edit = cx
+        .debug_bounds("objectdialog-row-edit-3")
+        .expect("slot 3's edit control is painted under the prompt");
+    cx.simulate_click(edit.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| (
+            s.stage.clone(),
+            s.save.as_ref().map(|save| save.chain.clone())
+        )),
+        (objectdialog::Stage::Browse, Some(chain(&["lhu"]))),
+        "a question owns the pointer as well as the keys"
+    );
+    assert_eq!(choice(&shell, &cx), GroupingChoice::AdHoc);
+}
