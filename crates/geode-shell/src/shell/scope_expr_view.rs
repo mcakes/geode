@@ -630,7 +630,11 @@ fn naming_key(
 /// Stash the text and turn the field into a name entry. An empty field
 /// refuses with [`SAVE_EMPTY`] before any name is asked for, since no
 /// name could be saved for it.
-fn begin_naming(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+pub(super) fn begin_naming(
+    shell: &mut ShellView,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
     let text = shell.dialog_input.read(cx).value().to_string();
     let Some(state) = shell.scope_expr_dialog.as_mut() else {
         return;

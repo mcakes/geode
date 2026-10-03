@@ -18282,6 +18282,70 @@ run_mutation "scope dialog: a move records the cursor's row" \
   geode-shell \
   the_cursor_stays_on_its_row_when_another_row_goes
 
+# p pushes the picker over Current; its commit pops back with the new row.
+run_mutation "scope dialog: p pushes the picker" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '            crate::shell::picker::open(shell, None, window, cx);' \
+  '' \
+  geode-shell \
+  a_picker_commit_returns_to_current_with_the_new_row
+
+# x pushes the expression dialog in Add mode.
+run_mutation "scope dialog: x pushes the expression step" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '            crate::shell::scope_expr_view::open(' \
+  '            let _ = (' \
+  geode-shell \
+  x_adds_an_expression_and_returns
+
+# i inlines the cursor's reference, and refuses off one.
+run_mutation "scope dialog: i inlines" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        ("i", true, false) => inline_cursor_row(shell, cx),' \
+  '' \
+  geode-shell \
+  i_inlines_a_reference_and_refuses_elsewhere
+
+# mod+s opens the cursor's term straight into its name entry.
+run_mutation "scope dialog: mod+s names a term" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '            name_cursor_term(shell, window, cx);' \
+  '' \
+  geode-shell \
+  mod_s_on_a_term_opens_its_name_entry
+
+# o pushes the saved-scope chooser.
+run_mutation "scope dialog: o pushes the saved chooser" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '            crate::shell::choicedialog::open_scopes(shell, window, cx);' \
+  '' \
+  geode-shell \
+  o_and_s_push_the_saved_chooser_and_the_save_prompt
+
+# s pushes the save prompt.
+run_mutation "scope dialog: s pushes the save prompt" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '            crate::shell::objectdialog::render::open_save_scope(shell, window, cx);' \
+  '' \
+  geode-shell \
+  o_and_s_push_the_saved_chooser_and_the_save_prompt
+
+# A row's double-click opens the step that edits it, as enter does.
+run_mutation "scope dialog: a row double-click acts as enter" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '                    if event.click_count == 2 {' \
+  '                    if false {' \
+  geode-shell \
+  a_row_double_click_acts_as_enter
+
+# A claimed key drops the last refusal, so the error names only the last action.
+run_mutation "scope dialog: a key clears the last refusal" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    let prior_error = state.error.take();' \
+  '    let prior_error = state.error.clone();' \
+  geode-shell \
+  removing_a_term_that_moved_refuses
+
 # The toolbar's load glyph opens the saved-scope picker.
 run_mutation "scope-picker: the load glyph click opens the picker" \
   crates/geode-shell/src/shell/render.rs \

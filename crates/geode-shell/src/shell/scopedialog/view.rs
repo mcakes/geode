@@ -36,6 +36,11 @@ const TEXT_TITLE: &str = "TEXT";
 const TERM_DETAIL: &str = "unnamed";
 const TEXT_DETAIL: &str = "textual columns";
 
+/// Refusal when `mod+s` is pressed off an unnamed term.
+pub(crate) const NAME_ONLY_TERMS: &str = "only an unnamed term can be named";
+/// Refusal when `i` is pressed off a named reference.
+pub(crate) const INLINE_ONLY_NAMED: &str = "only a named reference can be inlined";
+
 /// One row's painted strings, prepared when the rows derive so `build`
 /// only clones them instead of formatting on every frame.
 pub(crate) struct RowDisplay {
@@ -209,12 +214,15 @@ fn handle_key(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
-    let Some(state) = shell.scope_dialog.as_ref() else {
+    let Some(state) = shell.scope_dialog.as_mut() else {
         return false;
     };
     if in_text_step(state) {
         return text_step_key(shell, ks, window, cx);
     }
+    // The error describes the last action only: every claimed key drops it,
+    // and the refusing action sets it again. An unclaimed key puts it back.
+    let prior_error = state.error.take();
     let plain = !ks.mods.is_chord();
     match (ks.key.as_str(), plain, ks.mods.shift) {
         ("j" | "down", true, false) => move_cursor(shell, 1),
@@ -229,7 +237,45 @@ fn handle_key(
         ("r", false, false) if ks.mods.ctrl && !ks.mods.alt && !ks.mods.cmd => {
             edit_lane(shell, cx, |f| f.redo_scope());
         }
-        _ => return false,
+        // Step openers push their modal over this one and return: the pushed
+        // modal owns the next frame, and its commit pops back here through
+        // `close_modal`, which re-derives these rows.
+        ("p", true, false) => {
+            crate::shell::picker::open(shell, None, window, cx);
+            return true;
+        }
+        ("x", true, false) => {
+            crate::shell::scope_expr_view::open(
+                shell,
+                crate::shell::scope_expr_view::Mode::Add,
+                window,
+                cx,
+            );
+            return true;
+        }
+        ("o", true, false) => {
+            crate::shell::choicedialog::open_scopes(shell, window, cx);
+            return true;
+        }
+        ("s", true, false) => {
+            crate::shell::objectdialog::render::open_save_scope(shell, window, cx);
+            return true;
+        }
+        ("enter" | "e", true, false) => {
+            open_cursor_row(shell, window, cx);
+            return true;
+        }
+        ("i", true, false) => inline_cursor_row(shell, cx),
+        ("s", false, false) if ks.mods == shell.services.mod_alias => {
+            name_cursor_term(shell, window, cx);
+            return true;
+        }
+        _ => {
+            if let Some(state) = shell.scope_dialog.as_mut() {
+                state.error = prior_error;
+            }
+            return false;
+        }
     }
     // Every edit above may have changed the lane: re-derive now so the next
     // key and the next paint read the same rows.
@@ -287,6 +333,79 @@ fn remove_cursor_row(shell: &mut ShellView, cx: &mut Context<ShellView>) {
             edit_lane(shell, cx, |f| f.set_text(None));
             None
         }
+    };
+    if let Some(state) = shell.scope_dialog.as_mut() {
+        state.error = refused;
+    }
+}
+
+/// Open the step that edits the cursor's row, pushed over this dialog: a
+/// dimension's values in the picker, a term in the expression dialog, a
+/// reference's definition in the Expressions object dialog, the text in
+/// the text step.
+fn open_cursor_row(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let Some(row) = shell
+        .scope_dialog
+        .as_ref()
+        .and_then(|s| s.cursor_row().cloned())
+    else {
+        return;
+    };
+    match row.kind {
+        RowKind::Dimension { column, .. } => {
+            crate::shell::picker::open(shell, Some(column), window, cx)
+        }
+        RowKind::Term { index, .. } => {
+            crate::shell::scope_expr_view::open_term(shell, index, window, cx)
+        }
+        RowKind::Named { name, .. } => crate::shell::objectdialog::render::open_object(
+            shell,
+            crate::shell::objectdialog::Domain::Expressions,
+            &name,
+            window,
+            cx,
+        ),
+        RowKind::Text { .. } => enter_text_step(shell, window, cx),
+    }
+}
+
+/// The text step; it has no screen yet, so the text row opens nothing.
+fn enter_text_step(_: &mut ShellView, _: &mut Window, _: &mut Context<ShellView>) {}
+
+/// `mod+s`: open the cursor's term in the expression dialog straight into
+/// its name entry. Off a term it refuses, so a dimension or reference is
+/// never handed to a dialog that would name some other term.
+fn name_cursor_term(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let row = shell
+        .scope_dialog
+        .as_ref()
+        .and_then(|s| s.cursor_row().cloned());
+    let Some(RowKind::Term { index, .. }) = row.map(|r| r.kind) else {
+        if let Some(state) = shell.scope_dialog.as_mut() {
+            state.error = Some(NAME_ONLY_TERMS.into());
+        }
+        cx.notify();
+        return;
+    };
+    crate::shell::scope_expr_view::open_term(shell, index, window, cx);
+    // `open_term` opens nothing when the term is gone; naming then would
+    // land on whatever dialog is on top.
+    if shell.top_kind() == Some(dialog::DialogKind::ScopeExpr) {
+        crate::shell::scope_expr_view::begin_naming(shell, window, cx);
+    }
+}
+
+/// `i`: replace the cursor's reference with its definition in one undoable
+/// edit. A reference that does not resolve, or a row that is not a
+/// reference, refuses into `error` and changes nothing.
+fn inline_cursor_row(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let row = shell
+        .scope_dialog
+        .as_ref()
+        .and_then(|s| s.cursor_row().cloned());
+    let refused = match row.map(|r| r.kind) {
+        Some(RowKind::Named { name, .. }) => edit_lane(shell, cx, |f| f.inline_named(&name)).err(),
+        _ => Some(INLINE_ONLY_NAMED.to_string()),
     };
     if let Some(state) = shell.scope_dialog.as_mut() {
         state.error = refused;
@@ -422,13 +541,23 @@ fn build(
                     .child(div().text_xs().text_color(muted).child(detail)),
             };
             let click = entity.clone();
-            el = el.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            el = el.on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 click.update(cx, |shell, cx| {
                     if let Some(state) = shell.scope_dialog.as_mut() {
                         state.cursor = i;
                         state.cursor_id = state.rows.rows.get(i).map(|r| r.id.clone());
+                        state.error = None;
                     }
-                    dialog::sync_dialog_text(shell, window, cx);
+                    // The first press moves the cursor; the second press of a
+                    // double-click is `enter`. Exactly 2, so a triple-click
+                    // does not open a second step.
+                    if event.click_count == 2 {
+                        open_cursor_row(shell, window, cx);
+                    }
+                    // A pushed step synced the shared input for itself.
+                    if shell.top_kind() == Some(dialog::DialogKind::Scope) {
+                        dialog::sync_dialog_text(shell, window, cx);
+                    }
                     cx.notify();
                 });
             });
@@ -459,13 +588,35 @@ fn build(
     .into_any_element()
 }
 
-fn hints(_shell: &ShellView, _state: &ScopeDialogState) -> Vec<Hint> {
-    vec![
+fn hints(shell: &ShellView, state: &ScopeDialogState) -> Vec<Hint> {
+    let mut hints = vec![
         Hint::new(HintRow::Move, &["j", "k"], "row"),
+        Hint::new(HintRow::Edit, &["p"], "dimension…"),
+        Hint::new(HintRow::Edit, &["x"], "expression…"),
+        Hint::new(HintRow::Edit, &["t"], "text"),
         Hint::new(HintRow::Edit, &["d"], "remove"),
         Hint::new(HintRow::Edit, &["shift+d"], "clear all"),
         Hint::new(HintRow::Edit, &["u"], "undo"),
         Hint::new(HintRow::Edit, &["ctrl+r"], "redo"),
+    ];
+    // Row-specific verbs show only on the rows they act on.
+    match state.cursor_row().map(|r| &r.kind) {
+        Some(RowKind::Named { .. }) => hints.push(Hint::new(HintRow::Edit, &["i"], "inline")),
+        Some(RowKind::Term { .. }) => hints.push(Hint::keystroke(
+            HintRow::Edit,
+            Keystroke {
+                key: "s".into(),
+                mods: shell.services.mod_alias,
+            },
+            "name",
+        )),
+        _ => {}
+    }
+    hints.extend([
+        Hint::new(HintRow::Go, &["enter"], "edit row"),
+        Hint::new(HintRow::Go, &["o"], "saved scopes…"),
+        Hint::new(HintRow::Go, &["s"], "save as…"),
         Hint::new(HintRow::Go, &["escape"], "close"),
-    ]
+    ]);
+    hints
 }

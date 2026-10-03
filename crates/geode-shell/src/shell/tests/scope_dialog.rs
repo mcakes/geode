@@ -286,6 +286,15 @@ fn removing_a_term_that_moved_refuses(cx: &mut gpui::TestAppContext) {
     );
     let error = shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().unwrap().error.clone());
     assert!(error.is_some());
+    draw(&mut vcx);
+    assert!(
+        vcx.debug_bounds("scope-dialog-error").is_some(),
+        "the refusal paints"
+    );
+    // The error describes the last action only: the next key clears it.
+    vcx.simulate_keystrokes("j");
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-dialog-error").is_none());
 }
 
 #[gpui::test]
@@ -328,4 +337,254 @@ fn bounds(
     selector: String,
 ) -> Option<gpui::Bounds<gpui::Pixels>> {
     vcx.debug_bounds(Box::leak(selector.into_boxed_str()))
+}
+
+#[gpui::test]
+fn a_picker_commit_returns_to_current_with_the_new_row(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, Scope::default());
+    vcx.simulate_keystrokes("p");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Picker)
+    );
+    // Pick a column, then a value from a delivered list.
+    shell.update(&mut vcx, |s, cx| {
+        let p = s.picker.as_mut().unwrap();
+        p.stage = crate::shell::picker::Stage::Values {
+            column: "book".into(),
+        };
+        p.values = Some(Ok(vec![("BK001".into(), 3)]));
+        cx.notify();
+    });
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+    assert_eq!(lane_scope(&shell, &vcx).sole("book"), Some("BK001"));
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-dialog-row-0").is_some());
+}
+
+#[gpui::test]
+fn mod_p_alone_still_closes_on_commit(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services());
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "frame::pick", &mut vcx);
+    shell.update(&mut vcx, |s, cx| {
+        let p = s.picker.as_mut().unwrap();
+        p.stage = crate::shell::picker::Stage::Values {
+            column: "book".into(),
+        };
+        p.values = Some(Ok(vec![("BK001".into(), 3)]));
+        cx.notify();
+    });
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(shell.read_with(&vcx, |s, _| s.top_kind()), None);
+}
+
+#[gpui::test]
+fn x_adds_an_expression_and_returns(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, Scope::default());
+    vcx.simulate_keystrokes("x");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::ScopeExpr)
+    );
+    vcx.simulate_input("npv > 1");
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+    assert_eq!(
+        lane_scope(&shell, &vcx).expression,
+        Some(parse_expr("npv > 1").unwrap())
+    );
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-dialog-row-0").is_some());
+}
+
+#[gpui::test]
+fn enter_on_a_term_edits_that_term(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    vcx.simulate_keystrokes("j enter"); // term 0: npv > 0
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::ScopeExpr)
+    );
+    // The idiom shell/tests/scope_expr.rs uses: the commit reads the field.
+    vcx.update(|window, cx| {
+        let input = shell.read(cx).dialog_input.clone();
+        input.update(cx, |i, cx| i.set_value("npv > 9", window, cx));
+    });
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(
+        lane_scope(&shell, &vcx).expression,
+        Some(parse_expr("npv > 9 and delta < 5").unwrap())
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+    draw(&mut vcx);
+}
+
+#[gpui::test]
+fn e_on_a_dimension_opens_the_picker_on_its_column(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    vcx.simulate_keystrokes("e"); // row 0: book
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Picker)
+    );
+    let stage = shell.read_with(&vcx, |s, _| s.picker.as_ref().map(|p| p.stage.clone()));
+    assert_eq!(
+        stage,
+        Some(crate::shell::picker::Stage::Values {
+            column: "book".into()
+        })
+    );
+}
+
+#[gpui::test]
+fn enter_on_a_reference_opens_its_expressions_entry(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    vcx.simulate_keystrokes("j j j enter"); // the reference `liq`
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Object)
+    );
+    let opened = shell.read_with(&vcx, |s, _| {
+        s.object_dialog
+            .as_ref()
+            .map(|d| (d.domain, d.stage.clone()))
+    });
+    assert_eq!(
+        opened,
+        Some((
+            crate::shell::objectdialog::Domain::Expressions,
+            crate::shell::objectdialog::Stage::Edit {
+                object: "liq".into()
+            }
+        ))
+    );
+    // Escape steps the object dialog back to its list, then closes it.
+    vcx.simulate_keystrokes("escape escape");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-dialog").is_some());
+}
+
+#[gpui::test]
+fn a_row_double_click_acts_as_enter(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    let row = vcx
+        .debug_bounds("scope-dialog-row-1")
+        .expect("term row paints");
+    super::double_click(&mut vcx, row.center(), gpui::Modifiers::default());
+    assert_eq!(
+        cursor_id(&shell, &vcx),
+        Some(RowId::Term("npv > 0".into(), 0))
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::ScopeExpr)
+    );
+    assert_eq!(shell.read_with(&vcx, |s, _| s.modal_depth()), 2);
+}
+
+#[gpui::test]
+fn a_single_row_press_only_moves_the_cursor(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    let row = vcx
+        .debug_bounds("scope-dialog-row-1")
+        .expect("term row paints");
+    vcx.simulate_click(row.center(), gpui::Modifiers::default());
+    assert_eq!(
+        cursor_id(&shell, &vcx),
+        Some(RowId::Term("npv > 0".into(), 0))
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+}
+
+#[gpui::test]
+fn i_inlines_a_reference_and_refuses_elsewhere(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    vcx.simulate_keystrokes("i");
+    let error = shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().unwrap().error.clone());
+    assert_eq!(
+        error.as_deref(),
+        Some(crate::shell::scopedialog::view::INLINE_ONLY_NAMED)
+    );
+    draw(&mut vcx);
+    assert!(
+        vcx.debug_bounds("scope-dialog-error").is_some(),
+        "the refusal paints"
+    );
+    vcx.simulate_keystrokes("j j j i"); // the reference
+    let scope = lane_scope(&shell, &vcx);
+    assert!(scope.named.is_empty());
+    assert_eq!(
+        scope.expression,
+        Some(parse_expr("npv > 0 and delta < 5 and npv > 0").unwrap())
+    );
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-dialog-error").is_none());
+}
+
+#[gpui::test]
+fn mod_s_on_a_term_opens_its_name_entry(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    vcx.simulate_keystrokes("alt-s");
+    let error = shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().unwrap().error.clone());
+    assert_eq!(
+        error.as_deref(),
+        Some(crate::shell::scopedialog::view::NAME_ONLY_TERMS),
+        "a dimension cannot be named"
+    );
+    draw(&mut vcx);
+    assert!(
+        vcx.debug_bounds("scope-dialog-error").is_some(),
+        "the refusal paints"
+    );
+    vcx.simulate_keystrokes("j alt-s");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::ScopeExpr)
+    );
+    let naming = shell.read_with(&vcx, |s, _| {
+        s.scope_expr_dialog.as_ref().and_then(|d| d.naming.clone())
+    });
+    assert_eq!(naming.as_deref(), Some("npv > 0"));
+}
+
+#[gpui::test]
+fn o_and_s_push_the_saved_chooser_and_the_save_prompt(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    vcx.simulate_keystrokes("o");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Choice)
+    );
+    vcx.simulate_keystrokes("enter"); // loads `eu`
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+    assert_eq!(lane_scope(&shell, &vcx).sole("book"), Some("BK001"));
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("s");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Object)
+    );
+    let domain = shell.read_with(&vcx, |s, _| s.object_dialog.as_ref().map(|d| d.domain));
+    assert_eq!(domain, Some(crate::shell::objectdialog::Domain::Scopes));
 }
