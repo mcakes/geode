@@ -485,6 +485,7 @@ fn a_restored_frame_applies_to_the_frame_with_clean_history_and_the_first_flush_
         active_slot: None,
         ad_hoc: None,
         ad_hoc_active: false,
+        loaded_from: None,
         as_of: geode_core::query::AsOf::At(chrono::Utc::now()),
     };
 

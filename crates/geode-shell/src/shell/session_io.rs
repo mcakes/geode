@@ -21,6 +21,7 @@ impl ShellView {
             active_slot: frame.active_slot(),
             ad_hoc: frame.ad_hoc().map(<[String]>::to_vec),
             ad_hoc_active: frame.grouping_choice() == GroupingChoice::AdHoc,
+            loaded_from: frame.loaded_from().map(str::to_string),
             as_of: frame.as_of().clone(),
         }
     }
@@ -41,6 +42,7 @@ impl ShellView {
                         active_slot: lane.active_slot(),
                         ad_hoc: lane.ad_hoc().map(<[String]>::to_vec),
                         ad_hoc_active: lane.grouping_choice() == GroupingChoice::AdHoc,
+                        loaded_from: lane.loaded_from().map(str::to_string),
                         as_of: lane.as_of().clone(),
                     },
                 )

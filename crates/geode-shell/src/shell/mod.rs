@@ -38,6 +38,9 @@ pub mod row_menu;
 mod rows;
 pub mod scale;
 pub mod scope_expr_view;
+// Read only by its tests until the dialog view is built on it.
+#[allow(dead_code)]
+mod scopedialog;
 mod session_io;
 pub mod settings_view;
 pub mod sidebar;
@@ -254,6 +257,19 @@ pub const EXPR_KEY: QueryKey = QueryKey(u64::MAX - 4);
 /// reservation reasoning. [`ShellView::deliver_distinct`] routes it to the
 /// open choice dialog, which drops a reply whose tag is not its own.
 pub const ACTION_KEY: QueryKey = QueryKey(u64::MAX - 5);
+
+/// Whether `key` is one of the shell's own reserved query keys. A distinct
+/// outcome under any other key belongs to the tile with that id.
+pub fn is_shell_key(key: QueryKey) -> bool {
+    [
+        PICKER_KEY,
+        DIAGNOSTICS_KEY,
+        SCOPES_KEY,
+        EXPR_KEY,
+        ACTION_KEY,
+    ]
+    .contains(&key)
+}
 
 /// The bridge's live reference reads (`Request::Reference` at `AsOf::Live`)
 /// submit under this key — one lower than `ACTION_KEY`, same reservation
@@ -1338,6 +1354,13 @@ impl ShellView {
                 if let Some(chain) = record.ad_hoc {
                     s.restore_ad_hoc(chain, record.ad_hoc_active);
                 }
+                if !s.restore_loaded_from(record.loaded_from.clone()) {
+                    tracing::warn!(
+                        target: "geode::session",
+                        "restored scope provenance dropped: no saved scope '{}'",
+                        record.loaded_from.as_deref().unwrap_or_default()
+                    );
+                }
                 s.set_as_of(record.as_of);
                 s.clear_history();
             });
@@ -1376,6 +1399,15 @@ impl ShellView {
                 // `clear_history`, like every other restored value.
                 if let Some(chain) = record.ad_hoc {
                     lane.restore_ad_hoc(chain, record.ad_hoc_active);
+                }
+                // `pin` copied the shared lane's provenance; the record names
+                // this lane's own, and a record without one clears the copy.
+                if !lane.restore_loaded_from(record.loaded_from.clone()) {
+                    tracing::warn!(
+                        target: "geode::session",
+                        "restored scope provenance dropped: no saved scope '{}'",
+                        record.loaded_from.as_deref().unwrap_or_default()
+                    );
                 }
                 lane.set_as_of(record.as_of);
                 lane.clear_history();
@@ -1777,6 +1809,14 @@ impl ShellView {
             })
             .detach();
         }
+        // Whole-object config edits queued by a module tile join the object
+        // dialogs' pending batch: one debounce, one write, one reload. With
+        // no user directory the refusal shows on the status bar.
+        let edits = frame.update(cx, |f, _| f.take_pending_config_edits());
+        if let Err(e) = objectdialog::apply::queue_edits(self, edits, cx) {
+            self.config_write_error = Some(e.into());
+            cx.notify();
+        }
         // A pressed header link chip opens the chooser on its own tile.
         if let Some(tile) = frame.update(cx, |f, _| f.take_pending_link_chooser()) {
             self.open_link_chooser_on(tile, window, cx);
@@ -1946,8 +1986,11 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) -> Result<bool, String> {
         self.target_frame().update(cx, |f, cx| {
+            let before = f.generation();
             let loaded = f.load_scope(name);
-            if let Ok(true) = loaded {
+            // Loading the scope in force changes only the lane's provenance;
+            // observers keyed on the generation still have to hear it.
+            if f.generation() != before {
                 cx.notify();
             }
             loaded
@@ -2046,9 +2089,9 @@ impl ShellView {
     /// Deliver a distinct-value reply from the app bridge. `EXPR_KEY` routes
     /// to the open expression field's suggestions. `SCOPES_KEY` routes
     /// to the object dialog's Values stage. `ACTION_KEY` routes to an open
-    /// action value choice. Other replies reach the dimension
+    /// action value choice. `PICKER_KEY` replies reach the dimension
     /// picker only if it is open in Values stage and both column and latest
-    /// request tag match. Stale replies cause no mutation or notification.
+    /// request tag match; any other key is dropped. Stale replies cause no mutation or notification.
     pub fn deliver_distinct(&mut self, outcome: DistinctOutcome, cx: &mut Context<Self>) {
         if outcome.key == EXPR_KEY {
             expr_suggest::deliver(self, outcome, cx);
@@ -2060,6 +2103,11 @@ impl ShellView {
         }
         if outcome.key == ACTION_KEY {
             choicedialog::deliver_action_values(self, outcome, cx);
+            return;
+        }
+        // Only the picker's own key reaches it: a tile's tag counter can
+        // match the picker's, and its values would then fill the picker.
+        if outcome.key != PICKER_KEY {
             return;
         }
         let Some(state) = self.picker.as_mut() else {

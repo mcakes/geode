@@ -470,8 +470,12 @@ impl ShellView {
         } else if action.0 == "frame::scope_clear" {
             // Palette-only (no chord — occasional deliberate act, not
             // muscle memory): clear the whole scope, itself undoable.
+            // Clearing an empty scope still forgets its provenance, which
+            // observers keyed on the generation have to hear.
             self.target_frame().update(cx, |f, cx| {
-                if f.clear_scope() {
+                let before = f.generation();
+                f.clear_scope();
+                if f.generation() != before {
                     cx.notify();
                 }
             });

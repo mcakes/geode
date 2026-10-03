@@ -4931,8 +4931,8 @@ run_mutation "palette: out-of-order words claim distinct characters" \
 
 run_mutation "palette: selecting a saved scope loads it" \
   crates/geode-shell/src/shell/palette_ctl.rs \
-  '                    if let Ok(true) = f.load_scope(&name) {' \
-  '                    if let Ok(true) = f.load_scope("no-such-scope") {' \
+  '                let _ = self.load_saved_scope(&name, cx);' \
+  '                let _ = self.load_saved_scope("no-such-scope", cx);' \
   geode-shell a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it
 
 # Category matches have a lower weight than title matches. Without the
@@ -18274,6 +18274,167 @@ run_mutation "scope-picker: an empty set's footer drops enter" \
   geode-shell \
   with_no_saved_scopes_the_picker_says_how_to_save_one
 
+# ---- Scope dialog: lane provenance, rows, saved rows and layers ----
+
+# A load of the scope already in force must still name its source, or the
+# dialog title says "unsaved" right after a load.
+run_mutation "scope dialog: a load records its source" \
+  crates/geode-shell/src/frame.rs \
+  '        self.set_loaded_from(Some(name.to_string()));
+        Ok(changed)' \
+  '        Ok(changed)' \
+  geode-shell \
+  loading_the_scope_already_in_force_still_records_its_name
+
+# Clearing a followed group's scope must not forget the lane's source.
+run_mutation "scope dialog: clearing a group keeps the lane's source" \
+  crates/geode-shell/src/frame.rs \
+  '        if following.is_none() {
+            self.set_loaded_from(None);
+        }' \
+  '        self.set_loaded_from(None);' \
+  geode-shell \
+  clearing_through_a_followers_view_keeps_the_lanes_provenance
+
+# A new source must reach the session file even when no scope changed.
+run_mutation "scope dialog: a new source dirties the session" \
+  crates/geode-shell/src/frame.rs \
+  '            self.lane().loaded_from = name;
+            fresh(&mut self.frame.generation);' \
+  '            self.lane().loaded_from = name;' \
+  geode-shell \
+  loading_the_scope_already_in_force_still_records_its_name_and_advances_the_generation
+
+# Restore refuses a name no saved scope has.
+run_mutation "scope dialog: restore refuses an unknown source" \
+  crates/geode-shell/src/frame.rs \
+  '            .is_none_or(|n| self.frame.saved_scopes.contains_key(n));' \
+  '            .is_none_or(|_| true);' \
+  geode-shell \
+  restoring_provenance_refuses_a_name_no_saved_scope_has
+
+# A pinned record without provenance must clear the copy pin took from the
+# shared lane, or the pinned lane reads "from <shared's scope>".
+run_mutation "scope dialog: restoring none clears a pinned copy" \
+  crates/geode-shell/src/frame.rs \
+  '        self.set_loaded_from(name.filter(|_| known));' \
+  '        if name.is_some() {
+            self.set_loaded_from(name.filter(|_| known));
+        }' \
+  geode-shell \
+  a_pinned_record_without_provenance_does_not_inherit_the_shared_lanes
+
+# The shared lane's provenance must be written to the session.
+run_mutation "scope dialog: the session writes the source" \
+  crates/geode-shell/src/session.rs \
+  '            t.insert("loaded_from".into(), toml::Value::String(name.clone()));' \
+  '' \
+  geode-shell \
+  provenance_round_trips
+
+# Two equal terms need two identities, or the cursor and d act on the wrong one.
+run_mutation "scope dialog: equal terms are distinct rows" \
+  crates/geode-shell/src/shell/scopedialog/rows.rs \
+  '                let occurrence = seen.iter().filter(|t| **t == text).count();' \
+  '                let occurrence = 0;' \
+  geode-shell \
+  identical_terms_get_distinct_identities
+
+# A deleted source must not read as "changed".
+run_mutation "scope dialog: a deleted source reads unsaved" \
+  crates/geode-shell/src/shell/scopedialog/rows.rs \
+  '        None => Provenance::Unsaved,' \
+  '        None => Provenance::Changed(loaded_from.unwrap_or_default().to_string()),' \
+  geode-shell \
+  provenance_reads_equal_changed_unsaved_or_nothing
+
+# The cursor follows its row by identity, not by index.
+run_mutation "scope dialog: the cursor keeps its row" \
+  crates/geode-shell/src/shell/scopedialog/rows.rs \
+  '            && let Some(i) = self.rows.iter().position(|r| &r.id == id)' \
+  '            && let Some(i) = self.rows.iter().position(|r| &r.id == id).filter(|_| false)' \
+  geode-shell \
+  the_cursor_keeps_its_row_by_identity_else_its_index_clamped
+
+# Inlining a broken reference must refuse, not drop it and widen the scope.
+run_mutation "scope dialog: inlining a missing name refuses" \
+  crates/geode-shell/src/frame.rs \
+  "            None => return Err(format!(\"named expression '{name}' is missing\"))," \
+  "            None => {
+                s.named.retain(|n| n != name);
+                return Ok(self.set_lane_scope(s));
+            }" \
+  geode-shell \
+  inlining_a_broken_reference_refuses_and_changes_nothing
+
+# Toggle removes an applied name rather than adding it twice.
+run_mutation "scope dialog: toggle removes an applied name" \
+  crates/geode-shell/src/frame.rs \
+  '        let applied = s.named.iter().any(|n| n == name);' \
+  '        let applied = false;' \
+  geode-shell \
+  toggling_a_name_adds_it_then_removes_it_each_one_undo_step
+
+# The applied tag is what tells enter's toggle which way it will go.
+run_mutation "scope dialog: saved expressions show applied" \
+  crates/geode-shell/src/shell/scopedialog/saved.rs \
+  '                applied: current.named.iter().any(|n| n == name),' \
+  '                applied: false,' \
+  geode-shell \
+  scopes_then_expressions_each_in_name_order_with_applied_and_broken
+
+# A one-shot door's step must close the dialog, not leave an empty modal.
+run_mutation "scope dialog: an emptied stack closes" \
+  crates/geode-shell/src/shell/scopedialog/state.rs \
+  '        if self.layers.is_empty() {' \
+  '        if false {' \
+  geode-shell \
+  a_one_shot_step_closes_on_commit_and_on_escape
+
+# A successful save makes the saved name the lane's source.
+run_mutation "scope dialog: a save records its name" \
+  crates/geode-shell/src/frame.rs \
+  '        self.set_loaded_from(Some(name.to_string()));
+        Ok(())' \
+  '        Ok(())' \
+  geode-shell \
+  loading_and_saving_a_scope_record_its_name_and_clearing_forgets_it
+
+# Clearing the lane forgets its source.
+run_mutation "scope dialog: clearing the lane forgets its source" \
+  crates/geode-shell/src/frame.rs \
+  '        if following.is_none() {
+            self.set_loaded_from(None);
+        }' \
+  '' \
+  geode-shell \
+  loading_and_saving_a_scope_record_its_name_and_clearing_forgets_it
+
+# A pinned lane starts from the shared lane's source.
+run_mutation "scope dialog: pinning copies the source" \
+  crates/geode-shell/src/frame.rs \
+  '            loaded_from: self.loaded_from.clone(),' \
+  '            loaded_from: None,' \
+  geode-shell \
+  pinning_copies_the_provenance_and_the_lanes_then_diverge
+
+# A load that changes only the source must still notify the frame's
+# observers, or the Grouping dialog's prepared rows go stale under it.
+run_mutation "scope dialog: a source-only load notifies" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            if f.generation() != before {' \
+  '            if false {' \
+  geode-shell \
+  loading_the_scope_in_force_notifies_the_frames_observers
+
+# Clearing an empty scope that still names a source must notify.
+run_mutation "scope dialog: a source-only clear notifies" \
+  crates/geode-shell/src/shell/input.rs \
+  '                if f.generation() != before {' \
+  '                if false {' \
+  geode-shell \
+  clearing_an_empty_scope_with_a_source_notifies_the_frames_observers
+
 # ---- Tile picker: placeholder double-click, tile::add and mod-n ----
 
 # Only a PLACEHOLDER's double-click is the door — a real tile's may
@@ -29753,7 +29914,7 @@ run_mutation "pricer leg tint: the fallback never walks away from the foreground
 # factory the new dimensions.
 run_mutation "pricer key: dimensions left out" \
   crates/geode-app/src/bridge.rs \
-  '        dimensions: config.doc("dimensions").map(|d| d.value.clone()),' \
+  '        dimensions: config.doc(DIMENSIONS_DOC).map(|d| d.value.clone()),' \
   '        dimensions: None,' \
   geode-app a_dimensions_reload_reaches_the_pricer
 
@@ -31202,8 +31363,8 @@ run_mutation "link: set_scope on a follower writes the group" \
 # lane's own fields and have no group route to take.
 run_mutation "link: loading a saved scope edits the lane through a follower's view" \
   crates/geode-shell/src/frame.rs \
-  '        Ok(self.set_lane_scope(scope))' \
-  '        Ok(self.set_scope(scope))' \
+  '        let changed = self.set_lane_scope(scope);' \
+  '        let changed = self.set_scope(scope);' \
   geode-shell the_scope_bars_other_verbs_edit_the_lane_through_a_followers_view
 
 run_mutation "link: dropping a dimension edits the lane through a follower's view" \
@@ -35496,6 +35657,154 @@ run_mutation "value colors: a desk none is nothing to follow" \
   '            (Some(user), Some(lower)) if user != lower => Some(lower),' \
   geode-core \
   the_state_separates_the_user_entry_from_the_layers_below
+
+# ---- Classifications: seams ----
+#
+# A classification is a derived dimension a person edits. Its edits, import
+# and naming are pure geode-core; the shell door, the file worker and the
+# derived projection are the seams that carry them to config and to queries.
+
+# Undo replays over the current object; a row changed since must be skipped,
+# not overwritten.
+run_mutation "classification: undo skips a row changed since" \
+  crates/geode-core/src/classification/mod.rs \
+  '        if next.values.get(&change.source) != expect.as_ref() {' \
+  '        if false {' \
+  geode-core \
+  undo_reverts_over_the_current_object_and_skips_rows_changed_since
+
+# A blank label clears rather than writing an empty label.
+run_mutation "classification: blank label clears" \
+  crates/geode-core/src/classification/mod.rs \
+  '        .filter(|l| !l.is_empty())' \
+  '        .filter(|_| true)' \
+  geode-core \
+  assigning_a_blank_label_clears
+
+# The header check is what stops a region file loading into sector.
+run_mutation "classification: import header must match" \
+  crates/geode-core/src/classification/import.rs \
+  '    if got != [dim.from.as_str(), dim.name.as_str()] {' \
+  '    if false {' \
+  geode-core \
+  a_header_for_another_classification_is_refused
+
+# A source given two labels must not apply either.
+run_mutation "classification: conflicting duplicates are rejected" \
+  crates/geode-core/src/classification/import.rs \
+  '        if conflicted.contains_key(&source) {' \
+  '        if false {' \
+  geode-core \
+  a_source_given_two_labels_rejects_both_rows_and_keeps_its_label
+
+# Excel leaves a cleared row as bare commas; it says nothing and must not
+# read as a rejected "empty source".
+run_mutation "classification: blank rows are skipped" \
+  crates/geode-core/src/classification/import.rs \
+  '        if record.fields.iter().all(|f| f.trim().is_empty()) {' \
+  '        if false {' \
+  geode-core \
+  an_all_blank_row_is_skipped_like_a_blank_line
+
+# DuckDB resolves identifiers case-insensitively, so `Book` beside the column
+# `book` would be ambiguous in the compiled SQL.
+run_mutation "classification: name clash ignores case" \
+  crates/geode-core/src/classification/validate.rs \
+  '        .find(|c| c.name.eq_ignore_ascii_case(name))' \
+  '        .find(|c| c.name == name)' \
+  geode-core \
+  shadowing_is_case_insensitive
+
+# A classification named `not` could never be named bare in an expression.
+run_mutation "classification: expression keywords are reserved" \
+  crates/geode-core/src/classification/validate.rs \
+  '    if KEYWORDS.iter().any(|k| k.eq_ignore_ascii_case(name)) {' \
+  '    if false {' \
+  geode-core \
+  a_name_may_not_be_a_scope_expression_keyword
+
+# Classifications never chain: a derived name is never offered as a source.
+run_mutation "classification: a derived source is refused" \
+  crates/geode-core/src/classification/validate.rs \
+  '            if out.iter().any(|c| c == name) || dims.get(name).is_some() {' \
+  '            if out.iter().any(|c| c == name) {' \
+  geode-core \
+  source_columns_are_groupable_utf8_and_never_derived
+
+# ...and never accepted as one when named directly.
+run_mutation "classification: a derived source is refused by name" \
+  crates/geode-core/src/classification/validate.rs \
+  '    if dims.get(from).is_some() {' \
+  '    if false {' \
+  geode-core \
+  source_columns_are_groupable_utf8_and_never_derived
+
+# Over a non-text source the text-keyed projection and the column-typed
+# narrowing disagree on which rows a label covers: plausible wrong totals.
+run_mutation "derived: a non-text source is refused" \
+  crates/geode-core/src/view.rs \
+  '            if src.ty == ColumnType::Utf8 {' \
+  '            if true {' \
+  geode-core \
+  a_derived_dimension_over_a_non_text_source_is_refused
+
+# An unmapped or NULL source must group under NULL, not under a label.
+run_mutation "derived: unmapped values group under NULL" \
+  crates/geode-data/src/query/compile.rs \
+  '        "map_extract_value(MAP([{}], [{}]), \"{from}\"::varchar)",' \
+  '        "coalesce(map_extract_value(MAP([{}], [{}]), \"{from}\"::varchar), {from:?})",' \
+  geode-data \
+  an_unmapped_or_null_source_groups_under_null_and_no_row_is_lost_or_multiplied
+
+# The picker's own answers stay with the shell; dropping its key from the
+# shell keys would deliver them to a tile.
+run_mutation "distinct: shell keys stay with the shell" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        PICKER_KEY,' \
+  '        DIAGNOSTICS_KEY,' \
+  geode-shell \
+  shell_keys_are_recognised_and_tile_keys_are_not
+
+# A module edit must reach the batch.
+run_mutation "config door: drained edits are queued" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, None, cx);' \
+  '    let _ = (edits, user_dir);' \
+  geode-shell \
+  queued_config_edits_reach_the_user_layer_through_the_batch
+
+# The read limit is checked before reading.
+run_mutation "files: oversized reads are refused" \
+  crates/geode-data/src/files.rs \
+  '    if len > max_bytes {' \
+  '    if false {' \
+  geode-data \
+  refuses_a_file_over_the_limit_without_reading_it
+
+# A failed write leaves neither a partial file nor a stray temporary.
+run_mutation "files: a failed write removes its temporary" \
+  crates/geode-data/src/files.rs \
+  '        let _ = std::fs::remove_file(&tmp);' \
+  '        let _ = &tmp;' \
+  geode-data \
+  a_failed_rename_removes_the_temporary
+
+# A tile waiting on its tag must hear back even after shutdown.
+run_mutation "files: a stopped worker answers with an error" \
+  crates/geode-data/src/files.rs \
+  '            return answer(&self.sink, &params, refused(&params, "file worker stopped"));' \
+  '            return;' \
+  geode-data \
+  a_stopped_worker_answers_a_submission_with_an_error
+
+# Keyed by tile alone, a failed export would be coalesced away behind a
+# later import's answer from the same tile.
+run_mutation "events: text-file outcomes key by tile and tag" \
+  crates/geode-app/src/events.rs \
+  '        DataEvent::TextFile(o) => Key::TextFile(o.key, o.tag),' \
+  '        DataEvent::TextFile(o) => Key::TextFile(o.key, 0),' \
+  geode-app \
+  two_text_file_outcomes_for_the_same_tile_are_both_delivered
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

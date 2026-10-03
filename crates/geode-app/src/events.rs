@@ -7,7 +7,8 @@
 //!
 //! An upload outcome keys on `(tile, tag)` rather than the tile alone, so two
 //! distinct uploads from the same tile remain separate. Coalescing by tile
-//! alone could hide an earlier upload's failure behind a later success.
+//! alone could hide an earlier upload's failure behind a later success. A
+//! text file outcome keys on `(tile, tag)` for the same reason.
 //! Local-write, position-command, and reference-table outcomes never coalesce
 //! (`Key::Local`): each retains its own place in mailbox arrival order.
 //! Reference freshness is checked by the bridge after delivery.
@@ -35,6 +36,9 @@ enum Key {
     /// still-undelivered outcome (e.g. a failure) when a later upload from
     /// the same tile answers before the first is read.
     Upload(QueryKey, u64),
+    /// Keyed on `(tile, tag)` like `Upload`: an earlier read or write's
+    /// failure must not be coalesced away behind a later answer.
+    TextFile(QueryKey, u64),
     /// An arrival sequence keeps local-write, command, and reference answers
     /// distinct and in mailbox arrival order. A load may be waiting for one
     /// specific save; coalescing writes could leave it waiting forever.
@@ -62,6 +66,7 @@ fn key(event: &DataEvent, seq: u64) -> Key {
         DataEvent::Price(o) => Key::Price(o.key),
         DataEvent::VolSlices(o) => Key::VolSlices(o.key),
         DataEvent::Upload(o) => Key::Upload(o.key, o.tag),
+        DataEvent::TextFile(o) => Key::TextFile(o.key, o.tag),
         DataEvent::Published { dataset, batch, .. } => {
             Key::Published(dataset.clone(), batch.clone())
         }
@@ -97,6 +102,7 @@ fn tag(event: &DataEvent) -> Option<u64> {
         DataEvent::Price(o) => Some(o.tag),
         DataEvent::VolSlices(o) => Some(o.tag),
         DataEvent::Upload(o) => Some(o.tag),
+        DataEvent::TextFile(o) => Some(o.tag),
         _ => None,
     }
 }
@@ -374,6 +380,37 @@ mod tests {
         assert!(matches!(
             rx.recv().await.unwrap(),
             DataEvent::Upload(o) if o.tag == 2 && o.result == Ok(())
+        ));
+    }
+
+    #[gpui::test]
+    async fn two_text_file_outcomes_for_the_same_tile_are_both_delivered() {
+        // A failed export followed by an import from the same tile must
+        // both reach it: coalescing by tile alone would hide the failure
+        // behind the later answer.
+        use geode_core::textfile::{TextFileOutcome, TextFileResult};
+        let (tx, rx) = channel();
+        let outcome = |tag, result| {
+            DataEvent::TextFile(TextFileOutcome {
+                key: QueryKey(1),
+                tag,
+                path: "classes.csv".into(),
+                result,
+            })
+        };
+        tx.try_send(outcome(1, TextFileResult::Written(Err("disk full".into()))))
+            .unwrap();
+        tx.try_send(outcome(2, TextFileResult::Read(Ok("name\n".into()))))
+            .unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::TextFile(o) if o.tag == 1
+                && o.result == TextFileResult::Written(Err("disk full".into()))
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::TextFile(o) if o.tag == 2
+                && o.result == TextFileResult::Read(Ok("name\n".into()))
         ));
     }
 

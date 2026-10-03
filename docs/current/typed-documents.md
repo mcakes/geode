@@ -83,6 +83,23 @@ non-array mapped value warns; non-string elements inside arrays are skipped.
 The reader does not validate `from` against a dataset. `base_column` performs
 one lookup, so chained derived dimensions are not recursively resolved.
 
+A classification created at runtime is held to stricter rules at creation
+than the reader applies to a hand-written file
+([`classification::validate`](../../crates/geode-core/src/classification/validate.rs)).
+Its name must be an identifier (`[A-Za-z_][A-Za-z0-9_]*`) so a scope
+expression can name it bare. It may not be a scope-expression keyword
+(`and`, `or`, `not`, `in`, `like`, `true`, `false`), `config_version`, a
+dataset column, or an existing derived dimension, each compared without
+regard to case. The expression parser matches keywords ignoring case, so
+`NOT` still negates, and DuckDB resolves identifiers ignoring case, so `Book`
+beside the column `book` would be ambiguous in the compiled SQL. Its source
+must be a column that is groupable in some dataset and `utf8` wherever it is
+declared, and never itself a derived dimension: classifications do not chain,
+since `base_column` resolves only one level. Rename and delete do not rewrite
+the groupings, views, saved scopes and named expressions that name a
+classification; `validate::references` counts them so the confirmation can
+say how many will break.
+
 ## Views and presentation
 
 [`ViewSpec`](../../crates/geode-core/src/view.rs) reads dataset, joins,
@@ -94,7 +111,8 @@ primary dataset, a `dimension` column's reachability through the grouping, a
 join, or a declared grain carrying it alongside the whole grouping (the
 unanimity rule; `ViewSpec::ungrouped_dimensions` lists those columns for both
 validation and the compiler), and grouping references. Derived dimensions
-must resolve to a source column in the primary dataset. It does not validate
+must resolve to a `utf8` source column in the primary dataset; a non-text
+source is refused (see [data path](data-path.md)). It does not validate
 derived SQL or sort keys. The compiler emits them into SQL; DuckDB binding
 and execution can reject them.
 

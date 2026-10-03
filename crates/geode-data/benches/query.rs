@@ -229,6 +229,19 @@ kind = "measure"
 [[shallow.columns]]
 name = "daily_trading_pnl"
 kind = "measure"
+
+# Grouped by a 5,000-value classification over underlying_ref. `sector`
+# is a derived dimension the bench supplies through `replace_views`; until
+# then the view is registered but refused.
+[by_sector]
+dataset = "risk_snapshot"
+grouping = ["sector", "underlying_ref"]
+[[by_sector.columns]]
+name = "delta01"
+kind = "measure"
+[[by_sector.columns]]
+name = "vega01"
+kind = "measure"
 "#;
     let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
     ViewSpec::from_doc(&doc)
@@ -793,11 +806,102 @@ fn bench_context(c: &mut Criterion) {
     group.finish();
 }
 
+/// A desk-sized classification: every observed underlying mapped to one of
+/// eleven sectors, padded with unobserved values to 5,000 arms, then a
+/// grouped requery. The derived dimension projects as one MAP probe per row,
+/// so the requery time should stay near the unclassified one as the value
+/// count grows; this measures that at the observed size and at 5,000.
+fn bench_classification(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_classification");
+    group.sample_size(20);
+    let rows = 1_000_000usize;
+    let (_db, _src, mut svc, rx, loaded) = service(rows);
+    assert!(loaded > 0, "fixture ingested nothing");
+    svc.distinct(&geode_core::query::DistinctParams {
+        key: QueryKey(2),
+        tag: 0,
+        column: "underlying_ref".into(),
+        scope: Scope::default(),
+        as_of: AsOf::Live,
+    })
+    .unwrap();
+    let observed: Vec<String> = loop {
+        match rx
+            .recv_timeout(Duration::from_secs(120))
+            .expect("no distinct")
+        {
+            geode_data::DataEvent::Distinct(o) => {
+                break o
+                    .values
+                    .expect("distinct failed")
+                    .into_iter()
+                    .map(|(v, _)| v)
+                    .collect();
+            }
+            _ => continue,
+        }
+    };
+    for arms in [observed.len(), 5_000] {
+        let mut text = String::from("[sector]\nfrom = \"underlying_ref\"\n[sector.values]\n");
+        let mut by_sector: Vec<Vec<String>> = vec![Vec::new(); 11];
+        for (i, u) in observed
+            .iter()
+            .cloned()
+            .chain((observed.len()..arms).map(|i| format!("PAD{i:05}")))
+            .enumerate()
+        {
+            by_sector[i % 11].push(format!("\"{u}\""));
+        }
+        for (i, sources) in by_sector.iter().enumerate() {
+            text.push_str(&format!("S{i:02} = [{}]\n", sources.join(", ")));
+        }
+        let dims = DerivedDimensions::from_doc(&merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin("dimensions", &text).unwrap()],
+        ))
+        .0;
+        assert_eq!(
+            dims.get("sector").map(|d| d.values.len()),
+            Some(arms),
+            "classification lost values in parsing"
+        );
+        // `tree_carried` is refused under `schema()` by design; only
+        // `by_sector` must be honoured.
+        let refusals = svc.replace_views(views(), dims);
+        assert!(
+            !refusals
+                .iter()
+                .any(|d| d.path.as_deref() == Some("views.by_sector")),
+            "by_sector refused under the classification: {refusals:?}"
+        );
+        eprintln!(
+            "\n[{rows} rows, {arms} arms] by_sector result rows {}",
+            requery(&svc, &rx, "by_sector", &Scope::default(), usize::MAX)
+        );
+        group.bench_function(format!("{rows}_rows_by_sector_{arms}_arms"), |b| {
+            b.iter(|| {
+                black_box(requery(
+                    &svc,
+                    &rx,
+                    "by_sector",
+                    &Scope::default(),
+                    usize::MAX,
+                ))
+            })
+        });
+        group.bench_function(format!("{rows}_rows_by_sector_{arms}_arms_depth_2"), |b| {
+            b.iter(|| black_box(requery(&svc, &rx, "by_sector", &Scope::default(), 2)))
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_requery,
     bench_resolve,
     bench_carried,
-    bench_context
+    bench_context,
+    bench_classification
 );
 criterion_main!(benches);

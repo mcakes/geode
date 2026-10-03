@@ -108,14 +108,16 @@ impl TileContent for GuideContent {
         self.0.update(cx, |tile, cx| tile.find(event, window, cx));
     }
     fn deliver(&self, delivery: Delivery, _: &mut Window, _: &mut App) {
-        // No query or source belongs to this bundled document.
+        // No query, source or file belongs to this bundled document.
         match delivery {
             Delivery::Query(_)
             | Delivery::Price(_)
             | Delivery::VolSlices(_)
             | Delivery::Series(_)
             | Delivery::SeriesFetched { .. }
-            | Delivery::Upload(_) => {}
+            | Delivery::Upload(_)
+            | Delivery::Distinct(_)
+            | Delivery::TextFile(_) => {}
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {
