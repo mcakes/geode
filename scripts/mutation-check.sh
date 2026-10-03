@@ -12167,8 +12167,8 @@ run_mutation "runner/document: the publish runs outside the panic boundary" \
                     source_time,
                     received_at: job.received_at,
                     bytes: job.bytes,
-                    compare_live: false,
-                    topic: None,
+                    compare_live: job.recovered,
+                    topic: job.topic.as_deref(),
                 },
             )
             .map_err(|e| e.to_string())
@@ -12184,8 +12184,8 @@ run_mutation "runner/document: the publish runs outside the panic boundary" \
                 source_time,
                 received_at: job.received_at,
                 bytes: job.bytes,
-                compare_live: false,
-                topic: None,
+                compare_live: job.recovered,
+                topic: job.topic.as_deref(),
             },
         )
         .map_err(|e| e.to_string()));' \
@@ -34556,6 +34556,24 @@ run_mutation "topics: recent reads only its own source" \
   '    let sql = "select topic from subscription_topics where source = ? order by topic";' \
   '    let sql = "select topic from subscription_topics where (source = ? or true) order by topic";' \
   geode-data a_recorded_topic_is_read_back_per_source
+
+# ---- document job marks
+# A recovered job compares against live. Dropping the mark publishes an
+# equal recovery reply, spending a generation and sending Published on
+# every reconnect.
+run_mutation "runner: a recovered job compares against live" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    compare_live: job.recovered,' \
+  '                    compare_live: false,' \
+  geode-data an_unchanged_recovered_document_job_reports_unchanged_not_published
+
+# A job's topic reaches the publish. Dropping it records nothing, and the
+# source has no topic to recover at its next start.
+run_mutation "runner: a job's topic reaches the publish" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    topic: job.topic.as_deref(),' \
+  '                    topic: None,' \
+  geode-data a_document_job_with_a_topic_records_it
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
