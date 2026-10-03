@@ -1357,25 +1357,28 @@ impl ShellView {
                         // to that occupant. Reuse focus restoration without arming a
                         // drag or handling double-click gestures, then opens the
                         // row menu at the pointer if the occupant answers
-                        // `press_context`.
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                        // `press_context`. Captured, not bubbled: an occupant
+                        // may stop a right press's propagation (gpui-component's
+                        // selectable table does, on a cell), and that must not
+                        // hide the press from the shell.
+                        .capture_any_mouse_down(cx.listener(
+                            move |view, event: &MouseDownEvent, window, cx| {
+                                if event.button != MouseButton::Right {
+                                    return;
+                                }
                                 view.leave_command_line(window, cx);
                                 if view.services.workspaces.active_mut().focus_main_tile(id) {
                                     view.session_dirty = true;
                                 }
                                 view.pending_focus_restore = true;
                                 cx.notify();
-                                // One beat later, so the module's own press
-                                // handling (a cursor move delivered as an
-                                // event) has landed before its context is read.
-                                let at = event.position;
-                                cx.defer_in(window, move |view, window, cx| {
-                                    view.open_row_menu_from_press(id, at, window, cx);
-                                });
-                            }),
-                        ),
+                                // One effect later, so every listener of this
+                                // press has run, including the module's own
+                                // bubble-phase one that records the pressed row
+                                // synchronously, before its context is read.
+                                view.open_row_menu_after_press(id, event.position, window, cx);
+                            },
+                        )),
                 );
             }
         }
@@ -1426,11 +1429,14 @@ impl ShellView {
                                     cx.notify();
                                 }),
                             )
-                            .on_mouse_down(
-                                MouseButton::Right,
+                            .capture_any_mouse_down(
                                 // The tree tile's right-press focus tail, for a
-                                // docked tile (same reason, same shape).
+                                // docked tile (same reason, same shape, also
+                                // captured so an occupant cannot hide it).
                                 cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                                    if event.button != MouseButton::Right {
+                                        return;
+                                    }
                                     view.leave_command_line(window, cx);
                                     if view
                                         .services
@@ -1442,10 +1448,7 @@ impl ShellView {
                                     }
                                     view.pending_focus_restore = true;
                                     cx.notify();
-                                    let at = event.position;
-                                    cx.defer_in(window, move |view, window, cx| {
-                                        view.open_row_menu_from_press(id, at, window, cx);
-                                    });
+                                    view.open_row_menu_after_press(id, event.position, window, cx);
                                 }),
                             ),
                     );

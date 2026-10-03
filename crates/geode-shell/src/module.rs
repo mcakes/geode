@@ -296,9 +296,11 @@ pub trait TileContent {
     }
     /// The context of the row a right press just landed on, for the shell's
     /// row menu, or `None` for a tile that opens no menu on a right press.
-    /// Called once per right press, after the module's own press handling
-    /// has run; a module records the pressed row and column in its own
-    /// press handler and answers from them here.
+    /// Called once per right press, one deferred effect after the press's
+    /// dispatch. A module records the pressed row and column synchronously,
+    /// in a mouse-down listener (any phase), and answers from them here;
+    /// handling it routes through an event or a defer may land after the
+    /// menu opened, and must not move window focus.
     fn press_context(&self, _cx: &mut App) -> Option<DimensionContext> {
         None
     }
@@ -1115,6 +1117,19 @@ pub mod recording {
         /// the shell sends a tile whose membership changed. (The shell's
         /// own repaint re-renders every tile too; that is not counted.)
         pub repaints: Rc<RefCell<Vec<TileId>>>,
+        /// When set, every occupant's view handles a right mouse-down as a
+        /// grid module with a selectable table does: it stops the press's
+        /// propagation (gpui-component's table does, on a cell) and records
+        /// its pressed row in that bubble-phase listener, the
+        /// `press_context` contract. The fixture's `press_context` is
+        /// empty until that listener puts `pressed_context` there, so the
+        /// shell reads a context only if its right-press beat runs after
+        /// the occupant's listener. A shell test's proof that the tile's
+        /// listener still sees the press, and reads the context late
+        /// enough.
+        pub stops_right_press: bool,
+        /// What a `stops_right_press` view records on a right press.
+        pub pressed_context: Option<DimensionContext>,
     }
 
     impl RecordingFactory {
@@ -1147,6 +1162,8 @@ pub mod recording {
                 scope_at_create: Rc::new(RefCell::new(Vec::new())),
                 generation_at_create: Rc::new(RefCell::new(Vec::new())),
                 repaints: Rc::new(RefCell::new(Vec::new())),
+                stops_right_press: false,
+                pressed_context: None,
             }
         }
     }
@@ -1167,6 +1184,13 @@ pub mod recording {
         input: Option<Entity<InputState>>,
         /// The `/` results a table-hosting occupant paints in its body.
         find: Option<gpui::WeakEntity<crate::fuzzyfind::FuzzyFind>>,
+        /// Shared with [`RecordingFactory::stops_right_press`].
+        stops_right_press: bool,
+        /// Shared with [`RecordingFactory::press_context`]: where a
+        /// `stops_right_press` view records `pressed_context` on the press.
+        press_context: Rc<RefCell<Option<DimensionContext>>>,
+        /// Shared with [`RecordingFactory::pressed_context`].
+        pressed_context: Option<DimensionContext>,
     }
 
     impl Render for RecordingView {
@@ -1176,10 +1200,19 @@ pub mod recording {
                 .as_ref()
                 .and_then(|f| f.upgrade())
                 .filter(|f| f.read(cx).is_active());
+            let stops_right_press = self.stops_right_press;
+            let press_context = self.press_context.clone();
+            let pressed_context = self.pressed_context.clone();
             div()
                 .size_full()
                 .track_focus(&self.focus)
                 .debug_selector(|| format!("tile-content-{}", self.tile.0))
+                .when(stops_right_press, |d| {
+                    d.on_mouse_down(gpui::MouseButton::Right, move |_, _, cx| {
+                        cx.stop_propagation();
+                        *press_context.borrow_mut() = pressed_context.clone();
+                    })
+                })
                 .child(format!("rec {}", self.tile.0))
                 .children(self.input.as_ref().map(Input::new))
                 .children(find)
@@ -1617,6 +1650,9 @@ pub mod recording {
                 focus,
                 input: None,
                 find: None,
+                stops_right_press: self.stops_right_press,
+                press_context: self.press_context.clone(),
+                pressed_context: self.pressed_context.clone(),
             });
             self.frame_handles.borrow_mut().insert(tile, frame.clone());
             self.followed_at_create

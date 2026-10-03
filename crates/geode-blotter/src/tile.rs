@@ -212,9 +212,6 @@ pub struct BlotterTile {
     /// including watched data and configuration; a tile-local requery clears
     /// the stage because it moves no frame counter.
     following: FollowingQuery<(Arc<Snapshot>, Vec<String>)>,
-    /// The display cell (row, column) the last right press landed on,
-    /// until `press_context` takes it for the shell's row menu.
-    pressed: Option<(usize, usize)>,
 }
 
 /// The frame counters a blotter's answer depends on, copied out of the tile
@@ -523,7 +520,6 @@ impl BlotterTile {
             find_task: None,
             find_cancel: None,
             following: FollowingQuery::new(),
-            pressed: None,
         }
     }
 
@@ -565,7 +561,9 @@ impl BlotterTile {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Option<geode_core::context::DimensionContext> {
-        let (row, col) = self.pressed.take()?;
+        let (row, col) = self
+            .table
+            .update(cx, |t, _| t.delegate_mut().pressed_cell.take())?;
         let d = self.table.read(cx).delegate();
         let mut ctx = d.context_at_row(row)?;
         ctx.first = d
@@ -1195,8 +1193,8 @@ impl BlotterTile {
     /// A right press on display cell (`row`, `col`), ahead of the shell's
     /// row menu. Inside a live row (`V`) selection nothing moves, so the
     /// selected rows ride along; anywhere else it is a plain press: the
-    /// selection clears and the cursor moves to the cell. Either way the
-    /// cell is recorded for [`Self::press_context`].
+    /// selection clears and the cursor moves to the cell. The delegate's
+    /// listener has already recorded the cell for [`Self::press_context`].
     fn context_press(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
         let inside = self
             .table
@@ -1221,7 +1219,6 @@ impl BlotterTile {
             self.table
                 .update(cx, |t, cx| t.set_right_clicked_row(None, cx));
         }
-        self.pressed = Some((row, col));
         cx.notify();
     }
 

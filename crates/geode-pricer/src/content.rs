@@ -440,6 +440,12 @@ impl TileContent for PricerContent {
         self.tile.read(cx).dimension_context(cx)
     }
 
+    /// The row a right press landed on, taken: the shell's row menu at
+    /// the pointer.
+    fn press_context(&self, cx: &mut App) -> Option<geode_core::context::DimensionContext> {
+        self.tile.update(cx, |t, cx| t.press_context(cx))
+    }
+
     /// A pricer hides the lines the frame's scope does not select, so
     /// following a link group changes the lines it shows.
     fn follows(&self) -> bool {

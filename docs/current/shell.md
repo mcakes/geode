@@ -148,11 +148,17 @@ its one `dimension_context`. Two routes open it:
   last painted it), or at the tile's top-left when it records none. The
   blotter and pricer bind it to `g .` in normal mode, beside `g m`.
 - A right press on a tile first focuses it, as a left press does, then
-  defers one beat so the module's own press handling has landed, and asks
-  the occupant's `TileContent::press_context` for the pressed row. The
-  default answers `None` and nothing opens; an answer opens the menu at the
-  pointer. The blotter answers it; the pricer answers `dimension_context`
-  only, so it has `g .` but no right-press menu.
+  asks the occupant's `TileContent::press_context` for the pressed row. The
+  tile cell hears the press in the capture phase, so an occupant that stops
+  its propagation (gpui-component's table does, on a cell) cannot hide it.
+  The shell reads `press_context` one deferred effect later
+  (`open_row_menu_after_press`): every mouse-down listener, capture and
+  bubble, has run by then, so an occupant records its pressed row
+  synchronously in a mouse-down listener (any phase). Handling it routes
+  through an event may land after the menu opens, and must not move window
+  focus.
+  The default answers `None` and nothing opens; an answer opens the menu at
+  the pointer. The blotter and the pricer answer it.
 
 `dimension::menu_rows` builds the rows. Each context column, the clicked
 column (`DimensionContext::first`) first and then the rest in context
@@ -322,7 +328,8 @@ their existing find behavior.
 GPUI window focus and the tiling model's focused tile are separate state and
 must be reconciled deliberately. Left and right tile presses focus the tile
 and arm `pending_focus_restore`; a right press does not start a drag or a
-double-click gesture. This gives a module's context menu the same tile's key
+double-click gesture, and is heard in the capture phase, so an occupant that
+stops its propagation still has its tile focused. This gives a module's context menu the same tile's key
 context. Keyboard commands that move structural focus also arm restoration.
 The shell returns window focus to the appropriate tile surface, except while
 that occupant intentionally holds an insert-mode input.

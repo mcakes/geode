@@ -319,6 +319,107 @@ fn a_right_press_opens_the_row_menu_at_the_pointer(cx: &mut gpui::TestAppContext
     );
 }
 
+/// An occupant that stops a right press's propagation (gpui-component's
+/// selectable table does, on a cell) cannot hide it from the shell: the
+/// tile cell's listener runs in the capture phase, so the press still
+/// focuses the tile and opens the row menu.
+#[gpui::test]
+fn a_right_press_is_seen_when_the_occupant_stops_propagation(cx: &mut gpui::TestAppContext) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.accepts = &["underlying_ref"];
+    rec.stops_right_press = true;
+    // Recorded by the occupant's own listener on the press: nothing until then.
+    rec.pressed_context = Some(spx_p7());
+    let services = services_with_recorders(vec![rec]);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let first = focused(&shell, &vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let second = focused(&shell, &vcx);
+    assert_ne!(first, second, "the split focused the new tile");
+    let at = main_tile_point(&mut vcx, &shell, first, 0.5, 0.5);
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert_eq!(focused(&shell, &vcx), first, "the press focused its tile");
+    let opened_at = shell.read_with(&vcx, |s, _| s.row_menu.as_ref().and_then(|m| m.at()));
+    assert_eq!(opened_at, Some(at));
+    let tiles = shell.read_with(&vcx, |s, _| s.occupants.len());
+    // A mouse-opened surface must take typed keys (grouping-picker rule).
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.row_menu.is_none()));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupants.len()),
+        tiles + 1,
+        "enter picked Open Rec"
+    );
+}
+
+/// The captured listener sees every button; only a right press opens the
+/// menu.
+#[gpui::test]
+fn a_left_press_never_opens_the_row_menu(cx: &mut gpui::TestAppContext) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.accepts = &["underlying_ref"];
+    *rec.press_context.borrow_mut() = Some(spx_p7());
+    let services = services_with_recorders(vec![rec]);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let id = focused(&shell, &vcx);
+    let at = main_tile_point(&mut vcx, &shell, id, 0.5, 0.5);
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+    vcx.simulate_mouse_up(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.row_menu.is_none()));
+    vcx.simulate_keystrokes("ctrl-{"); // tile → left dock
+    draw(&mut vcx);
+    let at = super::drag::dock_tile_point(&mut vcx, &shell, DockSide::Left, id, 0.5, 0.5);
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+    vcx.simulate_mouse_up(at, gpui::MouseButton::Left, gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.row_menu.is_none()));
+}
+
+/// The dock's right-press listener is captured too.
+#[gpui::test]
+fn a_right_press_on_a_docked_tile_is_seen_when_the_occupant_stops_propagation(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.accepts = &["underlying_ref"];
+    rec.stops_right_press = true;
+    // Recorded by the occupant's own listener on the press: nothing until then.
+    rec.pressed_context = Some(spx_p7());
+    let services = services_with_recorders(vec![rec]);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let id = focused(&shell, &vcx);
+    vcx.simulate_keystrokes("ctrl-{"); // tile → left dock
+    draw(&mut vcx);
+    let at = super::drag::dock_tile_point(&mut vcx, &shell, DockSide::Left, id, 0.5, 0.5);
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+    draw(&mut vcx);
+    let opened_at = shell.read_with(&vcx, |s, _| s.row_menu.as_ref().and_then(|m| m.at()));
+    assert_eq!(opened_at, Some(at));
+    let tiles = shell.read_with(&vcx, |s, _| s.occupants.len());
+    // A mouse-opened surface must take typed keys (grouping-picker rule).
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.row_menu.is_none()));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupants.len()),
+        tiles + 1,
+        "enter picked Open Rec"
+    );
+}
+
 /// A right press moves focus to the tile, so the menu it opens hands focus
 /// home when it closes, never back to the scope bar's text field — even
 /// when the field still held focus at the beat the menu opened (an occupant

@@ -21601,13 +21601,44 @@ run_mutation "timeseries triggers: the editor keeps the range trigger open" \
 # keyboard actions.
 run_mutation "shell: a right press focuses the tile" \
   crates/geode-shell/src/shell/render.rs \
-  '                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
-                                view.leave_command_line(window, cx);
-                                if view.services.workspaces.active_mut().focus_main_tile(id) {' \
-  '                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
-                                view.leave_command_line(window, cx);
-                                if false {' \
+  $'                                    return;\n                                }\n                                view.leave_command_line(window, cx);\n                                if view.services.workspaces.active_mut().focus_main_tile(id) {' \
+  $'                                    return;\n                                }\n                                view.leave_command_line(window, cx);\n                                if false {' \
   geode-shell a_right_click_focuses_the_tile_and_never_arms_a_drag
+
+# The tile cell's right press is captured: a module that stops the press's
+# propagation (gpui-component's selectable table, on a cell) cannot hide it.
+run_mutation "shell: the tree tile's right press bubbles" \
+  crates/geode-shell/src/shell/render.rs \
+  $'                        .capture_any_mouse_down(cx.listener(\n                            move |view, event: &MouseDownEvent, window, cx| {' \
+  $'                        .on_any_mouse_down(cx.listener(\n                            move |view, event: &MouseDownEvent, window, cx| {' \
+  geode-shell a_right_press_is_seen_when_the_occupant_stops_propagation
+
+run_mutation "shell: the docked tile's right press bubbles" \
+  crates/geode-shell/src/shell/render.rs \
+  $'                            .capture_any_mouse_down(\n                                // The tree tile\'s right-press focus tail, for a' \
+  $'                            .on_any_mouse_down(\n                                // The tree tile\'s right-press focus tail, for a' \
+  geode-shell a_right_press_on_a_docked_tile_is_seen_when_the_occupant_stops_propagation
+
+# The captured listener hears every button; only a right press opens the menu.
+run_mutation "shell: the tree tile's captured press ignores the button" \
+  crates/geode-shell/src/shell/render.rs \
+  $'cx| {\n                                if event.button != MouseButton::Right {' \
+  $'cx| {\n                                if false && event.button != MouseButton::Right {' \
+  geode-shell a_left_press_never_opens_the_row_menu
+
+run_mutation "shell: the docked tile's captured press ignores the button" \
+  crates/geode-shell/src/shell/render.rs \
+  $'cx| {\n                                    if event.button != MouseButton::Right {' \
+  $'cx| {\n                                    if false && event.button != MouseButton::Right {' \
+  geode-shell a_left_press_never_opens_the_row_menu
+
+# The capture listener runs before the occupant's own listener records its
+# press; reading in the capture phase, with no defer, reads nothing.
+run_mutation "shell: a captured right press reads its context before the occupant records it" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  $'        cx.defer_in(window, move |view, window, cx| {\n            view.open_row_menu_from_press(id, at, window, cx);\n        });' \
+  '        self.open_row_menu_from_press(id, at, window, cx);' \
+  geode-shell a_right_press_is_seen_when_the_occupant_stops_propagation
 
 # A verb outside the menu's own closes it first.
 run_mutation "timeseries mouse: a foreign verb closes the menu" \
@@ -23870,8 +23901,8 @@ run_mutation "row menu: a right press inside the selection drops it" \
 # press_context takes the press: a later call (a stale beat) opens nothing.
 run_mutation "row menu: the press is not consumed" \
   crates/geode-blotter/src/tile.rs \
-  '        let (row, col) = self.pressed.take()?;' \
-  '        let (row, col) = self.pressed?;' \
+  '            .update(cx, |t, _| t.delegate_mut().pressed_cell.take())?;' \
+  '            .update(cx, |t, _| t.delegate_mut().pressed_cell)?;' \
   geode-blotter a_right_press_moves_the_cursor_and_names_the_column
 
 # A press inside a V selection leaves the cursor where it was; the menu is
@@ -23907,6 +23938,20 @@ run_mutation "row menu: a right press beside the cells opens nothing" \
 
 # The row bubbles after a cell's right press; reporting it again at the old
 # cursor column overwrites the pressed column.
+# The press is recorded in the listener itself (the press_context
+# contract), at the cell and beside the cells.
+run_mutation "row menu: a cell's right press records nothing" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    d.pressed_cell = Some((row_ix, col_ix));' \
+  '                    let _ = (row_ix, col_ix);' \
+  geode-blotter a_right_press_moves_the_cursor_and_names_the_column
+
+run_mutation "row menu: a right press beside the cells records nothing" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    d.pressed_cell = Some((row_ix, col));' \
+  '                    let _ = (row_ix, col);' \
+  geode-blotter a_right_press_beside_the_cells_opens_the_rows_context
+
 run_mutation "row menu: a cell's right press is reported twice" \
   crates/geode-blotter/src/delegate.rs \
   '                    if std::mem::take(&mut d.context_reported) {' \
@@ -24018,14 +24063,14 @@ run_mutation "row menu: a right press hangs the menu at the tile" \
 # are substrings of the other's.
 run_mutation "row menu: a main-tree right press opens nothing" \
   crates/geode-shell/src/shell/render.rs \
-  $'                                let at = event.position;\n                                cx.defer_in(window, move |view, window, cx| {\n                                    view.open_row_menu_from_press(id, at, window, cx);\n                                });' \
-  '                                let _ = event;' \
+  $'is read.\n                                view.open_row_menu_after_press(id, event.position, window, cx);' \
+  $'is read.\n                                let _ = event;' \
   geode-shell a_right_press_opens_the_row_menu_at_the_pointer
 
 run_mutation "row menu: a docked right press opens nothing" \
   crates/geode-shell/src/shell/render.rs \
-  $'                                    let at = event.position;\n                                    cx.defer_in(window, move |view, window, cx| {\n                                        view.open_row_menu_from_press(id, at, window, cx);\n                                    });' \
-  '                                    let _ = event;' \
+  $'                                    cx.notify();\n                                    view.open_row_menu_after_press(id, event.position, window, cx);' \
+  $'                                    cx.notify();\n                                    let _ = event;' \
   geode-shell a_right_press_on_a_docked_tile_opens_the_row_menu_at_the_pointer
 
 # Opened while the scope bar's text field held focus, the menu hands
@@ -24975,9 +25020,101 @@ run_mutation "pricer select: a refused package qty step lets the rest land" \
 # catches it) is the editor's, never a cancel.
 run_mutation "pricer select: a press inside the editor's cell cancels it" \
   crates/geode-pricer/src/delegate.rs \
-  $'                if col.is_some()\n                    && d.editor' \
-  $'                if false\n                    && d.editor' \
+  $'        col.is_some()\n            && self\n                .editor' \
+  $'        false\n            && self\n                .editor' \
   geode-pricer a_press_on_the_date_fields_separator_keeps_the_editor_open
+
+# A right press in the open editor's cell is the editor's (its own context
+# menu); it records no row and never cancels the edit.
+run_mutation "pricer right press: the editor's cell reports a row" \
+  crates/geode-pricer/src/delegate.rs \
+  $'                if d.is_editor_cell(row_ix, col) {\n                    return;\n                }\n                d.pressed_row = Some(row_ix);' \
+  '                d.pressed_row = Some(row_ix);' \
+  geode-pricer a_right_press_inside_the_open_editor_keeps_it_open
+
+# A right press records its row for the shell's row menu in the listener
+# itself (the press_context contract): on a cell, and beside the cells.
+run_mutation "pricer right press: a cell's press records nothing" \
+  crates/geode-pricer/src/delegate.rs \
+  '                d.pressed_row = Some(row_ix);' \
+  '                let _ = &d.pressed_row;' \
+  geode-pricer a_right_press_moves_the_cursor_and_names_that_rows_underlying
+
+run_mutation "pricer right press: a press beside the cells records nothing" \
+  crates/geode-pricer/src/delegate.rs \
+  '                    this.delegate_mut().pressed_row = Some(row_ix);' \
+  '                    let _ = this.delegate_mut();' \
+  geode-pricer a_right_press_beside_the_cells_names_that_row
+
+# Inside a V selection the press still closes an open (bulk) editor.
+run_mutation "pricer right press: inside a V selection the bulk editor stays open" \
+  crates/geode-pricer/src/tile.rs \
+  $'                {\n                    self.close_editor(window, cx);\n                    self.table\n                        .update(cx, |t, cx| t.set_right_clicked_row(None, cx));' \
+  $'                {\n                    self.table\n                        .update(cx, |t, cx| t.set_right_clicked_row(None, cx));' \
+  geode-pricer a_right_press_inside_a_rows_selection_closes_the_bulk_editor
+
+# Inside a V selection the table's own right-press row outline is dropped.
+run_mutation "pricer right press: inside a V selection the row outline stays" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    self.close_editor(window, cx);\n                    self.table\n                        .update(cx, |t, cx| t.set_right_clicked_row(None, cx));' \
+  '                    self.close_editor(window, cx);' \
+  geode-pricer a_right_press_inside_a_rows_selection_drops_the_row_outline
+
+# press_context takes the press: a later call (a stale beat) opens nothing.
+run_mutation "pricer right press: the press is not consumed" \
+  crates/geode-pricer/src/tile.rs \
+  '            .update(cx, |t, _| t.delegate_mut().pressed_row.take())?;' \
+  '            .update(cx, |t, _| t.delegate_mut().pressed_row)?;' \
+  geode-pricer a_right_press_moves_the_cursor_and_names_that_rows_underlying
+
+# Inside a V selection holding the pressed row, the cursor and the
+# selection stay.
+run_mutation "pricer right press: a press inside a V selection clears it" \
+  crates/geode-pricer/src/tile.rs \
+  '                    .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row))' \
+  '                    .is_some_and(|r| false && r.contains_row(row))' \
+  geode-pricer a_right_press_inside_a_rows_selection_keeps_it
+
+# Only a row (V) selection is kept; a v block holding the row clears.
+run_mutation "pricer right press: a v block holding the row is kept" \
+  crates/geode-pricer/src/tile.rs \
+  '                    .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row))' \
+  '                    .is_some_and(|r| r.contains_row(row))' \
+  geode-pricer a_right_press_outside_the_selection_clears_it
+
+# A double-click on a package row's tree cell toggles it, as space does.
+run_mutation "pricer double-click: a package's tree cell toggles nothing" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    {\n                        self.tree_verb(None, cx);\n                    }\n                    self.rebuild_chrome();' \
+  $'                    {\n                        let _ = &cx;\n                    }\n                    self.rebuild_chrome();' \
+  geode-pricer double_clicking_a_packages_tree_cell_toggles_it
+
+# Only a package's own row: a leg's tree cell would collapse its package
+# through tree_verb's leaf-to-parent rule.
+run_mutation "pricer double-click: a leg's tree cell collapses its package" \
+  crates/geode-pricer/src/tile.rs \
+  '                            Some(GridRowKind::Package { .. })
+                        )
+                    {' \
+  '                            Some(GridRowKind::Package { .. })
+                        ) || true
+                    {' \
+  geode-pricer double_clicking_a_legs_tree_cell_does_not_collapse_its_package
+
+# A double-click whose first press was the chevron's toggles once.
+run_mutation "pricer double-click: a chevron's double-click toggles twice" \
+  crates/geode-pricer/src/tile.rs \
+  '                    if !chevron_toggled' \
+  '                    if true' \
+  geode-pricer a_chevron_double_click_while_the_bar_is_open_keeps_the_package
+
+# The pricer's TileContent forwarder is the production press_context seam;
+# the trait default (None) would leave the pricer's row menu dead.
+run_mutation "pricer right press: the content drops press_context" \
+  crates/geode-pricer/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.press_context(cx))' \
+  '        { let _ = cx; None }' \
+  geode-app a_right_press_on_a_pricer_line_opens_its_row_menu
 
 # A sheet replace clears the selection deliberately: line ids restart per
 # sheet, and a lost-anchor footer would misreport it.

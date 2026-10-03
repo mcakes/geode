@@ -719,6 +719,13 @@ pub struct PricerTile {
     /// press's own `DoubleClickedCell` (every press emits `SelectCell`
     /// first, which overwrites it).
     pressed: Option<Option<At>>,
+    /// The line the latest press's chevron toggled, if it was a chevron's.
+    /// Every press's `SelectCell` moves it into `pressed_chevron`, so it
+    /// lives for exactly one following press, as `click_anchor` does.
+    chevron_anchor: Option<At>,
+    /// `chevron_anchor`, taken by the latest press: a double-click whose
+    /// first press was that line's chevron toggles it no second time.
+    pressed_chevron: Option<At>,
     /// A grip drag from its press to its drop, cancel or release
     /// elsewhere (`tile::reorder`).
     pub(crate) row_drag: Option<reorder::RowDragState>,
@@ -1122,6 +1129,8 @@ impl PricerTile {
             last_press_on_name: false,
             click_anchor: None,
             pressed: None,
+            chevron_anchor: None,
+            pressed_chevron: None,
             row_drag: None,
             underlyings: Rc::from([]),
             underlyings_rev: None,
@@ -5373,15 +5382,34 @@ impl PricerTile {
         &self,
         cx: &App,
     ) -> Option<geode_core::context::DimensionContext> {
-        let g = self.cursor_row()?;
-        let mut ctx = match self.underlying_at(g) {
-            Some(u) => geode_core::context::DimensionContext::of(&[("underlying_ref", &u)]),
-            None => geode_core::context::DimensionContext::default(),
-        };
+        let mut ctx = self.context_at(self.cursor_row()?);
         // Where `g .` hangs the row menu: the cursor row's painted
         // lower-left, or `None` (the tile's top-left) while it is off screen.
         ctx.anchor = self.table.read(cx).delegate().cursor_anchor.get();
         Some(ctx)
+    }
+
+    /// The context of the row the latest right press landed on (the
+    /// delegate's listener recorded it), taken: the shell reads it once,
+    /// one beat after the press, and hangs the menu at the pointer (so no
+    /// anchor). `None` when no press is pending.
+    pub(crate) fn press_context(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<geode_core::context::DimensionContext> {
+        let row = self
+            .table
+            .update(cx, |t, _| t.delegate_mut().pressed_row.take())?;
+        Some(self.context_at(row))
+    }
+
+    /// Grid row `g`'s context: its sole underlying as `underlying_ref`, or
+    /// an empty context when it names none.
+    fn context_at(&self, g: usize) -> geode_core::context::DimensionContext {
+        match self.underlying_at(g) {
+            Some(u) => geode_core::context::DimensionContext::of(&[("underlying_ref", &u)]),
+            None => geode_core::context::DimensionContext::default(),
+        }
     }
 
     /// The one underlying the cursor row names, or `None` with no cursor
@@ -5521,6 +5549,7 @@ impl PricerTile {
         // second press must still resolve the package, not the row that
         // slid up. A press takes any older anchor, as `SelectCell` does.
         self.click_anchor = self.entry.is_some().then(|| line.clone());
+        self.chevron_anchor = line.clone();
         self.close_entry(window, cx);
         self.close_editor(window, cx);
         if let Some(at) = line {
@@ -5659,6 +5688,35 @@ impl PricerTile {
                 self.close_entry(window, cx);
                 (row, col, Some(kind_for(tree)))
             }
+            CellPointer::Context { row } => {
+                // The delegate already recorded the row for the shell's row
+                // menu (`press_context`); this is the cursor's part. A right
+                // press on a row of a live `V` selection leaves the cursor
+                // and the selection alone (the menu acts on one of its
+                // rows), but closes an open editor, the bulk one included,
+                // as every gesture does, and drops the table's own
+                // right-press row outline.
+                if self
+                    .resolved
+                    .as_ref()
+                    .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row))
+                {
+                    self.close_editor(window, cx);
+                    self.table
+                        .update(cx, |t, cx| t.set_right_clicked_row(None, cx));
+                    if snapshot(self) != before {
+                        self.rebuild_chrome();
+                        cx.notify();
+                    }
+                    return;
+                }
+                // Otherwise a plain press's move. No `SelectCell` follows a
+                // right press, so the bar closes here, as on a drag; the
+                // cursor keeps its column.
+                self.clear_selection();
+                self.close_entry(window, cx);
+                (row, None, None)
+            }
         };
         if self.editor.is_some() {
             self.close_editor(window, cx);
@@ -5696,6 +5754,7 @@ impl PricerTile {
                 // two presses of one double-click: hand this press's line
                 // to the next press only, whatever row that one lands on.
                 self.pressed = self.click_anchor.take();
+                self.pressed_chevron = self.chevron_anchor.take();
                 if self.entry.is_some() {
                     self.click_anchor = Some(line.clone());
                 }
@@ -5756,6 +5815,23 @@ impl PricerTile {
                     return;
                 }
                 let Some(c) = SheetDelegate::plan_col(*col) else {
+                    // A package row's tree cell (its name) is `space` on
+                    // it. Only a package's own row: `tree_verb` takes a
+                    // leg to its parent, and a leg's name must not
+                    // collapse the package it sits in. Not when the first
+                    // press was this line's chevron: that already toggled
+                    // it (the second press lands here when closing the
+                    // entry bar slid the table up under the pointer).
+                    let chevron_toggled =
+                        self.pressed_chevron.is_some() && self.pressed_chevron == self.cursor.at;
+                    if !chevron_toggled
+                        && matches!(
+                            self.cursor_row().and_then(|g| self.model.kind(g)),
+                            Some(GridRowKind::Package { .. })
+                        )
+                    {
+                        self.tree_verb(None, cx);
+                    }
                     self.rebuild_chrome();
                     cx.notify();
                     return;
@@ -8365,6 +8441,56 @@ pub(crate) mod tests {
             click(&mut vcx, sel, 2);
             assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "{sel}: and closes it again");
         }
+    }
+
+    /// A double-click on a package row's tree cell (its name, beside the
+    /// chevron) is `space` on it: the package opens, then closes.
+    #[gpui::test]
+    fn double_clicking_a_packages_tree_cell_toggles_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        assert_eq!(h.tree(&vcx).len(), 3, "the package starts closed");
+        click(&mut vcx, "pricer-cell-1-0", 1);
+        click(&mut vcx, "pricer-cell-1-0", 2);
+        assert_eq!(h.tree(&vcx).len(), 5, "a double-click opens it");
+        assert!(h.tile.read_with(&vcx, |t, _| t.editor.is_none()));
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
+        click(&mut vcx, "pricer-cell-1-0", 1);
+        click(&mut vcx, "pricer-cell-1-0", 2);
+        assert_eq!(h.tree(&vcx).len(), 3, "and closes it again");
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
+    }
+
+    /// A package row's value cells still edit on a double-click; the
+    /// package keeps its expansion.
+    #[gpui::test]
+    fn double_clicking_a_packages_value_cell_still_edits(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        click(&mut vcx, "pricer-cell-1-4", 1);
+        click(&mut vcx, "pricer-cell-1-4", 2);
+        assert_eq!(h.mode(&mut vcx), "insert", "the editor opened");
+        assert_eq!(h.tree(&vcx).len(), 3, "the package stays closed");
+    }
+
+    /// A leg's tree cell is not its package's: a double-click there never
+    /// collapses the package (`space`'s leaf-to-parent rule is not used).
+    #[gpui::test]
+    fn double_clicking_a_legs_tree_cell_does_not_collapse_its_package(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let at = centre_of(&mut vcx, "pricer-chevron-1");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.tree(&vcx).len(), 5, "fixture: the package is open");
+        click(&mut vcx, "pricer-cell-2-0", 1);
+        click(&mut vcx, "pricer-cell-2-0", 2);
+        assert_eq!(h.tree(&vcx).len(), 5, "the package stays open");
+        assert_eq!(
+            h.cursor(&vcx).map(|c| c.0),
+            Some(2),
+            "the cursor stays on the leg"
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.editor.is_none()));
     }
 
     #[gpui::test]
