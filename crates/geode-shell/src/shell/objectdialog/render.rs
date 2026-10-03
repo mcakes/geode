@@ -1660,6 +1660,14 @@ fn handle_edit_key_inner(
                 None => set_notice(shell, "that is as far as this row goes".to_string()),
             }
         }
+        NormalCommand::Verb('d') if editing_ad_hoc(shell) => {
+            super::grouping_list::forget(shell, cx);
+            leave_edit(shell, cx);
+            return true;
+        }
+        NormalCommand::Verb('r') if editing_ad_hoc(shell) => {
+            set_notice(shell, super::grouping_list::AD_HOC_NO_REVERT.to_string())
+        }
         NormalCommand::Verb('d') => arm_delete(shell, cx),
         // In a column stage `r` and `shift+r` release the field(s) to the layers below;
         // everywhere else `r` is the object's revert.
@@ -2317,6 +2325,13 @@ fn in_column_stage(shell: &ShellView) -> bool {
         .is_some_and(|draft| draft.column().is_some())
 }
 
+/// Whether the open edit stage is the lane's ad hoc chain.
+fn editing_ad_hoc(shell: &ShellView) -> bool {
+    shell.object_dialog.as_ref().is_some_and(|state| {
+        matches!(&state.stage, Stage::Edit { object } if object == super::grouping_list::AD_HOC)
+    })
+}
+
 /// Is the Values stage open? [`in_column_stage`]'s own mirror, off [`Draft::values`]
 /// for the same reason: the projection is what the verbs below actually act on.
 fn in_values_stage(shell: &ShellView) -> bool {
@@ -2435,6 +2450,11 @@ fn commit_change(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         .and_then(|state| state.draft.as_ref())
         .is_some_and(|draft| draft.is_dirty());
     if !dirty {
+        return;
+    }
+    // The ad hoc chain is the frame's, not a config object: its edits never
+    // reach the pending batch.
+    if super::grouping_list::commit_ad_hoc(shell, cx) {
         return;
     }
     let fork =
@@ -3084,6 +3104,15 @@ fn actions(shell: &ShellView) -> Vec<Action> {
         out.push(Action {
             key: "r",
             label: "Revert to desk".to_string(),
+            destructive: true,
+        });
+    }
+    // The ad hoc chain's row has no layer, so the two blocks above offer
+    // nothing; its own destructive verb is forgetting it.
+    if editing_ad_hoc(shell) {
+        out.push(Action {
+            key: "d",
+            label: "Forget this chain".to_string(),
             destructive: true,
         });
     }
@@ -5024,6 +5053,10 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
         return;
     }
     match key {
+        "d" if editing_ad_hoc(shell) => {
+            super::grouping_list::forget(shell, cx);
+            leave_edit(shell, cx);
+        }
         "d" => arm_delete(shell, cx),
         "r" => arm_revert(shell),
         "i" => open_field(shell),

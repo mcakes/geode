@@ -67,11 +67,17 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
                 .collect()
         })
         .unwrap_or_default();
+    chain_fields(config, Some(object.unwrap_or("")), current)
+}
 
-    // The slot's own chain first, in chain order, ticked; then every
-    // other pickable column, in schema order, unticked — all of them the
-    // object's OWN items, because ticking is the whole of membership
-    // here (this module's own doc comment).
+/// The fields for a chain: `current` ticked and first, in chain order, then
+/// every other groupable column unticked. `slot` is the read-only identity
+/// row; the ad hoc chain has none, since it is not a numbered object.
+pub fn chain_fields(config: &Config, slot: Option<&str>, current: Vec<String>) -> Vec<Field> {
+    // The chain first, in chain order, ticked; then every other pickable
+    // column, in schema order, unticked — all of them the object's OWN
+    // items, because ticking is the whole of membership here (this
+    // module's own doc comment).
     let mut items: Vec<ListItem> = current
         .iter()
         .map(|name| ListItem {
@@ -99,26 +105,44 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         });
     }
 
-    vec![
-        Field {
-            key: "slot".to_string(),
-            label: "Slot".to_string(),
-            kind: FieldKind::Text(object.unwrap_or("").to_string()),
-            dest: Destination::Doc,
-            layer: None,
+    let dimensions = Field {
+        key: DIMENSIONS.to_string(),
+        label: "Dimensions".to_string(),
+        kind: FieldKind::OrderedList {
+            items,
+            // No catalogue, not an empty one — see this module's doc.
+            available: None,
         },
-        Field {
-            key: "dimensions".to_string(),
-            label: "Dimensions".to_string(),
-            kind: FieldKind::OrderedList {
-                items,
-                // No catalogue, not an empty one — see this module's doc.
-                available: None,
+        dest: Destination::Doc,
+        layer: None,
+    };
+    match slot {
+        Some(slot) => vec![
+            Field {
+                key: "slot".to_string(),
+                label: "Slot".to_string(),
+                kind: FieldKind::Text(slot.to_string()),
+                dest: Destination::Doc,
+                layer: None,
             },
-            dest: Destination::Doc,
-            layer: None,
-        },
-    ]
+            dimensions,
+        ],
+        None => vec![dimensions],
+    }
+}
+
+/// The draft for the lane's ad hoc chain. It is not a configuration object:
+/// its fields come from `chain`, and `render::commit_change` sends its edits
+/// to the frame instead of the config writer.
+pub fn ad_hoc_draft(config: &Config, chain: &[String]) -> Draft {
+    let mut draft = super::Domain::Groupings.draft(config, super::grouping_list::AD_HOC);
+    let fields = chain_fields(config, None, chain.to_vec());
+    draft.baseline = fields.clone();
+    draft.fields = fields;
+    // `Domain::draft` validated the slot-shaped fields it built; the stage
+    // must open showing what is wrong with these.
+    draft.diagnostics = validate(&draft, config);
+    draft
 }
 
 /// The `dimensions` field's key — the one list the chain field edits.
@@ -331,7 +355,15 @@ pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
 /// `views::validate` gives for doing the same: validating the whole merged doc would
 /// report every other slot's problems against this one object.
 pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
-    let table = rendered_doc_table(draft);
+    // The reader validates slots. The ad hoc chain is checked as if it were
+    // one: the same existence rules apply, and its own name is not a slot.
+    let table = if draft.name == super::grouping_list::AD_HOC {
+        super::object_text("1", to_table(draft, Destination::Doc))
+            .parse::<toml::Table>()
+            .unwrap_or_default()
+    } else {
+        rendered_doc_table(draft)
+    };
     let doc = merge_docs(
         DOC,
         &[LayerDoc {
@@ -425,6 +457,25 @@ mod tests {
             desk: None,
             user: None,
         })
+    }
+
+    #[test]
+    fn the_ad_hoc_draft_ticks_its_chain_and_validates_clean() {
+        let config = config_with_slot("3 = [\"book\"]\n");
+        let draft = ad_hoc_draft(&config, &["lhu".to_string(), "book".to_string()]);
+        assert_eq!(draft.name, "*");
+        assert_eq!(super::ticked(&draft), ["lhu", "book"]);
+        assert!(
+            draft.fields.iter().all(|f| f.key != "slot"),
+            "the ad hoc chain is not a numbered object"
+        );
+        assert!(!draft.is_dirty());
+        assert!(
+            validate(&draft, &config).is_empty(),
+            "{:?}",
+            validate(&draft, &config)
+        );
+        assert!(draft.diagnostics.is_empty(), "{:?}", draft.diagnostics);
     }
 
     /// `dimensions` offers the dataset's groupable columns: the slot's own

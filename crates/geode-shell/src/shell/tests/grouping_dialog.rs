@@ -541,3 +541,306 @@ fn a_click_on_an_empty_slot_then_typing_defines_and_activates_it(cx: &mut gpui::
         written(&dir)
     );
 }
+
+fn stored(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<Vec<String>> {
+    frame_of(shell, cx).read_with(cx, |f, _| f.shared().ad_hoc().map(<[String]>::to_vec))
+}
+
+#[gpui::test]
+fn i_types_an_ad_hoc_chain_and_enter_applies_it_with_no_file_write(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, dir) = open_dialog(cx);
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "*".to_string()
+        }
+    );
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
+    let crumb = shell.read_with(&cx, |shell, _| objectdialog::render::crumb_text(shell));
+    assert_eq!(crumb, "ad hoc");
+
+    cx.simulate_input("lhu book");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert!(!is_open(&shell, &cx));
+    assert_eq!(choice(&shell, &cx), GroupingChoice::AdHoc);
+    assert_eq!(in_force(&shell, &cx), Some(chain(&["lhu", "book"])));
+    flush_config_write(&mut cx);
+    assert_eq!(
+        written(&dir),
+        "",
+        "the ad hoc chain is never written to groupings.toml"
+    );
+}
+
+#[gpui::test]
+fn i_is_seeded_from_the_cursor_row_and_enter_applies_it_unchanged(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    cx.simulate_keystrokes("j j i"); // row 2 is slot 1: book / lhu
+    cx.run_until_parked();
+    let field = shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(field, "book / lhu");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        choice(&shell, &cx),
+        GroupingChoice::AdHoc,
+        "an untouched seed is still a request to apply that chain ad hoc"
+    );
+    assert_eq!(in_force(&shell, &cx), Some(chain(&["book", "lhu"])));
+    assert_eq!(
+        frame_of(&shell, &cx).read_with(&cx, |f, _| f.slots().get(1).map(<[String]>::to_vec)),
+        Some(chain(&["book", "lhu"])),
+        "the slot it was seeded from is untouched"
+    );
+}
+
+#[gpui::test]
+fn escape_from_the_ad_hoc_field_returns_to_the_list_and_changes_nothing(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_input("lhu");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert_eq!(stored(&shell, &cx), None);
+    assert_eq!(cursor_name(&shell, &cx).as_deref(), Some("*"));
+}
+
+#[gpui::test]
+fn enter_and_a_on_an_empty_ad_hoc_row_open_its_chain_field(cx: &mut gpui::TestAppContext) {
+    for keys in ["j enter", "a"] {
+        let (shell, mut cx, _dir) = open_dialog(cx);
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+        assert!(is_open(&shell, &cx), "{keys}");
+        assert!(edit_draft(&shell, &cx, |d| d.chain_entry()), "{keys}");
+    }
+}
+
+#[gpui::test]
+fn a_returns_to_a_stored_ad_hoc_chain(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+        f.shared_mut().set_active_slot(Some(1));
+    });
+    cx.simulate_keystrokes("a");
+    cx.run_until_parked();
+    assert_eq!(choice(&shell, &cx), GroupingChoice::AdHoc);
+    assert!(!is_open(&shell, &cx));
+}
+
+#[gpui::test]
+fn ticking_in_the_ad_hoc_editor_regroups_at_once(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+        f.shared_mut().set_active_slot(Some(1));
+    });
+    cx.simulate_keystrokes("k k"); // from slot 1 (row 2) up to row 0, then:
+    cx.simulate_keystrokes("j e"); // row 1 is the ad hoc row
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "*".to_string()
+        }
+    );
+    // The editor opens on the first dimension row, `lhu`; the next is `book`.
+    cx.simulate_keystrokes("j space");
+    cx.run_until_parked();
+    assert_eq!(
+        choice(&shell, &cx),
+        GroupingChoice::AdHoc,
+        "an ad hoc edit applies it"
+    );
+    assert_eq!(in_force(&shell, &cx), Some(chain(&["lhu", "book"])));
+    assert!(
+        is_open(&shell, &cx),
+        "the editor stays open for the next tick"
+    );
+    flush_config_write(&mut cx);
+    assert_eq!(written(&dir), "");
+}
+
+#[gpui::test]
+fn the_last_ad_hoc_dimension_cannot_be_unticked(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+    });
+    cx.simulate_keystrokes("e space");
+    cx.run_until_parked();
+    assert_eq!(stored(&shell, &cx), Some(chain(&["lhu"])));
+    assert!(
+        !notice(&shell, &cx).is_empty(),
+        "the refusal is said out loud"
+    );
+}
+
+#[gpui::test]
+fn d_forgets_the_ad_hoc_chain_from_the_list_without_asking(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+    });
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "a retypable chain needs no question"
+    );
+    assert_eq!(stored(&shell, &cx), None);
+    assert_eq!(choice(&shell, &cx), GroupingChoice::ViewDefault);
+    assert!(is_open(&shell, &cx));
+}
+
+#[gpui::test]
+fn d_and_r_on_the_view_default_and_r_on_the_ad_hoc_row_are_refused(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+        f.shared_mut().set_active_slot(None);
+    });
+    // Cursor opens on the view default (the active row).
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert!(!notice(&shell, &cx).is_empty());
+    assert_eq!(stored(&shell, &cx), Some(chain(&["lhu"])));
+    cx.simulate_keystrokes("j r");
+    cx.run_until_parked();
+    assert_eq!(
+        notice(&shell, &cx),
+        objectdialog::grouping_list::AD_HOC_NO_REVERT
+    );
+    assert_eq!(stored(&shell, &cx), Some(chain(&["lhu"])));
+}
+
+#[gpui::test]
+fn ticking_in_an_empty_ad_hoc_editor_defines_the_chain(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, dir) = open_dialog(cx);
+    cx.simulate_keystrokes("j e");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "*".to_string()
+        }
+    );
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert_eq!(choice(&shell, &cx), GroupingChoice::AdHoc);
+    assert_eq!(stored(&shell, &cx).map(|c| c.len()), Some(1));
+    flush_config_write(&mut cx);
+    assert_eq!(written(&dir), "");
+}
+
+#[gpui::test]
+fn d_in_the_ad_hoc_editor_forgets_the_chain_and_returns_to_the_list(cx: &mut gpui::TestAppContext) {
+    for route in ["key", "button"] {
+        let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+            f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+        });
+        cx.simulate_keystrokes("e");
+        cx.run_until_parked();
+        if route == "key" {
+            cx.simulate_keystrokes("d");
+        } else {
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let button = cx
+                .debug_bounds("objectdialog-action-d")
+                .expect("the ad hoc editor offers its forget button");
+            cx.simulate_click(button.center(), gpui::Modifiers::none());
+        }
+        cx.run_until_parked();
+        assert_eq!(stored(&shell, &cx), None, "{route}");
+        assert_eq!(choice(&shell, &cx), GroupingChoice::ViewDefault, "{route}");
+        assert_eq!(
+            dialog_state(&shell, &cx, |s| s.stage.clone()),
+            objectdialog::Stage::Browse,
+            "{route}"
+        );
+        assert!(
+            cx.debug_bounds("objectdialog-confirm").is_none(),
+            "{route}: no question"
+        );
+    }
+}
+
+#[gpui::test]
+fn r_in_the_ad_hoc_editor_is_refused(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+    });
+    cx.simulate_keystrokes("e r");
+    cx.run_until_parked();
+    assert_eq!(
+        notice(&shell, &cx),
+        objectdialog::grouping_list::AD_HOC_NO_REVERT
+    );
+    assert_eq!(stored(&shell, &cx), Some(chain(&["lhu"])));
+}
+
+#[gpui::test]
+fn a_failed_slot_write_leaves_an_open_ad_hoc_editor_as_it_was(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, dir) = open_dialog(cx);
+    std::fs::write(dir.path().join("groupings.toml"), "3 = [\n").unwrap();
+    // Tick `book` into slot 3 (queues a write), then open the ad hoc editor
+    // before the write fails.
+    cx.simulate_keystrokes("j j j j e j space escape");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("k k k e");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "*".to_string()
+        }
+    );
+
+    flush_config_write(&mut cx);
+
+    assert!(
+        edit_draft(&shell, &cx, |d| d.fields.iter().all(|f| f.key != "slot")),
+        "the ad hoc draft contributed nothing to the batch and is not rebuilt as a slot"
+    );
+}
+
+#[gpui::test]
+fn the_dialog_edits_the_pinned_workspaces_own_ad_hoc_chain(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut vcx) = open_shell_with_user_dir(cx, services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    dispatch_action(&shell, "frame::pin_workspace", &mut vcx);
+    vcx.run_until_parked();
+    let ws = shell.read_with(&vcx, |s, _| s.target_frame().workspace());
+    assert!(frame.read_with(&vcx, |f, _| f.is_pinned(ws)));
+
+    dispatch_action(&shell, DOOR, &mut vcx);
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_keystrokes("i");
+    vcx.run_until_parked();
+    vcx.simulate_input("lhu");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.view(ws).ad_hoc().map(<[String]>::to_vec)),
+        Some(chain(&["lhu"]))
+    );
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().ad_hoc().map(<[String]>::to_vec)),
+        None,
+        "the shared lane is another lane"
+    );
+}

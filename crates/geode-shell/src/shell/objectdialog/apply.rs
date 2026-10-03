@@ -677,6 +677,12 @@ fn rebuild_after_revert(state: &mut super::ObjectDialogState, config: &Config, m
     let Some(draft) = state.draft.as_ref() else {
         return;
     };
+    // The ad hoc chain lives in the frame and never joins a batch, so a
+    // failed write reverted nothing of it; rebuilding it from config would
+    // turn it into a slot-shaped draft named `*`.
+    if state.domain == super::Domain::Groupings && draft.name == super::grouping_list::AD_HOC {
+        return;
+    }
     let selected = draft.selected;
     let name = draft.name.clone();
     let mut rebuilt = state.domain.draft(config, &name);

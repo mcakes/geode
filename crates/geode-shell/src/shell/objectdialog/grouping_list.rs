@@ -24,6 +24,8 @@ pub const VIEW_DEFAULT_NOTE: &str = "each view's own grouping";
 pub const NOTHING_TO_EDIT: &str = "view default has nothing to edit";
 pub const NO_ROW: &str = "no row is selected";
 pub const NO_AD_HOC_CHAIN: &str = "no ad hoc chain yet";
+pub const AD_HOC_NO_REVERT: &str = "the ad hoc chain has nothing to revert to";
+pub const NOTHING_TO_CLEAR: &str = "view default has nothing to clear";
 
 /// Which row of the list a name is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +78,17 @@ pub(super) fn handle_key(
             apply(shell, RowKind::Slot(key.as_bytes()[0] - b'0'), window, cx)
         }
         "e" => edit(shell, kind, cx),
+        "i" => {
+            let seed = kind.and_then(|kind| chain_of(shell, kind, cx));
+            open_ad_hoc_chain(shell, seed, cx);
+        }
+        "d" if kind == Some(RowKind::AdHoc) => forget(shell, cx),
+        "d" if kind == Some(RowKind::ViewDefault) => {
+            render::set_notice(shell, NOTHING_TO_CLEAR.to_string())
+        }
+        "r" if matches!(kind, Some(RowKind::AdHoc | RowKind::ViewDefault)) => {
+            render::set_notice(shell, AD_HOC_NO_REVERT.to_string())
+        }
         _ => return None,
     }
     cx.notify();
@@ -86,7 +99,7 @@ pub(super) fn handle_key(
 /// text afterwards, as the key path does.
 ///
 /// A click that opened a stage instead of closing the dialog (an empty
-/// slot's chain field) marks it `click_opened_stage`: the field's
+/// slot's or an empty ad hoc row's chain field) marks it `click_opened_stage`: the field's
 /// completion rows paint where the list was, and a double-click's second
 /// half would otherwise complete whichever dimension now sits under the
 /// pointer.
@@ -140,7 +153,7 @@ fn apply(shell: &mut ShellView, kind: RowKind, window: &mut Window, cx: &mut Con
         }
         RowKind::AdHoc => {
             if frame.read(cx).ad_hoc().is_none() {
-                render::set_notice(shell, NO_AD_HOC_CHAIN.to_string());
+                open_ad_hoc_chain(shell, None, cx);
                 return;
             }
             frame.update(cx, |f, cx| {
@@ -158,7 +171,7 @@ fn apply(shell: &mut ShellView, kind: RowKind, window: &mut Window, cx: &mut Con
 fn edit(shell: &mut ShellView, kind: Option<RowKind>, cx: &mut Context<ShellView>) {
     match kind {
         Some(RowKind::Slot(n)) => render::enter_edit_stage(shell, &n.to_string(), None, cx),
-        Some(RowKind::AdHoc) => render::set_notice(shell, NO_AD_HOC_CHAIN.to_string()),
+        Some(RowKind::AdHoc) => enter_ad_hoc_stage(shell, None, cx),
         Some(RowKind::ViewDefault) => render::set_notice(shell, NOTHING_TO_EDIT.to_string()),
         None => render::set_notice(shell, NO_ROW.to_string()),
     }
@@ -213,8 +226,23 @@ pub(super) fn finish_list_chain(
     if let Some(state) = shell.object_dialog.as_mut() {
         state.chain_from_list = false;
     }
-    let Some(RowKind::Slot(n)) = kind_of(&name) else {
-        return;
+    let n = match kind_of(&name) {
+        Some(RowKind::Slot(n)) => n,
+        Some(RowKind::AdHoc) => {
+            // Through `set_ad_hoc` even when the typed chain equals the seed:
+            // an untouched seed is still a request to apply that chain. The
+            // field refused an empty chain in place, so `set_ad_hoc` refuses
+            // only a chain already in force, where closing is the answer.
+            let frame = shell.target_frame();
+            frame.update(cx, |f, cx| {
+                if f.set_ad_hoc(chain) {
+                    cx.notify();
+                }
+            });
+            shell.close_modal(window, cx);
+            return;
+        }
+        _ => return,
     };
     render::revalidate(shell);
     if let Some(refusal) = super::apply::blocking_diagnostic(shell) {
@@ -234,6 +262,104 @@ pub(super) fn finish_list_chain(
     shell.close_modal(window, cx);
 }
 
+/// Enter the ad hoc chain's edit stage. `seed` replaces the stored chain as
+/// the starting point (`i` on another row); the frame is not changed until
+/// an edit or `enter` commits.
+fn enter_ad_hoc_stage(
+    shell: &mut ShellView,
+    seed: Option<Vec<String>>,
+    cx: &mut Context<ShellView>,
+) {
+    let chain = seed
+        .or_else(|| {
+            shell
+                .target_frame()
+                .read(cx)
+                .ad_hoc()
+                .map(<[String]>::to_vec)
+        })
+        .unwrap_or_default();
+    let config =
+        super::apply::config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+    let draft = super::groupings::ad_hoc_draft(&config, &chain);
+    render::enter_edit_stage(shell, AD_HOC, Some(draft), cx);
+}
+
+/// Open the ad hoc chain's field from the list, seeded with `seed` or the
+/// stored chain.
+pub(super) fn open_ad_hoc_chain(
+    shell: &mut ShellView,
+    seed: Option<Vec<String>>,
+    cx: &mut Context<ShellView>,
+) {
+    enter_ad_hoc_stage(shell, seed, cx);
+    render::open_field(shell);
+    mark_chain_from_list(shell);
+}
+
+/// The chain a row holds, for `i`'s seed: a slot's as the frame holds it,
+/// the stored ad hoc chain, nothing for the view default or an empty slot
+/// (the stored ad hoc chain then seeds instead).
+fn chain_of(shell: &ShellView, kind: RowKind, cx: &Context<ShellView>) -> Option<Vec<String>> {
+    let frame = shell.target_frame();
+    let view = frame.read(cx);
+    match kind {
+        RowKind::Slot(n) => view.slots().get(n).map(<[String]>::to_vec),
+        RowKind::AdHoc => view.ad_hoc().map(<[String]>::to_vec),
+        RowKind::ViewDefault => None,
+    }
+}
+
+/// Send the open ad hoc draft's chain to the frame. `true` when the open
+/// draft is the ad hoc chain, whether or not anything changed: the config
+/// writer must never see it, so the caller stops here either way.
+pub(super) fn commit_ad_hoc(shell: &mut ShellView, cx: &mut Context<ShellView>) -> bool {
+    let Some(chain) = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .filter(|draft| draft.name == AD_HOC)
+        .map(super::groupings::ticked)
+    else {
+        return false;
+    };
+    if let Some(refusal) = super::apply::blocking_diagnostic(shell) {
+        render::set_notice(shell, refusal);
+        return true;
+    }
+    let frame = shell.target_frame();
+    frame.update(cx, |f, cx| {
+        if f.set_ad_hoc(chain) {
+            cx.notify();
+        }
+    });
+    if let Some(draft) = shell
+        .object_dialog
+        .as_mut()
+        .and_then(|state| state.draft.as_mut())
+    {
+        draft.mark_saved();
+    }
+    true
+}
+
+/// `d` on the ad hoc chain, from the list or its editor: forget it. No
+/// question: the chain is a few names and lives nowhere a revert could
+/// restore it from.
+pub(super) fn forget(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let frame = shell.target_frame();
+    let forgot = frame.update(cx, |f, cx| {
+        let forgot = f.forget_ad_hoc();
+        if forgot {
+            cx.notify();
+        }
+        forgot
+    });
+    if !forgot {
+        render::set_notice(shell, NO_AD_HOC_CHAIN.to_string());
+    }
+}
+
 /// The list's normal-mode footer.
 pub(super) fn list_hints(query_is_empty: bool) -> Vec<Hint> {
     vec![
@@ -241,6 +367,7 @@ pub(super) fn list_hints(query_is_empty: bool) -> Vec<Hint> {
         Hint::range(HintRow::Move, "1", "9", "slot"),
         Hint::new(HintRow::Move, &["0"], "view default"),
         Hint::new(HintRow::Move, &["a"], "ad hoc"),
+        Hint::new(HintRow::Edit, &["i"], "type a chain"),
         Hint::new(HintRow::Edit, &["e"], "edit row"),
         Hint::new(HintRow::Edit, &["d"], "clear"),
         Hint::new(HintRow::Edit, &["r"], "revert"),

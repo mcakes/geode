@@ -3178,8 +3178,12 @@ pub struct ObjectDialogState {
     /// stage has painted a DIFFERENT row — without this flag it would
     /// open `i` on whatever field now sits under the pointer, a field
     /// the trader never aimed at (a Views column row, say). Groupings'
-    /// list applies on a click instead and opens no stage. With it, a
-    /// double-click on a door row is "open the stage" and nothing more.
+    /// list applies on a click, except on an empty slot or an empty ad hoc
+    /// row, where `grouping_list::click` opens that row's chain field and
+    /// sets this flag: the field's completion rows paint where the list
+    /// was. Read by `on_edit_row_clicked` and `on_completion_clicked`.
+    /// With it, a double-click on a door row is "open the stage" and
+    /// nothing more.
     pub click_opened_stage: bool,
     /// The open chain field was opened from the list (`enter` or a digit on
     /// an empty slot), not from inside an edit stage. There, `enter`
