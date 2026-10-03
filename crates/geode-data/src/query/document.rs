@@ -221,9 +221,13 @@ mod tests {
                 source_time: ts("2026-09-12T14:00:00Z"),
                 received_at: ts("2026-09-12T14:00:00Z"),
                 bytes: 0,
+                compare_live: false,
+                topic: None,
             },
         )
-        .unwrap();
+        .unwrap()
+        .published()
+        .expect("an uncompared document publishes");
         publish_document(
             &store,
             &DocumentPublishRequest {
@@ -233,6 +237,8 @@ mod tests {
                 source_time: ts("2026-09-12T14:03:00Z"),
                 received_at: ts("2026-09-12T14:03:00Z"),
                 bytes: 0,
+                compare_live: false,
+                topic: None,
             },
         )
         .unwrap();
@@ -245,6 +251,8 @@ mod tests {
                 source_time: ts("2026-09-12T14:05:00Z"),
                 received_at: ts("2026-09-12T14:05:00Z"),
                 bytes: 0,
+                compare_live: false,
+                topic: None,
             },
         )
         .unwrap();
@@ -522,6 +530,8 @@ mod tests {
                     source_time: ts(at),
                     received_at: ts(at),
                     bytes: 0,
+                    compare_live: false,
+                    topic: None,
                 },
             )
             .unwrap();

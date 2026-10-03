@@ -908,6 +908,8 @@ role = "attribute"
                     source_time: ts(at),
                     received_at: ts(at),
                     bytes: 0,
+                    compare_live: false,
+                    topic: None,
                 },
             )
             .unwrap();

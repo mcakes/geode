@@ -6,7 +6,8 @@
 //! A column access plan is built once per document; the appender reads columns
 //! by row index without constructing intermediate domain row objects.
 
-use crate::store::catalog::{Catalog, FileGeneration};
+use crate::store::catalog::{Catalog, FileGeneration, FileId};
+use crate::store::compare::staged_equals_live;
 use crate::store::ddl::{self, TablePair};
 use crate::store::publish::{Partition, PublishOutcome, PublishRequest, publish_in_transaction};
 use crate::store::{Store, StoreError};
@@ -31,6 +32,15 @@ pub struct DocumentPublishRequest<'a> {
     /// The message's size, for provenance. A document has no `stat`, so
     /// this and `received_at` stand in for a file's length and mtime.
     pub bytes: u64,
+    /// Compare the staged rows with the key's live generation first, and
+    /// publish nothing when they are equal. For a recovered document, which
+    /// repeats what a previous run most likely stored; an ordinary NOTIFY
+    /// document is a fresh update and skips the comparison's cost.
+    pub compare_live: bool,
+    /// The concrete topic the document arrived on, recorded in the publish
+    /// transaction so a later run can ask for it again. `None` records
+    /// nothing.
+    pub topic: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -39,6 +49,28 @@ pub struct DocumentPublished {
     pub gen_id: i64,
     pub rows: usize,
     pub outcome: PublishOutcome,
+}
+
+#[derive(Debug)]
+pub enum DocumentOutcome {
+    Published(DocumentPublished),
+    /// A `compare_live` document whose rows equal the live generation of
+    /// its key: nothing was published and no identifier was spent. The
+    /// shared staging table was still rewritten, since the comparison
+    /// reads the staged rows.
+    Unchanged {
+        batch: String,
+    },
+}
+
+impl DocumentOutcome {
+    /// The publication, or `None` for an unchanged document.
+    pub fn published(self) -> Option<DocumentPublished> {
+        match self {
+            DocumentOutcome::Published(p) => Some(p),
+            DocumentOutcome::Unchanged { .. } => None,
+        }
+    }
 }
 
 /// The synthetic `file_generations.path` for a document: there is no file,
@@ -99,7 +131,7 @@ fn cell_source<'a>(
 pub fn publish_document(
     store: &Store,
     req: &DocumentPublishRequest,
-) -> Result<DocumentPublished, StoreError> {
+) -> Result<DocumentOutcome, StoreError> {
     // Before anything is written, including before an id is spent: an
     // invalid document must leave the store exactly as it was, so a
     // malformed message cannot half-publish.
@@ -109,87 +141,43 @@ pub fn publish_document(
     let conn = store.writer();
     let ds = req.dataset;
     let batch = join_key(&req.rows.key);
-    let catalog = Catalog::new(conn);
-    // Reserve identifiers before staging so failed attempts cannot reuse ids
-    // already stamped onto rows, even when no catalog entry was committed.
-    let file_id = catalog.reserve_file_id()?;
-    let gen_id = catalog.reserve_gen_id()?;
-
-    // Stage with `create or replace` so a previous attempt's leftovers can
-    // never be published as this document's rows. The column list is
-    // `document_columns()` order followed by the same storage columns
-    // `ddl::create_document_table_sql` appends — `batch`, `book`,
-    // `source_file_id` — because `publish_file` moves the staged rows with
-    // `insert into live select *, gen, time from staging`: position, not
-    // name, is what lines the two tables up. `gen_id` and `source_time`
-    // are the two that publish itself supplies, so staging omits them.
     let columns = ds.document_columns();
-    let create = format!(
-        "create or replace table {STAGING_TABLE} ({}, \"batch\" VARCHAR, \
-         \"book\" VARCHAR, \"source_file_id\" BIGINT)",
-        columns
-            .iter()
-            .map(|c| format!("\"{}\" {}", c.name, c.ty.sql()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    conn.execute_batch(&create)
-        .map_err(|source| StoreError::Sql {
-            statement: create.clone(),
-            source,
-        })?;
+    let catalog = Catalog::new(conn);
+    let tables = TablePair::for_document(&ds.name);
 
-    let rows = req.rows.rows();
-    let plan: Vec<Cell> = columns
-        .iter()
-        .map(|spec| {
-            cell_source(ds, req.rows, spec).ok_or_else(|| {
-                StoreError::Document(format!(
-                    "column '{}' of dataset '{}' has no staged values",
-                    spec.name, ds.name
-                ))
-            })
-        })
-        .collect::<Result<_, _>>()?;
-    {
-        let mut app = conn
-            .appender(STAGING_TABLE)
+    let (file_id, gen_id) = if req.compare_live {
+        // Stage with no file id, compare, and reserve only once the
+        // document is known to publish: an unchanged recovered document
+        // must spend no identifier. A live generation, not live rows, gates
+        // the comparison, so a first document always publishes. The id is
+        // stamped onto staging before the transaction so a failed publish
+        // cannot leave rows naming another generation's file.
+        stage(conn, ds, req.rows, &columns, &batch, None)?;
+        let live = catalog.live_source_time(&ds.name, &batch, None)?;
+        if live.is_some()
+            && staged_equals_live(conn, STAGING_TABLE, &tables.live, &columns, &batch)?
+        {
+            return Ok(DocumentOutcome::Unchanged { batch });
+        }
+        let file_id = catalog.reserve_file_id()?;
+        let gen_id = catalog.reserve_gen_id()?;
+        let stamp = format!("update {STAGING_TABLE} set source_file_id = ?");
+        conn.execute(&stamp, [file_id])
             .map_err(|source| StoreError::Sql {
-                statement: format!("appender on {STAGING_TABLE}"),
+                statement: stamp.clone(),
                 source,
             })?;
-        // One buffer for the whole document, cleared per row: the appender
-        // wants an owned `duckdb::types::Value` per cell, so a text cell
-        // costs a `String` clone, but the Vec itself is allocated once.
-        let mut cells: Vec<duckdb::types::Value> = Vec::with_capacity(plan.len() + 3);
-        for i in 0..rows {
-            cells.clear();
-            for source in &plan {
-                cells.push(match source {
-                    Cell::Key(part) => duckdb::types::Value::Text((*part).to_string()),
-                    Cell::Const(v) => value(v),
-                    Cell::Col(col) => cell(col, i),
-                });
-            }
-            cells.push(duckdb::types::Value::Text(batch.clone()));
-            // Document partitions have a NULL book. The column remains present
-            // because partition-keyed storage statements join on it.
-            cells.push(duckdb::types::Value::Null);
-            cells.push(duckdb::types::Value::BigInt(file_id));
-            app.append_row(duckdb::appender_params_from_iter(cells.iter()))
-                .map_err(|source| StoreError::Sql {
-                    statement: format!("append row {i} into {STAGING_TABLE}"),
-                    source,
-                })?;
-        }
-        // Explicitly, and before the appender is dropped: the implicit
-        // flush on drop discards its error, so a row DuckDB refused would
-        // otherwise be published as a silently shorter document.
-        app.flush().map_err(|source| StoreError::Sql {
-            statement: format!("flush {STAGING_TABLE}"),
-            source,
-        })?;
-    }
+        (file_id, gen_id)
+    } else {
+        // Reserve identifiers before staging so failed attempts cannot
+        // reuse ids already stamped onto rows, even when no catalog entry
+        // was committed.
+        let file_id = catalog.reserve_file_id()?;
+        let gen_id = catalog.reserve_gen_id()?;
+        stage(conn, ds, req.rows, &columns, &batch, Some(file_id))?;
+        (file_id, gen_id)
+    };
+    let rows = req.rows.rows();
 
     // Publish through the shared transaction. One partition: the key as
     // the batch, no book. The backfill guard reads the live source time
@@ -200,7 +188,6 @@ pub fn publish_document(
     let conn = &tx;
     let catalog = Catalog::new(conn);
     let live_source_time = catalog.live_source_time(&ds.name, &batch, None)?;
-    let tables = TablePair::for_document(&ds.name);
     let outcome = publish_in_transaction(
         conn,
         &PublishRequest {
@@ -247,14 +234,107 @@ pub fn publish_document(
         health: Health::Ok,
     })?;
 
+    // In the publish's own transaction, so a rolled-back publish records no
+    // topic and a recorded topic always names one that published.
+    if let Some(topic) = req.topic {
+        crate::store::topics::record(conn, req.source, topic, req.received_at)?;
+    }
+
     crate::store::commit_transaction(tx)?;
 
-    Ok(DocumentPublished {
+    Ok(DocumentOutcome::Published(DocumentPublished {
         batch,
         gen_id,
         rows,
         outcome,
-    })
+    }))
+}
+
+/// Stage one document's rows, replacing whatever staging held. `file_id`
+/// stamps `source_file_id`; `None` leaves it NULL for the caller to stamp
+/// once it knows the document publishes.
+///
+/// `create or replace` so a previous attempt's leftovers can never be
+/// published as this document's rows. The column list is
+/// `document_columns()` order followed by the same storage columns
+/// `ddl::create_document_table_sql` appends — `batch`, `book`,
+/// `source_file_id` — because `publish_file` moves the staged rows with
+/// `insert into live select *, gen, time from staging`: position, not
+/// name, is what lines the two tables up. `gen_id` and `source_time` are
+/// the two that publish itself supplies, so staging omits them.
+fn stage(
+    conn: &duckdb::Connection,
+    ds: &DatasetSpec,
+    doc: &DocumentRows,
+    columns: &[&ColumnSpec],
+    batch: &str,
+    file_id: Option<FileId>,
+) -> Result<(), StoreError> {
+    let create = format!(
+        "create or replace table {STAGING_TABLE} ({}, \"batch\" VARCHAR, \
+         \"book\" VARCHAR, \"source_file_id\" BIGINT)",
+        columns
+            .iter()
+            .map(|c| format!("\"{}\" {}", c.name, c.ty.sql()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    conn.execute_batch(&create)
+        .map_err(|source| StoreError::Sql {
+            statement: create.clone(),
+            source,
+        })?;
+
+    let rows = doc.rows();
+    let plan: Vec<Cell> = columns
+        .iter()
+        .map(|spec| {
+            cell_source(ds, doc, spec).ok_or_else(|| {
+                StoreError::Document(format!(
+                    "column '{}' of dataset '{}' has no staged values",
+                    spec.name, ds.name
+                ))
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    let mut app = conn
+        .appender(STAGING_TABLE)
+        .map_err(|source| StoreError::Sql {
+            statement: format!("appender on {STAGING_TABLE}"),
+            source,
+        })?;
+    // One buffer for the whole document, cleared per row: the appender
+    // wants an owned `duckdb::types::Value` per cell, so a text cell
+    // costs a `String` clone, but the Vec itself is allocated once.
+    let mut cells: Vec<duckdb::types::Value> = Vec::with_capacity(plan.len() + 3);
+    for i in 0..rows {
+        cells.clear();
+        for source in &plan {
+            cells.push(match source {
+                Cell::Key(part) => duckdb::types::Value::Text((*part).to_string()),
+                Cell::Const(v) => value(v),
+                Cell::Col(col) => cell(col, i),
+            });
+        }
+        cells.push(duckdb::types::Value::Text(batch.to_string()));
+        // Document partitions have a NULL book. The column remains present
+        // because partition-keyed storage statements join on it.
+        cells.push(duckdb::types::Value::Null);
+        cells.push(file_id.map_or(duckdb::types::Value::Null, duckdb::types::Value::BigInt));
+        app.append_row(duckdb::appender_params_from_iter(cells.iter()))
+            .map_err(|source| StoreError::Sql {
+                statement: format!("append row {i} into {STAGING_TABLE}"),
+                source,
+            })?;
+    }
+    // Explicitly, and before the appender is dropped: the implicit
+    // flush on drop discards its error, so a row DuckDB refused would
+    // otherwise be published as a silently shorter document.
+    app.flush().map_err(|source| StoreError::Sql {
+        statement: format!("flush {STAGING_TABLE}"),
+        source,
+    })?;
+    Ok(())
 }
 
 /// Forget one document: delete every live and archived row of `batch`, its
@@ -433,9 +513,13 @@ mod tests {
                 source_time: ts(at),
                 received_at: ts(at),
                 bytes: 1234,
+                compare_live: false,
+                topic: None,
             },
         )
         .unwrap()
+        .published()
+        .expect("an uncompared document publishes")
     }
 
     #[test]
@@ -464,6 +548,8 @@ mod tests {
                     source_time: ts("2026-09-12T14:05:00Z"),
                     received_at: ts("2026-09-12T14:05:00Z"),
                     bytes: 0,
+                    compare_live: false,
+                    topic: None,
                 },
             );
             assert!(result.is_err());
@@ -721,9 +807,13 @@ mod tests {
                 source_time: ts("2026-09-12T14:00:00Z"),
                 received_at: ts("2026-09-12T14:01:00Z"),
                 bytes: 1234,
+                compare_live: false,
+                topic: None,
             },
         )
-        .unwrap();
+        .unwrap()
+        .published()
+        .expect("an uncompared document publishes");
         let (path, size, rows, health, mtime, source_time): (
             String,
             i64,
@@ -796,6 +886,8 @@ mod tests {
                 source_time: ts("2026-09-12T14:00:00Z"),
                 received_at: ts("2026-09-12T14:00:00Z"),
                 bytes: 0,
+                compare_live: false,
+                topic: None,
             },
         )
         .unwrap_err();
@@ -837,6 +929,8 @@ mod tests {
                 source_time: ts("2026-09-12T14:05:00Z"),
                 received_at: ts("2026-09-12T14:05:00Z"),
                 bytes: 0,
+                compare_live: false,
+                topic: None,
             },
         )
         .unwrap_err();
@@ -891,9 +985,13 @@ mod tests {
                     source_time: ts(at),
                     received_at: ts(at),
                     bytes: 0,
+                    compare_live: false,
+                    topic: None,
                 },
             )
             .unwrap()
+            .published()
+            .expect("an uncompared document publishes")
         };
         publish_sheet("gone", &[1, 2], "2026-09-12T14:00:00Z");
         publish_sheet("gone", &[3, 4, 5], "2026-09-12T14:01:00Z");
@@ -1020,6 +1118,192 @@ role = "attribute"
         assert_eq!(
             geode_core::document::split_key(&out.batch),
             vec!["SPX.Z".to_string(), "NDX.Z".to_string()]
+        );
+    }
+
+    fn req<'a>(
+        ds: &'a DatasetSpec,
+        rows: &'a DocumentRows,
+        at: &str,
+    ) -> DocumentPublishRequest<'a> {
+        DocumentPublishRequest {
+            dataset: ds,
+            source: "cvi",
+            rows,
+            source_time: ts(at),
+            received_at: ts(at),
+            bytes: 0,
+            compare_live: false,
+            topic: None,
+        }
+    }
+
+    /// The last value each identifier sequence handed out, so a test can
+    /// see that nothing was spent: `latest_gen_id` reads only recorded
+    /// generations and misses a reserved-then-abandoned id.
+    fn sequence_positions(store: &Store) -> (i64, i64) {
+        store
+            .writer()
+            .query_row(
+                "select currval('file_generations_id'), currval('file_generations_gen_id')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    fn live_source_file_ids(store: &Store, batch: &str) -> Vec<i64> {
+        let mut stmt = store
+            .writer()
+            .prepare(
+                "select distinct source_file_id from cvi_params_document_live \
+                 where batch = ? order by 1",
+            )
+            .unwrap();
+        stmt.query_map(duckdb::params![batch], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn file_id_of(store: &Store, gen_id: i64) -> i64 {
+        store
+            .writer()
+            .query_row(
+                "select file_id from file_generations where gen_id = ?",
+                [gen_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn an_unchanged_recovered_document_spends_no_generation() {
+        let (_d, store, ds) = fixture();
+        let rows = cvi_doc("SPX.Z", [1., 2., 3., 4., 5., 6.]);
+        publish_document(&store, &req(&ds, &rows, "2026-09-12T14:00:00Z")).unwrap();
+        let gen_before = Catalog::new(store.writer()).latest_gen_id().unwrap();
+        let sequences_before = sequence_positions(&store);
+        let out = publish_document(
+            &store,
+            &DocumentPublishRequest {
+                compare_live: true,
+                ..req(&ds, &rows, "2026-09-12T14:05:00Z")
+            },
+        )
+        .unwrap();
+        assert!(matches!(out, DocumentOutcome::Unchanged { ref batch } if batch == "SPX.Z"));
+        assert_eq!(
+            Catalog::new(store.writer()).latest_gen_id().unwrap(),
+            gen_before
+        );
+        assert_eq!(sequence_positions(&store), sequences_before);
+        assert_eq!(document_generation_count(&store, &ds, "SPX.Z").unwrap(), 1);
+    }
+
+    #[test]
+    fn a_changed_recovered_document_publishes() {
+        let (_d, store, ds) = fixture();
+        publish_document(
+            &store,
+            &req(&ds, &cvi_doc("SPX.Z", [1.; 6]), "2026-09-12T14:00:00Z"),
+        )
+        .unwrap();
+        let changed = cvi_doc("SPX.Z", [1., 1., 1., 1., 1., 2.]);
+        let out = publish_document(
+            &store,
+            &DocumentPublishRequest {
+                compare_live: true,
+                ..req(&ds, &changed, "2026-09-12T14:05:00Z")
+            },
+        )
+        .unwrap();
+        let published = out.published().expect("a changed document publishes");
+        assert_eq!(document_generation_count(&store, &ds, "SPX.Z").unwrap(), 2);
+        assert_eq!(live_params(&store, "SPX.Z"), vec![1., 1., 1., 1., 1., 2.]);
+        // Provenance names the IDs actually stamped on the rows.
+        assert_eq!(
+            live_source_file_ids(&store, "SPX.Z"),
+            vec![file_id_of(&store, published.gen_id)]
+        );
+    }
+
+    #[test]
+    fn a_recovered_document_with_no_live_generation_publishes() {
+        let (_d, store, ds) = fixture();
+        let out = publish_document(
+            &store,
+            &DocumentPublishRequest {
+                compare_live: true,
+                ..req(&ds, &cvi_doc("SPX.Z", [1.; 6]), "2026-09-12T14:00:00Z")
+            },
+        )
+        .unwrap();
+        let published = out
+            .published()
+            .expect("a first recovered document publishes");
+        assert_eq!(
+            live_source_file_ids(&store, "SPX.Z"),
+            vec![file_id_of(&store, published.gen_id)]
+        );
+    }
+
+    #[test]
+    fn a_notify_document_equal_to_live_still_publishes() {
+        let (_d, store, ds) = fixture();
+        let rows = cvi_doc("SPX.Z", [1.; 6]);
+        publish_document(&store, &req(&ds, &rows, "2026-09-12T14:00:00Z")).unwrap();
+        publish_document(&store, &req(&ds, &rows, "2026-09-12T14:05:00Z"))
+            .unwrap()
+            .published()
+            .expect("a NOTIFY document is never compared");
+        assert_eq!(document_generation_count(&store, &ds, "SPX.Z").unwrap(), 2);
+    }
+
+    #[test]
+    fn a_document_with_a_topic_records_it_in_its_transaction() {
+        let (_d, store, ds) = fixture();
+        let rows = cvi_doc("SPX.Z", [1.; 6]);
+        publish_document(
+            &store,
+            &DocumentPublishRequest {
+                topic: Some("marketdata/cvi/SPX/NOTIFY"),
+                ..req(&ds, &rows, "2026-09-12T14:00:00Z")
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            crate::store::topics::recent(store.writer(), "cvi").unwrap(),
+            vec!["marketdata/cvi/SPX/NOTIFY"]
+        );
+    }
+
+    #[test]
+    fn a_rolled_back_publish_records_no_topic() {
+        let (_d, store, ds) = fixture();
+        publish_document(
+            &store,
+            &req(&ds, &cvi_doc("SPX.Z", [1.; 6]), "2026-09-12T14:00:00Z"),
+        )
+        .unwrap();
+        // The second catalog insert fails after rows, dictionaries and the
+        // topic were written inside the transaction.
+        store
+            .writer()
+            .execute_batch("create unique index one_file_for_test on file_generations(dataset)")
+            .unwrap();
+        let result = publish_document(
+            &store,
+            &DocumentPublishRequest {
+                topic: Some("marketdata/cvi/NDX/NOTIFY"),
+                ..req(&ds, &cvi_doc("NDX.Z", [2.; 6]), "2026-09-12T14:05:00Z")
+            },
+        );
+        assert!(result.is_err());
+        assert!(
+            crate::store::topics::recent(store.writer(), "cvi")
+                .unwrap()
+                .is_empty()
         );
     }
 }

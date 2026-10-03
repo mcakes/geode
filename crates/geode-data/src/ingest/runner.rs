@@ -28,7 +28,7 @@ use crate::ingest::plan::{WorkItem, WorkPlan};
 use crate::source::discovery::is_unchanged;
 use crate::source::{CandidateState, Priority};
 use crate::store::document::{
-    DocumentPublishRequest, DocumentPublished, document_generation_count, document_path,
+    DocumentOutcome, DocumentPublishRequest, document_generation_count, document_path,
     forget_document, prune_orphan_provenance, publish_document,
 };
 use crate::store::reference::{ReferencePublishRequest, ReferencePublished, publish_reference};
@@ -264,7 +264,7 @@ type LoadFn = fn(&Store, &LoadRequest) -> Result<LoadOutcome, LoadError>;
 
 /// Document-publish operation, injectable to verify panic containment.
 /// Malformed document validation normally returns an error before writing.
-type PublishFn = fn(&Store, &DocumentPublishRequest) -> Result<DocumentPublished, StoreError>;
+type PublishFn = fn(&Store, &DocumentPublishRequest) -> Result<DocumentOutcome, StoreError>;
 
 impl IngestRunner {
     pub fn spawn(
@@ -637,6 +637,8 @@ fn publish_one_document(
                     source_time,
                     received_at: job.received_at,
                     bytes: job.bytes,
+                    compare_live: false,
+                    topic: None,
                 },
             )
             .map_err(|e| e.to_string())
@@ -644,7 +646,14 @@ fn publish_one_document(
     }));
 
     let event = match outcome {
-        Ok(Ok(published)) => IngestEvent::Published {
+        // Nothing was published and no generation spent: the same clean
+        // load-lane answer an unchanged reference snapshot gives.
+        Ok(Ok(DocumentOutcome::Unchanged { batch })) => IngestEvent::Unchanged {
+            source: job.source.clone(),
+            dataset: job.dataset.clone(),
+            batch,
+        },
+        Ok(Ok(DocumentOutcome::Published(published))) => IngestEvent::Published {
             source: job.source.clone(),
             dataset: job.dataset.clone(),
             // The publish's own batch, not the one computed above: they
@@ -2321,7 +2330,7 @@ mod tests {
     fn gated_publish(
         store: &Store,
         req: &DocumentPublishRequest,
-    ) -> Result<DocumentPublished, StoreError> {
+    ) -> Result<DocumentOutcome, StoreError> {
         let (lock, opened) = &BACKLOG_GATE;
         let mut open = lock.lock().unwrap_or_else(|e| e.into_inner());
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -2786,7 +2795,7 @@ mod tests {
     fn slow_publish(
         store: &Store,
         req: &DocumentPublishRequest,
-    ) -> Result<DocumentPublished, crate::store::StoreError> {
+    ) -> Result<DocumentOutcome, crate::store::StoreError> {
         std::thread::sleep(std::time::Duration::from_millis(200));
         publish_document(store, req)
     }
@@ -2832,7 +2841,7 @@ mod tests {
     fn boom_publish(
         _store: &Store,
         _req: &DocumentPublishRequest,
-    ) -> Result<DocumentPublished, crate::store::StoreError> {
+    ) -> Result<DocumentOutcome, crate::store::StoreError> {
         panic!("injected publish panic");
     }
 
@@ -3381,6 +3390,8 @@ mod tests {
                     source_time: at,
                     received_at: at,
                     bytes: 0,
+                    compare_live: false,
+                    topic: None,
                 },
             )
             .unwrap();

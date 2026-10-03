@@ -83,6 +83,8 @@ fn bench(c: &mut Criterion) {
                             source_time: ts("2026-01-01T00:00:00Z"),
                             received_at: ts("2026-01-01T00:00:00Z"),
                             bytes: 1234,
+                            compare_live: false,
+                            topic: None,
                         },
                     )
                     .unwrap();
@@ -105,9 +107,13 @@ fn bench(c: &mut Criterion) {
                             source_time: ts("2026-01-01T00:00:05Z"),
                             received_at: ts("2026-01-01T00:00:05Z"),
                             bytes: 1234,
+                            compare_live: false,
+                            topic: None,
                         },
                     )
-                    .unwrap();
+                    .unwrap()
+                    .published()
+                    .expect("an uncompared document publishes");
                     (dir, store, published.rows)
                 },
                 criterion::BatchSize::PerIteration,

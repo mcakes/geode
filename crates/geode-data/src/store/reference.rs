@@ -8,6 +8,7 @@
 
 use crate::query::as_of::{AsOf, resolve_generations};
 use crate::store::catalog::{Catalog, FileGeneration};
+use crate::store::compare::staged_equals_live;
 use crate::store::ddl::{self, TablePair};
 use crate::store::document::days_since_epoch;
 use crate::store::publish::{Partition, PublishOutcome, PublishRequest, publish_in_transaction};
@@ -100,38 +101,17 @@ pub fn publish_reference(
     exec(conn, &create)?;
     append_rows(conn, req.rows, &batch)?;
 
-    // Unchanged when a live generation exists and holds exactly these rows.
-    // Set difference both ways with EXCEPT ALL: duplicates count, and NULLs
-    // compare equal in set operations, so a NULL cell does not read as a
-    // change. Compared against stored rows rather than a remembered hash,
-    // so it holds across restarts and a failed publish never reads as
-    // unchanged. A live generation, not live rows: an empty snapshot is a
-    // real generation, and repeating it must not publish another.
+    // Unchanged when a live generation exists and holds exactly these rows
+    // (see `staged_equals_live`). A live generation, not live rows: an
+    // empty snapshot is a real generation, and repeating it must not
+    // publish another.
     let catalog = Catalog::new(conn);
     let live_source_time = catalog.live_source_time(&ds.name, &batch, None)?;
     let tables = TablePair::for_reference(&ds.name);
-    if live_source_time.is_some() {
-        let payload = columns
-            .iter()
-            .map(|c| format!("\"{}\"", c.name))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let live = &tables.live;
-        let diff = format!(
-            "select (select count(*) from (select {payload} from {STAGING_TABLE} \
-                     except all select {payload} from {live} where batch = ?)) + \
-                    (select count(*) from (select {payload} from {live} where batch = ? \
-                     except all select {payload} from {STAGING_TABLE}))"
-        );
-        let differing: i64 = conn
-            .query_row(&diff, duckdb::params![batch, batch], |r| r.get(0))
-            .map_err(|source| StoreError::Sql {
-                statement: diff.clone(),
-                source,
-            })?;
-        if differing == 0 {
-            return Ok(ReferencePublished::Unchanged);
-        }
+    if live_source_time.is_some()
+        && staged_equals_live(conn, STAGING_TABLE, &tables.live, &columns, &batch)?
+    {
+        return Ok(ReferencePublished::Unchanged);
     }
 
     // Reserved only once the snapshot is known to publish, so an unchanged

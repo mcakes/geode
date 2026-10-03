@@ -10916,26 +10916,52 @@ run_mutation "document: a document with no rows is refused" \
 # comparison reports every repeat poll as unchanged, so a changed snapshot
 # never publishes.
 run_mutation "reference: a changed cell is not unchanged" \
-  crates/geode-data/src/store/reference.rs \
-  '        if differing == 0 {' \
-  '        if differing >= 0 {' \
+  crates/geode-data/src/store/compare.rs \
+  '    Ok(differing == 0)' \
+  '    Ok(differing >= 0)' \
   geode-data a_changed_cell_publishes_a_new_generation
 
 # The comparison runs both ways. Dropping the live-minus-staged half lets a
 # snapshot that removed a key read as unchanged, leaving the key live.
 run_mutation "reference: the diff counts rows live has and staging lacks" \
-  crates/geode-data/src/store/reference.rs \
-  '                     except all select {payload} from {STAGING_TABLE}))"' \
-  '                     except all select {payload} from {live} where false))*0"' \
+  crates/geode-data/src/store/compare.rs \
+  '                 except all select {payload} from {staging}))"' \
+  '                 except all select {payload} from {live} where false))*0"' \
   geode-data a_removed_key_leaves_live_and_stays_in_history
 
 # A live generation, not live rows, gates the comparison: an empty
 # snapshot is a real generation and repeating it must not publish again.
 run_mutation "reference: an empty live generation compares as unchanged" \
   crates/geode-data/src/store/reference.rs \
-  '    if live_source_time.is_some() {' \
-  '    if live_source_time.is_some() && req.rows.rows > 0 {' \
+  '    if live_source_time.is_some()' \
+  '    if live_source_time.is_some() && req.rows.rows > 0' \
   geode-data an_empty_snapshot_is_a_generation_and_repeats_unchanged
+
+# Rule 2 of recovery: an unchanged recovered document publishes nothing.
+# Skipping the comparison publishes a duplicate generation per key at
+# every subscription start.
+run_mutation "document: an unchanged recovered document spends no generation" \
+  crates/geode-data/src/store/document.rs \
+  '        if live.is_some()' \
+  '        if false' \
+  geode-data an_unchanged_recovered_document_spends_no_generation
+
+# A compared document stages with no file id and is stamped once it is
+# known to publish. Skipping the stamp leaves its live rows naming no file,
+# so provenance joins return nothing.
+run_mutation "document: a compared document's rows name its file" \
+  crates/geode-data/src/store/document.rs \
+  '        let stamp = format!("update {STAGING_TABLE} set source_file_id = ?");' \
+  '        let stamp = format!("update {STAGING_TABLE} set source_file_id = ? where false");' \
+  geode-data a_changed_recovered_document_publishes
+
+# A document's topic is recorded in its publish transaction. Dropping the
+# record leaves recovery with nothing to ask for after a restart.
+run_mutation "document: a topic is recorded with its publish" \
+  crates/geode-data/src/store/document.rs \
+  '    if let Some(topic) = req.topic {' \
+  '    if let Some(topic) = req.topic.filter(|_| false) {' \
+  geode-data a_document_with_a_topic_records_it_in_its_transaction
 
 # The live read takes its generation from the summary. Reading it from a
 # live row instead makes an empty snapshot read as nothing published.
@@ -12141,12 +12167,14 @@ run_mutation "runner/document: the publish runs outside the panic boundary" \
                     source_time,
                     received_at: job.received_at,
                     bytes: job.bytes,
+                    compare_live: false,
+                    topic: None,
                 },
             )
             .map_err(|e| e.to_string())
         })
     }));' \
-  '    let outcome: Result<Result<DocumentPublished, String>, Box<dyn std::any::Any + Send>> =
+  '    let outcome: Result<Result<DocumentOutcome, String>, Box<dyn std::any::Any + Send>> =
         Ok(publish(
             store,
             &DocumentPublishRequest {
@@ -12156,6 +12184,8 @@ run_mutation "runner/document: the publish runs outside the panic boundary" \
                 source_time,
                 received_at: job.received_at,
                 bytes: job.bytes,
+                compare_live: false,
+                topic: None,
             },
         )
         .map_err(|e| e.to_string()));' \

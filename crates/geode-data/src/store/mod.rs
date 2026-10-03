@@ -4,6 +4,7 @@
 //! connections on the same database; no separate in-memory copy is maintained.
 
 pub mod catalog;
+pub(crate) mod compare;
 pub mod ddl;
 pub mod document;
 pub mod drift;
