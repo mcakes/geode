@@ -808,8 +808,9 @@ fn bench_context(c: &mut Criterion) {
 
 /// A desk-sized classification: every observed underlying mapped to one of
 /// eleven sectors, padded with unobserved values to 5,000 arms, then a
-/// grouped requery. The CASE grows one arm per value; this is the number that
-/// decides whether `derived_case` needs a hashed lookup.
+/// grouped requery. The derived dimension projects as one MAP probe per row,
+/// so the requery time should stay near the unclassified one as the value
+/// count grows; this measures that at the observed size and at 5,000.
 fn bench_classification(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_classification");
     group.sample_size(20);

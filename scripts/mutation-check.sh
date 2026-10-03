@@ -29340,7 +29340,7 @@ run_mutation "pricer leg tint: the fallback never walks away from the foreground
 # factory the new dimensions.
 run_mutation "pricer key: dimensions left out" \
   crates/geode-app/src/bridge.rs \
-  '        dimensions: config.doc("dimensions").map(|d| d.value.clone()),' \
+  '        dimensions: config.doc(DIMENSIONS_DOC).map(|d| d.value.clone()),' \
   '        dimensions: None,' \
   geode-app a_dimensions_reload_reaches_the_pricer
 
@@ -34550,8 +34550,8 @@ run_mutation "classification: blank rows are skipped" \
   geode-core \
   an_all_blank_row_is_skipped_like_a_blank_line
 
-# Unquoted names resolve case-insensitively in scope expressions, so `Book`
-# beside the column `book` would be ambiguous there.
+# DuckDB resolves identifiers case-insensitively, so `Book` beside the column
+# `book` would be ambiguous in the compiled SQL.
 run_mutation "classification: name clash ignores case" \
   crates/geode-core/src/classification/validate.rs \
   '        .find(|c| c.name.eq_ignore_ascii_case(name))' \
@@ -34600,7 +34600,8 @@ run_mutation "derived: unmapped values group under NULL" \
   geode-data \
   an_unmapped_or_null_source_groups_under_null_and_no_row_is_lost_or_multiplied
 
-# Only the picker's key may feed the picker.
+# The picker's own answers stay with the shell; dropping its key from the
+# shell keys would deliver them to a tile.
 run_mutation "distinct: shell keys stay with the shell" \
   crates/geode-shell/src/shell/mod.rs \
   '        PICKER_KEY,' \

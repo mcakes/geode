@@ -332,6 +332,34 @@ mod tests {
     }
 
     #[test]
+    fn redo_skips_and_reports_a_row_changed_since_the_undo() {
+        let dim = sector(&[("AAPL", "Tech"), ("XOM", "Energy")]);
+        let (edited, entry) = assign(&dim, &s(&["AAPL", "XOM"]), Some("Index"));
+        let (undone, _) = undo(&edited, &entry);
+        // XOM no longer holds the change's `before` (Energy) when redo runs.
+        let (current, _) = assign(&undone, &s(&["XOM"]), Some("Utilities"));
+
+        let (redone, skipped) = redo(&current, &entry);
+        assert_eq!(redone.values.get("AAPL").map(String::as_str), Some("Index"));
+        assert_eq!(
+            redone.values.get("XOM").map(String::as_str),
+            Some("Utilities")
+        );
+        assert_eq!(skipped, s(&["XOM"]));
+    }
+
+    #[test]
+    fn undo_of_a_clear_restores_the_label() {
+        let dim = sector(&[("AAPL", "Tech"), ("XOM", "Energy")]);
+        let (cleared, entry) = assign(&dim, &s(&["AAPL"]), None);
+        assert!(!cleared.values.contains_key("AAPL"));
+
+        let (undone, skipped) = undo(&cleared, &entry);
+        assert_eq!(undone, dim);
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
     fn to_toml_round_trips_through_the_dimensions_reader() {
         let dim = sector(&[("AAPL", "Tech"), ("MSFT", "Tech"), ("XOM", "Energy")]);
         let mut doc = toml::Table::new();

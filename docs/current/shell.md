@@ -871,9 +871,9 @@ feature.
 occupant to decide how it handles that variant at compile time. Query, pricing,
 series, upload, and text file outcomes route by tile key, and so does a
 distinct-values answer under a tile's key (`Delivery::Distinct`); answers
-under the shell's own keys (`shell::is_shell_key`) never reach a tile. A series fetch completion has no tile
-key and is broadcast to visible occupants because several tiles may watch the
-same `(identity, source)` pair.
+under the shell's own keys (`shell::is_shell_key`) never reach a tile. A
+series fetch completion has no tile key and is broadcast to visible occupants
+because several tiles may watch the same `(identity, source)` pair.
 
 The app bridge supplies these deliveries from a coalescing mailbox. See
 [requests and UI delivery](request-delivery.md) for admission/refusal,
@@ -1321,6 +1321,12 @@ write and one reload, and a later edit to the same object replaces an earlier
 one. The write reaches tiles through the reload it causes; queuing moves no
 frame version. With no writable user directory nothing is queued and the
 refusal shows as the status bar's configuration write error.
+
+The door does not validate. A caller validates the object before queuing it
+(a classification through `geode_core::classification::validate`). An edit
+whose in-memory reload is rejected, keeping the last good configuration, is
+still written to the user file; the status bar then reports
+`saved to disk · rejected by the merge` with the error count.
 
 Hot reload keeps the last valid configuration when a changed document is
 rejected by the file, modifier, clock, or keymap checks. Later typed readers

@@ -166,9 +166,10 @@ to the shell's own consumers, and only the picker's key reaches the picker,
 which checks its current tag, column, and open state; a tile's tag counter can
 equal the picker's, so a tag check alone would let a tile's values fill it.
 Any other key is a tile's and is delivered to that occupant as
-`Delivery::Distinct`. If submitting the picker's request fails, the bridge immediately
-delivers a matching synthetic error rather than leaving it loading: `the data
-service is busy — try again` or `the data service has stopped`.
+`Delivery::Distinct`. If submitting the picker's request fails, the bridge
+immediately delivers a matching synthetic error rather than leaving it
+loading: `the data service is busy — try again` or `the data service has
+stopped`.
 
 `ThreadStopped` records the thread in `Diagnostics` for the status bar and the
 diagnostics page. On every drained event the bridge also reads the handle's

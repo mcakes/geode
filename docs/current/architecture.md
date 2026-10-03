@@ -99,8 +99,9 @@ to the UI and never restarted. The text file worker (`geode-files`) is the
 one piece of file I/O `geode-data` performs that is not a source: modules
 never touch the filesystem, so a tile's import or export is a request
 answered by tile key and tag, and a slow path stalls neither the UI nor the
-request loop (see [text files](data-path.md#text-files)). Transport threads standing in for a vendor
-client (the channel adapter's dispatcher, the demo bus) are not.
+request loop (see [text files](data-path.md#text-files)). Transport threads
+standing in for a vendor client (the channel adapter's dispatcher, the demo
+bus) are not.
 
 Submission reports admission or refusal without waiting for queue space; a
 refusal says whether the queue was busy (a retry can succeed) or the service
@@ -163,8 +164,9 @@ the whole candidate. Runtime edits write the user layer through an ordered,
 atomic write path. A module never writes configuration itself: it queues
 whole-object edits on the frame (`Frame::queue_config_edits`), and the
 shell folds them into the same debounced, user-layer batch the configuration
-dialogs use (see [the config door](shell.md#the-config-door)). The session file holds layout, occupants, frame state,
-and palette usage, with separate save ordering and recovery rules. See
+dialogs use (see [the config door](shell.md#the-config-door)). The session
+file holds layout, occupants, frame state, and palette usage, with separate
+save ordering and recovery rules. See
 [configuration](configuration.md) and [session persistence](shell.md#session-format)
 for those boundaries.
 

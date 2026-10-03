@@ -90,12 +90,13 @@ Its name must be an identifier (`[A-Za-z_][A-Za-z0-9_]*`) so a scope
 expression can name it bare. It may not be a scope-expression keyword
 (`and`, `or`, `not`, `in`, `like`, `true`, `false`), `config_version`, a
 dataset column, or an existing derived dimension, each compared without
-regard to case, because the expression parser resolves names and keywords
-that way: `NOT` still negates, and `Book` beside the column `book` would be
-ambiguous. Its source must be a column that is groupable in some dataset and
-`utf8` wherever it is declared, and never itself a derived dimension:
-classifications do not chain, since `base_column` resolves only one level. Rename and delete do not rewrite the
-groupings, views, saved scopes and named expressions that name a
+regard to case. The expression parser matches keywords ignoring case, so
+`NOT` still negates, and DuckDB resolves identifiers ignoring case, so `Book`
+beside the column `book` would be ambiguous in the compiled SQL. Its source
+must be a column that is groupable in some dataset and `utf8` wherever it is
+declared, and never itself a derived dimension: classifications do not chain,
+since `base_column` resolves only one level. Rename and delete do not rewrite
+the groupings, views, saved scopes and named expressions that name a
 classification; `validate::references` counts them so the confirmation can
 say how many will break.
 

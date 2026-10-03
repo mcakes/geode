@@ -5,7 +5,9 @@
 
 use geode_blotter::BlotterFactory;
 use geode_core::colour::NamedColours;
-use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, load_views, merge_docs};
+use geode_core::config::{
+    Config, DIMENSIONS_DOC, Diagnostic, Layer, LayerDoc, Severity, load_views, merge_docs,
+};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::DocumentKind;
 use geode_core::egress_config;
@@ -140,7 +142,7 @@ pub fn data_setup(
     let (views, d) = load_views(config);
     diagnostics.extend(d);
     let (dimensions, d) = config
-        .doc("dimensions")
+        .doc(DIMENSIONS_DOC)
         .map(DerivedDimensions::from_doc)
         .unwrap_or_default();
     diagnostics.extend(d);
@@ -616,7 +618,7 @@ pub fn pricer_config_key(config: &Config) -> PricerConfigKey {
             .map(|d| d.value.clone()),
         pricer_views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),
         templates: config.doc(PRICER_TEMPLATES_DOC).map(|d| d.value.clone()),
-        dimensions: config.doc("dimensions").map(|d| d.value.clone()),
+        dimensions: config.doc(DIMENSIONS_DOC).map(|d| d.value.clone()),
         refresh: config.get("app", "pricing.refresh").cloned(),
         underlyings: config.get("app", "pricing.underlyings").cloned(),
         payout_currency: config.get("app", "pricing.payout_currency").cloned(),
@@ -1244,7 +1246,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 timeseries.set_colours(colours.clone());
                 factory.set_colours(colours);
                 let (dims, _) = config
-                    .doc("dimensions")
+                    .doc(DIMENSIONS_DOC)
                     .map(DerivedDimensions::from_doc)
                     .unwrap_or_default();
                 // Refresh factory settings on ConfigReloaded. The stale
@@ -1374,7 +1376,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // The dimensions doc's own diagnostics are the
                 // ConfigReloaded observer's to report.
                 let (dims, _) = config
-                    .doc("dimensions")
+                    .doc(DIMENSIONS_DOC)
                     .map(DerivedDimensions::from_doc)
                     .unwrap_or_default();
                 let (refresh, refresh_diag) = pricing_refresh_from_config(config);

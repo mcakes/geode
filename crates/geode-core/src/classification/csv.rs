@@ -199,6 +199,20 @@ mod tests {
     }
 
     #[test]
+    fn text_after_a_closing_quote_is_an_error_naming_its_line() {
+        let err = read("a,b\nok,1\n\"x\"y,z\n").unwrap_err();
+        assert_eq!(err.line, 3);
+        assert_eq!(err.message, "text after a closing quote");
+    }
+
+    #[test]
+    fn a_crlf_inside_a_quoted_field_reads_as_a_line_feed() {
+        let got = read("h1,h2\r\n\"two\r\nlines\",x\r\nlast,y\r\n").unwrap();
+        assert_eq!(got[1].fields[0], "two\nlines");
+        assert_eq!(got[2].line, 4);
+    }
+
+    #[test]
     fn write_quotes_only_when_needed_and_round_trips() {
         let records = vec![
             vec!["underlying_ref".to_string(), "sector".to_string()],
