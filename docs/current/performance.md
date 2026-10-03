@@ -344,9 +344,9 @@ measure already reads. Re-measure on an idle machine before quoting them.
   pipeline. Concurrent staging is on hold until the real path and a network
   share are measured.
 - CI compiles benchmarks but has no stable regression baseline.
-- The vol slice `model_build` bench (`cargo bench -p geode-volslice`) has
-  not been measured locally; CI compiles it. It times `core::build::model`
-  alone, the work a repaint does on the UI thread when a batch answers, over
+- The vol slice `model_build` bench (`cargo bench -p geode-volslice`) measured
+  about 100 µs with 1,000-point curves (see the measurement log). It times
+  `core::build::model` alone, the work a repaint does on the UI thread when a batch answers, over
   twelve active monthly expiries with the published CVI, a draft and a
   60-strike chain at each, densities on and a `cvi draft − chain`
   difference, in moneyness, the batch answered once by the stand-in model
