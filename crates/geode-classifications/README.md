@@ -39,12 +39,13 @@ the frame's config door.
   classification and the optimistic object an edit produced. Every verb
   works over `current` (the pending object, else the configuration's), so
   two edits before a reload compose; undo and redo replay row by row over
-  it and report rows another surface changed since. A refusal drops the
-  pending object; so does a reload that changed this classification (it
-  carries the edit, or another surface wrote it). A reload that left it as
-  the edit found it (another classification or document changed inside the
-  write's debounce) keeps the pending object, so the label does not flash
-  back and the next edit builds on it. Showing another classification, or
+  it and report rows another surface changed since. Every edit queued
+  since the configuration's object (`base`) is in flight until a reload
+  carries it. A reload carrying the pending object drops it; one carrying
+  the base or an earlier in-flight object (a later edit was queued after
+  that write fired, or something else changed) keeps it, so a later label
+  does not flash off and the next edit builds on it; any other object is
+  another surface's write and drops it, as a refusal does. Showing another classification, or
   a rename, delete or revert, forgets all.
 - `core/prompt.rs`: `Prompt` (`NewName`, `NewColumn`, `Rename`) and
   `submit`, which validates the trimmed answer (`validate_name`,
@@ -122,7 +123,7 @@ the shown classification goes away.
 
 Registered actions only (the palette and the `⋯` menu), never `:`
 commands. The `⋯` menu lists Set, Clear, Copy and Paste label, then New…,
-Rename…, Delete, Revert to desk (only over a desk copy) and Refresh values;
+Rename…, Delete, Revert… (only over a lower copy) and Refresh values;
 a row that cannot act says why in its lane and in full when picked.
 
 New asks a name, then a source column from a closed choice (the
@@ -137,7 +138,9 @@ removes the old in one `queue_config_edits` batch; delete and revert remove
 the user definition. Rename and delete act only on a classification the
 user layer owns outright: a desk or builtin one cannot be removed from the
 user layer, and removing a user copy over a desk one would leave the desk
-one under the old name (Revert to desk is the verb for that). After a
+one under the old name (Revert… is the verb for that, and its question
+names the lower copy's layer). A classification with no recorded layer is
+refused too (`can't tell where <name> is defined`). After a
 create or rename the tile shows the new name (`Saving <name>…` until the
 reload carries it); after a delete the switcher opens without it. A
 `Refused` notice puts back what was shown before. While the prompt or a

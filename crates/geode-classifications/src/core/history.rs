@@ -8,10 +8,15 @@
 //! undo replays row by row over what is current, skipping a row another
 //! surface changed since (`classification::undo`).
 //!
-//! The pending object outlives a reload that leaves this classification as
-//! it was (another classification or document changed inside the write's
-//! debounce): dropping it then would flash the old labels back and build
-//! the next edit over a stale base.
+//! The pending object outlives a reload that is not its answer. Each edit
+//! the tile queues is in flight until a reload carries it, and the shell
+//! writes them in order, so a reload carrying an earlier one (the second
+//! edit was queued after the first write fired), or still carrying the
+//! object the edits started from (another classification or document
+//! changed), is a step behind the pending object: dropping it then would
+//! flash the later labels off, and the next edit, built over the reload,
+//! would overwrite them. Any other object is someone else's write, and is
+//! the truth now.
 
 use geode_core::classification::{self, UndoEntry};
 use geode_core::dimensions::DerivedDimension;
@@ -21,9 +26,11 @@ pub struct History {
     undo: Vec<UndoEntry>,
     redo: Vec<UndoEntry>,
     pending: Option<DerivedDimension>,
-    /// The configuration's object the pending one was made over: a reload
-    /// still carrying exactly this has not answered the write yet.
+    /// The configuration's object the in-flight edits were made over.
     base: Option<DerivedDimension>,
+    /// Every object an edit produced since `base`, oldest first; the last
+    /// is `pending`.
+    in_flight: Vec<DerivedDimension>,
 }
 
 impl History {
@@ -71,32 +78,48 @@ impl History {
         Some((next, skipped))
     }
 
-    /// Keep `next` as the pending object over `config`. A pending object
-    /// already held keeps its base: `config` is still that base, or a
+    /// Keep `next` as the pending object over `config`, in flight behind
+    /// any earlier edit. A pending object already held keeps its base:
+    /// `config` is still that base or one of the in-flight objects, or a
     /// reload would have dropped it.
     fn hold(&mut self, config: &DerivedDimension, next: &DerivedDimension) {
         if self.pending.is_none() {
             self.base = Some(config.clone());
+            self.in_flight.clear();
         }
+        self.in_flight.push(next.clone());
         self.pending = Some(next.clone());
     }
 
-    /// A reload brought `config` for this classification. It carries the
-    /// pending object, or something else changed this classification (the
-    /// configuration's word is the truth now): the optimistic copy goes. A
-    /// reload leaving the classification as the pending object found it
-    /// has not answered the write yet, and the copy stays.
+    /// A reload brought `config` for this classification. The pending
+    /// object itself: every edit landed, and the copy goes. The base or an
+    /// earlier in-flight object: the later edits are still on their way, so
+    /// the copy stays, and the edits it carries are no longer in flight.
+    /// Anything else is another surface's write: the copy goes.
     pub fn reloaded(&mut self, config: &DerivedDimension) {
-        if self.base.as_ref() != Some(config) {
-            self.pending = None;
-            self.base = None;
+        let Some(pending) = &self.pending else {
+            return;
+        };
+        if pending == config {
+            self.drop_pending();
+        } else if self.base.as_ref() == Some(config) {
+        } else if let Some(at) = self.in_flight.iter().position(|o| o == config) {
+            self.in_flight.drain(..=at);
+            self.base = Some(config.clone());
+        } else {
+            self.drop_pending();
         }
     }
 
     /// The write was refused and the configuration's object stands.
     pub fn refused(&mut self) {
+        self.drop_pending();
+    }
+
+    fn drop_pending(&mut self) {
         self.pending = None;
         self.base = None;
+        self.in_flight.clear();
     }
 
     /// Another classification is shown, or this one was renamed or deleted:
@@ -104,8 +127,7 @@ impl History {
     pub fn forget(&mut self) {
         self.undo.clear();
         self.redo.clear();
-        self.pending = None;
-        self.base = None;
+        self.drop_pending();
     }
 }
 
@@ -149,6 +171,31 @@ mod tests {
         let second = h.apply(&cfg, &["B".into()], Some("Y")).unwrap();
         assert_eq!(second.values.get("A").map(String::as_str), Some("X"));
         assert_eq!(second.values.get("B").map(String::as_str), Some("Y"));
+    }
+
+    /// The second edit was queued after the first write fired: the reload
+    /// carrying the first is a step behind, keeps both, and the third edit
+    /// builds on both; the reload carrying the last drops the copy.
+    #[test]
+    fn a_reload_of_an_earlier_write_keeps_the_later_edits() {
+        let cfg = dim(&[]);
+        let mut h = History::default();
+        let e1 = h.apply(&cfg, &["A".into()], Some("X")).unwrap();
+        let e2 = h.apply(&cfg, &["B".into()], Some("Y")).unwrap();
+        h.reloaded(&e1);
+        assert_eq!(h.current(&e1), &e2, "E2 does not flash off");
+        let e3 = h.apply(&e1, &["C".into()], Some("Z")).unwrap();
+        assert_eq!(
+            e3,
+            dim(&[("A", "X"), ("B", "Y"), ("C", "Z")]),
+            "E3 builds on E1 and E2"
+        );
+        // E1 is no longer in flight: its reload again is someone's revert.
+        h.reloaded(&e2);
+        assert_eq!(h.current(&e2), &e3);
+        h.reloaded(&e3);
+        assert_eq!(h.current(&e3), &e3);
+        assert!(h.pending.is_none(), "every edit landed");
     }
 
     /// A reload that changed this classification otherwise (another tile

@@ -1495,13 +1495,13 @@ fn an_unrelated_reload_keeps_the_pending_edit_and_the_next_edit_builds_on_it(
 // ---- new, rename, delete, revert ----
 
 /// `dims` with `user` defined in the user layer, and `shadowed` of those
-/// over a desk copy.
-fn config_layered(dims: &str, user: &[&str], shadowed: &[&str]) -> ClassificationsConfig {
+/// over a copy in the given lower layer.
+fn config_layered(dims: &str, user: &[&str], shadowed: &[(&str, Layer)]) -> ClassificationsConfig {
     let mut c = config(dims);
     for name in user {
         c.layers.insert(name.to_string(), Layer::User);
     }
-    c.shadowed = shadowed.iter().map(|s| s.to_string()).collect();
+    c.shadowed = shadowed.iter().map(|(n, l)| (n.to_string(), *l)).collect();
     c
 }
 
@@ -1755,7 +1755,7 @@ fn delete_refuses_a_desk_object(cx: &mut gpui::TestAppContext) {
 fn revert_is_offered_only_for_a_shadowed_user_copy_and_removes_it(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_with(
         cx,
-        config_layered(TWO, &["region"], &["region"]),
+        config_layered(TWO, &["region"], &[("region", Layer::Desk)]),
         restored("region"),
     );
     h.press(&mut vcx, ".");
@@ -1765,7 +1765,7 @@ fn revert_is_offered_only_for_a_shadowed_user_copy_and_removes_it(cx: &mut gpui:
         .into_iter()
         .map(|(t, _)| t)
         .collect();
-    assert!(titles.iter().any(|t| t == "Revert to desk"), "{titles:?}");
+    assert!(titles.iter().any(|t| t == "Revert\u{2026}"), "{titles:?}");
     h.press(&mut vcx, "escape");
     h.act(&mut vcx, "classifications::revert");
     assert_eq!(
@@ -1793,7 +1793,7 @@ fn revert_is_not_offered_without_a_desk_copy(cx: &mut gpui::TestAppContext) {
         .into_iter()
         .map(|(t, _)| t)
         .collect();
-    assert!(!titles.iter().any(|t| t == "Revert to desk"), "{titles:?}");
+    assert!(!titles.iter().any(|t| t == "Revert\u{2026}"), "{titles:?}");
     h.press(&mut vcx, "escape");
     h.act(&mut vcx, "classifications::revert");
     assert_eq!(h.confirm(&vcx), None);
@@ -1856,4 +1856,102 @@ fn the_dot_menu_lists_actions_with_disabled_reasons(cx: &mut gpui::TestAppContex
     pick(5, &mut vcx);
     assert_eq!(h.action_menu(&vcx), None);
     assert!(h.prompt(&vcx).is_some(), "New\u{2026} opened the prompt");
+}
+
+/// A user copy over a builtin definition (every demo classification is
+/// builtin) names the builtin layer in its revert and its refusals.
+#[gpui::test]
+fn a_builtin_shadowed_copy_names_the_builtin_layer(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(TWO, &["region"], &[("region", Layer::Builtin)]),
+        restored("region"),
+    );
+    h.act(&mut vcx, "classifications::delete");
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notices(&vcx),
+        [
+            "region has a builtin copy under yours, which a delete would leave in place \u{2014} Revert\u{2026} removes yours"
+        ]
+    );
+    h.press(&mut vcx, ".");
+    let rows = h.action_menu(&vcx).expect("the menu");
+    assert!(
+        rows.contains(&(
+            "Delete".to_string(),
+            Some("a builtin copy stands under it".to_string())
+        )),
+        "{rows:?}"
+    );
+    h.press(&mut vcx, "escape");
+    h.act(&mut vcx, "classifications::revert");
+    assert_eq!(
+        h.confirm(&vcx).as_deref(),
+        Some("revert region to the builtin copy \u{2014} y reverts")
+    );
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.edits(&mut vcx), [removal("region")]);
+}
+
+/// A label edit still waiting for its reload goes with the rename: the new
+/// object carries it, rather than the old name's removal taking it away.
+#[gpui::test]
+fn a_rename_carries_a_label_edit_not_yet_reloaded(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(TWO, &["region"], &[]),
+        restored("region"),
+    );
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    h.press(&mut vcx, "x");
+    h.edits(&mut vcx);
+    h.act(&mut vcx, "classifications::rename");
+    vcx.simulate_input("zone");
+    h.press(&mut vcx, "enter");
+    vcx.simulate_keystrokes("y");
+    let zone = DerivedDimension {
+        name: "zone".into(),
+        ..region(&[("SX5E", "Europe")])
+    };
+    assert_eq!(h.edits(&mut vcx), [edit_of(&zone), removal("region")]);
+}
+
+/// With no layer recorded for it, the tile cannot tell a removal would
+/// remove anything: it refuses rather than wait on a no-op write.
+#[gpui::test]
+fn delete_refuses_a_classification_with_no_recorded_layer(cx: &mut gpui::TestAppContext) {
+    let mut c = config(TWO);
+    c.layers.remove("region");
+    let (h, mut vcx) = open_with(cx, c, restored("region"));
+    h.act(&mut vcx, "classifications::delete");
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(h.notices(&vcx), ["can't tell where region is defined"]);
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("region"));
+}
+
+/// The second clear is queued after the first write fired; the reload
+/// carrying only the first must not flash the second off, and the third
+/// clear builds on both.
+#[gpui::test]
+fn a_reload_of_the_first_write_keeps_a_later_edit_in_flight(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "x");
+    h.goto(&mut vcx, "DAX");
+    h.press(&mut vcx, "x");
+    h.edits(&mut vcx);
+    // The first write lands: SPX cleared, DAX still Europe.
+    let first =
+        "[region]\nfrom = \"underlying_ref\"\n[region.values]\nEurope = [\"SX5E\", \"DAX\"]\n";
+    vcx.update(|_, cx| h.factory.set_config(config(first), cx));
+    assert_eq!(h.label(&vcx, "DAX"), None, "the second edit stays");
+    h.goto(&mut vcx, "SX5E");
+    h.press(&mut vcx, "x");
+    assert_eq!(
+        h.edits(&mut vcx),
+        [edit_of(&region(&[]))],
+        "the third edit carries all three"
+    );
 }

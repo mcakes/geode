@@ -40,7 +40,7 @@ use geode_shell::vimfind::FindStyle;
 use gpui::{App, AsyncApp, Entity, WindowHandle};
 use gpui_component::Root;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -74,10 +74,11 @@ pub struct DataSetup {
     /// Error per refused panel for the shell's config section.
     pub panels: Vec<PanelSpec>,
     pub panel_diagnostics: Vec<Diagnostic>,
-    /// Each classification's winning layer and the ones a user copy
-    /// shadows, for the classifications factory's startup snapshot.
+    /// Each classification's winning layer and, for the ones a user copy
+    /// shadows, the layer of the copy beneath it, for the classifications
+    /// factory's startup snapshot.
     pub classification_layers: BTreeMap<String, Layer>,
-    pub classification_shadowed: BTreeSet<String>,
+    pub classification_shadowed: BTreeMap<String, Layer>,
 }
 
 /// Tile and page kinds other modules own. A panel of one of these names
@@ -300,13 +301,13 @@ pub fn data_setup(
 }
 
 /// Each classification's winning layer, and the classifications whose user
-/// copy shadows a definition in a lower layer: the ones a revert would
-/// restore. Read from the layered `dimensions` documents, the same
+/// copy shadows a definition in a lower layer, with that layer: the ones a
+/// revert would restore, and what it restores. Read from the layered `dimensions` documents, the same
 /// provenance the object dialog badges.
 fn classification_provenance(
     config: &Config,
     dims: &DerivedDimensions,
-) -> (BTreeMap<String, Layer>, BTreeSet<String>) {
+) -> (BTreeMap<String, Layer>, BTreeMap<String, Layer>) {
     let layers: BTreeMap<String, Layer> = dims
         .all()
         .filter_map(|d| {
@@ -317,10 +318,10 @@ fn classification_provenance(
         .collect();
     let shadowed = layers
         .iter()
-        .filter(|(name, layer)| {
-            **layer == Layer::User && shadow_of(config, DIMENSIONS_DOC, name).is_some()
+        .filter(|(_, layer)| **layer == Layer::User)
+        .filter_map(|(name, _)| {
+            shadow_of(config, DIMENSIONS_DOC, name).map(|(lower, _)| (name.clone(), lower))
         })
-        .map(|(name, _)| name.clone())
         .collect();
     (layers, shadowed)
 }
@@ -2931,8 +2932,12 @@ role = "attribute"
                 ("sector".to_string(), Layer::User),
             ])
         );
-        // Only the user copy with a lower definition beneath it shadows one.
-        assert_eq!(config.shadowed, BTreeSet::from(["desk".to_string()]));
+        // Only the user copy with a lower definition beneath it shadows one,
+        // and the snapshot names that lower layer.
+        assert_eq!(
+            config.shadowed,
+            BTreeMap::from([("desk".to_string(), Layer::Builtin)])
+        );
     }
 
     /// The classifications factory holds its snapshot from startup, before

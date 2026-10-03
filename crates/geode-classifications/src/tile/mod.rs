@@ -793,32 +793,47 @@ impl ClassificationsTile {
                 layer.name()
             ),
         };
-        match config.layers.get(&name).copied().unwrap_or(Layer::User) {
-            Layer::Desk => return Err(lower(Layer::Desk, "defined in desk config")),
-            Layer::Builtin => return Err(lower(Layer::Builtin, "defined in builtin config")),
-            Layer::User => {}
+        // No recorded layer: a removal from the user layer might remove
+        // nothing, and the tile would wait for a reload that never comes.
+        match config.layers.get(&name).copied() {
+            None => {
+                return Err(Blocked {
+                    short: "defined where unknown",
+                    long: format!("can't tell where {name} is defined"),
+                });
+            }
+            Some(Layer::Desk) => return Err(lower(Layer::Desk, "defined in desk config")),
+            Some(Layer::Builtin) => {
+                return Err(lower(Layer::Builtin, "defined in builtin config"));
+            }
+            Some(Layer::User) => {}
         }
-        if config.shadowed.contains(&name) {
+        if let Some(&under) = config.shadowed.get(&name) {
+            let short = match under {
+                Layer::Builtin => "a builtin copy stands under it",
+                Layer::Desk | Layer::User => "a desk copy stands under it",
+            };
             return Err(Blocked {
-                short: "a desk copy stands under it",
+                short,
                 long: format!(
-                    "{name} has a desk copy under yours, which a {verb_name} would leave in place \u{2014} Revert to desk removes yours"
+                    "{name} has a {} copy under yours, which a {verb_name} would leave in place \u{2014} Revert\u{2026} removes yours",
+                    under.name()
                 ),
             });
         }
         Ok(name)
     }
 
-    /// The shown classification when a desk copy stands under the user's.
-    fn revertible(&self) -> Result<String, String> {
+    /// The shown classification and the layer of the copy under the
+    /// user's, when one stands there.
+    fn revertible(&self) -> Result<(String, Layer), String> {
         let Some(name) = self.shown() else {
             return Err(NOTHING_SHOWN.into());
         };
         let config = self.shared.config.borrow();
-        if config.as_ref().is_some_and(|c| c.shadowed.contains(&name)) {
-            Ok(name)
-        } else {
-            Err(format!("{name} has no desk copy to revert to"))
+        match config.as_ref().and_then(|c| c.shadowed.get(&name)) {
+            Some(&under) => Ok((name, under)),
+            None => Err(format!("{name} has no copy beneath yours to revert to")),
         }
     }
 
@@ -1345,7 +1360,15 @@ impl ClassificationsTile {
         let checked = {
             let config = self.shared.config.borrow();
             config.as_ref().and_then(|c| {
-                let dim = c.dims.get(&from)?.clone();
+                // The shown object as the tile has it: a label edit still
+                // on its way to the old name goes with the rename, not
+                // into the old name's removal.
+                let dim = c.dims.get(&from)?;
+                let dim = if self.state.name.as_deref() == Some(from.as_str()) {
+                    self.history.current(dim).clone()
+                } else {
+                    dim.clone()
+                };
                 Some(prompt::submit(
                     &Prompt::Rename { from: from.clone() },
                     &to,
@@ -1678,8 +1701,11 @@ impl ClassificationsTile {
             REVERT_ACTION => {
                 self.close_menu(cx);
                 match self.revertible() {
-                    Ok(name) => {
-                        let question = format!("revert {name} to the desk copy \u{2014} y reverts");
+                    Ok((name, under)) => {
+                        let question = format!(
+                            "revert {name} to the {} copy \u{2014} y reverts",
+                            under.name()
+                        );
                         self.notices.outcome.clear();
                         self.rebuild_chrome();
                         confirm::arm(self, Pending::Revert { name }, question, window, cx);

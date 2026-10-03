@@ -4,7 +4,7 @@
 //! door for keys, commands and deliveries.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use geode_core::config::Layer;
@@ -36,7 +36,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("classifications::new", "Classification: New\u{2026}"),
     ("classifications::rename", "Classification: Rename\u{2026}"),
     ("classifications::delete", "Classification: Delete"),
-    ("classifications::revert", "Classification: Revert to desk"),
+    ("classifications::revert", "Classification: Revert\u{2026}"),
     ("classifications::refresh", "Classification: Refresh values"),
     ("classifications::edit", "Classification: Set label"),
     ("classifications::clear", "Classification: Clear label"),
@@ -135,8 +135,9 @@ pub struct ClassificationsConfig {
     /// The layer each classification's winning definition comes from.
     pub layers: BTreeMap<String, Layer>,
     /// Classifications whose user copy shadows a definition in a lower
-    /// layer: the ones a revert would restore.
-    pub shadowed: BTreeSet<String>,
+    /// layer, with that layer: the ones a revert would restore, and what
+    /// it restores.
+    pub shadowed: BTreeMap<String, Layer>,
 }
 
 /// What every tile of the factory shares: the latest snapshot and the live
@@ -341,7 +342,7 @@ mod tests {
         let ids: Vec<&str> = ACTIONS.iter().map(|(id, _)| *id).collect();
         let bindings = doc.table["bindings"].as_array().unwrap();
         assert_eq!(bindings.len(), 4, "visual, normal, insert and menu");
-        let mut bound = BTreeSet::new();
+        let mut bound = std::collections::BTreeSet::new();
         let mut count = 0;
         for b in bindings {
             for (key, action) in b["keys"].as_table().unwrap() {
