@@ -342,8 +342,9 @@ fn slots(h: &Harness, vcx: &mut VisualTestContext, filled: &[(u8, &[&str])]) {
     });
 }
 
-/// Activate frame slot `n` (or none) on the tile's lane, as the palette's
-/// grouping picker does; the tile's observer runs on the notify.
+/// Activate frame slot `n` (or none) on the tile's lane, as a pick in the
+/// Grouping dialog or a `frame::slot_*` chord does; the tile's observer runs
+/// on the notify.
 fn activate(h: &Harness, vcx: &mut VisualTestContext, n: Option<u8>) {
     h.frame.update(vcx, |f, cx| {
         f.shared_mut().set_active_slot(n);

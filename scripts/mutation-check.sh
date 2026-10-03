@@ -5486,15 +5486,16 @@ run_mutation "objectdialog: the dialog opens in filter mode" \
   geode-shell \
   config_views_opens_in_normal_mode_and_lists_the_views
 
-# The displayed query must drive ranking. `visible_rows` is the fresh
-# ranking the prepared browse list must equal; ranked against an empty
-# query it disagrees with the list a typed query ranked.
+# The displayed query must drive ranking. `visible_rows` is the ranking a
+# removal landing resolves its cursor against: ranked against an empty
+# query under a filter, it clamps against the unfiltered list and leaves
+# the cursor past the end of the filtered one.
 run_mutation "objectdialog: the browse list ignores the query it displays" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
   '    crate::listfilter::rank(&texts, &state.query)' \
   '    crate::listfilter::rank(&texts, "")' \
   geode-shell \
-  typing_reranks_browse_rows_without_re_deriving
+  a_filtered_browse_delete_of_the_last_match_lands_on_the_match_left
 
 # Closing an object dialog must remove its state. The test opens another
 # dialog afterward so leftover object state cannot silently survive an
@@ -8223,7 +8224,7 @@ run_mutation "expr-chips: the term × occludes the chip body" \
   a_terms_close_glyph_drops_only_that_term
 
 # The menu's click catcher occludes: without it the closing press also
-# reaches what is beneath (the grouping readout opens its picker).
+# reaches what is beneath (the grouping readout opens the Grouping dialog).
 run_mutation "add-filter: an outside press closes the menu and goes no further" \
   crates/geode-shell/src/shell/render.rs \
   '                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())
@@ -17769,7 +17770,7 @@ run_mutation "grouping dialog: a double-click's second half completes a dimensio
 # the ad hoc branch the `*` draft falls through to `commit_edit`. (Keeping
 # the call and dropping only its `return` is an equivalent mutant:
 # `commit_ad_hoc` marks the draft saved, so `commit_edit` finds no edits.)
-run_mutation "grouping dialog: an ad hoc edit never reaches the config writer" \
+run_mutation "grouping dialog: an ad hoc edit commits through the frame, not the writer" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    if super::grouping_list::commit_ad_hoc(shell, cx) {
         return;

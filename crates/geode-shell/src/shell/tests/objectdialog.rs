@@ -9617,6 +9617,50 @@ fn a_browse_delete_of_the_last_row_lands_the_cursor_on_the_new_last_row(
     );
 }
 
+/// Under a filter the landing clamps against the FILTERED list: deleting the
+/// last of two matching rows lands on the one left, not one past it (the
+/// unfiltered list is longer, so a clamp against it would leave the cursor
+/// off the end of what is painted).
+#[gpui::test]
+fn a_filtered_browse_delete_of_the_last_match_lands_on_the_match_left(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    // Sorted `(dataset, name)`: risk·live, vol·vols, vol·zza, vol·zzb.
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_user_sources(&[("zza", "vol"), ("zzb", "vol")]),
+        dir.path(),
+        "config::sources",
+    );
+    cx.simulate_keystrokes("/ z z enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-row-vols").is_none(),
+        "fixture: the filter keeps only the two zz rows"
+    );
+    cx.simulate_keystrokes("j");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.selected), 1);
+
+    cx.simulate_keystrokes("d enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-row-zzb").is_none());
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.selected),
+        0,
+        "the cursor lands on the match left, inside the filtered list"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "zza".to_string()
+        }
+    );
+}
+
 /// Confirmation records the target name, not only its browse index. If a reload changes
 /// the row under the question, refuse the answer with a notice instead of deleting
 /// another object.
