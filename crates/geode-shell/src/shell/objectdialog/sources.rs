@@ -27,25 +27,58 @@ pub const PATH_SEPARATOR: char = ';';
 
 const READINESS: [&str; 2] = ["sentinel", "stable_mtime"];
 const PRIORITY: [&str; 3] = ["latest_risk", "latest_other", "backfill"];
+/// The reader's priority for a snapshot source that sets none.
+const SNAPSHOT_PRIORITY: &str = "latest_other";
 
 /// The browse row's muted second line: how many paths a source watches and which
-/// cold-start priority it claims — the two facts a trader scans the list for. Read
-/// straight off the raw table, for the reason `views::summary` and `groupings::summary`
-/// both give for doing the same: a malformed source is exactly the one this dialog
-/// exists to fix, and the reader would drop it from the merged result entirely.
-pub fn summary(value: &toml::Value) -> String {
+/// cold-start priority it claims — the two facts a trader scans the list for. A snapshot
+/// source watches no paths, so its line names the table it reads and the snapshot
+/// priority default instead. Read straight off the raw table, for the reason
+/// `views::summary` and `groupings::summary` both give for doing the same: a malformed
+/// source is exactly the one this dialog exists to fix, and the reader would drop it
+/// from the merged result entirely.
+pub fn summary(config: &Config, value: &toml::Value) -> String {
     let Some(table) = value.as_table() else {
         return "not a table".to_string();
     };
+    let priority = table.get("priority").and_then(|v| v.as_str());
+    if is_snapshot(table, &schema_of(config)) {
+        let priority = priority.unwrap_or(SNAPSHOT_PRIORITY);
+        return match table.get("table").and_then(|v| v.as_str()) {
+            Some(name) => format!("table {name} · {priority}"),
+            None => format!("no table · {priority}"),
+        };
+    }
     let n = table
         .get("paths")
         .and_then(|v| v.as_array())
         .map_or(0, |a| a.len());
-    let priority = table
-        .get("priority")
-        .and_then(|v| v.as_str())
-        .unwrap_or(PRIORITY[0]);
+    let priority = priority.unwrap_or(PRIORITY[0]);
     format!("{n} path{} · {priority}", if n == 1 { "" } else { "s" })
+}
+
+/// The datasets document as the reader parses it; empty when there is none.
+fn schema_of(config: &Config) -> SchemaSpec {
+    config
+        .doc("datasets")
+        .map(|doc| SchemaSpec::from_doc(doc).0)
+        .unwrap_or_default()
+}
+
+/// `SourceSpec::shape`'s own rule, read off the raw table: another adapter over a
+/// reference dataset is a snapshot source. The directory rows and defaults mean nothing
+/// to it, so showing them would misstate what the reader applies.
+fn is_snapshot(table: &toml::Table, schema: &SchemaSpec) -> bool {
+    let adapter = table
+        .get("adapter")
+        .and_then(|v| v.as_str())
+        .unwrap_or(CSV_DIR_ADAPTER);
+    adapter != CSV_DIR_ADAPTER
+        && table
+            .get("dataset")
+            .and_then(|v| v.as_str())
+            .and_then(|d| schema.dataset(d))
+            .is_some_and(|d| d.is_reference())
 }
 
 /// Dataset prefix for the source's browse label and primary sort key.
@@ -103,10 +136,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         .and_then(|value| value.as_table());
     let get_str = |key: &str| table.and_then(|t| t.get(key)).and_then(|v| v.as_str());
 
-    let schema = config
-        .doc("datasets")
-        .map(|doc| SchemaSpec::from_doc(doc).0)
-        .unwrap_or_default();
+    let schema = schema_of(config);
     // A local dataset is written by the app and never fed by a source (the
     // source reader refuses one), so it is not offered; computed: a module
     // answers for it and no source may feed it.
@@ -192,7 +222,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             field(
                 "priority",
                 "Priority",
-                choice(&PRIORITY, get_str("priority").unwrap_or("latest_other")),
+                choice(&PRIORITY, get_str("priority").unwrap_or(SNAPSHOT_PRIORITY)),
             ),
             text(
                 "poll_interval",
@@ -525,7 +555,7 @@ mod tests {
             .get("live")
             .cloned()
             .unwrap();
-        assert_eq!(summary(&value), "2 paths · latest_other");
+        assert_eq!(summary(&config(), &value), "2 paths · latest_other");
         assert_eq!(prefix(&value).as_deref(), Some("risk"));
     }
 
@@ -712,7 +742,8 @@ role = "value"
     }
 
     /// A reference dataset and a snapshot source over it that sets neither priority
-    /// nor poll interval, so the dialog has to spell both defaults.
+    /// nor poll interval, so the dialog has to spell both defaults. Its hand-written
+    /// `topics` is a key the dialog shows no row for.
     fn snapshot_config() -> Config {
         Config::load(&ConfigSources {
             builtin: vec![
@@ -728,7 +759,7 @@ role = "value"
                 LayerDoc::builtin(
                     "sources",
                     "[refdb]\nadapter = \"demo_refdb\"\ndataset = \"underlyings\"\n\
-                     table = \"underlyings\"\n",
+                     table = \"underlyings\"\ntopics = [\"a/>\"]\n",
                 )
                 .unwrap(),
             ],
@@ -760,6 +791,16 @@ role = "value"
         assert!(!help("table").is_empty());
     }
 
+    /// A snapshot source watches no paths; its browse line names the table it reads
+    /// and the snapshot priority default, not `0 paths · latest_risk`.
+    #[test]
+    fn a_snapshot_source_summary_names_its_table_and_snapshot_priority() {
+        let config = snapshot_config();
+        let rows = Domain::Sources.objects(&config);
+        let refdb = rows.iter().find(|r| r.name == "refdb").unwrap();
+        assert_eq!(refdb.summary, "table underlyings · latest_other");
+    }
+
     #[test]
     fn editing_the_table_row_writes_table() {
         let config = snapshot_config();
@@ -768,14 +809,23 @@ role = "value"
         draft.fields[i].kind = FieldKind::Text("underlyings_v2".into());
         let text = super::super::object_text("refdb", to_table(&draft, Destination::Doc));
         assert!(text.contains("table = \"underlyings_v2\""), "{text}");
+        assert!(
+            text.contains("topics = [\"a/>\"]"),
+            "a key the dialog has no row for is kept: {text}"
+        );
         for key in ["paths", "readiness", "pending_timeout", "batch_pattern"] {
             assert!(
                 !text.contains(key),
                 "{key} written to a snapshot source: {text}"
             );
         }
+        // The kept `topics` is the reader's only complaint, and only a warning.
         let diags = validate(&draft, &config);
-        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            matches!(&diags[..], [d] if d.severity == geode_core::config::Severity::Warning
+                && d.path.as_deref() == Some("sources.refdb.topics")),
+            "{diags:?}"
+        );
     }
 
     #[test]

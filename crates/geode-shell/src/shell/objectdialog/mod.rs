@@ -240,15 +240,17 @@ impl Domain {
     /// How this domain describes one object on its browse row — the only
     /// genuinely domain-specific part of a row, and therefore the only
     /// part an adapter gets to supply.
-    fn summary_fn(self) -> fn(&toml::Value) -> String {
+    /// Only Sources reads the config: whether a source is a snapshot depends on its
+    /// dataset's family.
+    fn summary_fn(self) -> fn(&Config, &toml::Value) -> String {
         match self {
-            Domain::Views => views::summary,
-            Domain::Groupings => groupings::summary,
-            Domain::Scopes => scopes::summary,
-            Domain::Schema => schema::summary,
+            Domain::Views => |_, v| views::summary(v),
+            Domain::Groupings => |_, v| groupings::summary(v),
+            Domain::Scopes => |_, v| scopes::summary(v),
+            Domain::Schema => |_, v| schema::summary(v),
             Domain::Sources => sources::summary,
-            Domain::Colors => colours::summary,
-            Domain::Expressions => expressions::summary,
+            Domain::Colors => |_, v| colours::summary(v),
+            Domain::Expressions => |_, v| expressions::summary(v),
         }
     }
 
@@ -560,7 +562,7 @@ fn derive_rows(
     doc: &str,
     presentation_doc: Option<&str>,
     roster: Option<&'static [&'static str]>,
-    summary: fn(&toml::Value) -> String,
+    summary: fn(&Config, &toml::Value) -> String,
     prefix: Option<fn(&toml::Value) -> Option<String>>,
 ) -> Vec<ObjectRow> {
     // Objects the user layer has personalised without overriding: a
@@ -626,7 +628,7 @@ fn derive_rows(
             // winning layer and the summary describe the copy that
             // actually takes effect.
             entry.1.layer = Some(layered.layer);
-            entry.1.summary = summary(value);
+            entry.1.summary = summary(config, value);
             entry.1.prefix = prefix.and_then(|f| f(value));
             if layered.layer != Layer::User {
                 entry.2 = Some(value.clone());
