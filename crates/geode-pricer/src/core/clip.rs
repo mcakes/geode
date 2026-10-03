@@ -13,6 +13,7 @@ fn line_spec(sheet: &Sheet, row: usize) -> LineSpec {
             .clone(),
         qty: sheet.qty(row),
         shift: sheet.shift(row),
+        currency: sheet.currency(row),
     }
 }
 
@@ -71,6 +72,35 @@ mod tests {
             panic!("a leg yanks as a line")
         };
         assert_eq!(leg.qty, -5);
+    }
+
+    #[test]
+    fn a_yanked_line_keeps_its_currency() {
+        use crate::core::sheet::tests::{eur, line_in};
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![
+                line_in(spx(5000.0, OptionKind::Call), 1, Some(eur())),
+                line_in(spx(5000.0, OptionKind::Put), 1, None),
+            ],
+        );
+        let RowSpec::Line(l) = spec_of(&s, 0) else {
+            panic!("a line yanks as a line")
+        };
+        assert_eq!(l.currency, Some(eur()));
+        let RowSpec::Line(blank) = spec_of(&s, 1) else {
+            panic!("a line yanks as a line")
+        };
+        assert_eq!(blank.currency, None, "a blank line yanks blank");
+        let RowSpec::Package { legs, .. } = spec_of(&sheet(), 1) else {
+            panic!("a package yanks with its legs")
+        };
+        assert!(
+            legs.iter()
+                .all(|l| l.currency == Some(geode_core::pricing::Currency::USD)),
+            "{legs:?}"
+        );
     }
 
     #[test]

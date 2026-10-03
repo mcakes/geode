@@ -497,17 +497,16 @@ pub fn hold(rollup: &mut Rollup, sheet: &Sheet, held: &Held) {
 mod tests {
     use super::*;
     use crate::core::rollup::{self, effective_chain};
-    use crate::core::sheet::tests::{at, push, result};
+    use crate::core::sheet::tests::{at, in_usd, push, result};
     use crate::core::shorthand::parse_builtin;
     use crate::core::visibility::Visibility;
     use geode_core::clock::Clock;
     use geode_core::dimensions::DerivedDimensions;
-    use geode_core::pricing::Currency;
 
     fn sheet(lines: &[&str]) -> Sheet {
         let mut s = Sheet::new("t");
         for l in lines {
-            push(&mut s, vec![parse_builtin(l).unwrap()]);
+            push(&mut s, vec![in_usd(parse_builtin(l).unwrap())]);
         }
         s
     }
@@ -638,12 +637,7 @@ mod tests {
         let mut s = sheet(&["SPX Z26 5000 C", "SPX Z26 4800/5200 CS", "SPX Z26 4000 C"]);
         price(&mut s, &[(0, 1.0), (3, 9.0), (4, 2.0)]);
         // Price the long leg (row 2) in EUR: the package's local npv is a gap.
-        let id = s.id(2);
-        let rev = s.revision(2);
-        let mut eur = result(100.0);
-        eur.currency = Currency::parse("EUR").unwrap();
-        s.deliver(id, rev, Ok(eur), at(0));
-        s.fold_packages();
+        crate::core::sheet::tests::deliver_in_eur(&mut s, 2, result(100.0), at(0));
         assert!(s.result(1).unwrap().currency.is_mixed(), "precondition");
         let local = ranked(&s, &[], spec("npv", SortOrder::Desc));
         assert_eq!(local.first().unwrap(), "SPX Z26 4000 C");

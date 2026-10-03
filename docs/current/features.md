@@ -1462,8 +1462,12 @@ pricer sheet. A package whose legs priced in different currencies, or a
 selection total over such lines, paints `—` in its local-currency measure
 columns; the `_usd` columns still sum, and are the comparable ones across
 currencies. Both bundled views end in a `status` column, which says
-`pricing…` on a stale line and a failed line's reason, so neither state is
-shown by color alone. Column 0 is a connector tree. A package row shows its
+`pricing…` on a stale line, a failed line's reason, and `needs currency`
+on a line with no payout currency, so no state is shown by color alone. The
+`currency` column is the line's payout currency, the one it asks the
+pricer to report in: it edits (three letters, any case; empty clears) and
+reprices the line, and a blank line is never priced. A result reported in
+another currency fails the line (`priced in EUR, asked for USD`). Column 0 is a connector tree. A package row shows its
 chevron, its template (`CS`, `CUSTOM`) as a neutral chip, a summary of its
 legs' distinct expiries and strikes (`Z26 4800/5200`) and a muted leg count
 (`· 2 legs`). Each leg hangs from a drawn connector under the package's
@@ -1918,9 +1922,9 @@ line's cell paints the per-unit result: `npv < 0` keeps a short line whose
 per-unit npv is positive. A leg's `template` is its package's token, because
 `template` is a position-grain column and a leg's position is its package; a
 bare line has none. A blank cell, a measure on an unpriced or failed line,
-and the currency of an unpriced line are NULL. NULL follows SQL: only TRUE
-keeps a line, so `npv > 0` hides an unpriced line and so does
-`not (currency = 'USD')`. The text filter searches the nine textual
+and a blank currency are NULL. NULL follows SQL: only TRUE keeps a line,
+so `npv > 0` hides an unpriced line and `not (currency = 'USD')` hides a
+line with no currency. The text filter searches the nine textual
 dimensions (see [configuration](configuration.md)).
 
 The scope is re-applied on every model rebuild: an edit, a price delivery, a

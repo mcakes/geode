@@ -79,9 +79,22 @@ fn sheet(n: usize) -> Sheet {
 fn sheet_of(texts: &[String]) -> Sheet {
     let mut s = Sheet::new("bench");
     let templates = TemplateSet::builtin();
+    // Every line in USD, as the answers are: a blank line has no request,
+    // and a package over one would fold to a failure.
     let rows: Vec<RowSpec> = texts
         .iter()
-        .map(|t| parse(t, &templates).expect("bench text parses"))
+        .map(|t| {
+            let mut row = parse(t, &templates).expect("bench text parses");
+            match &mut row {
+                RowSpec::Line(l) => l.currency = Some(Currency::USD),
+                RowSpec::Package { legs, .. } => {
+                    for l in legs {
+                        l.currency = Some(Currency::USD);
+                    }
+                }
+            }
+            row
+        })
         .collect();
     s.apply(Edit::Insert {
         place: Place::Root { at: 0 },

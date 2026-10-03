@@ -1216,8 +1216,8 @@ fn a_block_step_steps_each_block_column_and_counts_what_does_not_step(
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some("1"));
     assert_eq!(
         notice(&h, &vcx).as_deref(),
-        Some("stepped 2 cells +1, skipped 2 (1 read-only, 1 not numeric)"),
-        "currency is read-only, type is not numeric"
+        Some("stepped 2 cells +1, skipped 2 (2 not numeric)"),
+        "type and currency are text, not numbers"
     );
     assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200", "outside the block");
 }

@@ -431,10 +431,15 @@ mod tests {
         );
     }
 
-    /// Install `price` as row `row`'s result in `currency`.
+    /// Move row `row` to `currency` and install `price` as its result in it.
     fn price_in(s: &mut Sheet, row: usize, price: f64, currency: &str) {
         let mut r = result(price);
         r.currency = Currency::parse(currency).unwrap();
+        s.apply(crate::core::edit::Edit::SetCurrency {
+            row,
+            currency: Some(r.currency),
+        })
+        .unwrap();
         let d = s.deliver(s.id(row), s.revision(row), Ok(r), at(0));
         assert_eq!(d, crate::core::sheet::Delivered::Installed);
     }

@@ -2842,6 +2842,20 @@ impl PricerTile {
     /// current revision. Hidden and loading tiles submit nothing. Admission refusal
     /// retains stale state and schedules retry independently of periodic refresh.
     pub(crate) fn submit(&mut self, cx: &mut Context<Self>) {
+        // Tests price seeded and typed lines in USD; the reference default
+        // replaces this. A blank line was never requested, so its currency
+        // is set without a new revision.
+        #[cfg(test)]
+        {
+            let blank: Vec<usize> = self.sheet.lines_needing_currency().collect();
+            if !blank.is_empty() {
+                for r in blank {
+                    self.sheet
+                        .set_currency(r, Some(geode_core::pricing::Currency::USD));
+                }
+                self.sheet.fold_packages();
+            }
+        }
         // A stopped service admits nothing again: a refresh tick or an edit
         // asking it would only repeat the refusal the header already shows.
         if !self.visible || self.loading || self.stopped {

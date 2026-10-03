@@ -3,7 +3,7 @@
 //! theme colours. Formatting takes the configured clock explicitly and needs no GPUI
 //! context.
 
-use crate::core::sheet::{Folded, LineState, RowKind, Sheet};
+use crate::core::sheet::{Folded, LineState, NEEDS_CURRENCY, RowKind, Sheet};
 use crate::core::shorthand::{render_barrier_kind, render_expiry, render_strike};
 use chrono::{DateTime, Utc};
 use geode_core::format::{Sign, format_number};
@@ -26,7 +26,7 @@ pub enum ColumnKind {
     Expiry,
     Strike,
     OptionType,
-    /// The result's currency, blank until priced.
+    /// The line's payout currency, blank until set; a package aggregates its legs'.
     Currency,
     Barrier,
     BarrierType,
@@ -246,7 +246,7 @@ pub static COLUMNS: [ColumnDef; 44] = [
         "currency",
         "currency",
         ColumnKind::Currency,
-        false,
+        true,
         EveryRow,
         TEXT,
         84.0,
@@ -799,8 +799,8 @@ pub fn cell_text(
             RowKind::Package { template } => own(template.token()),
             RowKind::Line | RowKind::Underlying => blank(),
         },
-        ColumnKind::Currency => match sheet.result(row) {
-            Some(r) => own(r.currency.as_str()),
+        ColumnKind::Currency => match sheet.currency(row) {
+            Some(c) => own(c.as_str()),
             None => blank(),
         },
         ColumnKind::Qty => own(sheet.qty(row).to_string()),
@@ -835,6 +835,13 @@ pub fn cell_text(
             number(sheet.state(row), sheet.result(row), measure, usd, format)
         }
         ColumnKind::PricedAt => priced_at(sheet.priced_at(row), clock),
+        // Ahead of the state: a line without a currency is never
+        // requested, so its `Stale` would read `pricing…` for good.
+        ColumnKind::Status if sheet.is_line(row) && sheet.currency(row).is_none() => CellText {
+            text: NEEDS_CURRENCY.into(),
+            state: CellState::Failed,
+            sign: None,
+        },
         ColumnKind::Status => status(sheet.state(row)),
     }
 }
@@ -1083,6 +1090,7 @@ mod tests {
                 "expiry",
                 "strike",
                 "option_type",
+                "currency",
                 "barrier",
                 "barrier_type",
                 "spot_shift",
@@ -1100,7 +1108,7 @@ mod tests {
         ] {
             let c = column(name).unwrap();
             assert_eq!(c.label, label);
-            assert!(!c.editable, "{name}");
+            assert_eq!(c.editable, name == "currency", "{name}");
             assert_eq!(c.applies_to, Applies::EveryRow, "{name}");
             assert_eq!(c.default_format, TEXT, "{name}");
         }
@@ -1172,22 +1180,39 @@ mod tests {
         assert_eq!(text(bare, "instrument_ref"), format!("i{}", s.id(bare).0));
         assert_eq!(text(pkg, "template"), "CS");
         assert_eq!(text(bare, "template"), "");
-        assert_eq!(text(bare, "currency"), "", "blank until priced");
-        assert_eq!(cell(&s, bare, "currency").state, CellState::Blank);
+        assert_eq!(text(pkg, "currency"), "USD", "its legs' currency");
     }
 
+    /// The cell is the line's payout currency, before any price and
+    /// whatever the last result said; a blank line reads blank.
     #[test]
-    fn a_priced_line_paints_its_currency() {
+    fn a_line_paints_its_payout_currency() {
         let mut s = crate::core::sheet::tests::sheet_with_package_and_line();
         let bare = 3;
-        s.deliver_all(vec![(s.id(bare), 1, Ok(result(1.0)))], at(0));
         assert_eq!(
             cell(&s, bare, "currency"),
             CellText {
                 text: "USD".into(),
                 state: CellState::Own,
                 sign: None
-            }
+            },
+            "unpriced"
+        );
+        s.deliver_all(vec![(s.id(bare), 1, Ok(result(1.0)))], at(0));
+        s.apply(Edit::SetCurrency {
+            row: bare,
+            currency: None,
+        })
+        .unwrap();
+        assert_eq!(cell(&s, bare, "currency").state, CellState::Blank);
+        assert_eq!(
+            cell(&s, bare, "status"),
+            CellText {
+                text: "needs currency".into(),
+                state: CellState::Failed,
+                sign: None
+            },
+            "ahead of its state"
         );
     }
 
@@ -1365,10 +1390,8 @@ mod tests {
     fn a_mixed_currency_package_paints_a_gap_in_local_measures_and_sums_usd() {
         let mut s = Sheet::new("t");
         push(&mut s, vec![callspread(-5)]); // legs: -5 × 4800 call, +5 × 5200 call
-        let mut eur = result(40.0);
-        eur.currency = geode_core::pricing::Currency::parse("EUR").unwrap();
         s.deliver(s.id(1), 1, Ok(result(100.0)), at(0));
-        s.deliver(s.id(2), 1, Ok(eur), at(0));
+        crate::core::sheet::tests::deliver_in_eur(&mut s, 2, result(40.0), at(0));
         assert!(s.result(0).unwrap().currency.is_mixed());
         assert_eq!(
             cell(&s, 0, "npv"),

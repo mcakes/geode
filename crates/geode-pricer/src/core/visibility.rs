@@ -219,7 +219,7 @@ impl RowValues for SheetRow<'_> {
 mod tests {
     use super::*;
     use crate::core::columns::COLUMNS;
-    use crate::core::sheet::tests::{at, push, result};
+    use crate::core::sheet::tests::{at, in_usd, push, result};
     use crate::core::shorthand::parse_builtin;
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::scope::{DimensionSelection, parse_expr};
@@ -237,7 +237,7 @@ mod tests {
                 "SPX Z26/H27 5000 CAL",
             ]
             .iter()
-            .map(|l| parse_builtin(l).unwrap())
+            .map(|l| in_usd(parse_builtin(l).unwrap()))
             .collect(),
         );
         assert_eq!(s.len(), 8);
@@ -328,13 +328,17 @@ mod tests {
     }
 
     #[test]
-    fn an_unpriced_line_never_matches_a_measure_or_currency_comparison() {
+    fn an_unpriced_line_never_matches_a_measure_and_a_blank_currency_is_null() {
         let s = sheet();
         let v = apply(&s, &expr("npv > 0")).unwrap();
         assert_eq!(shown(&s, &v), Vec::<usize>::new());
-        let v = apply(&s, &expr("not (currency = 'USD')")).unwrap();
-        assert!(!v.is_shown(0), "an unpriced line's currency is NULL");
-        assert_eq!(v.hidden, 6);
+        let v = apply(&s, &expr("currency = 'USD'")).unwrap();
+        assert!(v.is_shown(0), "an unpriced line has its own currency");
+        let mut blank = Sheet::new("t");
+        push(&mut blank, vec![parse_builtin("SPX Z26 4000 P").unwrap()]);
+        let v = apply(&blank, &expr("not (currency = 'EUR')")).unwrap();
+        assert!(!v.is_shown(0), "a blank currency is NULL");
+        assert_eq!(v.hidden, 1);
         // Priced, the same lines match.
         let mut p = sheet();
         price_all(&mut p, 1.0);
@@ -345,7 +349,10 @@ mod tests {
     #[test]
     fn a_measure_is_the_position_value_result_times_qty() {
         let mut s = Sheet::new("t");
-        push(&mut s, vec![parse_builtin("-2 SPX Z26 4000 P").unwrap()]);
+        push(
+            &mut s,
+            vec![in_usd(parse_builtin("-2 SPX Z26 4000 P").unwrap())],
+        );
         price_all(&mut s, 3.0);
         assert_eq!(
             SheetRow {
@@ -476,7 +483,10 @@ mod tests {
     #[test]
     fn expiry_scopes_by_iso_date_or_tenor() {
         let mut s = sheet();
-        push(&mut s, vec![parse_builtin("SPX 3m 5000 C").unwrap()]);
+        push(
+            &mut s,
+            vec![in_usd(parse_builtin("SPX 3m 5000 C").unwrap())],
+        );
         let v = apply(&s, &expr("expiry = '2026-12-18'")).unwrap();
         // Row 7 is the CAL's Z26 leg; its H27 leg (row 6) hides.
         assert_eq!(shown(&s, &v), vec![0, 1, 2, 3, 4, 5, 7], "every Z26 line");
@@ -505,8 +515,8 @@ mod tests {
         push(
             &mut s,
             vec![
-                parse_builtin("SPX Z26 5000 C UO 5500").unwrap(),
-                parse_builtin("SPX Z26 100% P").unwrap(),
+                in_usd(parse_builtin("SPX Z26 5000 C UO 5500").unwrap()),
+                in_usd(parse_builtin("SPX Z26 100% P").unwrap()),
             ],
         );
         s.apply(crate::core::Edit::SetSheetShift(crate::core::OwnShifts {

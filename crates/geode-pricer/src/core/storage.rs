@@ -537,6 +537,8 @@ pub fn from_rows(name: &str, rows: &DocumentRows) -> Result<Sheet, String> {
                 spot_pct: own(spot_own[i], spot[i]),
                 vol_pts: own(vol_own[i], vol[i]),
             },
+            // Not stored: a loaded line is blank until given one.
+            currency: None,
             revision: 1,
             result: None,
             state: if row_kind == RowKind::Line {

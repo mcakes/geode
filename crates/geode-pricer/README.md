@@ -200,13 +200,31 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   New tile edits use `PricerTile::apply_edit`/`apply_edits`; undo and redo
   apply through the LIFO history. Loading replaces the sheet. Deliveries,
   stale marking, and sheet metadata updates have separate paths.
+- Every line carries a payout currency (`LineSpec`/`RowRecord::currency`,
+  `Sheet::currency`), the one its request asks the pricer to report in. The
+  shorthand names none, so a parsed line is blank until given one. A blank
+  line has no request: it is not submitted or counted as pricing, and its
+  status reads `needs currency` ahead of its state; a package with a blank
+  leg fails its fold naming that leg (`<leg>: needs currency`). The
+  `currency` cell edits (`Edit::SetCurrency`, a request change, so it
+  reprices and undoes): exactly three letters in any case, stored upper
+  case; empty text clears; anything else is refused with `a currency is
+  three letters, e.g. USD`. A package cell maps codes onto its legs like any
+  aggregated input. `Sheet::fill_currency` gives a blank line a currency
+  without an undo step and never overwrites one; `lines_needing_currency`
+  lists the blank lines. A result whose currency differs from the line's
+  fails the line (`priced in EUR, asked for USD`) and installs nothing; a
+  result that lands after a currency edit answers an older revision and is
+  dropped. Yank copies the currency. `pricer_sheets` does not store it yet:
+  a loaded line is blank.
 - Package rows derive from their legs; they are not independent instruments.
   Their pricing timestamp is the oldest present leg-attempt timestamp,
   including failed attempts. The fold keeps the legs' currency when they
   agree and marks it `Currency::MIXED` when they differ: a package whose
   legs priced in different currencies paints `—` in its local-currency
   measure columns, while the `_usd` columns still sum. Its `currency` cell
-  joins the legs' codes with `/`, so the gap says which currencies met.
+  joins the legs' payout codes with `/` (a blank leg among set ones paints
+  `—`), so the gap says which currencies met.
 - A package row's qty and eight text columns aggregate its legs: the
   distinct values, compared as values, in leg order joined with `/` and
   spelled as a line's cell spells them. Barrier columns read only barrier
