@@ -326,6 +326,20 @@ columns](data-path.md#ungrouped-dimension-columns). A numeric dimension such as
 `strike` sorts by number and paints its exact value, never rounded by the text
 format.
 
+A dimension value that `value_colors` maps paints in that value's named
+color. A tree label is a value of the grouping dimension at its depth, so
+`L1` under `lhu` takes `lhu`'s mapping for `L1`, never another level's; the
+gutter number, indent and chevron keep their own paint. A `dimension`
+column's unanimous value takes its color too. `mixed`, blanks, the grand
+total, measures, headers and the selection footer are never value-colored.
+Muted states (`mixed`, non-attributable, determined non-additive, the `/`
+table's context rows) win; otherwise the value's color wins over the column's
+own `color` (`sign` or named), which wins over the foreground. A value has no
+sign, so a `tint_sign` color paints its base. The name is looked up when the
+visible window is prepared, not in render; a mapping or definitions reload
+re-prepares the window, and the `/` table drops its held cells when it is
+installed under a different mapping.
+
 `g m` opens a panel on the cursor row's `underlying_ref`, the column every
 panel kind accepts. The blotter reads it from the grouping path, a shown
 column, or the hidden context column the data service adds; a row above the

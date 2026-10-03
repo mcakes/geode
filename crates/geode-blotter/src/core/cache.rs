@@ -1,11 +1,13 @@
 //! The blotter's cell formatter and the cell it prepares. The delegate
 //! fills a `geode_tile::grid::WindowCache<CachedCell>` with these for the
 //! window the table reports and on snapshot delivery, outside `render_td`;
-//! callers invalidate when the snapshot, row order or plan changes.
+//! callers invalidate when the snapshot, row order, plan or value-color
+//! mapping changes.
 
 use crate::core::format::{Sign, format_number};
 use crate::core::plan::{ColumnKind, ColumnPlan};
 use geode_core::attribution::Attribution;
+use geode_core::colour::ValueColors;
 use geode_core::snapshot::Snapshot;
 use std::sync::Arc;
 
@@ -19,6 +21,10 @@ pub struct CachedCell {
     /// [`MIXED`] and paints muted. Distinct from a blank cell (no value at
     /// all), which is not cached.
     pub mixed: bool,
+    /// The cell shows a dimension value that `value_colors` maps: the
+    /// color's name, looked up here so paint only resolves it. `None` on a
+    /// measure, a `mixed` cell, the grand total and an unmapped value.
+    pub value_color: Option<Arc<str>>,
 }
 
 /// What an ungrouped dimension cell says when the rows under it disagree
@@ -29,7 +35,14 @@ pub const MIXED: &str = "mixed";
 /// Format one snapshot cell for display. Missing columns and NULL values
 /// return `None`. In particular, compiler-supplied NULL for a
 /// `NonAttributable` cell stays blank rather than becoming `0.00`.
-pub fn cell(snapshot: &Snapshot, plan: &ColumnPlan, row: usize, col: usize) -> Option<CachedCell> {
+/// `values` names the color of a dimension value the cell shows.
+pub fn cell(
+    snapshot: &Snapshot,
+    plan: &ColumnPlan,
+    values: &ValueColors,
+    row: usize,
+    col: usize,
+) -> Option<CachedCell> {
     let column = plan.columns.get(col)?;
     if row >= snapshot.rows() {
         return None;
@@ -37,12 +50,22 @@ pub fn cell(snapshot: &Snapshot, plan: &ColumnPlan, row: usize, col: usize) -> O
     let depth = snapshot.tree().depth(row);
     let attribution = plan.attribution(col, depth);
     match column.kind {
-        ColumnKind::Tree => plan.tree_text(snapshot, row).map(|t| CachedCell {
-            text: t.into(),
-            sign: None,
-            attribution,
-            mixed: false,
-        }),
+        ColumnKind::Tree => {
+            let text = plan.tree_text(snapshot, row)?;
+            // The label is a value of the grouping column at this depth.
+            let value_color = depth
+                .checked_sub(1)
+                .and_then(|level| plan.grouping.get(level))
+                .and_then(|dimension| values.get(dimension, text))
+                .cloned();
+            Some(CachedCell {
+                text: text.into(),
+                sign: None,
+                attribution,
+                mixed: false,
+                value_color,
+            })
+        }
         ColumnKind::Measure => {
             let idx = column.index?;
             let value = snapshot.f64_at(idx, row)?;
@@ -52,6 +75,7 @@ pub fn cell(snapshot: &Snapshot, plan: &ColumnPlan, row: usize, col: usize) -> O
                 sign: Some(f.sign),
                 attribution,
                 mixed: false,
+                value_color: None,
             })
         }
         ColumnKind::Dimension => {
@@ -65,14 +89,17 @@ pub fn cell(snapshot: &Snapshot, plan: &ColumnPlan, row: usize, col: usize) -> O
                     sign: None,
                     attribution,
                     mixed: true,
+                    value_color: None,
                 });
             }
             let text = dimension_text(snapshot, idx, row)?;
+            let value_color = values.get(&column.name, &text).cloned();
             Some(CachedCell {
                 text: text.into(),
                 sign: None,
                 attribution,
                 mixed: false,
+                value_color,
             })
         }
     }
@@ -95,6 +122,7 @@ mod tests {
     use super::*;
     use crate::core::plan::ColumnPlan;
     use geode_core::attribution::{Attribution, ScopeSemantics};
+    use geode_core::colour::ValueColors;
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
     use geode_core::view::ViewSpec;
@@ -111,6 +139,7 @@ mod tests {
                 sign: None,
                 attribution: Attribution::Additive,
                 mixed: false,
+                value_color: None,
             })
         };
         c.set_window(0..10, 2, fill);
@@ -126,11 +155,9 @@ mod tests {
         assert_eq!(fills.get(), 50, "everything refilled after invalidation");
     }
 
-    #[test]
-    fn cells_honour_the_read_paths_opinions() {
-        // NonAttributable is NULL and paints blank, never 0.00; a
-        // DeterminedNonAdditive cell carries its value and its marker; a
-        // real zero paints.
+    /// Grouped by `lhu` then `underlying_ref`: row 0 the grand total, row 1
+    /// `L1`, row 2 `SPX`; two measures after the tree column.
+    fn fixture() -> (Snapshot, ColumnPlan) {
         let meta = |n: &str, by_depth: Vec<Attribution>| ColumnMeta {
             name: n.into(),
             attribution_by_depth: by_depth,
@@ -181,31 +208,91 @@ mod tests {
         let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
         let view = ViewSpec::from_doc(&doc).0.remove(0);
         let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
+        (snap, plan)
+    }
 
+    #[test]
+    fn cells_honour_the_read_paths_opinions() {
+        // NonAttributable is NULL and paints blank, never 0.00; a
+        // DeterminedNonAdditive cell carries its value and its marker; a
+        // real zero paints.
+        let (snap, plan) = fixture();
         assert_eq!(
-            cell(&snap, &plan, 0, 1).map(|c| c.text.to_string()),
+            cell(&snap, &plan, &ValueColors::default(), 0, 1).map(|c| c.text.to_string()),
             Some("0.00".into()),
             "a real zero paints"
         );
         assert_eq!(
-            cell(&snap, &plan, 1, 1),
+            cell(&snap, &plan, &ValueColors::default(), 1, 1),
             None,
             "NonAttributable is blank, never 0.00"
         );
-        let leaf = cell(&snap, &plan, 2, 2).unwrap();
+        let leaf = cell(&snap, &plan, &ValueColors::default(), 2, 2).unwrap();
         assert_eq!(&*leaf.text, "7.00");
         assert_eq!(leaf.attribution, Attribution::DeterminedNonAdditive);
         assert_eq!(
-            cell(&snap, &plan, 0, 0),
+            cell(&snap, &plan, &ValueColors::default(), 0, 0),
             None,
             "the grand total has no tree text"
         );
         assert_eq!(
-            cell(&snap, &plan, 2, 0).map(|c| c.text.to_string()),
+            cell(&snap, &plan, &ValueColors::default(), 2, 0).map(|c| c.text.to_string()),
             Some("SPX".into())
         );
-        assert_eq!(cell(&snap, &plan, 9, 1), None, "past the end");
-        assert_eq!(cell(&snap, &plan, 0, 9), None, "no such column");
+        assert_eq!(
+            cell(&snap, &plan, &ValueColors::default(), 9, 1),
+            None,
+            "past the end"
+        );
+        assert_eq!(
+            cell(&snap, &plan, &ValueColors::default(), 0, 9),
+            None,
+            "no such column"
+        );
+    }
+
+    #[test]
+    fn a_tree_label_carries_the_color_of_its_levels_value() {
+        let (snap, plan) = fixture();
+        let mut values = ValueColors::default();
+        values.insert("lhu", "L1", "amber");
+        values.insert("underlying_ref", "SPX", "blue");
+        // A value of another level's dimension is not this row's value.
+        values.insert("underlying_ref", "L1", "wrong");
+        let color = |row| {
+            cell(&snap, &plan, &values, row, 0).and_then(|c| c.value_color.map(|n| n.to_string()))
+        };
+        assert_eq!(color(1), Some("amber".into()), "depth 1 is an lhu value");
+        assert_eq!(
+            color(2),
+            Some("blue".into()),
+            "depth 2 is an underlying_ref value"
+        );
+        assert_eq!(color(0), None, "the grand total names no value");
+    }
+
+    #[test]
+    fn a_measure_cell_never_carries_a_value_color() {
+        let (snap, plan) = fixture();
+        let mut values = ValueColors::default();
+        // Even a mapping keyed by a measure's name and printed text.
+        for col in 1..plan.columns.len() {
+            if let Some(c) = cell(&snap, &plan, &ValueColors::default(), 2, col) {
+                values.insert(&plan.columns[col].name, &c.text, "blue");
+            }
+        }
+        let mut measures = 0;
+        for col in 1..plan.columns.len() {
+            if plan.columns[col].kind == ColumnKind::Measure {
+                measures += 1;
+                assert_eq!(
+                    cell(&snap, &plan, &values, 2, col).and_then(|c| c.value_color),
+                    None,
+                    "column {col}"
+                );
+            }
+        }
+        assert_eq!(measures, 2, "both measures were checked");
     }
 
     /// Root plus three LHUs whose ungrouped `strike` is a value (A), mixed
@@ -259,11 +346,36 @@ mod tests {
             2,
             "tree and strike; the flag is not shown"
         );
-        let value = cell(&snap, &plan, 1, 1).unwrap();
+        let value = cell(&snap, &plan, &ValueColors::default(), 1, 1).unwrap();
         assert_eq!((&*value.text, value.mixed), ("4250.5", false));
-        let mixed = cell(&snap, &plan, 2, 1).unwrap();
+        let mixed = cell(&snap, &plan, &ValueColors::default(), 2, 1).unwrap();
         assert_eq!((&*mixed.text, mixed.mixed), (MIXED, true));
-        assert_eq!(cell(&snap, &plan, 3, 1), None, "blank is not mixed");
-        assert!(cell(&snap, &plan, 0, 1).unwrap().mixed, "the root too");
+        assert_eq!(
+            cell(&snap, &plan, &ValueColors::default(), 3, 1),
+            None,
+            "blank is not mixed"
+        );
+        assert!(
+            cell(&snap, &plan, &ValueColors::default(), 0, 1)
+                .unwrap()
+                .mixed,
+            "the root too"
+        );
+
+        // The marker is not a value: a mapping for the word itself colors
+        // nothing, while the unanimous value in the same column does.
+        let (row, col, unanimous_row) = (2, 1, 1);
+        let mut values = ValueColors::default();
+        values.insert(&plan.columns[col].name, MIXED, "blue");
+        let mixed = cell(&snap, &plan, &values, row, col).expect("the marker is painted");
+        assert!(mixed.mixed);
+        assert_eq!(mixed.value_color, None);
+        values.insert(&plan.columns[col].name, "4250.5", "blue");
+        assert_eq!(
+            cell(&snap, &plan, &values, unanimous_row, col)
+                .and_then(|c| c.value_color)
+                .as_deref(),
+            Some("blue")
+        );
     }
 }

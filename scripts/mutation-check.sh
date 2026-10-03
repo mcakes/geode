@@ -4096,7 +4096,7 @@ run_mutation "delegate: any_determined reflects the whole cached window" \
   '        self.cache
             .set_window(window.clone(), cols, |shown_row, col| {
                 let row = *shown.get(shown_row)? as usize;
-                cell(snapshot, plan, row, col)
+                cell(snapshot, plan, values, row, col)
             });
         // Scanned over the *whole* current window, not just the rows
         // this call'"'"'s `fill` closure actually ran for: `set_window`
@@ -4116,7 +4116,7 @@ run_mutation "delegate: any_determined reflects the whole cached window" \
         self.cache
             .set_window(window.clone(), cols, |shown_row, col| {
                 let row = *shown.get(shown_row)? as usize;
-                let c = cell(snapshot, plan, row, col)?;
+                let c = cell(snapshot, plan, values, row, col)?;
                 if c.attribution == Attribution::DeterminedNonAdditive {
                     any_determined = true;
                 }
@@ -32659,8 +32659,8 @@ run_mutation "blotter find: the arriving index re-formats the opened rows" \
 
 run_mutation "blotter find: the row report formats nothing" \
   crates/geode-blotter/src/delegate.rs \
-  '            cell(&p.snapshot, &p.plan, row, c)' \
-  '            { let _ = (p, row, c); None }' \
+  '            cell(&p.snapshot, &p.plan, colours.values(), row, c)' \
+  '            { let _ = (p, colours, row, c); None }' \
   geode-blotter \
   fzf_formats_only_the_rows_it_paints
 
@@ -34165,6 +34165,49 @@ run_mutation "value colors: the reload hands the blotter the mapping" \
   '                let (colours, colour_diags) = config.doc(geode_core::config::COLORS_DOC).map(NamedColours::from_doc).unwrap_or_default();' \
   geode-app \
   a_config_reload_hands_the_blotter_factory_the_value_colors
+
+# A value's color wins over the column's own color.
+run_mutation "blotter: a value color wins over the column color" \
+  crates/geode-blotter/src/delegate.rs \
+  '    if value {
+        return TextPaint::Value;
+    }' \
+  '    if false {
+        return TextPaint::Value;
+    }' \
+  geode-blotter \
+  a_values_color_wins_over_the_columns_color_and_nothing_else_changes
+
+# A label is a value of the grouping column at ITS depth, not the first.
+run_mutation "blotter: a tree label is colored by its own level's dimension" \
+  crates/geode-blotter/src/core/cache.rs \
+  '                .and_then(|level| plan.grouping.get(level))' \
+  '                .and_then(|_| plan.grouping.first())' \
+  geode-blotter \
+  a_tree_label_carries_the_color_of_its_levels_value
+
+# A reloaded mapping re-reads the prepared window.
+run_mutation "blotter: a reloaded mapping invalidates the prepared cells" \
+  crates/geode-blotter/src/delegate.rs \
+  '            self.invalidate_cells();
+        }
+    }
+
+    /// Named colour of column' \
+  '        }
+    }
+
+    /// Named colour of column' \
+  geode-blotter \
+  a_reloaded_mapping_reaches_the_prepared_window
+
+# The / table's held cells carry names from one mapping.
+run_mutation "blotter: a find display under a new mapping drops its cells" \
+  crates/geode-blotter/src/delegate.rs \
+  '            && Arc::ptr_eq(&self.colours, &colours)' \
+  '            && true' \
+  geode-blotter \
+  a_find_display_under_a_new_mapping_drops_its_held_cells
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

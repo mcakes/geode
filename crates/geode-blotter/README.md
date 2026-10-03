@@ -183,6 +183,14 @@ cargo bench -p geode-blotter   # the pure core
 - `ColourCache` is keyed on `(Anchors, Tokens)`; `set_colours` invalidates
   it when the definitions' `Arc` identity changes. The delegate separately
   memoizes theme-to-input conversion using all consumed theme colors.
+- `core::cache::cell` takes the `ValueColors` mapping and stores a mapped
+  dimension value's color name on `CachedCell.value_color` (tree labels by
+  `plan.grouping[depth - 1]`; never on a measure, `mixed` or the grand
+  total). Paint only resolves the name through `themed_value_colour`;
+  `text_paint` orders it above the column's `color`. Because the window
+  holds names from one mapping, `set_colours` also calls `invalidate_cells`
+  on an identity change, and `FindCells::install` drops its held cells when
+  the `NamedColours` `Arc` differs.
 - The gutter (`[ui] line_numbers`) is painted inside the tree cell, and
   `on_ui_settings` must call `TableState::refresh` because the pinned
   gpui-component caches column widths.
