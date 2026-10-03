@@ -2718,12 +2718,14 @@ dependencies = [
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",
+ "mach2",
  "serde_json",
  "tempfile",
  "toml 1.1.4+spec-1.1.0",
  "toml_edit 0.25.13+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

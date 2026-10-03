@@ -22,6 +22,7 @@ use geode_core::query::{CatalogSnapshot, DatasetCatalog};
 pub use geode_core::source_config::SourceShape;
 use gpui::SharedString;
 
+use crate::memory::{self, MemoryReading};
 use crate::perf::FrameHistogram;
 
 /// The request loop's thread name as the data layer spawns it. The shell
@@ -273,7 +274,8 @@ pub fn trim_keeping_errors<T>(
 /// - `data`: publications and catalog snapshots.
 /// - `config`: current config diagnostics, their history, and data diagnostics.
 /// - `log_levels`: target-level settings.
-/// - `perf`: the copied frame histogram and dropped-event count.
+/// - `perf`: the copied frame histogram, process memory reading, and
+///   dropped-event count.
 ///
 /// Frame as-of/config versions and the log ring sequence are separate inputs
 /// observed by the tile. Performance rows also read frame requery statistics
@@ -342,6 +344,10 @@ pub struct Diagnostics {
     /// on the reload-poll tick — see that method's own doc comment for
     /// why this is a copy rather than the histogram itself.
     pub frame_hist: FrameHistogram,
+    /// The process memory reading as last copied by [`Self::refresh_memory`]
+    /// on the reload-poll tick. `None` before the first copy, while never
+    /// watched, and on a platform the sampler cannot read.
+    pub memory: Option<MemoryReading>,
     /// The latest catalog outcome, including its as-of and resource metrics.
     pub catalog: Option<CatalogSnapshot>,
     /// When `catalog` was stored, as the caller of [`Self::set_catalog`]
@@ -390,6 +396,7 @@ impl Diagnostics {
             stopped_segment: None,
             restart_required: None,
             frame_hist: FrameHistogram::new(),
+            memory: None,
             catalog: None,
             catalog_at: None,
             levels,
@@ -710,6 +717,30 @@ impl Diagnostics {
             return false;
         }
         self.frame_hist = hist.clone();
+        self.version += 1;
+        self.versions.perf += 1;
+        true
+    }
+
+    /// Copy the process memory reading only while watched and when its
+    /// displayed text (current or peak, via [`memory::format_bytes`]) would
+    /// change. Return `true` and advance the perf version only after copying.
+    ///
+    /// The poll samples on every tick, so comparing raw bytes would notify on
+    /// almost every one and keep an idle page repainting. A peak rise too
+    /// small to change the displayed peak leaves the older peak time shown.
+    pub fn refresh_memory(&mut self, reading: &MemoryReading) -> bool {
+        if self.watchers == 0 {
+            return false;
+        }
+        if let Some(shown) = &self.memory
+            && memory::format_bytes(shown.current_bytes)
+                == memory::format_bytes(reading.current_bytes)
+            && memory::format_bytes(shown.peak_bytes) == memory::format_bytes(reading.peak_bytes)
+        {
+            return false;
+        }
+        self.memory = Some(*reading);
         self.version += 1;
         self.versions.perf += 1;
         true
@@ -1399,6 +1430,47 @@ mod tests {
             "identical histogram, no copy, no bump"
         );
         assert_eq!(d.version(), v);
+    }
+
+    fn reading(current: u64, peak: u64, at_secs: u64) -> MemoryReading {
+        MemoryReading {
+            current_bytes: current,
+            peak_bytes: peak,
+            peak_at: SystemTime::UNIX_EPOCH + Duration::from_secs(at_secs),
+        }
+    }
+
+    #[test]
+    fn the_memory_reading_is_copied_only_while_watched() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let r = reading(1 << 30, 2 << 30, 5);
+        assert!(!d.refresh_memory(&r));
+        assert_eq!(d.memory, None);
+        d.watch();
+        let perf = d.versions().perf;
+        assert!(d.refresh_memory(&r));
+        assert_eq!(d.memory, Some(r));
+        assert_eq!(d.versions().perf, perf + 1);
+    }
+
+    /// The poll samples every 500 ms; a change too small to alter the
+    /// displayed text must not notify, or an idle page repaints forever.
+    #[test]
+    fn refresh_memory_copies_only_when_the_displayed_value_changes() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.watch();
+        let gib = 1u64 << 30;
+        assert!(d.refresh_memory(&reading(gib, 2 * gib, 5)));
+        let v = d.version();
+        // 1 MiB on 1 GiB still reads 1.0GB: nothing copied, nothing bumped.
+        assert!(!d.refresh_memory(&reading(gib + (1 << 20), 2 * gib, 5)));
+        assert_eq!(d.version(), v);
+        assert_eq!(d.memory.unwrap().current_bytes, gib);
+        // Current crossing a displayed step copies.
+        assert!(d.refresh_memory(&reading(gib + gib / 5, 2 * gib, 5)));
+        // So does the peak alone.
+        assert!(d.refresh_memory(&reading(gib + gib / 5, 3 * gib, 9)));
+        assert_eq!(d.memory.unwrap().peak_at, reading(0, 0, 9).peak_at);
     }
 
     #[test]

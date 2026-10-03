@@ -50,7 +50,7 @@ pub use keys::convert_keystroke;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use gpui::prelude::*;
 use gpui::{
@@ -1040,6 +1040,7 @@ impl ShellView {
         // perform filesystem I/O and must not run during UI construction.
         cx.spawn(async move |this, cx| {
             let mut is_first_poll = true;
+            let mut memory = crate::memory::MemoryTracker::new();
             loop {
                 cx.background_executor()
                     .timer(hot_reload::RELOAD_POLL_INTERVAL)
@@ -1075,6 +1076,24 @@ impl ShellView {
                             cx.notify();
                         }
                     });
+                }
+
+                // Sample process memory on every tick, watched or not, so the
+                // `geode::memory` log keeps its peak record with the page
+                // closed. The copy into diagnostics is gated on watchers and
+                // on a displayed-value change, so an idle poll never notifies.
+                if let Some(sample) = crate::memory::sample() {
+                    let log = memory.observe(sample, Instant::now(), SystemTime::now());
+                    if let Some(reading) = memory.reading().copied() {
+                        crate::memory::emit(log, &reading);
+                        if watched {
+                            diagnostics.update(cx, |d, cx| {
+                                if d.refresh_memory(&reading) {
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    }
                 }
 
                 // Refresh the cached date and notify only when it changes. Rendering

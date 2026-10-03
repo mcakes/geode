@@ -24,9 +24,11 @@ use super::{ShellEvent, ShellView, docs_equal, pickable_columns};
 /// Delay between background reload polls. Scanning and loading run off the UI
 /// thread; validation and application run on it. Work adds to this interval.
 ///
-/// Also drives visible diagnostics frame-histogram refresh. Keep this interval
-/// no less than `perf::IDLE_CUTOFF` (500ms), or add a floor at the
-/// `refresh_frame_hist` call site so idle samples are excluded consistently.
+/// Also drives visible diagnostics frame-histogram refresh and the process
+/// memory sample (`memory::sample`, logged whether or not diagnostics is
+/// watched). Keep this interval no less than `perf::IDLE_CUTOFF` (500ms), or
+/// add a floor at the `refresh_frame_hist` and `refresh_memory` call sites so
+/// idle samples are excluded consistently.
 pub(super) const RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Read grouping slots against the current dataset schema and derived

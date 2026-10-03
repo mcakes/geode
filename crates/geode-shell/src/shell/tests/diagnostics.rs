@@ -712,3 +712,37 @@ fn one_step_choice_dialogs_have_no_back_button(cx: &mut gpui::TestAppContext) {
     assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
     assert!(vcx.debug_bounds("shell-modal-back").is_none());
 }
+
+/// The reload poll samples process memory on every tick but copies it into
+/// diagnostics only while a page watches. Proven through the production
+/// timer loop, not by calling `refresh_memory` directly.
+#[cfg(any(target_os = "macos", windows))]
+#[gpui::test]
+fn the_reload_poll_copies_process_memory_only_while_watched(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+    let tick = |vcx: &mut gpui::VisualTestContext| {
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        vcx.run_until_parked();
+    };
+
+    tick(&mut vcx);
+    assert_eq!(
+        diagnostics.read_with(&vcx, |d, _| d.memory),
+        None,
+        "unwatched: sampled and logged, never copied"
+    );
+
+    diagnostics.update(&mut vcx, |d, cx| {
+        d.watch();
+        cx.notify();
+    });
+    tick(&mut vcx);
+    let reading = diagnostics
+        .read_with(&vcx, |d, _| d.memory)
+        .expect("watched: the next tick copies the reading");
+    assert!(reading.current_bytes > 0);
+    assert!(reading.peak_bytes >= reading.current_bytes);
+}
