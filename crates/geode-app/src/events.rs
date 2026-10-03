@@ -384,6 +384,37 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn two_text_file_outcomes_for_the_same_tile_are_both_delivered() {
+        // A failed export followed by an import from the same tile must
+        // both reach it: coalescing by tile alone would hide the failure
+        // behind the later answer.
+        use geode_core::textfile::{TextFileOutcome, TextFileResult};
+        let (tx, rx) = channel();
+        let outcome = |tag, result| {
+            DataEvent::TextFile(TextFileOutcome {
+                key: QueryKey(1),
+                tag,
+                path: "classes.csv".into(),
+                result,
+            })
+        };
+        tx.try_send(outcome(1, TextFileResult::Written(Err("disk full".into()))))
+            .unwrap();
+        tx.try_send(outcome(2, TextFileResult::Read(Ok("name\n".into()))))
+            .unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::TextFile(o) if o.tag == 1
+                && o.result == TextFileResult::Written(Err("disk full".into()))
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::TextFile(o) if o.tag == 2
+                && o.result == TextFileResult::Read(Ok("name\n".into()))
+        ));
+    }
+
+    #[gpui::test]
     async fn every_local_write_outcome_is_delivered_in_order() {
         // A writer may be waiting on any one of a document's outcomes (a
         // sheet load deferred behind its save resumes only on that save's
