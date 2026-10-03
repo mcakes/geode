@@ -20,7 +20,13 @@ Lotus, Dawn, and GitHub Light are light variants; the others are dark.
 
 Muted text is adjusted to clear 4.5:1 on the base, raised, and popover surfaces.
 Gain/loss colors use separate red and green/teal roles; Rosé Pine uses its
-upstream leaf color for gains. The five chart series are chosen individually:
+upstream leaf color for gains. Dragon's base hue anchors have increased
+saturation so generated link-group colors remain distinct; its chrome and
+chart palette retain their muted colors. List and table selection use the
+accent directly: the pinned parser caps those fills at 20% opacity (30% for
+text selection). Pre-blending a pale fill would fade it a second time and
+make selection hard to distinguish from pricer legs.
+The five chart series are chosen individually:
 
 - Wave: blue, gold, rose, green, and warm white.
 - Dragon: blue-grey, sand, red, green, and cool white.

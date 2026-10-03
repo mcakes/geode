@@ -12717,6 +12717,40 @@ run_mutation "theme additions: Dragon green remains separated from blue grey" \
   '        "chart.4": "#87a987",' \
   geode-chart every_bundled_themes_palette_is_readable_and_separated
 
+run_mutation "theme additions: Dawn selection remains distinct from pricer legs" \
+  assets/themes/rose-pine.json \
+  '        "table.active.background": "#907aa9",' \
+  '        "table.active.background": "#dfdad9",' \
+  geode-pricer every_leg_ground_is_a_faint_distinct_tint_on_every_bundled_theme
+
+run_mutation "theme additions: Dragon hue anchors keep link groups distinct" \
+  assets/themes/kanagawa.json \
+  '        "base.blue": "#82a7b9",
+        "base.blue.light": "#9ab9c8",
+        "base.cyan": "#88aaa7",
+        "base.cyan.light": "#a1bab9",
+        "base.green": "#7eb27e",
+        "base.green.light": "#98c198",
+        "base.magenta": "#a68ea7",
+        "base.magenta.light": "#b8a5b8",
+        "base.red": "#da6259",
+        "base.red.light": "#e1817a",
+        "base.yellow": "#d3b87b",
+        "base.yellow.light": "#dcc595",' \
+  '        "base.blue": "#8ba4b0",
+        "base.blue.light": "#a2b6c0",
+        "base.cyan": "#8ea4a2",
+        "base.cyan.light": "#a5b6b5",
+        "base.green": "#87a987",
+        "base.green.light": "#9fba9f",
+        "base.magenta": "#a292a3",
+        "base.magenta.light": "#b5a8b5",
+        "base.red": "#c4746e",
+        "base.red.light": "#d0908b",
+        "base.yellow": "#c4b28a",
+        "base.yellow.light": "#d0c1a1",' \
+  geode-shell every_bundled_theme_keeps_the_group_colors_readable_and_distinct
+
 run_mutation "theme: bundled themes clear 3:1 through the resolver" \
   crates/geode-core/src/colour/mod.rs \
   '    if contrast_ratio(rgb, background) >= ratio {
