@@ -37,7 +37,9 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_shell::vimfind::{FindDirection, FindStyle};
-use geode_tile::following::{Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered};
+use geode_tile::following::{
+    Arrival, DeferredDoor, Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered,
+};
 use geode_tile::header::{Cluster, HealthWatch, TimeRun};
 use geode_tile::notice::Notice;
 use gpui::prelude::*;
@@ -823,6 +825,14 @@ impl BlotterTile {
     }
 
     fn requery(&mut self, cx: &mut Context<Self>) {
+        self.requery_with(Arrival::Now, cx);
+    }
+
+    /// Ask the current question, making any arrival that needs no outcome
+    /// (no view, an unresolved name, a refusal) through the door `arrival`
+    /// names: deferred from `set_visible`, which the shell calls while it
+    /// draws.
+    fn requery_with(&mut self, arrival: Arrival, cx: &mut Context<Self>) {
         // A new question supersedes staged work even when frame versions are
         // unchanged, as with tile-local filters and grouping overrides.
         // Every path clears it in `begin`, including the two that ask
@@ -850,7 +860,7 @@ impl BlotterTile {
             self.following.submitted(
                 false,
                 Unanswered::KeepActed,
-                &mut FrameDoor::new(&self.frame, cx),
+                &mut arrival.door(&self.frame, cx),
                 key,
             );
             cx.notify();
@@ -898,7 +908,7 @@ impl BlotterTile {
                 self.following.submitted(
                     false,
                     Unanswered::KeepActed,
-                    &mut FrameDoor::new(&self.frame, cx),
+                    &mut arrival.door(&self.frame, cx),
                     key,
                 );
                 cx.notify();
@@ -945,7 +955,7 @@ impl BlotterTile {
         self.following.submitted(
             queued.is_ok(),
             Unanswered::Retry,
-            &mut FrameDoor::new(&self.frame, cx),
+            &mut arrival.door(&self.frame, cx),
             key,
         );
         // Repaint once the in-flight affordance is due, if still waiting.
@@ -1005,6 +1015,10 @@ impl BlotterTile {
         cx.notify();
     }
 
+    /// Showing asks again when a followed counter moved while hidden. The
+    /// shell calls this while it draws, so an arrival it makes is deferred:
+    /// a release notified during the draw would be dropped, holding every
+    /// other tile to the barrier's deadline.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         self.visible = visible;
         if visible {
@@ -1013,7 +1027,7 @@ impl BlotterTile {
                 .following
                 .follows_changed(now, |a, b| self.differs_on_followed(a, b))
             {
-                self.requery(cx);
+                self.requery_with(Arrival::Deferred, cx);
             }
         }
         self.arm_stale(cx);
@@ -1022,12 +1036,13 @@ impl BlotterTile {
     /// The shell is removing this tile: cancel its view query by key and
     /// answer any barrier still waiting on it. Hiding cancels nothing. Runs
     /// inside the shell's occupant reconciliation, so it updates only the
-    /// frame and the data handle.
+    /// frame and the data handle, and its arrival is deferred: a release
+    /// notified during the shell's draw would be dropped.
     pub fn closed(&mut self, cx: &mut Context<Self>) {
         let key = QueryKey(self.tile.0);
         self.data.cancel(key);
         self.following
-            .close(&mut FrameDoor::new(&self.frame, cx), key);
+            .close(&mut DeferredDoor::new(&self.frame, cx), key);
     }
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
@@ -2608,6 +2623,8 @@ mod tests {
         /// trick): there is no service behind a `for_tests` handle, so
         /// this only drops the sender.
         data: DataHandle,
+        /// The shell stand-in, for the draw-time doors.
+        host: Entity<Host>,
     }
 
     fn open(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
@@ -2681,17 +2698,14 @@ mod tests {
                                 cx,
                             )
                         });
-                        Host {
-                            tile,
-                            frame,
-                            diagnostics,
-                        }
+                        Host::new(tile, frame, diagnostics)
                     })
                 })
             })
             .unwrap();
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
-        let (tile, frame, diagnostics) = window.root(&mut vcx).unwrap().read_with(&vcx, |h, _| {
+        let host = window.root(&mut vcx).unwrap();
+        let (tile, frame, diagnostics) = host.read_with(&vcx, |h, _| {
             (h.tile.clone(), h.frame.clone(), h.diagnostics.clone())
         });
         vcx.update(|window, cx| {
@@ -2704,6 +2718,7 @@ mod tests {
                 diagnostics,
                 requests,
                 data,
+                host,
             },
             vcx,
         )
@@ -2752,17 +2767,14 @@ mod tests {
                                 cx,
                             )
                         });
-                        Host {
-                            tile,
-                            frame,
-                            diagnostics,
-                        }
+                        Host::new(tile, frame, diagnostics)
                     })
                 })
             })
             .unwrap();
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
-        let (tile, frame, diagnostics) = window.root(&mut vcx).unwrap().read_with(&vcx, |h, _| {
+        let host = window.root(&mut vcx).unwrap();
+        let (tile, frame, diagnostics) = host.read_with(&vcx, |h, _| {
             (h.tile.clone(), h.frame.clone(), h.diagnostics.clone())
         });
         vcx.update(|window, cx| {
@@ -2775,6 +2787,7 @@ mod tests {
                 diagnostics,
                 requests,
                 data,
+                host,
             },
             vcx,
         )
@@ -3057,16 +3070,137 @@ mod tests {
         (TwoHarness { a, b, requests }, vcx)
     }
 
-    /// A root view for the test window that just paints the tile.
+    /// A root view for the test window that paints the tile and stands in
+    /// for the shell's draw-time doors. The shell tells an occupant its
+    /// visibility, and that it is closing, from inside its own render; a
+    /// test queues either here and the next draw delivers it from this
+    /// render. Like the shell's, this render reads the frame, so the window
+    /// tracks it and a notify the frame is sent during a draw is dropped
+    /// here as it is in the app: a release made from a draw-time door is
+    /// heard only if deferred.
     struct Host {
         tile: Entity<BlotterTile>,
         frame: Entity<Frame>,
         diagnostics: Entity<Diagnostics>,
+        pending_visible: Option<bool>,
+        pending_closed: bool,
+    }
+    impl Host {
+        fn new(
+            tile: Entity<BlotterTile>,
+            frame: Entity<Frame>,
+            diagnostics: Entity<Diagnostics>,
+        ) -> Host {
+            Host {
+                tile,
+                frame,
+                diagnostics,
+                pending_visible: None,
+                pending_closed: false,
+            }
+        }
     }
     impl gpui::Render for Host {
-        fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let _ = self.frame.read(cx).data_version();
+            let content = crate::content::BlotterContent::for_tile(self.tile.clone());
+            if let Some(visible) = self.pending_visible.take() {
+                content.set_visible(visible, cx);
+            }
+            if std::mem::take(&mut self.pending_closed) {
+                content.closed(cx);
+            }
             div().size_full().child(self.tile.clone())
         }
+    }
+
+    impl Harness {
+        /// Deliver visibility as the shell does: from inside its render, on
+        /// the next draw.
+        fn show_in_draw(&self, vcx: &mut gpui::VisualTestContext) {
+            self.host.update(vcx, |h, cx| {
+                h.pending_visible = Some(true);
+                cx.notify();
+            });
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+
+        /// Close the tile as the shell does: from inside its render, on the
+        /// next draw.
+        fn close_in_draw(&self, vcx: &mut gpui::VisualTestContext) {
+            self.host.update(vcx, |h, cx| {
+                h.pending_closed = true;
+                cx.notify();
+            });
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+
+        /// A counter of the notifications frame observers hear from now on.
+        fn frame_heard(
+            &self,
+            vcx: &mut gpui::VisualTestContext,
+        ) -> (Rc<Cell<usize>>, gpui::Subscription) {
+            let heard = Rc::new(Cell::new(0));
+            let count = heard.clone();
+            let sub =
+                vcx.update(|_, cx| cx.observe(&self.frame, move |_, _| count.set(count.get() + 1)));
+            (heard, sub)
+        }
+    }
+
+    /// A tile the shell closes from inside its draw, while the flip awaits
+    /// its query, answers the flip through a deferred arrival that frame
+    /// observers hear, so every staged tile promotes now rather than at the
+    /// barrier's deadline. Inline, the release's notify falls in the draw
+    /// and is dropped.
+    #[gpui::test]
+    fn a_close_from_the_draw_releases_the_flip_to_frame_observers(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests);
+        h.frame.update(&mut vcx, |f, _| {
+            f.shared_mut().open_flip([QueryKey(7)], Instant::now())
+        });
+        assert!(h.frame.read_with(&vcx, |f, _| f.barrier_open()));
+        let (heard, _sub) = h.frame_heard(&mut vcx);
+        h.close_in_draw(&mut vcx);
+        vcx.run_until_parked();
+        assert!(
+            !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "the closing tile arrived"
+        );
+        assert!(heard.get() > 0, "frame observers heard the release");
+    }
+
+    /// A show from inside the shell's draw whose query is refused answers
+    /// the open flip through a deferred arrival that frame observers hear.
+    #[gpui::test]
+    fn a_refused_show_from_the_draw_releases_the_flip_to_frame_observers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.frame.update(&mut vcx, |f, _| {
+            f.shared_mut().open_flip([QueryKey(7)], Instant::now())
+        });
+        let (heard, _sub) = h.frame_heard(&mut vcx);
+        h.data.fill_for_tests();
+        h.show_in_draw(&mut vcx);
+        vcx.run_until_parked();
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.error.as_ref().map(|e| e.text().to_string()))
+                .as_deref(),
+            Some("query refused: the data service is busy")
+        );
+        assert!(
+            !h.frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "the refusal arrived"
+        );
+        assert!(heard.get() > 0, "frame observers heard the release");
     }
 
     fn next_query(rx: &Receiver<Request>) -> geode_data::QueryParams {
