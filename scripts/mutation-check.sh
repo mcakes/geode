@@ -18265,6 +18265,14 @@ run_mutation "scope dialog: toggle removes an applied name" \
   geode-shell \
   toggling_a_name_adds_it_then_removes_it_each_one_undo_step
 
+# The applied tag is what tells enter's toggle which way it will go.
+run_mutation "scope dialog: saved expressions show applied" \
+  crates/geode-shell/src/shell/scopedialog/saved.rs \
+  '                applied: current.named.iter().any(|n| n == name),' \
+  '                applied: false,' \
+  geode-shell \
+  scopes_then_expressions_each_in_name_order_with_applied_and_broken
+
 # ---- Tile picker: placeholder double-click, tile::add and mod-n ----
 
 # Only a PLACEHOLDER's double-click is the door — a real tile's may
