@@ -25811,8 +25811,12 @@ run_mutation "mdmenu: a rebind does not reach the menu" \
 # against a scope it never followed.
 run_mutation "following: the door reads the tile's own lane" \
   crates/geode-tile/src/following.rs \
-  '        self.frame.read(self.cx).versions()' \
-  '        self.frame.entity().read(self.cx).shared().versions()' \
+  'impl Barrier for FrameDoor<'"'"'_> {
+    fn current(&self) -> FrameVersions {
+        self.frame.read(self.cx).versions()' \
+  'impl Barrier for FrameDoor<'"'"'_> {
+    fn current(&self) -> FrameVersions {
+        self.frame.entity().read(self.cx).shared().versions()' \
   geode-tile the_door_reads_the_tiles_own_lane
 
 run_mutation "following: KeepActed remembers what a local refusal answered" \
@@ -32062,6 +32066,71 @@ run_mutation "volslice: a close from the draw arrives deferred" \
   '            .close(&mut DeferredDoor::new(&self.frame, cx), key);' \
   '            .close(&mut FrameDoor::new(&self.frame, cx), key);' \
   geode-volslice a_close_from_the_draw_releases_the_flip_to_frame_observers
+
+# A follower whose group scope moves but still names the loaded underlying
+# answers the flip without refetching both documents.
+run_mutation "volslice: a scope change keeping the underlying asks nothing" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        let scope_only = asked.as_of == now.as_of && asked.data == now.data;' \
+  '        let scope_only = false;' \
+  geode-volslice a_group_scope_change_keeping_the_underlying_releases_the_flip_unasked
+
+# ...and one naming another underlying still refetches.
+run_mutation "volslice: a scope change naming another underlying refetches" \
+  crates/geode-volslice/src/tile/data.rs \
+  '            .is_some_and(|u| self.loaded_for.as_deref() == Some(u.as_str()));' \
+  '            .is_some();' \
+  geode-volslice a_group_scope_change_flips_the_follower
+
+# The deferred door's arrival notifies the frame when it releases the
+# barrier: deferral alone would land the release where nobody hears it.
+run_mutation "deferred arrival: a deferred release notifies the frame" \
+  crates/geode-tile/src/following.rs \
+  '                if frame.arrived(key, versions) {
+                    cx.notify();
+                }' \
+  '                let _ = frame.arrived(key, versions);' \
+  geode-tile a_deferred_arrival_lands_after_the_cycle_and_notifies_its_release
+
+# The shell calls `closed` and `set_visible` inside its render, where a
+# notify to the frame is dropped: each module's arrivals from those doors
+# go through the deferred door, or the release is never heard and every
+# other tile waits for the barrier's deadline.
+run_mutation "deferred arrival: a blotter close from the draw is heard" \
+  crates/geode-blotter/src/tile.rs \
+  '            .close(&mut DeferredDoor::new(&self.frame, cx), key);' \
+  '            .close(&mut FrameDoor::new(&self.frame, cx), key);' \
+  geode-blotter a_close_from_the_draw_releases_the_flip_to_frame_observers
+
+run_mutation "deferred arrival: a blotter refused show from the draw is heard" \
+  crates/geode-blotter/src/tile.rs \
+  '                self.requery_with(Arrival::Deferred, cx);' \
+  '                self.requery_with(Arrival::Now, cx);' \
+  geode-blotter a_refused_show_from_the_draw_releases_the_flip_to_frame_observers
+
+run_mutation "deferred arrival: a timeseries close from the draw is heard" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            .close(&mut DeferredDoor::new(&self.frame, cx), key);' \
+  '            .close(&mut FrameDoor::new(&self.frame, cx), key);' \
+  geode-timeseries a_close_from_the_draw_releases_the_flip_to_frame_observers
+
+run_mutation "deferred arrival: a timeseries refused show from the draw is heard" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '                self.requery_with(Arrival::Deferred, cx);' \
+  '                self.requery_with(Arrival::Now, cx);' \
+  geode-timeseries a_refused_show_from_the_draw_releases_the_flip_to_frame_observers
+
+run_mutation "deferred arrival: a market-data close from the draw is heard" \
+  crates/geode-marketdata/src/tile.rs \
+  '            .close(&mut DeferredDoor::new(&self.frame, cx), key);' \
+  '            .close(&mut FrameDoor::new(&self.frame, cx), key);' \
+  geode-marketdata a_close_from_the_draw_releases_the_flip_to_frame_observers
+
+run_mutation "deferred arrival: a market-data refused show from the draw is heard" \
+  crates/geode-marketdata/src/tile.rs \
+  '                self.requery_with(Arrival::Deferred, cx);' \
+  '                self.requery_with(Arrival::Now, cx);' \
+  geode-marketdata a_refused_show_from_the_draw_releases_the_flip_to_frame_observers
 
 # An empty state is the muted status tone; a failure or refusal is danger.
 run_mutation "volslice: an empty state is not painted as a failure" \

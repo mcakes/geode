@@ -1122,7 +1122,12 @@ underlyings paints `no underlying in A`. A tile added with no underlying
 and no group prompts with the picker at once. Following is compared through
 `FrameView::following()` on every frame notification, since following a
 group whose scope was never written moves no version; while following, the
-group's scope generation counts as a change. A change of group, joining or
+group's scope generation counts as a change. A scope change that still names
+the underlying whose documents are loaded asks nothing when no read is out,
+nothing is held for a flip, and neither the as-of nor a watched publication
+moved: the documents depend on nothing else, so the tile answers the flip at
+once rather than holding it behind two reads of what is on screen. A change
+of the underlying, or of anything else it follows, refetches. A change of group, joining or
 leaving, clears the painted curves and moves the vol tag before asking
 again: the old group's draft, painted or still in flight, would otherwise
 sit dashed under no draft chip, and stay there if the requery failed.

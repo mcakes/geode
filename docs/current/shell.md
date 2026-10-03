@@ -518,11 +518,14 @@ and still answers any barrier the tile was enrolled in, and on return the tile
 requeries only if a counter it follows moved while it was hidden. Closing is
 different: removal calls `TileContent::closed`, and a following tile cancels
 its query by key and answers any open barrier still waiting on it. The shell
-calls `closed` inside its render, where a notify to the frame is dropped: the
-vol slice viewer defers its closing arrival, so the release reaches the other
-tiles at once, while the blotter, timeseries and market-data tiles arrive
-inline and can hold staged tiles to the deadline or the next frame
-notification. `closed` fires only for removal while the window lives; quitting the
+calls `closed` and `set_visible` inside its render, where gpui drops a notify
+to the frame (the render reads it), so a release made there would leave the
+other tiles holding their stages until the deadline. Every following tile
+therefore makes an arrival from either door, a close or a show whose requery
+is refused or has nothing to ask, through `geode_tile::following::DeferredDoor`:
+the arrival and its notify land after the draw, and the other tiles promote at
+once. Frame observers, deliveries and key handlers keep `FrameDoor`, which
+notifies in the same pass. `closed` fires only for removal while the window lives; quitting the
 application calls it for no occupant. A tile with its own error and no query
 to send (a blotter whose view is no longer configured, or whose scope names an
 undefined expression) answers the barrier at once, as a failed query does.
