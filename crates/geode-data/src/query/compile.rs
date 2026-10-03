@@ -191,31 +191,33 @@ fn sql_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-/// Project a derived dimension as a scalar `CASE` over its source column.
-/// This preserves row cardinality even if mapping keys repeat, and unmapped
-/// values become NULL. A lookup join could multiply rows or match rolled-up
-/// NULL keys.
+/// Project a derived dimension as a scalar map probe over its source column.
+/// This preserves row cardinality, and unmapped values become NULL. A lookup
+/// join could multiply rows or match rolled-up NULL keys; a `CASE` with one
+/// arm per value tests every arm per row and took seconds at a million rows
+/// once a classification held thousands of values.
 fn derived_expr(d: &geode_core::dimensions::DerivedDimension) -> String {
     format!("{} as \"{}\"", derived_case(d), d.name)
 }
 
-/// Unaliased derived-dimension `CASE`, shared with distinct-value queries
+/// Unaliased derived-dimension lookup, shared with distinct-value queries
 /// that name the output `value` instead of the dimension's name.
 pub(crate) fn derived_case(d: &geode_core::dimensions::DerivedDimension) -> String {
     if d.values.is_empty() {
         return "NULL::varchar".to_string();
     }
-    let arms: Vec<String> = d
-        .values
-        .iter()
-        .map(|(source, derived)| {
-            format!("when {} then {}", sql_literal(source), sql_literal(derived))
-        })
-        .collect();
+    let keys: Vec<String> = d.values.keys().map(|k| sql_literal(k)).collect();
+    let vals: Vec<String> = d.values.values().map(|v| sql_literal(v)).collect();
+    // A MAP literal is a hashed lookup: one probe per row however many
+    // values the classification holds. `map_extract_value` is NULL for a
+    // missing key (and a NULL source), so unmapped values stay NULL, and no
+    // row is multiplied. The keys are text; the source is cast to text so a
+    // non-text column binds instead of failing type deduction.
     format!(
-        "case \"{from}\" {arms} end",
-        from = d.from,
-        arms = arms.join(" ")
+        "map_extract_value(MAP([{}], [{}]), \"{from}\"::varchar)",
+        keys.join(", "),
+        vals.join(", "),
+        from = d.from
     )
 }
 

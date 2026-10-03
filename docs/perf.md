@@ -2689,3 +2689,38 @@ sheet blank in one batch with one package fold at its end (setup, which
 reloads the blank sheet from rows, is excluded). The same batch folding
 after each filled line measured 13.7 ms: each fold walks every package and
 formats the needs-currency failure for each one with a blank leg.
+
+## Grouping by a classification: `CASE` against a map probe (2026-10-03)
+
+`cargo bench -p geode-data --bench query -- query_classification`. One
+service over one million generated rows (959,012 ingested), the `by_sector`
+view (`sector > underlying_ref`, `delta01` and `vega01`, both
+underlying-grain), unscoped, live. `sector` is a derived dimension over
+`underlying_ref` built in the bench: the distinct `underlying_ref` values
+(the demo generator produces ten) dealt round-robin into eleven sectors,
+then padded with unobserved `PADnnnnn` values to 5,000 entries. Both
+fixtures return 21 result rows. Timing is submission through snapshot
+receipt, as for `query_requery`.
+
+Conditions: Apple M5 Pro (18 cores, 48 GB), rustc 1.96.0, bench profile,
+20 samples. **The machine was heavily loaded** throughout by builds in other
+checkouts (load average 45 to 85 for the `CASE` run and map run 1, 12 rising
+to 58 for map run 2), so read rows within one run as ratios.
+
+| shape | `CASE` | map run 1 | map run 2 |
+| --- | ---: | ---: | ---: |
+| 10 values, full depth | 26.5 ms | 13.3 ms | 24.0 ms |
+| 10 values, depth 2 | 27.4 ms | 11.9 ms | 14.3 ms |
+| 5,000 values, full depth | 2,731 ms | 65.5 ms | 55.3 ms |
+| 5,000 values, depth 2 | 2,597 ms | 53.0 ms | 51.2 ms |
+
+The `CASE` (`case "underlying_ref" when … then … end`, one arm per value)
+was a hundred times over budget at 5,000 values, so `derived_case` became
+`map_extract_value(MAP([keys], [labels]), "from"::varchar)`, confirmed
+present in the pinned DuckDB (v1.5.5), where it also accepts an ENUM source.
+The map is about fifty times faster at 5,000 values and no slower at ten,
+but its cost still grows with the classification: 5,000 values sit at or
+just over 50 ms on this loaded machine. Not established: whether the growth
+is the per-row key search or parsing and binding the 5,000-pair literal on
+every requery. An idle re-measure is owed; if it stays over budget, a keyed
+lookup table joined on the unique source value is the next candidate.

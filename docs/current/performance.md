@@ -140,6 +140,7 @@ the measurement log for fixture and hardware details.
 | View requery | 1,000,000 rows, no text filter, depth two | 2.51 ms |
 | View requery, no context columns | 1,000,000 rows, underlying-grain measures only, depth two | 20.5 ms |
 | View requery, roster's context columns | the same view with `underlying_ref`, `position_ref`, `instrument_ref` | 35.0 ms |
+| View requery grouped by a classification (`query_classification`) | 1,000,000 rows, `sector > underlying_ref`, two underlying-grain measures; `sector` maps the 10 observed underlyings / 5,000 values (padded); full depth / depth two; loaded machine (load 33 to 58) | 24.0 / 14.3 ms; 55.3 / 51.2 ms |
 | Series query | four slots plus ratio, daily over one year | 9.56 ms |
 | Series query with stats | two minute slots over one month | 14.5 ms |
 | Chart path rebuild | 500,000 points into 1,600 columns | 1.51 ms |
@@ -183,6 +184,14 @@ two rows were recorded on a heavily loaded machine, so read them as a ratio
 rather than as reference figures: on this shape the three context columns cost
 about 70% more, mostly the position- and instrument-grain scans no shown
 measure already reads. Re-measure on an idle machine before quoting them.
+
+A derived dimension is a map probe per row, not a `CASE` with one arm per
+value: at 5,000 values the `CASE` took 2.7 s against 26 ms at ten, and the
+probe 53 to 65 ms against 12 to 24 ms, all on a loaded machine. A
+5,000-value classification therefore still sits at or just over the 50 ms
+budget there, and the probe's cost still grows with the classification's
+size. An idle re-measure is owed; the next lever is a keyed lookup table
+joined on the unique source value, if the idle figure stays over budget.
 
 ## Cache and allocation contracts
 

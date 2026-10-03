@@ -745,6 +745,16 @@ dimensions resolve to their source columns, and derived measures inherit
 their inputs' attribution. Non-attributable results must return NULL, with
 validity preserved through `Snapshot`, as well as carry the attribution marker.
 
+A derived dimension is projected onto the scanned relation as one map probe
+per row (`map_extract_value` over a MAP literal of its configured values),
+shared by view and distinct-value queries. A source value no entry maps, and
+a NULL source, yield NULL; no row is multiplied. The probe's cost does not
+grow with the number of mapped values, which a `CASE` with one arm per value
+did (see the `query_classification` row in
+[performance](performance.md#current-reference-measurements)). The source is
+read as text, so a non-text source matches by DuckDB's text spelling of its
+value (`1.5`, never `1.50`).
+
 A document request names its document by key. A key with fewer parts than the
 dataset declares reads **every document under it**: `["SPX"]` on
 `option_chain` (keyed `underlying, expiry`) returns every SPX expiry in one
