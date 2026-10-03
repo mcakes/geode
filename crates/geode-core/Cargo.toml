@@ -11,6 +11,7 @@ bench = false
 # Fixture builders for downstream tests. `Snapshot::for_tests` accepts plain
 # Rust values so fixtures need no Arrow dependency. `config::test_support::
 # config_from` builds a real Config from one builtin document without disk I/O.
+# `reference::test_support::reference_dataset` is a parsed reference DatasetSpec.
 test-support = []
 
 [dependencies]

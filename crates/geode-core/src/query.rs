@@ -104,6 +104,37 @@ pub struct CatalogOutcome {
     pub snapshot: Result<CatalogSnapshot, String>,
 }
 
+/// One reference table, live or as of a time. Answered whole: reference
+/// tables are small.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceParams {
+    pub key: QueryKey,
+    pub tag: u64,
+    pub dataset: String,
+    pub as_of: AsOf,
+}
+
+/// Cells as display text in `columns` order, NULL as `None`; rows sorted by
+/// key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceTable {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Option<String>>>,
+    pub gen_id: i64,
+    pub source_time: DateTime<Utc>,
+}
+
+/// The reference request's result, addressed to the key that asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceOutcome {
+    pub key: QueryKey,
+    pub tag: u64,
+    pub dataset: String,
+    pub as_of: AsOf,
+    /// `Ok(None)`: no generation exists at `as_of`. `Err` is the failure text.
+    pub table: Result<Option<ReferenceTable>, String>,
+}
+
 /// What the database holds, as of the moment it was read.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct CatalogSnapshot {

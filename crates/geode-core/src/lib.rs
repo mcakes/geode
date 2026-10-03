@@ -25,6 +25,7 @@ pub mod panic;
 pub mod positions;
 pub mod pricing;
 pub mod query;
+pub mod reference;
 pub mod schema;
 pub mod scope;
 pub mod scopes;

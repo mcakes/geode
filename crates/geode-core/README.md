@@ -33,7 +33,8 @@ Reader defaults, partial validation, and presentation rules are described in
 | `grid` | Row and cell-block selections anchored by identity and resolved against current display order. Selection summaries exclude descendants of selected parents to avoid double-counting, and suppress totals for non-additive cells or unsummable columns. |
 | `link` | Link-group vocabulary shared by the shell and the modules: `Group` (the four fixed groups, their letter and their session spelling), `Membership` (the group a tile follows and the one it emits into), and `Emission` (an optional scope and `BoardEntry` draft documents). A `BoardEntry` compares its rows by allocation, so an emitter that reuses an `Arc` for an unchanged draft is read as unchanged, and carries a `DraftMark` (`Editing`, `Behind`, `Sent`; `label()` is the follower's word, none for a live edit) that compares too, since the same rows falling behind or being sent is a change. `UNDERLYING` is the one column a group's scope is named by (`underlying_ref`): emitters build their scope with `underlying_scope(underlying)` and readers take the name back with `underlying_of(scope)`, the scope's sole value for that column, so the two sides cannot disagree on the column. Pure: the frame in `geode-shell` holds the state. |
 | `context` | `DimensionContext`: the `(column, value)` pairs at a tile's cursor row — every dimension or key with one value there — plus the selected rows' values. NULL, mixed, or not-yet-grouped values are absent, never guessed. `offers` is true when the context holds any one column a kind accepts. |
-| `query` | Requests and outcomes for views, distinct values, catalogs, and documents; request keys, tags, and as-of parsing. |
+| `query` | Requests and outcomes for views, distinct values, catalogs, documents, and reference tables; request keys, tags, and as-of parsing. |
+| `reference` | Whole-table snapshots for reference datasets. `TableRows` is an adapter's answer, named columns in any order; `conform` checks it against the declaration and returns `ConformedRows` in `document_columns()` order, rows sorted by key. It refuses a repeated column, unequal lengths, no rows, a missing key column, a type mismatch, a non-finite number, a NULL key and a repeated key, so a bad snapshot never replaces the live table. An omitted optional column reads NULL and is named in `missing`; an undeclared column is ignored and named in `extra`. |
 | `snapshot` | Immutable, `Arc`-shared columnar results, attribution and freshness metadata, and typed cell access. Feature modules can read cells without an Arrow dependency; construction and raw array access also expose Arrow types. |
 | `tree` | The parent/child index of a rollup result, built once on the query worker. |
 | `sort` | Sibling sort vocabulary shared by the grid tiles: `SortOrder` (asc, desc, abs desc, abs asc), the `s`/`shift+s` key cycles (`cycle`), the header click cycle (`click_cycle`, desc first, a measure's walking the absolute pair too), `on_column` folding an absolute order on a text column to its signed direction, and the `:sort` argument grammar and completions (`parse_args`, `completions`). Each tile holds its own sort and ranks its own rows. |
@@ -56,7 +57,9 @@ Reader defaults, partial validation, and presentation rules are described in
 ## Features
 
 - `test-support` exposes a `Snapshot` fixture builder accepting plain Rust
-  values and a configuration helper that builds a layer without disk I/O.
+  values, a configuration helper that builds a layer without disk I/O, and
+  `reference::test_support::reference_dataset`, a reference `DatasetSpec`
+  parsed through the schema reader.
   Downstream tests enable this feature as needed. This crate's self
   dev-dependency enables it for its own tests and benchmarks too.
 
