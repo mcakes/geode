@@ -3,7 +3,7 @@
 //! keep their label. The header must name `<from>,<name>` exactly, so a file
 //! exported from one classification cannot load into another by mistake.
 
-use super::{Change, UndoEntry, csv};
+use super::{Change, UndoEntry, csv, normalized, set_label};
 use crate::dimensions::DerivedDimension;
 use std::collections::BTreeMap;
 
@@ -56,14 +56,7 @@ impl ImportPlan {
             if before == change.after {
                 continue;
             }
-            match &change.after {
-                Some(l) => {
-                    next.values.insert(change.source.clone(), l.clone());
-                }
-                None => {
-                    next.values.remove(&change.source);
-                }
-            }
+            set_label(&mut next, &change.source, change.after.as_ref());
             entry.changes.push(Change {
                 source: change.source.clone(),
                 before,
@@ -104,6 +97,12 @@ pub fn plan_import(dim: &DerivedDimension, text: &str) -> Result<ImportPlan, Str
     let mut index: BTreeMap<String, usize> = BTreeMap::new();
     let mut conflicted: BTreeMap<String, ()> = BTreeMap::new();
     for record in rows {
+        // Excel keeps a cleared row inside the used range as bare commas;
+        // like a blank line it says nothing, so it is neither planned nor
+        // rejected.
+        if record.fields.iter().all(|f| f.trim().is_empty()) {
+            continue;
+        }
         if record.fields.len() != 2 {
             plan.rejected.push(Rejected {
                 line: record.line,
@@ -119,7 +118,7 @@ pub fn plan_import(dim: &DerivedDimension, text: &str) -> Result<ImportPlan, Str
             });
             continue;
         }
-        let label = Some(record.fields[1].trim().to_string()).filter(|l| !l.is_empty());
+        let label = normalized(Some(&record.fields[1]));
         match index.get(&source) {
             Some(&i) => {
                 if wanted[i].1 != label {
@@ -268,6 +267,14 @@ mod tests {
             ]
         );
         assert_eq!(plan.added(), 1);
+    }
+
+    #[test]
+    fn an_all_blank_row_is_skipped_like_a_blank_line() {
+        let text = "underlying_ref,sector\nA,X\n,\n , \nB,Y\n";
+        let plan = plan_import(&sector(&[]), text).unwrap();
+        assert_eq!(plan.added(), 2);
+        assert!(plan.rejected.is_empty(), "{:?}", plan.rejected);
     }
 
     #[test]
