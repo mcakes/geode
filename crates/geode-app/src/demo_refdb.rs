@@ -301,6 +301,80 @@ mod tests {
         assert!(conformed.missing.is_empty(), "{:?}", conformed.missing);
     }
 
+    /// The real demo declaration through the real store: the first revision
+    /// publishes, the next one (`table(3)`) is a new generation, and the
+    /// first stays readable as of an instant before it. Proves the shipped
+    /// columns and types stage, compare and read back, which hand-built
+    /// test datasets cannot.
+    #[test]
+    fn the_demo_table_publishes_revisions_through_the_store() {
+        use chrono::{DateTime, Utc};
+        use geode_data::query::as_of::AsOf;
+        use geode_data::store::Store;
+        use geode_data::store::catalog::Catalog;
+        use geode_data::store::reference::{
+            ReferencePublishRequest, ReferencePublished, publish_reference, read_reference,
+        };
+
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: crate::demo::layer(std::path::Path::new("/tmp/x")),
+            ..geode_core::config::ConfigSources::default()
+        });
+        let (schema, _) = geode_core::schema::SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        let ds = schema.dataset("underlyings").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        store.apply_schema(ds).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+
+        let at = |s: i64| DateTime::<Utc>::from_timestamp(1_800_000_000 + s, 0).unwrap();
+        let publish = |poll: u64, t: DateTime<Utc>| {
+            let rows = table(poll).conform(ds).unwrap();
+            publish_reference(
+                &store,
+                &ReferencePublishRequest {
+                    dataset: ds,
+                    source: "refdb",
+                    rows: &rows,
+                    source_time: t,
+                    received_at: t,
+                },
+            )
+            .unwrap()
+        };
+        let ReferencePublished::Published { gen_id: first, .. } = publish(0, at(0)) else {
+            panic!("the first revision publishes");
+        };
+        let ReferencePublished::Published { gen_id: second, .. } = publish(3, at(60)) else {
+            panic!("a revised table is a new generation");
+        };
+        assert_ne!(first, second);
+
+        let reader = store.reader().unwrap();
+        // Rows come back in key order; revision 1 renames the first row of
+        // `ROWS`, which is not the first by key.
+        let first_ref = ROWS[0].0;
+        let name = |t: &geode_core::query::ReferenceTable| {
+            let i = t.columns.iter().position(|c| c == "name").unwrap();
+            let row = t
+                .rows
+                .iter()
+                .find(|r| r[0].as_deref() == Some(first_ref))
+                .unwrap();
+            row[i].clone().unwrap()
+        };
+        let live = read_reference(&reader, ds, &AsOf::Live).unwrap().unwrap();
+        assert_eq!(live.gen_id, second);
+        assert_eq!(live.rows.len(), 10);
+        assert!(name(&live).ends_with("· rev 1"), "{}", name(&live));
+        let before = read_reference(&reader, ds, &AsOf::At(at(30)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.gen_id, first);
+        assert_eq!(before.rows.len(), 10);
+        assert_eq!(name(&before), name_of(&table(0), 0));
+    }
+
     #[test]
     fn fail_next_fails_exactly_one_query() {
         let db = DemoRefDb::new(Duration::ZERO);
