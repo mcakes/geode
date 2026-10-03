@@ -1826,8 +1826,13 @@ impl ShellView {
             let next = !self.perf_overlay;
             self.set_perf_overlay(next, cx);
         }
-        if pending_page {
-            self.open_page_on_request(crate::diagnostics::DIAGNOSTICS_PAGE_KIND, window, cx);
+        if let Some(source) = pending_page {
+            self.open_page_on_request(
+                crate::diagnostics::DIAGNOSTICS_PAGE_KIND,
+                &source,
+                window,
+                cx,
+            );
         }
         cx.notify();
     }

@@ -402,9 +402,10 @@ pub struct Diagnostics {
     versions: DiagVersions,
     pending_level: Option<(String, Level)>,
     pending_overlay_toggle: bool,
-    /// A tile's health chip asked for the diagnostics page; the shell's
-    /// observer drains it through `open_page`, never the toggle.
-    pending_diagnostics_page: bool,
+    /// A tile's health chip asked for the diagnostics page at this source;
+    /// the shell's observer drains it through `open_page`, never the
+    /// toggle, then has the page reveal the source.
+    pending_diagnostics_page: Option<String>,
     /// The shell's `perf_overlay` as of its last toggle, mirrored by
     /// [`Self::set_overlay_visible`]; see that method.
     overlay_visible: bool,
@@ -453,7 +454,7 @@ impl Diagnostics {
             versions: DiagVersions::default(),
             pending_level: None,
             pending_overlay_toggle: false,
-            pending_diagnostics_page: false,
+            pending_diagnostics_page: None,
             overlay_visible: false,
             pending_catalog_request: false,
             pending_explicit_catalog: false,
@@ -981,16 +982,18 @@ impl Diagnostics {
         std::mem::take(&mut self.pending_overlay_toggle)
     }
 
-    /// Queue an open of the diagnostics page for the shell to drain: the
-    /// route a tile's health chip takes, since a tile holds no shell
-    /// actions handle. No version moves (nothing shown changed); the
-    /// caller notifies so the shell's observer runs.
-    pub fn request_diagnostics_page(&mut self) {
-        self.pending_diagnostics_page = true;
+    /// Queue an open of the diagnostics page at `source` for the shell to
+    /// drain: the route a tile's health chip takes, since a tile holds no
+    /// shell actions handle. The source travels with the request so the
+    /// page shows it rather than whichever section it last showed. No
+    /// version moves (nothing shown changed); the caller notifies so the
+    /// shell's observer runs.
+    pub fn request_diagnostics_page(&mut self, source: &str) {
+        self.pending_diagnostics_page = Some(source.to_string());
     }
 
-    pub fn take_pending_diagnostics_page(&mut self) -> bool {
-        std::mem::take(&mut self.pending_diagnostics_page)
+    pub fn take_pending_diagnostics_page(&mut self) -> Option<String> {
+        self.pending_diagnostics_page.take()
     }
 
     /// Whether the performance overlay is showing, mirrored here by the

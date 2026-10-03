@@ -916,9 +916,13 @@ summary, and closes through `page::close`, the same toggle, or any
 naming a kind no factory registered logs a warning and opens nothing.
 
 A tile opens the diagnostics page by queueing `request_diagnostics_page` on
-the shared `Diagnostics` entity (its health chip does this); the shell's
-diagnostics observer drains it through `open_page`, never the toggle, so the
-request only ever opens. It begins as a dispatched action does: the crash
+the shared `Diagnostics` entity with a source name (its health chip does
+this, naming its worst source); the shell's diagnostics observer drains it
+through `open_page`, never the toggle, so the request only ever opens. The
+shell then passes the source to `PageContent::reveal`, whether the page was
+just opened or already open, so the page shows that source rather than the
+section it last showed (the diagnostics page selects Sources at its row; the
+default `reveal` does nothing). It begins as a dispatched action does: the crash
 report's action tail records `page::toggle_diagnostics`, and the shell's
 notice, stack list and add-filter menu expire. Under a modal it is then
 refused with the toggle's `close the dialog first` notice.

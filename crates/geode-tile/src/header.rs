@@ -247,6 +247,8 @@ pub struct HealthChip {
     title: SharedString,
     more: Option<SharedString>,
     tip_selector: SharedString,
+    /// The worst source, which a press asks the diagnostics page to show.
+    source: SharedString,
     tile: TileId,
     diagnostics: Entity<Diagnostics>,
 }
@@ -270,6 +272,7 @@ impl HealthChip {
             title: format!("{}: {why}", h.source).into(),
             more: (h.others > 0).then(|| format!("+{} more", h.others).into()),
             tip_selector: format!("tip-tile-health-{}", tile.0).into(),
+            source: h.source.clone().into(),
             tile,
             diagnostics,
         }
@@ -536,6 +539,7 @@ fn health_chip(h: &HealthChip, theme: &Theme) -> Stateful<Div> {
     let paint = chip_paint(theme, h.tone);
     let tile = h.tile.0;
     let diagnostics = h.diagnostics.clone();
+    let source = h.source.clone();
     div()
         .id(ElementId::NamedInteger(
             SharedString::new_static("tile-health"),
@@ -555,12 +559,13 @@ fn health_chip(h: &HealthChip, theme: &Theme) -> Stateful<Div> {
             h.more.clone(),
         ))
         // The press is the chip's own: it neither refocuses the tile nor
-        // reaches the shell root. The shell opens the page (never toggles).
+        // reaches the shell root. The shell opens the page (never toggles)
+        // at this chip's source.
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
             window.prevent_default();
             diagnostics.update(cx, |d, cx| {
-                d.request_diagnostics_page();
+                d.request_diagnostics_page(&source);
                 cx.notify();
             });
         })
@@ -1345,12 +1350,16 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clicking_the_health_chip_queues_the_diagnostics_page(cx: &mut TestAppContext) {
+    fn clicking_the_health_chip_queues_the_diagnostics_page_at_its_source(cx: &mut TestAppContext) {
         let (view, diagnostics, _, vcx) = open_strip(cx);
         show_failure(&view, &diagnostics, vcx);
         let at = centre(vcx, "tile-health-3");
         click(vcx, at);
-        assert!(diagnostics.update(vcx, |d, _| d.take_pending_diagnostics_page()));
+        assert_eq!(
+            diagnostics.update(vcx, |d, _| d.take_pending_diagnostics_page()),
+            Some("risk_src".to_string()),
+            "the request names the chip's source"
+        );
         assert_eq!(
             parent_presses(&view, vcx),
             0,

@@ -256,14 +256,20 @@ impl DiagnosticsPage {
         .detach();
 
         let table = Self::new_table(SectionDelegate::new(), window, cx);
-        // `set_selected_row` echoes `SelectRow`; `set_cursor` returns early
-        // when the row is already the cursor, so the echo is inert. A
-        // single click only selects, so a click never surprises with a
-        // layout change; the double-click toggles the row like `activate`.
+        // `set_selected_row` echoes `SelectRow` after the update that set
+        // it. Two selections in one update (a rebuild at a fallback row,
+        // then one at the found row) deliver both echoes after the second:
+        // obeying the stale one moves the cursor back, whose own echo then
+        // undoes it, forever. An echo the table no longer holds is dropped;
+        // a click selects before it emits, so it always holds. The current
+        // echo hits `set_cursor`'s early return. A single click only
+        // selects, so a click never surprises with a layout change; the
+        // double-click toggles the row like `activate`.
         cx.subscribe_in(
             &table,
             window,
-            |this, _table, event: &TableEvent, _window, cx| match event {
+            |this, table, event: &TableEvent, _window, cx| match event {
+                TableEvent::SelectRow(ix) if table.read(cx).selected_row() != Some(*ix) => {}
                 TableEvent::SelectRow(ix) => this.set_cursor(*ix, cx),
                 TableEvent::DoubleClickedRow(ix) => {
                     this.set_cursor(*ix, cx);
@@ -283,8 +289,11 @@ impl DiagnosticsPage {
         cx.subscribe_in(
             &diag_table,
             window,
-            |this, _table, event: &TableEvent, _window, cx| {
-                if let TableEvent::SelectRow(ix) = event {
+            |this, table, event: &TableEvent, _window, cx| {
+                // A stale echo is dropped, as for the section table.
+                if let TableEvent::SelectRow(ix) = event
+                    && table.read(cx).selected_row() == Some(*ix)
+                {
                     this.set_diag_cursor(*ix, cx);
                 }
             },
@@ -1272,6 +1281,26 @@ impl DiagnosticsPage {
         self.rebuild(cx);
         self.request_reference(cx);
         self.sync_ages_timer(cx);
+    }
+
+    /// Select Sources with the cursor on `source`'s row: where a tile's
+    /// health chip points. A Sources filter that hides the row is cleared,
+    /// so the cursor never rests on some other source. A source with no row
+    /// leaves the cursor where the rebuild puts it.
+    pub fn reveal_source(&mut self, source: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let slot = Section::Sources as usize;
+        self.selected_keys[slot] = Some(source.to_string());
+        if self.section == Section::Sources {
+            self.rebuild(cx);
+        } else {
+            self.set_section(Section::Sources, window, cx);
+        }
+        let shown = |p: &Self| p.prepared.rows.iter().any(|r| r.key == source);
+        if !shown(self) && !self.filters[slot].is_empty() {
+            // The rebuild moved the remembered key to its fallback row.
+            self.selected_keys[slot] = Some(source.to_string());
+            self.reset_filters(window, cx);
+        }
     }
 
     fn set_cursor(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -3301,6 +3330,85 @@ mod tests {
         assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before);
         h.page.update(&mut vcx, |p, cx| p.set_visible(false, cx));
         assert!(h.page.read_with(&vcx, |p, _| p.ages_timer.is_none()));
+    }
+
+    /// Two programmatic selections in one update settle on the second: the
+    /// first's echo, delivered after both, must not pull the cursor back.
+    #[gpui::test]
+    fn a_stale_selection_echo_does_not_move_the_cursor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            let now = SystemTime::now();
+            for s in ["alpha", "bravo", "charlie"] {
+                d.note_health(s, Health::Ok, String::new(), now);
+            }
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        h.page.update(&mut vcx, |p, cx| {
+            p.cursors[Section::Sources as usize] = 0;
+            p.table.update(cx, |t, cx| t.set_selected_row(0, cx));
+            p.cursors[Section::Sources as usize] = 2;
+            p.table.update(cx, |t, cx| t.set_selected_row(2, cx));
+        });
+        vcx.run_until_parked();
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.cursor()), 2);
+    }
+
+    /// A health chip's request reaches the page through `PageContent::reveal`:
+    /// whatever section was last shown, Sources is selected with the cursor
+    /// on the chip's source, and a Sources filter hiding that row is cleared.
+    #[gpui::test]
+    fn reveal_selects_sources_at_the_named_source(cx: &mut gpui::TestAppContext) {
+        use geode_shell::module::PageContent as _;
+        let (h, mut vcx) = open(cx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            let now = SystemTime::now();
+            d.note_health("alpha", Health::Ok, String::new(), now);
+            d.note_health("bravo", Health::Ok, String::new(), now);
+            d.note_health("charlie", Health::Ok, String::new(), now);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            h.page.update(cx, |p, cx| {
+                p.filters[Section::Sources as usize] = "alpha".into();
+                p.set_section(Section::Log, window, cx);
+            });
+        });
+        let content = crate::DiagnosticsContent {
+            page: h.page.clone(),
+        };
+        let key_at_cursor = |p: &DiagnosticsPage| p.prepared.rows[p.cursor()].key.clone();
+        vcx.update(|window, cx| content.reveal("charlie", window, cx));
+        h.page.read_with(&vcx, |p, cx| {
+            assert_eq!(p.section(), Section::Sources);
+            assert_eq!(key_at_cursor(p), "charlie");
+            assert!(p.filters[Section::Sources as usize].is_empty());
+            assert!(p.filter_input.read(cx).value().is_empty());
+        });
+        // Already on Sources, unfiltered: only the cursor moves.
+        vcx.update(|window, cx| content.reveal("alpha", window, cx));
+        h.page.read_with(&vcx, |p, _| {
+            assert_eq!(p.section(), Section::Sources);
+            assert_eq!(key_at_cursor(p), "alpha");
+        });
+        // A filter that keeps the row stays.
+        vcx.update(|window, cx| {
+            h.page.update(cx, |p, cx| {
+                p.filter_input
+                    .update(cx, |i, cx| i.set_value("bravo", window, cx));
+                p.filters[Section::Sources as usize] = "bravo".into();
+                p.rebuild(cx);
+            });
+        });
+        vcx.update(|window, cx| content.reveal("bravo", window, cx));
+        h.page.read_with(&vcx, |p, _| {
+            assert_eq!(key_at_cursor(p), "bravo");
+            assert_eq!(p.filters[Section::Sources as usize], "bravo");
+        });
     }
 
     /// Ticks against an explicit `now`, so the reading does not depend on
