@@ -82,10 +82,10 @@ impl Layers {
         self.layers.push(layer);
     }
 
-    #[allow(dead_code)] // Called by the step and Saved routes, which the view lacks yet.
     /// Swap the top layer without changing where its commit leads: a new
     /// expression's text step becomes its naming step and still returns to
     /// the screen beneath.
+    #[allow(dead_code)] // Called by the step and Saved routes, which the view lacks yet.
     pub(crate) fn replace_top(&mut self, layer: Layer) {
         if let Some(top) = self.layers.last_mut() {
             *top = layer;
@@ -97,17 +97,17 @@ impl Layers {
         self.pop()
     }
 
-    #[allow(dead_code)] // Called by the step and Saved routes, which the view lacks yet.
     /// A step committed: it leaves, and whatever opened it shows again.
+    #[allow(dead_code)] // Called by the step and Saved routes, which the view lacks yet.
     pub(crate) fn commit_step(&mut self) -> After {
         debug_assert!(matches!(self.top(), Layer::Step(_)), "{:?}", self.top());
         self.pop()
     }
 
-    #[allow(dead_code)] // Called by the step and Saved routes, which the view lacks yet.
     /// A Saved row committed (a scope loaded, an expression toggled): the
     /// Saved screen leaves with it, back to Current when Saved was entered
     /// from there, else the dialog closes.
+    #[allow(dead_code)] // Called by the step and Saved routes, which the view lacks yet.
     pub(crate) fn commit_saved_row(&mut self) -> After {
         debug_assert_eq!(self.top(), &Layer::Saved);
         self.pop()

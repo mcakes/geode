@@ -18258,6 +18258,30 @@ run_mutation "scope dialog: the title shows the provenance" \
   geode-shell \
   the_title_says_where_the_scope_came_from
 
+# An empty scope's title carries no provenance element at all.
+run_mutation "scope dialog: the title extra paints only with a provenance" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    let Some(label) = shell.scope_dialog.as_ref().and_then(|s| s.title.clone()) else {' \
+  '    let Some(label) = shell.scope_dialog.as_ref().map(|s| s.title.clone().unwrap_or_default()) else {' \
+  geode-shell \
+  the_title_says_where_the_scope_came_from
+
+# d on a term row passes the row's seed, so a moved term refuses.
+run_mutation "scope dialog: removing a moved term refuses" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '            f.replace_expression_term(index, &term, None).err()' \
+  '            f.drop_expression_term(index).then_some(()).and(None::<crate::frame::TermGone>)' \
+  geode-shell \
+  removing_a_term_that_moved_refuses
+
+# The cursor's identity is re-taken after each move, so a frame change keeps it.
+run_mutation "scope dialog: a move records the cursor's row" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    state.cursor_id = state.rows.rows.get(state.cursor).map(|r| r.id.clone());' \
+  '' \
+  geode-shell \
+  the_cursor_stays_on_its_row_when_another_row_goes
+
 # The toolbar's load glyph opens the saved-scope picker.
 run_mutation "scope-picker: the load glyph click opens the picker" \
   crates/geode-shell/src/shell/render.rs \

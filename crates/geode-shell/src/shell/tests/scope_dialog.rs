@@ -4,6 +4,8 @@
 use super::*;
 use geode_core::scope::{DimensionSelection, Scope, parse_expr};
 
+use crate::shell::scopedialog::rows::RowId;
+
 /// `book` and `desk` are dimensions; `npv` and `delta` measures; one
 /// saved scope `eu` (book BK001) and one named expression `liq`.
 pub(super) fn services() -> ShellServices {
@@ -113,8 +115,14 @@ fn each_ingredient_is_a_painted_row_in_section_order(cx: &mut gpui::TestAppConte
         );
     }
     assert!(vcx.debug_bounds("scope-dialog-empty-dimensions").is_none());
-    let mut row = |i: usize| bounds(&mut vcx, format!("scope-dialog-row-{i}")).unwrap();
-    assert!(row(0).top() < row(1).top() && row(3).top() < row(4).top());
+    let tops: Vec<_> = (0..5)
+        .map(|i| {
+            bounds(&mut vcx, format!("scope-dialog-row-{i}"))
+                .unwrap()
+                .top()
+        })
+        .collect();
+    assert!(tops.windows(2).all(|w| w[0] < w[1]), "{tops:?}");
 }
 
 #[gpui::test]
@@ -125,12 +133,14 @@ fn the_title_says_where_the_scope_came_from(cx: &mut gpui::TestAppContext) {
         None,
         "an empty scope says nothing"
     );
+    assert!(vcx.debug_bounds("scope-dialog-title-extra").is_none());
     frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
         f.shared_mut().load_scope("eu").unwrap();
         cx.notify();
     });
     draw(&mut vcx);
     assert_eq!(title_extra(&shell, &vcx).as_deref(), Some("from eu"));
+    assert!(vcx.debug_bounds("scope-dialog-title-extra").is_some());
     frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
         f.shared_mut().set_text(Some("x".into()));
         cx.notify();
@@ -178,6 +188,130 @@ fn escape_closes_the_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_on(cx, rich_scope());
     vcx.simulate_keystrokes("escape");
     assert_eq!(shell.read_with(&vcx, |s, _| s.top_kind()), None);
+}
+
+fn cursor_id(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<RowId> {
+    shell.read_with(cx, |s, _| {
+        s.scope_dialog.as_ref().and_then(|d| d.cursor_id.clone())
+    })
+}
+
+fn lane_scope(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Scope {
+    frame_of(shell, cx).read_with(cx, |f, _| f.shared().scope().clone())
+}
+
+#[gpui::test]
+fn j_and_k_move_the_cursor_and_wrap(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    assert_eq!(
+        cursor_id(&shell, &vcx),
+        Some(RowId::Dimension("book".into()))
+    );
+    vcx.simulate_keystrokes("j j");
+    assert_eq!(
+        cursor_id(&shell, &vcx),
+        Some(RowId::Term("delta < 5".into(), 0))
+    );
+    vcx.simulate_keystrokes("k k k");
+    assert_eq!(
+        cursor_id(&shell, &vcx),
+        Some(RowId::Text),
+        "k from the top wraps"
+    );
+}
+
+#[gpui::test]
+fn d_removes_the_cursor_row_in_one_undo_step(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    vcx.simulate_keystrokes("d");
+    assert!(
+        lane_scope(&shell, &vcx)
+            .dimensions
+            .iter()
+            .all(|d| d.values.is_empty())
+    );
+    vcx.simulate_keystrokes("j d"); // now on the second term
+    let scope = lane_scope(&shell, &vcx);
+    assert_eq!(scope.expression, Some(parse_expr("npv > 0").unwrap()));
+    // The removed term's index now holds the named reference.
+    vcx.simulate_keystrokes("d");
+    assert!(lane_scope(&shell, &vcx).named.is_empty());
+    vcx.simulate_keystrokes("d"); // the text, now under the cursor
+    assert_eq!(lane_scope(&shell, &vcx).text, None);
+    vcx.simulate_keystrokes("u");
+    assert_eq!(lane_scope(&shell, &vcx).text.as_deref(), Some("dec"));
+    vcx.simulate_keystrokes("ctrl-r");
+    assert_eq!(lane_scope(&shell, &vcx).text, None);
+    draw(&mut vcx);
+}
+
+#[gpui::test]
+fn shift_d_clears_the_whole_scope(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    vcx.simulate_keystrokes("shift-d");
+    assert!(lane_scope(&shell, &vcx).is_empty());
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-dialog-empty-dimensions").is_some());
+}
+
+#[gpui::test]
+fn the_cursor_stays_on_its_row_when_another_row_goes(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    vcx.simulate_keystrokes("j j j"); // the named reference
+    frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
+        f.shared_mut().drop_dimension("book");
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(cursor_id(&shell, &vcx), Some(RowId::Named("liq".into())));
+}
+
+#[gpui::test]
+fn removing_a_term_that_moved_refuses(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    vcx.simulate_keystrokes("j j"); // term 1: delta < 5
+    // The rows are derived; swap the expression without letting them refresh,
+    // so the row's index and seed are stale when `d` runs.
+    frame_of(&shell, &vcx).update(&mut vcx, |f, _| {
+        let mut s = f.shared().scope().clone();
+        s.expression = Some(parse_expr("npv > 0 and desk = 'EQ'").unwrap());
+        f.shared_mut().set_scope(s);
+    });
+    vcx.simulate_keystrokes("d");
+    assert_eq!(
+        lane_scope(&shell, &vcx).expression,
+        Some(parse_expr("npv > 0 and desk = 'EQ'").unwrap()),
+        "a stale term row must not remove whichever term now has its index"
+    );
+    let error = shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().unwrap().error.clone());
+    assert!(error.is_some());
+}
+
+#[gpui::test]
+fn the_dialog_edits_the_lane_it_was_opened_on(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services());
+    let shell = shell_of(&window, &mut vcx);
+    let ws2 = crate::tiling::WorkspaceIx::new(2).unwrap();
+    dispatch_action(&shell, "workspace::switch_2", &mut vcx);
+    vcx.run_until_parked();
+    frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
+        assert!(f.pin(ws2));
+        f.view_mut(ws2).set_text(Some("pinned".into()));
+        cx.notify();
+    });
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("d");
+    let frame = frame_of(&shell, &vcx);
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.view(ws2).scope().text.clone()),
+        None
+    );
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().scope().clone()),
+        Scope::default()
+    );
 }
 
 fn title_extra(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<String> {
