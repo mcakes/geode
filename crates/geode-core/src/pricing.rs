@@ -142,9 +142,11 @@ pub struct PriceRequest {
 /// [`PriceResult`] stays `Copy` (the sheet copies results into records
 /// and folds them per leg).
 ///
-/// [`Currency::MIXED`] is the one value that is not a code: it marks a
+/// [`Currency::MIXED`] is the one value that is not a code. It marks a
 /// fold over results that priced in differing currencies, whose local
-/// arrays are then sums of unlike units. It never comes from a pricer
+/// arrays are then sums of unlike units, and an answer held for a line
+/// that now asks for a different currency than it was priced in, whose
+/// local arrays are then in the wrong unit. It never comes from a pricer
 /// (`parse` accepts letters only) and displays as `—`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Currency([u8; 3]);
@@ -152,10 +154,12 @@ pub struct Currency([u8; 3]);
 impl Currency {
     pub const USD: Currency = Currency(*b"USD");
 
-    /// A fold over differing currencies. Not a code: `parse` can never
-    /// produce it, so a pricer cannot report it, and a local-currency
-    /// figure carrying it is a gap, not a number, wherever it is painted
-    /// or summed. The `_usd` arrays under it are still comparable.
+    /// A fold over differing currencies, or an answer not in the currency
+    /// its line now asks for (`Sheet::shown_result` in the pricer). Not a
+    /// code: `parse` can never produce it, so a pricer cannot report it,
+    /// and a local-currency figure carrying it is a gap, not a number,
+    /// wherever it is painted or summed. The `_usd` arrays under it are
+    /// still comparable.
     pub const MIXED: Currency = Currency(*b"???");
 
     /// `None` unless exactly three uppercase ASCII letters.
