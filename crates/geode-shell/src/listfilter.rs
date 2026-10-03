@@ -82,16 +82,24 @@ pub fn level(query: &str, a: &str, b: &str) -> bool {
 /// Each takes the column where it scores best, the leftmost of equals, on
 /// characters no earlier word claimed in that column, so two words never
 /// share a character. The placement is greedy: a row that a different
-/// assignment would fit can still be dropped, as with the palette's
-/// multi-word fallback.
+/// assignment would fit can still be dropped (`ab ba` against `abab`), as
+/// with the palette's multi-word fallback.
+///
+/// Matching runs on lowercased characters and marks map back to the
+/// original text by character position, as the palette's highlights do. A
+/// character whose lowercase is longer (`İ` lowers to two) shifts the
+/// marks after it within that column, and a mark past the text's end is
+/// dropped; matching itself is unaffected.
 ///
 /// The words are lowered once at construction and the per-column scratch
 /// buffers are reused across rows, so one `Narrow` serves a whole rebuild.
+/// A caller that narrows the same rows under many queries can lower each
+/// column once with [`lower`] and pass it to [`Narrow::row_lowered`].
 #[derive(Debug, Clone, Default)]
 pub struct Narrow {
     /// Lowered query words, longest first, ties in query order.
     words: Vec<Vec<char>>,
-    /// Each column of the row in hand, lowered and decoded.
+    /// Each column of the row in hand, lowered and decoded, for [`Narrow::row`].
     lowered: Vec<Vec<char>>,
     claimed: Vec<Vec<bool>>,
     placed: Vec<Vec<usize>>,
@@ -124,13 +132,29 @@ impl ColumnMarks {
     }
 }
 
+/// `text` lowered and decoded the way [`Narrow`] matches it, appended to
+/// `out`.
+fn lower_into(text: &str, out: &mut Vec<char>) {
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.extend(ch.to_lowercase());
+        }
+    }
+}
+
+/// `text` lowered and decoded for [`Narrow::row_lowered`].
+pub fn lower(text: &str) -> Vec<char> {
+    let mut out = Vec::with_capacity(text.len());
+    lower_into(text, &mut out);
+    out
+}
+
 impl Narrow {
     /// A filter for `query`. A blank query keeps every row unmarked.
     pub fn new(query: &str) -> Narrow {
-        let mut words: Vec<Vec<char>> = query
-            .split_whitespace()
-            .map(|w| w.chars().flat_map(char::to_lowercase).collect())
-            .collect();
+        let mut words: Vec<Vec<char>> = query.split_whitespace().map(lower).collect();
         // Stable: equal lengths keep the typed order.
         words.sort_by_key(|w| std::cmp::Reverse(w.len()));
         Narrow {
@@ -150,20 +174,38 @@ impl Narrow {
         if self.words.is_empty() {
             return Some(ColumnMarks::default());
         }
-        let n = columns.len();
-        self.lowered.resize_with(n, Vec::new);
+        let mut lowered = std::mem::take(&mut self.lowered);
+        lowered.resize_with(columns.len(), Vec::new);
+        for (buffer, text) in lowered.iter_mut().zip(columns) {
+            buffer.clear();
+            lower_into(text, buffer);
+        }
+        let marks = self.place(columns.len(), |c| columns[c], |c| &lowered[c]);
+        self.lowered = lowered;
+        marks
+    }
+
+    /// [`Narrow::row`] over columns the caller lowered with [`lower`]:
+    /// each pair is a column's original text and its lowered characters.
+    pub fn row_lowered(&mut self, columns: &[(&str, &[char])]) -> Option<ColumnMarks> {
+        if self.words.is_empty() {
+            return Some(ColumnMarks::default());
+        }
+        self.place(columns.len(), |c| columns[c].0, |c| columns[c].1)
+    }
+
+    /// Place every word over the row's `n` columns (column `c`'s text is
+    /// `text(c)`, lowered `lowered(c)`) and return each column's marks, or
+    /// `None` when a word fits no column.
+    fn place<'t, 'l>(
+        &mut self,
+        n: usize,
+        text: impl Fn(usize) -> &'t str,
+        lowered: impl Fn(usize) -> &'l [char],
+    ) -> Option<ColumnMarks> {
         self.claimed.resize_with(n, Vec::new);
         self.placed.resize_with(n, Vec::new);
-        for (c, text) in columns.iter().enumerate() {
-            let lowered = &mut self.lowered[c];
-            lowered.clear();
-            for ch in text.chars() {
-                if ch.is_ascii() {
-                    lowered.push(ch.to_ascii_lowercase());
-                } else {
-                    lowered.extend(ch.to_lowercase());
-                }
-            }
+        for c in 0..n {
             self.placed[c].clear();
             self.claimed[c].clear();
         }
@@ -172,7 +214,7 @@ impl Narrow {
         for word in &self.words {
             let mut best: Option<(u32, usize, Vec<usize>)> = None;
             for c in 0..n {
-                let candidate = &self.lowered[c];
+                let candidate = lowered(c);
                 if !is_subsequence(word, candidate) {
                     continue;
                 }
@@ -194,7 +236,7 @@ impl Narrow {
             if several {
                 let claimed = &mut self.claimed[c];
                 if claimed.is_empty() {
-                    claimed.resize(self.lowered[c].len(), false);
+                    claimed.resize(lowered(c).len(), false);
                 }
                 for &j in &indices {
                     claimed[j] = true;
@@ -202,15 +244,15 @@ impl Narrow {
             }
             self.placed[c].extend(indices);
         }
-        let marks = columns
-            .iter()
-            .zip(self.placed.iter_mut())
-            .map(|(text, placed)| {
+        let marks = self.placed[..n]
+            .iter_mut()
+            .enumerate()
+            .map(|(c, placed)| {
                 if placed.is_empty() {
                     return Vec::new();
                 }
                 placed.sort_unstable();
-                highlight_runs(text, placed)
+                highlight_runs(text(c), placed)
             })
             .collect();
         Some(ColumnMarks(marks))
@@ -321,6 +363,10 @@ mod tests {
         let rows: &[&[&str]] = &[&["geode::ingest", "boom"], &["geode::ingest", "quiet"]];
         assert_eq!(kept("ingest boom", rows), vec![0]);
         assert_eq!(kept("boom ingest", rows), vec![0], "any word order");
+        // The documented greedy false negative: `ab` takes the leading
+        // pair and leaves `ba` no `a` after a free `b`, though `a(0) b(3)`
+        // with `b(1) a(2)` would fit.
+        assert!(kept("ab ba", &[&["abab"]]).is_empty());
     }
 
     /// `g` ends the first column and `b` starts the second: joined, "gb"
@@ -373,6 +419,33 @@ mod tests {
         // "é" and "·" are two bytes each, so TECH at char 7 starts at byte 9.
         assert_eq!(marks_of(&mut narrow, &[text]), Some(vec![vec![9..13]]));
         assert_eq!(&text[9..13], "TECH");
+    }
+
+    /// Columns lowered once by the caller narrow exactly as `row` does.
+    #[test]
+    fn narrow_over_pre_lowered_columns_matches_row() {
+        let rows: &[&[&str]] = &[
+            &["09:00", "geode::ingest", "Partition LOADED"],
+            &["é · EU_TECH", "İstanbul", ""],
+            &["one two", "ab", "abab"],
+        ];
+        for query in ["", "ingest ptn", "tech", "on two", "ab ba", "ist", "zz"] {
+            let mut by_row = Narrow::new(query);
+            let mut by_lowered = Narrow::new(query);
+            for row in rows {
+                let lowered: Vec<Vec<char>> = row.iter().map(|t| lower(t)).collect();
+                let pairs: Vec<(&str, &[char])> = row
+                    .iter()
+                    .zip(&lowered)
+                    .map(|(t, l)| (*t, l.as_slice()))
+                    .collect();
+                assert_eq!(
+                    by_lowered.row_lowered(&pairs),
+                    by_row.row(row),
+                    "{query:?} on {row:?}"
+                );
+            }
+        }
     }
 
     #[test]

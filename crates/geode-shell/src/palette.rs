@@ -230,13 +230,21 @@ pub(crate) fn align_in(
     let free = |j: usize| !claimed.is_some_and(|taken| taken[j]);
     let lo = (0..m).find(|&j| c[j] == q[0] && free(j))?;
     let hi = (0..m).rev().find(|&j| c[j] == q[n - 1] && free(j))?;
+    if lo > hi {
+        return None;
+    }
+    // The tables hold only the window's `w` columns: cell `(i, j)` lives
+    // at `i * w + (j - lo)`. A cell left of the window is `None`, which
+    // is why the column at `lo` has no predecessor below row 0.
+    let w = hi - lo + 1;
+    let at = |i: usize, j: usize| i * w + (j - lo);
 
     // Track best scores ending at each cell and within each prefix. Both
-    // n-by-m tables are retained for alignment backtracking.
+    // n-by-w tables are retained for alignment backtracking.
     ends_at.clear();
-    ends_at.resize(n * m, None);
+    ends_at.resize(n * w, None);
     within.clear();
-    within.resize(n * m, None);
+    within.resize(n * w, None);
     for i in 0..n {
         let mut best_so_far: Option<u32> = None;
         let mut any = false;
@@ -246,20 +254,20 @@ pub(crate) fn align_in(
                 let base = base_at(j);
                 if i == 0 {
                     cell = Some(base);
-                } else {
-                    let prev = (i - 1) * m + (j - 1);
+                } else if j > lo {
+                    let prev = at(i - 1, j - 1);
                     let fresh = within[prev];
                     let cont = ends_at[prev].map(|s| s + run_at(j));
                     cell = fresh.max(cont).map(|s| s + base);
                 }
             }
-            ends_at[i * m + j] = cell;
+            ends_at[at(i, j)] = cell;
             if let Some(s) = cell
                 && best_so_far.is_none_or(|b| s > b)
             {
                 best_so_far = Some(s);
             }
-            within[i * m + j] = best_so_far;
+            within[at(i, j)] = best_so_far;
             any |= cell.is_some();
         }
         if !any {
@@ -267,22 +275,23 @@ pub(crate) fn align_in(
         }
     }
 
-    let score = within[(n - 1) * m + hi]?;
+    let score = within[at(n - 1, hi)]?;
 
     // Backtrack through the same score rules, preferring a continuing run
     // when it attains the cell's score, otherwise the earliest matching endpoint.
+    // A scored cell below row 0 always has its predecessor inside the window.
     let mut indices = vec![0usize; n];
-    let mut j = (0..m).find(|&j| ends_at[(n - 1) * m + j] == Some(score))?;
+    let mut j = (lo..=hi).find(|&j| ends_at[at(n - 1, j)] == Some(score))?;
     indices[n - 1] = j;
     for i in (1..n).rev() {
-        let cell = ends_at[i * m + j]?;
+        let cell = ends_at[at(i, j)]?;
         let base = base_at(j);
-        let prev = (i - 1) * m + (j - 1);
+        let prev = at(i - 1, j - 1);
         j = match ends_at[prev] {
             Some(s) if s + run_at(j) + base == cell => j - 1,
             _ => {
                 let target = within[prev];
-                (0..j).find(|&jj| ends_at[(i - 1) * m + jj] == target)?
+                (lo..j).find(|&jj| ends_at[at(i - 1, jj)] == target)?
             }
         };
         indices[i - 1] = j;
@@ -1106,6 +1115,10 @@ mod tests {
         let (_, indices) = fuzzy_match("ac", "c b a c").unwrap();
         assert_eq!(indices, vec![4, 6]);
         assert!(fuzzy_match("ba", "a b").is_none());
+        // A later query character on the window's first column has no
+        // predecessor inside the window.
+        let (_, indices) = fuzzy_match("pp", "apple").unwrap();
+        assert_eq!(indices, vec![1, 2]);
     }
 
     #[test]
