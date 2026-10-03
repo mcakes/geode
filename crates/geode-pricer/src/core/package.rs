@@ -12,11 +12,11 @@ use geode_core::pricing::{Instrument, OptionKind, Strike};
 use geode_core::view::ColumnFormat;
 
 /// Whether a package row aggregates its legs for `kind`: qty, the eight
-/// input columns, the currency (the fold marks legs priced in differing
-/// currencies `MIXED`, which would paint `—`; the legs' codes joined
-/// with `/` say which currencies) and the instrument (a package has
-/// none, so the cell stays blank). Results, status and the package's
-/// own identity columns stay the package's own.
+/// input columns, the payout currency (a package has none of its own; its
+/// legs' codes joined with `/` say which currencies a `MIXED` fold met)
+/// and the instrument (a package has none, so the cell stays blank).
+/// Results, status and the package's own identity columns stay the
+/// package's own.
 pub fn aggregates(kind: ColumnKind) -> bool {
     matches!(
         kind,
@@ -35,8 +35,8 @@ pub fn aggregates(kind: ColumnKind) -> bool {
 }
 
 /// Whether a package cell for `kind` opens an editor: it aggregates and
-/// its column is editable. A read-only aggregate (currency) must refuse
-/// at open, as a line's read-only cell does, not at commit.
+/// its column is editable. A read-only aggregate (the instrument) must
+/// refuse at open, as a line's read-only cell does, not at commit.
 fn edits(kind: ColumnKind) -> bool {
     aggregates(kind)
         && crate::core::columns::COLUMNS
@@ -182,13 +182,12 @@ pub(crate) fn groups_over(
         ColumnKind::BarrierType => group_by(barrier_legs().map(|(l, b)| (l, b.barrier)), |k| {
             same(render_barrier_kind(*k).to_string())
         }),
-        // Priced legs only: an unpriced package's currency is blank, as
-        // an unpriced line's is.
-        ColumnKind::Currency => group_by(
-            rows.iter()
-                .filter_map(|&l| sheet.result(l).map(|r| (l, r.currency))),
-            |c| same(c.as_str().to_string()),
-        ),
+        // The legs' payout currencies, not their results': a blank leg is
+        // one empty group, so a package of blank legs reads blank and a
+        // blank among set legs paints `UNSET`.
+        ColumnKind::Currency => group_by(legs().map(|(l, _)| (l, sheet.currency(l))), |c| {
+            same(c.map(|c| c.as_str().to_string()).unwrap_or_default())
+        }),
         ColumnKind::SpotShift | ColumnKind::VolShift => {
             let pick = shift_pick(kind).expect("a shift column");
             let sheet_value = pick(sheet.sheet_shift());
@@ -430,48 +429,69 @@ mod tests {
         (c.text, c.state)
     }
 
-    /// The fold gives a package its first leg's currency; the cell paints
-    /// every priced leg's instead, so mixed legs read `USD/EUR`, and it
-    /// refuses to edit at open as any read-only cell does.
+    /// A package's currency cell paints its legs' payout currencies, not
+    /// its results': blank legs read blank, and a blank among set ones
+    /// paints `—` so the parts line up with the legs.
     #[test]
-    fn a_package_paints_its_legs_distinct_currencies_and_refuses_to_edit_them() {
-        use crate::core::sheet::tests::{at, result};
-        use geode_core::pricing::{Currency, PriceResult};
+    fn a_package_paints_its_legs_distinct_currencies() {
         let mut s = sheet_of(&["-5 SPX Z26 7400/7800 CS"]);
         let legs: Vec<usize> = s.children(0).collect();
         assert_eq!(
             text(&s, 0, "currency"),
             (String::new(), CellState::Blank),
-            "unpriced"
+            "blank legs"
         );
         assert_eq!(
             text(&s, 0, "instrument_ref"),
             (String::new(), CellState::Blank),
             "a package is no instrument"
         );
-        s.deliver(s.id(legs[0]), 1, Ok(result(1.0)), at(0));
-        assert_eq!(text(&s, 0, "currency"), ("USD".into(), CellState::Own));
-        let eur = PriceResult::zero(Currency::parse("EUR").unwrap());
-        s.deliver(s.id(legs[1]), 1, Ok(eur), at(1));
+        assert!(s.fill_currency(legs[0], geode_core::pricing::Currency::USD));
+        assert_eq!(text(&s, 0, "currency"), ("USD/—".into(), CellState::Own));
+        assert!(s.fill_currency(legs[1], crate::core::sheet::tests::eur()));
         assert_eq!(text(&s, 0, "currency").0, "USD/EUR", "leg order");
+    }
+
+    #[test]
+    fn a_package_currency_edit_sets_every_leg() {
+        use crate::core::sheet::tests::eur;
+        use geode_core::pricing::Currency;
+        let mut s = sheet_of(&["-5 SPX Z26 7400/7800 CS"]);
+        let legs: Vec<usize> = s.children(0).collect();
+        let cur = ColumnKind::Currency;
         assert_eq!(
-            editor_text(&s, 0, ColumnKind::Currency, fmt(ColumnKind::Currency)),
-            None
+            crate::core::cell::editor_for(&s, 0, cur, fmt(cur)),
+            Ok(crate::core::cell::CellEditor::Text(String::new())),
+            "blank legs open empty"
+        );
+        assert_eq!(apply(&mut s, 0, "currency", "usd"), Ok(2));
+        assert!(legs.iter().all(|&l| s.currency(l) == Some(Currency::USD)));
+        assert_eq!(editor_text(&s, 0, cur, fmt(cur)), Some("USD".into()));
+        assert_eq!(
+            apply(&mut s, 0, "currency", "USD/EUR"),
+            Err("1 value: USD".into()),
+            "one group takes one value"
         );
         assert_eq!(
-            crate::core::cell::editor_for(&s, 0, ColumnKind::Currency, fmt(ColumnKind::Currency)),
-            Err(crate::core::cell::READ_ONLY)
+            apply(&mut s, 0, "currency", "EURO"),
+            Err(crate::core::cell::CURRENCY_REFUSAL.into())
         );
+        assert!(legs.iter().all(|&l| s.currency(l) == Some(Currency::USD)));
+        // Two groups map by position.
+        s.apply(Edit::SetCurrency {
+            row: legs[1],
+            currency: None,
+        })
+        .unwrap();
+        assert_eq!(text(&s, 0, "currency").0, "USD/—");
+        assert_eq!(editor_text(&s, 0, cur, fmt(cur)), Some("USD/".into()));
+        assert_eq!(apply(&mut s, 0, "currency", "USD/EUR"), Ok(1));
         assert_eq!(
-            commit(
-                &s,
-                0,
-                ColumnKind::Currency,
-                fmt(ColumnKind::Currency),
-                "USD"
-            ),
-            Err(crate::core::cell::READ_ONLY.to_string())
+            (s.currency(legs[0]), s.currency(legs[1])),
+            (Some(Currency::USD), Some(eur()))
         );
+        assert_eq!(apply(&mut s, 0, "currency", ""), Ok(2), "empty clears");
+        assert!(legs.iter().all(|&l| s.currency(l).is_none()));
     }
 
     #[test]

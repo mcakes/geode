@@ -13,7 +13,7 @@ use crate::log::LogFilter;
 
 const GEODE_PREFIX: &str = "geode::";
 
-/// The level words in [`LEVELS`] order.
+/// The level words in [`crate::log::LEVELS`] order.
 const LEVEL_WORDS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

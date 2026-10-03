@@ -527,7 +527,7 @@ fn override_entries(config: &Config) -> BTreeMap<String, (String, String)> {
 }
 
 /// The sidecar keys, as spelled in the file, recording `doc.object` — what
-/// [`render::removal_edits`] removes beside a delete/revert, so a missing
+/// `render::removal_edits` removes beside a delete/revert, so a missing
 /// sidecar is never created just to remove nothing from it, and an entry
 /// recorded under an old document name goes with its object.
 pub(super) fn override_keys_of(config: &Config, doc: &str, object: &str) -> Vec<String> {
@@ -3229,7 +3229,7 @@ pub struct ObjectDialogState {
     /// Suggestions for the Scopes `expression` field, created on the first
     /// refresh after it opens and dropped when it opens again, so a reopened
     /// field never shows values fetched under another scope. Read only while
-    /// [`expression_entry_open`] holds.
+    /// `expression_entry_open` holds.
     pub expr: Option<crate::exprcomplete::ExprCompletion>,
     /// The browse rows: the domain's leading rows, then its configuration
     /// objects, ranked for `query`. Keyed by the config revision and, for a

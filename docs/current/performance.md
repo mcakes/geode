@@ -160,6 +160,7 @@ the measurement log for fixture and hardware details.
 | Line-pricer flat rebuild | 1,000 entries / 1,200 sheet rows, every package open: the empty-chain rollup plus the index, as the tile runs it, before its window fill | 343 µs |
 | Line-pricer grouped rebuild | 1,000 entries over four underlyings × three expiries under `[underlying_ref, expiry, position_ref]`, every group and package open: rollup plus index, before its window fill (a cold grouped 40-row fill adds 206 µs) | 610 µs |
 | Line-pricer refill-only delivery | 1,000 entries / 1,200 sheet rows, structure unchanged | 241 µs |
+| Line-pricer reference fill | 1,000 entries / 1,200 sheet rows, every line blank: one `fill_currencies` batch, packages folded once (folding per filled line measured 13.7 ms) | 17.4 µs |
 | Line-pricer sorted rebuild | the flat rebuild above under an `npv` descending sort over varied prices: rollup, `sort::rank`, index (heavily loaded machine; the unsorted rebuild measured 469 µs in the same run) | 549 µs |
 | Line-pricer sorted grouped rebuild | the grouped rebuild above under the same sort (the unsorted one measured 834 µs in the same run; the rank alone 102 µs) | 923 µs |
 | In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
@@ -360,8 +361,12 @@ measure already reads. Re-measure on an idle machine before quoting them.
   nodes and sheet rows through a stale index; the status line reads "Results
   out of date — reopen /" so a blank does not read as an unpriced line.
 - The pinned table never reports a visible range of one row; a tile scrolled
-  to show a single row keeps the window it last had, so that row can paint
-  blank, as every `/` table can.
+  to a single row outside its prepared window can therefore paint it blank
+  until another invalidation. Grid tiles cover initial one-row results by
+  seeding the first 64 rows, and `WindowRequest::refill_range` refills the
+  tail when a shrink moves the old window past the end. Fuzzy `/` tables
+  also report their rows at layout after a result change, so narrowing to
+  one match does not depend on the table's omitted callback.
 
 ## Recording a measurement
 

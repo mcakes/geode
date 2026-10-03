@@ -1,10 +1,14 @@
 //! Whole-table snapshots for reference datasets. An adapter answers a
 //! snapshot query with [`TableRows`]; [`TableRows::conform`] checks it
 //! against the declaration and returns the rows in storage order, sorted by
-//! key, before anything is written. Pure: no I/O.
+//! key, before anything is written. On the read side, [`ReferenceData`]
+//! holds the live tables consumers look cells up in. Pure: no I/O.
+
+use std::collections::BTreeMap;
 
 use chrono::NaiveDate;
 
+use crate::query::ReferenceTable;
 use crate::schema::{ColumnType, DatasetSpec};
 
 /// One nullable column. SQL sources return NULLs, so every cell is optional;
@@ -202,6 +206,190 @@ impl TableRows {
             extra,
             missing,
         })
+    }
+}
+
+/// Live reference tables keyed by dataset, then by joined key text.
+///
+/// Live only: consumers never see reference data at the frame's as-of.
+/// Equality covers columns and cells, never the generation or source time, so
+/// a republish of unchanged rows compares equal and wakes no observer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReferenceData {
+    tables: BTreeMap<String, Table>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Table {
+    columns: Vec<String>,
+    /// Whole rows, key cells included, so a column's index addresses its cell.
+    rows: BTreeMap<String, Vec<Option<String>>>,
+}
+
+impl Table {
+    /// The key is the first `key_columns` cells joined with `/`; the
+    /// reference schema allows only utf8 keys. A row with a NULL key cell is
+    /// dropped rather than keyed by empty text, which could answer a lookup
+    /// for some other key; `TableRows::conform` refuses such rows on ingest.
+    fn from_answer(table: &ReferenceTable, key_columns: usize) -> Table {
+        let rows = table
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let key = row
+                    .iter()
+                    .take(key_columns)
+                    .map(|cell| cell.as_deref())
+                    .collect::<Option<Vec<&str>>>()?
+                    .join("/");
+                Some((key, row.clone()))
+            })
+            .collect();
+        Table {
+            columns: table.columns.clone(),
+            rows,
+        }
+    }
+}
+
+impl ReferenceData {
+    /// Replace one dataset's table from a read answer. `None` when the stored
+    /// table already equals the new one, so the caller can skip republishing.
+    pub fn with_table(
+        &self,
+        dataset: &str,
+        table: &ReferenceTable,
+        key_columns: usize,
+    ) -> Option<ReferenceData> {
+        let table = Table::from_answer(table, key_columns);
+        if self.tables.get(dataset) == Some(&table) {
+            return None;
+        }
+        let mut next = self.clone();
+        next.tables.insert(dataset.to_string(), table);
+        Some(next)
+    }
+
+    /// Remove a dataset (nothing published). `None` when it was already absent.
+    pub fn without(&self, dataset: &str) -> Option<ReferenceData> {
+        if !self.tables.contains_key(dataset) {
+            return None;
+        }
+        let mut next = self.clone();
+        next.tables.remove(dataset);
+        Some(next)
+    }
+
+    /// The cell at `column` of the row keyed `key`. `None` for an unknown
+    /// dataset, key or column, and for a NULL cell.
+    pub fn lookup(&self, dataset: &str, key: &str, column: &str) -> Option<&str> {
+        let table = self.tables.get(dataset)?;
+        let index = table.columns.iter().position(|c| c == column)?;
+        table.rows.get(key)?.get(index)?.as_deref()
+    }
+
+    pub fn has(&self, dataset: &str) -> bool {
+        self.tables.contains_key(dataset)
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::*;
+    use crate::query::ReferenceTable;
+
+    fn table(rows: &[(&str, Option<&str>)]) -> ReferenceTable {
+        ReferenceTable {
+            columns: vec!["underlying_ref".into(), "currency".into()],
+            rows: rows
+                .iter()
+                .map(|(k, c)| vec![Some(k.to_string()), c.map(str::to_string)])
+                .collect(),
+            gen_id: 1,
+            source_time: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn lookup_finds_a_cell_by_dataset_key_and_column() {
+        let r = ReferenceData::default()
+            .with_table("underlyings", &table(&[("SPX", Some("USD"))]), 1)
+            .unwrap();
+        assert_eq!(r.lookup("underlyings", "SPX", "currency"), Some("USD"));
+    }
+
+    #[test]
+    fn lookup_misses_read_none() {
+        let r = ReferenceData::default()
+            .with_table("underlyings", &table(&[("SPX", None)]), 1)
+            .unwrap();
+        assert_eq!(
+            r.lookup("underlyings", "SPX", "currency"),
+            None,
+            "NULL cell"
+        );
+        assert_eq!(
+            r.lookup("underlyings", "AAPL", "currency"),
+            None,
+            "unknown key"
+        );
+        assert_eq!(
+            r.lookup("underlyings", "SPX", "isin"),
+            None,
+            "unknown column"
+        );
+        assert_eq!(
+            r.lookup("calendars", "SPX", "currency"),
+            None,
+            "unknown dataset"
+        );
+    }
+
+    #[test]
+    fn an_identical_table_changes_nothing() {
+        let t = table(&[("SPX", Some("USD"))]);
+        let r = ReferenceData::default()
+            .with_table("underlyings", &t, 1)
+            .unwrap();
+        assert_eq!(r.with_table("underlyings", &t, 1), None);
+        let mut moved = t.clone();
+        moved.gen_id = 2;
+        assert_eq!(
+            r.with_table("underlyings", &moved, 1),
+            None,
+            "a new generation with equal rows is not a change"
+        );
+    }
+
+    #[test]
+    fn a_changed_cell_is_a_change_and_without_removes() {
+        let r = ReferenceData::default()
+            .with_table("underlyings", &table(&[("SPX", Some("USD"))]), 1)
+            .unwrap();
+        let r2 = r
+            .with_table("underlyings", &table(&[("SPX", Some("EUR"))]), 1)
+            .unwrap();
+        assert_eq!(r2.lookup("underlyings", "SPX", "currency"), Some("EUR"));
+        let r3 = r2.without("underlyings").unwrap();
+        assert!(!r3.has("underlyings"));
+        assert_eq!(r3.without("underlyings"), None);
+    }
+
+    #[test]
+    fn a_composite_key_joins_with_a_slash_and_a_null_key_row_is_dropped() {
+        let t = ReferenceTable {
+            columns: vec!["market".into(), "ref".into(), "currency".into()],
+            rows: vec![
+                vec![Some("XNYS".into()), Some("SPX".into()), Some("USD".into())],
+                vec![Some("XEUR".into()), None, Some("EUR".into())],
+            ],
+            gen_id: 1,
+            source_time: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+        };
+        let r = ReferenceData::default().with_table("u", &t, 2).unwrap();
+        assert_eq!(r.lookup("u", "XNYS/SPX", "currency"), Some("USD"));
+        assert_eq!(r.lookup("u", "XEUR/", "currency"), None, "NULL key cell");
+        assert_eq!(r.lookup("u", "XEUR", "currency"), None, "NULL key cell");
     }
 }
 

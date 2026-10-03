@@ -4325,6 +4325,110 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
   geode-app \
   the_drain_task_ends_on_the_first_event_after_the_window_closes
 
+# ---- live reference tables (ReferenceGlobal)
+
+# Every reference dataset is read live at attach; without it the global
+# stays empty until the dataset's next publish.
+run_mutation "reference global: attach reads each reference dataset" \
+  crates/geode-app/src/bridge.rs \
+  '        reference_cache.refresh(dataset, cx);' \
+  '        let _ = dataset;' \
+  geode-app attach_reads_each_reference_dataset_live
+
+# The global is live only: a read at the frame's as-of would hand modules
+# a historical table.
+run_mutation "reference global: the cache reads at Live" \
+  crates/geode-app/src/bridge.rs \
+  '            dataset: dataset.to_string(),
+            as_of: AsOf::Live,' \
+  '            dataset: dataset.to_string(),
+            as_of: AsOf::At(chrono::Utc::now()),' \
+  geode-app attach_reads_each_reference_dataset_live
+
+run_mutation "reference global: a reference publish rereads the dataset" \
+  crates/geode-app/src/bridge.rs \
+  '                        if reference_cache.is_reference(&dataset) {' \
+  '                        if false && reference_cache.is_reference(&dataset) {' \
+  geode-app a_publish_of_a_reference_dataset_rereads_it
+
+run_mutation "reference global: a non-reference publish reads nothing" \
+  crates/geode-app/src/bridge.rs \
+  '        self.key_columns.contains_key(dataset)' \
+  '        !dataset.is_empty()' \
+  geode-app a_publish_of_a_reference_dataset_rereads_it
+
+run_mutation "reference global: a superseded tag is dropped" \
+  crates/geode-app/src/bridge.rs \
+  '            || self.tags.borrow().get(&outcome.dataset) != Some(&outcome.tag)' \
+  '            || false' \
+  geode-app a_stale_tag_answer_is_ignored
+
+# Republishing an unchanged table wakes every observing module for nothing.
+run_mutation "reference global: an unchanged table is not republished" \
+  crates/geode-app/src/bridge.rs \
+  '                current.with_table(&dataset, &table, key_columns)' \
+  '                current
+                    .with_table(&dataset, &table, key_columns)
+                    .or_else(|| Some((*current).clone()))' \
+  geode-app an_answer_publishes_the_global_and_a_repeat_does_not_notify
+
+run_mutation "reference global: no generation removes the table" \
+  crates/geode-app/src/bridge.rs \
+  '                current.without(&dataset)' \
+  '                None' \
+  geode-app an_empty_answer_removes_the_table
+
+# A failed read emptying the table would turn every lookup into a missing
+# value on a transient error.
+run_mutation "reference global: a failed read keeps the last table" \
+  crates/geode-app/src/bridge.rs \
+  '                        "reference '"'"'{dataset}'"'"' read failed: {e}"
+                    );
+                }
+                None' \
+  '                        "reference '"'"'{dataset}'"'"' read failed: {e}"
+                    );
+                }
+                Some(geode_core::reference::ReferenceData::default())' \
+  geode-app a_failed_read_keeps_the_last_table
+
+run_mutation "reference global: a busy refusal arms a retry" \
+  crates/geode-app/src/bridge.rs \
+  '            Err(Refusal::Busy) => self.retry(dataset, cx),' \
+  '            Err(Refusal::Busy) => {}' \
+  geode-app a_busy_refusal_retries_and_keeps_the_cache
+
+run_mutation "reference global: one retry timer per dataset" \
+  crates/geode-app/src/bridge.rs \
+  '        if !self.retry.borrow_mut().insert(dataset.to_string()) {' \
+  '        if false && !self.retry.borrow_mut().insert(dataset.to_string()) {' \
+  geode-app a_busy_refusal_retries_and_keeps_the_cache
+
+# A refused reread sends nothing; advancing the tag before the submission
+# is accepted drops the answer to the read still in flight.
+run_mutation "reference global: a refused reread leaves the latest tag" \
+  crates/geode-app/src/bridge.rs \
+  '        let tag = self.tags.borrow().get(dataset).copied().unwrap_or(0) + 1;' \
+  '        let tag = {
+            let mut tags = self.tags.borrow_mut();
+            let tag = tags.entry(dataset.to_string()).or_default();
+            *tag += 1;
+            *tag
+        };' \
+  geode-app a_refused_reread_keeps_the_in_flight_answer_current
+
+run_mutation "reference global: a run of failures warns once" \
+  crates/geode-app/src/bridge.rs \
+  '        self.failing.borrow_mut().insert(dataset.to_string())' \
+  '        { self.failing.borrow_mut().insert(dataset.to_string()); true }' \
+  geode-app a_failure_warns_once_until_a_read_succeeds
+
+run_mutation "reference global: the shell installs an empty global" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        cx.set_global(crate::reference::ReferenceGlobal::default());' \
+  '' \
+  geode-shell the_reference_global_starts_empty
+
 # ---- carried dimensions
 
 run_mutation "carried: a carried dimension is a payload column of its grain and finer" \
@@ -18484,9 +18588,69 @@ run_mutation "pricer core: a failed leg still sums" \
 # fold marks the package MIXED, and a local cell or total paints a gap.
 run_mutation "pricer core: a package over differing currencies keeps the first leg's" \
   crates/geode-pricer/src/core/sheet.rs \
-  '                    if acc.currency != r.currency {' \
-  '                    if false {' \
+  '                    if acc.currency != r.currency || self.currency[leg] != Some(r.currency) {' \
+  '                    if self.currency[leg] != Some(r.currency) {' \
   geode-pricer a_package_over_differing_currencies_folds_to_a_mixed_currency
+
+# A leg still holding an answer in a currency it no longer asks for mixes
+# the fold, or a package whose legs all moved paints the old sum under the
+# new code.
+run_mutation "pricer core: a fold over legs moved off their priced currency keeps it" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '                    if acc.currency != r.currency || self.currency[leg] != Some(r.currency) {' \
+  '                    if acc.currency != r.currency {' \
+  geode-pricer a_package_whose_legs_moved_currency_gaps_its_local_figures
+
+# A line's local figures never sit under a currency they were not priced in.
+run_mutation "pricer core: a line moved off its priced currency shows its old figures" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '        if self.is_line(row) && self.currency[row] != Some(r.currency) {' \
+  '        if false {' \
+  geode-pricer a_line_moved_off_its_priced_currency_gaps_its_local_figures
+
+run_mutation "pricer cells: a line's measure reads its raw result" \
+  crates/geode-pricer/src/core/columns.rs \
+  '            sheet.shown_result(row).as_ref(),' \
+  '            sheet.result(row),' \
+  geode-pricer a_line_moved_off_its_priced_currency_gaps_its_local_figures
+
+run_mutation "pricer totals: a blank-currency line still totals" \
+  crates/geode-pricer/src/core/select.rs \
+  '            _ if blank => None,
+' \
+  '' \
+  geode-pricer risk_totals_refuse_a_line_whose_currency_was_cleared
+
+run_mutation "pricer totals: a line moved off its priced currency totals locally" \
+  crates/geode-pricer/src/core/select.rs \
+  '            None => (sheet.state(r), sheet.shown_result(r)),' \
+  '            None => (sheet.state(r), sheet.result(r).copied()),' \
+  geode-pricer risk_totals_gap_locally_over_a_line_moved_off_its_priced_currency
+
+run_mutation "pricer sort: a blank-currency line sorts as pricing" \
+  crates/geode-pricer/src/core/sort.rs \
+  '    if kind == ColumnKind::Status && sheet.is_line(row) && sheet.currency(row).is_none() {' \
+  '    if false {' \
+  geode-pricer a_line_without_a_currency_sorts_by_status_as_it_reads
+
+run_mutation "pricer sort: a line's measure keys on its raw result" \
+  crates/geode-pricer/src/core/sort.rs \
+  '            sheet.shown_result(row).as_ref(),' \
+  '            sheet.result(row),' \
+  geode-pricer a_line_moved_off_its_priced_currency_sorts_its_local_figure_as_a_gap
+
+run_mutation "pricer sort: currency keys on the last answer's currency" \
+  crates/geode-pricer/src/core/sort.rs \
+  '        ColumnKind::Currency => sheet.currency(row).map(|c| Part::Text(c.as_str().into())),' \
+  '        ColumnKind::Currency => sheet.result(row).map(|r| Part::Text(r.currency.as_str().into())),' \
+  geode-pricer a_line_sorts_by_the_currency_its_cell_shows
+
+run_mutation "pricer filter: a line moved off its priced currency filters locally" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '                    (_, Some(_)) if sheet.is_package(row) => None,
+                    (_, Some(r)) if !usd && r.currency.is_mixed() => None,' \
+  '                    (_, Some(_)) if sheet.is_package(row) => None,' \
+  geode-pricer a_line_moved_off_its_priced_currency_has_no_local_measure
 
 run_mutation "pricer totals: a mixed-currency local total is a gap" \
   crates/geode-pricer/src/core/select.rs \
@@ -18689,10 +18853,10 @@ run_mutation "pricer templates: a reload leaves the open bar's history stale" \
 run_mutation "pricer app: a reload hands the factory the builtin templates" \
   crates/geode-app/src/bridge.rs \
   '            pricer.set_dims(dims);
-            pricer.reload(views, templates, colours, refresh, stale_after, cx);' \
+            pricer.reload(views, templates, colours, refresh, stale_after, payout, cx);' \
   '            pricer.set_dims(dims);
             let _ = templates;
-            pricer.reload(views, TemplateSet::builtin(), colours, refresh, stale_after, cx);' \
+            pricer.reload(views, TemplateSet::builtin(), colours, refresh, stale_after, payout, cx);' \
   geode-app a_config_reload_hands_the_pricer_factory_its_templates
 
 # On a reload, "previous" is the running set, not an empty one.
@@ -18762,6 +18926,122 @@ run_mutation "pricer storage: an answer for another sheet installs under this na
   '                Column::Utf8(v) if v.iter().all(|k| k == name) => continue,' \
   '                Column::Utf8(_) => continue,' \
   geode-pricer a_missing_or_wrong_typed_column_is_refused_by_name
+
+# A line's payout currency is saved and reloaded; a dropped one would
+# reload every line blank and price nothing until refilled.
+run_mutation "pricer storage: a line's currency saves as blank" \
+  crates/geode-pricer/src/core/storage.rs \
+  '                .map_or_else(String::new, |c| c.as_str().to_string()),' \
+  '                .map_or_else(String::new, |_| String::new()),' \
+  geode-pricer a_sheet_round_trips_its_currencies
+
+run_mutation "pricer storage: a stored currency loads blank" \
+  crates/geode-pricer/src/core/storage.rs \
+  '                Currency::parse(&currency[i])' \
+  '                None' \
+  geode-pricer a_sheet_round_trips_its_currencies
+
+# The currency an underlying edit looks up is part of that edit: undone
+# apart, `u` would restore the old underlying under the new one's
+# currency and the line would price in it.
+run_mutation "pricer tile: an underlying edit's currency lookup is no part of its undo" \
+  crates/geode-pricer/src/tile.rs \
+  '                fills.push(u);' \
+  '                drop(u);' \
+  geode-pricer editing_a_blank_lines_underlying_looks_its_currency_up
+
+run_mutation "pricer tile: a lower-case reference currency is a miss" \
+  crates/geode-pricer/src/tile.rs \
+  '        Currency::parse(&cell.trim().to_ascii_uppercase())' \
+  '        Currency::parse(cell)' \
+  geode-pricer a_reference_cell_in_lower_case_or_padded_still_fills
+
+run_mutation "pricer tile: every reload refills blank currencies" \
+  crates/geode-pricer/src/tile.rs \
+  '        if payout != self.payout_seen {' \
+  '        if true {' \
+  geode-pricer a_reload_keeping_the_payout_source_does_not_refill
+
+# A typed line takes its underlying's reference currency in the inserted
+# spec, so it prices at once and the default undoes with the insert.
+run_mutation "pricer tile: commit_entry inserts a line without its default currency" \
+  crates/geode-pricer/src/tile.rs \
+  '        let mut rows = vec![spec.clone()];
+        self.default_currencies(&mut rows, cx);' \
+  '        let rows = vec![spec.clone()];' \
+  geode-pricer a_new_spx_line_gets_usd_from_reference_data
+
+run_mutation "pricer tile: a put inserts a blank line without its default currency" \
+  crates/geode-pricer/src/tile.rs \
+  '        let mut rows = specs.clone();
+        self.default_currencies(&mut rows, cx);' \
+  '        let rows = specs.clone();' \
+  geode-pricer a_put_keeps_a_set_currency_and_looks_a_blank_one_up
+
+# A reference refresh is how a line typed before its underlying was listed
+# ever gets a currency.
+run_mutation "pricer tile: a reference refresh fills nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '        cx.observe_global::<ReferenceGlobal>(|this, cx| this.fill_from_reference(cx))' \
+  '        cx.observe_global::<ReferenceGlobal>(|_, _| {})' \
+  geode-pricer a_reference_refresh_fills_only_blank_currencies
+
+# A fill supplies a default: overwriting a set currency would reprice a
+# line the trader moved on purpose.
+run_mutation "pricer core: fill_currency overwrites a set currency" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '            if !self.is_line(row) || self.currency[row].is_some() {' \
+  '            if !self.is_line(row) {' \
+  geode-pricer fill_currency_touches_only_blank_lines
+
+# A fold walks every package, so folding per filled line makes a reference
+# refresh over many blank lines quadratic in sheet size.
+run_mutation "pricer core: fill_currencies folds per filled line" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '            filled += 1;
+        }' \
+  '            filled += 1;
+            self.fold_packages();
+        }' \
+  geode-pricer fill_currencies_folds_once_per_batch
+
+# A line without a currency has nothing to ask for; requesting it in a
+# guessed one prices it in units the line never claimed.
+run_mutation "pricer core: a blank-currency line requests in USD" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '        let currency = self.currency[row]?;' \
+  '        let currency = self.currency[row].unwrap_or(Currency::USD);' \
+  geode-pricer a_line_without_a_currency_has_no_request_and_needs_currency
+
+# An answer in another currency than the line asked for must fail the
+# line, not install figures under the wrong currency.
+run_mutation "pricer core: an answer in another currency installs" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '                Some(want) if r.currency != want => {' \
+  '                Some(want) if false && r.currency != want => {' \
+  geode-pricer a_result_in_another_currency_fails_the_line
+
+# A currency edit changes the request: without a touch the line keeps its
+# old answer and never reprices in the new currency.
+run_mutation "pricer core: a currency edit does not reprice" \
+  crates/geode-pricer/src/core/edit.rs \
+  '            | Edit::SetCurrency { row, .. } => (*row < self.len())' \
+  '            | Edit::SetCurrency { row, .. } => (*row < self.len() && !matches!(edit, Edit::SetCurrency { .. }))' \
+  geode-pricer a_currency_edit_reprices_the_line
+
+run_mutation "pricer cell: a typed currency is not upper-cased" \
+  crates/geode-pricer/src/core/cell.rs \
+  '    Currency::parse(&text.to_ascii_uppercase())' \
+  '    Currency::parse(text)' \
+  geode-pricer typing_a_currency_is_checked_and_uppercased
+
+# The status cell reads `needs currency` ahead of the state, so a blank
+# line held as Fresh must not scope as `fresh`.
+run_mutation "pricer scope: a blank-currency fresh line scopes as fresh" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '                    && !(sheet.is_line(row) && sheet.currency(row).is_none()) =>' \
+  '                    =>' \
+  geode-pricer a_fresh_line_without_a_currency_scopes_as_needs_currency
 
 run_mutation "pricer store: a refused submission answers Refused, not Pending" \
   crates/geode-pricer/src/store.rs \
@@ -22429,8 +22709,8 @@ run_mutation "pricer cell: an empty shift commits zero" \
 
 run_mutation "pricer app: a config reload never reaches the pricer" \
   crates/geode-app/src/bridge.rs \
-  '            pricer.reload(views, templates, colours, refresh, stale_after, cx);' \
-  '            let _ = (views, templates, colours, refresh, stale_after);' \
+  '            pricer.reload(views, templates, colours, refresh, stale_after, payout, cx);' \
+  '            let _ = (views, templates, colours, refresh, stale_after, payout);' \
   geode-app a_config_reload_hands_the_pricer_factory_its_views
 
 # The free underlying typeahead: ranking is a subsequence match, so an
@@ -23560,6 +23840,59 @@ run_mutation "pricer app: a malformed underlyings reload empties the list" \
                 }' \
   '                underlyings.set(&names.unwrap_or_default());' \
   geode-app a_malformed_underlyings_reload_keeps_the_last_list
+
+# The reload key must see [pricing] payout_currency, or an edit to it
+# alone never reaches the pricer.
+run_mutation "pricer config key: payout_currency is not part of the key" \
+  crates/geode-app/src/bridge.rs \
+  '        payout_currency: config.get("app", "pricing.payout_currency").cloned(),' \
+  '        payout_currency: None,' \
+  geode-app a_payout_currency_change_alone_passes_the_reload_gate
+
+# A key column is the row identity, never a payout currency.
+run_mutation "pricer payout currency: a key column resolves" \
+  crates/geode-app/src/bridge.rs \
+  '            .filter(|d| d.key.len() == 1 && d.key[0] != column)' \
+  '            .filter(|d| d.key.len() == 1)' \
+  geode-app a_payout_currency_naming_the_key_column_is_an_error
+
+# A lookup joins a multi-column key with `/`; the pricer looks up by the
+# underlying alone, so a two-key dataset never matches a line.
+run_mutation "pricer payout currency: a multi-key dataset resolves" \
+  crates/geode-app/src/bridge.rs \
+  '            .filter(|d| d.key.len() == 1 && d.key[0] != column)' \
+  '            .filter(|d| !d.key.iter().any(|k| k == column))' \
+  geode-app a_payout_currency_in_a_multi_key_dataset_is_an_error
+
+# A column that is not text never parses as a currency code.
+run_mutation "pricer payout currency: a non-text column resolves" \
+  crates/geode-app/src/bridge.rs \
+  '            .filter(|d| d.column(column).is_some_and(|c| c.ty == ColumnType::Utf8))' \
+  '            .filter(|d| d.column(column).is_some())' \
+  geode-app a_payout_currency_naming_a_non_text_column_is_an_error
+
+# Only a reference dataset answers lookups by underlying.
+run_mutation "pricer payout currency: any dataset family resolves" \
+  crates/geode-app/src/bridge.rs \
+  '            .find(|d| d.name == dataset && d.is_reference())' \
+  '            .find(|d| d.name == dataset)' \
+  geode-app a_payout_currency_naming_a_missing_column_is_an_error
+
+# Startup must hand the factory the resolved payout source.
+run_mutation "pricer app: startup drops the payout source" \
+  crates/geode-app/src/bridge.rs \
+  '        stale_after: Duration::default(),
+        payout,' \
+  '        stale_after: Duration::default(),
+        payout: None,' \
+  geode-app startup_hands_the_pricer_factory_its_payout_source
+
+# A reload must hand the factory the resolved payout source.
+run_mutation "pricer app: a reload drops the payout source" \
+  crates/geode-app/src/bridge.rs \
+  '            pricer.reload(views, templates, colours, refresh, stale_after, payout, cx);' \
+  '            pricer.reload(views, templates, colours, refresh, stale_after, None, cx);' \
+  geode-app a_config_reload_hands_the_pricer_factory_its_payout_source
 
 run_mutation "pricer retiring: a restore opens a sheet being removed" \
   crates/geode-pricer/src/tile.rs \
@@ -27393,6 +27726,36 @@ run_mutation "pricing: a currency is three uppercase letters" \
   '        if b.len() == 3 && b.iter().all(|c| c.is_ascii_alphabetic()) {' \
   geode-core a_currency_is_three_uppercase_ascii_letters
 
+run_mutation "pricing: a currency is at least three letters" \
+  crates/geode-core/src/pricing.rs \
+  '        if b.len() == 3 && b.iter().all(|c| c.is_ascii_uppercase()) {' \
+  '        if b.len() >= 3 && b.iter().all(|c| c.is_ascii_uppercase()) {' \
+  geode-core a_currency_is_three_uppercase_ascii_letters
+
+# A NULL reference cell is no value: read as text it would default a line
+# to an empty code rather than leave it blank.
+run_mutation "reference data: a NULL cell reads as empty text" \
+  crates/geode-core/src/reference.rs \
+  '        table.rows.get(key)?.get(index)?.as_deref()' \
+  '        Some(table.rows.get(key)?.get(index)?.as_deref().unwrap_or(""))' \
+  geode-core lookup_misses_read_none
+
+# An unchanged table answers None so the bridge does not republish the
+# global and wake every observer for a repeat.
+run_mutation "reference data: an identical table is a change" \
+  crates/geode-core/src/reference.rs \
+  '        if self.tables.get(dataset) == Some(&table) {' \
+  '        if false {' \
+  geode-core an_identical_table_changes_nothing
+
+# The mock refuses a currency it has no rate for rather than pricing it at
+# an invented one.
+run_mutation "pricing mock: an unrated currency prices at par" \
+  crates/geode-pricing/src/lib.rs \
+  '        let rate = usd_rate(req.currency)' \
+  '        let rate = usd_rate(req.currency).or(Some(1.0))' \
+  geode-pricing an_unrated_currency_is_refused
+
 # The mock converts USD from the local array by the underlying's rate; a
 # zeroed USD array makes the npv ratio 0, which the rate check refuses.
 run_mutation "mock pricer: usd is converted from local" \
@@ -28299,8 +28662,8 @@ run_mutation "pricer scope: arrival only when a scope applied" \
 # `status = 'fresh'` hides every line.
 run_mutation "pricer scope: a fresh status reads its blank cell" \
   crates/geode-pricer/src/core/visibility.rs \
-  '            ColumnKind::Status if matches!(sheet.state(row), LineState::Fresh) => {' \
-  '            ColumnKind::Status if false => {' \
+  '                if matches!(sheet.state(row), LineState::Fresh)' \
+  '                if false' \
   geode-pricer status_fresh_shows_priced_lines_and_hides_stale_ones
 
 # The synthetic keys never match a desk value: a selection on them drops
@@ -29486,17 +29849,39 @@ run_mutation "tile health: the bridge links a source to its dataset" \
 # The shell drains a tile's page request; skipped, the chip does nothing.
 run_mutation "tile header: the shell opens a queued diagnostics page" \
   crates/geode-shell/src/shell/mod.rs \
-  '        if pending_page {' \
-  '        if false && pending_page {' \
+  '        if let Some(source) = pending_page {' \
+  '        if let Some(source) = pending_page.filter(|_| false) {' \
   geode-shell a_queued_page_open_opens_the_diagnostics_page
 
 # Opening only: drained through the toggle, a second chip click closes it.
 run_mutation "tile header: a queued page open never closes the page" \
   crates/geode-shell/src/shell/page.rs \
   '        self.open_page(kind, window, cx);
-    }' \
+        if let Some(page) = &self.page' \
   '        self.toggle_page(kind, window, cx);
-    }' \
+        if let Some(page) = &self.page' \
+  geode-shell a_queued_page_open_never_closes_the_page
+
+# The opened page is told what the request names; skipped, the page shows
+# whichever section it last showed.
+run_mutation "tile header: a queued page open reveals its source" \
+  crates/geode-shell/src/shell/page.rs \
+  '            page.occupant.content.reveal(target, window, cx);' \
+  '' \
+  geode-shell a_queued_page_open_opens_the_diagnostics_page
+
+# An already-open page still reveals; gated on a fresh open, a chip click
+# over the open page changes nothing.
+run_mutation "tile header: an open page still reveals the source" \
+  crates/geode-shell/src/shell/page.rs \
+  '        self.open_page(kind, window, cx);
+        if let Some(page) = &self.page
+            && page.open' \
+  '        let was_open = self.page_open();
+        self.open_page(kind, window, cx);
+        if let Some(page) = &self.page
+            && page.open
+            && !was_open' \
   geode-shell a_queued_page_open_never_closes_the_page
 
 # A queued open under a modal is refused with the close-the-dialog notice;
@@ -29519,9 +29904,42 @@ run_mutation "tile header: health re-asks only when sources moved" \
 # The chip's click queues the page.
 run_mutation "tile header: the chip click asks for the page" \
   crates/geode-tile/src/header.rs \
-  '                d.request_diagnostics_page();' \
+  '                d.request_diagnostics_page(&source);' \
   '' \
-  geode-tile clicking_the_health_chip_queues_the_diagnostics_page
+  geode-tile clicking_the_health_chip_queues_the_diagnostics_page_at_its_source
+
+# The request names the chip's own source, not a blank one.
+run_mutation "tile header: the chip click names its source" \
+  crates/geode-tile/src/header.rs \
+  '                d.request_diagnostics_page(&source);' \
+  '                d.request_diagnostics_page("");' \
+  geode-tile clicking_the_health_chip_queues_the_diagnostics_page_at_its_source
+
+# Reveal selects Sources; without the switch the page stays on the section
+# it last showed.
+run_mutation "diagnostics page: reveal selects Sources" \
+  crates/geode-diagnostics/src/page.rs \
+  '            self.set_section(Section::Sources, window, cx);
+        }
+        let shown' \
+  '        }
+        let shown' \
+  geode-diagnostics reveal_selects_sources_at_the_named_source
+
+# A Sources filter hiding the source is cleared; kept, the cursor rests on
+# another source.
+run_mutation "diagnostics page: reveal clears a filter hiding the source" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if !shown(self) && !self.filters[slot].is_empty() {' \
+  '        if false && !shown(self) && !self.filters[slot].is_empty() {' \
+  geode-diagnostics reveal_selects_sources_at_the_named_source
+
+# Only a filter that hides the source is cleared; one that keeps it stays.
+run_mutation "diagnostics page: reveal keeps a filter showing the source" \
+  crates/geode-diagnostics/src/page.rs \
+  '        if !shown(self) && !self.filters[slot].is_empty() {' \
+  '        if !self.filters[slot].is_empty() {' \
+  geode-diagnostics reveal_selects_sources_at_the_named_source
 
 # Cluster order; the tail reversed, the chip lands left of the times.
 run_mutation "tile header: the cluster paints in order" \
@@ -29602,7 +30020,7 @@ run_mutation "tile health: the pricer refreshes on a health change" \
 # End to end in the app: the chip's click reaches the page.
 run_mutation "tile header: a chip click opens the page in the app" \
   crates/geode-tile/src/header.rs \
-  '                d.request_diagnostics_page();' \
+  '                d.request_diagnostics_page(&source);' \
   '' \
   geode-app a_health_chip_click_opens_the_diagnostics_page
 

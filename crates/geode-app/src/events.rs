@@ -1,6 +1,6 @@
 //! Coalesced state for UI delivery. Pending entries are keyed by event kind and
-//! recipient, source, dataset/batch, or (for local-write outcomes) arrival
-//! sequence. Tagged outcomes retain the highest tag;
+//! recipient, source, dataset/batch, or arrival sequence. Coalesced tagged
+//! outcomes retain the highest tag;
 //! publications union affected books and keep the greatest generation ID.
 //! Replacing an entry preserves its position among other pending keys, so this
 //! is not a chronological event log. See `docs/current/request-delivery.md`.
@@ -8,8 +8,9 @@
 //! An upload outcome keys on `(tile, tag)` rather than the tile alone, so two
 //! distinct uploads from the same tile remain separate. Coalescing by tile
 //! alone could hide an earlier upload's failure behind a later success.
-//! Local-write outcomes never coalesce (`Key::Local`): each writer's answer
-//! retains its own place in admission order.
+//! Local-write, position-command, and reference-table outcomes never coalesce
+//! (`Key::Local`): each retains its own place in mailbox arrival order.
+//! Reference freshness is checked by the bridge after delivery.
 //!
 //! A one-slot channel carries only wakeups. Full wakeup capacity does not refuse
 //! state, but pending entries have no fixed key-count cap. Sender acceptance
@@ -34,10 +35,10 @@ enum Key {
     /// still-undelivered outcome (e.g. a failure) when a later upload from
     /// the same tile answers before the first is read.
     Upload(QueryKey, u64),
-    /// An arrival sequence keeps every local-write answer distinct and in
-    /// admission order. A load may be waiting for one specific save to settle;
-    /// coalescing it with another write could leave that load waiting forever.
-    /// Pending local outcomes have no fixed cap and grow with undelivered writes.
+    /// An arrival sequence keeps local-write, command, and reference answers
+    /// distinct and in mailbox arrival order. A load may be waiting for one
+    /// specific save; coalescing writes could leave it waiting forever.
+    /// These pending outcomes have no fixed count cap.
     Local(u64),
     Published(String, String),
     Fetched(String, String, bool),
@@ -50,8 +51,8 @@ enum Key {
     Stopped(String),
 }
 
-/// `seq` numbers local-write outcomes (see `Key::Local`); every other
-/// event ignores it.
+/// `seq` distinguishes uncoalesced outcomes (see `Key::Local`); events with
+/// a domain key ignore it.
 fn key(event: &DataEvent, seq: u64) -> Key {
     match event {
         DataEvent::Query(o) => Key::Query(o.key),

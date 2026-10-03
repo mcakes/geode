@@ -15,6 +15,13 @@ numbers are shaped to respond plausibly to spot and volatility shifts but are
 not a financial model. `FAIL` is a deliberate refused underlying used to test
 per-line failure handling.
 
+A request names its payout currency and the mock prices in it, with no quanto
+adjustment. Each `_usd` value is the local value at the currency's rate in
+`usd_rate`: USD 1.0, EUR 1.08, JPY 0.0067, GBP 1.27, CHF 1.12, HKD 0.128,
+KRW 0.00073. A currency outside that table is refused with
+`no USD rate for {code}` rather than priced at an invented rate; the table
+covers every currency the demo reference data names.
+
 ## Vol models
 
 `DemoVolModel` implements `geode_core::vol::VolModel` for `cvi_params`
@@ -40,5 +47,7 @@ cargo test -p geode-pricing
 - A pricer receives market overrides once per batch through its stateful
   `set_overrides` seam.
 - Invalid overrides are refused before pricing any line.
+- A result is in the requested currency or the line is refused; the mock
+  never substitutes another currency.
 - The implementation has no dependency on the shell, data service, or a
   feature module.

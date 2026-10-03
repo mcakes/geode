@@ -45,3 +45,15 @@ contract, update its current guide in the same change.
 Start with the relevant current guide, then its crate README and code. Fill
 gaps in the maintained guides rather than sending future readers into the
 implementation archive.
+
+Check Rust documentation in both public and internal views:
+
+```sh
+cargo doc --workspace --no-deps
+cargo doc --workspace --no-deps --document-private-items
+```
+
+Resolve broken links and markup warnings in both modes. Public comments
+should explain the contract without requiring a link to a private helper.
+Check Markdown links against their destination files and headings, and verify
+commands, defaults, and limitations against the implementation and tests.

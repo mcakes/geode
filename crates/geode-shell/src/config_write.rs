@@ -109,7 +109,7 @@ pub(crate) fn submit<T: Send + 'static>(
 }
 
 /// Resolve a config document path, rejecting every layer except
-/// [`Layer::User`] before filesystem access. Both [`write`] and [`edit`] use
+/// [`Layer::User`] before filesystem access. Both [`write()`] and [`edit`] use
 /// this guard; builtin documents are compiled in and desk files are shared.
 pub(crate) fn doc_path(user_dir: &Path, layer: Layer, doc: &str) -> Result<PathBuf, String> {
     if layer != Layer::User {

@@ -319,7 +319,7 @@ impl ChoiceDialogState {
     /// `follows`, then the five emit rows when it `emits`. A tile that does
     /// neither has no rows, and its chooser is never opened
     /// ([`open_link_group`]). The highlight opens on the row for what the
-    /// tile does now (`current`, see [`link_opening_row`]), so `enter` on
+    /// tile does now (`current`), so `enter` on
     /// an untouched chooser changes nothing.
     pub fn link_group(tile: TileId, follows: bool, emits: bool, current: Membership) -> Self {
         let mut options: Vec<String> = Vec::with_capacity(10);
@@ -750,7 +750,7 @@ pub(crate) const NO_GROUP_TO_JOIN: &str = "this tile has no link group to join";
 /// Open the link chooser on the focused tile (`tile::link_group`). The
 /// tile, whether its module follows and emits, and its membership are read
 /// now and kept by the dialog. A tile that does neither gets
-/// [`NO_GROUP_TO_JOIN`] and no dialog.
+/// `this tile has no link group to join` and no dialog.
 pub fn open_link_group(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let focused = view
         .services

@@ -668,6 +668,7 @@ fn a_views_reload_dropping_the_sort_ends_a_live_selection(cx: &mut gpui::TestApp
             NamedColours::default(),
             None,
             std::time::Duration::from_secs(60),
+            None,
             cx,
         )
     });

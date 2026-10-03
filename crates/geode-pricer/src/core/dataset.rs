@@ -19,7 +19,9 @@ pub const PRICER_DATASET: &str = "pricer";
 /// the position grain, whose keys every finer grain's key contains, so
 /// the underlying grain the measures declare carries them. Measure and
 /// identity spellings are `risk_snapshot`'s, so a scope or grouping
-/// written against the blotter reads the same on a sheet.
+/// written against the blotter reads the same on a sheet. `currency` is
+/// the line's payout currency, an input of the instrument grain (blank,
+/// so NULL, on a line not yet given one), not a property of its result.
 pub const PRICER_DATASET_DECLARATION: &str = r#"[pricer]
 computed = true
 

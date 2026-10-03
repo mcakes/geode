@@ -222,14 +222,26 @@ context = "pricer && mode == menu"
 "." = "pricer::menu_close"
 "#;
 
+/// The reference column a new line's payout currency defaults from:
+/// `dataset` is a reference dataset keyed by underlying, `column` one of its
+/// non-key columns (`[pricing] payout_currency`, e.g. `underlyings.currency`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayoutSource {
+    pub dataset: String,
+    pub column: String,
+}
+
 /// Shared pricing settings: the running adapter's name and availability,
-/// default refresh interval (`None` disables it), and freshness threshold.
+/// default refresh interval (`None` disables it), freshness threshold, and
+/// where a new line's payout currency comes from (`None`: nowhere, so new
+/// lines get no currency).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricerSettings {
     pub pricer: String,
     pub pricer_missing: bool,
     pub refresh: Option<Duration>,
     pub stale_after: Duration,
+    pub payout: Option<PayoutSource>,
 }
 
 impl Default for PricerSettings {
@@ -239,6 +251,7 @@ impl Default for PricerSettings {
             pricer_missing: false,
             refresh: Some(Duration::from_secs(30)),
             stale_after: Duration::from_secs(15 * 60),
+            payout: None,
         }
     }
 }
@@ -707,10 +720,12 @@ impl PricerFactory {
             .detach();
     }
 
-    /// Replace views, template tables, named colours, and live pricing settings.
+    /// Replace views, template tables, named colours, and live pricing settings
+    /// (refresh, stale threshold, payout currency source).
     /// Every open tile adopts the tables, re-resolves its view, repaints from the
     /// colours, and restarts its timer. Adapter name and availability describe
     /// the running data engine and change only on restart.
+    #[allow(clippy::too_many_arguments)]
     pub fn reload(
         &self,
         views: Views,
@@ -718,6 +733,7 @@ impl PricerFactory {
         colours: NamedColours,
         refresh: Option<Duration>,
         stale_after: Duration,
+        payout: Option<PayoutSource>,
         cx: &mut App,
     ) {
         *self.shared.views.borrow_mut() = views;
@@ -727,6 +743,7 @@ impl PricerFactory {
             let mut s = self.shared.settings.borrow_mut();
             s.refresh = refresh;
             s.stale_after = stale_after;
+            s.payout = payout;
         }
         let tiles: Vec<WeakEntity<PricerTile>> = {
             let mut t = self.shared.tiles.borrow_mut();

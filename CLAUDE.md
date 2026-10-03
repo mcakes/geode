@@ -103,8 +103,9 @@ filter gate, before any toolchain step.
 - Repeated elements use stable domain-derived IDs. Theme tokens and the rem
   scale own application presentation; avoid literal colors, radii, and
   unexplained fixed pixels.
-- The four module-visible GPUI globals are `UiSettings`, `Chords`, `AppClock`,
-  and `SeriesSettings`. Add a global only for genuinely app-wide state that
+- The five module-visible GPUI globals are `UiSettings`, `Chords`, `AppClock`,
+  `SeriesSettings`, and `ReferenceGlobal` (live reference tables).
+  Add a global only for genuinely app-wide state that
   independently hosted modules must observe.
 
 ## Data and configuration rules

@@ -1,4 +1,4 @@
-//! Deterministic risk batches, CSV fixtures, and CVI/dividend documents.
+//! Deterministic risk batches, CSV fixtures, and CVI, dividend, and option-chain documents.
 //! Risk measures repeat at their declared grain. Document generators retain
 //! per-key state and produce repeatable sequences from explicit seeds and dates.
 

@@ -5,7 +5,7 @@
 
 use crate::core::sheet::{LineId, LineSpec, OwnShifts, Place, RowKind, RowRecord, RowSpec, Sheet};
 use crate::core::template::Template;
-use geode_core::pricing::{Instrument, PriceRequest};
+use geode_core::pricing::{Currency, Instrument, PriceRequest};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +36,12 @@ pub enum Edit {
     SetShift {
         row: usize,
         shift: OwnShifts,
+    },
+    /// A line's payout currency; `None` clears it, leaving the line
+    /// without a request until one is set.
+    SetCurrency {
+        row: usize,
+        currency: Option<Currency>,
     },
     /// Within the parent; `delta` in sibling steps.
     Move {
@@ -157,7 +163,9 @@ impl Sheet {
     /// touches matching lines explicitly.
     fn touched_by(&self, edit: &Edit) -> Vec<LineId> {
         match edit {
-            Edit::SetInstrument { row, .. } | Edit::SetShift { row, .. } => (*row < self.len())
+            Edit::SetInstrument { row, .. }
+            | Edit::SetShift { row, .. }
+            | Edit::SetCurrency { row, .. } => (*row < self.len())
                 .then(|| self.id(*row))
                 .into_iter()
                 .collect(),
@@ -275,6 +283,17 @@ impl Sheet {
                 self.set_shift(row, shift);
                 Ok(Undo {
                     inverse: vec![Edit::SetShift { row, shift: old }],
+                })
+            }
+            Edit::SetCurrency { row, currency } => {
+                self.row_exists(row)?;
+                if !self.is_line(row) {
+                    return Err(EditError::NotALine(row));
+                }
+                let old = self.currency(row);
+                self.set_currency(row, currency);
+                Ok(Undo {
+                    inverse: vec![Edit::SetCurrency { row, currency: old }],
                 })
             }
             Edit::Move { row, delta } => self.move_row(row, delta),
@@ -636,6 +655,61 @@ mod tests {
     use crate::core::sheet::tests::{at, callspread, line, push, result, spx};
     use crate::core::sheet::{Delivered, LineId, LineState, Place, Sheet};
     use geode_core::pricing::{Measure, OptionKind};
+
+    #[test]
+    fn a_currency_edit_reprices_the_line() {
+        use crate::core::sheet::tests::eur;
+        let mut s = Sheet::new("t");
+        push(
+            &mut s,
+            vec![
+                line(spx(5000.0, OptionKind::Call), 1),
+                line(spx(5100.0, OptionKind::Call), 1),
+            ],
+        );
+        s.deliver_all(
+            [(s.id(0), 1, Ok(result(1.0))), (s.id(1), 1, Ok(result(2.0)))],
+            at(0),
+        );
+        let undo = s
+            .apply(Edit::SetCurrency {
+                row: 0,
+                currency: Some(eur()),
+            })
+            .unwrap();
+        assert_eq!(s.revision(0), 2, "the request changed");
+        assert_eq!(s.state(0), &LineState::Stale);
+        assert_eq!(s.request(0).unwrap().currency, eur());
+        assert_eq!(
+            (s.revision(1), s.state(1)),
+            (1, &LineState::Fresh),
+            "only that line"
+        );
+        assert_eq!(
+            undo.inverse,
+            vec![Edit::SetCurrency {
+                row: 0,
+                currency: Some(geode_core::pricing::Currency::USD)
+            }]
+        );
+        // Setting the same currency changes no request.
+        s.apply(Edit::SetCurrency {
+            row: 0,
+            currency: Some(eur()),
+        })
+        .unwrap();
+        assert_eq!(s.revision(0), 2);
+        // A package carries no currency of its own.
+        push(&mut s, vec![callspread(1)]);
+        assert_eq!(
+            s.apply(Edit::SetCurrency {
+                row: 2,
+                currency: Some(eur()),
+            })
+            .unwrap_err(),
+            EditError::NotALine(2)
+        );
+    }
 
     #[test]
     fn undo_of_a_remove_reinstates_rows_with_ids_and_results_and_requests_nothing() {
@@ -1566,6 +1640,14 @@ mod tests {
                 instrument: spx(7.0, OptionKind::Put),
             },
             Edit::SetQty { row: 2, qty: 5 },
+            Edit::SetCurrency {
+                row: 3,
+                currency: Some(geode_core::pricing::Currency::parse("EUR").unwrap()),
+            },
+            Edit::SetCurrency {
+                row: 0,
+                currency: None,
+            },
             Edit::SetShift {
                 row: 3,
                 shift: OwnShifts {
@@ -1627,6 +1709,7 @@ mod tests {
                         &a.instrument,
                         a.qty,
                         a.shift,
+                        a.currency,
                         a.result,
                         a.priced_at
                     ),
@@ -1637,6 +1720,7 @@ mod tests {
                         &b.instrument,
                         b.qty,
                         b.shift,
+                        b.currency,
                         b.result,
                         b.priced_at
                     ),

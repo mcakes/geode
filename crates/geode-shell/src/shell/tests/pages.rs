@@ -918,7 +918,7 @@ fn a_queued_page_open_opens_the_diagnostics_page(cx: &mut gpui::TestAppContext) 
     let shell = shell_of(&window, &mut cx);
     let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
     diagnostics.update(&mut cx, |d, cx| {
-        d.request_diagnostics_page();
+        d.request_diagnostics_page("risk_src");
         cx.notify();
     });
     cx.run_until_parked();
@@ -927,8 +927,14 @@ fn a_queued_page_open_opens_the_diagnostics_page(cx: &mut gpui::TestAppContext) 
         Some("diagnostics")
     );
     assert!(log.borrow().contains(&PageRecorded::Visible(true)));
-    assert!(
-        !diagnostics.update(&mut cx, |d, _| d.take_pending_diagnostics_page()),
+    assert_eq!(
+        log.borrow().last(),
+        Some(&PageRecorded::Reveal("risk_src".into())),
+        "the opened page reveals the requested source"
+    );
+    assert_eq!(
+        diagnostics.update(&mut cx, |d, _| d.take_pending_diagnostics_page()),
+        None,
         "the shell drained the request"
     );
 }
@@ -944,27 +950,32 @@ fn a_queued_page_open_never_closes_the_page(cx: &mut gpui::TestAppContext) {
     let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
     for _ in 0..2 {
         diagnostics.update(&mut cx, |d, cx| {
-            d.request_diagnostics_page();
+            d.request_diagnostics_page("risk_src");
             cx.notify();
         });
         cx.run_until_parked();
     }
     assert!(shell.read_with(&cx, |s, _| s.page_open()));
     assert!(!log.borrow().contains(&PageRecorded::Visible(false)));
+    let reveals = log
+        .borrow()
+        .iter()
+        .filter(|r| matches!(r, PageRecorded::Reveal(_)))
+        .count();
+    assert_eq!(reveals, 2, "an already-open page still reveals the source");
 }
 
 /// Under a modal the request is refused as the toggle is.
 #[gpui::test]
 fn a_queued_page_open_under_a_modal_is_refused(cx: &mut gpui::TestAppContext) {
-    let (window, mut cx) = open_shell(
-        cx,
-        services_with_page(RecordingPageFactory::new("diagnostics")),
-    );
+    let factory = RecordingPageFactory::new("diagnostics");
+    let log = factory.log();
+    let (window, mut cx) = open_shell(cx, services_with_page(factory));
     let shell = shell_of(&window, &mut cx);
     dispatch_action(&shell, "settings::open", &mut cx);
     let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
     diagnostics.update(&mut cx, |d, cx| {
-        d.request_diagnostics_page();
+        d.request_diagnostics_page("risk_src");
         cx.notify();
     });
     cx.run_until_parked();
@@ -973,6 +984,12 @@ fn a_queued_page_open_under_a_modal_is_refused(cx: &mut gpui::TestAppContext) {
         assert!(!s.page_open());
         assert_eq!(s.notice.as_deref(), Some(CLOSE_DIALOG_FIRST));
     });
+    assert!(
+        !log.borrow()
+            .iter()
+            .any(|r| matches!(r, PageRecorded::Reveal(_))),
+        "a refused request reveals nothing"
+    );
 }
 
 /// The chip's request begins as the page's action does: the last refusal
@@ -996,7 +1013,7 @@ fn a_queued_page_open_clears_the_notice_and_records_the_action(cx: &mut gpui::Te
     });
     let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
     diagnostics.update(&mut cx, |d, cx| {
-        d.request_diagnostics_page();
+        d.request_diagnostics_page("risk_src");
         cx.notify();
     });
     cx.run_until_parked();

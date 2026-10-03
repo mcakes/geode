@@ -3,7 +3,7 @@
 //! share the line palette: the tree column carries their structure. Two rows have a
 //! ground of their own and so a [`RowPalette`] floored on it: a grouping row
 //! (`Paints::group`) and a package leg (`Paints::leg`, a faint tint marking the row as
-//! inside its package, [`leg_ground`]). A package's template chip takes the neutral
+//! inside its package, from `leg_ground`). A package's template chip takes the neutral
 //! chip pair (`chip_fill`, `chip_text`). The grid index and its window remain independent of the theme.
 //!
 //! Row text is adjusted against its base background and the table's hover and selection
@@ -254,7 +254,7 @@ pub struct Paints {
     /// assumed one, so the pricer takes this one). Hover and selection
     /// replace it as they replace a line's.
     pub group: RowPalette,
-    /// A package leg's palette, on its faint tint ([`leg_ground`]): the
+    /// A package leg's palette, on its faint tint (from `leg_ground`): the
     /// ground that marks a row as inside its package. Bare lines and
     /// package rows keep the table's ground.
     pub leg: RowPalette,

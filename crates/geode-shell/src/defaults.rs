@@ -632,7 +632,7 @@ pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[&str]) -> Vec<Dia
 }
 
 /// Register one toggle per page kind, mirroring `register_add_actions`:
-/// `page::toggle_<kind>` titled "<Title>: Open page" in category `<Title>`.
+/// `page::toggle_<kind>` titled `<Title>: Open page` in category `<Title>`.
 pub fn register_page_actions(reg: &mut ActionRegistry, pages: &[(&str, &str)]) {
     for (kind, title) in pages {
         action(

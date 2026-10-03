@@ -174,6 +174,10 @@ impl PageContent for DiagnosticsContent {
     fn serialize(&self, cx: &App) -> toml::Table {
         self.page.read(cx).serialize()
     }
+    fn reveal(&self, target: &str, window: &mut Window, cx: &mut App) {
+        self.page
+            .update(cx, |p, cx| p.reveal_source(target, window, cx))
+    }
 }
 
 /// Builds the diagnostics page sharing the log ring and loaded config.

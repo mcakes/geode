@@ -4,9 +4,10 @@
 //! This calculation leaf depends on `geode-core` and exposes implementations
 //! through its `Pricer` and `VolModel` traits. [`MockPricer`] supplies
 //! deterministic demo and test results; [`DemoVolModel`] is the smooth
-//! stand-in vol-surface evaluator `[vol] model = "demo"` selects. `geode-app` registers available implementations in its
-//! `PricerRegistry`; an unknown `[pricing] adapter` produces per-line errors
-//! without preventing startup.
+//! stand-in vol-surface evaluator `[vol] model = "demo"` selects. `geode-app`
+//! registers them in `geode-data`'s `PricerRegistry` and `VolModelRegistry`,
+//! respectively. An unknown `[pricing] adapter` produces per-line errors
+//! without preventing startup; an unknown vol model refuses each vol batch.
 
 pub mod black;
 pub mod demo_vol;
@@ -36,9 +37,10 @@ pub const REFUSED_UNDERLYING: &str = "FAIL";
 /// derive from those analytics (a 1%/2%/5% spot bump for the deltas and
 /// gammas, one vol point for the vegas, ten basis points for the rhos),
 /// so a call's deltas and rhos are positive and a put's negative, gammas
-/// and vegas are positive, and theta is negative. Each measure's `_usd`
-/// twin is the local value at a rate fixed per underlying, in a currency
-/// fixed per underlying.
+/// and vegas are positive, and theta is negative. It prices in the
+/// requested currency; no quanto adjustment. Each measure's `_usd` twin is
+/// the local value at that currency's [`usd_rate`]; a currency without a
+/// rate is refused.
 #[derive(Debug)]
 pub struct MockPricer {
     delay: Duration,
@@ -77,16 +79,24 @@ fn seed(instrument: &Instrument) -> u64 {
     h.finish()
 }
 
-/// A deterministic currency and USD rate per underlying name.
-fn currency_of(underlying: &str) -> (Currency, f64) {
-    const TABLE: [(&str, f64); 4] = [("USD", 1.0), ("EUR", 1.08), ("JPY", 0.0067), ("HKD", 0.128)];
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    underlying.hash(&mut h);
-    let (code, rate) = TABLE[(h.finish() % 4) as usize];
-    (
-        Currency::parse(code).expect("table codes are well-formed"),
-        rate,
-    )
+/// The mock's USD value of one unit of each currency it prices in. A
+/// currency missing here is refused rather than priced at a made-up rate.
+const USD_RATES: [(&str, f64); 7] = [
+    ("USD", 1.0),
+    ("EUR", 1.08),
+    ("JPY", 0.0067),
+    ("GBP", 1.27),
+    ("CHF", 1.12),
+    ("HKD", 0.128),
+    ("KRW", 0.00073),
+];
+
+/// The mock's USD rate for `currency`, `None` when it has none.
+pub fn usd_rate(currency: Currency) -> Option<f64> {
+    USD_RATES
+        .iter()
+        .find(|(code, _)| *code == currency.as_str())
+        .map(|(_, rate)| *rate)
 }
 
 impl Pricer for MockPricer {
@@ -115,6 +125,8 @@ impl Pricer for MockPricer {
         if req.instrument.underlying() == REFUSED_UNDERLYING {
             return Err(PricingError("refused by the mock".to_string()));
         }
+        let rate = usd_rate(req.currency)
+            .ok_or_else(|| PricingError(format!("no USD rate for {}", req.currency.as_str())))?;
         let s = seed(&req.instrument);
         let sign = match req.instrument.kind() {
             OptionKind::Call => 1.0,
@@ -143,8 +155,6 @@ impl Pricer for MockPricer {
         // Bumped measures from the analytics: a 1%/2%/5% spot bump for
         // delta and gamma, one vol point for vega, ten basis points for
         // rho. Skew and normalized vega are fixed multiples of vega.
-        // Currency and FX follow the underlying's hash so one underlying
-        // always prices in one currency.
         let bump = |pct: f64| reference * pct;
         let mut local = [0.0; Measure::COUNT];
         local[Measure::Npv.index()] = price;
@@ -161,13 +171,12 @@ impl Pricer for MockPricer {
         local[Measure::RhoRfr010.index()] = rho * 0.06;
         local[Measure::RhoOis010.index()] = rho * 0.04;
         local[Measure::CleanThetaBusinessDay.index()] = theta;
-        let (currency, rate) = currency_of(req.instrument.underlying());
         let mut usd = local;
         for v in &mut usd {
             *v *= rate;
         }
         Ok(PriceResult {
-            currency,
+            currency: req.currency,
             local,
             usd,
         })
@@ -196,6 +205,7 @@ mod tests {
         PriceRequest {
             instrument,
             shifts: Shifts { spot_pct, vol_pts },
+            currency: Currency::USD,
         }
     }
 
@@ -239,16 +249,28 @@ mod tests {
     }
 
     #[test]
-    fn currency_is_deterministic_per_underlying_and_well_formed() {
-        let p = MockPricer::new();
-        let a = p
-            .price(&req(pct("SPX", "3m", 100.0, OptionKind::Call), 0.0, 0.0))
-            .unwrap();
-        let b = p
-            .price(&req(pct("SPX", "6m", 90.0, OptionKind::Put), 0.0, 0.0))
-            .unwrap();
-        assert_eq!(a.currency, b.currency, "one underlying, one currency");
-        assert!(Currency::parse(a.currency.as_str()).is_some());
+    fn a_line_prices_in_its_requested_currency() {
+        let mut r = req(pct("SPX", "3m", 100.0, OptionKind::Call), 0.0, 0.0);
+        r.currency = Currency::parse("EUR").unwrap();
+        let res = MockPricer::default().price(&r).unwrap();
+        assert_eq!(res.currency.as_str(), "EUR");
+        let rate = res.usd[Measure::Npv as usize] / res.local[Measure::Npv as usize];
+        assert!((rate - 1.08).abs() < 1e-12);
+    }
+
+    #[test]
+    fn an_unrated_currency_is_refused() {
+        let mut r = req(pct("SPX", "3m", 100.0, OptionKind::Call), 0.0, 0.0);
+        r.currency = Currency::parse("ZAR").unwrap();
+        let err = MockPricer::default().price(&r).unwrap_err();
+        assert_eq!(err.0, "no USD rate for ZAR");
+    }
+
+    #[test]
+    fn every_demo_reference_currency_has_a_rate() {
+        for code in ["USD", "EUR", "JPY", "GBP", "CHF", "HKD", "KRW"] {
+            assert!(usd_rate(Currency::parse(code).unwrap()).is_some(), "{code}");
+        }
     }
 
     #[test]
@@ -387,6 +409,7 @@ mod tests {
                 kind: OptionKind::Call,
             }),
             shifts: Shifts::default(),
+            currency: Currency::USD,
         };
         p.set_overrides(&MarketOverrides::default()).unwrap();
         let base = p.price(&r).unwrap();

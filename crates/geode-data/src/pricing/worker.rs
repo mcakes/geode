@@ -305,6 +305,7 @@ pub(crate) mod tests {
                     kind: OptionKind::Call,
                 }),
                 shifts: Shifts::default(),
+                currency: geode_core::pricing::Currency::USD,
             },
         }
     }
