@@ -248,8 +248,38 @@ mod tests {
 
     #[test]
     fn every_gpui_named_key_and_single_characters_parse() {
-        for name in NAMED_KEYS {
-            assert_eq!(&parse_keystroke(name, Modifiers::NONE).unwrap().key, name);
+        // Spelled out from the pinned gpui backends rather than read from
+        // `NAMED_KEYS`, so dropping or misspelling a name there fails here.
+        let gpui_names = [
+            "space",
+            "tab",
+            "enter",
+            "escape",
+            "backspace",
+            "delete",
+            "insert",
+            "up",
+            "down",
+            "left",
+            "right",
+            "home",
+            "end",
+            "pageup",
+            "pagedown",
+            "back",
+            "forward",
+            "menu",
+            "f1",
+            "f12",
+            "f24",
+            "f35",
+        ];
+        for name in gpui_names {
+            assert_eq!(parse_keystroke(name, Modifiers::NONE).unwrap().key, name);
+        }
+        for n in 1..=35 {
+            let name = format!("f{n}");
+            assert_eq!(parse_keystroke(&name, Modifiers::NONE).unwrap().key, name);
         }
         for key in ["-", "=", "[", "/", "1", "é", "ctrl+-", "shift+="] {
             assert!(parse_keystroke(key, Modifiers::NONE).is_ok(), "{key}");
