@@ -287,6 +287,10 @@ fn handle_browse_key(
         cx.notify();
     }
 
+    // The save prompt owns input exactly as a confirm does.
+    if state.save.is_some() {
+        return super::grouping_list::handle_save_key(shell, ks, window, cx);
+    }
     // A confirmation owns input in browse as well as edit, ahead of the Escape ladder
     // and ordinary commands.
     if state.confirm.is_some() {
@@ -889,8 +893,9 @@ fn on_row_clicked(
     // a question owns the mouse as well as the keys. A click here would both open the
     // row (answering the question with a shrug — `enter_edit` clears the confirm) and,
     // worse, move the cursor off the row the question is about, so `enter` would then
-    // act on a different object from the one the prompt names.
-    if state.confirm.is_some() {
+    // act on a different object from the one the prompt names. The save
+    // prompt is a question too.
+    if state.confirm.is_some() || state.save.is_some() {
         return;
     }
     let Some(ix) = state.rows.position(|r| r.name == clicked) else {
@@ -1343,6 +1348,13 @@ fn handle_edit_key_inner(
         cx.notify();
     }
 
+    if shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.save.is_some())
+    {
+        return super::grouping_list::handle_save_key(shell, ks, window, cx);
+    }
     if armed_confirm(shell).is_some() {
         match dialog::ConfirmAnswer::from_key(ks) {
             Some(dialog::ConfirmAnswer::Yes) => answer_confirm(shell, true, cx),
@@ -1751,6 +1763,14 @@ fn handle_edit_key_inner(
         // letters act here, so a silent `z` reads as the dialog having
         // stopped responding — and it is the one branch where the key
         // that did nothing is not otherwise on screen to explain itself.
+        NormalCommand::Verb('s')
+            if shell
+                .object_dialog
+                .as_ref()
+                .is_some_and(|state| state.domain.saves_into_roster()) =>
+        {
+            super::grouping_list::arm_save(shell, cx)
+        }
         NormalCommand::Verb(letter) => {
             set_notice(shell, format!("{letter} is not a verb here"));
         }
@@ -2009,6 +2029,30 @@ fn handle_text_key(
                 }
                 scroll_to_choice(shell);
             }
+        }
+        cx.notify();
+        return true;
+    }
+    // ---- `mod+s` in a chain field opened from the list ----
+    //
+    // Takes the typed chain into the draft, then asks which slot to save
+    // it to. A refused chain keeps the field open with the refusal.
+    let from_list = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.chain_from_list);
+    if from_list && ks.key == "s" && ks.mods == shell.services.mod_alias {
+        match draft_mut(shell).map(Draft::apply_chain) {
+            Some(Step::Changed | Step::Inert) => {
+                if let Some(state) = shell.object_dialog.as_mut() {
+                    state.mode = DialogMode::Normal;
+                    state.chain_from_list = false;
+                }
+                revalidate(shell);
+                super::grouping_list::arm_save(shell, cx);
+            }
+            Some(Step::Refused(reason)) => set_notice(shell, reason),
+            None => {}
         }
         cx.notify();
         return true;
@@ -2435,6 +2479,16 @@ fn arm_confirm(shell: &mut ShellView, confirm: Confirm) {
 /// The question currently on screen, if any.
 fn armed_confirm(shell: &ShellView) -> Option<Confirm> {
     shell.object_dialog.as_ref().and_then(|state| state.confirm)
+}
+
+/// Whether a question (a confirm or the save prompt) owns input. A pointer
+/// handler returns early on it: a click behind the question would act on
+/// the rows the question is about.
+fn question_up(shell: &ShellView) -> bool {
+    shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.confirm.is_some() || state.save.is_some())
 }
 
 /// Queue the changed draft and announce a definition fork if one is accepted. Read
@@ -3132,6 +3186,13 @@ fn actions(shell: &ShellView) -> Vec<Action> {
             destructive: false,
         });
     }
+    if state.domain.saves_into_roster() && draft.text_entry.is_none() {
+        out.push(Action {
+            key: "s",
+            label: "Save to slot…".to_string(),
+            destructive: false,
+        });
+    }
     // The one new verb this domain adds (this module's `arm_overwrite`
     // doc has the full reasoning): available whenever a scope is open,
     // regardless of layer or override, since `Confirm::Overwrite`'s own
@@ -3420,7 +3481,9 @@ fn build(
 
     // Advertise only keys supported by the current stage and mode. Filter-mode
     // Enter keeps the query; normal-mode Enter opens the selected object.
-    let hints: Vec<Hint> = if state.confirm.is_some() {
+    let hints: Vec<Hint> = if let Some(hints) = save_hints(state) {
+        hints
+    } else if state.confirm.is_some() {
         // The edit footer's own three lines: a question on screen is the
         // whole vocabulary until it is answered.
         vec![
@@ -3538,17 +3601,19 @@ fn build(
     // action bar, in the edit stage's place for it (outside the list, so the rows never
     // shift under it) — and, while a question stands, the confirm row in the bar's
     // place, exactly as `build_edit` swaps them.
-    let action_block = match state.confirm {
+    let action_block = match (&state.save, state.confirm) {
+        // The save prompt takes the bar's place as a confirm does.
+        (Some(save), _) => super::grouping_list::save_prompt(state, save, entity, cx),
         // The RECORDED target, never the cursor's current answer: after
         // a reload re-ranks the list the index names a different row,
         // and the prompt must name the object the answer is about — the
         // one `run_confirmed` will refuse for otherwise. Also the one
         // read here that derives nothing per frame.
-        Some(confirm) => {
+        (None, Some(confirm)) => {
             let name = state.confirm_target.clone().unwrap_or_default();
             confirm_row(confirm, &name, state.confirm_detail.as_deref(), entity, cx)
         }
-        None => browse_action_bar(state, entity),
+        (None, None) => browse_action_bar(state, entity),
     };
 
     v_flex()
@@ -3558,6 +3623,25 @@ fn build(
         .child(action_block)
         .child(footer)
         .into_any_element()
+}
+
+/// The footer while the save prompt is up, or `None` when it is not: the
+/// digits and `escape` while it asks for a slot, the confirm footer's own
+/// lines while a user-owned slot awaits its y/n.
+fn save_hints(state: &ObjectDialogState) -> Option<Vec<Hint>> {
+    let save = state.save.as_ref()?;
+    Some(if save.replace.is_some() {
+        vec![
+            Hint::prose(HintRow::Go, "this needs an answer first"),
+            Hint::new(HintRow::Go, &["enter"], "go ahead"),
+            Hint::new(HintRow::Go, &["escape"], "leave it alone"),
+        ]
+    } else {
+        vec![
+            Hint::range(HintRow::Go, "1", "9", "save and activate that slot"),
+            Hint::new(HintRow::Go, &["escape"], "back"),
+        ]
+    })
 }
 
 /// Typed-entry label shared by footer sites: choice rows invite choosing a value; other
@@ -3591,20 +3675,24 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // Build actions before borrowing the theme. Hide the action bar while a value field
     // is open: pointer actions must not arm a destructive question over a focused text
     // input when keyboard actions cannot reach those verbs.
-    let action_block = match (draft.text_entry.is_some(), state.confirm) {
-        // `min_h_6` for the same reason `action_bar` itself carries it: this
-        // placeholder sits where that bar would, and a bare `div()` with no children
-        // has no height of its own, so opening a field (`i`) would shift the footer up
-        // by a button's height and `escape` would shift it back.
-        (true, _) => div().min_h_6().into_any_element(),
-        (false, Some(confirm)) => confirm_row(
-            confirm,
-            &draft.name,
-            state.confirm_detail.as_deref(),
-            entity,
-            cx,
-        ),
-        (false, None) => action_bar(shell, entity),
+    let action_block = if let Some(save) = state.save.as_ref() {
+        super::grouping_list::save_prompt(state, save, entity, cx)
+    } else {
+        match (draft.text_entry.is_some(), state.confirm) {
+            // `min_h_6` for the same reason `action_bar` itself carries it: this
+            // placeholder sits where that bar would, and a bare `div()` with no children
+            // has no height of its own, so opening a field (`i`) would shift the footer up
+            // by a button's height and `escape` would shift it back.
+            (true, _) => div().min_h_6().into_any_element(),
+            (false, Some(confirm)) => confirm_row(
+                confirm,
+                &draft.name,
+                state.confirm_detail.as_deref(),
+                entity,
+                cx,
+            ),
+            (false, None) => action_bar(shell, entity),
+        }
     };
     let theme = cx.theme();
     let row_paint = super::super::listrow::row_paint(theme);
@@ -4361,7 +4449,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let i_hint = |row: Option<EditRow>| -> Hint {
         Hint::new(HintRow::Edit, &["i"], i_hint_word(row, draft)).selector("objectdialog-hint-i")
     };
-    let hints: Vec<Hint> = if state.confirm.is_some() {
+    let hints: Vec<Hint> = if let Some(hints) = save_hints(state) {
+        hints
+    } else if state.confirm.is_some() {
         vec![
             Hint::prose(HintRow::Go, "this needs an answer first"),
             Hint::new(HintRow::Go, &["enter"], "go ahead"),
@@ -4382,6 +4472,11 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 hints.push(Hint::new(HintRow::Move, &["up", "down"], "move"));
                 hints.push(Hint::new(HintRow::Go, &["tab"], "complete"));
                 hints.push(Hint::new(HintRow::Go, &["enter"], "apply"));
+                if state.chain_from_list
+                    && let Some(spec) = super::grouping_list::mod_s_spec(shell.services.mod_alias)
+                {
+                    hints.push(Hint::new(HintRow::Go, &[spec], "save to slot…"));
+                }
             }
             Completions::Choice => {
                 hints.push(Hint::prose(HintRow::Move, "type to narrow"));
@@ -4472,6 +4567,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             hints.push(
                 Hint::new(HintRow::Edit, &["i"], "type a chain").selector("objectdialog-hint-i"),
             );
+            if state.domain.saves_into_roster() {
+                hints.push(Hint::new(HintRow::Edit, &["s"], "save to slot…"));
+            }
             hints.push(Hint::range(HintRow::Go, "1", "9", "jump to slot"));
         } else if types {
             hints.push(i_hint(selected_row));
@@ -4514,7 +4612,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // One fixed-height line shows the latest notice, otherwise selected-field help.
     // Keep it blank during confirmation, but retain grammar help during text entry.
     // Fixed line height and truncation prevent footer movement.
-    let help = if state.confirm.is_some() {
+    let help = if state.confirm.is_some() || state.save.is_some() {
         ""
     } else {
         selected_row
@@ -5061,6 +5159,7 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
         "d" => arm_delete(shell, cx),
         "r" => arm_revert(shell),
         "i" => open_field(shell),
+        "s" => super::grouping_list::arm_save(shell, cx),
         "o" => overwrite_scope(shell, cx),
         _ => {}
     }
@@ -5088,8 +5187,8 @@ fn on_edit_row_clicked(
     {
         cx.notify();
     }
-    // Ignore row clicks while a confirmation owns input, before moving selection.
-    if armed_confirm(shell).is_some() {
+    // Ignore row clicks while a question owns input, before moving selection.
+    if question_up(shell) {
         return;
     }
     let domain = shell.object_dialog.as_ref().map(|state| state.domain);
@@ -5194,7 +5293,7 @@ pub(in crate::shell) fn on_value_chip_clicked(
     let Some(draft) = state.draft.as_ref() else {
         return;
     };
-    if state.confirm.is_some() || draft.text_entry.is_some() {
+    if state.confirm.is_some() || state.save.is_some() || draft.text_entry.is_some() {
         return;
     }
     if position >= draft.visible_rows().len() {
@@ -5242,7 +5341,7 @@ fn on_tick_clicked(
         cx.notify();
         return;
     }
-    if armed_confirm(shell).is_some() {
+    if question_up(shell) {
         return;
     }
     let Some(draft) = draft_mut(shell) else {
@@ -5278,6 +5377,9 @@ fn on_completion_clicked(
         && state.notice.take().is_some()
     {
         cx.notify();
+    }
+    if question_up(shell) {
+        return;
     }
     if let Some(state) = shell.object_dialog.as_mut() {
         if click_count <= 1 {
@@ -5390,7 +5492,7 @@ pub(in crate::shell) fn on_row_dropped(
         cx.notify();
         return;
     }
-    if armed_confirm(shell).is_some() {
+    if question_up(shell) {
         return;
     }
     let Some(draft) = draft_mut(shell) else {

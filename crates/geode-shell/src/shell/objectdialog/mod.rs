@@ -3211,6 +3211,11 @@ pub struct ObjectDialogState {
     /// object (a named expression's saved scopes and the frame). Written beside the
     /// question and cleared with it by [`Self::disarm`].
     pub confirm_detail: Option<String>,
+    /// The pending "save to slot" question (Groupings): which chain, and the
+    /// slot awaiting a y/n because saving there replaces a user-owned chain.
+    /// Like `confirm`, it replaces the action bar and owns keys and pointer
+    /// until answered, and every stage transition drops it.
+    pub save: Option<grouping_list::SaveToSlot>,
     /// Source dataset captured from the selected browse row when naming starts. Clear
     /// it when naming ends; it seeds the new source's dataset choice.
     pub naming_dataset: Option<String>,
@@ -3280,6 +3285,7 @@ impl ObjectDialogState {
             confirm: None,
             confirm_target: None,
             confirm_detail: None,
+            save: None,
             naming_dataset: None,
             naming_seed: NameSeed::Empty,
             values_tag: 0,
@@ -3332,6 +3338,7 @@ impl ObjectDialogState {
         self.confirm = None;
         self.confirm_target = None;
         self.confirm_detail = None;
+        self.save = None;
     }
 
     /// Pure stage entry, called through `render::enter_edit_stage` so scroll reset,

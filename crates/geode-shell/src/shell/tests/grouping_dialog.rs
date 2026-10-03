@@ -901,3 +901,310 @@ fn the_dialog_edits_the_pinned_workspaces_own_ad_hoc_chain(cx: &mut gpui::TestAp
         "the shared lane is another lane"
     );
 }
+/// `services()` plus a user-layer `groupings` document defining slot 5.
+/// The user document rides in the `builtin` list, as `services_with_views`
+/// in `tests/objectdialog.rs` does: its `layer` field is what makes it the
+/// user's.
+fn services_with_a_user_slot_5() -> ShellServices {
+    let mut services = services();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "groupings".to_string(),
+        file: "<test:user>".into(),
+        table: "5 = [\"book\"]\n".parse().unwrap(),
+    };
+    let mut docs = services.builtin.clone();
+    docs.push(user);
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: docs,
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+#[gpui::test]
+fn s_then_a_digit_saves_the_ad_hoc_chain_to_an_empty_slot_and_activates_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut cx, dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu", "book"]));
+    });
+    cx.simulate_keystrokes("s");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-save").is_some(),
+        "the prompt replaces the action bar"
+    );
+    assert!(is_open(&shell, &cx));
+
+    cx.simulate_keystrokes("6");
+    cx.run_until_parked();
+    assert!(!is_open(&shell, &cx));
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(6));
+    assert_eq!(in_force(&shell, &cx), Some(chain(&["lhu", "book"])));
+    assert_eq!(
+        stored(&shell, &cx),
+        Some(chain(&["lhu", "book"])),
+        "the ad hoc chain stays stored"
+    );
+
+    flush_config_write(&mut cx);
+    assert!(
+        written(&dir).contains("6 = [\"lhu\", \"book\"]"),
+        "{}",
+        written(&dir)
+    );
+}
+
+#[gpui::test]
+fn escape_cancels_the_save_prompt(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+    });
+    cx.simulate_keystrokes("s escape");
+    cx.run_until_parked();
+    assert!(
+        is_open(&shell, &cx),
+        "escape answers the prompt, not the dialog"
+    );
+    assert!(cx.debug_bounds("objectdialog-save").is_none());
+    cx.simulate_keystrokes("j"); // the list has its keys back
+    cx.run_until_parked();
+    assert_eq!(cursor_name(&shell, &cx).as_deref(), Some("1"));
+    flush_config_write(&mut cx);
+    assert_eq!(written(&dir), "");
+}
+
+#[gpui::test]
+fn s_on_a_row_with_no_chain_is_refused(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    for keys in ["s", "j s", "j j j s"] {
+        // the view default, the empty ad hoc row, empty slot 2
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("objectdialog-save").is_none(), "{keys}");
+        assert!(!notice(&shell, &cx).is_empty(), "{keys}");
+        cx.simulate_keystrokes("g"); // back to the top row
+        cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn saving_over_an_inherited_slot_forks_it_without_asking(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu", "book"]));
+    });
+    cx.simulate_keystrokes("s 3"); // slot 3 is builtin: lhu
+    cx.run_until_parked();
+    assert!(
+        !is_open(&shell, &cx),
+        "a recoverable fork is not a question"
+    );
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(3));
+    assert_eq!(in_force(&shell, &cx), Some(chain(&["lhu", "book"])));
+    let status = shell
+        .read_with(&cx, |s, _| s.notice.clone())
+        .unwrap_or_default();
+    assert!(status.contains("copied '3'"), "{status}");
+    flush_config_write(&mut cx);
+    assert!(
+        written(&dir).contains("3 = [\"lhu\", \"book\"]"),
+        "{}",
+        written(&dir)
+    );
+    let sidecar = std::fs::read_to_string(dir.path().join("overrides.toml")).unwrap_or_default();
+    assert!(
+        sidecar.contains("groupings.3"),
+        "the fork's baseline is recorded: {sidecar}"
+    );
+}
+
+#[gpui::test]
+fn saving_over_a_user_owned_slot_asks_and_n_changes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services_with_a_user_slot_5(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    let frame = frame_of(&shell, &cx);
+    frame.update(&mut cx, |f, cx| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    dispatch_action(&shell, DOOR, &mut cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    cx.simulate_keystrokes("s 5");
+    cx.run_until_parked();
+    assert!(
+        is_open(&shell, &cx),
+        "a user-owned chain would be lost: ask"
+    );
+    assert!(cx.debug_bounds("objectdialog-save-replace").is_some());
+
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    assert!(is_open(&shell, &cx));
+    assert!(
+        cx.debug_bounds("objectdialog-save").is_none(),
+        "the prompt is gone"
+    );
+    assert_eq!(choice(&shell, &cx), GroupingChoice::AdHoc);
+    assert_eq!(
+        frame.read_with(&cx, |f, _| f.slots().get(5).map(<[String]>::to_vec)),
+        Some(chain(&["book"]))
+    );
+    flush_config_write(&mut cx);
+    assert_eq!(written(&dir), "");
+
+    cx.simulate_keystrokes("s 5 y");
+    cx.run_until_parked();
+    assert!(!is_open(&shell, &cx));
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(5));
+    assert_eq!(in_force(&shell, &cx), Some(chain(&["lhu"])));
+}
+
+#[gpui::test]
+fn saving_a_chain_a_slot_already_holds_writes_nothing_and_activates_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut cx, dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+    });
+    cx.simulate_keystrokes("s");
+    cx.run_until_parked();
+    // Without the prompt, `3` would apply slot 3 from the list and pass.
+    assert!(cx.debug_bounds("objectdialog-save").is_some());
+    cx.simulate_keystrokes("3"); // slot 3 already holds lhu
+    cx.run_until_parked();
+    assert!(!is_open(&shell, &cx));
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(3));
+    flush_config_write(&mut cx);
+    assert_eq!(
+        written(&dir),
+        "",
+        "an equal chain is not a write, and not a fork"
+    );
+}
+
+#[gpui::test]
+fn mod_s_in_the_list_opened_chain_field_saves_the_typed_chain(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, dir) = open_dialog(cx);
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_input("book lhu");
+    cx.simulate_keystrokes("alt-s");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-save").is_some());
+    cx.simulate_keystrokes("7");
+    cx.run_until_parked();
+    assert!(!is_open(&shell, &cx));
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(7));
+    assert_eq!(
+        stored(&shell, &cx),
+        None,
+        "the typed chain went to the slot, not the ad hoc store"
+    );
+    flush_config_write(&mut cx);
+    assert!(
+        written(&dir).contains("7 = [\"book\", \"lhu\"]"),
+        "{}",
+        written(&dir)
+    );
+}
+
+#[gpui::test]
+fn mod_s_on_a_refused_chain_keeps_the_field_open(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog(cx);
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_input("nope");
+    cx.simulate_keystrokes("alt-s");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-save").is_none());
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
+    assert!(notice(&shell, &cx).contains("nope"));
+}
+
+#[gpui::test]
+fn s_in_an_edit_stage_saves_that_stages_chain(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, dir) = open_dialog(cx);
+    cx.simulate_keystrokes("j j e"); // slot 1's editor: book / lhu
+    cx.run_until_parked();
+    cx.simulate_keystrokes("s 8");
+    cx.run_until_parked();
+    assert!(!is_open(&shell, &cx));
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(8));
+    flush_config_write(&mut cx);
+    assert!(
+        written(&dir).contains("8 = [\"book\", \"lhu\"]"),
+        "{}",
+        written(&dir)
+    );
+}
+
+#[gpui::test]
+fn a_click_on_a_prompt_digit_saves_to_that_slot(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu", "book"]));
+    });
+    cx.simulate_keystrokes("s");
+    cx.run_until_parked();
+    let digit = cx
+        .debug_bounds("objectdialog-save-9")
+        .expect("the digit is a button");
+    cx.simulate_click(digit.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(!is_open(&shell, &cx));
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(9));
+}
+
+#[gpui::test]
+fn a_row_click_under_the_save_prompt_is_ignored(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx, _dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+    });
+    cx.simulate_keystrokes("s");
+    cx.run_until_parked();
+    let row = cx.debug_bounds("objectdialog-row-1").unwrap();
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(40.0), row.origin.y + gpui::px(4.0)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(
+        is_open(&shell, &cx),
+        "a question owns the pointer as well as the keys"
+    );
+    assert_eq!(choice(&shell, &cx), GroupingChoice::AdHoc);
+}
+
+#[gpui::test]
+fn a_click_on_replace_saves_over_a_user_owned_slot(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services_with_a_user_slot_5(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    let frame = frame_of(&shell, &cx);
+    frame.update(&mut cx, |f, cx| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    dispatch_action(&shell, DOOR, &mut cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.simulate_keystrokes("s 5");
+    cx.run_until_parked();
+    let yes = cx
+        .debug_bounds("objectdialog-save-confirm-yes")
+        .expect("the question's answers are buttons");
+    cx.simulate_click(yes.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(!is_open(&shell, &cx));
+    assert_eq!(choice(&shell, &cx), GroupingChoice::Slot(5));
+    assert_eq!(in_force(&shell, &cx), Some(chain(&["lhu"])));
+}

@@ -4,9 +4,17 @@
 //! the frame, and owns the list's own keys; the shared browse and edit
 //! handlers call in through `Domain::applies_from_browse`.
 
-use geode_core::groupings::GroupingSlots;
-use gpui::{Context, Window};
+use std::rc::Rc;
 
+use geode_core::config::Layer;
+use geode_core::groupings::GroupingSlots;
+use gpui::prelude::*;
+use gpui::{AnyElement, App, Context, Entity, Window, div};
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+
+use super::super::dialog::{ConfirmAnswer, ConfirmHandler, confirm_row, sync_dialog_text};
+use super::super::kbd;
 use super::{ObjectRow, render};
 use crate::footer::{Hint, HintRow};
 use crate::frame::{FrameView, GroupingChoice};
@@ -83,6 +91,7 @@ pub(super) fn handle_key(
             let seed = kind.and_then(|kind| chain_of(shell, kind, cx));
             open_ad_hoc_chain(shell, seed, cx);
         }
+        "s" => arm_save(shell, cx),
         "d" if kind == Some(RowKind::AdHoc) => forget(shell, cx),
         "d" if kind == Some(RowKind::ViewDefault) => {
             render::set_notice(shell, NOTHING_TO_CLEAR.to_string())
@@ -383,6 +392,7 @@ pub(super) fn list_hints(query_is_empty: bool) -> Vec<Hint> {
         Hint::new(HintRow::Move, &["a"], "ad hoc"),
         Hint::new(HintRow::Edit, &["i"], "type a chain"),
         Hint::new(HintRow::Edit, &["e"], "edit row"),
+        Hint::new(HintRow::Edit, &["s"], "save row to slot…"),
         Hint::new(HintRow::Edit, &["d"], "clear"),
         Hint::new(HintRow::Edit, &["r"], "revert"),
         Hint::new(HintRow::Go, &["enter"], "apply").selector("objectdialog-hint-enter"),
@@ -467,6 +477,353 @@ pub fn title_of(domain: super::Domain, name: &str) -> String {
     }
 }
 
+/// The pending save: the chain, and the slot awaiting a y/n.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveToSlot {
+    pub chain: Vec<String>,
+    pub replace: Option<u8>,
+}
+
+/// What saving a chain into a slot would do to what the slot holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveTarget {
+    /// Nothing defines the slot.
+    Empty,
+    /// The slot already holds this chain: nothing to write.
+    Equal,
+    /// Only a lower layer defines it: a save forks it, and `r` restores it.
+    Inherited,
+    /// The user layer defines it with another chain, which a save would lose.
+    Owned,
+}
+
+/// Classify slot `slot` as a save target for `chain`. `held` is the chain
+/// the slot holds now, `rows` the list's rows (for the layer that defines it).
+pub fn classify(
+    rows: &[ObjectRow],
+    held: Option<&[String]>,
+    slot: u8,
+    chain: &[String],
+) -> SaveTarget {
+    if held == Some(chain) {
+        return SaveTarget::Equal;
+    }
+    let name = slot.to_string();
+    match rows
+        .iter()
+        .find(|row| row.name == name)
+        .and_then(|row| row.layer)
+    {
+        None => SaveTarget::Empty,
+        Some(Layer::User) => SaveTarget::Owned,
+        Some(_) => SaveTarget::Inherited,
+    }
+}
+
+pub const NOTHING_TO_SAVE: &str = "this row has no chain to save";
+
+/// `s`: ask which slot to save the chain to. From the list, the cursor
+/// row's chain; from an edit stage or its chain field, the draft's.
+pub(super) fn arm_save(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let from_draft = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .map(super::groupings::ticked);
+    let chain = match from_draft {
+        Some(chain) => {
+            // A draft with an error is not a chain a slot may take: the
+            // slot's reader would drop it, leaving an active slot that
+            // groups by nothing.
+            if let Some(refusal) = super::apply::blocking_diagnostic(shell) {
+                render::set_notice(shell, refusal);
+                return;
+            }
+            Some(chain)
+        }
+        None => cursor_kind(shell).and_then(|kind| chain_of(shell, kind, cx)),
+    };
+    match chain.filter(|chain| !chain.is_empty()) {
+        Some(chain) => {
+            if let Some(state) = shell.object_dialog.as_mut() {
+                state.save = Some(SaveToSlot {
+                    chain,
+                    replace: None,
+                });
+            }
+        }
+        None => render::set_notice(shell, NOTHING_TO_SAVE.to_string()),
+    }
+}
+
+/// Keys while the save prompt is up. It owns every key: a stray letter must
+/// not act on the list behind the question.
+pub(super) fn handle_save_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
+    let Some(save) = shell.object_dialog.as_ref().and_then(|s| s.save.clone()) else {
+        return false;
+    };
+    if let Some(slot) = save.replace {
+        match ConfirmAnswer::from_key(ks) {
+            Some(ConfirmAnswer::Yes) => carry_out_save(shell, slot, save.chain, window, cx),
+            Some(ConfirmAnswer::No) => clear_save(shell),
+            None => {}
+        }
+    } else if ks.key == "escape" {
+        clear_save(shell);
+    } else if let Some(slot) = slot_digit(ks) {
+        choose_slot(shell, slot, window, cx);
+    }
+    cx.notify();
+    true
+}
+
+/// A bare `1`…`9`.
+fn slot_digit(ks: &Keystroke) -> Option<u8> {
+    let &[byte] = ks.key.as_bytes() else {
+        return None;
+    };
+    (ks.mods == Modifiers::NONE && (b'1'..=b'9').contains(&byte)).then(|| byte - b'0')
+}
+
+/// A click on one of the prompt's digits. Only while the digits are what
+/// the prompt shows: a click that arrives after the y/n question replaced
+/// them must not pick another slot behind it.
+pub(super) fn press_save_digit(
+    shell: &mut ShellView,
+    slot: u8,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|s| s.save.as_ref().is_some_and(|save| save.replace.is_none()))
+    {
+        choose_slot(shell, slot, window, cx);
+        cx.notify();
+    }
+}
+
+fn clear_save(shell: &mut ShellView) {
+    if let Some(state) = shell.object_dialog.as_mut() {
+        state.save = None;
+    }
+}
+
+/// A digit answered the prompt: save now, or ask first when the slot's own
+/// user-layer chain would be lost.
+fn choose_slot(shell: &mut ShellView, slot: u8, window: &mut Window, cx: &mut Context<ShellView>) {
+    let Some(save) = shell.object_dialog.as_ref().and_then(|s| s.save.clone()) else {
+        return;
+    };
+    let target = {
+        let frame = shell.target_frame();
+        let view = frame.read(cx);
+        let rows = shell
+            .object_dialog
+            .as_ref()
+            .map(|s| s.rows.rows())
+            .unwrap_or_default();
+        classify(rows, view.slots().get(slot), slot, &save.chain)
+    };
+    match target {
+        SaveTarget::Owned => {
+            if let Some(state) = shell.object_dialog.as_mut()
+                && let Some(save) = state.save.as_mut()
+            {
+                save.replace = Some(slot);
+            }
+        }
+        SaveTarget::Equal => {
+            clear_save(shell);
+            activate_and_close(shell, slot, None, window, cx);
+        }
+        SaveTarget::Empty | SaveTarget::Inherited => {
+            carry_out_save(shell, slot, save.chain, window, cx)
+        }
+    }
+}
+
+/// Queue the write, stage the slot so it can be activated now, activate it
+/// and close. A refused write changes nothing in the frame and says why,
+/// with the dialog still open.
+fn carry_out_save(
+    shell: &mut ShellView,
+    slot: u8,
+    chain: Vec<String>,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    clear_save(shell);
+    match super::apply::queue_slot_chain(shell, slot, &chain, cx) {
+        Err(refusal) => render::set_notice(shell, refusal),
+        Ok(fork) => {
+            activate_and_close(shell, slot, Some(chain), window, cx);
+            // The dialog has closed, so the fork is announced on the status
+            // bar, in the words every fork uses.
+            if let Some(fork) = fork {
+                shell.notice = Some(fork.into());
+            }
+        }
+    }
+}
+
+fn activate_and_close(
+    shell: &mut ShellView,
+    slot: u8,
+    staged: Option<Vec<String>>,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let frame = shell.target_frame();
+    frame.update(cx, |f, cx| {
+        if let Some(chain) = staged {
+            f.stage_slot(slot, chain);
+        }
+        f.set_active_slot(Some(slot));
+        cx.notify();
+    });
+    shell.close_modal(window, cx);
+}
+
+/// `mod+s` as a footer chip, spelled with the user's alias. `None` for an
+/// alias no single chip can name.
+pub(super) fn mod_s_spec(alias: Modifiers) -> Option<&'static str> {
+    match alias {
+        Modifiers {
+            ctrl: true,
+            alt: false,
+            shift: false,
+            cmd: false,
+        } => Some("ctrl+s"),
+        Modifiers {
+            ctrl: false,
+            alt: true,
+            shift: false,
+            cmd: false,
+        } => Some("alt+s"),
+        Modifiers {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            cmd: true,
+        } => Some("cmd+s"),
+        _ => None,
+    }
+}
+
+/// The save prompt, painted where the action bar sits: the chain, nine
+/// digit buttons (an empty slot's outlined, so the slots a save loses
+/// nothing to stand out), and a line saying what each kind of slot does.
+/// While a user-owned slot awaits its answer, the y/n question instead.
+pub(super) fn save_prompt(
+    state: &super::ObjectDialogState,
+    save: &SaveToSlot,
+    entity: &Entity<ShellView>,
+    cx: &mut App,
+) -> AnyElement {
+    if let Some(slot) = save.replace {
+        let held = state
+            .rows
+            .rows()
+            .iter()
+            .find(|row| row.name == slot.to_string())
+            .map(|row| row.summary.clone())
+            .unwrap_or_default();
+        let on_yes: ConfirmHandler = Rc::new(move |shell, window, cx| {
+            let Some(chain) = shell
+                .object_dialog
+                .as_ref()
+                .and_then(|s| s.save.as_ref())
+                .filter(|save| save.replace == Some(slot))
+                .map(|save| save.chain.clone())
+            else {
+                return;
+            };
+            carry_out_save(shell, slot, chain, window, cx);
+        });
+        let on_no: ConfirmHandler = Rc::new(|shell, _window, _cx| clear_save(shell));
+        return v_flex()
+            .debug_selector(|| "objectdialog-save".to_string())
+            .child(
+                div()
+                    .debug_selector(|| "objectdialog-save-replace".to_string())
+                    .child(confirm_row(
+                        format!("Replace slot {slot} ({held})? Its chain is lost."),
+                        "Replace",
+                        "objectdialog-save",
+                        entity,
+                        on_yes,
+                        on_no,
+                        cx,
+                    )),
+            )
+            .into_any_element();
+    }
+    let theme = cx.theme();
+    let mut digits = h_flex().gap_1().items_center();
+    for slot in 1..=9u8 {
+        let entity = entity.clone();
+        let ks = crate::keymap::parse_keystroke(&slot.to_string(), Modifiers::NONE)
+            .expect("a digit is a valid key");
+        let empty = state
+            .rows
+            .rows()
+            .iter()
+            .find(|row| row.name == slot.to_string())
+            .is_none_or(|row| !has_chain(row));
+        let button = Button::new(("objectdialog-save-digit", slot as usize))
+            .small()
+            .child(kbd::chip(&ks))
+            .on_click(move |_event, window, cx| {
+                entity.update(cx, |shell, cx| {
+                    press_save_digit(shell, slot, window, cx);
+                    shell.refresh_dialog_rows(cx);
+                    sync_dialog_text(shell, window, cx);
+                });
+            });
+        let button = if empty {
+            button.outline()
+        } else {
+            button.ghost()
+        };
+        digits = digits.child(
+            div()
+                .debug_selector(move || format!("objectdialog-save-{slot}"))
+                .child(button),
+        );
+    }
+    v_flex()
+        .gap_1()
+        .debug_selector(|| "objectdialog-save".to_string())
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .text_sm()
+                .child(format!(
+                    "Save {} to slot",
+                    GroupingSlots::label_of(&save.chain)
+                ))
+                .child(digits),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(SAVE_NOTE),
+        )
+        .into_any_element()
+}
+
+/// What each kind of target slot does with a save.
+pub const SAVE_NOTE: &str = "an empty slot is filled · a desk or builtin slot is copied to your config · your own slot asks first";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +867,41 @@ mod tests {
         assert_eq!(rows[1].summary, "underlying_ref / expiry");
         assert!(has_chain(&rows[1]));
         assert!(!has_chain(&rows[0]), "the view default has no chain");
+    }
+
+    fn row(name: &str, layer: Option<Layer>) -> ObjectRow {
+        ObjectRow {
+            name: name.to_string(),
+            summary: String::new(),
+            layer,
+            overridden: false,
+            drifted: false,
+            prefix: None,
+        }
+    }
+
+    #[test]
+    fn a_save_target_is_classified_by_what_saving_would_lose() {
+        let rows = [
+            row("1", Some(Layer::Builtin)),
+            row("2", Some(Layer::User)),
+            row("3", None),
+        ];
+        let lhu = vec!["lhu".to_string()];
+        let book = vec!["book".to_string()];
+        assert_eq!(classify(&rows, None, 3, &lhu), SaveTarget::Empty);
+        assert_eq!(
+            classify(&rows, Some(&book), 1, &lhu),
+            SaveTarget::Inherited,
+            "a fork is recoverable with r, so it never asks"
+        );
+        assert_eq!(
+            classify(&rows, Some(&book), 2, &lhu),
+            SaveTarget::Owned,
+            "a user-owned chain would be lost"
+        );
+        assert_eq!(classify(&rows, Some(&lhu), 2, &lhu), SaveTarget::Equal);
+        assert_eq!(classify(&rows, Some(&lhu), 1, &lhu), SaveTarget::Equal);
     }
 
     #[test]
