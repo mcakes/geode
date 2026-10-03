@@ -18418,8 +18418,9 @@ run_mutation "pricer sort: currency keys on the last answer's currency" \
 
 run_mutation "pricer filter: a line moved off its priced currency filters locally" \
   crates/geode-pricer/src/core/visibility.rs \
-  '                    (_, Some(r)) if !usd && r.currency.is_mixed() => None,' \
-  '' \
+  '                    (_, Some(_)) if sheet.is_package(row) => None,
+                    (_, Some(r)) if !usd && r.currency.is_mixed() => None,' \
+  '                    (_, Some(_)) if sheet.is_package(row) => None,' \
   geode-pricer a_line_moved_off_its_priced_currency_has_no_local_measure
 
 run_mutation "pricer totals: a mixed-currency local total is a gap" \
@@ -18731,6 +18732,76 @@ run_mutation "pricer tile: every reload refills blank currencies" \
   '        if payout != self.payout_seen {' \
   '        if true {' \
   geode-pricer a_reload_keeping_the_payout_source_does_not_refill
+
+# A typed line takes its underlying's reference currency in the inserted
+# spec, so it prices at once and the default undoes with the insert.
+run_mutation "pricer tile: commit_entry inserts a line without its default currency" \
+  crates/geode-pricer/src/tile.rs \
+  '        let mut rows = vec![spec.clone()];
+        self.default_currencies(&mut rows, cx);' \
+  '        let rows = vec![spec.clone()];' \
+  geode-pricer a_new_spx_line_gets_usd_from_reference_data
+
+run_mutation "pricer tile: a put inserts a blank line without its default currency" \
+  crates/geode-pricer/src/tile.rs \
+  '        let mut rows = specs.clone();
+        self.default_currencies(&mut rows, cx);' \
+  '        let rows = specs.clone();' \
+  geode-pricer a_put_keeps_a_set_currency_and_looks_a_blank_one_up
+
+# A reference refresh is how a line typed before its underlying was listed
+# ever gets a currency.
+run_mutation "pricer tile: a reference refresh fills nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '        cx.observe_global::<ReferenceGlobal>(|this, cx| this.fill_from_reference(cx))' \
+  '        cx.observe_global::<ReferenceGlobal>(|_, _| {})' \
+  geode-pricer a_reference_refresh_fills_only_blank_currencies
+
+# A fill supplies a default: overwriting a set currency would reprice a
+# line the trader moved on purpose.
+run_mutation "pricer core: fill_currency overwrites a set currency" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '        if !self.is_line(row) || self.currency[row].is_some() {' \
+  '        if !self.is_line(row) {' \
+  geode-pricer fill_currency_touches_only_blank_lines
+
+# A line without a currency has nothing to ask for; requesting it in a
+# guessed one prices it in units the line never claimed.
+run_mutation "pricer core: a blank-currency line requests in USD" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '        let currency = self.currency[row]?;' \
+  '        let currency = self.currency[row].unwrap_or(Currency::USD);' \
+  geode-pricer a_line_without_a_currency_has_no_request_and_needs_currency
+
+# An answer in another currency than the line asked for must fail the
+# line, not install figures under the wrong currency.
+run_mutation "pricer core: an answer in another currency installs" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '                Some(want) if r.currency != want => {' \
+  '                Some(want) if false && r.currency != want => {' \
+  geode-pricer a_result_in_another_currency_fails_the_line
+
+# A currency edit changes the request: without a touch the line keeps its
+# old answer and never reprices in the new currency.
+run_mutation "pricer core: a currency edit does not reprice" \
+  crates/geode-pricer/src/core/edit.rs \
+  '            | Edit::SetCurrency { row, .. } => (*row < self.len())' \
+  '            | Edit::SetCurrency { row, .. } => (*row < self.len() && !matches!(edit, Edit::SetCurrency { .. }))' \
+  geode-pricer a_currency_edit_reprices_the_line
+
+run_mutation "pricer cell: a typed currency is not upper-cased" \
+  crates/geode-pricer/src/core/cell.rs \
+  '    Currency::parse(&text.to_ascii_uppercase())' \
+  '    Currency::parse(text)' \
+  geode-pricer typing_a_currency_is_checked_and_uppercased
+
+# The status cell reads `needs currency` ahead of the state, so a blank
+# line held as Fresh must not scope as `fresh`.
+run_mutation "pricer scope: a blank-currency fresh line scopes as fresh" \
+  crates/geode-pricer/src/core/visibility.rs \
+  '                    && !(sheet.is_line(row) && sheet.currency(row).is_none()) =>' \
+  '                    =>' \
+  geode-pricer a_fresh_line_without_a_currency_scopes_as_needs_currency
 
 run_mutation "pricer store: a refused submission answers Refused, not Pending" \
   crates/geode-pricer/src/store.rs \
@@ -27400,6 +27471,36 @@ run_mutation "pricing: a currency is three uppercase letters" \
   '        if b.len() == 3 && b.iter().all(|c| c.is_ascii_alphabetic()) {' \
   geode-core a_currency_is_three_uppercase_ascii_letters
 
+run_mutation "pricing: a currency is at least three letters" \
+  crates/geode-core/src/pricing.rs \
+  '        if b.len() == 3 && b.iter().all(|c| c.is_ascii_uppercase()) {' \
+  '        if b.len() >= 3 && b.iter().all(|c| c.is_ascii_uppercase()) {' \
+  geode-core a_currency_is_three_uppercase_ascii_letters
+
+# A NULL reference cell is no value: read as text it would default a line
+# to an empty code rather than leave it blank.
+run_mutation "reference data: a NULL cell reads as empty text" \
+  crates/geode-core/src/reference.rs \
+  '        table.rows.get(key)?.get(index)?.as_deref()' \
+  '        Some(table.rows.get(key)?.get(index)?.as_deref().unwrap_or(""))' \
+  geode-core lookup_misses_read_none
+
+# An unchanged table answers None so the bridge does not republish the
+# global and wake every observer for a repeat.
+run_mutation "reference data: an identical table is a change" \
+  crates/geode-core/src/reference.rs \
+  '        if self.tables.get(dataset) == Some(&table) {' \
+  '        if false {' \
+  geode-core an_identical_table_changes_nothing
+
+# The mock refuses a currency it has no rate for rather than pricing it at
+# an invented one.
+run_mutation "pricing mock: an unrated currency prices at par" \
+  crates/geode-pricing/src/lib.rs \
+  '        let rate = usd_rate(req.currency)' \
+  '        let rate = usd_rate(req.currency).or(Some(1.0))' \
+  geode-pricing an_unrated_currency_is_refused
+
 # The mock converts USD from the local array by the underlying's rate; a
 # zeroed USD array makes the npv ratio 0, which the rate check refuses.
 run_mutation "mock pricer: usd is converted from local" \
@@ -28306,8 +28407,8 @@ run_mutation "pricer scope: arrival only when a scope applied" \
 # `status = 'fresh'` hides every line.
 run_mutation "pricer scope: a fresh status reads its blank cell" \
   crates/geode-pricer/src/core/visibility.rs \
-  '            ColumnKind::Status if matches!(sheet.state(row), LineState::Fresh) => {' \
-  '            ColumnKind::Status if false => {' \
+  '                if matches!(sheet.state(row), LineState::Fresh)' \
+  '                if false' \
   geode-pricer status_fresh_shows_priced_lines_and_hides_stale_ones
 
 # The synthetic keys never match a desk value: a selection on them drops
