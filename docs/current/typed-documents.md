@@ -262,6 +262,17 @@ available lightness path never reaches that contrast, its endpoint is
 returned. Untinted semantic tokens retain their exact theme color. Sign
 tinting applies contrast adjustment to all three variants, including zero.
 
+[`ValueColors::from_doc`](../../crates/geode-core/src/colour/values.rs) reads
+`value_colors.toml`: one table per dimension, each mapping a value's text to a
+`colors.toml` name. Values match exactly, so `spx` is not `SPX`. Five shapes
+are refused with an error that drops the entry: a dimension that is not a
+table, an entry that is not a string, `sign` (a column color mode, not a
+color), a name starting with `#` (an absolute color), and an empty value. An
+entry of `none` reads as unmapped without a diagnostic; it is how a higher
+layer clears a lower layer's color. A dimension whose entries are all cleared
+or refused is absent. The reader does not consult the schema or the color
+definitions.
+
 [`format_number`](../../crates/geode-core/src/format.rs) scales, rounds, then
 applies grouping and negative notation. Its returned sign follows the
 rounded result, so a small negative rounded to zero receives zero styling.

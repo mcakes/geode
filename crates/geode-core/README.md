@@ -49,7 +49,7 @@ Reader defaults, partial validation, and presentation rules are described in
 | `positions` | Position-system command vocabulary: `MoveLhuParams` (tag, positions, LHU), `CommandOutcome`, the I/O-free `positions.toml` reader (`PositionsSpec`, `from_doc`: one `[service] adapter`; a missing adapter is an error at `positions.service.adapter`, unknown keys warn), and the Move LHU notice wording (`noun`, `sent_notice`, `outcome_notice`) the action and the shell share. Restart-required. |
 | `format` | Number formatting (scale, precision, grouping, negative style) shared by the blotter and the market-data panel. |
 | `nudge` | Pure numeric-editor stepping at a supplied or inferred precision. Returns text without committing an edit; segmented date fields handle dates. |
-| `colour` | Named colors from semantic tokens or OKLCH hue interpolation. Contrast correction targets 3:1 but may fall short for custom themes. Pure; callers supply `Anchors`/`Tokens`. |
+| `colour` | Named colors from semantic tokens or OKLCH hue interpolation. Contrast correction targets 3:1 but may fall short for custom themes. Pure; callers supply `Anchors`/`Tokens`. `values`: `value_colors.toml` reader — a text dimension's value → color name. |
 | `health` | Source-health states (`Ok`, `Pending`, `PendingTooLong`, `Degraded`, `Failed`). Rollups compare explicit severity ranks and preserve simultaneous reasons; derived `Ord` also sorts reason text. |
 | `log` | The in-process log ring every `tracing` layer feeds, `[log]` levels by `geode::*` target, and the runtime level control. |
 | `panic` | The thread-local marker that lets the process panic hook tell a contained panic from a fatal one. |

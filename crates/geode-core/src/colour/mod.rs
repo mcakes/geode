@@ -4,6 +4,9 @@
 //! adjustment are shared by cells, swatches, and charts.
 
 pub mod oklab;
+pub mod values;
+
+pub use values::{DimensionColors, ValueColors};
 
 use crate::config::{Diagnostic, MergedDoc, Severity, check_object_name};
 pub use crate::format::Sign;

@@ -171,6 +171,34 @@ mod tests {
     }
 
     #[test]
+    fn value_colors_merge_per_value_not_per_dimension() {
+        // No atomic depth: a user layer naming one value overrides that
+        // value and keeps the desk's others for the same dimension.
+        let merged = merge_docs(
+            crate::config::VALUE_COLORS_DOC,
+            &[
+                doc(
+                    Layer::Desk,
+                    "value_colors",
+                    "[underlying_ref]\nSPX = \"blue\"\nNDX = \"amber\"\n",
+                ),
+                doc(
+                    Layer::User,
+                    "value_colors",
+                    "[underlying_ref]\nSPX = \"teal\"\n",
+                ),
+            ],
+        );
+        let dimension = merged.value["underlying_ref"].as_table().unwrap();
+        assert_eq!(dimension["SPX"].as_str(), Some("teal"));
+        assert_eq!(
+            dimension["NDX"].as_str(),
+            Some("amber"),
+            "the desk's other values survive a user override of one"
+        );
+    }
+
+    #[test]
     fn non_atomic_arrays_are_replaced_not_appended() {
         let merged = merge_docs(
             "app",

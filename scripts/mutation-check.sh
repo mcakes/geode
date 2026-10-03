@@ -34084,6 +34084,31 @@ run_mutation "close: the vol slice content forwards its handle" \
   '        let _ = (close, cx);' \
   geode-volslice the_header_paints_the_close_button
 
+# value_colors merges per value: listing it as atomic would make a user
+# override of one value drop the desk's others.
+run_mutation "value colors: the document merges per value" \
+  crates/geode-core/src/config/merge.rs \
+  '        "colors" => Some(1),' \
+  '        "colors" | "value_colors" => Some(1),' \
+  geode-core \
+  value_colors_merge_per_value_not_per_dimension
+
+# `none` clears: it must not be stored as a color named "none".
+run_mutation "value colors: none reads as unmapped" \
+  crates/geode-core/src/colour/values.rs \
+  '                if name == NO_COLOR {' \
+  '                if name == "\u{0}" {' \
+  geode-core \
+  none_reads_as_unmapped_without_a_diagnostic
+
+# `sign` is a column mode, not a color.
+run_mutation "value colors: sign is refused" \
+  crates/geode-core/src/colour/values.rs \
+  '                if name == "sign" {' \
+  '                if name == "\u{0}" {' \
+  geode-core \
+  refused_entries_are_dropped_with_an_error_at_their_path
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

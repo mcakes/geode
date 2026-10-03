@@ -27,6 +27,10 @@ replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
+`value_colors` is deliberately absent from that list: it merges per value, so
+a user entry for one value keeps the lower layers' other values, and an entry
+of `"none"` clears a lower layer's color.
+
 Disk loading reads immediate `*.toml` children in sorted path order. Missing
 or unreadable directories and failed directory entries are silently skipped.
 An individual file read or TOML parse failure produces an error diagnostic
@@ -70,6 +74,7 @@ The main configuration documents have distinct owners:
 | `scopes.toml` | Named scopes |
 | `expressions.toml` | Named scope expressions, referenced by name from a saved scope or the frame |
 | `colors.toml` | Named semantic data colors |
+| `value_colors.toml` | A named color per value of a text dimension |
 | `dataset_presentation.toml` | Desk-level column presentation between schema and view overrides |
 | `view_presentation.toml` | Per-view column order, visibility, widths, and formatting overrides |
 | `keymap.toml` | User bindings layered over builtin and module bindings |
