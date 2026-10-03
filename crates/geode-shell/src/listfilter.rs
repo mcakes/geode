@@ -1,12 +1,16 @@
-//! Pure fuzzy ranking and navigation for filtered list surfaces.
+//! Pure fuzzy ranking, narrowing, and navigation for filtered list surfaces.
 //!
-//! Dialogs use `rank` over searchable row text. `nav_command` contains the
+//! Dialogs use `rank` over searchable row text. Tables that keep their own
+//! row order use [`Narrow`], which matches per column and never reorders.
+//! `nav_command` contains the
 //! keys that remain available while a single-line gpui-component input owns
 //! printable text. It deliberately avoids keys consumed by the input and can
 //! be tested without a window using shell-native `Keystroke` values.
 
+use std::ops::Range;
+
 use crate::keymap::{Keystroke, Modifiers};
-use crate::palette::fuzzy_match;
+use crate::palette::{AlignScratch, align_in, fuzzy_match, highlight_runs};
 use crate::vimnav::NavCommand;
 
 /// One row that survived the filter: its index into the *unfiltered* row
@@ -65,6 +69,161 @@ pub fn level(query: &str, a: &str, b: &str) -> bool {
     }
 }
 
+/// A fuzzy filter over table rows that keeps source order: a row either
+/// stays where it was or drops out, and nothing is ranked.
+///
+/// The query splits on whitespace into words. Every word must fuzzy-match
+/// (case-insensitive subsequence, with [`fuzzy_match`]'s alignment and
+/// scoring) inside a single column's text; different words may land in
+/// different columns. Columns are never joined, so a subsequence cannot be
+/// stitched from the tail of one column and the head of the next.
+///
+/// Words are placed one at a time, longest first (ties in query order).
+/// Each takes the column where it scores best, the leftmost of equals, on
+/// characters no earlier word claimed in that column, so two words never
+/// share a character. The placement is greedy: a row that a different
+/// assignment would fit can still be dropped, as with the palette's
+/// multi-word fallback.
+///
+/// The words are lowered once at construction and the per-column scratch
+/// buffers are reused across rows, so one `Narrow` serves a whole rebuild.
+#[derive(Debug, Clone, Default)]
+pub struct Narrow {
+    /// Lowered query words, longest first, ties in query order.
+    words: Vec<Vec<char>>,
+    /// Each column of the row in hand, lowered and decoded.
+    lowered: Vec<Vec<char>>,
+    claimed: Vec<Vec<bool>>,
+    placed: Vec<Vec<usize>>,
+    scratch: AlignScratch,
+}
+
+/// Per-column highlight byte ranges for a row [`Narrow::row`] kept, into
+/// that column's original text. A column no word landed in has none; an
+/// empty query highlights nothing and allocates nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColumnMarks(Vec<Vec<Range<usize>>>);
+
+impl ColumnMarks {
+    /// The ranges for `column`; empty past the last marked column.
+    pub fn get(&self, column: usize) -> &[Range<usize>] {
+        self.0.get(column).map_or(&[], Vec::as_slice)
+    }
+
+    /// Move `column`'s ranges out, leaving none behind.
+    pub fn take(&mut self, column: usize) -> Vec<Range<usize>> {
+        self.0
+            .get_mut(column)
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// Whether no column carries a range.
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(Vec::is_empty)
+    }
+}
+
+impl Narrow {
+    /// A filter for `query`. A blank query keeps every row unmarked.
+    pub fn new(query: &str) -> Narrow {
+        let mut words: Vec<Vec<char>> = query
+            .split_whitespace()
+            .map(|w| w.chars().flat_map(char::to_lowercase).collect())
+            .collect();
+        // Stable: equal lengths keep the typed order.
+        words.sort_by_key(|w| std::cmp::Reverse(w.len()));
+        Narrow {
+            words,
+            ..Narrow::default()
+        }
+    }
+
+    /// Whether the query has no words, so every row stays.
+    pub fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+
+    /// Whether the row whose column texts are `columns` stays, and if so
+    /// where each column's matched characters are. `None` drops the row.
+    pub fn row(&mut self, columns: &[&str]) -> Option<ColumnMarks> {
+        if self.words.is_empty() {
+            return Some(ColumnMarks::default());
+        }
+        let n = columns.len();
+        self.lowered.resize_with(n, Vec::new);
+        self.claimed.resize_with(n, Vec::new);
+        self.placed.resize_with(n, Vec::new);
+        for (c, text) in columns.iter().enumerate() {
+            let lowered = &mut self.lowered[c];
+            lowered.clear();
+            for ch in text.chars() {
+                if ch.is_ascii() {
+                    lowered.push(ch.to_ascii_lowercase());
+                } else {
+                    lowered.extend(ch.to_lowercase());
+                }
+            }
+            self.placed[c].clear();
+            self.claimed[c].clear();
+        }
+        // A single word claims nothing, so it needs no claim table.
+        let several = self.words.len() > 1;
+        for word in &self.words {
+            let mut best: Option<(u32, usize, Vec<usize>)> = None;
+            for c in 0..n {
+                let candidate = &self.lowered[c];
+                if !is_subsequence(word, candidate) {
+                    continue;
+                }
+                let claims = if several && !self.placed[c].is_empty() {
+                    Some(self.claimed[c].as_slice())
+                } else {
+                    None
+                };
+                let Some((score, indices)) =
+                    align_in(&mut self.scratch, word, candidate, usize::MAX, claims)
+                else {
+                    continue;
+                };
+                if best.as_ref().is_none_or(|(s, _, _)| score > *s) {
+                    best = Some((score, c, indices));
+                }
+            }
+            let (_, c, indices) = best?;
+            if several {
+                let claimed = &mut self.claimed[c];
+                if claimed.is_empty() {
+                    claimed.resize(self.lowered[c].len(), false);
+                }
+                for &j in &indices {
+                    claimed[j] = true;
+                }
+            }
+            self.placed[c].extend(indices);
+        }
+        let marks = columns
+            .iter()
+            .zip(self.placed.iter_mut())
+            .map(|(text, placed)| {
+                if placed.is_empty() {
+                    return Vec::new();
+                }
+                placed.sort_unstable();
+                highlight_runs(text, placed)
+            })
+            .collect();
+        Some(ColumnMarks(marks))
+    }
+}
+
+/// Whether `needle`'s chars appear in order in `haystack`: the
+/// allocation-free reject that spares `align` most non-matching columns.
+fn is_subsequence(needle: &[char], haystack: &[char]) -> bool {
+    let mut rest = haystack.iter();
+    needle.iter().all(|n| rest.any(|h| h == n))
+}
+
 /// Recognize filtered-list navigation while Input owns printable text:
 /// Up/Down and Control-P/N move ±1, Control-U/D move ±5, and Control-B/F or
 /// PageUp/PageDown move ±10. Exact modifier sets are required. Callers apply
@@ -106,6 +265,119 @@ mod tests {
             mods: Modifiers::CTRL,
             key: k.to_string(),
         }
+    }
+
+    fn marks_of(narrow: &mut Narrow, columns: &[&str]) -> Option<Vec<Vec<Range<usize>>>> {
+        narrow
+            .row(columns)
+            .map(|m| (0..columns.len()).map(|c| m.get(c).to_vec()).collect())
+    }
+
+    fn kept(query: &str, rows: &[&[&str]]) -> Vec<usize> {
+        let mut narrow = Narrow::new(query);
+        rows.iter()
+            .enumerate()
+            .filter_map(|(ix, row)| narrow.row(row).map(|_| ix))
+            .collect()
+    }
+
+    #[test]
+    fn narrow_keeps_source_order_and_drops_non_matches() {
+        // Row 2 is the tighter match; ranking would lift it first.
+        let rows: &[&[&str]] = &[&["s_p_l_i_t"], &["noise"], &["split"]];
+        assert_eq!(kept("split", rows), vec![0, 2]);
+    }
+
+    #[test]
+    fn narrow_with_a_blank_query_keeps_every_row_unmarked() {
+        for blank in ["", "  ", "\t"] {
+            let mut narrow = Narrow::new(blank);
+            assert!(narrow.is_empty());
+            let marks = narrow.row(&["a", "b"]).expect("kept");
+            assert!(marks.is_empty(), "{blank:?} marks nothing");
+            assert_eq!(marks, ColumnMarks::default(), "and allocates nothing");
+        }
+    }
+
+    #[test]
+    fn narrow_is_case_insensitive_both_ways() {
+        assert_eq!(kept("EU", &[&["eu_tech"]]), vec![0]);
+        assert_eq!(kept("eu", &[&["EU_TECH"]]), vec![0]);
+        let mut narrow = Narrow::new("TeCh");
+        assert_eq!(marks_of(&mut narrow, &["EU_TECH"]), Some(vec![vec![3..7]]));
+    }
+
+    #[test]
+    fn narrow_marks_the_column_each_word_landed_in() {
+        let mut narrow = Narrow::new("ingest boom");
+        assert_eq!(
+            marks_of(&mut narrow, &["09:00", "geode::ingest", "boom here"]),
+            Some(vec![vec![], vec![7..13], vec![0..4]])
+        );
+    }
+
+    #[test]
+    fn narrow_needs_every_word_somewhere() {
+        let rows: &[&[&str]] = &[&["geode::ingest", "boom"], &["geode::ingest", "quiet"]];
+        assert_eq!(kept("ingest boom", rows), vec![0]);
+        assert_eq!(kept("boom ingest", rows), vec![0], "any word order");
+    }
+
+    /// `g` ends the first column and `b` starts the second: joined, "gb"
+    /// would be a subsequence; per column it is not.
+    #[test]
+    fn narrow_never_stitches_a_word_across_columns() {
+        assert!(kept("gb", &[&["ag", "bz"]]).is_empty());
+        assert_eq!(kept("gb", &[&["ag", "bz"], &["gzb", ""]]), vec![1]);
+    }
+
+    /// Two words in one column take characters of their own, as in the
+    /// palette: one `o` cannot stand for both.
+    #[test]
+    fn narrow_words_in_one_column_take_distinct_characters() {
+        assert!(kept("o o", &[&["one"]]).is_empty());
+        let mut narrow = Narrow::new("o o");
+        assert_eq!(
+            marks_of(&mut narrow, &["one two"]),
+            Some(vec![vec![0..1, 6..7]])
+        );
+    }
+
+    /// A word takes the column where it scores best; a contiguous prefix
+    /// there outscores a scattered match to its left.
+    #[test]
+    fn narrow_places_a_word_in_its_best_column() {
+        let mut narrow = Narrow::new("ab");
+        assert_eq!(
+            marks_of(&mut narrow, &["xaxb", "ab"]),
+            Some(vec![vec![], vec![0..2]])
+        );
+        assert_eq!(
+            marks_of(&mut narrow, &["ab", "ab"]),
+            Some(vec![vec![0..2], vec![]]),
+            "the leftmost of equal scores"
+        );
+    }
+
+    #[test]
+    fn narrow_marks_are_byte_ranges_into_the_original_text() {
+        let text = "é · EU_TECH";
+        let mut narrow = Narrow::new("tech");
+        // "é" and "·" are two bytes each, so TECH at char 7 starts at byte 9.
+        assert_eq!(marks_of(&mut narrow, &[text]), Some(vec![vec![9..13]]));
+        assert_eq!(&text[9..13], "TECH");
+    }
+
+    #[test]
+    fn narrow_scratch_does_not_leak_between_rows() {
+        let mut narrow = Narrow::new("a b");
+        assert!(narrow.row(&["a", "b", "zzz"]).is_some());
+        assert_eq!(
+            marks_of(&mut narrow, &["ab"]),
+            Some(vec![vec![0..2]]),
+            "a narrower row reuses the buffers cleanly"
+        );
+        assert!(narrow.row(&["a"]).is_none());
     }
 
     #[test]

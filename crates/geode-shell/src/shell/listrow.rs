@@ -51,6 +51,54 @@ pub fn row_paint(theme: &Theme) -> RowPaint {
     }
 }
 
+/// The fuzzy-match colour inside a `DataTable`: `primary` floored to the
+/// readable ratio on each ground a table row paints on: the cursor row's
+/// `table_active`, the pointer's `table_hover`, both over the `table`
+/// surface, and that surface at rest.
+///
+/// [`RowPaint::accent`] floors against `list_active` over `popover`, the
+/// grounds a dialog list paints on. A table paints on neither, and a theme
+/// may set its table fills apart from the list ones. Each floor moves
+/// toward whichever of black or white contrasts more with its ground; on
+/// grounds of one polarity the moves only add contrast, so a later floor
+/// keeps the earlier ones. Grounds of mixed polarity can leave one state
+/// short, which the theme sweep reports.
+pub fn table_accent(theme: &Theme) -> Hsla {
+    let table = to_rgb(theme.table);
+    let grounds = [
+        over(theme.table_active, table),
+        over(theme.table_hover, table),
+        table,
+    ];
+    let accent = grounds
+        .into_iter()
+        .fold(to_rgb(theme.primary), |accent, ground| {
+            readable_on(accent, ground, pole(ground))
+        });
+    to_hsla(accent)
+}
+
+/// Black or white, whichever contrasts more with `ground`: an endpoint
+/// that can always reach the readable ratio, which a theme's own
+/// foreground cannot promise.
+fn pole(ground: Rgb) -> Rgb {
+    let black = Rgb {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+    };
+    let white = Rgb {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+    };
+    if contrast_ratio(black, ground) >= contrast_ratio(white, ground) {
+        black
+    } else {
+        white
+    }
+}
+
 /// Paints a list row's state: the active fill and text when
 /// `highlighted`, else the hover fill under the pointer.
 ///
@@ -125,6 +173,53 @@ mod tests {
         assert!(
             failures.is_empty(),
             "unreadable rows:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// A table's match accent stays readable on the cursor row, under the
+    /// pointer, and at rest, on every bundled theme.
+    #[gpui::test]
+    fn the_table_accent_is_readable_on_every_table_ground(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (service, _) = crate::theme::load_bundled();
+        let mut failures = Vec::new();
+        let mut checked = 0;
+        let mut list_accent_short = 0;
+        for name in service.names() {
+            let entry = service.resolve(&name).unwrap().clone();
+            cx.update(|cx| {
+                Theme::global_mut(cx).apply_config(&entry);
+                let theme = cx.theme();
+                let accent = to_rgb(table_accent(theme));
+                let list_accent = to_rgb(row_paint(theme).accent);
+                let table = to_rgb(theme.table);
+                let mut list_short = false;
+                for (state, ground) in [
+                    ("on the cursor row", over(theme.table_active, table)),
+                    ("under the pointer", over(theme.table_hover, table)),
+                    ("at rest", table),
+                ] {
+                    checked += 1;
+                    if contrast_ratio(accent, ground) < READABLE_RATIO {
+                        failures.push(format!("{name}: {state}"));
+                    }
+                    list_short |= contrast_ratio(list_accent, ground) < READABLE_RATIO;
+                }
+                list_accent_short += usize::from(list_short);
+            });
+        }
+        assert!(checked >= 3 * 40, "the sweep saw {checked} checks");
+        // The negative control: the list accent, floored on list grounds,
+        // falls short on some table ground, which is why tables floor
+        // their own.
+        assert!(
+            list_accent_short > 0,
+            "RowPaint::accent reads on every table ground — the sweep has lost its teeth"
+        );
+        assert!(
+            failures.is_empty(),
+            "unreadable table accents:\n{}",
             failures.join("\n")
         );
     }

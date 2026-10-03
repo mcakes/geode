@@ -191,27 +191,56 @@ fn align(
     title_len: usize,
     claimed: Option<&[bool]>,
 ) -> Option<(u32, Vec<usize>)> {
-    if query.is_empty() {
+    let q: Vec<char> = query.chars().collect();
+    let c: Vec<char> = candidate.chars().collect();
+    align_in(&mut AlignScratch::default(), &q, &c, title_len, claimed)
+}
+
+/// The score tables [`align_in`] fills, kept by a caller that aligns many
+/// candidates so each alignment reuses them instead of allocating.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AlignScratch {
+    ends_at: Vec<Option<u32>>,
+    within: Vec<Option<u32>>,
+}
+
+/// [`align`] over decoded characters and caller-owned tables: the same
+/// alignment and score, without decoding or allocating per candidate.
+pub(crate) fn align_in(
+    scratch: &mut AlignScratch,
+    q: &[char],
+    c: &[char],
+    title_len: usize,
+    claimed: Option<&[bool]>,
+) -> Option<(u32, Vec<usize>)> {
+    if q.is_empty() {
         return Some((0, Vec::new()));
     }
 
-    let q: Vec<char> = query.chars().collect();
-    let c: Vec<char> = candidate.chars().collect();
+    let AlignScratch { ends_at, within } = scratch;
     let (n, m) = (q.len(), c.len());
     if n > m {
         return None;
     }
-    let base_at = |j: usize| discounted(char_base(&c, j), j, title_len);
+    let base_at = |j: usize| discounted(char_base(c, j), j, title_len);
     let run_at = |j: usize| discounted(RUN_BONUS, j, title_len);
+    // No alignment starts before the first free occurrence of the query's
+    // first character or ends after the last of its last, so only the
+    // columns between them are scored; the cells outside stay `None`.
+    let free = |j: usize| !claimed.is_some_and(|taken| taken[j]);
+    let lo = (0..m).find(|&j| c[j] == q[0] && free(j))?;
+    let hi = (0..m).rev().find(|&j| c[j] == q[n - 1] && free(j))?;
 
     // Track best scores ending at each cell and within each prefix. Both
     // n-by-m tables are retained for alignment backtracking.
-    let mut ends_at: Vec<Option<u32>> = vec![None; n * m];
-    let mut within: Vec<Option<u32>> = vec![None; n * m];
+    ends_at.clear();
+    ends_at.resize(n * m, None);
+    within.clear();
+    within.resize(n * m, None);
     for i in 0..n {
         let mut best_so_far: Option<u32> = None;
         let mut any = false;
-        for j in 0..m {
+        for j in lo..=hi {
             let mut cell = None;
             if c[j] == q[i] && j >= i && !claimed.is_some_and(|taken| taken[j]) {
                 let base = base_at(j);
@@ -238,7 +267,7 @@ fn align(
         }
     }
 
-    let score = within[(n - 1) * m + (m - 1)]?;
+    let score = within[(n - 1) * m + hi]?;
 
     // Backtrack through the same score rules, preferring a continuing run
     // when it attains the cell's score, otherwise the earliest matching endpoint.
