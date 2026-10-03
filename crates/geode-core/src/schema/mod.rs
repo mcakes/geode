@@ -13,7 +13,8 @@ use crate::config::{Diagnostic, MergedDoc, Severity};
 
 /// Dataset storage and query family. Measures use fixed grains for
 /// attribution; documents use declared identity and row axes; series use a
-/// fixed timestamped value schema. An omitted family defaults to measures.
+/// fixed timestamped value schema; references replace one keyed table per
+/// snapshot. An omitted family defaults to measures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Family {
     #[default]
@@ -22,6 +23,9 @@ pub enum Family {
     /// Fixed five-column, bitemporal series storage. Columns are implied by
     /// `SERIES_COLUMNS` rather than declared individually.
     Series,
+    /// One whole table replaced per snapshot: `key` identifies a row, every
+    /// other column is a row attribute. Filled by a snapshot source.
+    Reference,
 }
 
 impl Family {
@@ -30,6 +34,7 @@ impl Family {
             "measures" => Some(Family::Measures),
             "document" => Some(Family::Document),
             "series" => Some(Family::Series),
+            "reference" => Some(Family::Reference),
             _ => None,
         }
     }
@@ -82,6 +87,10 @@ impl DatasetSpec {
 
     pub fn is_series(&self) -> bool {
         self.family == Family::Series
+    }
+
+    pub fn is_reference(&self) -> bool {
+        self.family == Family::Reference
     }
 
     /// The implied columns of a series dataset, in storage order. Answers
@@ -157,8 +166,8 @@ impl DatasetSpec {
     /// excluding row axes. Series expose none. Grouping editors and column
     /// completion share this vocabulary.
     pub fn groupable_columns(&self) -> Vec<&str> {
-        if self.is_series() {
-            // Series requests have no scope or grouping.
+        if self.is_series() || self.is_reference() {
+            // Series and reference datasets have no scope or grouping.
             return Vec::new();
         }
         if self.is_document() {
@@ -181,7 +190,14 @@ impl DatasetSpec {
     /// Document storage/projection order: keys, axes, values, then attributes.
     /// Keys and axes follow their declared arrays; values and attributes each
     /// follow schema order. DDL and document queries share this sequence.
+    /// Reference datasets store key columns, then the rest in declared order.
     pub fn document_columns(&self) -> Vec<&ColumnSpec> {
+        if self.is_reference() {
+            let mut out: Vec<&ColumnSpec> =
+                self.key.iter().filter_map(|k| self.column(k)).collect();
+            out.extend(self.columns.iter().filter(|c| !self.key.contains(&c.name)));
+            return out;
+        }
         let mut out: Vec<&ColumnSpec> = Vec::with_capacity(self.columns.len());
         out.extend(self.key.iter().filter_map(|k| self.column(k)));
         out.extend(self.axes.iter().filter_map(|a| self.column(a)));
@@ -424,8 +440,9 @@ impl SchemaSpec {
                 }
             }
             diags.extend(validate_dataset(&mut dataset));
-            if dataset.is_document() && dataset.columns.is_empty() {
-                // Rejected or columnless documents cannot be stored or queried. Empty
+            if (dataset.is_document() || dataset.is_reference()) && dataset.columns.is_empty() {
+                // Rejected or columnless documents and references cannot be stored or
+                // queried. Empty
                 // measure datasets remain inert because they declare no storage grain.
                 continue;
             }
@@ -444,8 +461,8 @@ pub const RESERVED_COLUMNS: &[&str] = &["batch", "source_file_id", "gen_id", "so
 
 /// Validate relationships after column parsing, then apply family-specific
 /// rules. Some errors remove invalid columns or clear unsupported flags;
-/// missing measure keys and reserved metadata names only warn. Document
-/// validation can clear the dataset, which `from_doc` then omits.
+/// missing measure keys and reserved metadata names only warn. Document and
+/// reference validation can clear the dataset, which `from_doc` then omits.
 fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
 
@@ -494,6 +511,11 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
 
     if ds.is_series() {
         diags.extend(validate_series(ds));
+        return diags;
+    }
+
+    if ds.is_reference() {
+        diags.extend(validate_reference(ds));
         return diags;
     }
 
@@ -660,6 +682,107 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
         }
     }
 
+    diags
+}
+
+/// Reference rules: a nonempty utf8 dimension key, no axes, every other
+/// column a grainless attribute of a storable type, and no column that
+/// shadows a storage column. Any failure drops the dataset, because a
+/// half-understood mapping table would publish rows into the wrong places.
+fn validate_reference(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
+    const STORAGE: [&str; 5] = ["batch", "book", "source_file_id", "gen_id", "source_time"];
+    let name = ds.name.clone();
+    let err = |message: String, path: String| Diagnostic {
+        severity: Severity::Error,
+        layer: None,
+        file: None,
+        message,
+        path: Some(path),
+    };
+    let mut diags = Vec::new();
+    let mut keep = true;
+    if ds.key.is_empty() {
+        diags.push(err(
+            format!(
+                "dataset '{name}': a reference dataset needs a nonempty 'key'; dataset dropped"
+            ),
+            format!("datasets.{name}.key"),
+        ));
+        keep = false;
+    }
+    if !ds.axes.is_empty() {
+        diags.push(err(
+            format!(
+                "dataset '{name}': 'axes' is not accepted on the reference family; dataset dropped"
+            ),
+            format!("datasets.{name}.axes"),
+        ));
+        keep = false;
+    }
+    for k in &ds.key {
+        let ok = ds.column(k).is_some_and(|c| {
+            c.role == ColumnRole::Dimension { grain: None } && c.ty == ColumnType::Utf8
+        });
+        if !ok {
+            diags.push(err(
+                format!(
+                    "dataset '{name}': key column '{k}' must be a declared utf8 column with \
+                     role = \"dimension\"; dataset dropped"
+                ),
+                format!("datasets.{name}.key"),
+            ));
+            keep = false;
+        }
+    }
+    for c in &ds.columns {
+        let path = format!("datasets.{name}.columns.{}", c.name);
+        if STORAGE.contains(&c.name.as_str()) {
+            diags.push(err(
+                format!(
+                    "dataset '{name}': '{}' is a storage column and cannot be declared; \
+                     dataset dropped",
+                    c.name
+                ),
+                path.clone(),
+            ));
+            keep = false;
+        }
+        if c.ty == ColumnType::Timestamp {
+            diags.push(err(
+                format!(
+                    "dataset '{name}': column '{}' is a timestamp; reference columns are utf8, \
+                     f64, i64, date or bool; dataset dropped",
+                    c.name
+                ),
+                path.clone(),
+            ));
+            keep = false;
+        }
+        let in_key = ds.key.contains(&c.name);
+        if !in_key && c.role != (ColumnRole::Attribute { grain: None }) {
+            diags.push(err(
+                format!(
+                    "dataset '{name}': column '{}' must have role = \"attribute\" (only key \
+                     columns are dimensions); dataset dropped",
+                    c.name
+                ),
+                path,
+            ));
+            keep = false;
+        }
+    }
+    if keep {
+        // The text filter routes through dimensions, and only key columns
+        // are dimensions here; a textual attribute could never match.
+        let key = ds.key.clone();
+        for c in ds.columns.iter_mut().filter(|c| !key.contains(&c.name)) {
+            c.textual = false;
+        }
+    } else {
+        ds.columns.clear();
+        ds.key.clear();
+        ds.axes.clear();
+    }
     diags
 }
 
@@ -1039,7 +1162,7 @@ fn parse_column(
         "attribute" => ColumnRole::Attribute {
             grain: match family {
                 Family::Measures => Some(grain_of(table)?),
-                Family::Document | Family::Series => None,
+                Family::Document | Family::Series | Family::Reference => None,
             },
         },
         "axis" => ColumnRole::Axis,
@@ -2421,6 +2544,128 @@ role = "dimension"
         assert!(
             diags.iter().any(|d| d.severity == Severity::Warning
                 && d.path.as_deref() == Some("datasets.risk.retention")),
+            "{diags:?}"
+        );
+    }
+
+    const REFERENCE: &str = r#"
+[underlyings]
+family = "reference"
+key = ["underlying_ref"]
+[underlyings.columns.name]
+type = "utf8"
+role = "attribute"
+[underlyings.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[underlyings.columns.multiplier]
+type = "f64"
+role = "attribute"
+[underlyings.columns.listed]
+type = "bool"
+role = "attribute"
+"#;
+
+    fn reference_with(from: &str, to: &str) -> (SchemaSpec, Vec<Diagnostic>) {
+        SchemaSpec::from_doc(&doc(&REFERENCE.replace(from, to)))
+    }
+
+    #[test]
+    fn a_reference_dataset_stores_its_key_first_then_declared_order() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(REFERENCE));
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("underlyings").unwrap();
+        assert!(ds.is_reference());
+        assert!(!ds.is_document());
+        let names: Vec<&str> = ds
+            .document_columns()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["underlying_ref", "name", "multiplier", "listed"]
+        );
+        assert!(
+            ds.groupable_columns().is_empty(),
+            "reference datasets are not grouped"
+        );
+    }
+
+    #[test]
+    fn a_reference_dataset_without_a_key_is_dropped() {
+        let (schema, diags) = reference_with("key = [\"underlying_ref\"]\n", "");
+        assert!(schema.dataset("underlyings").is_none());
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Error
+                && d.path.as_deref() == Some("datasets.underlyings.key")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_reference_dataset_declaring_axes_is_dropped() {
+        let (schema, diags) = reference_with(
+            "key = [\"underlying_ref\"]",
+            "key = [\"underlying_ref\"]\naxes = [\"name\"]",
+        );
+        assert!(schema.dataset("underlyings").is_none());
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Error
+                && d.path.as_deref() == Some("datasets.underlyings.axes")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_reference_key_column_must_be_a_utf8_dimension() {
+        let (schema, diags) =
+            reference_with("key = [\"underlying_ref\"]", "key = [\"multiplier\"]");
+        assert!(schema.dataset("underlyings").is_none());
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.severity == Severity::Error
+                    && d.message.contains("key column 'multiplier'")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_reference_non_key_dimension_or_measure_is_dropped() {
+        let (schema, diags) = reference_with(
+            "[underlyings.columns.name]\ntype = \"utf8\"\nrole = \"attribute\"",
+            "[underlyings.columns.name]\ntype = \"utf8\"\nrole = \"dimension\"",
+        );
+        assert!(schema.dataset("underlyings").is_none());
+        assert!(
+            diags.iter().any(|d| d.message.contains("'name'")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_reference_column_with_a_storage_name_is_dropped() {
+        let (schema, diags) = reference_with(
+            "[underlyings.columns.listed]",
+            "[underlyings.columns.gen_id]",
+        );
+        assert!(schema.dataset("underlyings").is_none());
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("'gen_id' is a storage column")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_reference_timestamp_column_is_dropped() {
+        let (schema, diags) = reference_with("type = \"bool\"", "type = \"timestamp\"");
+        assert!(schema.dataset("underlyings").is_none());
+        assert!(
+            diags.iter().any(|d| d.message.contains("timestamp")),
             "{diags:?}"
         );
     }

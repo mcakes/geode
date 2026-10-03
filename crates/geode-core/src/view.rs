@@ -423,7 +423,7 @@ impl ViewSpec {
         let Some(ds) = schema.dataset(&self.dataset) else {
             return Vec::new();
         };
-        if ds.is_document() || ds.is_series() {
+        if ds.is_document() || ds.is_series() || ds.is_reference() {
             return Vec::new();
         }
         self.columns
@@ -462,7 +462,7 @@ impl ViewSpec {
         let Some(ds) = schema.dataset(&self.dataset) else {
             return Vec::new();
         };
-        if ds.is_document() || ds.is_series() {
+        if ds.is_document() || ds.is_series() || ds.is_reference() {
             return Vec::new();
         }
         let mut out: Vec<UngroupedDimension<'a>> = Vec::new();
@@ -1936,6 +1936,37 @@ grain = "position"
         assert!(got.iter().all(|u| !u.required));
         // Validation ignores the runtime list.
         assert!(view.validate(&schema, &dimensions("")).is_empty());
+    }
+
+    /// A reference dataset has no grains, so the unanimity rule has nothing
+    /// to read an ungrouped or context dimension from: both lists are empty.
+    #[test]
+    fn a_reference_dataset_supplies_no_ungrouped_or_context_dimensions() {
+        let schema = schema_with(
+            "[underlyings]\nfamily = \"reference\"\nkey = [\"underlying_ref\"]\n\
+             [underlyings.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+             [underlyings.columns.name]\ntype = \"utf8\"\nrole = \"attribute\"\n",
+        );
+        assert!(
+            schema
+                .dataset("underlyings")
+                .is_some_and(|d| d.is_reference())
+        );
+        let mut view = ViewSpec::from_doc(&doc("[v]\ndataset = \"underlyings\"\n\
+             [[v.columns]]\nname = \"underlying_ref\"\nkind = \"dimension\"\n"))
+        .0
+        .remove(0);
+        view.context = vec!["underlying_ref".to_string()];
+        view.columns.clear();
+        assert!(view.context_dimensions(&schema, &dimensions("")).is_empty());
+        let view = ViewSpec::from_doc(&doc("[v]\ndataset = \"underlyings\"\n\
+             [[v.columns]]\nname = \"underlying_ref\"\nkind = \"dimension\"\n"))
+        .0
+        .remove(0);
+        assert!(
+            view.ungrouped_dimensions(&schema, &dimensions(""))
+                .is_empty()
+        );
     }
 
     /// The unanimity rule supplies an ungrouped dimension from a grain that

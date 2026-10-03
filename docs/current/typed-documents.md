@@ -19,10 +19,11 @@ parsed as a dataset. An omitted family defaults to `measures`.
 | `measures` | Columns declare roles and fixed grains. Measures and grain-bearing attributes create storage grains. Document-only roles and uncarriable dimensions are dropped. Missing grain-key declarations and reserved metadata names warn without removing the dataset. |
 | `document` | A nonempty ordered key identifies a document; nonempty ordered axes identify its rows. Key columns must be grainless utf8 dimensions. At least one value is required. Invalid identity or row shape removes the dataset. |
 | `series` | Storage implies `source`, `series_id`, `ts`, `received_at`, and `value`. Declared columns are dropped and nonempty key/axes arrays cleared with errors. Invalid retention windows report errors and become unbounded. |
+| `reference` | One keyed table replaced whole per snapshot. A nonempty `key` of grainless utf8 dimensions identifies a row; every other column is a grainless attribute of utf8, f64, i64, date, or bool. `axes`, timestamp columns, and the storage names `batch`, `book`, `source_file_id`, `gen_id`, and `source_time` are refused. Any failure removes the dataset, because a half-understood mapping table would place rows wrongly. Storage order is the key columns, then the rest in declared order. A reference dataset offers no grouping vocabulary and is neither a document-kind nor an egress target. |
 
 Unknown family strings or malformed key/axes arrays drop a dataset before
 family validation. A columnless measure dataset remains in the schema but
-owns no grain table. A columnless document is omitted. Series validation can
+owns no grain table. A columnless document or reference dataset is omitted. Series validation can
 retain a corrected dataset even while reporting errors.
 
 Document payload axes, values, and attributes support f64, i64, utf8, and
@@ -49,7 +50,8 @@ name. Categorical defaults apply to utf8 dimensions. Explicit
 false is accepted silently.
 
 Text-search checks are family-specific: documents allow identity dimensions
-only; measures accept a declared measure/attribute grain or a dimension
+only; a reference dataset keeps `textual` on key columns and clears it
+silently elsewhere; measures accept a declared measure/attribute grain or a dimension
 carriable by any built-in grain. A refused textual flag is cleared without
 discarding the column. The measure check does not require an actual carrying
 table in that dataset. For example, a textual underlying dimension can pass
