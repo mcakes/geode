@@ -663,9 +663,10 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
             let Some(state) = shell.object_dialog.as_mut() else {
                 return;
             };
-            // `build_edit` still paints the frozen row during confirmation, so guard
-            // the transition here as well as in keyboard routing.
-            if state.confirm.is_some() {
+            // `build_edit` still paints the frozen row during confirmation (and
+            // under the save prompt), so guard the transition here as well as in
+            // keyboard routing.
+            if state.confirm.is_some() || state.save.is_some() {
                 return;
             }
             state.enter_filter();
@@ -804,6 +805,20 @@ pub(crate) fn choice_rows(
     theme: &Theme,
     on_click: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
 ) -> AnyElement {
+    choice_rows_led(list, prefix, scroll, theme, Vec::new(), on_click)
+}
+
+/// [`choice_rows`] with a leading element per row: `leads[declared row]`,
+/// taken once (a swatch for the value-color list). A missing or `None`
+/// entry paints the row as `choice_rows` does.
+pub(crate) fn choice_rows_led(
+    list: &crate::choice::ChoiceList,
+    prefix: &'static str,
+    scroll: &gpui::ScrollHandle,
+    theme: &Theme,
+    mut leads: Vec<Option<AnyElement>>,
+    on_click: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
+) -> AnyElement {
     // Keep all ranked rows in the scroll container. Wheel scrolling and keyboard
     // scroll-follow share the viewport; highlight and clicks use ranked indices.
     let paint = super::listrow::row_paint(theme);
@@ -831,10 +846,12 @@ pub(crate) fn choice_rows(
             // scrolling past it.
             .flex_shrink_0()
             .px_3()
+            .gap_2()
             .items_center()
             .text_sm()
             .rounded(theme.radius)
             .debug_selector(move || selector.clone())
+            .children(leads.get_mut(ranked.row).and_then(Option::take))
             .child(super::keybindings_view::highlighted_text(
                 text,
                 &ranked.indices,
@@ -907,15 +924,29 @@ pub(crate) fn badge(
 /// Swatch for an already-resolved data colour. The caller resolves the definition
 /// against anchors, tokens, and the active theme; this helper paints that value with a
 /// theme border, keeping data colour separate from chrome.
-pub(crate) fn swatch(colour: Hsla, selector: String, cx: &App) -> AnyElement {
+pub(crate) fn swatch(colour: Hsla, selector: impl Into<SharedString>, cx: &App) -> AnyElement {
+    let selector: SharedString = selector.into();
     div()
-        .w(scale::design(14.))
-        .h(scale::design(14.))
+        .flex_shrink_0()
+        .w(scale::design(SWATCH_SIZE))
+        .h(scale::design(SWATCH_SIZE))
         .rounded(cx.theme().radius_tokens().sm)
         .border_1()
         .border_color(cx.theme().border)
         .bg(colour)
-        .debug_selector(move || selector.clone())
+        .debug_selector(move || selector.to_string())
+        .into_any_element()
+}
+
+/// A swatch's side on the design scale.
+const SWATCH_SIZE: f32 = 14.;
+
+/// An empty slot a swatch wide, for a row with no swatch among rows that
+/// have one, so every row's text starts on the same spine.
+pub(crate) fn swatch_space() -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .w(scale::design(SWATCH_SIZE))
         .into_any_element()
 }
 
@@ -1111,6 +1142,9 @@ pub(crate) fn hint_rows(hints: &[Hint]) -> AnyElement {
         }
         let last = members.len().saturating_sub(1);
         for (i, hint) in members.into_iter().enumerate() {
+            if let Some(ks) = &hint.keystroke {
+                line = line.child(super::kbd::chip(ks));
+            }
             for (k, key) in hint.keys.iter().enumerate() {
                 if k == 1
                     && let Some(between) = hint.between

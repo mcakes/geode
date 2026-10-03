@@ -1,7 +1,8 @@
 //! The gpui-dependent chart kit: what every element shares once it has a
 //! window. Rebuild counters, one pane side's resolved y axis, the theme
-//! colors a frame paints its chrome in, grid and axis painters, and stroke
-//! builders with the ceiling on what a path of separate segments holds.
+//! colors a frame paints its chrome in, grid and axis painters, stroke
+//! builders with the ceiling on what a path of separate segments holds,
+//! and the fill builder under a line.
 //! `core` holds the window-free geometry these are built from.
 
 use std::cell::Cell;
@@ -324,6 +325,31 @@ pub(crate) fn stroke_points(pts: &[Point], width: f32) -> Option<Path<Pixels>> {
         } else {
             builder.line_to(at);
         }
+    }
+    builder.build().ok()
+}
+
+/// One fill path over the outlines `core::marks::fill_outlines` leaves,
+/// each closed on itself, a new one after every break. An outline of
+/// fewer than three points encloses nothing and is skipped; `None` when
+/// none is left. The outlines come from a decimated polyline, so their
+/// points are bounded by the plot's pixel columns as a stroke's are.
+pub(crate) fn fill_points(outlines: &[Point]) -> Option<Path<Pixels>> {
+    let mut builder = PathBuilder::fill();
+    let mut any = false;
+    for outline in outlines.split(|p| p.is_break()) {
+        if outline.len() < 3 {
+            continue;
+        }
+        builder.move_to(point(px(outline[0].x), px(outline[0].y)));
+        for p in &outline[1..] {
+            builder.line_to(point(px(p.x), px(p.y)));
+        }
+        builder.close();
+        any = true;
+    }
+    if !any {
+        return None;
     }
     builder.build().ok()
 }

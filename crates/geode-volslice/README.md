@@ -42,20 +42,29 @@ cargo bench -p geode-volslice
 The `model_build` bench times `core::build::model` alone over twelve active
 expiries, the three kinds, densities and a `cvi draft − chain` difference,
 with the batch answered once outside the loop. Its target is under 1 ms; it
-has not been measured locally (see the performance guide).
+measured about 100 µs with 1,000-point curves (see the performance guide).
 
 ## What it paints
 
 The kinds are fixed, in header order: `cvi` (the published CVI document as
 of the frame, digit `1`), `cvi draft` (the followed group's board draft,
 `2`) and `chain` (the option chain, `3`). A curve kind is one solid
-(published) or dashed (draft) line per active expiry, evaluated `Dense(200)`
-on the document's strike range; the chain is its mid vols as points with the
-bid-ask range as a bar, a one-sided quote as a half bar. Each active expiry
-takes the chart palette color of its strip position, so twelve expiries
-cycle the theme's five chart colors. `shift+d` adds each visible curve's
-density on the right axis at a fixed lower opacity, per unit of the shown
-coordinate (a gap where delta saturates).
+(published) or dashed (draft) line per active expiry, evaluated at
+`GRID_N` (1,000) strikes on the document's strike range widened to the
+chain's lowest and highest listed strike wherever a chain is loaded at that
+expiry (`Grid::Dense { cover }`, from `core::build::cover`). The cover is
+asked whether or not the chain is shown, so toggling the chain does not move
+a curve's x extent; an expiry with no chain covers nothing. The chain is its
+mid vols as points with the bid-ask range as a bar, a one-sided quote as a
+half bar. Each active expiry takes the chart palette color of its strip
+position, so twelve expiries cycle the theme's five chart colors. `shift+d`
+adds each visible curve's density on the right axis at `DENSITY_ALPHA` of
+the expiry color, shaded down to zero (a filled xy line, so a negative lobe
+shades up to zero), per unit of the shown coordinate (a gap where delta
+saturates, in line and shading alike). The model spaces a dense grid; the
+demo model packs it toward the forward on the scale of σ√t, so a
+short-dated density keeps 25 or more points per σ√t·F however wide the
+chain and reads as a smooth hump.
 
 A difference pair (`d`) paints in a lower pane under the vol pane:
 

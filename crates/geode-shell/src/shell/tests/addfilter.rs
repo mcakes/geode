@@ -164,7 +164,7 @@ fn the_plus_menu_answers_j_k_enter_and_escape(cx: &mut gpui::TestAppContext) {
 }
 
 /// A press outside the open menu closes it and reaches nothing beneath:
-/// the grouping readout under the pointer does not open its picker.
+/// the grouping readout under the pointer does not open the Grouping dialog.
 #[gpui::test]
 fn a_click_outside_the_menu_closes_it_and_goes_no_further(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -174,8 +174,8 @@ fn a_click_outside_the_menu_closes_it_and_goes_no_further(cx: &mut gpui::TestApp
     click(&mut vcx, "scope-grouping");
     assert!(shell.read_with(&vcx, |s, _| s.add_filter_menu.is_none()));
     assert!(
-        shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()),
-        "the closing press does not also open the grouping picker"
+        shell.read_with(&vcx, |s, _| s.object_dialog.is_none() && !s.modal_open()),
+        "the closing press does not also open the Grouping dialog"
     );
     click(&mut vcx, "scope-pick-chip");
     click(&mut vcx, "scope-pick-chip");

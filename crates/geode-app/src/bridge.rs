@@ -85,6 +85,7 @@ pub(crate) const MODULE_KINDS: &[&str] = &[
     "volslice",
     "pricer",
     "diagnostics",
+    "guide",
     PLACEHOLDER_KIND,
 ];
 
@@ -171,10 +172,8 @@ pub fn data_setup(
     diagnostics.extend(d);
     let (positions, d) = geode_data::positions::resolve(positions_spec, &adapters);
     diagnostics.extend(d);
-    let (colours, colour_diags) = config
-        .doc(geode_core::config::COLORS_DOC)
-        .map(NamedColours::from_doc)
-        .unwrap_or_default();
+    // Definitions and the value mapping checked against them, as one.
+    let (colours, colour_diags) = NamedColours::from_config(config);
     diagnostics.extend(colour_diags);
     // Resolve the configured pricer, defaulting to mock. An unavailable name
     // warns and leaves the implementation absent; the pricing worker returns
@@ -583,8 +582,9 @@ pub fn pricer_templates_from_config(
 /// presentation overlays (the pricer's column plan is built from all three),
 /// the colors they may name (a named column's cells and header are painted
 /// from them, so a `colors.toml` edit alone must reach open tiles), the
-/// retired `pricer_views` doc (so one added at runtime raises its
-/// retirement diagnostic without a restart), merged `pricer_templates`, the
+/// `value_colors` mapping those colors carry (likewise), the retired
+/// `pricer_views` doc (so one added at runtime raises its retirement
+/// diagnostic without a restart), merged `pricer_templates`, the
 /// `dimensions` doc (a frame scope over the pricer may name a derived
 /// dimension, so an edit to it must re-apply open tiles' scopes), raw
 /// `app.pricing.refresh`, `app.pricing.underlyings` and
@@ -598,6 +598,8 @@ pub struct PricerConfigKey {
     view_presentation: Option<toml::Table>,
     dataset_presentation: Option<toml::Table>,
     colors: Option<toml::Table>,
+    /// The value mapping the pricer's colors carry.
+    value_colors: Option<toml::Table>,
     pricer_views: Option<toml::Table>,
     templates: Option<toml::Table>,
     /// The derived dimensions a frame scope over the pricer may name.
@@ -615,6 +617,9 @@ pub fn pricer_config_key(config: &Config) -> PricerConfigKey {
         dataset_presentation: config.doc("dataset_presentation").map(|d| d.value.clone()),
         colors: config
             .doc(geode_core::config::COLORS_DOC)
+            .map(|d| d.value.clone()),
+        value_colors: config
+            .doc(geode_core::config::VALUE_COLORS_DOC)
             .map(|d| d.value.clone()),
         pricer_views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),
         templates: config.doc(PRICER_TEMPLATES_DOC).map(|d| d.value.clone()),
@@ -1235,10 +1240,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 }
                 // Parse named colors separately to retain their own validation diagnostics;
                 // load_views uses them for reference checks but does not return those errors.
-                let (colours, colour_diags) = config
-                    .doc(geode_core::config::COLORS_DOC)
-                    .map(NamedColours::from_doc)
-                    .unwrap_or_default();
+                // Definitions and the value mapping checked against them, as one.
+                let (colours, colour_diags) = NamedColours::from_config(config);
                 for d in &colour_diags {
                     tracing::warn!(target: "geode::query", "{d}");
                 }
@@ -1369,10 +1372,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // pricer's are collected here.
                 let (specs, _) = load_views(config);
                 let (views, diags) = pricer_views_from_specs(config, &specs);
-                let (colours, _) = config
-                    .doc(geode_core::config::COLORS_DOC)
-                    .map(NamedColours::from_doc)
-                    .unwrap_or_default();
+                // Definitions and the value mapping checked against them, as one.
+                let (colours, _) = NamedColours::from_config(config);
                 // The dimensions doc's own diagnostics are the
                 // ConfigReloaded observer's to report.
                 let (dims, _) = config
@@ -2645,6 +2646,22 @@ role = "attribute"
         );
     }
 
+    /// The pricer's colors carry the value mapping, so a `value_colors`
+    /// edit alone must change the key and re-run the pricer's reload.
+    #[test]
+    fn the_pricer_reload_key_changes_with_value_colors() {
+        let with = |text: &str| {
+            Config::from_docs(vec![
+                LayerDoc::builtin(geode_core::config::VALUE_COLORS_DOC, text).unwrap(),
+            ])
+        };
+        assert_ne!(
+            pricer_config_key(&with("[underlying_ref]\nSPX = \"blue\"\n")),
+            pricer_config_key(&with("[underlying_ref]\nSPX = \"teal\"\n")),
+            "a value-color edit alone must re-run the pricer's reload"
+        );
+    }
+
     /// The retired doc is part of the key: one added at runtime, with no
     /// other pricer-relevant edit, must still reach the reload path that
     /// raises its retirement diagnostic.
@@ -2765,6 +2782,59 @@ role = "attribute"
         });
         vcx.run_until_parked();
         assert_eq!(bridge.pricer.view_names(), vec!["slim"]);
+    }
+
+    /// The `ConfigReloaded` observer hands the blotter factory colors that
+    /// carry the checked value mapping, not the definitions alone.
+    #[gpui::test]
+    fn a_config_reload_hands_the_blotter_factory_the_value_colors(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            // The observer refreshes factories only when a `views` doc exists.
+            builtin: vec![
+                LayerDoc::builtin("views", SLIM_VIEW).unwrap(),
+                LayerDoc::builtin(geode_core::config::COLORS_DOC, "[blue]\nhue = 240\n").unwrap(),
+                LayerDoc::builtin(
+                    "dimensions",
+                    "[region]\nfrom = \"underlying_ref\"\n[region.values]\nUS = [\"SPX\"]\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    geode_core::config::VALUE_COLORS_DOC,
+                    "[region]\nUS = \"blue\"\n",
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        assert!(
+            bridge.factory.colours().values().is_empty(),
+            "fixture: built with no value mapping"
+        );
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            bridge
+                .factory
+                .colours()
+                .values()
+                .get("region", "US")
+                .map(|c| &**c),
+            Some("blue")
+        );
     }
 
     /// A desk `pricer_templates` layer: a `CONDOR` and a broken `RR`

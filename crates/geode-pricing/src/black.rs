@@ -1,31 +1,63 @@
 //! Undiscounted Black formulas on a forward, for the demo vol model's
 //! delta coordinate and density. Zero rate: the forward carries carry.
-//! The normal CDF is the Numerical Recipes `erfcc` rational
-//! approximation (fractional error below 1.2e-7 everywhere), which is
-//! precision enough for a stand-in and keeps the crate free of a numeric
-//! dependency.
+//!
+//! The normal CDF is Hart's double-precision rational approximation (as
+//! West, "Better approximations to cumulative normal functions", 2005,
+//! sets it out): absolute error near 1e-14 within three standard
+//! deviations, relative error below 1e-8 in the tails, and exactly 0.5 at
+//! zero. The density is a second difference of call prices over a fine
+//! strike grid, which divides a price error by the square of the step: a
+//! single-precision approximation (error ~1e-7, with a jump at zero) shows
+//! there as visible noise around the money. Kept in-crate, free of a
+//! numeric dependency.
 
-use std::f64::consts::SQRT_2;
-
-/// Complementary error function, fractional error < 1.2e-7.
-fn erfc(x: f64) -> f64 {
-    let z = x.abs();
-    let t = 1.0 / (1.0 + 0.5 * z);
-    let poly = -z * z - 1.265_512_23
-        + t * (1.000_023_68
-            + t * (0.374_091_96
-                + t * (0.096_784_18
-                    + t * (-0.186_288_06
-                        + t * (0.278_868_07
-                            + t * (-1.135_203_98
-                                + t * (1.488_515_87 + t * (-0.822_152_23 + t * 0.170_872_77))))))));
-    let r = t * poly.exp();
-    if x >= 0.0 { r } else { 2.0 - r }
-}
+/// Past this the lower tail is below any f64 a price can resolve.
+const TAIL_END: f64 = 37.0;
+/// Where the rational form hands over to the continued fraction: 10/√2.
+const RATIONAL_END: f64 = 7.071_067_811_865_47;
+/// √(2π).
+const SQRT_TAU: f64 = 2.506_628_274_631;
+/// Hart's numerator and denominator, highest power first.
+const P: [f64; 7] = [
+    3.526_249_659_989_11e-2,
+    0.700_383_064_443_688,
+    6.373_962_203_531_65,
+    33.912_866_078_383,
+    112.079_291_497_871,
+    221.213_596_169_931,
+    220.206_867_912_376,
+];
+const Q: [f64; 8] = [
+    8.838_834_764_831_84e-2,
+    1.755_667_163_182_64,
+    16.064_177_579_207,
+    86.780_732_202_946_1,
+    296.564_248_779_674,
+    637.333_633_378_831,
+    793.826_512_519_948,
+    440.413_735_824_752,
+];
 
 /// Standard normal cumulative distribution.
 pub fn norm_cdf(x: f64) -> f64 {
-    0.5 * erfc(-x / SQRT_2)
+    let z = x.abs();
+    let lower = if z > TAIL_END {
+        0.0
+    } else {
+        let gauss = (-z * z / 2.0).exp();
+        if z < RATIONAL_END {
+            let num = P.iter().fold(0.0, |acc, c| acc * z + c);
+            let den = Q.iter().fold(0.0, |acc, c| acc * z + c);
+            gauss * num / den
+        } else {
+            let mut b = z + 0.65;
+            for k in [4.0, 3.0, 2.0, 1.0] {
+                b = z + k / b;
+            }
+            gauss / b / SQRT_TAU
+        }
+    };
+    if x > 0.0 { 1.0 - lower } else { lower }
 }
 
 fn d1(forward: f64, strike: f64, vol: f64, t: f64) -> f64 {
@@ -52,14 +84,45 @@ mod tests {
 
     #[test]
     fn the_normal_cdf_is_symmetric_and_matches_tabulated_values() {
-        // The erfcc polynomial sums to ~3e-8 at z = 0, so the CDF there is
-        // 0.5 to within its documented 1.2e-7, not to 1e-9.
-        assert!((norm_cdf(0.0) - 0.5).abs() < 1e-7);
-        assert!((norm_cdf(1.96) - 0.975_002).abs() < 1e-5);
-        assert!((norm_cdf(-1.96) - 0.024_998).abs() < 1e-5);
-        assert!((norm_cdf(1.0) + norm_cdf(-1.0) - 1.0).abs() < 1e-9);
-        assert!(norm_cdf(10.0) > 0.999_999);
-        assert!(norm_cdf(-10.0) < 1e-6);
+        assert_eq!(norm_cdf(0.0), 0.5, "no step at zero");
+        for (x, want) in [
+            (1.0, 0.841_344_746_068_542_9),
+            (1.96, 0.975_002_104_851_779_5),
+            (-1.96, 0.024_997_895_148_220_435),
+            (-3.0, 0.001_349_898_031_630_094_6),
+            (2.5, 0.993_790_334_674_223_8),
+        ] {
+            assert!((norm_cdf(x) - want).abs() < 1e-14, "{x}: {}", norm_cdf(x));
+        }
+        // The tail, relative: Φ(-8) is 6.220960574271785e-16.
+        assert!((norm_cdf(-8.0) / 6.220_960_574_271_785e-16 - 1.0).abs() < 1e-7);
+        assert!((norm_cdf(1.0) + norm_cdf(-1.0) - 1.0).abs() < 1e-15);
+        assert_eq!(norm_cdf(-40.0), 0.0);
+        assert_eq!(norm_cdf(40.0), 1.0);
+    }
+
+    /// A second difference of prices on a fine strike step must not see
+    /// the CDF's own error: across the money (where d1 and d2 cross zero)
+    /// the curvature of call prices in strike is the smooth lognormal
+    /// density, with no step where an approximation changes branch.
+    #[test]
+    fn call_prices_are_smooth_enough_for_a_fine_second_difference() {
+        let (f, vol, t) = (100.0, 0.2, 7.0 / 365.0);
+        let h = 0.01;
+        let pdf: Vec<f64> = (0..400)
+            .map(|i| 98.0 + i as f64 * h)
+            .map(|k| {
+                (call_price(f, k + h, vol, t) - 2.0 * call_price(f, k, vol, t)
+                    + call_price(f, k - h, vol, t))
+                    / (h * h)
+            })
+            .collect();
+        let peak = pdf.iter().copied().fold(f64::MIN, f64::max);
+        let rough = pdf
+            .windows(3)
+            .map(|w| (w[0] - 2.0 * w[1] + w[2]).abs())
+            .fold(0.0, f64::max);
+        assert!(rough / peak < 1e-4, "{}", rough / peak);
     }
 
     #[test]

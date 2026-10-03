@@ -7,8 +7,8 @@
 //! active workspace holds its own frame lane; it paints as a selected
 //! solid primary chip while pinned and as a bare verb otherwise. The readout
 //! then separates pin, as-of, grouping, and scope with inset hairlines.
-//! The as-of chip alone uses warning colors. Grouping opens a picker and
-//! stays visibly pressed while it is open. Filled selection chips contain
+//! The as-of chip alone uses warning colors. Grouping opens the Grouping
+//! dialog and stays visibly pressed while it is open. Filled selection chips contain
 //! a separate, occluding close target; add/load/save actions are bare
 //! glyphs. The load glyph opens the scope picker and, like the grouping
 //! readout, stays pressed while it is open.
@@ -185,7 +185,7 @@ fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
 /// reasoning: `render.rs`'s one call site builds each as its own
 /// `cx.entity()`-capturing closure, and this body hands each to exactly
 /// one element, so a struct would only move the assembly for no reader
-/// benefit. `grouping_open` is whether the grouping picker is up right
+/// benefit. `grouping_open` is whether the Grouping dialog is up right
 /// now — the readout paints its pressed fill for as long as it is (a
 /// control that owns a popup stays visibly pressed until it closes);
 /// `scope_open` is the same for the scope picker and the load glyph, which
@@ -578,7 +578,7 @@ pub fn toolbar(
         .when(has_chips, |el| el.child(chips_row))
         .child(verbs);
 
-    // The grouping picker trigger retains pressed styling while open and
+    // The Grouping dialog trigger retains pressed styling while open and
     // uses a chevron to expose that state. Closed, it shares the bare
     // control pointer colors used by the toolbar actions.
     let grouping = h_flex()
@@ -595,7 +595,7 @@ pub fn toolbar(
         .debug_selector(|| "scope-grouping".to_string())
         .tooltip(tips::tip(
             "tip-scope-grouping",
-            "Pick a grouping",
+            "Grouping",
             Some("frame::grouping"),
             None,
         ))

@@ -312,6 +312,69 @@ PY
   restore
 }
 
+# ---- bundled user guide
+
+run_mutation "guide: restore the selected heading" \
+  crates/geode-guide/src/tile.rs \
+  '            .and_then(section_for)' \
+  '            .and_then(|_| None)' \
+  geode-guide \
+  keyboard_and_pointer_navigate_and_restore_sections
+
+run_mutation "guide: the rendered reader scrolls" \
+  crates/geode-guide/src/tile/chrome.rs \
+  'TextView::new(&self.text)
+                            .scrollable(true)' \
+  'TextView::new(&self.text)
+                            .scrollable(false)' \
+  geode-guide \
+  scroll_keys_move_rendered_markdown_and_top_resets_it
+
+run_mutation "guide: cancelling find restores the entry section" \
+  crates/geode-guide/src/tile.rs \
+  'if let Some((section, offset)) = self.find_entry.take() {
+                    self.show_section(section, cx);' \
+  'if let Some((section, offset)) = self.find_entry.take() {
+                    let _ = section;
+                    self.show_section(0, cx);' \
+  geode-guide \
+  find_previews_sections_cancel_restores_and_committed_matches_cycle
+
+run_mutation "guide: frame changes acknowledge the offline reader" \
+  crates/geode-guide/src/tile.rs \
+  'cx.observe(frame.entity(), |this, _, cx| this.arrive(cx))' \
+  'cx.observe(frame.entity(), |this, _, cx| { if false { this.arrive(cx); } })' \
+  geode-guide \
+  a_frame_change_never_waits_for_the_offline_reader
+
+run_mutation "guide: startup registers the guide tile" \
+  crates/geode-app/src/main.rs \
+  '    roster.add(Box::new(geode_guide::GuideFactory));' \
+  '    // guide factory omitted' \
+  geode-app \
+  the_bundled_guide_launches_navigates_and_saves_through_the_shell
+
+run_mutation "guide: search paints the matching text" \
+  crates/geode-guide/src/search.rs \
+  '            block.render(&ranges, color, &mut marked.source);' \
+  '            block.render(&[], color, &mut marked.source);' \
+  geode-guide \
+  search_paints_matches_in_prose_code_and_tables_and_escape_removes_them
+
+run_mutation "guide: visible hints follow a rebind" \
+  crates/geode-guide/src/tile.rs \
+  '            this.hints = hint_keys(cx);' \
+  '            // retained hints omitted' \
+  geode-guide \
+  actions_menu_and_visible_hints_follow_the_live_keymap
+
+run_mutation "guide: dot opens the shared actions menu" \
+  crates/geode-guide/src/lib.rs \
+  '"." = "guide::menu"' \
+  '"." = "none"' \
+  geode-guide \
+  actions_menu_and_visible_hints_follow_the_live_keymap
+
 # ---- discovery
 #
 # Readiness checks distinguish files still being written from loadable files.
@@ -4096,7 +4159,7 @@ run_mutation "delegate: any_determined reflects the whole cached window" \
   '        self.cache
             .set_window(window.clone(), cols, |shown_row, col| {
                 let row = *shown.get(shown_row)? as usize;
-                cell(snapshot, plan, row, col)
+                cell(snapshot, plan, values, row, col)
             });
         // Scanned over the *whole* current window, not just the rows
         // this call'"'"'s `fill` closure actually ran for: `set_window`
@@ -4116,7 +4179,7 @@ run_mutation "delegate: any_determined reflects the whole cached window" \
         self.cache
             .set_window(window.clone(), cols, |shown_row, col| {
                 let row = *shown.get(shown_row)? as usize;
-                let c = cell(snapshot, plan, row, col)?;
+                let c = cell(snapshot, plan, values, row, col)?;
                 if c.attribution == Attribution::DeterminedNonAdditive {
                     any_determined = true;
                 }
@@ -5478,7 +5541,7 @@ run_mutation "objectdialog: browse d/r skip the read-only gate" \
 # confirmation tests do not exercise that mouse path.
 run_mutation "objectdialog: a browse row click answers the question with a shrug" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if state.confirm.is_some() {
+  '    if state.confirm.is_some() || state.save.is_some() {
         return;
     }
     let Some(ix) = state.rows.position(|r| r.name == clicked) else {' \
@@ -5515,8 +5578,8 @@ run_mutation "objectdialog: a browse removal walks leave_edit and drops the filt
 # last row. The test specifically removes that row.
 run_mutation "objectdialog: the removal landing clamps against the pre-flush rows" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        Some(config) => state.domain.objects(&config),' \
-  '        Some(_) => state.domain.objects(&shell.services.config),' \
+  '            .chain(state.domain.objects(&config))' \
+  '            .chain(state.domain.objects(&shell.services.config))' \
   geode-shell \
   a_browse_delete_of_the_last_row_lands_the_cursor_on_the_new_last_row
 
@@ -5575,7 +5638,7 @@ run_mutation "objectdialog: the help line paints under a notice" \
 # shows help for the cursor's row; the test checks the armed state.
 run_mutation "objectdialog: the help line paints beside an armed confirm" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let help = if state.confirm.is_some() {' \
+  '    let help = if state.confirm.is_some() || state.save.is_some() {' \
   '    let help = if false {' \
   geode-shell \
   the_help_line_is_blank_under_an_armed_confirm
@@ -5590,15 +5653,16 @@ run_mutation "objectdialog: the dialog opens in filter mode" \
   geode-shell \
   config_views_opens_in_normal_mode_and_lists_the_views
 
-# The displayed query must drive ranking. Mode and stored-query assertions
-# cannot detect a rank call using an empty query; the test checks that
-# nonmatching rows stop painting.
+# The displayed query must drive ranking. `visible_rows` is the ranking a
+# removal landing resolves its cursor against: ranked against an empty
+# query under a filter, it clamps against the unfiltered list and leaves
+# the cursor past the end of the filtered one.
 run_mutation "objectdialog: the browse list ignores the query it displays" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
   '    crate::listfilter::rank(&texts, &state.query)' \
   '    crate::listfilter::rank(&texts, "")' \
   geode-shell \
-  slash_filters_and_escape_walks_the_ladder
+  a_filtered_browse_delete_of_the_last_match_lands_on_the_match_left
 
 # Closing an object dialog must remove its state. The test opens another
 # dialog afterward so leftover object state cannot silently survive an
@@ -8327,7 +8391,7 @@ run_mutation "expr-chips: the term × occludes the chip body" \
   a_terms_close_glyph_drops_only_that_term
 
 # The menu's click catcher occludes: without it the closing press also
-# reaches what is beneath (the grouping readout opens its picker).
+# reaches what is beneath (the grouping readout opens the Grouping dialog).
 run_mutation "add-filter: an outside press closes the menu and goes no further" \
   crates/geode-shell/src/shell/render.rs \
   '                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())
@@ -8854,10 +8918,9 @@ run_mutation "groupings: to_table writes every list item, ticked or not" \
 
 run_mutation "groupings: validate discards the reader's own diagnostics" \
   crates/geode-shell/src/shell/objectdialog/groupings.rs \
-  '    let (_slots, diags) = GroupingSlots::from_doc(&doc, &schema, &dims);
-    diags' \
+  '    let (_slots, diags) = GroupingSlots::from_doc(&doc, &schema, &dims);' \
   '    let (_slots, _diags) = GroupingSlots::from_doc(&doc, &schema, &dims);
-    Vec::new()' \
+    let diags: Vec<Diagnostic> = Vec::new();' \
   geode-shell an_out_of_range_slot_key_still_warns_through_validate
 
 # `item_is_empty` recognizes an empty grouping array. Views use tables,
@@ -9052,8 +9115,10 @@ run_mutation "objectdialog: groupings roster lists the nine slots" \
 # nothing. `is_some_and(.. != User)` says None forks nothing.
 run_mutation "objectdialog: an unconfigured slot never forks" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '        .is_some_and(|row| row.layer.is_some_and(|layer| layer != Layer::User))' \
-  '        .is_some_and(|row| row.layer != Some(Layer::User))' \
+  '        .is_some_and(|row| row.layer.is_some_and(|layer| layer != Layer::User))
+}' \
+  '        .is_some_and(|row| row.layer != Some(Layer::User))
+}' \
   geode-shell \
   ticking_a_dimension_in_an_empty_slot_writes_it_without_asking
 
@@ -9651,14 +9716,14 @@ run_mutation "toolbar: the as-of segment paints its divider" \
   the_as_of_chip_leads_the_bar_and_opens_the_selector
 
 # The grouping readout reads "open" (pressed fill, chevron up) only
-# while the grouping picker is up. Pinning the branch to rest leaves a
+# while the Grouping dialog is up. Pinning the branch to rest leaves a
 # trigger that never shows its popup is open.
-run_mutation "toolbar: the readout's open state follows the grouping picker" \
+run_mutation "toolbar: the readout's open state follows the Grouping dialog" \
   crates/geode-shell/src/shell/toolbar.rs \
   '        .child(if grouping_open {' \
   '        .child(if false {' \
   geode-shell \
-  the_readout_paints_a_chevron_and_reads_open_while_the_picker_is_up
+  the_readout_reads_open_while_the_dialog_is_up
 
 # The text field's clear glyph removes the text filter. Without
 # `cleanable`, the click lands on the field and leaves the text in place.
@@ -9975,16 +10040,6 @@ run_mutation "dialogmode: a bare 0 is a digit command" \
   geode-shell \
   bare_digits_one_to_nine_are_a_command_and_zero_is_not
 
-# The browse jump is gated on the domain: inverting the gate sends a `3`
-# typed at the Views list into an edit stage for a view named "3" while
-# Groupings drops the very key its footer advertises.
-run_mutation "objectdialog: the browse digit jump ignores the domain" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            NormalCommand::Digit(n) if state.domain == Domain::Groupings => {' \
-  '            NormalCommand::Digit(n) if state.domain != Domain::Groupings => {' \
-  geode-shell \
-  a_digit_in_browse_opens_that_slot_on_groupings_only
-
 # The edit-stage jump has its own gate, spelled differently (an
 # `Option<Domain>` read off the state), so it is guarded separately.
 run_mutation "objectdialog: the edit-stage digit jump ignores the domain" \
@@ -10109,23 +10164,23 @@ run_mutation "groupings: an unchanged chain is applied anyway" \
 # tests cannot reach. The combined match arms uniquely identify the bar.
 run_mutation "objectdialog: the action bar stays up under the chain field" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        (true, _) => div().min_h_6().into_any_element(),
-        (false, Some(confirm)) => confirm_row(
-            confirm,
-            &draft.name,
-            state.confirm_detail.as_deref(),
-            entity,
-            cx,
-        ),
-        (false, None) => action_bar(shell, entity),' \
-  '        (_, Some(confirm)) => confirm_row(
-            confirm,
-            &draft.name,
-            state.confirm_detail.as_deref(),
-            entity,
-            cx,
-        ),
-        (_, None) => action_bar(shell, entity),' \
+  '            (true, _) => div().min_h_6().into_any_element(),
+            (false, Some(confirm)) => confirm_row(
+                confirm,
+                &draft.name,
+                state.confirm_detail.as_deref(),
+                entity,
+                cx,
+            ),
+            (false, None) => action_bar(shell, entity),' \
+  '            (_, Some(confirm)) => confirm_row(
+                confirm,
+                &draft.name,
+                state.confirm_detail.as_deref(),
+                entity,
+                cx,
+            ),
+            (_, None) => action_bar(shell, entity),' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
 
@@ -10163,9 +10218,9 @@ run_mutation "objectdialog: a Groupings slot opens in its chain field" \
 # the stage at Browse.
 run_mutation "objectdialog: a browse row click opens the edit stage" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if opens {
+  '    } else if opens {
         enter_edit_stage(shell, &name, None, cx);' \
-  '    if opens && false {
+  '    } else if opens && false {
         enter_edit_stage(shell, &name, None, cx);' \
   geode-shell clicking_a_browse_row_opens_its_edit_stage
 
@@ -10294,14 +10349,14 @@ run_mutation "objectdialog: x on an available Scopes row names enter" \
 # guard lets the click change the object behind a pending operation.
 run_mutation "objectdialog: a tick click is claimed and dropped while a confirm is armed" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if armed_confirm(shell).is_some() {
+  '    if question_up(shell) {
         return;
     }
     let Some(draft) = draft_mut(shell) else {
         return;
     };
     if position >= draft.visible_rows().len() {' \
-  '    if false && armed_confirm(shell).is_some() {
+  '    if false && question_up(shell) {
         return;
     }
     let Some(draft) = draft_mut(shell) else {
@@ -10310,9 +10365,10 @@ run_mutation "objectdialog: a tick click is claimed and dropped while a confirm 
     if position >= draft.visible_rows().len() {' \
   geode-shell a_tick_click_does_nothing_while_a_confirm_is_armed
 
-# The tick's mouse-down stops propagation to the row handler. Without
-# it, confirmation still blocks the value change but the same click moves
-# the draft cursor. This entry checks that independent selection effect.
+# The tick's mouse-down stops propagation to the row handler. Without it
+# the row handler also runs on the same press. Under an armed confirm both
+# handlers return early, so the effect shows only on an ordinary tick
+# click: the row handler moves the cursor off the row the tick parked it on.
 run_mutation "objectdialog: the tick's click does not stop propagation" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
@@ -10320,7 +10376,7 @@ run_mutation "objectdialog: the tick's click does not stop propagation" \
                                 entity_for_tick.update(cx, |shell, cx| {' \
   '.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                                 entity_for_tick.update(cx, |shell, cx| {' \
-  geode-shell a_tick_click_does_nothing_while_a_confirm_is_armed
+  geode-shell clicking_a_tick_hides_the_column_and_parks_the_cursor_there
 
 # ---- Row dragging -----------------------------------------------------
 
@@ -10336,14 +10392,14 @@ run_mutation "objectdialog: a drop resolves its source by name, not the cursor" 
 # guard clobbers the pending Delete and writes the drop.
 run_mutation "objectdialog: a drop is claimed and dropped while a confirm is armed" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if armed_confirm(shell).is_some() {
+  '    if question_up(shell) {
         return;
     }
     let Some(draft) = draft_mut(shell) else {
         return;
     };
     let resolves' \
-  '    if false && armed_confirm(shell).is_some() {
+  '    if false && question_up(shell) {
         return;
     }
     let Some(draft) = draft_mut(shell) else {
@@ -10570,8 +10626,8 @@ run_mutation "dblclick: the click that opened a stage does not also open a field
   geode-shell a_double_click_on_a_door_row_opens_the_stage_and_nothing_more
 
 # The browse list is a door too: mutated so the flag is not set there,
-# a double-click on Groupings' slot 3 opens the chain field on the stage
-# the first click painted.
+# a double-click on a Colors row opens the value field the first click's
+# stage painted under the pointer.
 run_mutation "dblclick: the browse click that opened a stage does not also open a field" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '        if let Some(state) = shell.object_dialog.as_mut() {
@@ -12568,8 +12624,8 @@ run_mutation "colours: the browse swatch resolves the row's own definition" \
 # A colours change reaches the tiles like a views change.
 run_mutation "hot_reload: a colours change fires ConfigReloaded" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                || changed(geode_core::config::COLORS_DOC);' \
-  '                || changed("views");' \
+  '                || changed(geode_core::config::COLORS_DOC)' \
+  '                || changed("views")' \
   geode-shell \
   a_colours_change_fires_config_reloaded
 
@@ -15841,11 +15897,11 @@ run_mutation "objectdialog: the value chip is inert under an armed confirm (spec
 # confirmation.
 run_mutation "objectdialog: an edit-row click is dropped while a confirm is armed (spec §20.6)" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if armed_confirm(shell).is_some() {
+  '    if question_up(shell) {
         return;
     }
     let domain = shell.object_dialog.as_ref().map(|state| state.domain);' \
-  '    if armed_confirm(shell).is_some() {
+  '    if question_up(shell) {
         let _ = 0;
     }
     let domain = shell.object_dialog.as_ref().map(|state| state.domain);' \
@@ -15948,13 +16004,15 @@ run_mutation "dialog: the keybindings frozen-row click is dropped while a confir
 # Ignore clicks there until the pending delete or revert is resolved.
 run_mutation "dialog: the object-dialog frozen-row click is dropped while a confirm is armed (spec §20.1)" \
   crates/geode-shell/src/shell/dialog.rs \
-  '            // `build_edit` still paints the frozen row during confirmation, so guard
-            // the transition here as well as in keyboard routing.
-            if state.confirm.is_some() {
+  '            // `build_edit` still paints the frozen row during confirmation (and
+            // under the save prompt), so guard the transition here as well as in
+            // keyboard routing.
+            if state.confirm.is_some() || state.save.is_some() {
                 return;
             }' \
-  '            // `build_edit` still paints the frozen row during confirmation, so guard
-            // the transition here as well as in keyboard routing.
+  '            // `build_edit` still paints the frozen row during confirmation (and
+            // under the save prompt), so guard the transition here as well as in
+            // keyboard routing.
             if false {
                 return;
             }' \
@@ -17045,6 +17103,53 @@ run_mutation "vol: density needs strictly ascending strikes" \
   '        if req.density && strikes.windows(2).any(|w| w[1] < w[0]) {' \
   geode-pricing density_on_strikes_not_strictly_ascending_is_refused
 
+# A dense grid reaches its cover on either side: a curve stops no shorter
+# than the listed strikes beside it.
+run_mutation "vol: a dense grid widens to its cover below the ladder" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '            self.k_min.min(lo / self.forward - 1.0),' \
+  '            self.k_min,' \
+  geode-pricing a_dense_grid_widens_to_its_cover_on_either_side
+
+run_mutation "vol: a dense grid widens to its cover above the ladder" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '            self.k_max.max(hi / self.forward - 1.0),' \
+  '            self.k_max,' \
+  geode-pricing a_dense_grid_widens_to_its_cover_on_either_side
+
+# A cover only widens: one inside the ladder leaves the grid as it was.
+run_mutation "vol: a cover inside the ladder does not narrow the grid" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '            self.k_min.min(lo / self.forward - 1.0),' \
+  '            lo / self.forward - 1.0,' \
+  geode-pricing a_cover_inside_the_ladder_does_not_narrow_the_grid
+
+# A dense grid packs its points toward the forward on the scale of
+# sigma-root-t: spread evenly, a wide cover leaves a one-week density too
+# few points across its width to read smooth.
+run_mutation "vol: a dense grid packs its points toward the forward" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '                i => c * (u0 + (u1 - u0) * i as f64 / last as f64).sinh(),' \
+  '                i => k_min + (k_max - k_min) * i as f64 / last as f64,' \
+  geode-pricing a_wide_cover_keeps_the_points_per_sigma_root_t_at_the_forward
+
+# An inverted cover is refused naming it, not evaluated as a span that
+# runs backwards.
+run_mutation "vol: an inverted cover is refused" \
+  crates/geode-pricing/src/demo_vol.rs \
+  '        if !(positive(lo) && positive(hi) && lo <= hi) {' \
+  '        if !(positive(lo) && positive(hi)) {' \
+  geode-pricing a_cover_that_is_not_an_ascending_pair_of_positive_strikes_is_refused
+
+# The density is a second difference of call prices on a fine strike
+# step: a CDF with a step at zero (as a single-precision approximation
+# has) shows there as a spike pair around the money.
+run_mutation "vol: the normal CDF has no step at zero" \
+  crates/geode-pricing/src/black.rs \
+  '            gauss * num / den' \
+  '            gauss * num / den * (1.0 + 1e-7)' \
+  geode-pricing call_prices_are_smooth_enough_for_a_fine_second_difference
+
 run_mutation "vol restart: a [vol] model change requires a restart" \
   crates/geode-shell/src/shell/hot_reload.rs \
   '            if new_config.get("app", "vol.model").cloned() != self.vol_baseline {' \
@@ -17747,29 +17852,315 @@ run_mutation "ad hoc: the action with nothing stored says so" \
   geode-shell \
   the_ad_hoc_action_with_nothing_stored_says_so
 
-# ---- Grouping picker: toolbar click, frame::grouping and mod-g ----
+# ---- Grouping dialog: one list that applies, edits, types and saves ----
 
-# Only FILLED slots are rows: an empty slot listed would be a row that
-# visibly does nothing (`set_active_slot` ignores it).
-run_mutation "grouping: only filled slots are rows" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '        if let Some(label) = slots.label(n) {' \
-  '        if let Some(label) = Some(slots.label(n).unwrap_or_default()) {' \
+# `mod+g` reaches the dialog through the dispatch arm.
+run_mutation "grouping dialog: frame::grouping opens it" \
+  crates/geode-shell/src/shell/input.rs \
+  '            // The Grouping dialog: the same one `config::groupings` opens.
+            objectdialog::render::open(self, objectdialog::Domain::Groupings, window, cx);' \
+  '            // The Grouping dialog: the same one `config::groupings` opens.
+            let _ = (window, cx);' \
   geode-shell \
-  rows_are_the_view_default_then_every_filled_slot
+  mod_g_then_a_digit_switches_the_grouping
 
-# The picker opens on the frame's ACTIVE slot, so a bare `enter` changes
-# nothing.
-run_mutation "grouping: the highlight opens on the active slot" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '        list.place(text.as_deref());' \
-  '        list.place(None);' \
+# The two leading rows come from the frame, ahead of the roster.
+run_mutation "grouping dialog: the list leads with the frame's rows" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                lead.iter()
+                    .cloned()
+                    .chain(domain.objects(config))' \
+  '                domain.objects(config).into_iter()' \
   geode-shell \
-  mod_g_opens_the_picker_on_the_active_slot
+  the_list_leads_with_the_view_default_and_the_ad_hoc_row
+
+# The rows' key carries the frame generation, or a frame change under the
+# open dialog leaves a stale ad hoc row.
+run_mutation "grouping dialog: the rows re-derive when the frame changes" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        let frame = if self.domain.applies_from_browse() {
+            frame_generation
+        } else {
+            0
+        };' \
+  '        let frame = 0;
+        let _ = frame_generation;' \
+  geode-shell \
+  the_ad_hoc_row_follows_the_frame_while_the_dialog_is_open
+
+# The dialog opens on the lane's choice, so a bare enter changes nothing.
+run_mutation "grouping dialog: the cursor opens on the active row" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            && let Some(ix) = state.rows.position(|row| row.name == active)' \
+  '            && let Some(ix) = state.rows.position(|row| row.name == active).filter(|_| false)' \
+  geode-shell \
+  the_dialog_opens_on_the_active_slot
+
+# A digit applies a filled slot from any row.
+run_mutation "grouping dialog: a digit applies that slot" \
+  crates/geode-shell/src/shell/objectdialog/grouping_list.rs \
+  '            apply(shell, RowKind::Slot(key.as_bytes()[0] - b'"'"'0'"'"'), window, cx)' \
+  '            apply(shell, RowKind::ViewDefault, window, cx)' \
+  geode-shell \
+  a_digit_applies_a_filled_slot_and_closes
+
+# An empty slot has nothing to apply: its chain field opens instead.
+run_mutation "grouping dialog: an empty slot opens its chain field" \
+  crates/geode-shell/src/shell/objectdialog/grouping_list.rs \
+  '            if frame.read(cx).slots().get(n).is_none() {
+                open_slot_chain(shell, n, cx);
+                return;
+            }' \
+  '            if false {
+                open_slot_chain(shell, n, cx);
+                return;
+            }' \
+  geode-shell \
+  a_digit_on_an_empty_slot_defines_it_activates_it_and_closes
+
+# The slot is staged so it can be activated on the defining keystroke.
+run_mutation "grouping dialog: a defined slot is staged before it is activated" \
+  crates/geode-shell/src/shell/objectdialog/grouping_list.rs \
+  '        f.stage_slot(n, chain);
+        f.set_active_slot(Some(n));' \
+  '        let _ = chain;
+        f.set_active_slot(Some(n));' \
+  geode-shell \
+  a_digit_on_an_empty_slot_defines_it_activates_it_and_closes
+
+# A failed slot write reloads the batch's original documents, and the
+# reload replaces the frame's slots: a staged chain persisted nowhere must
+# not stay in force.
+run_mutation "grouping dialog: a failed slot write unstages an empty slot" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                    let replaced = f.replace_slots(slots);' \
+  '                    let replaced = {
+                        let _ = slots;
+                        false
+                    };' \
+  geode-shell \
+  a_failed_slot_write_takes_the_staged_slot_back_out
+
+# A failed save over an inherited slot restores the lower layer's chain
+# through the revert's reload.
+run_mutation "grouping dialog: a failed save over an inherited slot restores its chain" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    let restored = Config::from_docs(pending.revert);
+    shell.apply_reload(restored, cx);' \
+  '    let restored = Config::from_docs(pending.revert);
+    let _ = restored;' \
+  geode-shell \
+  a_failed_save_over_an_inherited_slot_leaves_the_lower_layers_chain
+
+# A changed staged chain moves config: a tile pinned to that slot (no
+# lane's choice) has no other signal to requery.
+run_mutation "grouping dialog: a changed staged slot moves config" \
+  crates/geode-shell/src/frame.rs \
+  '        if !self.slots.set(slot, grouping) {
+            return false;
+        }
+        self.versions.config += 1;' \
+  '        if !self.slots.set(slot, grouping) {
+            return false;
+        }' \
+  geode-shell \
+  a_changed_staged_slot_moves_config_for_tiles_pinned_to_it
+
+# Escape from a list-opened field returns to the list, not the tick list.
+run_mutation "grouping dialog: escape from a list-opened field returns to the list" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        if from_list {
+            // The field was the whole visit: back to the list, on the row it came from.
+            leave_edit(shell, cx);
+            return true;
+        }' \
+  '        let _ = from_list;' \
+  geode-shell \
+  escape_from_a_list_opened_chain_field_returns_to_the_list
+
+# A click is enter on that row.
+run_mutation "grouping dialog: a row click applies" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        super::grouping_list::click(shell, &name, window, cx);' \
+  '        let _ = &name;' \
+  geode-shell \
+  a_row_click_applies_the_slot
+
+# A double-click whose first half opened an empty slot's chain field: the
+# second half lands on a completion row and must insert nothing.
+run_mutation "grouping dialog: a double-click's second half completes a dimension" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        } else if state.click_opened_stage {
+            return;
+        }
+    }
+    let completed = draft_mut(shell).is_some_and(|draft| {' \
+  '        } else if false && state.click_opened_stage {
+            return;
+        }
+    }
+    let completed = draft_mut(shell).is_some_and(|draft| {' \
+  geode-shell \
+  a_double_click_on_an_empty_slot_opens_its_field_and_inserts_nothing
+
+# An ad hoc edit goes to the frame and never to the config writer: without
+# the ad hoc branch the `*` draft falls through to `commit_edit`. (Keeping
+# the call and dropping only its `return` is an equivalent mutant:
+# `commit_ad_hoc` marks the draft saved, so `commit_edit` finds no edits.)
+run_mutation "grouping dialog: an ad hoc edit commits through the frame, not the writer" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if super::grouping_list::commit_ad_hoc(shell, cx) {
+        return;
+    }' \
+  '    let _ = super::grouping_list::commit_ad_hoc;' \
+  geode-shell \
+  ticking_in_the_ad_hoc_editor_regroups_at_once
+
+# An untouched seed is still a request to apply that chain ad hoc.
+run_mutation "grouping dialog: i applies its seed even when untouched" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            Some(Step::Changed | Step::Inert) if from_list => {' \
+  '            Some(Step::Changed) if from_list => {' \
+  geode-shell \
+  i_is_seeded_from_the_cursor_row_and_enter_applies_it_unchanged
+
+# Only the Groupings dialog's `*` row is the ad hoc chain: a view named `*`
+# is an ordinary view.
+run_mutation "grouping dialog: the ad hoc row is recognised in any domain" \
+  crates/geode-shell/src/shell/objectdialog/grouping_list.rs \
+  '    domain == super::Domain::Groupings && name == AD_HOC' \
+  '    let _ = domain;
+    name == AD_HOC' \
+  geode-shell \
+  a_view_named_star_is_an_ordinary_view
+
+# The leading rows exist only in the Groupings dialog: a view named `0` or
+# `*` counts in the crumb and lands once.
+run_mutation "grouping dialog: the leading rows are recognised in any domain" \
+  crates/geode-shell/src/shell/objectdialog/grouping_list.rs \
+  '    domain == super::Domain::Groupings && (name == VIEW_DEFAULT || name == AD_HOC)' \
+  '    let _ = domain;
+    name == VIEW_DEFAULT || name == AD_HOC' \
+  geode-shell \
+  a_view_named_like_a_leading_row_is_an_ordinary_view
+
+# Losing a user-owned chain asks; a recoverable fork does not.
+run_mutation "grouping dialog: saving over a user-owned slot asks" \
+  crates/geode-shell/src/shell/objectdialog/grouping_list.rs \
+  '        Some(Layer::User) => SaveTarget::Owned,' \
+  '        Some(Layer::User) => SaveTarget::Inherited,' \
+  geode-shell \
+  saving_over_a_user_owned_slot_asks_and_n_changes_nothing
+
+# A save target is classified against the pending batch: a slot an edit
+# forked a moment ago is the user's, and a save over it asks.
+run_mutation "grouping dialog: a save target ignores the pending batch" \
+  crates/geode-shell/src/shell/objectdialog/grouping_list.rs \
+  '    let target = match super::apply::config_with_pending(shell) {' \
+  '    let target = match super::apply::config_with_pending(shell).filter(|_| false) {' \
+  geode-shell \
+  saving_over_a_slot_the_pending_batch_just_forked_asks
+
+# An equal chain is not a write and not a fork.
+run_mutation "grouping dialog: saving an equal chain writes nothing" \
+  crates/geode-shell/src/shell/objectdialog/grouping_list.rs \
+  '    if held == Some(chain) {
+        return SaveTarget::Equal;
+    }' \
+  '    let _ = held;' \
+  geode-shell \
+  saving_a_chain_a_slot_already_holds_writes_nothing_and_activates_it
+
+# A fork records the inherited value, so drift and revert see it.
+run_mutation "grouping dialog: a save that forks records its baseline" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    if inherited && let Some((layer, value)) = super::shadow_of(&config, doc, &name) {' \
+  '    if false && let Some((layer, value)) = super::shadow_of(&config, doc, &name) {' \
+  geode-shell \
+  saving_over_an_inherited_slot_forks_it_without_asking
+
+# The save prompt owns the pointer as well as the keys.
+run_mutation "grouping dialog: a row click under the save prompt is ignored" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if state.confirm.is_some() || state.save.is_some() {
+        return;
+    }
+    let Some(ix) = state.rows.position(|r| r.name == clicked) else {' \
+  '    if state.confirm.is_some() {
+        return;
+    }
+    let Some(ix) = state.rows.position(|r| r.name == clicked) else {' \
+  geode-shell \
+  a_row_click_under_the_save_prompt_is_ignored
+
+# The back button is a pointer route the save prompt owns too.
+run_mutation "grouping dialog: a back click under the save prompt is ignored" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if self.confirm.is_some() || self.save.is_some() || !self.has_previous_stage() {' \
+  '        if self.confirm.is_some() || !self.has_previous_stage() {' \
+  geode-shell \
+  a_back_click_under_the_save_prompt_is_ignored
+
+# The row controls stop the press at their wrapper: a press on one must not
+# also apply the row and close the dialog.
+run_mutation "grouping dialog: the edit control does not apply the row" \
+  crates/geode-shell/src/shell/objectdialog/grouping_list.rs \
+  '            .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
+                cx.stop_propagation();
+            })' \
+  '            .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
+                let _ = cx;
+            })' \
+  geode-shell \
+  the_edit_control_opens_that_rows_editor_without_applying_it
+
+# A row control press behind a question would act on the rows it is about.
+run_mutation "grouping dialog: a row control click under the save prompt is ignored" \
+  crates/geode-shell/src/shell/objectdialog/grouping_list.rs \
+  '    if render::question_up(shell) {
+        return;
+    }' \
+  '    if false {
+        return;
+    }' \
+  geode-shell \
+  a_row_control_click_under_the_save_prompt_is_ignored
+
+# The readout and mod+g open the dialog, not a picker.
+run_mutation "grouping dialog: the readout click opens it" \
+  crates/geode-shell/src/shell/render.rs \
+  '                objectdialog::render::open(view, objectdialog::Domain::Groupings, window, cx);' \
+  '                let _ = (view, window, cx);' \
+  geode-shell \
+  clicking_the_readout_opens_the_dialog_and_a_typed_key_reaches_it
+
+# The readout reads open for the Grouping dialog only, not for every
+# object dialog.
+run_mutation "grouping dialog: any object dialog presses the readout" \
+  crates/geode-shell/src/shell/render.rs \
+  '                .is_some_and(|state| state.domain == objectdialog::Domain::Groupings)' \
+  '                .is_some_and(|_state| true)' \
+  geode-shell \
+  another_object_dialog_leaves_the_readout_at_rest
+
+# ---- Scope picker: frame::scope, mod-o and the toolbar load glyph ----
+
+# open_shell_dialog_with_key prevents the shell root's bubble-phase focus
+# grab from taking focus back after an opening mouse-down. Title-bar chips
+# occlude (the root is not hovered under them) and plus-menu rows stop
+# propagation, so only a non-occluding opener sees it: the status bar's
+# link-group segment.
+run_mutation "dialog: a dialog opened from a mouse-down keeps its field's focus" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    window.prevent_default();
+    // The new dialog'"'"'s state is installed: derive its rows before anything reads them.' \
+  '    // The new dialog'"'"'s state is installed: derive its rows before anything reads them.' \
+  geode-shell \
+  a_click_on_the_segment_opens_the_chooser
 
 # `enter` re-feeds the field's live text before trusting the highlight
 # (`set_value` emits no `Change`).
-run_mutation "grouping: enter picks the HIGHLIGHTED row, re-fed from the live text" \
+run_mutation "choice: enter picks the HIGHLIGHTED row, re-fed from the live text" \
   crates/geode-shell/src/shell/choicedialog.rs \
   '                state.set_query(&live);
                 state.highlighted_pick()' \
@@ -17778,66 +18169,14 @@ run_mutation "grouping: enter picks the HIGHLIGHTED row, re-fed from the live te
   geode-shell \
   enter_re_feeds_the_fields_live_text_before_picking
 
-# A slot emptied under the open picker commits nothing AND says so.
-run_mutation "grouping: a vanished slot is reported on the status bar" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '    if !changed && !still_there {' \
-  '    if false {' \
-  geode-shell \
-  picking_a_slot_emptied_under_the_picker_says_so
-
-# A digit jumps only on an EMPTY field — typed after text it is text.
-run_mutation "grouping: the digit jump needs an empty field" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '        && shell.dialog_input.read(cx).text().len() == 0' \
-  '        && true' \
-  geode-shell \
-  a_digit_after_text_filters_rather_than_jumps
-
-# An unfilled slot's digit is claimed and dropped, never typed.
-run_mutation "grouping: an unfilled slot's digit is dropped, not typed" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '        if let Some(slot) = slot {
-            commit(shell, Pick::Slot(slot), window, cx);
-        }
-        return true;' \
-  '        if let Some(slot) = slot {
-            commit(shell, Pick::Slot(slot), window, cx);
-            return true;
-        }
-        return false;' \
-  geode-shell \
-  a_digit_jumps_to_a_filled_slot_and_zero_to_the_view_default
-
 # A row click resolves through the RANKED order (the click's index),
 # not the declared one — after a filter the two differ.
-run_mutation "grouping: a row click resolves through the ranked order" \
+run_mutation "choice: a row click resolves through the ranked order" \
   crates/geode-shell/src/shell/choicedialog.rs \
   '        self.list.ranked().get(ranked).map(|r| self.pick_at(r.row))' \
   '        (ranked < self.list.options().len()).then(|| self.pick_at(ranked))' \
   geode-shell \
   a_click_resolves_through_the_ranked_order
-
-# The toolbar readout's click goes through the same open door as `mod+g`.
-run_mutation "grouping: the readout click opens the picker" \
-  crates/geode-shell/src/shell/render.rs \
-  '                choicedialog::open_grouping(view, window, cx);' \
-  '                let _ = (view, window, cx);' \
-  geode-shell \
-  clicking_the_readout_opens_the_picker_and_enter_activates_the_typed_slot
-
-# open_shell_dialog_with_key prevents the shell's bubble-phase focus grab
-# from taking focus back after a chip click. The expression-term chip tests
-# this path; plus-menu rows stop propagation independently.
-run_mutation "grouping: a dialog opened from a mouse-down keeps its field's focus" \
-  crates/geode-shell/src/shell/dialog.rs \
-  '    window.prevent_default();
-    // The new dialog'"'"'s state is installed: derive its rows before anything reads them.' \
-  '    // The new dialog'"'"'s state is installed: derive its rows before anything reads them.' \
-  geode-shell \
-  a_terms_body_edits_that_term_alone
-
-# ---- Scope picker: frame::scope, mod-o and the toolbar load glyph ----
 
 # The picker opens on the saved scope EQUAL to the frame's current one, so
 # a bare `enter` changes nothing.
@@ -20591,6 +20930,41 @@ run_mutation "chart xy: a huge points slot still paints" \
   '                let stride = mark_stride(end - start, SEGMENTS_PER_MARK, usize::MAX);' \
   geode-chart \
   a_points_slot_past_the_stroke_cap_is_thinned_not_dropped
+
+# A gap in a filled line is a gap in its fill. One outline over the
+# whole line would join the runs either side of the NaN across it.
+run_mutation "chart xy: a gap parts a line's fill" \
+  crates/geode-chart/src/core/marks.rs \
+  '    for run in points.split(|p| p.is_break()) {' \
+  '    for run in [points] {' \
+  geode-chart \
+  a_filled_line_fills_each_finite_run_to_zero_and_a_gap_parts_the_fill
+
+# A zero outside the plot fills to the plot's nearer edge, not to a y
+# off screen.
+run_mutation "chart xy: a fill's zero is held to the plot" \
+  crates/geode-chart/src/core/marks.rs \
+  '        zero_y.clamp(top, bottom)' \
+  '        zero_y' \
+  geode-chart \
+  a_fill_runs_to_the_plot_edge_when_zero_is_out_of_view_and_up_to_zero_from_below
+
+# A filled line paints a cached fill beside its stroke.
+run_mutation "chart xy: a filled line paints its fill" \
+  crates/geode-chart/src/xy/element.rs \
+  '                            || matches!(s.kind, SlotKind::Line { fill: true, .. }))' \
+  '                            || false)' \
+  geode-chart \
+  a_filled_line_caches_its_fill_beside_its_stroke
+
+# Every fill goes down before any stroke: painted slot by slot, a later
+# slot's fill tints an earlier slot's line.
+run_mutation "chart xy: fills paint before every stroke" \
+  crates/geode-chart/src/xy/element.rs \
+  '        [Layer::Fill, Layer::Stroke]' \
+  '        [Layer::Stroke, Layer::Fill]' \
+  geode-chart \
+  every_fill_is_painted_before_any_stroke
 
 # A points slot reads a point only within the tolerance of the
 # crosshair. Otherwise a crosshair between two quotes reads the nearer as
@@ -24938,8 +25312,8 @@ run_mutation "modal back: a click clears the kept query" \
 # A pending confirmation owns input: the click must do nothing.
 run_mutation "modal back: a click is ignored while a confirm is pending" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if self.confirm.is_some() || !self.has_previous_stage() {' \
-  '        if !self.has_previous_stage() {' \
+  '        if self.confirm.is_some() || self.save.is_some() || !self.has_previous_stage() {' \
+  '        if self.save.is_some() || !self.has_previous_stage() {' \
   geode-shell the_back_button_is_ignored_while_a_confirm_is_pending
 
 # ---- Named scope expressions.
@@ -31467,8 +31841,8 @@ run_mutation "link: a moved highlight is kept until the query changes" \
 # change.
 run_mutation "link: other dialogs keep the highlight by text" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '            | Target::ActionValue { .. } => self.list.set_query(query),' \
-  '            | Target::ActionValue { .. } => self.list.set_query_placing(query, None),' \
+  '            | Target::ValueColor { .. } => self.list.set_query(query),' \
+  '            | Target::ValueColor { .. } => self.list.set_query_placing(query, None),' \
   geode-shell other_targets_keep_the_highlight_by_text
 
 run_mutation "link: the title names the current groups" \
@@ -32953,8 +33327,8 @@ run_mutation "chrome rows: typing in the keybindings dialog re-derives" \
 # A missed refresh is refused at render, never painted.
 run_mutation "chrome rows: render never checks the prepared key" \
   crates/geode-shell/src/shell/rows.rs \
-  '    pub(crate) fn assert_rows_current(&self, _cx: &App) {' \
-  $'    pub(crate) fn assert_rows_current(&self, _cx: &App) {\n        #[allow(unreachable_code)]\n        return;' \
+  '    pub(crate) fn assert_rows_current(&self, cx: &App) {' \
+  $'    pub(crate) fn assert_rows_current(&self, cx: &App) {\n        let _ = cx;\n        #[allow(unreachable_code)]\n        return;' \
   geode-shell \
   render_refuses_keybinding_rows_a_refresh_missed
 
@@ -32971,8 +33345,8 @@ run_mutation "chrome rows: a pop reveals a stale parked browse list" \
 # the list a reload replaced.
 run_mutation "chrome rows: browse rows ignore the config revision" \
   crates/geode-shell/src/shell/rows.rs \
-  '            state.refresh_rows(&self.services.config, revision);' \
-  '            state.refresh_rows(&self.services.config, 0);' \
+  '            let key = state.rows_key(revision, generation);' \
+  '            let key = state.rows_key(0, generation);' \
   geode-shell \
   a_reload_adding_a_view_repaints_the_browse_list
 
@@ -32980,8 +33354,8 @@ run_mutation "chrome rows: browse rows ignore the config revision" \
 # a list the filter does not describe.
 run_mutation "chrome rows: browse rows rank an empty query" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  $'            &config_revision,\n            &self.query,' \
-  $'            &config_revision,\n            &String::new(),' \
+  $'            &key,\n            &self.query,' \
+  $'            &key,\n            &String::new(),' \
   geode-shell \
   typing_reranks_browse_rows_without_re_deriving
 
@@ -32997,8 +33371,8 @@ run_mutation "chrome rows: a browse row click skips the row refresh" \
 # The browse build refuses a stale list instead of painting it.
 run_mutation "chrome rows: browse render never checks the prepared key" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  $'    #[cfg(debug_assertions)]\n    shell.assert_rows_current(cx);\n    let theme = cx.theme();' \
-  '    let theme = cx.theme();' \
+  $'    #[cfg(debug_assertions)]\n    shell.assert_rows_current(cx);\n    let one_line = state.domain.applies_from_browse();' \
+  '    let one_line = state.domain.applies_from_browse();' \
   geode-shell \
   render_refuses_browse_rows_a_refresh_missed
 
@@ -33077,7 +33451,7 @@ run_mutation "blotter find: the arriving index re-formats the opened rows" \
 
 run_mutation "blotter find: the row report formats nothing" \
   crates/geode-blotter/src/delegate.rs \
-  '            cell(&p.snapshot, &p.plan, row, c)' \
+  '            cell(&p.snapshot, &p.plan, colours.values(), row, c)' \
   '            { let _ = (p, row, c); None }' \
   geode-blotter \
   fzf_formats_only_the_rows_it_paints
@@ -33294,7 +33668,7 @@ run_mutation "volslice: a hidden kind asks no curve" \
 run_mutation "volslice: a curve difference evaluates at the minuend's strikes" \
   crates/geode-volslice/src/core/build.rs \
   '                request: slice(expiry, Grid::Job(of), false),' \
-  '                request: slice(expiry, Grid::Dense(GRID_N), false),' \
+  '                request: slice(expiry, Grid::Dense { n: GRID_N, cover: None }, false),' \
   geode-volslice curve_minus_curve_evaluates_the_subtrahend_at_the_minuends_strikes
 
 # Each expiry's difference names its own expiry's minuend job; found by
@@ -33317,8 +33691,46 @@ run_mutation "volslice: a hidden subtrahend still gets its difference" \
 run_mutation "volslice: a curve-chain difference evaluates at the chain strikes" \
   crates/geode-volslice/src/core/build.rs \
   '                request: slice(expiry, Grid::At(c.strikes.clone()), false),' \
-  '                request: slice(expiry, Grid::Dense(GRID_N), false),' \
+  '                request: slice(expiry, Grid::Dense { n: GRID_N, cover: None }, false),' \
   geode-volslice curve_minus_chain_evaluates_the_curve_at_the_chain_strikes
+
+# A chain expiry's curves reach its listed strikes, so a curve is drawn
+# at least as wide as the quotes beside it.
+run_mutation "volslice: dense curves cover the chain's strikes" \
+  crates/geode-volslice/src/core/build.rs \
+  '            cover: cover(chain),' \
+  '            cover: None,' \
+  geode-volslice a_chain_expirys_curves_cover_its_listed_strikes_shown_or_not
+
+# The cover holds with the chain hidden: toggling the chain must not move
+# the curves' x extent.
+run_mutation "volslice: the cover holds with the chain hidden" \
+  crates/geode-volslice/src/core/build.rs \
+  '            cover: cover(chain),' \
+  '            cover: cover(chain.filter(|_| state.visible(loaded, Kind::Chain))),' \
+  geode-volslice a_chain_expirys_curves_cover_its_listed_strikes_shown_or_not
+
+# A cover is the span of the positive, finite listed strikes, in any order.
+run_mutation "volslice: a cover skips strikes that are not positive and finite" \
+  crates/geode-volslice/src/core/build.rs \
+  '        .filter(|k| k.is_finite() && *k > 0.0);' \
+  '        .filter(|k| !k.is_nan());' \
+  geode-volslice a_cover_is_the_chains_positive_finite_strike_span
+
+# Densities shade down to zero; the vol curves do not.
+run_mutation "volslice: a density is a filled line" \
+  crates/geode-volslice/src/core/build.rs \
+  '                            fill: true,' \
+  '                            fill: false,' \
+  geode-volslice densities_paint_filled_on_the_right_axis_and_curves_unfilled
+
+# A short-dated density over a wide chain needs enough points per
+# sigma-root-t to read as one smooth hump.
+run_mutation "volslice: a dense curve has enough points for a smooth density" \
+  crates/geode-volslice/src/core/build.rs \
+  'pub const GRID_N: usize = 1000;' \
+  'pub const GRID_N: usize = 200;' \
+  geode-volslice a_one_week_density_across_a_wide_chain_is_smooth
 
 run_mutation "volslice: a chain-first difference is negated" \
   crates/geode-volslice/src/core/build.rs \
@@ -34501,6 +34913,344 @@ run_mutation "close: the vol slice content forwards its handle" \
   '        self.tile.update(cx, |t, cx| t.set_close(close, cx))' \
   '        let _ = (close, cx);' \
   geode-volslice the_header_paints_the_close_button
+
+# value_colors merges per value: listing it as atomic would make a user
+# override of one value drop the desk's others.
+run_mutation "value colors: the document merges per value" \
+  crates/geode-core/src/config/merge.rs \
+  '        "colors" => Some(1),' \
+  '        "colors" | "value_colors" => Some(1),' \
+  geode-core \
+  value_colors_merge_per_value_not_per_dimension
+
+# `none` clears: it must not be stored as a color named "none".
+run_mutation "value colors: none reads as unmapped" \
+  crates/geode-core/src/colour/values.rs \
+  '                if name == NO_COLOR {' \
+  '                if name == "\u{0}" {' \
+  geode-core \
+  none_reads_as_unmapped_without_a_diagnostic
+
+# `sign` is a column mode, not a color.
+run_mutation "value colors: sign is refused" \
+  crates/geode-core/src/colour/values.rs \
+  '                if name == "sign" {' \
+  '                if name == "\u{0}" {' \
+  geode-core \
+  refused_entries_are_dropped_with_an_error_at_their_path
+
+# The check prunes an unknown color: a pruned value must not reach paint.
+run_mutation "value colors: an unknown color is pruned" \
+  crates/geode-core/src/colour/values.rs \
+  '            if named.get(color).is_none() {' \
+  '            if false {' \
+  geode-core \
+  the_check_prunes_what_cannot_paint_and_says_why
+
+# A non-text dimension is ignored, not colored by its printed number.
+run_mutation "value colors: a non-text dimension is ignored" \
+  crates/geode-core/src/colour/values.rs \
+  '        if column.ty == ColumnType::Utf8 {' \
+  '        if true {' \
+  geode-core \
+  a_dimension_is_text_not_text_or_undeclared
+
+# None over a desk color must write `none`: removing the user key alone
+# would let the desk's color show again.
+run_mutation "value colors: None over a desk color writes none" \
+  crates/geode-core/src/colour/values.rs \
+  '            } else if state.lower.as_deref().is_some_and(|c| c != NO_COLOR) {' \
+  '            } else if false {' \
+  geode-core \
+  a_pick_becomes_the_smallest_user_layer_write
+
+# A user `none` over a desk color is no color, not the desk's.
+run_mutation "value colors: a user none clears the effective color" \
+  crates/geode-core/src/colour/values.rs \
+  '        .filter(|c| c != NO_COLOR);' \
+  '        ;' \
+  geode-core \
+  the_state_separates_the_user_entry_from_the_layers_below
+
+# A value_colors edit alone reaches the app's reload handler.
+run_mutation "value colors: a change alone emits ConfigReloaded" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                || changed(geode_core::config::VALUE_COLORS_DOC);' \
+  '                ;' \
+  geode-shell \
+  a_value_colors_change_alone_emits_config_reloaded
+
+# A value_colors edit alone must re-run the pricer's reload.
+run_mutation "value colors: the pricer reload key covers value_colors" \
+  crates/geode-app/src/bridge.rs \
+  '            .doc(geode_core::config::VALUE_COLORS_DOC)' \
+  '            .doc(geode_core::config::COLORS_DOC)' \
+  geode-app \
+  the_pricer_reload_key_changes_with_value_colors
+
+# The reload handler's colors carry the value mapping, not the definitions alone.
+run_mutation "value colors: the reload hands the blotter the mapping" \
+  crates/geode-app/src/bridge.rs \
+  '                let (colours, colour_diags) = NamedColours::from_config(config);' \
+  '                let (colours, colour_diags) = config.doc(geode_core::config::COLORS_DOC).map(NamedColours::from_doc).unwrap_or_default();' \
+  geode-app \
+  a_config_reload_hands_the_blotter_factory_the_value_colors
+
+# A value's color wins over the column's own color.
+run_mutation "blotter: a value color wins over the column color" \
+  crates/geode-blotter/src/delegate.rs \
+  '    if value {
+        return TextPaint::Value;
+    }' \
+  '    if false {
+        return TextPaint::Value;
+    }' \
+  geode-blotter \
+  a_values_color_wins_over_the_columns_color_and_nothing_else_changes
+
+# A label is a value of the grouping column at ITS depth, not the first.
+run_mutation "blotter: a tree label is colored by its own level's dimension" \
+  crates/geode-blotter/src/core/cache.rs \
+  '                .and_then(|level| plan.grouping.get(level))' \
+  '                .and_then(|_| plan.grouping.first())' \
+  geode-blotter \
+  a_tree_label_carries_the_color_of_its_levels_value
+
+# A reloaded mapping re-reads the prepared window.
+run_mutation "blotter: a reloaded mapping invalidates the prepared cells" \
+  crates/geode-blotter/src/delegate.rs \
+  '            self.invalidate_cells();
+        }
+    }
+
+    /// Named colour of column' \
+  '        }
+    }
+
+    /// Named colour of column' \
+  geode-blotter \
+  a_reloaded_mapping_reaches_the_prepared_window
+
+# The / table's held cells carry names from one mapping.
+run_mutation "blotter: a find display under a new mapping drops its cells" \
+  crates/geode-blotter/src/delegate.rs \
+  '            && Arc::ptr_eq(&self.colours, &colours)' \
+  '            && true' \
+  geode-blotter \
+  a_find_display_under_a_new_mapping_drops_its_held_cells
+
+# A failed or stale cell keeps its state paint even when its value is colored.
+run_mutation "pricer: a state paint wins over a value color" \
+  crates/geode-pricer/src/paint.rs \
+  '    if !matches!(state, CellState::Own) {
+        return CellColour::State;
+    }
+    if value {' \
+  '    if value {' \
+  geode-pricer \
+  a_values_color_sits_between_the_state_paint_and_the_columns_color
+
+# Only an own value is looked up: a stale, `mixed` or blank cell is no value.
+run_mutation "pricer: only an own cell carries a value color" \
+  crates/geode-pricer/src/grid.rs \
+  '        let value_color = (t.state == CellState::Own' \
+  '        let value_color = (true' \
+  geode-pricer \
+  a_stale_cell_carries_no_value_color
+
+# A cell is looked up by the raw value its group label uses, not by its
+# painted text: an `expiry` mapping on `2026-12-18` colors `Z26` cells.
+run_mutation "pricer: a cell matches its raw value, not its painted text" \
+  crates/geode-pricer/src/grid.rs \
+  '        .and_then(|key| self.src.values.get(c.def.name, &key))' \
+  '        .and_then(|_| self.src.values.get(c.def.name, &t.text))' \
+  geode-pricer \
+  an_expiry_mapping_colors_group_labels_and_cells_by_one_raw_value
+
+# A package's aggregating cell matches the value its legs share; the
+# package row itself reads no expiry.
+run_mutation "pricer: a package cell matches its legs' sole raw value" \
+  crates/geode-pricer/src/grid.rs \
+  '                    sole_raw(sheet, sheet.children(r), def.name, clock)' \
+  '                    sole_raw(sheet, [r], def.name, clock)' \
+  geode-pricer \
+  an_expiry_mapping_colors_group_labels_and_cells_by_one_raw_value
+
+# The Color list's swatches resolve once per theme, not on every paint.
+run_mutation "value colors: swatches are cached per theme signature" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            Some((k, rows)) if *k == key => rows.clone(),' \
+  '            Some((k, rows)) if false && *k == key => rows.clone(),' \
+  geode-shell \
+  value_color_swatches_resolve_once_per_theme
+
+# A group row's label is its value: the index carries its color.
+run_mutation "pricer: a group row carries its value color" \
+  crates/geode-pricer/src/grid.rs \
+  '                    .and_then(|_| self.values.get(column, label))' \
+  '                    .and_then(|_| None::<&Arc<str>>)' \
+  geode-pricer \
+  a_group_label_and_a_dimension_cell_carry_their_values_color
+
+# A reload's rebuild reads the factory's new mapping before building.
+run_mutation "pricer: a reloaded mapping reaches the prepared rows" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.colors = self.shared.colours.borrow().clone();' \
+  '' \
+  geode-pricer \
+  a_reloaded_mapping_reaches_the_prepared_rows
+
+# A value color on a group row's ground is floored like a named column color.
+run_mutation "pricer: a group label's value color is floored on its ground" \
+  crates/geode-pricer/src/delegate.rs \
+  '            (Some(c), Some(palette)) => self.on_ground(palette, c.base),' \
+  '            (Some(c), Some(_)) => c.base,' \
+  geode-pricer \
+  a_reloaded_mapping_reaches_the_prepared_rows
+
+# Color… is offered for text dimensions only.
+run_mutation "row menu: Color is offered for text dimensions only" \
+  crates/geode-shell/src/dimension.rs \
+  '        .filter(|column| text_dims.contains(*column))' \
+  '        .filter(|_| true)' \
+  geode-shell \
+  no_color_row_without_a_text_dimension_value_at_the_row
+
+# A clicked text dimension leads the row's own.
+run_mutation "row menu: the clicked text dimension takes Color" \
+  crates/geode-shell/src/dimension.rs \
+  '    [ctx.first.as_ref(), ctx.own.as_ref()]' \
+  '    [ctx.own.as_ref(), ctx.first.as_ref()]' \
+  geode-shell \
+  a_clicked_text_dimension_takes_color_from_the_rows_own
+
+# The shell's open path hands the menu its cached text dimensions.
+run_mutation "row menu: the open path offers Color from the shell's text dimensions" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  '        let rows = menu_rows(&context, &self.services.roster, &self.text_dims);' \
+  '        let rows = menu_rows(&context, &self.services.roster, &Default::default());' \
+  geode-shell \
+  g_dot_offers_color_for_the_rows_own_text_dimension
+
+# A reload that changes the datasets rebuilds the text dimensions.
+run_mutation "row menu: a reload rebuilds the text dimensions" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                self.text_dims = text_dimension_names(&self.services.config);' \
+  '                let _ = text_dimension_names(&self.services.config);' \
+  geode-shell \
+  a_reload_that_removes_a_column_rebuilds_the_text_dimensions
+
+# A blotter row owns the grouping column at its depth; the grand total none.
+run_mutation "blotter: a row owns the grouping column at its depth" \
+  crates/geode-blotter/src/delegate.rs \
+  '                .checked_sub(1)' \
+  '                .checked_sub(0)' \
+  geode-blotter \
+  the_rows_context_names_the_grouping_column_at_its_depth
+
+# A pricer row naming an underlying owns underlying_ref.
+run_mutation "pricer: a line's context owns its underlying" \
+  crates/geode-pricer/src/tile.rs \
+  '                ctx.own = Some("underlying_ref".into());' \
+  '                ctx.own = None;' \
+  geode-pricer \
+  a_lines_context_owns_its_underlying
+
+# A dimension entry that is not a table refuses the write.
+run_mutation "value colors: a non-table dimension refuses the write" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '                let entry = doc.entry(dimension).or_insert(toml_edit::table());' \
+  '                doc.remove(dimension); let entry = doc.entry(dimension).or_insert(toml_edit::table());' \
+  geode-shell \
+  a_write_into_a_non_table_dimension_is_refused_and_leaves_the_file
+
+# Removing the last value removes the emptied dimension table.
+run_mutation "value colors: an emptied dimension table is removed" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '                if emptied {' \
+  '                if false {' \
+  geode-shell \
+  a_remove_drops_the_key_and_an_emptied_dimension
+
+# A value is one key, never split on a dot into nested tables.
+run_mutation "value colors: a dotted value is one key" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '                table.insert(value, toml_edit::value(name.as_str()));' \
+  '                table.insert(value.split(".").next().unwrap_or(value), toml_edit::value(name.as_str()));' \
+  geode-shell \
+  a_dotted_value_is_written_as_one_quoted_key
+
+# A pick that changes nothing writes nothing.
+run_mutation "value colors: an unchanged pick writes nothing" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '        if write == ValueWrite::Nothing {' \
+  '        if false {' \
+  geode-shell \
+  enter_on_the_untouched_list_writes_nothing
+
+# The write is decided against the color as painted: an undefined name is none.
+run_mutation "value colors: an undefined color in force is no color to clear" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '        state.effective = state.effective.filter(|name| named.get(name).is_some());' \
+  '        let _ = &named;' \
+  geode-shell \
+  enter_over_an_undefined_desk_color_writes_nothing
+
+# No user directory says so instead of saving nothing silently.
+run_mutation "value colors: no user directory says so" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '            self.notice = Some(NO_USER_DIR.into());' \
+  '            self.notice = None;' \
+  geode-shell \
+  a_pick_with_no_user_directory_says_so
+
+# A failed write shows the writer's error, not the success notice.
+run_mutation "value colors: a failed write shows the writer's error" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '                    Err(e) => e.into(),' \
+  '                    Err(_) => done.into(),' \
+  geode-shell \
+  a_failed_write_shows_the_writers_error
+
+# The list opens on the color in force.
+run_mutation "value colors: the list opens on the current color" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        list.set_ranked_highlighted(opening);' \
+  '        let _ = opening;' \
+  geode-shell \
+  the_color_list_holds_the_names_then_none_and_opens_on_the_current
+
+# A row stands for its pick by position: a color may be named None.
+run_mutation "value colors: a pick goes by position, not by text" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                pick: picks[declared].clone(),' \
+  '                pick: if self.list.options()[declared] == NO_COLOR_ROW { ValuePick::None } else { picks[declared].clone() },' \
+  geode-shell \
+  a_color_named_none_is_still_picked_by_position
+
+# Each color row paints its swatch.
+run_mutation "value colors: the color rows paint swatches" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    if swatches.iter().all(Option::is_none) {' \
+  '    if true {' \
+  geode-shell \
+  color_opens_the_pick_list_with_swatches
+
+# With no named colors the list says where to define one.
+run_mutation "value colors: no named colors shows the muted line" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        .children(no_colors.then(|| {' \
+  '        .children(false.then(|| {' \
+  geode-shell \
+  with_no_named_colors_the_list_holds_none_and_says_where_to_define_one
+
+# A desk entry of none offers no Follow desk row beside None.
+run_mutation "value colors: a desk none is nothing to follow" \
+  crates/geode-core/src/colour/values.rs \
+  '            (Some(user), Some(lower)) if user != lower && lower != NO_COLOR => Some(lower),' \
+  '            (Some(user), Some(lower)) if user != lower => Some(lower),' \
+  geode-core \
+  the_state_separates_the_user_entry_from_the_layers_below
 
 # ---- Classifications: seams ----
 #

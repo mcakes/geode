@@ -255,7 +255,14 @@ pub(super) fn fork_notice(shell: &ShellView, domain: Domain) -> String {
     else {
         return String::new();
     };
-    match super::shadow_of(&shell.services.config, domain.doc(), &name) {
+    fork_notice_of(&shell.services.config, domain.doc(), &name)
+}
+
+/// The fork announcement for `name` in `doc`, naming the layer the copy
+/// shadows in `config` when one does. One wording for every fork, whether
+/// a draft edit or a save to a slot made it.
+fn fork_notice_of(config: &Config, doc: &str, name: &str) -> String {
+    match super::shadow_of(config, doc, name) {
         Some((layer, _)) => format!(
             "copied '{name}' to your config — r restores the {} copy",
             layer.name()
@@ -267,15 +274,19 @@ pub(super) fn fork_notice(shell: &ShellView, domain: Domain) -> String {
 /// The first error-severity draft diagnostic, formatted as a refusal notice. Errors
 /// block value edits before they can enter the batch; warnings remain editable. This
 /// gate does not apply to removals that can clear invalid objects.
+///
+/// The ad hoc chain's refusal has no "not saved" prefix: it is never written, so
+/// the prefix would claim a save that was never going to happen.
 pub(super) fn blocking_diagnostic(shell: &ShellView) -> Option<String> {
-    let diagnostic = shell
-        .object_dialog
-        .as_ref()?
-        .draft
-        .as_ref()?
+    let state = shell.object_dialog.as_ref()?;
+    let draft = state.draft.as_ref()?;
+    let diagnostic = draft
         .diagnostics
         .iter()
         .find(|d| d.severity == Severity::Error)?;
+    if super::grouping_list::is_ad_hoc(state.domain, &draft.name) {
+        return Some(diagnostic.message.clone());
+    }
     Some(format!("not saved — {}", diagnostic.message))
 }
 
@@ -439,6 +450,55 @@ pub(crate) fn queue_edits(
         .collect::<BTreeMap<_, _>>();
     queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, None, cx);
     Ok(())
+}
+
+/// Queue `chain` as slot `slot`'s user-layer definition, with zero delay,
+/// joining any pending batch. Saving over a slot a lower layer defines is a
+/// fork like any definitional edit: the inherited value is recorded in the
+/// overrides sidecar in the same batch, so drift and revert see it.
+/// `Ok(Some(notice))` when it forked, with the fork's announcement. Refuses,
+/// with nothing queued, without a writable user directory.
+pub(super) fn queue_slot_chain(
+    shell: &mut ShellView,
+    slot: u8,
+    chain: &[String],
+    cx: &mut Context<ShellView>,
+) -> Result<Option<String>, String> {
+    let Some(user_dir) = shell.user_dir.clone() else {
+        return Err("no writable user config directory — nothing was changed".to_string());
+    };
+    let name = slot.to_string();
+    let doc = super::groupings::DOC;
+    // Pending-aware: a slot forked a moment ago is already the user's, and
+    // forking it again would overwrite its recorded baseline.
+    let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+    let inherited = Domain::Groupings
+        .objects(&config)
+        .into_iter()
+        .find(|row| row.name == name)
+        .is_some_and(|row| row.layer.is_some_and(|layer| layer != Layer::User));
+    let mut edits: BTreeMap<(&'static str, String), ObjectEdit> = BTreeMap::new();
+    let mut notice = None;
+    if inherited && let Some((layer, value)) = super::shadow_of(&config, doc, &name) {
+        // Stale sidecar keys are pruned before the fresh entry is inserted,
+        // so the fresh entry wins over a stale twin of the same key.
+        for stale in super::stale_override_keys(&config) {
+            edits.insert((super::OVERRIDES_DOC, stale), None);
+        }
+        edits.insert(
+            (super::OVERRIDES_DOC, super::override_key(doc, &name)),
+            Some(super::override_entry(layer, &name, &value)),
+        );
+        notice = Some(fork_notice_of(&config, doc, &name));
+    }
+    edits.insert(
+        (doc, name),
+        Some(toml::Value::Array(
+            chain.iter().cloned().map(toml::Value::String).collect(),
+        )),
+    );
+    queue_batch(shell, edits, user_dir, Duration::ZERO, None, cx);
+    Ok(notice)
 }
 
 /// Capture the batch's initial documents and schedule its accumulated edits. Callers
@@ -701,6 +761,12 @@ fn rebuild_after_revert(state: &mut super::ObjectDialogState, config: &Config, m
     let Some(draft) = state.draft.as_ref() else {
         return;
     };
+    // The ad hoc chain lives in the frame and never joins a batch, so a
+    // failed write reverted nothing of it; rebuilding it from config would
+    // turn it into a slot-shaped draft named `*`.
+    if super::grouping_list::is_ad_hoc(state.domain, &draft.name) {
+        return;
+    }
     let selected = draft.selected;
     let name = draft.name.clone();
     let mut rebuilt = state.domain.draft(config, &name);

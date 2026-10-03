@@ -1189,7 +1189,7 @@ pub mod chain {
                     .expect("the demo CVI slices at any date within its terms")
             };
             // An empty grid returns the forward alone.
-            let forward = slice(Grid::Dense(0)).forward;
+            let forward = slice(Grid::Dense { n: 0, cover: None }).forward;
             let inc = nice_step(forward * 0.0055);
             let atm = (forward / inc).round() * inc;
             let strikes: Vec<f64> = (-BELOW..=ABOVE)

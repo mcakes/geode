@@ -3688,20 +3688,31 @@ mod tests {
         };
         assert!(reason.contains(" messages dropped since "), "{reason}");
         assert!(detail.starts_with("cvi:queue: "), "{detail}");
+        let health = Arc::clone(&service.health);
+        let queue = crate::health::condition_key("cvi", crate::health::QUEUE);
         service.shutdown();
         // Stopping the subscription ends the receiver: its open episode is
-        // cleared, not left on the chip until restart. Nothing else could
-        // turn the source Ok inside the 60 s quiet interval.
-        let cleared = until_within(&rx, Duration::from_secs(5), |e| match e {
+        // cleared, not left on the chip until restart. The flood can also
+        // leave the source's backlog lane Degraded (under load the runner
+        // falls behind), so the source need not turn Ok: what clears is
+        // the queue lane, and the chip stops showing the queue's episode.
+        let moved_on = until_within(&rx, Duration::from_secs(5), |e| match e {
             DataEvent::Health {
                 source,
-                worst: Health::Ok,
-                ..
-            } if source == "cvi" => Some(()),
+                worst,
+                detail,
+            } if source == "cvi" && (worst == Health::Ok || !detail.starts_with("cvi:queue: ")) => {
+                Some(())
+            }
             _ => None,
         });
         assert!(
-            cleared.is_some(),
+            moved_on.is_some(),
+            "the chip leaves the queue's episode when the subscription ends"
+        );
+        assert_eq!(
+            health.load_lane("cvi", &queue),
+            Some(Health::Ok),
             "the queue Degraded clears when the subscription ends"
         );
     }

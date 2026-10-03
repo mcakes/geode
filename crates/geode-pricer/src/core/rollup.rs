@@ -318,8 +318,9 @@ fn cmp_key(a: &Option<Value>, b: &Option<Value>) -> Ordering {
     }
 }
 
-/// A value's text: its label and its path segment.
-fn text(v: &Value) -> String {
+/// A value's text: its label and its path segment, and the key a
+/// `value_colors` mapping matches a pricer value by.
+pub(crate) fn text(v: &Value) -> String {
     match v {
         Value::Utf8(s) => s.clone(),
         Value::F64(f) => f.to_string(),

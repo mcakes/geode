@@ -2690,6 +2690,12 @@ reloads the blank sheet from rows, is excluded). The same batch folding
 after each filled line measured 13.7 ms: each fold walks every package and
 formats the needs-currency failure for each one with a blank leg.
 
+`cargo bench -p geode-volslice --bench model_build` (3 s measurement, load
+65 to 93 from other sessions' builds): `model_twelve_expiries_three_kinds`
+99.8 µs (96.7 to 103.1) with each curve and density at 1,000 points, twelve
+expiries, both CVI kinds with densities, the chain and a difference; the
+batch is answered outside the timed loop.
+
 ## Grouping by a classification: `CASE` against a map probe (2026-10-03)
 
 `cargo bench -p geode-data --bench query -- query_classification`. One

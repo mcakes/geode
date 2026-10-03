@@ -19,7 +19,7 @@ use geode_core::groupings::GroupingSlots;
 use geode_core::log::LogLevels;
 use geode_core::schema::SchemaSpec;
 
-use super::{ShellEvent, ShellView, docs_equal, pickable_columns};
+use super::{ShellEvent, ShellView, docs_equal, pickable_columns, text_dimension_names};
 
 /// Delay between background reload polls. Scanning and loading run off the UI
 /// thread; validation and application run on it. Work adds to this interval.
@@ -208,13 +208,15 @@ impl ShellView {
             // Entry warnings name columns, so a schema change re-reads the entries.
             let named_changed =
                 changed(EXPRESSIONS_DOC) || changed("datasets") || changed("dimensions");
-            // Presentation, dimensions, and named colors all affect the views or
-            // factory settings refreshed by the app's `ConfigReloaded` handler.
+            // Presentation, dimensions, named colors, and value colors all
+            // affect the views or factory settings refreshed by the app's
+            // `ConfigReloaded` handler.
             let views_changed = changed("views")
                 || changed("view_presentation")
                 || changed("dataset_presentation")
                 || changed("dimensions")
-                || changed(geode_core::config::COLORS_DOC);
+                || changed(geode_core::config::COLORS_DOC)
+                || changed(geode_core::config::VALUE_COLORS_DOC);
             // `app` settings the bridge hands to module factories.
             let app_changed = changed("app");
             // Dimension picker columns depend on dataset columns and derived dimensions.
@@ -301,6 +303,7 @@ impl ShellView {
 
             if pickable_changed {
                 self.pickable = pickable_columns(&self.services.config);
+                self.text_dims = text_dimension_names(&self.services.config);
                 // Every open expression field re-ranks against the new columns
                 // at once, not at its next keystroke — including one covered
                 // by another dialog. `expr_suggest::completion_mut` reaches

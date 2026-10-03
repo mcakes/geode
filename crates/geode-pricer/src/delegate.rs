@@ -660,23 +660,36 @@ impl SheetDelegate {
         self.colour_cache.get(&self.colours, name, anchors, tokens)
     }
 
+    /// A named color resolved by name: a value's color. Shares the column
+    /// colors' theme memo and cache; `None` for a name the definitions do
+    /// not hold.
+    fn themed_value_colour(&mut self, name: &str, theme: &Theme) -> Option<ColourResolved> {
+        self.ensure_theme_inputs(theme);
+        let (_, anchors, tokens) = self.theme_inputs.as_ref().expect("set just above");
+        self.colour_cache.get(&self.colours, name, anchors, tokens)
+    }
+
     /// The text colour `render_cell` paints the cell at (`row_ix`,
     /// `plan_col`) with: the state paint, unless the cell is an own value
-    /// in a column whose `color` says otherwise (`paint::cell_colour`).
-    /// A row the model lacks, and a cell the window lacks, is the own
-    /// paint.
+    /// whose value has a color, or in a column whose `color` says
+    /// otherwise (`paint::cell_colour`). A row the model lacks, and a cell
+    /// the window lacks, is the own paint.
     pub(crate) fn text_colour(&mut self, row_ix: usize, plan_col: usize, theme: &Theme) -> Hsla {
-        let cell = self.window.get(row_ix, plan_col).map(|c| (c.state, c.sign));
+        let cell = self
+            .window
+            .get(row_ix, plan_col)
+            .map(|c| (c.state, c.sign, c.value_color.clone()));
         self.colour_of(row_ix, plan_col, cell, theme)
     }
 
-    /// [`Self::text_colour`] over a cell's `(state, sign)` read from
-    /// wherever it was prepared: the window, or a find table's rows.
+    /// [`Self::text_colour`] over a cell's `(state, sign, value color)`
+    /// read from wherever it was prepared: the window, or a find table's
+    /// rows.
     fn colour_of(
         &mut self,
         row_ix: usize,
         plan_col: usize,
-        cell: Option<(CellState, Option<Sign>)>,
+        cell: Option<(CellState, Option<Sign>, Option<Arc<str>>)>,
         theme: &Theme,
     ) -> Hsla {
         let model = Rc::clone(&self.model);
@@ -685,17 +698,28 @@ impl SheetDelegate {
         }
         // A group row or a leg: the palette floored on its own ground.
         let palette = self.row_palette(row_ix);
-        let Some((state, sign)) = cell else {
+        let Some((state, sign, value_color)) = cell else {
             return palette.map_or(self.paints.own, |p| p.own);
         };
+        // A name the definitions lack paints as if unmapped. A `tint_sign`
+        // color paints its base: a dimension value has no sign.
+        let value = value_color
+            .as_deref()
+            .and_then(|name| self.themed_value_colour(name, theme));
         let colour = model
             .columns
             .get(plan_col)
             .map_or(&Colour::None, |c| &c.colour);
         if let Some(palette) = palette {
             let base = palette.text(state);
-            return match cell_colour(colour, state, sign) {
+            return match cell_colour(colour, state, sign, value.is_some()) {
                 CellColour::State => base,
+                // On a row with its own ground, floored as a named column
+                // color is.
+                CellColour::Value => match value {
+                    Some(c) => self.on_ground(palette, c.base),
+                    None => base,
+                },
                 CellColour::Bearish => palette.bearish,
                 CellColour::Bullish => palette.bullish,
                 CellColour::Named(sign) => match self.themed_cell_colour(plan_col, theme) {
@@ -705,8 +729,9 @@ impl SheetDelegate {
             };
         }
         let base = self.paints.text(state);
-        match cell_colour(colour, state, sign) {
+        match cell_colour(colour, state, sign, value.is_some()) {
             CellColour::State => base,
+            CellColour::Value => value.map_or(base, |c| c.base),
             CellColour::Bearish => theme.chart_bearish,
             CellColour::Bullish => theme.chart_bullish,
             CellColour::Named(sign) => self
@@ -779,7 +804,12 @@ impl SheetDelegate {
         let colour = if find_row.is_context() {
             cx.theme().muted_foreground
         } else {
-            self.colour_of(row_ix, col, cell.map(|c| (c.state, c.sign)), cx.theme())
+            self.colour_of(
+                row_ix,
+                col,
+                cell.map(|c| (c.state, c.sign, c.value_color.clone())),
+                cx.theme(),
+            )
         };
         el.when(model.columns[col].right, |el| el.justify_end())
             .text_color(colour)
@@ -836,6 +866,21 @@ impl SheetDelegate {
         match self.model.kind(row) {
             Some(GridRowKind::Leg { .. }) => palette.map_or(self.paints.muted, |p| p.muted),
             _ => palette.map_or(self.paints.own, |p| p.own),
+        }
+    }
+
+    /// A group row's label paint: its value's color floored on the group
+    /// ground, else the row's own tree text paint.
+    pub(crate) fn group_label_paint(&mut self, row: usize, theme: &Theme) -> Hsla {
+        let model = Rc::clone(&self.model);
+        let value = model
+            .tree(row)
+            .and_then(|t| t.value_color)
+            .and_then(|name| self.themed_value_colour(name, theme));
+        match (value, self.row_palette(row)) {
+            (Some(c), Some(palette)) => self.on_ground(palette, c.base),
+            (Some(c), None) => c.base,
+            (None, _) => self.tree_text_paint(row),
         }
     }
 
@@ -1475,7 +1520,12 @@ impl SheetDelegate {
                             cx.emit(ChevronClicked(row_ix));
                         }))
                         .child(if open { "▾" } else { "▸" });
-                    (slot.child(chevron), self.tree_text_paint(row_ix))
+                    let text_paint = if group {
+                        self.group_label_paint(row_ix, cx.theme())
+                    } else {
+                        self.tree_text_paint(row_ix)
+                    };
+                    (slot.child(chevron), text_paint)
                 }
                 GridRowKind::Leg { last } => (
                     slot.relative()

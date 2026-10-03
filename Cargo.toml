@@ -12,6 +12,7 @@ members = [
     "crates/geode-timeseries",
     "crates/geode-volslice",
     "crates/geode-diagnostics",
+    "crates/geode-guide",
     "crates/geode-documents",
     "crates/geode-pricing",
     "crates/geode-pricer",

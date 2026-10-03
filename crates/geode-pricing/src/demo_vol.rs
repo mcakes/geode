@@ -8,8 +8,10 @@
 //! `atm + skew·k + param/100`; the smile is the natural cubic spline
 //! through a term's knots; between terms total variance is linear in
 //! time at equal `k` and the forward log-linear. Outside the term range
-//! it refuses rather than extrapolating, and a vol never goes below
-//! `VOL_FLOOR`.
+//! it refuses rather than extrapolating; past a term's node ladder in
+//! strike the smile continues the spline's end slope, and a vol never
+//! goes below `VOL_FLOOR`. A dense grid spans the ladder, widened to a
+//! request's cover, its points packed toward the forward.
 
 use crate::spline::Spline;
 use chrono::NaiveDate;
@@ -24,6 +26,10 @@ pub const DEMO_VOL_MODEL: &str = "demo";
 pub const KIND: &str = "cvi_params";
 /// No vol below this, whatever the extrapolated smile says.
 pub const VOL_FLOOR: f64 = 0.01;
+/// A dense grid's sinh scale is at least the span over this: the most it
+/// packs points toward the forward is about this many times its wings'
+/// spacing (`cosh(asinh(DENSE_SPREAD/2))`).
+const DENSE_SPREAD: f64 = 50.0;
 /// Time to expiry never below half a day, so a term on the anchor
 /// evaluates and still sits before a term the day after it.
 const MIN_DAYS: f64 = 0.5;
@@ -238,16 +244,61 @@ impl Surface {
 }
 
 impl Curve {
+    /// The moneyness offsets a dense grid spans: the node ladder (for an
+    /// expiry between terms, the union of the bracketing terms' ladders),
+    /// widened to reach `cover`'s strikes. Past the ladder the smile is the
+    /// spline's linear continuation of its end slope, floored at
+    /// `VOL_FLOOR`, so a steep wing can meet the floor and kink there.
+    fn span(&self, cover: Option<(f64, f64)>) -> Result<(f64, f64), VolError> {
+        let Some((lo, hi)) = cover else {
+            return Ok((self.k_min, self.k_max));
+        };
+        if !(positive(lo) && positive(hi) && lo <= hi) {
+            return Err(VolError(format!(
+                "cover {lo}..{hi} is not an ascending pair of positive strikes"
+            )));
+        }
+        Ok((
+            self.k_min.min(lo / self.forward - 1.0),
+            self.k_max.max(hi / self.forward - 1.0),
+        ))
+    }
+
+    /// `n >= 2` moneyness offsets from `k_min` to `k_max`, both exact,
+    /// strictly ascending, packed toward the forward: `k = c·sinh(u)` with
+    /// `u` even between `asinh(k_min/c)` and `asinh(k_max/c)`. The scale
+    /// `c` is the at-the-money σ√t, where the density has its width, so a
+    /// short-dated density keeps its points per σ√t·F however wide the
+    /// cover; it is floored at `1/DENSE_SPREAD` of the span, so a 0DTE
+    /// expiry over a wide chain still reaches its wings, and a long-dated
+    /// one (σ√t a large part of the span) is nearly even.
+    fn dense_offsets(&self, k_min: f64, k_max: f64, n: usize) -> Vec<f64> {
+        let c = ((self.vol)(0.0) * self.t.sqrt()).max((k_max - k_min) / DENSE_SPREAD);
+        let (u0, u1) = ((k_min / c).asinh(), (k_max / c).asinh());
+        let last = n - 1;
+        (0..n)
+            .map(|i| match i {
+                0 => k_min,
+                i if i == last => k_max,
+                i => c * (u0 + (u1 - u0) * i as f64 / last as f64).sinh(),
+            })
+            .collect()
+    }
+
     fn strikes(&self, grid: &Grid) -> Result<Vec<f64>, VolError> {
         Ok(match grid {
-            Grid::Dense(0) => Vec::new(),
-            Grid::Dense(1) => vec![self.forward * (1.0 + self.k_min)],
-            Grid::Dense(n) => (0..*n)
-                .map(|i| {
-                    let k = self.k_min + (self.k_max - self.k_min) * i as f64 / (*n as f64 - 1.0);
-                    self.forward * (1.0 + k)
-                })
-                .collect(),
+            Grid::Dense { n, cover } => {
+                let (k_min, k_max) = self.span(*cover)?;
+                match *n {
+                    0 => Vec::new(),
+                    1 => vec![self.forward * (1.0 + k_min)],
+                    n => self
+                        .dense_offsets(k_min, k_max, n)
+                        .into_iter()
+                        .map(|k| self.forward * (1.0 + k))
+                        .collect(),
+                }
+            }
             Grid::At(strikes) => {
                 if let Some(bad) = strikes.iter().find(|k| !positive(**k)) {
                     return Err(VolError(format!("strike {bad} is not positive")));
@@ -582,11 +633,14 @@ pub(crate) mod tests {
         let req = SliceRequest {
             expiry: date("2026-11-20"),
             coordinate: Coordinate::Strike,
-            grid: Grid::Dense(50),
+            grid: Grid::Dense { n: 50, cover: None },
             density: false,
         };
+        // The atm vol sets a dense grid's spacing, so b is read at a's
+        // strikes.
         let ra = DemoVolModel.slice(&a, &req).unwrap();
-        let rb = DemoVolModel.slice(&b, &req).unwrap();
+        let strikes: Vec<f64> = ra.points.iter().map(|p| p.strike).collect();
+        let rb = DemoVolModel.slice(&b, &at("2026-11-20", &strikes)).unwrap();
         assert_eq!(ra.points.len(), 50);
         // Variance interpolation makes the lift approximate between terms;
         // it is exact at a term, and monotone everywhere.
@@ -604,7 +658,8 @@ pub(crate) mod tests {
             ..req
         };
         let ra = DemoVolModel.slice(&a, &at_term).unwrap();
-        let rb = DemoVolModel.slice(&b, &at_term).unwrap();
+        let strikes: Vec<f64> = ra.points.iter().map(|p| p.strike).collect();
+        let rb = DemoVolModel.slice(&b, &at("2026-10-16", &strikes)).unwrap();
         for (pa, pb) in ra.points.iter().zip(&rb.points) {
             assert!((pb.vol - pa.vol - 0.05).abs() < 1e-9);
         }
@@ -619,7 +674,7 @@ pub(crate) mod tests {
                 &SliceRequest {
                     expiry: date("2026-10-16"),
                     coordinate: Coordinate::Strike,
-                    grid: Grid::Dense(7),
+                    grid: Grid::Dense { n: 7, cover: None },
                     density: false,
                 },
             )
@@ -632,6 +687,218 @@ pub(crate) mod tests {
         assert!(ks.windows(2).all(|w| w[1] > w[0]));
     }
 
+    fn dense(expiry: &str, n: usize, cover: Option<(f64, f64)>) -> SliceRequest {
+        SliceRequest {
+            expiry: date(expiry),
+            coordinate: Coordinate::Strike,
+            grid: Grid::Dense { n, cover },
+            density: false,
+        }
+    }
+
+    fn dense_strikes(doc: &DocumentRows, n: usize, cover: Option<(f64, f64)>) -> Vec<f64> {
+        DemoVolModel
+            .slice(doc, &dense("2026-10-16", n, cover))
+            .unwrap()
+            .points
+            .iter()
+            .map(|p| p.strike)
+            .collect()
+    }
+
+    /// The ladder is 80..105 at a forward of 100: a cover past either end
+    /// moves that end alone, and the grid stays strictly ascending, its
+    /// finest step at the forward.
+    #[test]
+    fn a_dense_grid_widens_to_its_cover_on_either_side() {
+        let doc = flat(0.2);
+        for (cover, lo, hi) in [
+            ((60.0, 130.0), 60.0, 130.0),
+            ((60.0, 100.0), 60.0, 105.0),
+            ((90.0, 130.0), 80.0, 130.0),
+        ] {
+            let ks = dense_strikes(&doc, 41, Some(cover));
+            assert_eq!(ks.len(), 41);
+            assert!(
+                (ks[0] - lo).abs() < 1e-9 && (ks[40] - hi).abs() < 1e-9,
+                "{cover:?}: {ks:?}"
+            );
+            assert!(ks.windows(2).all(|w| w[1] > w[0]), "{cover:?}: {ks:?}");
+            let finest = ks
+                .windows(2)
+                .min_by(|a, b| (a[1] - a[0]).total_cmp(&(b[1] - b[0])))
+                .unwrap();
+            assert!(
+                finest[0] <= 101.0 && finest[1] >= 99.0,
+                "{cover:?}: the finest step {finest:?} is at the forward"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cover_inside_the_ladder_does_not_narrow_the_grid() {
+        let doc = flat(0.2);
+        let ladder = dense_strikes(&doc, 7, None);
+        for cover in [(95.0, 100.0), (80.0, 105.0)] {
+            let ks = dense_strikes(&doc, 7, Some(cover));
+            assert!(
+                ks.iter().zip(&ladder).all(|(a, b)| (a - b).abs() < 1e-9),
+                "{cover:?}: {ks:?} vs {ladder:?}"
+            );
+        }
+    }
+
+    /// A one-week expiry over a cover of ±50% of the forward: spread
+    /// evenly, 500 strikes would put some 14 across one σ√t·F (2.8% of
+    /// the forward); packed toward the forward they put 25 or more, and
+    /// the density there is smooth.
+    #[test]
+    fn a_wide_cover_keeps_the_points_per_sigma_root_t_at_the_forward() {
+        let doc = cvi_doc(
+            "2026-09-01",
+            &[
+                ("2026-09-08", 100.0, 0.2, 0.0),
+                ("2026-10-16", 100.0, 0.2, 0.0),
+            ],
+            |_, _| 0.0,
+        );
+        let r = DemoVolModel
+            .slice(
+                &doc,
+                &SliceRequest {
+                    density: true,
+                    ..dense("2026-09-08", 500, Some((50.0, 150.0)))
+                },
+            )
+            .unwrap();
+        let ks: Vec<f64> = r.points.iter().map(|p| p.strike).collect();
+        assert_eq!((ks[0], ks[499]), (50.0, 150.0));
+        assert!(ks.windows(2).all(|w| w[1] > w[0]));
+        let width = 100.0 * 0.2 * (7.0f64 / 365.0).sqrt();
+        let near = ks
+            .iter()
+            .filter(|k| (**k - 100.0).abs() <= width / 2.0)
+            .count();
+        assert!(near >= 25, "{near} points across one σ√t·F at the forward");
+        let d = r.density.unwrap();
+        let peak = d.iter().map(|(_, p)| *p).fold(f64::MIN, f64::max);
+        let steepest = d
+            .windows(2)
+            .map(|w| (w[1].1 - w[0].1).abs())
+            .fold(0.0, f64::max);
+        assert!(steepest / peak < 0.025, "steepest step {}", steepest / peak);
+        let mass: f64 = d
+            .windows(2)
+            .map(|w| 0.5 * (w[0].1 + w[1].1) * (w[1].0 - w[0].0))
+            .sum();
+        assert!((mass - 1.0).abs() < 0.01, "{mass}");
+    }
+
+    /// Past the ladder the smile continues its end slope: a linear smile
+    /// stays linear out to the cover, floored at `VOL_FLOOR`.
+    #[test]
+    fn past_the_ladder_a_covered_strike_continues_the_end_slope() {
+        let doc = cvi_doc(
+            "2026-09-01",
+            &[
+                ("2026-10-16", 100.0, 0.2, -0.5),
+                ("2027-01-15", 100.0, 0.2, -0.5),
+            ],
+            |_, _| 0.0,
+        );
+        let r = DemoVolModel
+            .slice(&doc, &dense("2026-10-16", 9, Some((60.0, 150.0))))
+            .unwrap();
+        let vols: Vec<f64> = r.points.iter().map(|p| p.vol).collect();
+        // k = -0.4 at the low end, k = 0.5 meets the floor at the high.
+        assert!((vols[0] - 0.4).abs() < 1e-9, "{vols:?}");
+        assert!((vols[8] - VOL_FLOOR).abs() < 1e-12, "{vols:?}");
+        for p in &r.points {
+            let k = p.strike / 100.0 - 1.0;
+            let want = (0.2 - 0.5 * k).max(VOL_FLOOR);
+            assert!((p.vol - want).abs() < 1e-9, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn a_cover_that_is_not_an_ascending_pair_of_positive_strikes_is_refused() {
+        let doc = flat(0.2);
+        for (cover, words) in [
+            ((0.0, 100.0), "cover 0..100"),
+            ((-5.0, 100.0), "cover -5..100"),
+            ((110.0, 90.0), "cover 110..90"),
+            ((90.0, f64::INFINITY), "cover 90..inf"),
+            ((f64::NAN, 100.0), "cover NaN..100"),
+        ] {
+            let err = DemoVolModel
+                .slice(&doc, &dense("2026-10-16", 7, Some(cover)))
+                .unwrap_err();
+            assert_eq!(
+                err.0,
+                format!("{words} is not an ascending pair of positive strikes")
+            );
+        }
+        // One strike is a span of none, and still a cover.
+        assert_eq!(dense_strikes(&doc, 2, Some((100.0, 100.0))), [80.0, 105.0]);
+    }
+
+    /// A one-week expiry at about 20% vol has σ√t·F near 2.8% of the
+    /// forward. Over a cover some 42% of the forward wide, a thousand
+    /// strikes put about sixty points across one σ√t·F: the density is
+    /// one smooth hump that integrates to one, its steepest step between
+    /// neighbours a small fraction of its peak.
+    #[test]
+    fn a_one_week_density_over_a_wide_cover_is_smooth_and_integrates_to_one() {
+        let doc = cvi_doc(
+            "2026-09-01",
+            &[
+                ("2026-09-08", 100.0, 0.2, -0.3),
+                ("2026-10-16", 100.0, 0.2, -0.3),
+            ],
+            |_, _| 0.0,
+        );
+        let r = DemoVolModel
+            .slice(
+                &doc,
+                &SliceRequest {
+                    density: true,
+                    ..dense("2026-09-08", 1000, Some((70.0, 112.0)))
+                },
+            )
+            .unwrap();
+        assert!((r.points[0].strike - 70.0).abs() < 1e-9);
+        assert!((r.points[999].strike - 112.0).abs() < 1e-9);
+        let d = r.density.unwrap();
+        let mass: f64 = d
+            .windows(2)
+            .map(|w| 0.5 * (w[0].1 + w[1].1) * (w[1].0 - w[0].0))
+            .sum();
+        assert!((mass - 1.0).abs() < 0.01, "{mass}");
+        let peak = d.iter().map(|(_, p)| *p).fold(f64::MIN, f64::max);
+        assert!(d.iter().all(|(_, p)| *p > -1e-9 * peak), "no negative lobe");
+        // One hump: the slope changes sign once wherever the density is
+        // more than a thousandth of its peak.
+        let body: Vec<f64> = d
+            .iter()
+            .map(|(_, p)| *p)
+            .filter(|p| *p > 1e-3 * peak)
+            .collect();
+        let flips = body
+            .windows(3)
+            .filter(|w| (w[1] - w[0]).signum() != (w[2] - w[1]).signum())
+            .count();
+        assert_eq!(flips, 1, "one peak");
+        let steepest = d
+            .windows(2)
+            .map(|w| (w[1].1 - w[0].1).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            steepest / peak < 0.025,
+            "about 25 points or more per σ√t·F: steepest step {}",
+            steepest / peak
+        );
+    }
+
     #[test]
     fn a_dense_grid_of_zero_or_one_points_does_not_panic() {
         let doc = flat(0.2);
@@ -642,7 +909,7 @@ pub(crate) mod tests {
                     &SliceRequest {
                         expiry: date("2026-10-16"),
                         coordinate: Coordinate::Moneyness,
-                        grid: Grid::Dense(n),
+                        grid: Grid::Dense { n, cover: None },
                         density: true,
                     },
                 )
@@ -931,7 +1198,7 @@ pub(crate) mod tests {
                 &SliceRequest {
                     expiry: date("2026-11-20"),
                     coordinate: Coordinate::Delta,
-                    grid: Grid::Dense(40),
+                    grid: Grid::Dense { n: 40, cover: None },
                     density: false,
                 },
             )
@@ -1067,7 +1334,10 @@ pub(crate) mod tests {
                 &SliceRequest {
                     expiry: date("2026-10-16"),
                     coordinate: Coordinate::Moneyness,
-                    grid: Grid::Dense(200),
+                    grid: Grid::Dense {
+                        n: 200,
+                        cover: None,
+                    },
                     density: true,
                 },
             )

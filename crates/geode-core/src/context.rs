@@ -15,6 +15,15 @@ pub struct DimensionContext {
     /// The clicked column, when it names a dimension or key; its menu
     /// section leads. Set by a right press (Part 2); `None` otherwise.
     pub first: Option<String>,
+    /// The column whose value this row stands for: in a grouped grid the
+    /// grouping column at the row's depth; in the pricer `underlying_ref`
+    /// on a line, leg or package row naming one sole underlying. `None`
+    /// when the row stands for no single dimension value (a grand total, a
+    /// package across underlyings). When it is itself a text dimension with
+    /// a value at the row, the row menu's `Color…` row is offered for it
+    /// whenever the clicked column is not one (a measure, a cell without a
+    /// value, or no clicked column at all).
+    pub own: Option<String>,
     /// When the target row is inside a selection: each selected top-most
     /// row's values. Empty otherwise.
     pub selection: Vec<Vec<(String, String)>>,

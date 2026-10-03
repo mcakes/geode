@@ -1,0 +1,24 @@
+[package]
+name = "geode-guide"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+geode-core.workspace = true
+geode-shell.workspace = true
+geode-tile.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+markdown = "1.0.0"
+html5ever = "0.27.0"
+markup5ever_rcdom = "0.3.0"
+regex = "1"
+toml = "1.1.4"
+
+[dev-dependencies]
+geode-shell = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }

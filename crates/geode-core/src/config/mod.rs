@@ -18,6 +18,11 @@ pub const CONFIG_VERSION: i64 = 1;
 /// The named-color document, `colors.toml`.
 pub const COLORS_DOC: &str = "colors";
 
+/// The value-color document, `value_colors.toml`: a table per dimension
+/// mapping a value's text to a `colors.toml` name. Merged per value (it has
+/// no atomic depth), so a user entry overrides one value and keeps the rest.
+pub const VALUE_COLORS_DOC: &str = "value_colors";
+
 /// The named scope expressions document, `expressions.toml`.
 pub const EXPRESSIONS_DOC: &str = "expressions";
 

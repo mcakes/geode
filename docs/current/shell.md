@@ -226,6 +226,50 @@ separators part the rest. A context with no rows at all opens nothing: the
 status notice reads "no actions for this row" (`NO_ROW_ACTIONS`). That is
 also the answer with no tile focused or a tile that answers no context.
 
+#### Color…
+
+One section may end in a `Color…` row, which sets the color one dimension
+value paints in. It is for the clicked column (`DimensionContext::first`)
+when that is a text dimension with a value at the row, else for the row's
+own column (`DimensionContext::own`, the column the row stands for) under
+the same test. A text dimension is a column some dataset declares as a
+`utf8` dimension or key, or a derived dimension
+(`geode_core::colour::text_dimensions`); the shell caches the names and
+rebuilds them on a configuration reload. A row standing for no single value
+(a grand total) offers none.
+
+Picking it opens a choice list titled `Color · {column} {value}` (see
+[choice lists](input-and-dialogs.md#scope-tile-log-and-column-choices)):
+one row per named color in `colors.toml`, alphabetical, each with its
+swatch, then `None`, then `Follow desk ({name})` only when the user layer
+holds an entry for this value and a lower layer holds a different, colored
+one. It opens on the value's current color, or on `None` when it has none or
+its color is no longer defined, so `enter` on an untouched list changes
+nothing. A row stands for its pick by position, so a color named `None` is
+still that color. With no named color the list holds only `None` and a muted
+line, `no named colors: define one in the Colors dialog`.
+
+A pick writes only the user layer's `value_colors.toml`, through
+`config_write`, off the UI thread, keeping the rest of the file:
+
+| Pick | User-layer write |
+|---|---|
+| A color | `{dimension}.{value} = "{name}"`, the value one quoted key whatever its text (`"BRK.B"`) |
+| `None`, a lower layer colors the value | `{dimension}.{value} = "none"` |
+| `None`, no lower entry | the key removed, and the dimension table with it when that empties it |
+| `Follow desk` | the key removed, and an emptied dimension table |
+
+A pick equal to the color as painted writes nothing and says nothing; a
+name `colors.toml` no longer defines paints nothing, so `None` over it
+writes nothing either (a dangling user entry with no lower one is not
+cleared this way).
+After a write the status bar reads `SPX colored blue`, `SPX color cleared`
+or `SPX follows the desk`; the ordinary reload repaints. A failed write (a
+dimension entry that is not a table, an unreadable file) shows the writer's
+error as the notice and leaves the file untouched. With no user
+configuration directory the notice reads `no user configuration directory:
+the color was not saved`.
+
 While open, the menu owns the keys: `j`/`down` and `k`/`up` step over
 enabled rows, `enter` picks the highlighted row, and `escape` closes it.
 Any other bare key is consumed. A chord passes to the matcher, and its
@@ -453,10 +497,14 @@ numbered slot, or the lane's own ad hoc chain. The ad hoc chain is stored on
 the lane beside the choice, so it survives a switch to a slot and can be
 returned to (`frame::grouping_adhoc`, "Ad hoc grouping", no default
 binding; with no chain stored it reports that in the status bar). The
+Grouping dialog is where a chain is typed, edited, and saved to a slot. The
 toolbar's grouping readout reads `n · chain` for a slot, `* · chain` for an
-ad hoc chain, and `view default` otherwise. The frame holds one shared lane
-and one lane per pinned workspace. An unpinned workspace reads and writes
-the shared lane; a pinned one reads and writes only its own. Definitions
+ad hoc chain, and `view default` otherwise; a click on it opens the
+Grouping dialog on the lane (see
+[configuration dialogs](configuration-dialogs.md#the-grouping-dialog)).
+The frame holds one shared lane and one lane per pinned workspace. An
+unpinned workspace reads and writes the shared lane; a pinned one reads and
+writes only its own. Definitions
 stay shared across lanes — grouping slot contents, saved scopes, named
 expressions — as do recent publications and the data and config versions.
 
@@ -472,6 +520,11 @@ workspace reads the shared lane again. A grouping reload (`replace_slots`)
 bumps grouping in every lane, hidden pinned ones included, and clears an
 active slot that no longer exists in each lane separately; saving a slot
 (`save_slot`) bumps grouping only in the lanes where that slot is active.
+`stage_slot` holds a chain in a slot in memory ahead of its config write
+and queues no write of its own. A changed chain bumps grouping in the lanes
+on that slot and the frame's config version, because a tile pinned to the
+slot follows config, and the promotion's reload finds equal slots and bumps
+nothing; an equal chain bumps nothing.
 A reload that changes `groupings`, `datasets` or `dimensions` also checks
 each lane's ad hoc chain against the groupable columns. A chain naming a
 column outside them is dropped whole, with a warning, and a lane it was
@@ -654,7 +707,7 @@ for it.
 The load glyph (a folder-open icon, `scope-load-chip`) follows the `+` and
 paints whatever the scope holds, empty included; a click opens the scope
 picker (`frame::scope`, `mod+o`; see
-[input and dialogs](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices)),
+[input and dialogs](input-and-dialogs.md#scope-tile-log-and-column-choices)),
 and the glyph holds its pressed fill while the picker is open. The save
 glyph, when the scope is savable, comes after it, so its appearance never
 moves the load glyph.
@@ -806,7 +859,7 @@ still pending.
 
 **The chooser.** `tile::link_group` (`mod+u`, the palette, and a click on the
 status bar's `following` segment) opens the link chooser on the focused tile
-(see [input and dialogs](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices)).
+(see [input and dialogs](input-and-dialogs.md#scope-tile-log-and-column-choices)).
 It lists the follow rows for a tile whose module follows and the emit rows
 for one whose module emits. A tile that does neither (a timeseries tile) has
 nothing to choose: no dialog opens and the status bar reads `this tile has

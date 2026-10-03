@@ -35,6 +35,45 @@ Every module follows these interaction rules:
 - Stack state is visible through the shared marker in the module header.
 - Delivery matches are exhaustive so a new outcome cannot be ignored silently.
 
+## User guide
+
+`geode-guide` provides the `guide` tile, registered even when data setup fails.
+It embeds `docs/user-guide.md` at build time and renders one heading's section
+at a time with the component Markdown reader. The tile owns its selected
+section, retained text state, contents menu, and section-find state; it performs
+no I/O and answers frame flip barriers immediately. It neither follows nor
+emits a link group.
+
+The palette's **Guide: Split** and the tile picker's **guide** entry use the
+ordinary module factory. **Contents** (`c`) lists chapters; `[`/`]` and
+Previous/Next step through every heading, including subsections. Contents uses
+the shared tile menu's navigation and Escape dismissal. The header's **⋯**
+and `.` open the ordinary tile actions menu, including scrolling, navigation,
+copy, and search clearing. Controls, the footer, tooltips, and menu rows show
+live shortcut hints; keymap reloads update them, including unbound actions.
+`j`/`k` and the arrows
+scroll, Page Up/Down and Ctrl-B/F/U/D move by 80% of the viewport, `g g`/Home
+and `G`/End reach its ends. Counts multiply moves. `y` copies the section as
+Markdown. `:section <heading-anchor>` opens a section with completion;
+`:section` returns to the introduction. Guide actions are remappable.
+
+`/` previews the first case-insensitive matching section across the whole
+guide. Enter keeps it; Escape restores the entry section and scroll position.
+`n`/`N` cycle the matching sections. Matching text is highlighted in prose,
+headings, tables, and code, and each section opens at its first matching block.
+The footer gives the occurrence count and position among matching sections.
+Escape outside the find prompt clears the search and its highlights.
+Search reads displayed text, including phrases across inline formatting;
+hidden link destinations and Markdown syntax do not match. Fragment links navigate directly to
+their heading. Links to other repository documents display their label and
+path as text; those documents are not bundled destinations.
+
+Session state stores the selected heading anchor. Unknown or invalid anchors
+fall back to the introduction. Scroll offsets, text selections, menus, and
+searches are transient; restoring starts at the top of the saved section.
+The content describes this build's default keys, not a user's remapped keys;
+guide edits require rebuilding.
+
 ## Shared tile interaction
 
 Modules build their popups, `.` action menus, in-tile y/n confirms and
@@ -329,6 +368,20 @@ columns](data-path.md#ungrouped-dimension-columns). A numeric dimension such as
 `strike` sorts by number and paints its exact value, never rounded by the text
 format.
 
+A dimension value that `value_colors` maps paints in that value's named
+color. A tree label is a value of the grouping dimension at its depth, so
+`L1` under `lhu` takes `lhu`'s mapping for `L1`, never another level's; the
+gutter number, indent and chevron keep their own paint. A `dimension`
+column's unanimous value takes its color too. `mixed`, blanks, the grand
+total, measures, headers and the selection footer are never value-colored.
+Muted states (`mixed`, non-attributable, determined non-additive, the `/`
+table's context rows) win; otherwise the value's color wins over the column's
+own `color` (`sign` or named), which wins over the foreground. A value has no
+sign, so a `tint_sign` color paints its base. The name is looked up when the
+visible window is prepared, not in render; a mapping or definitions reload
+re-prepares the window, and the `/` table drops its held cells when it is
+installed under a different mapping.
+
 `g m` opens a panel on the cursor row's `underlying_ref`, the column every
 panel kind accepts. The blotter reads it from the grouping path, a shown
 column, or the hidden context column the data service adds; a row above the
@@ -359,8 +412,13 @@ a dimension the row carries (a click beside the cells counts as the
 cursor's column). Blank space below the data opens nothing. A right-click
 inside a `V` row selection keeps the cursor and the selection; anywhere
 else it clears any selection and moves the cursor to the clicked row first.
-A row with nothing to offer (an `lhu` subtotal, say) shows `no actions for
-this row` instead.
+A row with nothing to offer shows `no actions for
+this row` instead. The menu's [`Color…`](shell.md#color) row sets the
+color a value paints in: the clicked column's value when that column is a
+text dimension (a `utf8` dimension or key column, or a derived dimension),
+else the row's own value, the grouping column's at the row's depth (`L1`
+on an `lhu` subtotal, `lhu` being a `utf8` dimension). The grand total
+stands for no value of its own.
 
 A row carrying a single `position_ref` or `instrument_ref` (from the grouping
 path, a shown column, or the hidden context column) gets an "Open in Nemo" row in that column's section.
@@ -971,13 +1029,13 @@ decimation, and palette derivation; its paint half owns the pane frame, the
 axis painters and the stroke builders the elements share.
 `timeseries::ChartElement` paints an immutable `ChartModel`: polylines over a
 session or continuous time axis, with percentile rules and density bars.
-`xy::XyElement` paints an immutable `XyModel`: lines, solid or dashed, and
-point marks with a range bar over a linear x axis that can run reversed, with
-a crosshair that snaps to a quoted point. Both paint through gpui-component's
-plot surface in up to two panes. Paths and chrome are cached by the values
-that affect them; cursor movement does not rebuild the data model. The
-timeseries tile hosts the time chart and the vol slice viewer the xy
-element.
+`xy::XyElement` paints an immutable `XyModel`: lines, solid or dashed and
+optionally shaded down to zero, and point marks with a range bar over a
+linear x axis that can run reversed, with a crosshair that snaps to a quoted
+point. Both paint through gpui-component's plot surface in up to two panes.
+Paths and chrome are cached by the values that affect them; cursor movement
+does not rebuild the data model. The timeseries tile hosts the time chart and
+the vol slice viewer the xy element.
 
 The header's `⋯` button, a chip's right-click, and `.` open the action menu.
 It offers popup openers, actions for the selected slot, `Frequency…`, toggles,
@@ -1117,11 +1175,24 @@ through the axis's scale, so a reversed axis moves the way it reads. A
 coordinate change resets the view to the new extent, padded to that
 coordinate's narrowest span (a chain strike gap for strike).
 
+**Curves.** Each curve is evaluated at 1,000 strikes, packed toward the
+forward by the model, spanning the CVI's node ladder, widened to the listed
+chain's lowest and highest strike wherever a chain is loaded at that expiry,
+shown or hidden, so a curve is drawn at least as wide as the quotes and hiding
+the chain does not move its extent. Past the node ladder the demo model
+continues the smile's end slope, floored at its minimum vol; a steep wing that
+reaches the floor kinks there, and its density shows the kink.
+
 **Densities.** `shift+d` (the tile's binding beats the workspace's
 duplicate) asks each visible curve's density, painted on the right axis in
-the curve's color at a fixed lower opacity. The density is per unit of the
-shown coordinate, so its area is about one in each; where delta saturates
-the point is NaN and paints as a gap.
+the curve's color at a fixed lower opacity, with the region between it and
+zero shaded at a fraction of that. A negative lobe (a butterfly violation)
+shades up to zero from beneath. The density is per unit of the shown
+coordinate, so its area is about one in each; where delta saturates the
+point is NaN and paints as a gap in both line and shading. The demo model
+packs a curve's points toward the forward on the scale of σ√t, so a
+short-dated density keeps dozens of points across its width however wide
+the chain, and reads as a smooth hump.
 
 **Difference.** `d` opens a chooser of `none` and every ordered pair of
 loaded kinds (`:diff <kind> - <kind> | none` too). The pair paints in a lower
@@ -1462,6 +1533,21 @@ in the theme's bearish color and a positive one bullish, a named color from
 `colors.toml` tints the column and its header; a stale cell stays muted and a
 failed one danger whatever the column's color. Measures default to `sign`;
 a column says `color = "none"` to opt out.
+A dimension value that `value_colors` maps paints in that value's named
+color: a text dimension's cell showing an own value (`underlying_ref` on a
+line or leg, and a package or group row's agreed value), and a group row's
+label when the sheet is grouped by that dimension. Label and cell both match
+the raw value grouping and scope read, not the painted spelling: an `expiry`
+mapping names `2026-12-18`, which paints `Z26`, and a package or group cell
+matches only the value every leg beneath it shares. Stale, failed,
+inherited, `mixed` and blank cells keep their state paint; otherwise the
+value's color wins over the column's own `color`, which wins over the
+foreground. A value has no sign, so a `tint_sign` color paints its base; on
+a leg's or a group row's ground it is floored as a named column color is.
+Measures, the line shorthand in column 0, headers and the selection footer
+are never value-colored. The name is looked up when the index is built and
+the window filled, not in render; a mapping or definitions reload rebuilds
+the index and refills the window under the new mapping.
 Result columns
 carry risk_snapshot's names — `npv`, `delta01`, `gamma01`, `vega01`,
 `rho010`, `clean_theta_business_day` and the rest — each with a `_usd` twin
@@ -1664,7 +1750,10 @@ selection, closing an open editor (a bulk edit's live steps roll back);
 anywhere else it clears any selection, closes an open editor or entry bar,
 and moves the cursor to the clicked row, keeping its column. A
 right-click inside the open editor's own cell is the editor's and opens no
-row menu; blank space below the lines opens nothing.
+row menu; blank space below the lines opens nothing. The menu's
+[`Color…`](shell.md#color) row is for `underlying_ref` on line, leg and
+package rows (a package's when its legs share one); a grouping row's context
+is empty, so it offers none.
 
 Emitting into a [link group](#link-groups), the pricer posts the same
 underlying `g m` opens on, as the group's scope, so the two never name

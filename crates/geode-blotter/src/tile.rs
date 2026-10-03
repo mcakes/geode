@@ -1822,7 +1822,8 @@ impl BlotterTile {
         // Every held cell belonged to the previous display; `update_table`
         // marks the table stale, so the rows shown re-report at the next
         // layout and are formatted against this one.
-        cells.borrow_mut().install(prepared.clone(), cols);
+        let colours = Arc::clone(&self.colours.borrow());
+        cells.borrow_mut().install(prepared.clone(), cols, colours);
         let paint = cells;
         let table = self.table.clone();
         let header_table = self.table.clone();
@@ -5489,6 +5490,7 @@ mod tests {
                 let expected = crate::core::cache::cell(
                     &prepared.snapshot,
                     &prepared.plan,
+                    &geode_core::colour::ValueColors::default(),
                     prepared.rows[row] as usize,
                     col,
                 )
@@ -5671,6 +5673,7 @@ mod tests {
                 let expected = crate::core::cache::cell(
                     &prepared.snapshot,
                     &live,
+                    &geode_core::colour::ValueColors::default(),
                     prepared.rows[row] as usize,
                     col,
                 )

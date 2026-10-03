@@ -544,6 +544,9 @@ fn build_shell_services(
         add_bridge_modules(&mut roster, &bridge);
         bridge
     });
+    // Keep the existing launcher's order while making the bundled guide
+    // available even when data setup fails.
+    roster.add(Box::new(geode_guide::GuideFactory));
     for diag in &composition_diagnostics {
         print_diagnostic(diag);
     }
@@ -1424,6 +1427,69 @@ label = "skew"
             .unwrap()
             .downcast::<ShellView>()
             .unwrap()
+    }
+
+    #[gpui::test]
+    fn the_bundled_guide_launches_navigates_and_saves_through_the_shell(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::tiling::TileId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        assert_eq!(services.roster.kinds().first(), Some(&"blotter"));
+        assert!(services.roster.kinds().contains(&"guide"));
+        assert!(bridge::MODULE_KINDS.contains(&"guide"));
+        assert!(
+            services
+                .registry
+                .get(&geode_shell::actions::ActionId("tile::add_guide".into()))
+                .is_some()
+        );
+        let (window, mut vcx) = open(cx, services);
+        let shell = shell_of(&window, &mut vcx);
+        vcx.simulate_keystrokes("ctrl-k");
+        vcx.simulate_input("Guide: Split");
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
+            Some("guide")
+        );
+        vcx.simulate_keystrokes("]");
+        shell.read_with(&vcx, |s, cx| s.save_session(cx));
+        let saved: toml::Table = std::fs::read_to_string(user.path().join("session.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            saved["workspaces"]["1"]["tiles"]["1"]["state"]["section"].as_str(),
+            Some("how-to-think-about-geode")
+        );
+        vcx.simulate_keystrokes("/");
+        vcx.simulate_input("scope");
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            use gpui_component::ActiveTheme as _;
+            let _ = window.draw(cx);
+            let color = u32::from(gpui::Rgba::from(cx.theme().selection));
+            assert!(
+                window
+                    .painted_quads()
+                    .iter()
+                    .any(|q| q.background.as_solid().is_some_and(|fill| u32::from(
+                        gpui::Rgba::from(fill)
+                    )
+                    .to_be_bytes()
+                    .into_iter()
+                    .zip(color.to_be_bytes())
+                    .all(|(a, b)| a.abs_diff(b) <= 2))),
+                "the shell's find route paints matches in the guide"
+            );
+        });
+        assert!(vcx.debug_bounds("guide-search-status").is_some());
+        bridge.handle.shutdown();
     }
 
     /// A user panel over `cvi_params` becomes a tile kind: it restores from

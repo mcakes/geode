@@ -9,6 +9,15 @@ know Vim, write configuration files, or understand how Geode is built. The
 walkthrough uses generated demo data and the default keys; your desk may
 provide different views, grouping presets, and shortcuts.
 
+To read this guide beside your work, open the command palette with `ctrl+k`
+and choose **Guide: Split** (or choose **guide** in the tile picker). The
+**User guide** tile works offline. **Contents** (`c`) opens the chapter list;
+`[` and `]` move between sections, `j`/`k` scroll, and Page Up/Down move a
+page. `/` highlights matching text; `n` and `Shift-N` move between matching
+sections, and Escape clears the highlights. Press `.` or the header's **⋯**
+for the guide's actions and shortcuts. The controls and footer also show keys.
+The tile remembers its section when you reopen Geode.
+
 - [How to think about Geode](#how-to-think-about-geode)
 - [A first walkthrough](#a-first-walkthrough)
 - [Try the other tools](#try-the-other-tools)

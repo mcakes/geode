@@ -1,6 +1,6 @@
-//! The xy chart: lines and point marks against a linear x axis, in up to
-//! two panes with four y axes. [`XyModel`] is the immutable input a caller
-//! prepares; [`XyElement`] paints it.
+//! The xy chart: lines (optionally shaded down to zero) and point marks
+//! against a linear x axis, in up to two panes with four y axes. [`XyModel`]
+//! is the immutable input a caller prepares; [`XyElement`] paints it.
 //!
 //! Everything a caller names to build a model and host the element is here
 //! or at the crate root (`Axis`, `View`, the layout and hit test): the x

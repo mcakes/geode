@@ -1,11 +1,9 @@
-//! A filter-only choice modal for grouping slots, saved scopes, tile kinds,
-//! columns, log levels, and a tile's link groups.
+//! A filter-only choice modal for saved scopes, tile kinds, columns, log
+//! levels, a row action's value, and a tile's link groups.
 //! [`ChoiceList`] owns ranking, highlight, Tab completion, and navigation.
-//! Enter or a row click commits the selected option.
+//! Enter or a row click commits the selected option; digits are filter text.
 //!
-//! Grouping lists the view default followed by configured slots 1–9. With
-//! an empty query, digits activate a configured slot and 0 restores the view
-//! default. Tile choices follow roster order and omit the placeholder; a
+//! Tile choices follow roster order and omit the placeholder; a
 //! commit fills the focused placeholder or splits the focused real tile.
 //!
 //! Scope (`frame::scope`) lists the target frame's saved scopes as they
@@ -36,6 +34,16 @@
 //! title names the groups it is in. A pick changes one of the two through
 //! the shell's link doors. With no tile focused, a placeholder, or a tile
 //! whose module does neither, nothing opens and the status bar says so.
+//!
+//! The row menu's `Color…` lists, for one value of a text dimension, each
+//! named color (alphabetical, with its swatch), then `None`, then `Follow
+//! desk ({name})` when the user layer overrides a different, colored lower
+//! entry. It opens on the color in force (on `None` without one), so enter
+//! on an untouched list changes nothing; rows stand for their pick by
+//! position, so a color named `None` is still that color. A pick goes to
+//! `ShellView::set_value_color`, which writes the user layer's
+//! `value_colors` entry off the UI thread. With no named color the list
+//! holds `None` and a muted line naming the Colors dialog.
 
 use std::rc::Rc;
 
@@ -43,8 +51,9 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Focusable as _, SharedString, Window, div};
 use gpui_component::{ActiveTheme as _, v_flex};
 
+use geode_core::colour::{Definition, NamedColours, ValueColorState, ValuePick, value_color_state};
+use geode_core::config::VALUE_COLORS_DOC;
 use geode_core::context::DimensionContext;
-use geode_core::groupings::GroupingSlots;
 use geode_core::link::{Group, Membership};
 use geode_core::log::{Level, LogLevels, TARGETS};
 use geode_core::query::DistinctOutcome;
@@ -54,7 +63,7 @@ use geode_core::tile_columns::{TileColumn, TileColumns};
 
 use crate::choice::{self, ChoiceKey, ChoiceList};
 use crate::defaults::{AddPlacement, capitalize};
-use crate::keymap::{Keystroke, Modifiers};
+use crate::keymap::Keystroke;
 use crate::module::placeholder::PLACEHOLDER_KIND;
 use crate::tiling::TileId;
 
@@ -68,17 +77,9 @@ use super::scale;
 // Pure core — no gpui.
 // ---------------------------------------------------------------------
 
-/// The "return to the views' own grouping" row's text — the same words
-/// the toolbar readout shows when no slot is active
-/// (`scopebar::build_model`'s `slot_label`).
-pub const VIEW_DEFAULT: &str = "view default";
-
 /// What the rows stand for and what a pick does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Target {
-    /// The slot each DECLARED option (an index into `list.options()`)
-    /// activates: `None` for the view default.
-    Grouping { slots: Vec<Option<u8>> },
     /// The module kind each declared option adds (`add_tile`).
     TileKind { kinds: Vec<String> },
     /// `tile::open_with`: the kinds accepting `context`, which was captured
@@ -139,6 +140,82 @@ pub enum Target {
         empty: &'static str,
         window: gpui::AnyWindowHandle,
     },
+    /// The row menu's `Color…`: what `value` of `dimension` may be colored
+    /// with. `picks[i]` is what declared option `i` does (a row stands for
+    /// its pick by position: a color may be named like another row), and
+    /// `swatches[i]` the definition its row paints a swatch of. Captured
+    /// at open; `resolved` holds them resolved under the theme last painted.
+    ValueColor {
+        dimension: String,
+        value: String,
+        picks: Vec<ValuePick>,
+        swatches: Vec<Option<Definition>>,
+        resolved: SwatchCache,
+    },
+}
+
+/// One value-color row's resolved swatch and its stable selector, or `None`
+/// for a row without a color.
+pub type SwatchRow = Option<(gpui::Hsla, SharedString)>;
+
+/// The value-color list's swatches resolved (OKLCH and contrast seek) under
+/// one theme, keyed on that theme's [`super::colours::theme_signature`], so
+/// a repaint under the same theme reuses them and a theme change while the
+/// list is open resolves them again. A cache, not part of the dialog's
+/// identity: any two compare equal.
+#[derive(Debug, Clone, Default)]
+pub struct SwatchCache(std::cell::RefCell<Option<Box<SwatchMemo>>>);
+
+/// The theme signature a set of swatch rows was resolved under, and the
+/// rows. Boxed in [`SwatchCache`] so the signature does not widen `Target`.
+type SwatchMemo = ([gpui::Hsla; 28], Rc<[SwatchRow]>);
+
+impl PartialEq for SwatchCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl SwatchCache {
+    /// The rows resolved under the theme `key` names: the cached rows when
+    /// `key` is the one they were resolved under, else `resolve`'s, kept.
+    pub fn rows(
+        &self,
+        key: [gpui::Hsla; 28],
+        resolve: impl FnOnce() -> Rc<[SwatchRow]>,
+    ) -> Rc<[SwatchRow]> {
+        let mut slot = self.0.borrow_mut();
+        match slot.as_deref() {
+            Some((k, rows)) if *k == key => rows.clone(),
+            _ => {
+                let rows = resolve();
+                *slot = Some(Box::new((key, rows.clone())));
+                rows
+            }
+        }
+    }
+}
+
+/// Each row's swatch resolved under `anchors` and `tokens`: a color row
+/// with a captured definition gets its color and `valuecolor-swatch-{name}`;
+/// every other row `None`.
+fn resolve_swatches(
+    swatches: &[Option<Definition>],
+    picks: &[ValuePick],
+    anchors: &geode_core::colour::Anchors,
+    tokens: &geode_core::colour::Tokens,
+) -> Rc<[SwatchRow]> {
+    swatches
+        .iter()
+        .zip(picks)
+        .map(|(definition, pick)| match (definition, pick) {
+            (Some(d), ValuePick::Color(name)) => Some((
+                super::colours::to_hsla(geode_core::colour::resolve(d, anchors, tokens)),
+                SharedString::from(format!("valuecolor-swatch-{name}")),
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 /// What one link-chooser row changes about its tile: the group it follows
@@ -228,30 +305,13 @@ fn effective_level(levels: &LogLevels, target: &str) -> Level {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChoiceDialogState {
     /// The ranked rows, spelled as the surface a pick lands on spells
-    /// them: a grouping row is `"{n} · {label}"`, the toolbar readout's
-    /// own text, so the row a trader picks reads exactly as the bar will
-    /// afterwards; a tile row is the palette's `<Kind>` title.
+    /// them: a tile row is the palette's `<Kind>` title, a scope row the
+    /// saved scope's name.
     pub list: ChoiceList,
     pub target: Target,
 }
 
 impl ChoiceDialogState {
-    /// The grouping rows for `slots`, the highlight placed on `active`
-    /// (the frame's current slot — `None` lights the view-default row) so
-    /// `enter` on an untouched picker changes nothing, like every other
-    /// choice surface.
-    pub fn grouping(slots: &GroupingSlots, active: Option<u8>) -> Self {
-        let (options, targets) = grouping_rows(slots);
-        let mut list = ChoiceList::new(options, choice::DEFAULT_CAP);
-        let current = targets.iter().position(|t| *t == active);
-        let text = current.map(|ix| list.options()[ix].clone());
-        list.place(text.as_deref());
-        Self {
-            list,
-            target: Target::Grouping { slots: targets },
-        }
-    }
-
     /// The tile rows for the roster's `kinds`, in roster order, the
     /// placeholder left out (it is what a pick REPLACES, never something
     /// to add), the highlight on the first.
@@ -406,10 +466,12 @@ impl ChoiceDialogState {
                 _ => format!("Edit column in view \u{b7} {view}").into(),
             },
             Target::ActionValue { title, .. } => title.clone(),
-            Target::Grouping { .. }
-            | Target::TileKind { .. }
-            | Target::Scope { .. }
-            | Target::LogLevel { .. } => chrome(&self.target).0.into(),
+            Target::TileKind { .. } | Target::Scope { .. } | Target::LogLevel { .. } => {
+                chrome(&self.target).0.into()
+            }
+            Target::ValueColor {
+                dimension, value, ..
+            } => format!("Color \u{b7} {dimension} {value}").into(),
         }
     }
 
@@ -473,13 +535,13 @@ impl ChoiceDialogState {
                     })
                 })
             }
-            Target::Grouping { .. }
-            | Target::TileKind { .. }
+            Target::TileKind { .. }
             | Target::TileKindWith { .. }
             | Target::Column { .. }
             | Target::Scope { .. }
             | Target::LogLevel { .. }
-            | Target::ActionValue { .. } => self.list.set_query(query),
+            | Target::ActionValue { .. }
+            | Target::ValueColor { .. } => self.list.set_query(query),
         }
     }
 
@@ -497,7 +559,6 @@ impl ChoiceDialogState {
 
     fn pick_at(&self, declared: usize) -> Pick {
         match &self.target {
-            Target::Grouping { slots } => Pick::Slot(slots[declared]),
             Target::TileKind { kinds } => Pick::Kind(kinds[declared].clone()),
             Target::TileKindWith { kinds, context, .. } => {
                 Pick::KindWith(kinds[declared].clone(), context.clone())
@@ -527,35 +588,16 @@ impl ChoiceDialogState {
                 context: context.clone(),
                 value: self.list.options()[declared].clone(),
             },
-        }
-    }
-
-    /// Map a grouping digit to its configured slot, or 0 to the view default.
-    /// The key handler gates this on an empty query. Return `None` for an empty
-    /// slot, a non-digit, or another target.
-    pub fn jump(&self, key: &str) -> Option<Option<u8>> {
-        let Target::Grouping { slots } = &self.target else {
-            return None;
-        };
-        let digit = key.parse::<u8>().ok().filter(|d| *d <= 9)?;
-        if digit == 0 {
-            return Some(None);
-        }
-        slots.iter().find(|s| **s == Some(digit)).copied()
-    }
-
-    /// The grouping-target convenience the tests read.
-    pub fn highlighted_slot(&self) -> Option<Option<u8>> {
-        match self.highlighted_pick()? {
-            Pick::Slot(slot) => Some(slot),
-            Pick::Kind(_)
-            | Pick::KindWith(..)
-            | Pick::Column { .. }
-            | Pick::Scope(_)
-            | Pick::LogTarget(_)
-            | Pick::LogLevel(..)
-            | Pick::Link { .. }
-            | Pick::ActionValue { .. } => None,
+            Target::ValueColor {
+                dimension,
+                value,
+                picks,
+                ..
+            } => Pick::ValueColor {
+                dimension: dimension.clone(),
+                value: value.clone(),
+                pick: picks[declared].clone(),
+            },
         }
     }
 }
@@ -564,8 +606,6 @@ impl ChoiceDialogState {
 /// dialog state: a pick is a one-off event whose commit drops that state.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pick {
-    /// `FrameViewMut::set_active_slot`; `None` is the view default.
-    Slot(Option<u8>),
     /// `ShellView::add_tile` of this kind.
     Kind(String),
     /// `ShellView::add_tile` of this kind, with the factory's
@@ -592,20 +632,68 @@ pub enum Pick {
         context: DimensionContext,
         value: String,
     },
+    /// `ShellView::set_value_color` of `pick` for `value` of `dimension`.
+    ValueColor {
+        dimension: String,
+        value: String,
+        pick: ValuePick,
+    },
 }
 
-/// The grouping option texts and their slots, in row order: the view
-/// default, then slots 1–9 that are filled.
-pub fn grouping_rows(slots: &GroupingSlots) -> (Vec<String>, Vec<Option<u8>>) {
-    let mut options = vec![VIEW_DEFAULT.to_string()];
-    let mut targets = vec![None];
-    for n in 1..=9u8 {
-        if let Some(label) = slots.label(n) {
-            options.push(format!("{n} · {label}"));
-            targets.push(Some(n));
+/// The value-color list's no-color row.
+pub const NO_COLOR_ROW: &str = "None";
+
+impl ChoiceDialogState {
+    /// One row per named color (alphabetical), then [`NO_COLOR_ROW`], then
+    /// `Follow desk ({name})` when the user layer overrides a different
+    /// lower entry. Opens on the color in force, or on the no-color row
+    /// when there is none or it is no longer defined, so `enter` on an
+    /// untouched list changes nothing. The opening row is found by
+    /// position, never by text: a color may be named `None`.
+    pub fn value_colors(
+        dimension: String,
+        value: String,
+        named: &NamedColours,
+        state: &ValueColorState,
+    ) -> Self {
+        let mut options: Vec<String> = named.names().map(str::to_string).collect();
+        let mut picks: Vec<ValuePick> = options.iter().cloned().map(ValuePick::Color).collect();
+        let mut swatches: Vec<Option<Definition>> = options
+            .iter()
+            .map(|name| named.get(name).cloned())
+            .collect();
+        let no_color = options.len();
+        options.push(NO_COLOR_ROW.to_string());
+        picks.push(ValuePick::None);
+        swatches.push(None);
+        if let Some(lower) = state.follow_desk() {
+            options.push(format!("Follow desk ({lower})"));
+            picks.push(ValuePick::FollowDesk);
+            swatches.push(None);
+        }
+        let opening = state
+            .effective
+            .as_deref()
+            .and_then(|name| {
+                picks
+                    .iter()
+                    .position(|p| matches!(p, ValuePick::Color(n) if n == name))
+            })
+            .unwrap_or(no_color);
+        let mut list = ChoiceList::new(options, choice::DEFAULT_CAP);
+        // Unfiltered, ranked order is declared order.
+        list.set_ranked_highlighted(opening);
+        Self {
+            list,
+            target: Target::ValueColor {
+                dimension,
+                value,
+                picks,
+                swatches,
+                resolved: SwatchCache::default(),
+            },
         }
     }
-    (options, targets)
 }
 
 /// A column row: the painted label, then the column name when they differ,
@@ -624,23 +712,6 @@ fn column_row_text(c: &TileColumn) -> String {
 
 /// Dialog width on the design scale — the dimension picker's.
 const WIDTH: f32 = 480.0;
-
-const GROUPING_HINTS: &[Hint] = &[
-    Hint::Text("type to filter ·"),
-    Hint::Key("up"),
-    Hint::Key("down"),
-    Hint::Text("move ·"),
-    Hint::Key("enter"),
-    Hint::Text("activate ·"),
-    Hint::Key("1"),
-    Hint::Text("–"),
-    Hint::Key("9"),
-    Hint::Text("slot ·"),
-    Hint::Key("0"),
-    Hint::Text("view default ·"),
-    Hint::Key("escape"),
-    Hint::Text("close"),
-];
 
 const TILE_HINTS: &[Hint] = &[
     Hint::Text("type to filter ·"),
@@ -723,7 +794,6 @@ const LINK_HINTS: &[Hint] = &[
 /// and the footer.
 fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'static [Hint]) {
     match target {
-        Target::Grouping { .. } => ("Grouping", "grouping", "grouping-hints", GROUPING_HINTS),
         Target::TileKind { .. } => ("Add a tile", "tile", "tile-hints", TILE_HINTS),
         // This fallback title shows only if the target is built with no
         // subject; `tile::open_with` never builds it that way (a listed kind
@@ -738,17 +808,9 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
         Target::LinkGroup { .. } => ("Link group", "link", "link-hints", LINK_HINTS),
         // Fallback only: `title()` is the action's own.
         Target::ActionValue { .. } => ("Choose a value", "action", "action-hints", ACTION_HINTS),
+        // Fallback only: `title()` names the dimension and the value.
+        Target::ValueColor { .. } => ("Color", "valuecolor", "valuecolor-hints", ACTION_HINTS),
     }
-}
-
-/// Open on the frame's grouping slots — `frame::grouping` and the
-/// toolbar readout's click.
-pub fn open_grouping(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    let state = {
-        let frame = view.target_frame().read(cx);
-        ChoiceDialogState::grouping(frame.slots(), frame.active_slot())
-    };
-    open(view, state, window, cx);
 }
 
 /// Open on the target frame's saved scopes — `frame::scope` and the
@@ -882,6 +944,25 @@ pub fn open_link_group(view: &mut ShellView, window: &mut Window, cx: &mut Conte
 /// Open `Set log level…` on the target step (`log::level`, palette-only).
 pub fn open_log_level(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let state = ChoiceDialogState::log_targets(&view.diagnostics.read(cx).levels);
+    open(view, state, window, cx);
+}
+
+/// Open the color pick list for `value` of `dimension` (the row menu's
+/// `Color…`).
+pub(crate) fn open_value_color(
+    view: &mut ShellView,
+    dimension: String,
+    value: String,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let (named, _) = NamedColours::from_config(&view.services.config);
+    let state = value_color_state(
+        view.services.config.layered_docs(VALUE_COLORS_DOC),
+        &dimension,
+        &value,
+    );
+    let state = ChoiceDialogState::value_colors(dimension, value, &named, &state);
     open(view, state, window, cx);
 }
 
@@ -1092,17 +1173,13 @@ fn back_to_targets(
     true
 }
 
-/// Notice for a slot removed after the dialog captured its rows.
-pub(super) const SLOT_GONE: &str = "that grouping slot is no longer configured";
-
 /// Notice for a saved scope removed after the dialog captured its rows.
 pub(super) const SCOPE_GONE: &str = "that saved scope no longer exists";
 
 /// Notice for a link pick whose tile closed after the chooser captured it.
 pub(super) const TILE_GONE: &str = "that tile is no longer open";
 
-/// Commit through the target's operation. Grouping revalidates the slot
-/// against the frame; a scope loads through `load_saved_scope`, the
+/// Commit through the target's operation. A scope loads through `load_saved_scope`, the
 /// `scope::<name>` actions' own path, and a name gone since the open
 /// posts [`SCOPE_GONE`]. Tile kind closes the modal before calling `add_tile`,
 /// so modal focus return precedes occupant creation. A log target replaces
@@ -1111,19 +1188,6 @@ pub(super) const TILE_GONE: &str = "that tile is no longer open";
 /// tile closed since the open posts [`TILE_GONE`] and links nothing.
 fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Context<ShellView>) {
     match pick {
-        Pick::Slot(slot) => {
-            let (changed, still_there) = shell.target_frame().update(cx, |f, cx| {
-                let changed = f.set_active_slot(slot);
-                if changed {
-                    cx.notify();
-                }
-                (changed, slot.is_none_or(|n| f.slots().get(n).is_some()))
-            });
-            if !changed && !still_there {
-                shell.notice = Some(SLOT_GONE.into());
-            }
-            shell.close_modal(window, cx);
-        }
         Pick::Scope(name) => {
             if shell.load_saved_scope(&name, cx).is_err() {
                 shell.notice = Some(SCOPE_GONE.into());
@@ -1209,10 +1273,18 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
             shell.close_modal(window, cx);
             shell.run_action_chosen(action, &context, &value, window, cx);
         }
+        Pick::ValueColor {
+            dimension,
+            value,
+            pick,
+        } => {
+            shell.close_modal(window, cx);
+            shell.set_value_color(dimension, value, pick, cx);
+        }
     }
 }
 
-/// Route choice keys and grouping digits. Escape from log levels rebuilds
+/// Route choice keys; digits are filter text. Escape from log levels rebuilds
 /// the target list and clears its query; other Escape presses reach the
 /// shell's modal-close handler.
 fn handle_key(
@@ -1278,31 +1350,7 @@ fn handle_key(
         }
         None => {}
     }
-    // Grouping digits jump only on an empty Input. A digit for an unfilled
-    // slot is claimed without editing the query; other targets accept digits
-    // as filter text.
-    if ks.mods == Modifiers::NONE
-        && is_digit(&ks.key)
-        && shell.dialog_input.read(cx).text().len() == 0
-        && matches!(
-            shell.choice_dialog.as_ref().map(|s| &s.target),
-            Some(Target::Grouping { .. })
-        )
-    {
-        let slot = shell
-            .choice_dialog
-            .as_ref()
-            .and_then(|state| state.jump(&ks.key));
-        if let Some(slot) = slot {
-            commit(shell, Pick::Slot(slot), window, cx);
-        }
-        return true;
-    }
     false
-}
-
-fn is_digit(key: &str) -> bool {
-    key.len() == 1 && key.as_bytes()[0].is_ascii_digit()
 }
 
 /// Render the filter, ranked clickable choices, and footer. Row clicks commit.
@@ -1325,14 +1373,20 @@ fn build(
     } else {
         (hints_selector, hints)
     };
+    let leads = value_color_leads(&state.target, cx);
+    let no_colors = matches!(
+        &state.target,
+        Target::ValueColor { picks, .. } if !picks.iter().any(|p| matches!(p, ValuePick::Color(_)))
+    );
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let click_entity = entity.clone();
-    let rows = dialog::choice_rows(
+    let rows = dialog::choice_rows_led(
         &state.list,
         prefix,
         &shell.choice_dialog_scroll,
         theme,
+        leads,
         move |ranked, window, cx| {
             click_entity.update(cx, |shell, cx| {
                 let pick = shell
@@ -1364,8 +1418,55 @@ fn build(
         .w(scale::design(WIDTH))
         .child(dialog::filter_row(&shell.dialog_input, None, cx))
         .child(body)
+        .children(no_colors.then(|| {
+            div()
+                .px_3()
+                .text_sm()
+                .text_color(muted)
+                .debug_selector(|| "valuecolor-empty".to_string())
+                .child("no named colors: define one in the Colors dialog")
+        }))
         .child(hint_row(hints, hints_selector, WIDTH, muted, theme.border))
         .into_any_element()
+}
+
+/// The value-color list's leading elements, by declared row: a swatch for
+/// each color, resolved from the definition captured at open under the
+/// current theme (cached per theme signature, so a theme change while the
+/// list is open repaints it and an unchanged theme resolves nothing), and a
+/// swatch-wide space for the rows without one so every name starts on the
+/// same spine. Empty for every other target, and when no row has a swatch.
+/// Bounded by the row count.
+fn value_color_leads(target: &Target, cx: &App) -> Vec<Option<AnyElement>> {
+    let Target::ValueColor {
+        picks,
+        swatches,
+        resolved,
+        ..
+    } = target
+    else {
+        return Vec::new();
+    };
+    if swatches.iter().all(Option::is_none) {
+        return Vec::new();
+    }
+    let theme = cx.theme();
+    let rows = resolved.rows(super::colours::theme_signature(theme), || {
+        resolve_swatches(
+            swatches,
+            picks,
+            &super::colours::anchors_from_theme(theme),
+            &super::colours::tokens_from_theme(theme),
+        )
+    });
+    rows.iter()
+        .map(|row| {
+            Some(match row {
+                Some((colour, selector)) => dialog::swatch(*colour, selector.clone(), cx),
+                None => dialog::swatch_space(),
+            })
+        })
+        .collect()
 }
 
 /// The scope picker's empty state: how to save the first scope. Names the
@@ -1398,8 +1499,38 @@ fn no_scopes_hint(muted: gpui::Hsla, cx: &App) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keymap::parse_keystroke;
+    use crate::keymap::{Modifiers, parse_keystroke};
     use geode_core::tile_columns::{TileColumn, TileColumns};
+
+    /// The value-color swatches resolve once per theme: a repaint under the
+    /// same theme signature reuses the resolved rows, a changed signature
+    /// (a theme change while the list is open) resolves them again.
+    #[test]
+    fn value_color_swatches_resolve_once_per_theme() {
+        let cache = SwatchCache::default();
+        let calls = std::cell::Cell::new(0);
+        let resolve = |h: f32| {
+            calls.set(calls.get() + 1);
+            let rows: Rc<[SwatchRow]> =
+                Rc::from(vec![Some((gpui::hsla(h, 0.5, 0.5, 1.0), "s".into())), None]);
+            rows
+        };
+        let light = [gpui::Hsla::default(); 28];
+        let mut dark = light;
+        dark[12] = gpui::hsla(0.0, 0.0, 1.0, 1.0);
+        let first = cache.rows(light, || resolve(0.1));
+        let again = cache.rows(light, || resolve(0.9));
+        assert_eq!(calls.get(), 1, "an unchanged theme resolves nothing");
+        assert!(Rc::ptr_eq(&first, &again));
+        let changed = cache.rows(dark, || resolve(0.6));
+        assert_eq!(calls.get(), 2, "a theme change resolves again");
+        assert_eq!(changed[0].as_ref().map(|(c, _)| c.h), Some(0.6));
+        assert_eq!(
+            SwatchCache::default(),
+            cache,
+            "a cache is not part of the dialog's identity"
+        );
+    }
 
     fn tile() -> TileColumns {
         let c = |name: &str, label: &str, derived: bool| TileColumn {
@@ -1478,69 +1609,19 @@ mod tests {
         assert_eq!(ChoiceDialogState::columns(Domain::Schema, &t), None);
     }
 
-    fn slots() -> GroupingSlots {
-        let mut s = GroupingSlots::default();
-        s.set(1, vec!["book".into(), "lhu".into()]);
-        s.set(3, vec!["underlying_ref".into()]);
-        s
-    }
-
-    /// Only filled slots are rows, the view default first, each spelled
-    /// as the toolbar readout spells it.
-    #[test]
-    fn rows_are_the_view_default_then_every_filled_slot() {
-        let (options, targets) = grouping_rows(&slots());
-        assert_eq!(
-            options,
-            vec!["view default", "1 · book / lhu", "3 · underlying_ref"]
-        );
-        assert_eq!(targets, vec![None, Some(1), Some(3)]);
-    }
-
-    /// Opening on the frame's active slot lights that row, so `enter`
-    /// on an untouched picker changes nothing.
-    #[test]
-    fn the_highlight_opens_on_the_active_slot() {
-        let state = ChoiceDialogState::grouping(&slots(), Some(3));
-        assert_eq!(state.highlighted_slot(), Some(Some(3)));
-        let state = ChoiceDialogState::grouping(&slots(), None);
-        assert_eq!(state.highlighted_slot(), Some(None));
-    }
-
-    /// Typing narrows the rows and `enter` picks the highlighted one;
-    /// a query matching nothing leaves nothing to pick.
-    #[test]
-    fn typing_narrows_and_the_highlight_names_a_slot() {
-        let mut state = ChoiceDialogState::grouping(&slots(), None);
-        state.list.set_query("under");
-        assert_eq!(state.highlighted_slot(), Some(Some(3)));
-        state.list.set_query("zzz");
-        assert_eq!(state.highlighted_slot(), None);
-    }
-
-    /// A digit jumps to that slot when filled, `0` to the view default,
-    /// and an unfilled slot's digit does nothing — the chords' own rule.
-    #[test]
-    fn a_digit_jumps_to_a_filled_slot_or_the_view_default() {
-        let state = ChoiceDialogState::grouping(&slots(), None);
-        assert_eq!(state.jump("3"), Some(Some(3)));
-        assert_eq!(state.jump("0"), Some(None));
-        assert_eq!(state.jump("2"), None, "an empty slot is not a target");
-        assert_eq!(state.jump("j"), None);
-    }
-
     /// The ranked index a click hands back resolves through the RANKED
     /// list, not the declared one — after a filter the two differ.
     #[test]
     fn a_click_resolves_through_the_ranked_order() {
-        let mut state = ChoiceDialogState::grouping(&slots(), None);
-        state.list.set_query("under");
-        assert_eq!(state.pick_at_ranked(0), Some(Pick::Slot(Some(3))));
+        let saved = saved(&[("asia", "asia"), ("eu", "eu")]);
+        let mut state = ChoiceDialogState::scopes(&saved, &text_scope("none"));
+        state.list.set_query("eu");
+        assert_eq!(state.pick_at_ranked(0), Some(Pick::Scope("eu".to_string())));
         assert_eq!(state.pick_at_ranked(1), None);
     }
 
     /// `choice::route` is the key table: a bare digit is none of its keys
-    /// (it reaches the jump), `enter` is the pick.
+    /// (it is filter text), `enter` is the pick.
     #[test]
     fn a_bare_digit_is_not_a_choice_key() {
         let one = parse_keystroke("1", Modifiers::NONE).unwrap();
@@ -1550,15 +1631,13 @@ mod tests {
     }
 
     /// Tile rows are the roster's kinds in roster order, titled as the
-    /// palette titles them, with the placeholder left out; a digit on
-    /// this target is not a jump.
+    /// palette titles them, with the placeholder left out.
     #[test]
     fn tile_rows_are_the_roster_kinds_titled_minus_the_placeholder() {
         let state =
             ChoiceDialogState::tile_kinds(["blotter", PLACEHOLDER_KIND, "cvi", "diagnostics"]);
         assert_eq!(state.list.options(), ["Blotter", "Cvi", "Diagnostics"]);
         assert_eq!(state.highlighted_pick(), Some(Pick::Kind("blotter".into())));
-        assert_eq!(state.jump("1"), None, "digits type on the tile target");
         let mut state = state;
         state.list.set_query("diag");
         assert_eq!(
@@ -1610,7 +1689,6 @@ mod tests {
             state.highlighted_pick(),
             Some(Pick::LogTarget("ingest".into()))
         );
-        assert_eq!(state.jump("1"), None, "digits type on this target");
 
         let mut state =
             ChoiceDialogState::log_levels("ingest".into(), geode_core::log::Level::DEBUG);
@@ -1662,7 +1740,6 @@ mod tests {
         assert_eq!(state.list.options(), ["asia", "eu", "us"]);
         assert_eq!(state.highlighted_pick(), Some(Pick::Scope("asia".into())));
         assert_eq!(state.title().as_ref(), "Scope");
-        assert_eq!(state.jump("1"), None, "digits type on this target");
     }
 
     /// The row whose saved scope equals the frame's current scope is lit,
@@ -2022,12 +2099,14 @@ mod tests {
     /// change, as `ChoiceList::set_query` does.
     #[test]
     fn other_targets_keep_the_highlight_by_text() {
-        let mut state = ChoiceDialogState::grouping(&slots(), Some(3));
-        assert!(state.set_query("d"));
+        let saved = saved(&[("asia", "asia"), ("australasia", "aus")]);
+        // Opens lit on `australasia`, the scope equal to the current one.
+        let mut state = ChoiceDialogState::scopes(&saved, &text_scope("aus"));
+        assert!(state.set_query("a"));
         assert_eq!(
-            state.highlighted_slot(),
-            Some(Some(3)),
-            "`3 \u{00b7} underlying_ref` still matches and stays lit"
+            state.highlighted_pick(),
+            Some(Pick::Scope("australasia".to_string())),
+            "it still matches and stays lit"
         );
         assert_ne!(
             state.list.ranked_highlighted(),
@@ -2052,6 +2131,136 @@ mod tests {
             title(Some(Group::A), Some(Group::B)),
             "Link group \u{00b7} following A \u{00b7} emitting B"
         );
-        assert_eq!(link(true, None, None).jump("1"), None, "digits type here");
+    }
+
+    use geode_core::colour::{Definition, NamedColours, Tone, ValueColorState, ValuePick};
+
+    fn named(names: &[&str]) -> NamedColours {
+        let mut out = NamedColours::default();
+        for n in names {
+            out.insert(n.to_string(), Definition::hue(240.0, Tone::Normal));
+        }
+        out
+    }
+
+    fn value_state(desk: Option<&str>, user: Option<&str>) -> ValueColorState {
+        let lower = desk.map(str::to_string);
+        let user = user.map(str::to_string);
+        ValueColorState {
+            effective: user
+                .clone()
+                .or_else(|| lower.clone())
+                .filter(|c| c != "none"),
+            user,
+            lower,
+        }
+    }
+
+    fn value_list(names: &[&str], state: &ValueColorState) -> ChoiceDialogState {
+        ChoiceDialogState::value_colors("underlying_ref".into(), "SPX".into(), &named(names), state)
+    }
+
+    #[test]
+    fn the_color_list_holds_the_names_then_none_and_opens_on_the_current() {
+        let state = value_list(&["blue", "amber"], &value_state(None, Some("blue")));
+        assert_eq!(
+            state.list.options(),
+            ["amber", "blue", "None"],
+            "alphabetical, then None"
+        );
+        assert_eq!(state.title().as_ref(), "Color \u{b7} underlying_ref SPX");
+        assert_eq!(
+            state.highlighted_pick(),
+            Some(Pick::ValueColor {
+                dimension: "underlying_ref".into(),
+                value: "SPX".into(),
+                pick: ValuePick::Color("blue".into()),
+            }),
+            "enter on an untouched list changes nothing"
+        );
+        // No color in force: it opens on None.
+        let state = value_list(&["blue"], &value_state(None, None));
+        assert!(matches!(
+            state.highlighted_pick(),
+            Some(Pick::ValueColor {
+                pick: ValuePick::None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn follow_desk_is_offered_only_over_a_different_desk_entry() {
+        let state = value_list(&["blue", "teal"], &value_state(Some("blue"), Some("teal")));
+        assert_eq!(
+            state.list.options(),
+            ["blue", "teal", "None", "Follow desk (blue)"]
+        );
+        assert!(matches!(
+            state.pick_at_ranked(3),
+            Some(Pick::ValueColor {
+                pick: ValuePick::FollowDesk,
+                ..
+            })
+        ));
+        for (desk, user) in [
+            (Some("blue"), None),
+            (None, Some("teal")),
+            (Some("teal"), Some("teal")),
+            // A desk with no color: following it is what None does.
+            (Some("none"), Some("teal")),
+        ] {
+            let state = value_list(&["blue", "teal"], &value_state(desk, user));
+            assert_eq!(
+                state.list.options(),
+                ["blue", "teal", "None"],
+                "{desk:?} {user:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_color_named_none_is_still_picked_by_position() {
+        let state = value_list(&["None", "blue"], &value_state(None, None));
+        assert_eq!(state.list.options(), ["None", "blue", "None"]);
+        assert!(matches!(
+            state.pick_at_ranked(0),
+            Some(Pick::ValueColor { pick: ValuePick::Color(name), .. }) if name == "None"
+        ));
+        assert!(matches!(
+            state.pick_at_ranked(2),
+            Some(Pick::ValueColor {
+                pick: ValuePick::None,
+                ..
+            })
+        ));
+        // It opens on the no-color row by position, not on the first row
+        // spelled like it, so enter on the untouched list still changes
+        // nothing.
+        assert!(matches!(
+            state.highlighted_pick(),
+            Some(Pick::ValueColor {
+                pick: ValuePick::None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_color_no_longer_defined_opens_the_list_on_none() {
+        let state = value_list(&["blue"], &value_state(None, Some("gone")));
+        assert!(matches!(
+            state.highlighted_pick(),
+            Some(Pick::ValueColor {
+                pick: ValuePick::None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn with_no_named_colors_the_list_holds_only_none() {
+        let state = value_list(&[], &value_state(None, None));
+        assert_eq!(state.list.options(), ["None"]);
     }
 }

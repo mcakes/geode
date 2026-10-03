@@ -319,6 +319,61 @@ fn a_right_press_opens_the_row_menu_at_the_pointer(cx: &mut gpui::TestAppContext
     );
 }
 
+fn spx_own() -> DimensionContext {
+    let mut ctx = DimensionContext::of(&[("underlying_ref", "SPX")]);
+    ctx.own = Some("underlying_ref".into());
+    ctx
+}
+
+#[gpui::test]
+fn g_dot_offers_color_for_the_rows_own_text_dimension(cx: &mut gpui::TestAppContext) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.fragment = Some(ROW_FRAGMENT);
+    *rec.dimension_context.borrow_mut() = Some(spx_own());
+    let (window, mut vcx) = open_shell(cx, services_with_recorders(vec![rec]));
+    let shell = shell_of(&window, &mut vcx);
+    shell.update(&mut vcx, |s, _| {
+        s.text_dims.insert("underlying_ref".into());
+    });
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g .");
+    draw(&mut vcx);
+    assert_eq!(
+        row_menu_titles(&shell, &vcx),
+        Some(vec![
+            "# underlying_ref \u{b7} SPX".into(),
+            "Color\u{2026}".into(),
+        ])
+    );
+    // Rows paint under index selectors: section, then Color….
+    assert!(vcx.debug_bounds("row-menu-row-1").is_some(), "painted");
+}
+
+#[gpui::test]
+fn a_right_press_offers_color_for_the_pressed_row(cx: &mut gpui::TestAppContext) {
+    let rec = RecordingFactory::new("rec");
+    *rec.press_context.borrow_mut() = Some(spx_own());
+    let (window, mut vcx) = open_shell(cx, services_with_recorders(vec![rec]));
+    let shell = shell_of(&window, &mut vcx);
+    shell.update(&mut vcx, |s, _| {
+        s.text_dims.insert("underlying_ref".into());
+    });
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    let id = focused(&shell, &vcx);
+    let at = main_tile_point(&mut vcx, &shell, id, 0.5, 0.5);
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+    draw(&mut vcx);
+    assert_eq!(
+        row_menu_titles(&shell, &vcx),
+        Some(vec![
+            "# underlying_ref \u{b7} SPX".into(),
+            "Color\u{2026}".into(),
+        ])
+    );
+}
+
 /// An occupant that stops a right press's propagation (gpui-component's
 /// selectable table does, on a cell) cannot hide it from the shell: the
 /// tile cell's listener runs in the capture phase, so the press still
@@ -1117,4 +1172,205 @@ fn a_refused_command_reads_refused(cx: &mut gpui::TestAppContext) {
         "move to LHU BK003_LHU2 refused: unknown position P99"
     );
     assert_eq!(noted(cx, &o), Some(expected));
+}
+
+const TWO_COLORS: &str = "[amber]\nhue = 40\n[blue]\nhue = 240\n";
+
+fn color_services(colors: &str) -> ShellServices {
+    let mut rec = RecordingFactory::new("rec");
+    rec.fragment = Some(ROW_FRAGMENT);
+    *rec.dimension_context.borrow_mut() = Some(spx_own());
+    let mut services = services_with_recorders(vec![rec]);
+    // Assigned after the keymap is built, as reload.rs's fixtures do: only
+    // the readers of `config` see it.
+    services.config = geode_core::config::Config::from_docs(vec![
+        geode_core::config::LayerDoc::builtin("colors", colors).unwrap(),
+    ]);
+    services
+}
+
+/// `g .` on SPX's own row, then enter on `Color…`.
+fn open_color_list(
+    cx: &mut gpui::TestAppContext,
+    colors: &str,
+    user_dir: Option<std::path::PathBuf>,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    open_color_list_on(cx, color_services(colors), user_dir)
+}
+
+/// [`open_color_list`] over `services` as given.
+fn open_color_list_on(
+    cx: &mut gpui::TestAppContext,
+    services: ShellServices,
+    user_dir: Option<std::path::PathBuf>,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    shell.update(&mut vcx, |s, _| {
+        s.text_dims.insert("underlying_ref".into());
+        s.user_dir = user_dir;
+    });
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g .");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    (shell, vcx)
+}
+
+fn shell_notice(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Option<String> {
+    shell.read_with(vcx, |s, _| s.notice.clone().map(|n| n.to_string()))
+}
+
+#[gpui::test]
+fn color_opens_the_pick_list_with_swatches(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, None);
+    assert!(
+        shell.read_with(&vcx, |s, _| s.row_menu.is_none()),
+        "the menu closed"
+    );
+    let options = shell.read_with(&vcx, |s, _| {
+        s.choice_dialog.as_ref().map(|d| d.list.options().to_vec())
+    });
+    assert_eq!(
+        options,
+        Some(vec!["amber".into(), "blue".into(), "None".into()])
+    );
+    assert!(
+        vcx.debug_bounds("valuecolor-swatch-blue").is_some(),
+        "a swatch per color"
+    );
+    assert!(
+        vcx.debug_bounds("valuecolor-swatch-None").is_none(),
+        "none for None"
+    );
+    assert!(vcx.debug_bounds("valuecolor-choice-None").is_some());
+    assert!(vcx.debug_bounds("valuecolor-empty").is_none());
+}
+
+#[gpui::test]
+fn picking_a_color_writes_the_user_layer_and_says_so(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, Some(dir.path().to_path_buf()));
+    // Opens on None (last row); one up is `blue`.
+    vcx.simulate_keystrokes("up enter");
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert!(
+        shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()),
+        "closed"
+    );
+    let text = std::fs::read_to_string(dir.path().join("value_colors.toml")).unwrap();
+    assert!(
+        text.contains("[underlying_ref]") && text.contains("SPX = \"blue\""),
+        "{text}"
+    );
+    assert_eq!(shell_notice(&shell, &vcx), Some("SPX colored blue".into()));
+}
+
+#[gpui::test]
+fn a_clicked_color_row_writes_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, Some(dir.path().to_path_buf()));
+    let at = vcx
+        .debug_bounds("valuecolor-choice-amber")
+        .expect("the amber row is painted")
+        .center();
+    vcx.simulate_click(at, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    let text = std::fs::read_to_string(dir.path().join("value_colors.toml")).unwrap();
+    assert!(text.contains("SPX = \"amber\""), "{text}");
+    assert_eq!(shell_notice(&shell, &vcx), Some("SPX colored amber".into()));
+}
+
+#[gpui::test]
+fn enter_on_the_untouched_list_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, Some(dir.path().to_path_buf()));
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()),
+        "closed"
+    );
+    assert!(!dir.path().join("value_colors.toml").exists());
+    assert_eq!(shell_notice(&shell, &vcx), None);
+}
+
+/// The desk maps SPX to a color `colors.toml` no longer defines: nothing
+/// paints, the list opens on `None`, and enter on it is no change. Writing
+/// `none` would leave a user override masking the desk once it defines the
+/// color again.
+#[gpui::test]
+fn enter_over_an_undefined_desk_color_writes_nothing(cx: &mut gpui::TestAppContext) {
+    use geode_core::config::{Config, Layer, LayerDoc, VALUE_COLORS_DOC};
+    let dir = tempfile::tempdir().unwrap();
+    let mut services = color_services(TWO_COLORS);
+    services.config = Config::from_docs(vec![
+        LayerDoc::builtin("colors", TWO_COLORS).unwrap(),
+        LayerDoc {
+            layer: Layer::Desk,
+            name: VALUE_COLORS_DOC.into(),
+            file: "value_colors.toml".into(),
+            table: "[underlying_ref]\nSPX = \"gone\"\n".parse().unwrap(),
+        },
+    ]);
+    let (shell, mut vcx) = open_color_list_on(cx, services, Some(dir.path().to_path_buf()));
+    let lit = shell.read_with(&vcx, |s, _| {
+        s.choice_dialog
+            .as_ref()
+            .and_then(|d| d.list.highlighted_text().map(str::to_string))
+    });
+    assert_eq!(lit.as_deref(), Some("None"), "opens on None");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()),
+        "closed"
+    );
+    assert!(!dir.path().join("value_colors.toml").exists());
+    assert_eq!(shell_notice(&shell, &vcx), None);
+}
+
+#[gpui::test]
+fn a_pick_with_no_user_directory_says_so(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, None);
+    vcx.simulate_keystrokes("up enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        shell_notice(&shell, &vcx),
+        Some(crate::shell::value_color::NO_USER_DIR.to_string())
+    );
+}
+
+#[gpui::test]
+fn a_failed_write_shows_the_writers_error(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("value_colors.toml");
+    let before = "config_version = 1\nunderlying_ref = \"blue\"\n";
+    std::fs::write(&path, before).unwrap();
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, Some(dir.path().to_path_buf()));
+    vcx.simulate_keystrokes("up enter");
+    vcx.run_until_parked();
+    let notice = shell_notice(&shell, &vcx);
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|n| n.contains("is not a table")),
+        "{notice:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "unchanged");
+}
+
+#[gpui::test]
+fn with_no_named_colors_the_list_holds_none_and_says_where_to_define_one(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut vcx) = open_color_list(cx, "", None);
+    let options = shell.read_with(&vcx, |s, _| {
+        s.choice_dialog.as_ref().map(|d| d.list.options().to_vec())
+    });
+    assert_eq!(options, Some(vec!["None".into()]));
+    assert!(vcx.debug_bounds("valuecolor-empty").is_some());
 }

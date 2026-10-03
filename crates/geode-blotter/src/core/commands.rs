@@ -56,7 +56,7 @@ pub const REFUSED_ASOF_UNDO: &str =
     "frame as-of undo is in the palette (Swap to the previous as of)";
 pub const REFUSED_LIVE: &str = ":asof live pins this tile; Return to live (palette) sets the frame";
 pub const REFUSED_GROUP_SAVE: &str =
-    "saving a slot is in the Groupings dialog (palette: Edit groupings…)";
+    "saving a slot is in the Grouping dialog (palette: Pick a grouping…)";
 
 pub const GROUP_NONE_REFUSED: &str = "the blotter always groups: :group takes columns or `slot N`";
 

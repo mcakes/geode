@@ -111,16 +111,16 @@ cannot depend on such an event to keep text synchronized.
 
 Each entry records the workspace active when it was pushed
 (`ShellModal::workspace`). Frame dialogs — the dimension picker, as-of,
-grouping, the scope picker, the frame expression dialog, and the Scopes
-dialog's frame actions — read and commit the lane of the workspace recorded on the stack's
+the Grouping dialog, the scope picker, the frame expression dialog, and the
+Scopes dialog's frame actions — read and commit the lane of the workspace recorded on the stack's
 base entry, through `ShellView::target_frame`, so a dialog opened in a pinned
 workspace changes only that workspace's lane (see
 [workspace lanes](shell.md#workspace-lanes)).
 
 Known limitation: apart from object dialogs, the stack holds one instance per
 `DialogKind`, so a second request for a live kind cannot open beside the first
-even from a different call site. The `choicedialog` pickers (grouping, scope,
-tile kind, column, log level) share one kind and one state field, so none of them can
+even from a different call site. The `choicedialog` pickers (scope, tile kind,
+column, log level) share one kind and one state field, so none of them can
 open while another is anywhere in the stack.
 
 A multi-screen dialog registers its back step with `dialog::set_back`: a
@@ -447,22 +447,27 @@ needed to adopt a changed clock configuration. Commits update the frame's as-of
 and close the dialog. As-of undo swaps with the previous value rather than
 walking a history stack.
 
-## Grouping, scope, tile, log, and column choices
+## Scope, tile, log, and column choices
 
 [`shell/choicedialog.rs`](../../crates/geode-shell/src/shell/choicedialog.rs)
 uses a filter-only `ChoiceList` with a target-specific commit. Tab completes,
 Enter or a row click commits, and Escape closes, except for the nested log
 level stage.
 
+Choosing a grouping is not a choice dialog: `frame::grouping` (`mod+g`) and
+the toolbar's grouping readout open the Grouping dialog, the Groupings
+object dialog (see
+[configuration dialogs](configuration-dialogs.md#the-grouping-dialog)).
+
 | Target | Rows and commit |
 |---|---|
-| Grouping | View default, then filled slots 1–9; opens on the active choice. Empty-query digits commit directly, with zero choosing the default. Unfilled digits are consumed. Commit rechecks slot existence, reports removal if needed, then closes. |
 | Scope (`frame::scope`, `mod+o`, and the toolbar's load glyph) | One row per saved scope, named, in the saved set's name order, read from the target frame's live saved scopes at open, so a scope saved or reloaded since startup is listed (the palette's `scope::<name>` rows are registered once at startup). Opens on the first saved scope equal to the frame's current scope, else the first row, so Enter on an untouched picker changes nothing. Commit loads through `ShellView::load_saved_scope`, the `scope::<name>` actions' own path: one undoable `set_scope` step in the target lane. A name removed by a reload while the picker was open loads nothing, closes, and reports "that saved scope no longer exists". With no saved scope the list is replaced by a hint to narrow the scope and save it with the save glyph (painted once the scope is non-empty) or `scope::save_current` (its chord when bound, else its palette title); Enter there does nothing and the footer offers only Escape. |
 | Tile kind | Roster order excluding the placeholder. Closes before adding to the tile focused at commit time: fills a placeholder or splits a real tile using the configured placement. |
 | Tile kind with context (`tile::open_with`) | The same rows, pre-filtered to kinds whose factory accepts a column of the focused tile's captured dimension context, titled `Open {subject} in…` (the first context value of an accepted column). Commit always splits, passing the factory's translated `launch_state` as the new tile's restored record. |
 | Column (`config::view_column`, `config::schema_column`) | The focused tile's presented columns from `TileContent::tile_columns`, captured at open; a row reads the header label, then ` · name` when they differ. Schema omits columns no dataset of the view declares in current configuration (derived view columns, and derived dimensions a view lists as plain dimension columns). Opens on the cursor's column, else the first row. Before the list opens, a tile with no columns refuses with "this tile has no dataset columns", a Schema list with nothing left with "no schema columns in this tile's view", and a target dialog already in the stack with the stack's own refusal. Commit closes the list, then opens the dialog on that column's Column stage (see [configuration dialogs](configuration-dialogs.md#stages-and-ownership)). Palette-only, no default binding. |
 | Log level | Choose a logging target, then its level. Escape or the Back button from levels returns to a rebuilt target list and clears the filter; a level choice submits `Diagnostics::request_level`. |
 | Link group (`tile::link_group`, `mod+u`, and the status bar's `following` segment) | The [link groups](shell.md#link-groups) of the focused tile, which is captured at open with its membership, so a pick lands on that tile even if focus has moved. A tile whose module follows (`TileContent::follows`) gets `follow · workspace`, then `follow · A` to `follow · D`; a tile whose module emits gets `emit · none` and `emit · A` to `emit · D`; a tile whose module does both gets the follow rows, then the emit rows. A row stands for its change by position, not by its text. The title is `Link group`, with ` · following A` and ` · emitting B` appended for the groups the tile is in. Opens on the row for what the tile follows (for a tile with no follow row, on the row for what it emits into), so Enter on an untouched chooser changes nothing; a typed query places the highlight by the chooser's own rule (see [filtering, choice, and movement](#filtering-choice-and-movement)). Digits type into the filter. Commit closes the chooser, then follows or emits through the shell's link doors; one pick changes one of the two. With no focused tile, or a placeholder focused, nothing opens and the status bar reads `no tile to link`; on a tile whose module neither follows nor emits nothing opens and it reads `this tile has no link group to join`. A tile closed under the open chooser (the palette still reaches `Close tile`) is linked to nothing, and the pick reports `that tile is no longer open`. Refused while a page is open. |
+| Value color (the row menu's `Color…`) | Titled `Color · {column} {value}`: each named color, alphabetical, with its swatch, then `None`, then `Follow desk ({name})` when the user layer overrides a different, colored lower entry. Rows stand for their pick by position, so a color named `None` is still that color. Opens on the value's current color, else on `None`, so Enter on an untouched list changes nothing. With no named color it holds `None` and a muted line naming the Colors dialog. Commit closes the list, then writes the value's entry in the user layer's `value_colors.toml` off the UI thread, with a status notice (see [Color…](shell.md#color)). |
 
 Closing and reopening creates fresh dialog state. These pickers apply on
 Enter; they do not use Normal/Filter mode's keep-query Enter.

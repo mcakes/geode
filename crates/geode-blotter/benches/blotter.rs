@@ -13,6 +13,7 @@ use geode_blotter::core::expansion::path_of;
 use geode_blotter::core::flatten::flatten;
 use geode_blotter::core::plan::ColumnPlan;
 use geode_core::attribution::{Attribution, ScopeSemantics};
+use geode_core::colour::ValueColors;
 use geode_core::expansion::Expansion;
 use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
 use geode_core::view::{ViewColumn, ViewSpec};
@@ -120,13 +121,15 @@ fn bench(c: &mut Criterion) {
         });
         flatten(&snap, &plan, &open, None, &mut out);
         let shown = out.clone();
+        // No mapping: the fill pays only the empty lookup.
+        let values = ValueColors::default();
         g.bench_function(
             format!("cache_fill_40x{}_{name}", plan.columns.len()),
             |b| {
                 b.iter(|| {
                     let mut cache = WindowCache::default();
                     cache.set_window(0..40, plan.columns.len(), |r, c| {
-                        cell(&snap, &plan, shown[r] as usize, c)
+                        cell(&snap, &plan, &values, shown[r] as usize, c)
                     });
                     black_box(cache.window().len())
                 })
