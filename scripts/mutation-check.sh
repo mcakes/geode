@@ -18638,6 +18638,20 @@ run_mutation "pricer storage: an answer for another sheet installs under this na
   '                Column::Utf8(_) => continue,' \
   geode-pricer a_missing_or_wrong_typed_column_is_refused_by_name
 
+# A line's payout currency is saved and reloaded; a dropped one would
+# reload every line blank and price nothing until refilled.
+run_mutation "pricer storage: a line's currency saves as blank" \
+  crates/geode-pricer/src/core/storage.rs \
+  '                .map_or_else(String::new, |c| c.as_str().to_string()),' \
+  '                .map_or_else(String::new, |_| String::new()),' \
+  geode-pricer a_sheet_round_trips_its_currencies
+
+run_mutation "pricer storage: a stored currency loads blank" \
+  crates/geode-pricer/src/core/storage.rs \
+  '                Currency::parse(&currency[i])' \
+  '                None' \
+  geode-pricer a_sheet_round_trips_its_currencies
+
 run_mutation "pricer store: a refused submission answers Refused, not Pending" \
   crates/geode-pricer/src/store.rs \
   '        match queued {

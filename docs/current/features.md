@@ -2461,7 +2461,10 @@ are created once and written positionally, so a changed column list would put
 values into the wrong columns of an existing database. A layer redeclaring it
 differently is ignored with an error diagnostic (see
 [configuration](configuration.md)); changing it needs a migration, which does
-not exist.
+not exist. Each line's payout currency is stored in `currency`, the last value
+column (`""` when blank; an unreadable code loads blank). It was appended on
+2026-10-03, so a database created before then is refused by the drift check
+and must be cleared (delete its `pricer_sheets` tables, or the database).
 
 Every save is a new generation. A sheet keeps its live generation and the 200
 before it; older ones are swept on the writer after a save that crosses the

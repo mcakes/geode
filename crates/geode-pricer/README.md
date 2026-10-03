@@ -215,8 +215,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   lists the blank lines. A result whose currency differs from the line's
   fails the line (`priced in EUR, asked for USD`) and installs nothing; a
   result that lands after a currency edit answers an older revision and is
-  dropped. Yank copies the currency. `pricer_sheets` does not store it yet:
-  a loaded line is blank.
+  dropped. Yank copies the currency. `pricer_sheets` stores it in
+  `currency`, its last value column (`""` when blank; a value that is not a
+  code loads blank), so a sheet saved before a line had one reloads it blank.
 - Package rows derive from their legs; they are not independent instruments.
   Their pricing timestamp is the oldest present leg-attempt timestamp,
   including failed attempts. The fold keeps the legs' currency when they
