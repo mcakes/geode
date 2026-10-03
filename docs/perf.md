@@ -2632,3 +2632,41 @@ does not. No regression otherwise; the settings and object-edit rows are within
 run-to-run noise of before, as expected for paths this slice left alone.
 
 Headless model work only: no layout, paint or text shaping.
+
+## Diagnostics fuzzy filter (2026-10-02)
+
+Apple M5 Pro, rustc 1.96.0, release/bench profiles. The machine was heavily
+loaded throughout (load average 13 to 47 on 18 cores); runs swung by up to
+2.5x, so read each group as a ratio within one run.
+
+`cargo bench -p geode-diagnostics --bench log_filter` over a synthetic
+4,096-record tail (four targets, five levels, ~70-character messages
+`record {i}: partition 2026-09-27 · EU_TECH loaded {n} rows in {m} ms`):
+
+| Group | Query | Median | What it is |
+|---|---|---:|---|
+| `log_table_4096` | `""` | 1.51 ms | `log_rows` + `log_table`, no narrowing |
+| `log_table_4096` | `"ingest"` | 1.41 ms | a quarter of rows kept |
+| `log_table_4096` | `"eutch ld"` | 4.95 ms | two words, every row kept, marks in the message |
+| `log_table_4096` | `"zzq"` | 936 µs | every row rejected (formatting + subsequence reject) |
+| `narrow_4096` | `"ingest"` | 597 µs | `Narrow::row` alone over pre-formatted text |
+| `narrow_4096` | `"eutch ld"` | 3.26 ms | the same, worst case |
+
+`cargo test -p geode-diagnostics --release -- --ignored log_rebuild_timing
+--nocapture` (the page's headless `rebuild`, 20 runs): unfiltered median
+3.95 ms (max 4.41 ms); `"eutch ld"` median 6.78 ms (max 7.17 ms).
+
+The first `Narrow` drafts ran `eutch ld` at 19.6 ms (load ~47) and 7.0 ms
+(load ~20) for the table build. A sample showed `palette::align` dominating:
+it re-decoded both strings and allocated two score tables per call. Two
+changes brought it to the figures above: `align_in` over pre-decoded
+characters with caller-owned tables, and scoring only the columns between
+the first occurrence of the query's first character and the last of its
+last (no alignment lies outside them). ASCII characters lower without the
+Unicode mapping.
+
+The window also speeds the palette. `cargo bench -p geode-shell --bench
+shell_cores -- palette/`, same load, before / after: `set_query_66_items`
+16.2 / 13.4 µs, `set_query_500_items` 120.9 / 91.3 µs,
+`set_query_2000_items` 464.6 / 344.8 µs; `fuzzy_match_one` 1.13 / 1.15 µs
+(within noise: one short candidate gains nothing from the window).

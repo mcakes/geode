@@ -120,6 +120,7 @@ cargo bench -p geode-chart
 cargo bench -p geode-timeseries
 cargo bench -p geode-volslice
 cargo bench -p geode-pricer
+cargo bench -p geode-diagnostics
 cargo bench --workspace --no-run
 ```
 
@@ -168,6 +169,9 @@ the measurement log for fixture and hardware details.
 | Object browse rows | 500 views: derive and rank, per input change | 188 µs |
 | Object browse filter keystroke | the same, prepared re-rank | 240 µs |
 | Palette paint | 551 items, the rows in view, prepared labels | 275 ns |
+| Diagnostics Log rebuild, fuzzy filter | full 4,096-record tail, a two-word query every record matches in its message: the page's headless `rebuild` (heavily loaded machine; the unfiltered rebuild measured 3.95 ms in the same run) | 6.78 ms |
+| Diagnostics Log table build, fuzzy filter | the same tail and query: `log_rows` + `log_table` (unfiltered 1.51 ms) | 4.95 ms |
+| Diagnostics Log narrowing | the same, `listfilter::Narrow` alone over pre-formatted four-column text | 3.26 ms |
 
 Production view queries also carry the roster's context columns
 (`underlying_ref`, `position_ref`, `instrument_ref`; see
@@ -287,6 +291,14 @@ measure already reads. Re-measure on an idle machine before quoting them.
 - Large module tables use virtualization or prepared visible rows.
 
 ## Known gaps
+
+- The Diagnostics Log rebuilds its whole tail on every filter keystroke and
+  every batch of new records, reformatting each record's time and re-running
+  the fuzzy narrowing; nothing is cached across keystrokes. A two-word query
+  every one of 4,096 records matches stays under the 8 ms UI budget on the
+  reference machine (6.78 ms headless, loaded), about half of it the
+  unfiltered rebuild. A slower machine could cross it; caching formatted rows
+  per record is the next step if it does.
 
 - Object-dialog paint still formats per-row element ids (layer, override,
   drift badges; field and provenance ids) and resolves the Colors browse
