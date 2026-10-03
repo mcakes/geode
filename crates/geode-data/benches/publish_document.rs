@@ -35,12 +35,19 @@ fn grid(terms: usize, nodes: usize, offset: f64) -> DocumentRows {
     let mut term_col = Vec::with_capacity(terms * nodes);
     let mut node_col = Vec::with_capacity(terms * nodes);
     let mut params = Vec::with_capacity(terms * nodes);
+    // The declaration's per-slice values: constant across a term's nodes.
+    let mut forward = Vec::with_capacity(terms * nodes);
+    let mut atm = Vec::with_capacity(terms * nodes);
+    let mut skew = Vec::with_capacity(terms * nodes);
     for t in 0..terms {
         let term = base + chrono::Days::new(t as u64 * 7);
         for (i, n) in node_values.iter().enumerate() {
             term_col.push(term);
             node_col.push(*n);
             params.push((t * nodes + i) as f64 * 0.001 - 1.0 + offset);
+            forward.push(7650.0 + t as f64);
+            atm.push(0.2 + t as f64 * 0.001);
+            skew.push(-0.1);
         }
     }
     DocumentRows {
@@ -53,7 +60,12 @@ fn grid(terms: usize, nodes: usize, offset: f64) -> DocumentRows {
             ("term".into(), Column::Date(term_col)),
             ("node".into(), Column::F64(node_col)),
         ],
-        values: vec![("param".into(), Column::F64(params))],
+        values: vec![
+            ("param".into(), Column::F64(params)),
+            ("forward".into(), Column::F64(forward)),
+            ("atm".into(), Column::F64(atm)),
+            ("skew".into(), Column::F64(skew)),
+        ],
     }
 }
 
