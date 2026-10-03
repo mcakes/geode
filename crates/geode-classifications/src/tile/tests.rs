@@ -1420,3 +1420,440 @@ fn a_closed_switcher_stays_closed_across_an_unrelated_reload(cx: &mut gpui::Test
     });
     assert_eq!(h.switcher(&vcx), rows(&["desk"]));
 }
+
+// ---- no-op verbs and reloads inside the debounce ----
+
+/// A verb that changes nothing (`x` on rows already unclassified) is not a
+/// relabel: the live selection stands.
+#[gpui::test]
+fn a_verb_that_changes_nothing_keeps_the_selection(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.press(&mut vcx, "shift-v j");
+    assert_eq!(h.targets(&vcx), ["NKY", "HSI"]);
+    h.press(&mut vcx, "x");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(h.mode(&vcx).as_deref(), Some("visual"));
+    assert_eq!(h.targets(&vcx), ["NKY", "HSI"]);
+}
+
+/// `u` with nothing to undo, and a replay that skips every row, change
+/// nothing either: a restored cursor still waiting for its row keeps
+/// waiting.
+#[gpui::test]
+fn an_undo_that_changes_nothing_keeps_a_waiting_cursor(cx: &mut gpui::TestAppContext) {
+    let record = crate::core::session::to_table(&crate::core::session::State {
+        name: Some("region".into()),
+        cursor: Some("NKY".into()),
+        ..Default::default()
+    });
+    let (h, mut vcx) = open_with(cx, config(EDIT), Some(record));
+    // Only the map's rows: the cursor rests on the first, SPX, while NKY
+    // waits for the values.
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SPX"));
+    h.press(&mut vcx, "u");
+    assert_eq!(h.notices(&vcx), ["nothing to undo"]);
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert_eq!(saved["cursor"].as_str(), Some("NKY"), "still waiting");
+    h.press(&mut vcx, "x");
+    h.edits(&mut vcx);
+    // Another tile labelled SPX since; undo has nothing left to do.
+    let foreign = "[region]\nfrom = \"underlying_ref\"\n[region.values]\nAsia = [\"SPX\"]\nEurope = [\"SX5E\", \"DAX\"]\n";
+    vcx.update(|_, cx| h.factory.set_config(config(foreign), cx));
+    // A cursor waiting for a row the values have not brought yet, as a
+    // restore leaves it.
+    h.tile
+        .update(&mut vcx, |t, _| t.grid.seed_cursor("NKY".into()));
+    h.press(&mut vcx, "u");
+    assert!(h.edits(&mut vcx).is_empty());
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert_eq!(saved["cursor"].as_str(), Some("NKY"), "still waiting");
+}
+
+/// A reload that changes something else inside the write's debounce does
+/// not drop the optimistic edit: the label does not flash back, and the
+/// next edit is built over the first.
+#[gpui::test]
+fn an_unrelated_reload_keeps_the_pending_edit_and_the_next_edit_builds_on_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "x");
+    h.edits(&mut vcx);
+    let unrelated = format!("{EDIT}\n[desk]\nfrom = \"book\"\n");
+    vcx.update(|_, cx| h.factory.set_config(config(&unrelated), cx));
+    assert_eq!(h.label(&vcx, "SPX"), None, "no flash back");
+    h.goto(&mut vcx, "DAX");
+    h.press(&mut vcx, "x");
+    assert_eq!(
+        h.edits(&mut vcx),
+        [edit_of(&region(&[("SX5E", "Europe")]))],
+        "both edits in the queued object"
+    );
+}
+
+// ---- new, rename, delete, revert ----
+
+/// `dims` with `user` defined in the user layer, and `shadowed` of those
+/// over a desk copy.
+fn config_layered(dims: &str, user: &[&str], shadowed: &[&str]) -> ClassificationsConfig {
+    let mut c = config(dims);
+    for name in user {
+        c.layers.insert(name.to_string(), Layer::User);
+    }
+    c.shadowed = shadowed.iter().map(|s| s.to_string()).collect();
+    c
+}
+
+/// The prompt field as the tile holds it.
+#[derive(Debug, PartialEq)]
+struct PromptSeen {
+    prompt: crate::core::prompt::Prompt,
+    text: String,
+    placeholder: String,
+    error: Option<String>,
+    /// The closed choice's ranked options, for the column step.
+    options: Option<Vec<String>>,
+}
+
+impl Harness {
+    /// A registered action, the way the palette and the `⋯` menu reach the
+    /// tile: through its door.
+    fn act(&self, vcx: &mut gpui::VisualTestContext, id: &str) {
+        let id = ActionId(id.to_string());
+        vcx.update(|window, cx| {
+            self.content.dispatch(&id, None, window, cx);
+        });
+        self.draw(vcx);
+    }
+    fn prompt(&self, vcx: &gpui::VisualTestContext) -> Option<PromptSeen> {
+        self.tile.read_with(vcx, |t, cx| {
+            let p = t.prompt.as_ref()?;
+            let input = p.input.read(cx);
+            Some(PromptSeen {
+                prompt: p.prompt.clone(),
+                text: input.value().to_string(),
+                placeholder: input.presentation().placeholder().to_string(),
+                error: p.error.as_ref().map(|e| e.to_string()),
+                options: p.list.as_ref().map(|l| {
+                    l.ranked()
+                        .iter()
+                        .map(|r| l.options()[r.row].clone())
+                        .collect()
+                }),
+            })
+        })
+    }
+    fn confirm(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+        self.tile.read_with(vcx, |t, _| {
+            t.confirm.as_ref().map(|c| c.prompt_text().to_string())
+        })
+    }
+    /// The open `⋯` menu's rows: each title with its disabled lane text,
+    /// `---` for a separator.
+    fn action_menu(&self, vcx: &gpui::VisualTestContext) -> Option<Vec<(String, Option<String>)>> {
+        self.tile.read_with(vcx, |t, _| {
+            let (MenuKind::Actions, m) = t.menu.as_ref()? else {
+                return None;
+            };
+            Some(
+                m.rows()
+                    .iter()
+                    .map(|r| match r {
+                        Row::Action(a) => (
+                            a.title().to_string(),
+                            match a.trailing() {
+                                menu::Trailing::Text(t) if !a.is_enabled() => Some(t.to_string()),
+                                _ => None,
+                            },
+                        ),
+                        _ => ("---".to_string(), None),
+                    })
+                    .collect(),
+            )
+        })
+    }
+    fn shown_name(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+        self.tile.read_with(vcx, |t, _| t.state.name.clone())
+    }
+}
+
+fn removal(name: &str) -> ConfigEdit {
+    ConfigEdit {
+        doc: DIMENSIONS_DOC,
+        object: name.into(),
+        value: None,
+        origin: Some(TileId(TILE)),
+    }
+}
+
+#[gpui::test]
+fn new_asks_a_name_then_a_column_and_creates_an_empty_classification(
+    cx: &mut gpui::TestAppContext,
+) {
+    use crate::core::prompt::Prompt;
+    let (h, mut vcx) = open_with(cx, config(TWO), restored("region"));
+    h.act(&mut vcx, "classifications::new");
+    let seen = h.prompt(&vcx).expect("the prompt is open");
+    assert_eq!(seen.prompt, Prompt::NewName);
+    assert_eq!(seen.placeholder, "name");
+    assert_eq!(seen.text, "");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    assert!(vcx.debug_bounds("classifications-prompt-7").is_some());
+    vcx.simulate_input("sector");
+    h.press(&mut vcx, "enter");
+    let seen = h.prompt(&vcx).expect("the column step");
+    assert_eq!(
+        seen.prompt,
+        Prompt::NewColumn {
+            name: "sector".into()
+        }
+    );
+    assert_eq!(seen.text, "", "a fresh answer");
+    assert_eq!(
+        seen.options.as_deref(),
+        Some(&["underlying_ref", "book", "position_ref", "instrument_ref"].map(String::from)[..]),
+        "the columns a classification may map"
+    );
+    h.draw(&mut vcx);
+    assert!(
+        vcx.debug_bounds("classifications-prompt-row-book")
+            .is_some()
+    );
+    vcx.simulate_input("under");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.prompt(&vcx), None);
+    let sector = DerivedDimension {
+        name: "sector".into(),
+        from: "underlying_ref".into(),
+        values: Default::default(),
+    };
+    assert_eq!(h.edits(&mut vcx), [edit_of(&sector)]);
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("sector"));
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    // Until the reload carries it, the body says it is on its way.
+    let empty = h.empty(&vcx).expect("not defined yet");
+    assert!(empty.contains("sector"), "{empty}");
+    assert!(!empty.contains("no longer exists"), "{empty}");
+    let with_sector = format!("{TWO}\n[sector]\nfrom = \"underlying_ref\"\n");
+    vcx.update(|_, cx| h.factory.set_config(config(&with_sector), cx));
+    assert_eq!(h.title(&mut vcx), "Classification: sector");
+}
+
+#[gpui::test]
+fn new_refuses_a_shadowing_name_and_keeps_the_field_open(cx: &mut gpui::TestAppContext) {
+    use crate::core::prompt::Prompt;
+    let (h, mut vcx) = open_with(cx, config(TWO), restored("region"));
+    h.act(&mut vcx, "classifications::new");
+    vcx.simulate_input("book");
+    h.press(&mut vcx, "enter");
+    let seen = h.prompt(&vcx).expect("still open");
+    assert_eq!(seen.prompt, Prompt::NewName);
+    assert_eq!(
+        seen.error.as_deref(),
+        Some("'book' is already a dataset column ('book')")
+    );
+    assert!(h.edits(&mut vcx).is_empty());
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("classifications-prompt-error-7").is_some());
+    // Escape closes it with nothing written.
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.prompt(&vcx), None);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert!(!vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+}
+
+#[gpui::test]
+fn rename_confirms_with_the_reference_count_and_writes_one_batch(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(TWO, &["region"], &[]),
+        restored("region"),
+    );
+    h.frame.update(&mut vcx, |f, _| {
+        let mut slots = GroupingSlots::default();
+        slots.set(2, vec!["region".into(), "underlying_ref".into()]);
+        f.replace_slots(slots);
+    });
+    h.act(&mut vcx, "classifications::rename");
+    let seen = h.prompt(&vcx).expect("the rename field");
+    assert_eq!(seen.text, "region", "seeded, selected: typing replaces it");
+    vcx.simulate_input("zone");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.prompt(&vcx), None);
+    assert_eq!(
+        h.confirm(&vcx).as_deref(),
+        Some("rename region \u{2192} zone: 1 grouping still says 'region' \u{2014} y renames")
+    );
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("classifications-confirm-7-bar").is_some());
+    assert!(h.edits(&mut vcx).is_empty(), "nothing before y");
+    vcx.simulate_keystrokes("y");
+    let zone = DerivedDimension {
+        name: "zone".into(),
+        ..region(&[("SX5E", "Europe"), ("DAX", "Europe")])
+    };
+    assert_eq!(h.edits(&mut vcx), [edit_of(&zone), removal("region")]);
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("zone"));
+    assert_eq!(h.confirm(&vcx), None);
+}
+
+/// A rename the shell refuses never landed: the tile goes back to the old
+/// name, which the switcher lists again.
+#[gpui::test]
+fn a_refused_rename_shows_the_old_name_again(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(TWO, &["region"], &[]),
+        restored("region"),
+    );
+    h.act(&mut vcx, "classifications::rename");
+    vcx.simulate_input("zone");
+    h.press(&mut vcx, "enter");
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("zone"));
+    let why = "dimensions not written: the user layer is read-only";
+    h.shell_says(&mut vcx, TileNotice::Refused(why.into()));
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("region"));
+    assert_eq!(h.title(&mut vcx), "Classification: region");
+    assert_eq!(h.notices(&vcx), [why]);
+}
+
+#[gpui::test]
+fn delete_confirms_and_removes_a_user_object(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(TWO, &["region"], &[]),
+        restored("region"),
+    );
+    h.act(&mut vcx, "classifications::delete");
+    assert_eq!(
+        h.confirm(&vcx).as_deref(),
+        Some("delete region: nothing refers to it \u{2014} y deletes")
+    );
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.edits(&mut vcx), [removal("region")]);
+    assert_eq!(h.shown_name(&vcx), None);
+    assert_eq!(h.switcher(&vcx), rows(&["desk"]), "the deleted one is gone");
+}
+
+#[gpui::test]
+fn delete_refuses_a_desk_object(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), restored("desk"));
+    h.act(&mut vcx, "classifications::delete");
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notices(&vcx),
+        ["desk is defined in desk config; Geode cannot remove it from there"]
+    );
+    assert!(h.edits(&mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn revert_is_offered_only_for_a_shadowed_user_copy_and_removes_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(TWO, &["region"], &["region"]),
+        restored("region"),
+    );
+    h.press(&mut vcx, ".");
+    let titles: Vec<String> = h
+        .action_menu(&vcx)
+        .expect("the menu")
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    assert!(titles.iter().any(|t| t == "Revert to desk"), "{titles:?}");
+    h.press(&mut vcx, "escape");
+    h.act(&mut vcx, "classifications::revert");
+    assert_eq!(
+        h.confirm(&vcx).as_deref(),
+        Some("revert region to the desk copy \u{2014} y reverts")
+    );
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.edits(&mut vcx), [removal("region")]);
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("region"));
+}
+
+/// Without a desk copy under it there is nothing to revert to: no row, and
+/// the palette's revert refuses.
+#[gpui::test]
+fn revert_is_not_offered_without_a_desk_copy(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(TWO, &["region"], &[]),
+        restored("region"),
+    );
+    h.press(&mut vcx, ".");
+    let titles: Vec<String> = h
+        .action_menu(&vcx)
+        .unwrap()
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    assert!(!titles.iter().any(|t| t == "Revert to desk"), "{titles:?}");
+    h.press(&mut vcx, "escape");
+    h.act(&mut vcx, "classifications::revert");
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.edits(&mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn n_cancels_a_confirm_and_nothing_is_written(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(TWO, &["region"], &[]),
+        restored("region"),
+    );
+    h.act(&mut vcx, "classifications::delete");
+    assert!(h.confirm(&vcx).is_some());
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("region"));
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    // The keyboard is the tile's again.
+    h.press(&mut vcx, "g c");
+    assert!(h.switcher(&vcx).is_some());
+}
+
+#[gpui::test]
+fn the_dot_menu_lists_actions_with_disabled_reasons(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), restored("desk"));
+    h.press(&mut vcx, ".");
+    let s = |t: &str| (t.to_string(), None);
+    assert_eq!(
+        h.action_menu(&vcx).expect("the menu"),
+        [
+            s("Set label"),
+            s("Clear label"),
+            s("Copy label"),
+            ("Paste label".into(), Some("nothing copied".into())),
+            s("---"),
+            s("New\u{2026}"),
+            (
+                "Rename\u{2026}".into(),
+                Some("defined in desk config".into())
+            ),
+            ("Delete".into(), Some("defined in desk config".into())),
+            s("Refresh values"),
+        ]
+    );
+    // A disabled row says why in full and keeps the menu open.
+    let pick = |row: usize, vcx: &mut gpui::VisualTestContext| {
+        vcx.update(|window, cx| h.tile.update(cx, |t, cx| t.menu_pick(row, window, cx)));
+        h.draw(vcx);
+    };
+    pick(7, &mut vcx);
+    assert!(h.action_menu(&vcx).is_some());
+    assert_eq!(
+        h.notices(&vcx),
+        ["desk is defined in desk config; Geode cannot remove it from there"]
+    );
+    // An enabled row runs the palette's action.
+    pick(5, &mut vcx);
+    assert_eq!(h.action_menu(&vcx), None);
+    assert!(h.prompt(&vcx).is_some(), "New\u{2026} opened the prompt");
+}

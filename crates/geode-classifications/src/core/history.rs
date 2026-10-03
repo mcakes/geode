@@ -7,6 +7,11 @@
 //! before a reload therefore compose (the second builds on the first), and
 //! undo replays row by row over what is current, skipping a row another
 //! surface changed since (`classification::undo`).
+//!
+//! The pending object outlives a reload that leaves this classification as
+//! it was (another classification or document changed inside the write's
+//! debounce): dropping it then would flash the old labels back and build
+//! the next edit over a stale base.
 
 use geode_core::classification::{self, UndoEntry};
 use geode_core::dimensions::DerivedDimension;
@@ -16,6 +21,9 @@ pub struct History {
     undo: Vec<UndoEntry>,
     redo: Vec<UndoEntry>,
     pending: Option<DerivedDimension>,
+    /// The configuration's object the pending one was made over: a reload
+    /// still carrying exactly this has not answered the write yet.
+    base: Option<DerivedDimension>,
 }
 
 impl History {
@@ -40,7 +48,7 @@ impl History {
         }
         self.undo.push(entry);
         self.redo.clear();
-        self.pending = Some(next.clone());
+        self.hold(config, &next);
         Some(next)
     }
 
@@ -50,7 +58,7 @@ impl History {
         let entry = self.undo.pop()?;
         let (next, skipped) = classification::undo(self.current(config), &entry);
         self.redo.push(entry);
-        self.pending = Some(next.clone());
+        self.hold(config, &next);
         Some((next, skipped))
     }
 
@@ -59,15 +67,36 @@ impl History {
         let entry = self.redo.pop()?;
         let (next, skipped) = classification::redo(self.current(config), &entry);
         self.undo.push(entry);
-        self.pending = Some(next.clone());
+        self.hold(config, &next);
         Some((next, skipped))
     }
 
-    /// The configuration now carries the pending object, or the write was
-    /// refused and the configuration's object stands: drop the optimistic
-    /// copy either way.
-    pub fn reloaded(&mut self) {
+    /// Keep `next` as the pending object over `config`. A pending object
+    /// already held keeps its base: `config` is still that base, or a
+    /// reload would have dropped it.
+    fn hold(&mut self, config: &DerivedDimension, next: &DerivedDimension) {
+        if self.pending.is_none() {
+            self.base = Some(config.clone());
+        }
+        self.pending = Some(next.clone());
+    }
+
+    /// A reload brought `config` for this classification. It carries the
+    /// pending object, or something else changed this classification (the
+    /// configuration's word is the truth now): the optimistic copy goes. A
+    /// reload leaving the classification as the pending object found it
+    /// has not answered the write yet, and the copy stays.
+    pub fn reloaded(&mut self, config: &DerivedDimension) {
+        if self.base.as_ref() != Some(config) {
+            self.pending = None;
+            self.base = None;
+        }
+    }
+
+    /// The write was refused and the configuration's object stands.
+    pub fn refused(&mut self) {
         self.pending = None;
+        self.base = None;
     }
 
     /// Another classification is shown, or this one was renamed or deleted:
@@ -76,6 +105,7 @@ impl History {
         self.undo.clear();
         self.redo.clear();
         self.pending = None;
+        self.base = None;
     }
 }
 
@@ -101,7 +131,44 @@ mod tests {
         let mut h = History::default();
         let next = h.apply(&cfg, &["B".into()], Some("Y")).unwrap();
         assert_eq!(h.current(&cfg), &next);
-        h.reloaded();
+        h.reloaded(&next);
+        assert_eq!(h.current(&next), &next);
+        assert!(h.pending.is_none(), "the reload carried it");
+    }
+
+    /// A reload that leaves this classification as it was (another
+    /// classification or document changed) is not the one carrying the
+    /// edit: the edit stays on screen, and the next edit builds on it.
+    #[test]
+    fn an_unrelated_reload_keeps_the_pending_edit() {
+        let cfg = dim(&[]);
+        let mut h = History::default();
+        let first = h.apply(&cfg, &["A".into()], Some("X")).unwrap();
+        h.reloaded(&cfg);
+        assert_eq!(h.current(&cfg), &first);
+        let second = h.apply(&cfg, &["B".into()], Some("Y")).unwrap();
+        assert_eq!(second.values.get("A").map(String::as_str), Some("X"));
+        assert_eq!(second.values.get("B").map(String::as_str), Some("Y"));
+    }
+
+    /// A reload that changed this classification otherwise (another tile
+    /// wrote it) is the truth now: the optimistic copy goes.
+    #[test]
+    fn a_reload_changing_this_classification_otherwise_drops_the_pending_edit() {
+        let cfg = dim(&[]);
+        let mut h = History::default();
+        h.apply(&cfg, &["A".into()], Some("X"));
+        let foreign = dim(&[("C", "Z")]);
+        h.reloaded(&foreign);
+        assert_eq!(h.current(&foreign), &foreign);
+    }
+
+    #[test]
+    fn a_refusal_drops_the_pending_edit() {
+        let cfg = dim(&[]);
+        let mut h = History::default();
+        h.apply(&cfg, &["A".into()], Some("X"));
+        h.refused();
         assert_eq!(h.current(&cfg), &cfg);
     }
 
@@ -142,7 +209,7 @@ mod tests {
         let cfg = dim(&[]);
         let mut h = History::default();
         h.apply(&cfg, &["A".into()], Some("X"));
-        h.reloaded();
+        h.refused();
         // Another tile relabelled A since.
         let cfg = dim(&[("A", "Z")]);
         let (after, skipped) = h.undo(&cfg).unwrap();
@@ -155,8 +222,8 @@ mod tests {
         let cfg = dim(&[]);
         let mut h = History::default();
         h.apply(&cfg, &["A".into()], Some("X"));
-        h.reloaded();
         let cfg = dim(&[("A", "X")]);
+        h.reloaded(&cfg);
         let (undone, _) = h.undo(&cfg).unwrap();
         assert!(undone.values.is_empty());
         let (redone, skipped) = h.redo(&cfg).unwrap();

@@ -35605,7 +35605,7 @@ run_mutation "classifications: the session saves a filter-hidden cursor row" \
 # `tech` typed over `Tech` must not make a second label.
 run_mutation "classifications: a case variant takes the existing label" \
   crates/geode-classifications/src/tile/editor.rs \
-  '            .is_some_and(|h| h.eq_ignore_ascii_case(typed));' \
+  '            .is_some_and(|h| h.to_lowercase() == typed.to_lowercase());' \
   '            .is_some_and(|h| h == typed);' \
   geode-classifications \
   typing_a_case_variant_of_an_existing_label
@@ -35642,7 +35642,7 @@ run_mutation "classifications: the tile takes its shell notices" \
 
 run_mutation "classifications: a refusal drops the optimistic edit" \
   crates/geode-classifications/src/tile/mod.rs \
-  '            self.history.reloaded();' \
+  '            self.history.refused();' \
   '            let _ = &self.history;' \
   geode-classifications \
   a_refusal_notice_drops_the_optimistic_edit

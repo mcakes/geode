@@ -2,4 +2,5 @@
 
 pub mod grid;
 pub mod history;
+pub mod prompt;
 pub mod session;

@@ -39,8 +39,17 @@ the frame's config door.
   classification and the optimistic object an edit produced. Every verb
   works over `current` (the pending object, else the configuration's), so
   two edits before a reload compose; undo and redo replay row by row over
-  it and report rows another surface changed since. A reload or a refusal
-  drops the pending object; showing another classification forgets all.
+  it and report rows another surface changed since. A refusal drops the
+  pending object; so does a reload that changed this classification (it
+  carries the edit, or another surface wrote it). A reload that left it as
+  the edit found it (another classification or document changed inside the
+  write's debounce) keeps the pending object, so the label does not flash
+  back and the next edit builds on it. Showing another classification, or
+  a rename, delete or revert, forgets all.
+- `core/prompt.rs`: `Prompt` (`NewName`, `NewColumn`, `Rename`) and
+  `submit`, which validates the trimmed answer (`validate_name`,
+  `validate_source`) into the next `Step`: the column question, a create,
+  a rename, or a refusal that keeps the prompt open.
 - `tile/`: the hosted entity. `tile/header.rs` paints the header: the
   switch control (`Classification: <name> ▾`, also `g c`), the source
   column, `<n> values` and `<k> unclassified` from the grid, and the winning
@@ -63,8 +72,11 @@ the frame's config door.
 - `tile/editor.rs`: `LabelEditor`, the free typeahead over the labels in
   use, and its commit rule: the highlighted label when the highlight was
   moved (`up`/`down`, a row press) or equals the typed text ignoring case;
-  else the typed text trimmed, never re-cased; blank clears. The prefill is
-  the targets' label only when they all share one.
+  else the typed text trimmed, never re-cased; blank clears. The case
+  comparison is Unicode lowercasing. The prefill is the targets' label only
+  when they all share one. Also `PromptField`, the bar under the header
+  that New and Rename ask in; its column step hangs a closed choice over
+  `source_columns`, painted by the editor's list painter.
 
 ## Values and grid
 
@@ -105,6 +117,36 @@ is shown; session-restore notices until the trader's first key or press in
 the tile; the switcher's `no classifications to switch to` while that
 holds. The switcher opens by itself only on the first snapshot and when
 the shown classification goes away.
+
+## New, rename, delete and revert
+
+Registered actions only (the palette and the `⋯` menu), never `:`
+commands. The `⋯` menu lists Set, Clear, Copy and Paste label, then New…,
+Rename…, Delete, Revert to desk (only over a desk copy) and Refresh values;
+a row that cannot act says why in its lane and in full when picked.
+
+New asks a name, then a source column from a closed choice (the
+highlighted column answers; enter with nothing typed takes the first), and
+writes an empty classification. Rename asks the new name (seeded and
+selected). Each answer is validated before anything is written; a refusal
+shows under the field and keeps it open. Rename, Delete and Revert then ask
+y/n on the confirm bar (`geode_tile::confirm`), naming how many groupings,
+views, saved scopes and named expressions still name the classification
+(`references`): these are not rewritten. A rename writes the new object and
+removes the old in one `queue_config_edits` batch; delete and revert remove
+the user definition. Rename and delete act only on a classification the
+user layer owns outright: a desk or builtin one cannot be removed from the
+user layer, and removing a user copy over a desk one would leave the desk
+one under the old name (Revert to desk is the verb for that). After a
+create or rename the tile shows the new name (`Saving <name>…` until the
+reload carries it); after a delete the switcher opens without it. A
+`Refused` notice puts back what was shown before. While the prompt or a
+question is up the tile is in `insert` mode; any other verb closes the
+prompt or answers the question no.
+
+A verb that changes nothing (`x` on unclassified rows, `u` with nothing to
+undo, a replay that skips every row) is not a relabel: it keeps a live
+selection and a waiting cursor.
 
 ## Commands
 

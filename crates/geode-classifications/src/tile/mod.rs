@@ -11,6 +11,15 @@
 //! `classifications::refresh`. A refused or failed read leaves the map's
 //! rows alone on screen with a notice; `shift+r` asks again.
 //!
+//! New, Rename, Delete and Revert are registered actions (the palette and
+//! the `⋯` menu). New and Rename ask in a prompt bar under the header
+//! (`editor::PromptField`), validated before anything is written; Rename,
+//! Delete and Revert then ask y/n on the confirm bar, saying how many
+//! groupings, views, scopes and expressions still name the classification
+//! (they are not rewritten). Each writes through the config door as one
+//! batch; the tile shows where it will land at once and goes back if the
+//! shell refuses the write.
+//!
 //! What paint reads is prepared in `Chrome` and the table's `Prepared`
 //! whenever the configuration, the values, the filter or the sort change,
 //! never in render.
@@ -22,8 +31,9 @@ mod table;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use geode_core::classification::{self, validate::validate_source};
-use geode_core::config::DIMENSIONS_DOC;
+use geode_core::classification;
+use geode_core::classification::validate::{references, source_columns, validate_source};
+use geode_core::config::{DIMENSIONS_DOC, Layer};
 use geode_core::dimensions::DerivedDimension;
 use geode_core::query::{AsOf, DistinctOutcome, DistinctParams, QueryKey};
 use geode_core::scope::Scope;
@@ -36,6 +46,7 @@ use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimnav::NavCommand;
+use geode_tile::confirm::{self, Confirm, ConfirmHost};
 use geode_tile::edit::EditCaret;
 use geode_tile::header::{HEADER_HEIGHT, Mode, link_chips};
 use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, MenuPick, Row};
@@ -49,8 +60,9 @@ use gpui_component::{ActiveTheme as _, v_flex};
 use crate::content::{ClassificationsConfig, Shared, action_title};
 use crate::core::grid::{GridModel, label_text};
 use crate::core::history::History;
+use crate::core::prompt::{self, Prompt, Step};
 use crate::core::session::{self, SortCol, State};
-use editor::{EditorPaint, LabelEditor};
+use editor::{ChoiceKind, EditorPaint, LabelEditor, PromptField};
 use header::HeaderModel;
 use table::{GridDelegate, Prepared, RowPressed, SortClicked};
 
@@ -82,7 +94,32 @@ impl MenuPick for Pick {
 }
 
 const NEW_ACTION: &str = "classifications::new";
+const RENAME_ACTION: &str = "classifications::rename";
+const DELETE_ACTION: &str = "classifications::delete";
+const REVERT_ACTION: &str = "classifications::revert";
 const REFRESH_ACTION: &str = "classifications::refresh";
+
+/// What an armed confirm does on `y`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pending {
+    Rename { from: String, to: String },
+    Delete { name: String },
+    Revert { name: String },
+}
+
+/// A create, rename or delete the tile has written and is showing ahead
+/// of the reload that carries it. A refusal from the shell puts back what
+/// was shown before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Awaiting {
+    /// The classification the tile shows meanwhile (created or renamed to),
+    /// `None` after a delete.
+    shows: Option<String>,
+    /// The one it showed before, to go back to on a refusal.
+    restores: Option<String>,
+    /// The one renamed or deleted: kept out of the switcher meanwhile.
+    removed: Option<String>,
+}
 
 /// The switcher's refusal while there is nothing to list.
 const NOTHING_TO_SWITCH: &str = "no classifications to switch to";
@@ -171,9 +208,16 @@ pub struct ClassificationsTile {
     history: History,
     /// The open label editor; the tile is in insert mode while it is.
     editor: Option<LabelEditor>,
-    /// The window the editor opened in, to blur its field where no window
-    /// is at hand (a reload removing the classification, a close).
-    editor_window: Option<AnyWindowHandle>,
+    /// The open prompt (New, Rename); insert mode too.
+    prompt: Option<PromptField>,
+    /// The armed y/n question; it holds the keyboard, insert mode too.
+    confirm: Option<Confirm<Pending>>,
+    /// A create, rename or delete written and not yet reloaded.
+    awaiting: Option<Awaiting>,
+    /// The window the editor or the prompt opened in, to blur its field
+    /// where no window is at hand (a reload removing the classification, a
+    /// close).
+    field_window: Option<AnyWindowHandle>,
     /// The label `y y` copied; `Some(None)` copied an unclassified row.
     register: Option<Option<String>>,
     /// Whether a configuration has been settled yet: the first one is
@@ -275,7 +319,10 @@ impl ClassificationsTile {
             },
             history: History::default(),
             editor: None,
-            editor_window: None,
+            prompt: None,
+            confirm: None,
+            awaiting: None,
+            field_window: None,
             register: None,
             settled: false,
             was_shown: false,
@@ -290,12 +337,14 @@ impl ClassificationsTile {
         tile
     }
 
-    /// The factory stored a new configuration snapshot. It carries the
-    /// optimistic edit (or a revert, or someone else's change): the history
-    /// drops its pending copy and the rows are rebuilt from the
-    /// configuration's object.
+    /// The factory stored a new configuration snapshot. When it carries the
+    /// optimistic edit (or a revert, or someone else's change to this
+    /// classification) the history drops its pending copy; the rows are
+    /// rebuilt from what is current either way.
     pub fn config_changed(&mut self, cx: &mut Context<Self>) {
-        self.history.reloaded();
+        if let Some(dim) = self.config_dim() {
+            self.history.reloaded(&dim);
+        }
         self.settle(cx);
         cx.notify();
     }
@@ -310,9 +359,24 @@ impl ClassificationsTile {
     fn settle(&mut self, cx: &mut Context<Self>) {
         let shown = self.shown().is_some();
         if !shown {
-            // Its history means nothing now, and its editor writes nowhere.
+            // Its history means nothing now, and its editor writes nowhere;
+            // a rename or a question about it asks about nothing.
             self.history.forget();
             self.release_editor(cx);
+            if self
+                .prompt
+                .as_ref()
+                .is_some_and(|p| matches!(p.prompt, Prompt::Rename { .. }))
+            {
+                self.release_prompt(cx);
+            }
+            if confirm::withdraw(self, cx).is_some() {
+                self.notices
+                    .outcome(Notice::status("the classification asked about is gone"));
+            }
+        }
+        if self.awaiting.as_ref().is_some_and(|a| self.landed(a)) {
+            self.awaiting = None;
         }
         self.settle_menu(shown);
         if self.notices.nothing_to_switch && !self.switch_rows().is_empty() {
@@ -359,23 +423,50 @@ impl ClassificationsTile {
         if told.is_empty() {
             return;
         }
-        let mut refused = false;
-        for notice in told {
-            match notice {
-                TileNotice::Forked(text) => self.notices.outcome(Notice::status(text)),
-                TileNotice::Refused(text) => {
-                    self.notices.outcome(Notice::danger(text));
-                    refused = true;
+        let refused = told.iter().any(|n| matches!(n, TileNotice::Refused(_)));
+        // A create, rename or delete that never landed: back to what was
+        // shown before it, ahead of the notices, which showing another
+        // classification would clear.
+        if refused
+            && let Some(a) = self.awaiting.take()
+            && self.state.name == a.shows
+        {
+            self.menu = None;
+            match a.restores {
+                Some(name) => self.show(&name, cx),
+                None => {
+                    self.state.name = None;
+                    self.was_shown = false;
                 }
             }
         }
+        for notice in told {
+            match notice {
+                TileNotice::Forked(text) => self.notices.outcome(Notice::status(text)),
+                TileNotice::Refused(text) => self.notices.outcome(Notice::danger(text)),
+            }
+        }
         if refused {
-            self.history.reloaded();
+            self.history.refused();
             self.rebuild_rows(false, cx);
         } else {
             self.rebuild_chrome();
         }
         cx.notify();
+    }
+
+    /// Whether the configuration now carries what `a` wrote.
+    fn landed(&self, a: &Awaiting) -> bool {
+        let config = self.shared.config.borrow();
+        let Some(config) = config.as_ref() else {
+            return false;
+        };
+        a.shows
+            .as_ref()
+            .is_none_or(|n| config.dims.get(n).is_some())
+            && a.removed
+                .as_ref()
+                .is_none_or(|n| config.dims.get(n).is_none())
     }
 
     /// The shown classification's name and source column.
@@ -541,7 +632,7 @@ impl ClassificationsTile {
         Some(EditorPaint {
             row: self.grid.cursor()?,
             input: e.input.clone(),
-            choice: Rc::new(editor::choice_paint(&e.list)),
+            choice: Rc::new(editor::choice_paint(&e.list, ChoiceKind::Labels)),
             tile: cx.weak_entity(),
             tile_id: self.id.0,
         })
@@ -570,8 +661,12 @@ impl ClassificationsTile {
             .as_ref()
             .is_none_or(|c| c.dims.all().next().is_none());
         let new = action_title(NEW_ACTION);
+        let awaited = self.awaiting.as_ref().and_then(|a| a.shows.as_ref());
         self.chrome.empty = match (&self.state.name, dim) {
             (_, Some(_)) => None,
+            (Some(name), None) if awaited == Some(name) => {
+                Some(format!("Saving {name}\u{2026}").into())
+            }
             (Some(gone), None) if none_defined => {
                 Some(format!("{gone} no longer exists. {new} makes a classification.").into())
             }
@@ -612,9 +707,11 @@ impl ClassificationsTile {
     /// One row per classification, alphabetical, the shown one ticked.
     fn switch_rows(&self) -> Vec<Row<Pick>> {
         let config = self.shared.config.borrow();
+        let removed = self.awaiting.as_ref().and_then(|a| a.removed.as_deref());
         let mut names: Vec<&str> = config
             .iter()
             .flat_map(|c: &ClassificationsConfig| c.dims.all().map(|d| d.name.as_str()))
+            .filter(|n| Some(*n) != removed)
             .collect();
         names.sort_unstable();
         names
@@ -627,12 +724,102 @@ impl ClassificationsTile {
             .collect()
     }
 
-    /// The `⋯` menu: the tile's actions with their live chords.
+    /// The `⋯` menu: the label verbs, then the classification's own, each
+    /// running the palette's action, with its live chord. A row that cannot
+    /// act says why in its lane, and in full when picked; Revert is listed
+    /// only over a desk copy.
     fn action_rows(&self) -> Vec<Row<Pick>> {
-        let action = |id: &'static str| {
-            Row::Action(ActionRow::new(Pick::Action(id), action_title(id)).hint(Hint::chord(id)))
+        let row = |id: &'static str, enabled: Result<(), Blocked>| {
+            let title = action_title(id);
+            let title = title.strip_prefix("Classification: ").unwrap_or(title);
+            let row = ActionRow::new(Pick::Action(id), title).hint(Hint::chord(id));
+            Row::Action(match enabled {
+                Ok(()) => row,
+                Err(b) => row.enabled(Err(b.long.into())).short_reason(b.short),
+            })
         };
-        vec![action("classifications::switch")]
+        let shown = self.shown();
+        let labelled = || match (&shown, self.grid.targets().is_empty()) {
+            (None, _) => Err(Blocked::same(NOTHING_SHOWN)),
+            (Some(_), true) => Err(Blocked::same("no row")),
+            (Some(_), false) => Ok(()),
+        };
+        let paste = match (labelled(), &self.register) {
+            (Ok(()), None) => Err(Blocked {
+                short: "nothing copied",
+                long: NOTHING_COPIED.into(),
+            }),
+            (other, _) => other,
+        };
+        let mut rows = vec![
+            row("classifications::edit", labelled()),
+            row("classifications::clear", labelled()),
+            row("classifications::yank", labelled()),
+            row("classifications::paste", paste),
+            Row::Separator,
+            row(NEW_ACTION, Ok(())),
+            row(RENAME_ACTION, self.own(Verb::Rename).map(|_| ())),
+            row(DELETE_ACTION, self.own(Verb::Delete).map(|_| ())),
+        ];
+        if self.revertible().is_ok() {
+            rows.push(row(REVERT_ACTION, Ok(())));
+        }
+        rows.push(row(
+            REFRESH_ACTION,
+            shown.map(|_| ()).ok_or(Blocked::same(NOTHING_SHOWN)),
+        ));
+        rows
+    }
+
+    /// The shown classification when the user layer owns it outright, so
+    /// a rename or delete can remove it; else why not. A desk or builtin
+    /// definition cannot be removed from the user layer, and removing a
+    /// user copy over a desk one would leave the desk one standing under
+    /// the old name.
+    fn own(&self, verb: Verb) -> Result<String, Blocked> {
+        let Some(name) = self.shown() else {
+            return Err(Blocked::same(NOTHING_SHOWN));
+        };
+        let config = self.shared.config.borrow();
+        let config = config.as_ref().expect("shown, so configured");
+        let (verb_does, verb_name) = match verb {
+            Verb::Rename => ("rename it there", "rename"),
+            Verb::Delete => ("remove it from there", "delete"),
+        };
+        let lower = |layer: Layer, short| Blocked {
+            short,
+            long: format!(
+                "{name} is defined in {} config; Geode cannot {verb_does}",
+                layer.name()
+            ),
+        };
+        match config.layers.get(&name).copied().unwrap_or(Layer::User) {
+            Layer::Desk => return Err(lower(Layer::Desk, "defined in desk config")),
+            Layer::Builtin => return Err(lower(Layer::Builtin, "defined in builtin config")),
+            Layer::User => {}
+        }
+        if config.shadowed.contains(&name) {
+            return Err(Blocked {
+                short: "a desk copy stands under it",
+                long: format!(
+                    "{name} has a desk copy under yours, which a {verb_name} would leave in place \u{2014} Revert to desk removes yours"
+                ),
+            });
+        }
+        Ok(name)
+    }
+
+    /// The shown classification when a desk copy stands under the user's.
+    fn revertible(&self) -> Result<String, String> {
+        let Some(name) = self.shown() else {
+            return Err(NOTHING_SHOWN.into());
+        };
+        let config = self.shared.config.borrow();
+        if config.as_ref().is_some_and(|c| c.shadowed.contains(&name)) {
+            Ok(name)
+        } else {
+            Err(format!("{name} has no desk copy to revert to"))
+        }
     }
 
     /// Open the `kind` menu, or close it when it is the one open. The other
@@ -725,6 +912,7 @@ impl ClassificationsTile {
             return;
         }
         let before = self.history.current(&config_dim).clone();
+        let mut changed = false;
         let done = match write {
             Write::Assign(sources, label) => self
                 .history
@@ -760,9 +948,16 @@ impl ClassificationsTile {
                     }],
                     cx,
                 );
+                changed = true;
             }
         }
-        self.rebuild_rows(true, cx);
+        // Only a change is a relabel: one ends the selection and drops a
+        // waiting cursor, which a verb that did nothing must not do.
+        if changed {
+            self.rebuild_rows(true, cx);
+        } else {
+            self.rebuild_chrome();
+        }
         cx.notify();
     }
 
@@ -813,7 +1008,7 @@ impl ClassificationsTile {
         .detach();
         input.read(cx).focus_handle(cx).focus(window, cx);
         self.editor = Some(LabelEditor::new(input, labels, prefill.as_deref(), targets));
-        self.editor_window = Some(window.window_handle());
+        self.field_window = Some(window.window_handle());
         self.sync_editor(cx);
         cx.notify();
     }
@@ -858,9 +1053,20 @@ impl ClassificationsTile {
         let Some(e) = self.editor.take() else {
             return;
         };
-        let focus = e.input.read(cx).focus_handle(cx);
-        drop(e);
-        if let Some(handle) = self.editor_window {
+        self.release_field(e.input, cx);
+    }
+
+    /// [`Self::release_editor`] for the prompt.
+    fn release_prompt(&mut self, cx: &mut App) {
+        if let Some(p) = self.prompt.take() {
+            self.release_field(p.input, cx);
+        }
+    }
+
+    fn release_field(&self, input: Entity<InputState>, cx: &mut App) {
+        let focus = input.read(cx).focus_handle(cx);
+        drop(input);
+        if let Some(handle) = self.field_window {
             App::defer(cx, move |cx| {
                 let _ = handle.update(cx, |_, window, cx| {
                     if focus.is_focused(window) {
@@ -878,6 +1084,12 @@ impl ClassificationsTile {
             e.list.nav(NavCommand::Move(delta));
             e.moved = true;
             self.sync_editor(cx);
+        } else if let Some(p) = self.prompt.as_mut()
+            && let Some(list) = p.list.as_mut()
+        {
+            list.nav(NavCommand::Move(delta));
+            p.repaint();
+            cx.notify();
         }
     }
 
@@ -890,6 +1102,13 @@ impl ClassificationsTile {
             .is_some_and(|e| e.list.highlighted() != row && e.list.set_highlighted(row));
         if changed {
             self.sync_editor(cx);
+        } else if let Some(p) = self.prompt.as_mut()
+            && let Some(list) = p.list.as_mut()
+            && list.highlighted() != row
+            && list.set_highlighted(row)
+        {
+            p.repaint();
+            cx.notify();
         }
     }
 
@@ -907,14 +1126,266 @@ impl ClassificationsTile {
         if let Some((input, text)) = picked {
             input.update(cx, |s, cx| s.set_value(text, window, cx));
             self.commit_edit(window, cx);
+            return;
         }
+        // The prompt's column list: that column answers the step.
+        let picked = self.prompt.as_mut().and_then(|p| {
+            let list = p.list.as_mut()?;
+            list.set_highlighted(row).then(|| {
+                (
+                    p.input.clone(),
+                    list.highlighted_text().unwrap_or_default().to_string(),
+                )
+            })
+        });
+        if let Some((input, text)) = picked {
+            input.update(cx, |s, cx| s.set_value(text, window, cx));
+            self.commit_prompt(window, cx);
+        }
+    }
+
+    /// Open the prompt asking `prompt`, the field focused. A rename seeds
+    /// the current name, selected, so typing replaces it.
+    fn open_prompt(&mut self, prompt: Prompt, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_prompt(window, cx);
+        let seed = match &prompt {
+            Prompt::Rename { from } => from.clone(),
+            Prompt::NewName | Prompt::NewColumn { .. } => String::new(),
+        };
+        let placeholder = editor::placeholder(&prompt);
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        input.update(cx, |s, cx| EditCaret::Select.seed(s, seed, window, cx));
+        // The column step's list re-ranks as the column is typed. The
+        // subscription dies with the field.
+        cx.subscribe_in(&input, window, |this, input, event: &InputEvent, _, cx| {
+            if let InputEvent::Change = event {
+                let query = input.read(cx).value().to_string();
+                if let Some(p) = this.prompt.as_mut().filter(|p| &p.input == input)
+                    && let Some(list) = p.list.as_mut()
+                    && list.set_query(&query)
+                {
+                    p.repaint();
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        self.prompt = Some(PromptField::new(input, prompt, self.columns()));
+        self.field_window = Some(window.window_handle());
+        cx.notify();
+    }
+
+    /// The columns a new classification may map.
+    fn columns(&self) -> Vec<String> {
+        let config = self.shared.config.borrow();
+        config
+            .as_ref()
+            .map(|c| source_columns(&c.schema, &c.dims))
+            .unwrap_or_default()
+    }
+
+    /// `enter` in the prompt: the answer through `prompt::submit`. A
+    /// refusal stays on the bar with the field open; the name step moves
+    /// on to the column; the last step closes the prompt and creates, or
+    /// asks y/n to rename.
+    fn commit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.prompt.as_mut() else {
+            return;
+        };
+        let text = p.input.read(cx).value().to_string();
+        let answer = p.answer(&text);
+        let step = {
+            let config = self.shared.config.borrow();
+            match config.as_ref() {
+                Some(c) => prompt::submit(&p.prompt, &answer, &c.schema, &c.dims),
+                None => Step::Refuse("the configuration has not loaded yet".into()),
+            }
+        };
+        match step {
+            Step::Refuse(why) => {
+                p.error = Some(why.into());
+                p.repaint();
+            }
+            Step::Next(next) => {
+                let input = p.input.clone();
+                let placeholder = editor::placeholder(&next);
+                input.update(cx, |s, cx| {
+                    s.set_value("", window, cx);
+                    s.set_placeholder(placeholder, window, cx);
+                });
+                let columns = self.columns();
+                if let Some(p) = self.prompt.as_mut() {
+                    p.ask(next, columns);
+                }
+            }
+            Step::Create { name, from } => {
+                self.close_prompt(window, cx);
+                self.create(name, from, cx);
+            }
+            Step::Rename { from, to } => {
+                self.close_prompt(window, cx);
+                self.ask_rename(from, to, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Close the prompt with nothing written: `escape`, a press on the
+    /// grid, any other verb.
+    fn close_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.prompt.take() else {
+            return;
+        };
+        if p.input.read(cx).focus_handle(cx).is_focused(window) {
+            window.blur(cx);
+        }
+        cx.notify();
+    }
+
+    /// Queue `edits` as one batch and show `awaiting.shows` meanwhile. The
+    /// shown classification's history ends with its name.
+    fn write_objects(
+        &mut self,
+        edits: Vec<ConfigEdit>,
+        awaiting: Awaiting,
+        cx: &mut Context<Self>,
+    ) {
+        self.frame.queue_config_edits(edits, cx);
+        self.history.forget();
+        self.awaiting = Some(awaiting.clone());
+        match &awaiting.shows {
+            Some(name) => self.show(name, cx),
+            None => {
+                self.state.name = None;
+                self.state.cursor = None;
+                self.was_shown = false;
+                let rows = self.switch_rows();
+                self.menu =
+                    (!rows.is_empty()).then(|| (MenuKind::Switch, Menu::new(rows, &self.chords)));
+                self.ask_values(false);
+                self.rebuild_rows(false, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Write an empty classification `name` over `from` and show it.
+    fn create(&mut self, name: String, from: String, cx: &mut Context<Self>) {
+        self.notices.outcome.clear();
+        let dim = DerivedDimension {
+            name: name.clone(),
+            from,
+            values: Default::default(),
+        };
+        let restores = self.state.name.clone();
+        self.write_objects(
+            vec![set_edit(&dim)],
+            Awaiting {
+                shows: Some(name),
+                restores,
+                removed: None,
+            },
+            cx,
+        );
+    }
+
+    /// Who still names `name`: groupings, views, saved scopes and named
+    /// expressions. None of them is rewritten by a rename or a delete.
+    fn references_summary(&self, name: &str, cx: &App) -> Option<(String, usize)> {
+        let frame = self.frame.entity().read(cx);
+        let config = self.shared.config.borrow();
+        let views = config.as_ref().map(|c| c.views.as_slice()).unwrap_or(&[]);
+        let refs = references(
+            name,
+            frame.slots(),
+            views,
+            frame.saved_scopes(),
+            frame.named_expressions(),
+        );
+        let n =
+            refs.groupings.len() + refs.views.len() + refs.scopes.len() + refs.expressions.len();
+        (!refs.is_empty()).then(|| (refs.summary(), n))
+    }
+
+    /// `{summary} still say(s) '{name}'`, or `nothing refers to it`.
+    fn reference_clause(&self, name: &str, cx: &App) -> String {
+        match self.references_summary(name, cx) {
+            None => "nothing refers to it".to_string(),
+            Some((summary, 1)) => format!("{summary} still says '{name}'"),
+            Some((summary, _)) => format!("{summary} still say '{name}'"),
+        }
+    }
+
+    fn ask_rename(
+        &mut self,
+        from: String,
+        to: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let clause = self.reference_clause(&from, cx);
+        let question = format!("rename {from} \u{2192} {to}: {clause} \u{2014} y renames");
+        confirm::arm(self, Pending::Rename { from, to }, question, window, cx);
+        cx.notify();
+    }
+
+    /// Say why a verb cannot act, in the header.
+    fn refuse(&mut self, why: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.notices.outcome.clear();
+        self.notices.outcome(Notice::danger(why.into()));
+        self.rebuild_chrome();
+        cx.notify();
+    }
+
+    /// `y` on a rename: the new object and the old one's removal in one
+    /// batch, validated again (the configuration may have moved while the
+    /// question stood).
+    fn rename(&mut self, from: String, to: String, cx: &mut Context<Self>) {
+        let checked = {
+            let config = self.shared.config.borrow();
+            config.as_ref().and_then(|c| {
+                let dim = c.dims.get(&from)?.clone();
+                Some(prompt::submit(
+                    &Prompt::Rename { from: from.clone() },
+                    &to,
+                    &c.schema,
+                    &c.dims,
+                ))
+                .map(|step| (dim, step))
+            })
+        };
+        let dim = match checked {
+            Some((dim, Step::Rename { .. })) => dim,
+            Some((_, Step::Refuse(why))) => return self.refuse(format!("not renamed: {why}"), cx),
+            _ => return self.refuse(format!("not renamed: {from} no longer exists"), cx),
+        };
+        self.notices.outcome.clear();
+        let renamed = DerivedDimension {
+            name: to.clone(),
+            ..dim
+        };
+        self.write_objects(
+            vec![set_edit(&renamed), remove_edit(&from)],
+            Awaiting {
+                shows: Some(to),
+                restores: Some(from.clone()),
+                removed: Some(from),
+            },
+            cx,
+        );
     }
 
     /// Whether the editor's field owns window focus.
     pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
-        self.editor
+        let field = self
+            .editor
             .as_ref()
-            .is_some_and(|e| e.input.read(cx).focus_handle(cx).is_focused(window))
+            .map(|e| &e.input)
+            .into_iter()
+            .chain(self.prompt.as_ref().map(|p| &p.input))
+            .any(|i| i.read(cx).focus_handle(cx).is_focused(window));
+        field || self.confirm.as_ref().is_some_and(|c| c.holds_focus(window))
     }
 
     /// A press on shown row `row`: a double-click opens the label editor
@@ -922,8 +1393,10 @@ impl ClassificationsTile {
     /// cursor there and ends a selection.
     fn row_pressed(&mut self, e: RowPressed, window: &mut Window, cx: &mut Context<Self>) {
         self.user_acted(cx);
-        // A press on the grid leaves the editor unwritten, as escape would.
+        // A press on the grid leaves the editor or the prompt unwritten, as
+        // escape would.
         self.close_editor(window, cx);
+        self.close_prompt(window, cx);
         self.grid.click(e.row, e.shift);
         self.sync_table(false, cx);
         if e.clicks >= 2 && !e.shift {
@@ -1029,11 +1502,12 @@ impl ClassificationsTile {
         cx.notify();
     }
 
-    /// `insert` while the label editor is open (the shell then routes bare
-    /// keys to its field), `menu` while a menu is up, `visual` while a row
-    /// selection is live, `normal` otherwise.
+    /// `insert` while the label editor or the prompt is open (the shell
+    /// then routes bare keys to its field) or a y/n question holds the
+    /// keyboard, `menu` while a menu is up, `visual` while a row selection
+    /// is live, `normal` otherwise.
     fn mode(&self) -> &'static str {
-        if self.editor.is_some() {
+        if self.editor.is_some() || self.prompt.is_some() || self.confirm.is_some() {
             "insert"
         } else if self.menu.is_some() {
             "menu"
@@ -1070,6 +1544,31 @@ impl ClassificationsTile {
         cx: &mut Context<Self>,
     ) -> bool {
         self.user_acted(cx);
+        // A verb arriving under an armed question (the palette; a key never
+        // gets here, the question takes every key) answers no first.
+        confirm::cancel(self, window, cx);
+        // The prompt's own keys; any other verb closes it unwritten first.
+        if self.prompt.is_some() {
+            match action.0.as_str() {
+                "classifications::commit" => {
+                    self.commit_prompt(window, cx);
+                    return true;
+                }
+                "classifications::cancel" => {
+                    self.close_prompt(window, cx);
+                    return true;
+                }
+                "classifications::choice_up" => {
+                    self.choice_step(-1, cx);
+                    return true;
+                }
+                "classifications::choice_down" => {
+                    self.choice_step(1, cx);
+                    return true;
+                }
+                _ => self.close_prompt(window, cx),
+            }
+        }
         // The editor's own keys; any other verb closes it unwritten first.
         if self.editor.is_some() {
             match action.0.as_str() {
@@ -1144,6 +1643,51 @@ impl ClassificationsTile {
                 self.rebuild_chrome();
                 cx.notify();
             }
+            // The classification's own verbs, from the palette or the menu.
+            NEW_ACTION => {
+                self.close_menu(cx);
+                self.notices.outcome.clear();
+                self.rebuild_chrome();
+                self.open_prompt(Prompt::NewName, window, cx);
+            }
+            RENAME_ACTION => {
+                self.close_menu(cx);
+                match self.own(Verb::Rename) {
+                    Ok(from) => {
+                        self.notices.outcome.clear();
+                        self.rebuild_chrome();
+                        self.open_prompt(Prompt::Rename { from }, window, cx);
+                    }
+                    Err(refusal) => self.refuse(refusal.long, cx),
+                }
+            }
+            DELETE_ACTION => {
+                self.close_menu(cx);
+                match self.own(Verb::Delete) {
+                    Ok(name) => {
+                        let clause = self.reference_clause(&name, cx);
+                        let question = format!("delete {name}: {clause} \u{2014} y deletes");
+                        self.notices.outcome.clear();
+                        self.rebuild_chrome();
+                        confirm::arm(self, Pending::Delete { name }, question, window, cx);
+                        cx.notify();
+                    }
+                    Err(refusal) => self.refuse(refusal.long, cx),
+                }
+            }
+            REVERT_ACTION => {
+                self.close_menu(cx);
+                match self.revertible() {
+                    Ok(name) => {
+                        let question = format!("revert {name} to the desk copy \u{2014} y reverts");
+                        self.notices.outcome.clear();
+                        self.rebuild_chrome();
+                        confirm::arm(self, Pending::Revert { name }, question, window, cx);
+                        cx.notify();
+                    }
+                    Err(why) => self.refuse(why, cx),
+                }
+            }
             // The label verbs act on the selection, else the cursor's row.
             "classifications::edit" if self.menu.is_none() => self.open_editor(window, cx),
             "classifications::clear" if self.menu.is_none() => {
@@ -1158,8 +1702,7 @@ impl ClassificationsTile {
                 Some(label) => self.write(Write::Assign(self.grid.targets(), label), cx),
                 None => {
                     self.notices.outcome.clear();
-                    self.notices
-                        .outcome(Notice::status("nothing copied: y y copies a label"));
+                    self.notices.outcome(Notice::status(NOTHING_COPIED));
                     self.rebuild_chrome();
                     cx.notify();
                 }
@@ -1185,9 +1728,11 @@ impl ClassificationsTile {
     /// shown or hidden changes nothing.
     pub fn set_visible(&mut self, _visible: bool) {}
 
-    pub fn closed(&mut self, cx: &mut App) {
+    pub fn closed(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
         self.release_editor(cx);
+        self.release_prompt(cx);
+        let _ = confirm::withdraw(self, cx);
     }
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
@@ -1391,6 +1936,21 @@ impl Render for ClassificationsTile {
             },
             theme,
         );
+        // The prompt or the y/n question, on its own bar under the header,
+        // whole at any tile width.
+        let question = self.confirm.as_ref().map(|pending| {
+            confirm::bar(
+                pending,
+                &tile,
+                move || format!("classifications-confirm-{id}"),
+                theme,
+            )
+        });
+        let prompt = self
+            .prompt
+            .as_ref()
+            .map(|p| editor::render_prompt(p, &tile, id, cx));
+        let theme = cx.theme();
         let body = match &self.chrome.empty {
             Some(text) => v_flex()
                 .flex_1()
@@ -1409,7 +1969,7 @@ impl Render for ClassificationsTile {
                 .min_h_0()
                 .child(table::table_el(&self.table, id)),
         };
-        v_flex()
+        let root = v_flex()
             .size_full()
             .bg(theme.background)
             .child(
@@ -1427,7 +1987,105 @@ impl Render for ClassificationsTile {
                         )
                     }),
             )
-            .child(body)
+            .children(question)
+            .children(prompt)
+            .child(body);
+        // A pointer press anywhere on the tile answers an armed question no.
+        confirm::cancel_on_press(root, self.confirm.is_some(), &tile)
+    }
+}
+
+impl ConfirmHost for ClassificationsTile {
+    type Payload = Pending;
+
+    fn confirm_slot(&mut self) -> &mut Option<Confirm<Pending>> {
+        &mut self.confirm
+    }
+
+    fn confirmed(&mut self, pending: Pending, _: &mut Window, cx: &mut Context<Self>) {
+        match pending {
+            Pending::Rename { from, to } => self.rename(from, to, cx),
+            Pending::Delete { name } => {
+                self.notices.outcome.clear();
+                self.write_objects(
+                    vec![remove_edit(&name)],
+                    Awaiting {
+                        shows: None,
+                        restores: Some(name.clone()),
+                        removed: Some(name),
+                    },
+                    cx,
+                );
+            }
+            Pending::Revert { name } => {
+                self.notices.outcome.clear();
+                self.frame.queue_config_edits(vec![remove_edit(&name)], cx);
+                self.history.forget();
+                self.rebuild_rows(false, cx);
+                cx.notify();
+            }
+        }
+    }
+
+    fn cancelled(&mut self, pending: Pending, _: &mut Window, cx: &mut Context<Self>) {
+        let said = match pending {
+            Pending::Rename { from, .. } => format!("{from} not renamed"),
+            Pending::Delete { name } => format!("{name} not deleted"),
+            Pending::Revert { name } => format!("{name} not reverted"),
+        };
+        self.notices.outcome.clear();
+        self.notices.outcome(Notice::status(said));
+        self.rebuild_chrome();
+        cx.notify();
+    }
+}
+
+/// The verbs that remove the shown classification's user definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verb {
+    Rename,
+    Delete,
+}
+
+/// Why a verb cannot act: a few words for a menu row's lane, a sentence
+/// for the header.
+struct Blocked {
+    short: &'static str,
+    long: String,
+}
+
+impl Blocked {
+    fn same(text: &'static str) -> Blocked {
+        Blocked {
+            short: text,
+            long: text.to_string(),
+        }
+    }
+}
+
+/// What the menu and the verbs say while nothing is shown.
+const NOTHING_SHOWN: &str = "no classification shown";
+
+/// What `p` says with nothing copied.
+const NOTHING_COPIED: &str = "nothing copied: y y copies a label";
+
+/// The whole object `dim`, written.
+fn set_edit(dim: &DerivedDimension) -> ConfigEdit {
+    ConfigEdit {
+        doc: DIMENSIONS_DOC,
+        object: dim.name.clone(),
+        value: Some(classification::to_toml(dim)),
+        origin: None,
+    }
+}
+
+/// `name`'s user definition, removed.
+fn remove_edit(name: &str) -> ConfigEdit {
+    ConfigEdit {
+        doc: DIMENSIONS_DOC,
+        object: name.to_string(),
+        value: None,
+        origin: None,
     }
 }
 
