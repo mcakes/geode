@@ -976,10 +976,10 @@ fn escape_after_steps_keeps_a_behind_that_arrived_meanwhile(cx: &mut gpui::TestA
     );
 }
 
-/// A behind draft refuses both the selection editor and a selection
-/// bump, writing nothing.
+/// A behind draft whose base is held opens the selection editor and
+/// takes a selection bump, still painting that base.
 #[gpui::test]
-fn the_selection_edit_refuses_while_behind(cx: &mut gpui::TestAppContext) {
+fn the_selection_edit_works_while_behind(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     let tag = h.with_document_tagged(&mut vcx);
     h.command(&mut vcx, "bump 1 col").unwrap();
@@ -992,18 +992,23 @@ fn the_selection_edit_refuses_while_behind(cx: &mut gpui::TestAppContext) {
     h.dispatch(&mut vcx, "visual_block", None);
     h.dispatch(&mut vcx, "edit", None);
     assert!(
-        h.editor_value(&vcx).is_none(),
-        "no editor opens while behind"
+        h.editor_value(&vcx).is_some(),
+        "the selection editor opens over the held base"
     );
-    assert_eq!(h.mode(&vcx), "visual");
-    assert_eq!(
-        h.command(&mut vcx, "bump 1"),
-        Err("the draft is behind — :rebase or :revert first".to_string())
+    h.dispatch(&mut vcx, "cancel", None);
+    let before = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.command(&mut vcx, "bump 1").expect("a selection bump");
+    assert!(
+        !h.tile
+            .read_with(&vcx, |t, _| t.draft().same_work_as(&before)),
+        "the bump wrote"
     );
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
     assert_eq!(
-        h.tile.read_with(&vcx, |t, _| t.draft().len()),
-        2,
-        "nothing further was written"
+        h.tile
+            .read_with(&vcx, |t, _| t.model().base.clone().map(|b| b.as_of)),
+        Some(BASE.to_string())
     );
 }
 

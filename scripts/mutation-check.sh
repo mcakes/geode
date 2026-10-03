@@ -13381,21 +13381,24 @@ run_mutation "mddraft: rebase resolves labels against the newer document" \
   geode-marketdata \
   rebase_reapplies_edits_by_label_and_reports_dropped_ones
 
-# Editing is refused while Behind. New edits would otherwise be keyed
-# against the base grid while rebase is pending to move edits onto the newer
-# document by label.
-run_mutation "mddraft: editing is refused while the draft is behind" \
+# A Behind draft whose base is gone refuses editing. Its edits are keyed to
+# the base grid, and the painted fallback is a different one, so a new edit
+# would land on the wrong row and column.
+run_mutation "mddraft: editing is refused while behind with the base gone" \
   crates/geode-marketdata/src/tile.rs \
-  '        if let Some(refusal) = self.held_refusal() {
-            self.notice = Some(refusal.into());
-            return;
-        }' \
-  '        if let Some(refusal) = self.held_refusal().filter(|_| false) {
-            self.notice = Some(refusal.into());
-            return;
-        }' \
+  '        if self.draft.is_behind() && self.base_snapshot.is_none() {' \
+  '        if false && self.draft.is_behind() && self.base_snapshot.is_none() {' \
   geode-marketdata \
-  edit_and_bump_are_refused_while_behind
+  a_restored_behind_draft_without_its_base_refuses_edits
+
+# A Behind draft whose base is retained stays editable: the painted grid is
+# the one its edits are keyed to, and the held delivery waits for rebase.
+run_mutation "mddraft: a behind draft with its base held stays editable" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.draft.is_behind() && self.base_snapshot.is_none() {' \
+  '        if self.draft.is_behind() {' \
+  geode-marketdata \
+  a_behind_draft_edits_against_its_held_base
 
 # Revert clears the retained base as well as the draft. Keeping the base
 # would show stale data with a Clean state and no remaining draft to rebase

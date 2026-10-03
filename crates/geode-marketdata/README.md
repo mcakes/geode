@@ -84,7 +84,9 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   `:auto` policy is applied only on a real transition, never on a
   redelivery or the first usable delivery after a restore. Without the saved
   base snapshot, a restored Behind draft paints the delivered grid while its
-  unresolved cell edits remain withheld.
+  unresolved cell edits remain withheld. `held_refusal` lets a Behind draft
+  edit while its base is retained (the grid its edits are keyed to) and
+  refuses only once that base is gone.
 - `DocumentBase::differs_from` compares source time and, when both are known,
   store generations. Unknown generations fall back to source time, so they
   cannot detect a same-time republish. Retaining a base snapshot, capturing
