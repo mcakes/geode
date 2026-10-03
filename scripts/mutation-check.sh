@@ -17071,7 +17071,7 @@ run_mutation "volslice: an expiry past the last term paints its curves" \
   crates/geode-pricing/src/demo_vol.rs \
   '            return Ok(self.extrapolated(expiry));' \
   '            return Err(VolError(format!("expiry {expiry} is outside the terms")));' \
-  geode-volslice an_expiry_past_the_last_term_paints
+  geode-volslice an_expiry_past_the_last_term_paints_its_curves
 
 run_mutation "vol: total variance, not vol, is linear between terms" \
   crates/geode-pricing/src/demo_vol.rs \
