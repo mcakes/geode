@@ -286,8 +286,9 @@ fn view_control(
         .into_any_element()
 }
 
-/// Live rendering inputs: freshness, stack marker and menu trigger. The tile
-/// retains their state; the header only installs their handlers.
+/// Live rendering inputs: freshness, stack marker, menu trigger and close
+/// handle. The tile retains their state; the header only installs their
+/// handlers.
 pub(crate) struct HeaderChrome<'a> {
     /// Whether the last priced time is older than `stale_after` —
     /// computed by the caller per frame and passed in, so rendering never

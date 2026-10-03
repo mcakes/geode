@@ -3091,10 +3091,10 @@ run_mutation "dialog stack: transient chrome runs behind the stack instead of be
   crates/geode-shell/src/shell/input.rs \
   '        if self.modal_open()
             && (matches!(
-                action.0.as_str(),' \
+                id,' \
   '        if false
             && (matches!(
-                action.0.as_str(),' \
+                id,' \
   geode-shell \
   palette_transient_chrome_is_refused_over_a_dialog
 
@@ -3102,7 +3102,7 @@ run_mutation "dialog stack: transient chrome runs behind the stack instead of be
 # commits to the lane it opened in; the toolbar then mixes the two lanes.
 run_mutation "dialog stack: a workspace switch runs behind the stack instead of being refused" \
   crates/geode-shell/src/shell/input.rs \
-  '            ) || action.0.starts_with("workspace::switch_"))' \
+  '            ) || id.starts_with("workspace::switch_"))' \
   '            ) || false)' \
   geode-shell \
   switching_and_pinning_are_refused_behind_a_dialog
@@ -6748,7 +6748,7 @@ run_mutation "shell page: a workspace switch leaves the page open" \
 
 run_mutation "shell page: nothing is refused over a page" \
   crates/geode-shell/src/shell/input.rs \
-  '        if self.page_open() && refused_over_a_page(&action.0) {' \
+  '        if self.page_open() && refused_over_a_page(id) {' \
   '        if false {' \
   geode-shell \
   layout_edits_are_refused_while_a_page_is_open
@@ -33429,6 +33429,137 @@ run_mutation "keybinding capture: the round-trip check accepts everything" \
   '        (!reads_back).then(' \
   '        false.then(' \
   geode-shell a_capture_the_parser_cannot_read_back_is_refused
+
+# ---- Tile close button ----
+#
+# Every tile paints a × that closes THAT tile: a focused tile closes as
+# `ctrl+w` does, any other leaves focus where it was. The press runs the
+# key's path (refusals, `:` line, session) and only a first press closes.
+
+run_mutation "close: an unfocused tile is removed by id, not by focus" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '            return true;
+        }
+        match region {
+            FocusRegion::Main => {
+                self.tree.remove(id);
+            }' \
+  '            return true;
+        }
+        match region {
+            FocusRegion::Main => {
+                self.tree.close();
+            }' \
+  geode-shell close_tile_id_on_an_unfocused_tile_keeps_focus
+
+run_mutation "close: an emptied dock hides" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '                if dock.tree().is_empty() {
+                    dock.set_visible(false);
+                    if self.region == region {' \
+  '                if false {
+                    dock.set_visible(false);
+                    if self.region == region {' \
+  geode-shell close_tile_id_of_an_unfocused_docks_last_tile_hides_it_and_keeps_focus
+
+# Unstopped, the press reaches the tile under it: the second press of a
+# double-click lands on the neighbour that slid under the pointer and
+# opens its double-click gesture (fullscreen, the tile picker).
+run_mutation "close: the press stops at the button" \
+  crates/geode-shell/src/module.rs \
+  '                cx.stop_propagation();
+                window.prevent_default();
+                // Only a first press closes.' \
+  '                window.prevent_default();
+                // Only a first press closes.' \
+  geode-shell a_double_click_on_the_close_button_closes_one_tile
+
+# Closing the right tile slides its neighbour's × under the pointer; the
+# double-click's second press must not close that one too.
+run_mutation "close: a double-click's second press closes nothing" \
+  crates/geode-shell/src/module.rs \
+  '                if event.click_count > 1 {
+                    return;
+                }
+                handle.close(window, cx);' \
+  '                let _ = event.click_count;
+                handle.close(window, cx);' \
+  geode-shell a_double_click_on_the_close_button_closes_one_tile
+
+run_mutation "close: every occupant receives its close handle" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            occupant.content.set_close(close, cx);' \
+  '            let _ = close;' \
+  geode-shell the_close_button_closes_its_own_tile_and_keeps_focus
+
+run_mutation "close: the pointer route shares the refusals" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if let Some(refusal) = self.action_refusal(crate::module::CLOSE_ACTION) {' \
+  '        if let Some(refusal) = None::<&str> {' \
+  geode-shell the_close_button_is_refused_over_a_page
+
+run_mutation "close: the pointer route leaves the command line" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        self.leave_command_line(window, cx);
+        self.begin_action(crate::module::CLOSE_ACTION);' \
+  '        self.begin_action(crate::module::CLOSE_ACTION);' \
+  geode-shell the_close_button_leaves_an_open_command_line
+
+run_mutation "close: the pointer route records the action" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        self.begin_action(crate::module::CLOSE_ACTION);
+        tracing::debug!(target: "geode::shell", tile = tile.0, "close by pointer");' \
+  '        tracing::debug!(target: "geode::shell", tile = tile.0, "close by pointer");' \
+  geode-shell the_close_button_records_the_close_action
+
+run_mutation "close: a pointer close dirties the session" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if self.services.workspaces.active_mut().close_tile_id(tile) {
+            self.session_dirty = true;' \
+  '        if self.services.workspaces.active_mut().close_tile_id(tile) {' \
+  geode-shell the_close_button_closes_its_own_tile_and_keeps_focus
+
+run_mutation "close: the placeholder paints the ×" \
+  crates/geode-shell/src/module.rs \
+  '                .children(self.close.as_ref().map(|c| {' \
+  '                .children(self.close.as_ref().filter(|_| false).map(|c| {' \
+  geode-shell the_placeholder_paints_the_close_button
+
+run_mutation "close: the header paints the ×" \
+  crates/geode-tile/src/header.rs \
+  '    row = row.children(c.close.map(|h| h.button(theme, c.tile)));' \
+  '    let _ = c.close;' \
+  geode-tile the_close_button_paints_last_and_runs_its_handle
+
+run_mutation "close: the blotter header carries its handle" \
+  crates/geode-blotter/src/tile.rs \
+  '        cluster.close = self.close.clone();' \
+  '        cluster.close = None;' \
+  geode-blotter the_header_paints_the_close_button
+
+run_mutation "close: the market-data header carries its handle" \
+  crates/geode-marketdata/src/header.rs \
+  '    cluster.close = close.cloned();' \
+  '    cluster.close = None;' \
+  geode-marketdata the_header_paints_the_close_button
+
+run_mutation "close: the pricer header carries its handle" \
+  crates/geode-pricer/src/header.rs \
+  '    cluster.close = c.close.cloned();' \
+  '    cluster.close = None;' \
+  geode-pricer the_header_paints_the_close_button
+
+run_mutation "close: the timeseries header carries its handle" \
+  crates/geode-timeseries/src/header.rs \
+  '    cluster.close = close.cloned();' \
+  '    cluster.close = None;' \
+  geode-timeseries the_header_paints_the_close_button
+
+run_mutation "close: the vol slice header carries its handle" \
+  crates/geode-volslice/src/header.rs \
+  '    cluster.close = close.cloned();' \
+  '    cluster.close = None;' \
+  geode-volslice the_header_paints_the_close_button
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

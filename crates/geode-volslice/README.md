@@ -26,8 +26,8 @@ data tier's vol door; the crate computes none of them.
   and divider gestures and the strip's presses.
 - `header.rs`: the header (underlying, coordinate, a chip per loaded kind
   with its digit, the diff chip, link chips, the two datasets' health, the
-  shell's × last) and
-  the footer (the first notice with a count of the rest, the key hints).
+  shell's × last) and the footer (the first notice with a count of the rest,
+  the key hints).
 - `strip.rs`: the expiry strip beside the chart: a dot in the expiry's
   palette color (filled when active), the date and a digit per kind that
   has the expiry.

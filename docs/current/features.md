@@ -79,15 +79,15 @@ line, and the blotter the notice line. Diagnostics has none of them.
 - Every tile header is `geode_tile::header::frame`: 22 px at the design rem,
   the stack marker first, the module's own left side, then a right cluster in
   a fixed order — the mode icon, status items, notices, source times, the
-  health chip, `⋯`, and last the shell's close button (×), which closes that
-  tile.
+  link chips, the health chip, `⋯`, and last the shell's close button (×),
+  which closes that tile.
   Status items and notices shrink: each is one line, cut with an ellipsis
   when it does not fit, and together they take at most half the header
   (`TEXT_SHARE`); a cut notice shows its whole text in its tooltip. Source
-  times, the chip and `⋯` never shrink. The left side takes what remains and
-  clips, so neither a long left side nor a long notice pushes the times, the
-  chip or `⋯` off the tile — they leave it only when the tile is narrower
-  than those three alone.
+  times, the link chips, the health chip, `⋯` and × never shrink. The left
+  side takes what remains and clips, so neither a long left side nor a long
+  notice pushes that fixed tail off the tile — it leaves only when the tile
+  is narrower than the tail alone.
   A stale source time takes the warning text tone. It turns stale while the
   tile is idle, too: market-data arms a wake-up at its source time plus
   `stale_after`, and the blotter one per dataset time, each firing in turn so
@@ -1406,11 +1406,12 @@ while lines are stale, `N failed` in danger text while any line's last answer
 was a failure, `pricer <name>`, the last priced time, which reads `stale` once
 it is older than the shell's `stale_after` — re-evaluated on each repaint: the
 reprice timer's ticks repaint it, and with `refresh = "off"` an idle pricer's
-`stale` waits for its next repaint (known limitation) — and a `⋯` button at the trailing
-edge that opens and closes the action menu (the pointer's `.`). The header is
-the [shared frame](#shared-tile-interaction): notices paint after the status
-items, the health chip sits between the time and `⋯`, and × is last. The health chip
-covers `pricer_sheets` only (see the pricer README's limits). A pending load
+`stale` waits for its next repaint (known limitation) — and a `⋯` button
+that opens and closes the action menu (the pointer's `.`). The header is the
+[shared frame](#shared-tile-interaction): notices paint after the status
+items, the health chip sits between the time and `⋯`, and the × is last, at
+the trailing edge. The health chip covers `pricer_sheets` only (see the
+pricer README's limits). A pending load
 paints `loading…` muted in the header and `Loading sheet…` in the empty table;
 an empty loaded sheet says `No lines — press o to add one`. A pricer this
 binary lacks is named in danger text with its recovery (`set [pricing]

@@ -56,6 +56,40 @@ into tiles. The shell dispatches both rather than the pure workspace router:
 the split's orientation needs the slot's geometry, and a refused pull leaves a
 notice.
 
+Every tile paints a × that closes it. The shell sends each occupant a
+`CloseHandle` once, when the occupant is created
+(`TileContent::set_close`, required so a new occupant cannot silently lack
+the button); the handle is a closure over the shell's weak entity and the
+tile's id, so a module closes its own tile without a path to `ShellView`.
+`CloseHandle::button` paints the × itself: a bare muted glyph with the
+control door's hover and pressed fills, tooltip `Close tile` with the live
+key of `workspace::close_tile`, selector `tile-close-{tile}`. A module puts
+it last in its header's fixed tail (after health and `⋯`), which never
+shrinks, so a narrow tile keeps it; the placeholder, which has no header,
+paints it in its top-right corner. The × is always painted, not gated on
+hover or focus, so the header never reflows under the pointer.
+
+A press closes the tile whose × it is, never "the focused tile". It
+stops at the button and prevents default, so it does not focus the tile on
+its way out. If the pressed tile was focused, the result is exactly
+`ctrl+w`'s (stack sibling, else tree-order neighbor; an emptied dock hides
+and focus falls back). If another tile held focus, that tile keeps it
+(`Workspace::close_tile_id`). Only the first press of a click closes: closing
+a tile slides its neighbor's × under the pointer, so the second press of a
+double-click is swallowed — it neither closes that neighbor nor reaches a
+tile's double-click gestures (fullscreen, the tile picker). There is no
+confirmation and no undo; the pricer saves a dirty sheet on `closed`, so
+only layout and view state go.
+
+The press runs the key's path (`ShellView::close_tile_by_pointer`): it leaves
+an open `:` line as any press on another tile does, records
+`workspace::close_tile` in the action tail, and asks the same
+`action_refusal` predicate as `dispatch`, then marks the session dirty and
+arms focus restoration. Over a page the close is refused with
+`close the page first (esc)`; the page covers the tiles in any case. A dialog
+does not refuse it (the palette may close a tile behind a dialog), but the
+modal overlay covers every ×. A handle outliving its tile closes nothing.
+
 A fullscreen tile paints with the same chrome as a workspace's only tile,
 so the status bar marks it instead. The bar's right region is its
 view-state section: how the window is being shown, then the active
@@ -814,7 +848,8 @@ older than the last one the group held.
 
 `TileContent` is the module boundary. An occupant supplies its key context,
 handles actions and local commands, receives find events and deliveries,
-reports focus ownership, and accepts visibility and stack state. Required
+reports focus ownership, and accepts visibility, stack state and its close
+handle. Required
 methods make lifecycle obligations explicit for every feature.
 
 `Delivery` is an exhaustive enum. Adding a new outcome type forces every
