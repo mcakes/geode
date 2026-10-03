@@ -10,11 +10,9 @@ use std::rc::Rc;
 use geode_shell::shell::{chip, listrow, scale};
 use geode_shell::{fonts, palette};
 use gpui::prelude::*;
-use gpui::{
-    App, Context, Div, Entity, FocusHandle, Hsla, SharedString, TextAlign, Window, div, px,
-};
+use gpui::{App, Context, Div, Entity, FocusHandle, SharedString, TextAlign, Window, div, px};
 use gpui_component::table::{Column, DataTable, TableDelegate, TableState};
-use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, Size, v_flex};
 
 use crate::model::Tone;
 use crate::prepared::{Cell, PreparedTable, RowKind};
@@ -62,7 +60,7 @@ pub struct SectionDelegate {
     row_selector: &'static str,
     empty_title: &'static str,
     empty_help: &'static str,
-    accent: AccentMemo,
+    accent: listrow::TableAccent,
 }
 
 impl SectionDelegate {
@@ -78,7 +76,7 @@ impl SectionDelegate {
             row_selector,
             empty_title: "No rows",
             empty_help: "",
-            accent: AccentMemo::default(),
+            accent: listrow::TableAccent::default(),
         }
     }
 
@@ -236,31 +234,6 @@ fn painted_text<'a>(cell: &'a Cell, expander: &str) -> (SharedString, Cow<'a, [R
     )
 }
 
-/// [`listrow::table_accent`] memoised on the tokens it reads: it floors
-/// through three OKLCH searches, too much to repeat for every marked cell
-/// of every paint, and a theme change must still reach it.
-#[derive(Default)]
-struct AccentMemo(Option<([Hsla; 4], Hsla)>);
-
-impl AccentMemo {
-    fn get(&mut self, theme: &Theme) -> Hsla {
-        let key = [
-            theme.primary,
-            theme.table,
-            theme.table_active,
-            theme.table_hover,
-        ];
-        match self.0 {
-            Some((k, accent)) if k == key => accent,
-            _ => {
-                let accent = listrow::table_accent(theme);
-                self.0 = Some((key, accent));
-                accent
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,27 +283,8 @@ mod tests {
         assert_eq!(calls.len(), 1, "one highlight call");
         let window = &text[calls[0].saturating_sub(120)..calls[0]];
         assert!(window.contains("self.accent.get(theme)"), "{window}");
-        let memo = ["listrow::table_", "accent(theme)"].concat();
-        assert!(
-            text.contains(memo.as_str()),
-            "the memo floors through table_accent"
-        );
-    }
-
-    /// The memo recomputes when a token it reads changes.
-    #[gpui::test]
-    fn the_accent_memo_follows_the_theme(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-        let mut memo = AccentMemo::default();
-        cx.update(|cx| {
-            let first = memo.get(cx.theme());
-            assert_eq!(first, listrow::table_accent(cx.theme()));
-            let mut theme = cx.theme().clone();
-            theme.primary = theme.danger;
-            let second = memo.get(&theme);
-            assert_eq!(second, listrow::table_accent(&theme));
-            assert_ne!(first, second);
-        });
+        let memo = ["listrow::Table", "Accent"].concat();
+        assert!(text.contains(memo.as_str()), "the shared table-accent memo");
     }
 
     /// Column widths are design pixels: identity at the design rem and

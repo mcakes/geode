@@ -78,6 +78,35 @@ pub fn table_accent(theme: &Theme) -> Hsla {
     to_hsla(accent)
 }
 
+/// [`table_accent`] memoised on the tokens it reads, for a table delegate
+/// that paints match runs every frame: the floor runs three OKLCH
+/// searches, too much to repeat per marked cell, and a theme change must
+/// still reach it. `get` takes `&self` so a delegate painting through a
+/// shared reference can hold one.
+#[derive(Debug, Clone, Default)]
+pub struct TableAccent(std::cell::Cell<Option<([Hsla; 4], Hsla)>>);
+
+impl TableAccent {
+    /// The table accent for `theme`, recomputed only when a token it
+    /// reads has changed since the last call.
+    pub fn get(&self, theme: &Theme) -> Hsla {
+        let key = [
+            theme.primary,
+            theme.table,
+            theme.table_active,
+            theme.table_hover,
+        ];
+        match self.0.get() {
+            Some((k, accent)) if k == key => accent,
+            _ => {
+                let accent = table_accent(theme);
+                self.0.set(Some((key, accent)));
+                accent
+            }
+        }
+    }
+}
+
 /// Black or white, whichever contrasts more with `ground`: an endpoint
 /// that can always reach the readable ratio, which a theme's own
 /// foreground cannot promise.
@@ -175,6 +204,24 @@ mod tests {
             "unreadable rows:\n{}",
             failures.join("\n")
         );
+    }
+
+    /// The memo answers `table_accent` and recomputes when a token it
+    /// reads changes.
+    #[gpui::test]
+    fn the_table_accent_memo_follows_the_theme(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let memo = TableAccent::default();
+        cx.update(|cx| {
+            let first = memo.get(cx.theme());
+            assert_eq!(first, table_accent(cx.theme()));
+            let mut theme = cx.theme().clone();
+            theme.primary = theme.danger;
+            let second = memo.get(&theme);
+            assert_eq!(second, table_accent(&theme));
+            assert_ne!(first, second);
+            assert_eq!(memo.get(cx.theme()), first, "and back");
+        });
     }
 
     /// A table's match accent stays readable on the cursor row, under the
