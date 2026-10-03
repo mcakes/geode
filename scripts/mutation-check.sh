@@ -8751,10 +8751,9 @@ run_mutation "groupings: to_table writes every list item, ticked or not" \
 
 run_mutation "groupings: validate discards the reader's own diagnostics" \
   crates/geode-shell/src/shell/objectdialog/groupings.rs \
-  '    let (_slots, diags) = GroupingSlots::from_doc(&doc, &schema, &dims);
-    diags' \
+  '    let (_slots, diags) = GroupingSlots::from_doc(&doc, &schema, &dims);' \
   '    let (_slots, _diags) = GroupingSlots::from_doc(&doc, &schema, &dims);
-    Vec::new()' \
+    let diags: Vec<Diagnostic> = Vec::new();' \
   geode-shell an_out_of_range_slot_key_still_warns_through_validate
 
 # `item_is_empty` recognizes an empty grouping array. Views use tables,
@@ -17715,6 +17714,30 @@ run_mutation "grouping dialog: a defined slot is staged before it is activated" 
   geode-shell \
   a_digit_on_an_empty_slot_defines_it_activates_it_and_closes
 
+# A failed slot write reloads the batch's original documents, and the
+# reload replaces the frame's slots: a staged chain persisted nowhere must
+# not stay in force.
+run_mutation "grouping dialog: a failed slot write unstages an empty slot" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                    let replaced = f.replace_slots(slots);' \
+  '                    let replaced = {
+                        let _ = slots;
+                        false
+                    };' \
+  geode-shell \
+  a_failed_slot_write_takes_the_staged_slot_back_out
+
+# A failed save over an inherited slot restores the lower layer's chain
+# through the revert's reload.
+run_mutation "grouping dialog: a failed save over an inherited slot restores its chain" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    let restored = Config::from_docs(pending.revert);
+    shell.apply_reload(restored, cx);' \
+  '    let restored = Config::from_docs(pending.revert);
+    let _ = restored;' \
+  geode-shell \
+  a_failed_save_over_an_inherited_slot_leaves_the_lower_layers_chain
+
 # A changed staged chain moves config: a tile pinned to that slot (no
 # lane's choice) has no other signal to requery.
 run_mutation "grouping dialog: a changed staged slot moves config" \
@@ -17819,8 +17842,8 @@ run_mutation "grouping dialog: saving over a user-owned slot asks" \
 # forked a moment ago is the user's, and a save over it asks.
 run_mutation "grouping dialog: a save target ignores the pending batch" \
   crates/geode-shell/src/shell/objectdialog/grouping_list.rs \
-  '    let (target, held) = match super::apply::config_with_pending(shell) {' \
-  '    let (target, held) = match super::apply::config_with_pending(shell).filter(|_| false) {' \
+  '    let target = match super::apply::config_with_pending(shell) {' \
+  '    let target = match super::apply::config_with_pending(shell).filter(|_| false) {' \
   geode-shell \
   saving_over_a_slot_the_pending_batch_just_forked_asks
 

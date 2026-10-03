@@ -688,35 +688,31 @@ fn choose_slot(shell: &mut ShellView, slot: u8, window: &mut Window, cx: &mut Co
     // may have forked this slot (so a save would lose the user's chain) or
     // changed its chain (so an "equal" one is not), and neither reaches the
     // list's rows or the frame until promotion.
-    let (target, held) = match super::apply::config_with_pending(shell) {
+    let target = match super::apply::config_with_pending(shell) {
         Some(config) => {
             let rows = super::Domain::Groupings.objects(&config);
             let slots = super::super::hot_reload::rebuild_slots(&config);
-            let held = slots.get(slot).map(GroupingSlots::label_of);
-            (classify(&rows, slots.get(slot), slot, &save.chain), held)
+            classify(&rows, slots.get(slot), slot, &save.chain)
         }
         None => {
             let frame = shell.target_frame();
             let view = frame.read(cx);
-            let held = view.slots().get(slot).map(GroupingSlots::label_of);
             let rows = shell
                 .object_dialog
                 .as_ref()
                 .map(|s| s.rows.rows())
                 .unwrap_or_default();
-            (
-                classify(rows, view.slots().get(slot), slot, &save.chain),
-                held,
-            )
+            classify(rows, view.slots().get(slot), slot, &save.chain)
         }
     };
     match target {
         SaveTarget::Owned => {
+            let replaced = owned_label(shell, slot);
             if let Some(state) = shell.object_dialog.as_mut()
                 && let Some(save) = state.save.as_mut()
             {
                 save.replace = Some(slot);
-                save.replaced = held.unwrap_or_default();
+                save.replaced = replaced;
             }
         }
         SaveTarget::Equal => {
@@ -731,6 +727,20 @@ fn choose_slot(shell: &mut ShellView, slot: u8, window: &mut Window, cx: &mut Co
             carry_out_save(shell, slot, save.chain, window, cx)
         }
     }
+}
+
+/// The chain a save over user-owned slot `slot` would lose, as the user layer
+/// spells it (pending batch folded in). Read off the raw entry rather than the
+/// frame: a slot naming an unknown column is the user's, but the reader
+/// dropped it, and a label from the frame would be empty.
+fn owned_label(shell: &ShellView, slot: u8) -> String {
+    let pending = super::apply::config_with_pending(shell);
+    let config = pending.as_ref().unwrap_or(&shell.services.config);
+    config
+        .doc(super::groupings::DOC)
+        .and_then(|doc| doc.value.get(&slot.to_string()))
+        .map(super::groupings::summary)
+        .unwrap_or_default()
 }
 
 /// Queue the write, stage the slot so it can be activated now, activate it
@@ -806,7 +816,7 @@ pub(super) fn save_prompt(
                 div()
                     .debug_selector(|| "objectdialog-save-replace".to_string())
                     .child(confirm_row(
-                        format!("Replace slot {slot} ({held})? Its chain is lost."),
+                        replace_question(slot, &held),
                         "Replace",
                         "objectdialog-save",
                         entity,
@@ -871,6 +881,17 @@ pub(super) fn save_prompt(
                 .child(SAVE_NOTE),
         )
         .into_any_element()
+}
+
+/// The y/n question over a user-owned slot, naming the chain a yes loses.
+/// With no label to name (an entry that could not be read), it says what is
+/// lost without painting empty parentheses.
+pub fn replace_question(slot: u8, held: &str) -> String {
+    if held.is_empty() {
+        format!("Replace slot {slot}? Its user-layer entry is lost.")
+    } else {
+        format!("Replace slot {slot} ({held})? Its chain is lost.")
+    }
 }
 
 /// What each kind of target slot does with a save.
@@ -1107,6 +1128,18 @@ mod tests {
         );
         assert_eq!(classify(&rows, Some(&lhu), 2, &lhu), SaveTarget::Equal);
         assert_eq!(classify(&rows, Some(&lhu), 1, &lhu), SaveTarget::Equal);
+    }
+
+    #[test]
+    fn the_replace_question_never_paints_empty_parentheses() {
+        assert_eq!(
+            replace_question(3, "book / lhu"),
+            "Replace slot 3 (book / lhu)? Its chain is lost."
+        );
+        assert_eq!(
+            replace_question(3, ""),
+            "Replace slot 3? Its user-layer entry is lost."
+        );
     }
 
     #[test]

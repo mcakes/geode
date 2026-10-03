@@ -837,10 +837,14 @@ fn an_untouched_ad_hoc_seed_the_field_cannot_check_is_refused_not_applied(
     cx.run_until_parked();
     assert!(is_open(&shell, &cx), "the refusal keeps the field open");
     assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
+    let refusal = notice(&shell, &cx);
+    assert!(refusal.contains("nope"), "{refusal}");
+    // The chain is checked as if it were slot 1, and nothing was going to
+    // be saved: the refusal must name the ad hoc chain, not a real slot.
+    assert!(refusal.contains("ad hoc chain"), "{refusal}");
     assert!(
-        notice(&shell, &cx).contains("nope"),
-        "{}",
-        notice(&shell, &cx)
+        !refusal.contains("slot 1") && !refusal.contains("not saved"),
+        "{refusal}"
     );
     assert_eq!((stored(&shell, &cx), choice(&shell, &cx)), before);
 }
@@ -1449,22 +1453,9 @@ fn a_slot_the_reader_dropped_offers_edit_but_no_save(cx: &mut gpui::TestAppConte
     // Slot 4 is defined in the user layer with a column no dataset declares:
     // the row has a layer, but the frame holds no chain for it, so `s`
     // would refuse and the pointer must not offer it either.
-    let mut services = services();
-    let user = LayerDoc {
-        layer: Layer::User,
-        name: "groupings".to_string(),
-        file: "<test:user>".into(),
-        table: "4 = [\"nope\"]\n".parse().unwrap(),
-    };
-    let mut docs = services.builtin.clone();
-    docs.push(user);
-    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
-        builtin: docs,
-        desk: None,
-        user: None,
-    });
     let dir = tempfile::tempdir().unwrap();
-    let (window, mut cx) = open_shell_with_user_dir(cx, services, dir.path());
+    let (window, mut cx) =
+        open_shell_with_user_dir(cx, services_with_a_dropped_user_slot_4(), dir.path());
     let shell = shell_of(&window, &mut cx);
     dispatch_action(&shell, DOOR, &mut cx);
     cx.update(|window, cx| {
@@ -1480,6 +1471,88 @@ fn a_slot_the_reader_dropped_offers_edit_but_no_save(cx: &mut gpui::TestAppConte
     );
     assert!(cx.debug_bounds("objectdialog-row-edit-4").is_some());
     assert!(cx.debug_bounds("objectdialog-row-save-4").is_none());
+}
+
+/// `services()` plus a user-layer slot 4 naming a column no dataset
+/// declares: the configuration defines it, the reader drops it.
+fn services_with_a_dropped_user_slot_4() -> ShellServices {
+    let mut services = services();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "groupings".to_string(),
+        file: "<test:user>".into(),
+        table: "4 = [\"nope\"]\n".parse().unwrap(),
+    };
+    let mut docs = services.builtin.clone();
+    docs.push(user);
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: docs,
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+#[gpui::test]
+fn saving_over_a_user_slot_the_reader_dropped_names_its_raw_chain(cx: &mut gpui::TestAppContext) {
+    // The frame holds no chain for slot 4, so a label taken from the frame
+    // would be empty and the question would read `Replace slot 4 ()?`.
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) =
+        open_shell_with_user_dir(cx, services_with_a_dropped_user_slot_4(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    let frame = frame_of(&shell, &cx);
+    frame.update(&mut cx, |f, cx| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu"]));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    dispatch_action(&shell, DOOR, &mut cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    cx.simulate_keystrokes("s 4");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-save-replace").is_some());
+    let replaced = dialog_state(&shell, &cx, |s| {
+        s.save.as_ref().map(|save| save.replaced.clone())
+    });
+    assert_eq!(replaced.as_deref(), Some("nope"));
+    assert_eq!(
+        objectdialog::grouping_list::replace_question(4, "nope"),
+        "Replace slot 4 (nope)? Its chain is lost."
+    );
+}
+
+#[gpui::test]
+fn a_failed_save_over_an_inherited_slot_leaves_the_lower_layers_chain(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut cx, dir) = open_dialog_after(cx, |f| {
+        f.shared_mut().set_ad_hoc(chain(&["lhu", "book"]));
+    });
+    // Unparseable and never loaded by this shell: memory accepts the save,
+    // and only the write discovers the problem.
+    std::fs::write(dir.path().join("groupings.toml"), "6 = [\n").unwrap();
+    // A save queues with no debounce, so the write may already have failed
+    // once the keys settle; the flush makes sure it has.
+    cx.simulate_keystrokes("s 3"); // slot 3 is builtin: lhu
+    cx.run_until_parked();
+    assert!(!is_open(&shell, &cx), "the save went through and closed");
+
+    flush_config_write(&mut cx);
+
+    assert_eq!(
+        choice(&shell, &cx),
+        GroupingChoice::Slot(3),
+        "the slot still exists in the builtin layer"
+    );
+    assert_eq!(
+        in_force(&shell, &cx),
+        Some(chain(&["lhu"])),
+        "the saved chain is persisted nowhere: the builtin chain is back"
+    );
 }
 
 #[gpui::test]

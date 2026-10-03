@@ -222,7 +222,10 @@ Editing a slot writes `groupings.toml` through the pending batch, like every
 definitional edit. Editing the ad hoc chain writes no file: each completed
 edit sets the lane's ad hoc chain and makes it the choice, so an ad hoc edit
 always regroups. Its stage has no `Slot` row, `d` forgets the chain and
-returns to the list, and `r` is refused.
+returns to the list, and `r` is refused. The chain is checked by the slot
+reader, but its refusals name the ad hoc chain (`the ad hoc chain names
+'x', which is not a groupable column`) and carry no "not saved" prefix:
+nothing was going to be saved.
 
 ### Saving to a slot
 
@@ -242,7 +245,7 @@ user's.
 | Empty | Saved. |
 | Holds an equal chain | No write. |
 | Defined only by a lower layer | Saved as a user-layer fork, announced on the status bar; the inherited value is recorded in `overrides.toml` in the same batch. No question: `r` restores it. |
-| Has a user-layer entry with another chain | Asks `y`/`n` first, naming the chain that would be lost. `n` changes nothing. |
+| Has a user-layer entry with another chain | Asks `y`/`n` first, naming the chain that would be lost as the user layer spells it, even when the reader dropped it for an unknown column. `n` changes nothing. |
 
 After a save the slot is the lane's choice and the dialog closes. A write
 the batch refuses leaves the dialog open with the refusal and the frame

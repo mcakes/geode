@@ -274,15 +274,19 @@ fn fork_notice_of(config: &Config, doc: &str, name: &str) -> String {
 /// The first error-severity draft diagnostic, formatted as a refusal notice. Errors
 /// block value edits before they can enter the batch; warnings remain editable. This
 /// gate does not apply to removals that can clear invalid objects.
+///
+/// The ad hoc chain's refusal has no "not saved" prefix: it is never written, so
+/// the prefix would claim a save that was never going to happen.
 pub(super) fn blocking_diagnostic(shell: &ShellView) -> Option<String> {
-    let diagnostic = shell
-        .object_dialog
-        .as_ref()?
-        .draft
-        .as_ref()?
+    let state = shell.object_dialog.as_ref()?;
+    let draft = state.draft.as_ref()?;
+    let diagnostic = draft
         .diagnostics
         .iter()
         .find(|d| d.severity == Severity::Error)?;
+    if super::grouping_list::is_ad_hoc(state.domain, &draft.name) {
+        return Some(diagnostic.message.clone());
+    }
     Some(format!("not saved — {}", diagnostic.message))
 }
 

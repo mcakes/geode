@@ -14,7 +14,7 @@
 //! writes the grouping definition. The final dimension cannot be unticked because an
 //! empty grouping definition cannot express an active empty slot.
 
-use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
+use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, merge_docs};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
 use geode_core::schema::SchemaSpec;
@@ -382,7 +382,46 @@ pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
         .map(DerivedDimensions::from_doc)
         .unwrap_or_default();
     let (_slots, diags) = GroupingSlots::from_doc(&doc, &schema, &dims);
+    if draft.name == super::grouping_list::AD_HOC {
+        return ad_hoc_diagnostics(draft, diags);
+    }
     diags
+}
+
+/// The reader's diagnostics on the ad hoc chain, reworded for it. The reader
+/// checked the chain as slot 1, so its messages name "slot 1": a real slot
+/// that has nothing to do with the chain. The reader stays the authority on
+/// whether and how severely the chain is refused; only the words change.
+fn ad_hoc_diagnostics(draft: &Draft, diags: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    let chain = ticked(draft);
+    let path = Some(format!("{DOC}.{}", super::grouping_list::AD_HOC));
+    diags
+        .into_iter()
+        .map(|d| {
+            let message = if chain.is_empty() {
+                "the ad hoc chain is empty".to_string()
+            } else if d.severity == Severity::Error {
+                // The reader quotes the first column it does not know as
+                // `names '<column>'`.
+                match chain
+                    .iter()
+                    .find(|name| d.message.contains(&format!("names '{name}'")))
+                {
+                    Some(name) => {
+                        format!("the ad hoc chain names '{name}', which is not a groupable column")
+                    }
+                    None => "the ad hoc chain names a column that is not groupable".to_string(),
+                }
+            } else {
+                "the ad hoc chain is not a list of column names".to_string()
+            };
+            Diagnostic {
+                message,
+                path: path.clone(),
+                ..d
+            }
+        })
+        .collect()
 }
 
 /// The draft's `groupings.toml` entry, rendered and parsed back the way
@@ -476,6 +515,27 @@ mod tests {
             validate(&draft, &config)
         );
         assert!(draft.diagnostics.is_empty(), "{:?}", draft.diagnostics);
+    }
+
+    /// The ad hoc chain is checked by the slot reader as if it were slot 1,
+    /// but its diagnostics must name the ad hoc chain: "slot 1" is a real,
+    /// unrelated slot.
+    #[test]
+    fn the_ad_hoc_drafts_diagnostics_name_the_ad_hoc_chain() {
+        let config = config_with_slot("3 = [\"book\"]\n");
+        for chain in [vec!["nope".to_string()], vec![]] {
+            let draft = ad_hoc_draft(&config, &chain);
+            assert!(!draft.diagnostics.is_empty(), "{chain:?}");
+            for d in &draft.diagnostics {
+                assert!(d.message.contains("ad hoc chain"), "{}", d.message);
+                assert!(!d.message.contains("slot"), "{}", d.message);
+            }
+        }
+        let draft = ad_hoc_draft(&config, &["nope".to_string()]);
+        assert_eq!(
+            draft.diagnostics[0].message,
+            "the ad hoc chain names 'nope', which is not a groupable column"
+        );
     }
 
     /// `dimensions` offers the dataset's groupable columns: the slot's own
