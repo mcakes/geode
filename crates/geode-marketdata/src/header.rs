@@ -20,7 +20,7 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_tile::confirm::{self, Confirm};
-use geode_tile::header::{Cluster, HealthChip, LinkChip, MenuTrigger, Mode, TimeRun};
+use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks, TimeRun};
 use geode_tile::notice::{self, Notice};
 use gpui::prelude::*;
 use gpui::{AnyElement, ElementId, Entity, FocusHandle, Hsla, SharedString, div, rems};
@@ -344,7 +344,7 @@ pub(crate) fn render(
     stack: Option<&StackHandle>,
     health: Option<&HealthChip>,
     mode: Mode,
-    links: [Option<LinkChip>; 2],
+    links: TileLinks,
 ) -> impl IntoElement {
     let muted = theme.muted_foreground;
     let mut left = h_flex().items_center().gap_3();

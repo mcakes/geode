@@ -148,11 +148,17 @@ its one `dimension_context`. Two routes open it:
   last painted it), or at the tile's top-left when it records none. The
   blotter and pricer bind it to `g .` in normal mode, beside `g m`.
 - A right press on a tile first focuses it, as a left press does, then
-  defers one beat so the module's own press handling has landed, and asks
-  the occupant's `TileContent::press_context` for the pressed row. The
-  default answers `None` and nothing opens; an answer opens the menu at the
-  pointer. The blotter answers it; the pricer answers `dimension_context`
-  only, so it has `g .` but no right-press menu.
+  asks the occupant's `TileContent::press_context` for the pressed row. The
+  tile cell hears the press in the capture phase, so an occupant that stops
+  its propagation (gpui-component's table does, on a cell) cannot hide it.
+  The shell reads `press_context` one deferred effect later
+  (`open_row_menu_after_press`): every mouse-down listener, capture and
+  bubble, has run by then, so an occupant records its pressed row
+  synchronously in a mouse-down listener (any phase). Handling it routes
+  through an event may land after the menu opens, and must not move window
+  focus.
+  The default answers `None` and nothing opens; an answer opens the menu at
+  the pointer. The blotter and the pricer answer it.
 
 `dimension::menu_rows` builds the rows. Each context column, the clicked
 column (`DimensionContext::first`) first and then the rest in context
@@ -322,7 +328,8 @@ their existing find behavior.
 GPUI window focus and the tiling model's focused tile are separate state and
 must be reconciled deliberately. Left and right tile presses focus the tile
 and arm `pending_focus_restore`; a right press does not start a drag or a
-double-click gesture. This gives a module's context menu the same tile's key
+double-click gesture, and is heard in the capture phase, so an occupant that
+stops its propagation still has its tile focused. This gives a module's context menu the same tile's key
 context. Keyboard commands that move structural focus also arm restoration.
 The shell returns window focus to the appropriate tile surface, except while
 that occupant intentionally holds an insert-mode input.
@@ -518,12 +525,16 @@ and still answers any barrier the tile was enrolled in, and on return the tile
 requeries only if a counter it follows moved while it was hidden. Closing is
 different: removal calls `TileContent::closed`, and a following tile cancels
 its query by key and answers any open barrier still waiting on it. The shell
-calls `closed` inside its render, where a notify to the frame is dropped: the
-vol slice viewer defers its closing arrival, so the release reaches the other
-tiles at once, while the blotter, timeseries and market-data tiles arrive
-inline and can hold staged tiles to the deadline or the next frame
-notification. `closed` fires only for removal while the window lives; quitting the
-application calls it for no occupant. A tile with its own error and no query
+calls `closed` and `set_visible` inside its render, where gpui drops a notify
+to the frame (the render reads it), so a release made there would leave the
+other tiles holding their stages until the deadline. Every following tile
+therefore makes an arrival from either door, a close or a show whose requery
+is refused or has nothing to ask, through
+`geode_tile::following::DeferredDoor`: the arrival and its notify land after
+the draw, and the other tiles promote at once. Frame observers, deliveries and
+key handlers keep `FrameDoor`, which notifies in the same pass. `closed` fires
+only for removal while the window lives; quitting the application calls it
+for no occupant. A tile with its own error and no query
 to send (a blotter whose view is no longer configured, or whose scope names an
 undefined expression) answers the barrier at once, as a failed query does.
 Tiles that submit no frame query (pricer, diagnostics) answer every barrier at
@@ -731,7 +742,12 @@ status bar's `following` segment) opens the link chooser on the focused tile
 It lists the follow rows for a tile whose module follows and the emit rows
 for one whose module emits. A tile that does neither (a timeseries tile) has
 nothing to choose: no dialog opens and the status bar reads `this tile has
-no link group to join`. The header chip takes no press.
+no link group to join`. A press on a tile's header link chip opens the
+chooser on that tile: the chip queues `Frame::request_link_chooser`, since a
+module never reaches the shell, and the shell's frame observer drains it,
+focuses the chip's tile (it may not have held focus) and dispatches
+`tile::link_group`. The press stops at the chip. The request moves no frame
+version and so opens no flip.
 
 **The chip.** A tile in a group shows a solid chip per group in its header:
 the group's color as the fill, the letter and the role arrows as text floored

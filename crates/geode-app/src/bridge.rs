@@ -2522,6 +2522,15 @@ role = "key"
     /// keymap fragment wired exactly as `main` wires them — so a typed
     /// key travels the shell's real matcher and insert-focus predicate.
     fn test_shell_services_with_a_pricer_tile() -> ShellServices {
+        test_shell_services_with_a_pricer_tile_and(|_| {})
+    }
+
+    /// [`test_shell_services_with_a_pricer_tile`], with `roster_hook`
+    /// adding what the test hosts beside the pricer before the keymap is
+    /// built.
+    fn test_shell_services_with_a_pricer_tile_and(
+        roster_hook: impl FnOnce(&mut ModuleRoster),
+    ) -> ShellServices {
         let mut services = test_shell_services();
         let (handle, _rx) = DataHandle::for_tests();
         let mut roster = ModuleRoster::new();
@@ -2532,6 +2541,7 @@ role = "key"
             TemplateSet::builtin(),
             PricerSettings::default(),
         )));
+        roster_hook(&mut roster);
         roster.register_actions(&mut services.registry);
         let (fragments, diags) = roster.keymap_fragments();
         assert!(diags.is_empty(), "{diags:?}");
@@ -2602,6 +2612,90 @@ role = "key"
             !dispatched("workspace::duplicate_horizontal"),
             "a capital typed into the entry field ran a shell binding"
         );
+    }
+
+    /// End to end: a real pricer in the shell, a real right press on a
+    /// line's cell. gpui-component's selectable table stops a cell's right
+    /// press, so only the shell's captured listener sees it; the pricer
+    /// records the row and answers `press_context` for it, and the row
+    /// menu opens at the pointer on the PRESSED line (SPX), not the cursor
+    /// line (NDX, the last typed). `enter` (a mouse-opened surface takes
+    /// typed keys) picks Open Rec with that underlying.
+    #[gpui::test]
+    fn a_right_press_on_a_pricer_line_opens_its_row_menu(cx: &mut gpui::TestAppContext) {
+        let mut rec = RecordingFactory::new("rec");
+        rec.accepts = &["underlying_ref"];
+        let log = rec.log.clone();
+        let services = test_shell_services_with_a_pricer_tile_and(|roster| {
+            roster.add(Box::new(rec));
+        });
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+        };
+        draw(&mut vcx);
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.simulate_keystrokes("o");
+        vcx.simulate_input("-5 SPX Z26 5000 C");
+        vcx.simulate_keystrokes("enter");
+        vcx.simulate_input("-5 NDX Z26 20000 C");
+        vcx.simulate_keystrokes("enter escape");
+        draw(&mut vcx);
+
+        let at = vcx
+            .debug_bounds("pricer-cell-0-1")
+            .expect("the SPX line's first value cell is painted")
+            .center();
+        vcx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+        vcx.simulate_mouse_up(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+        draw(&mut vcx);
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.notice_for_test()),
+            None,
+            "the press found a row to offer"
+        );
+
+        vcx.simulate_keystrokes("enter");
+        draw(&mut vcx);
+        let launched: Vec<_> = log
+            .borrow()
+            .iter()
+            .filter_map(|r| match r {
+                Recorded::Created(_, state) => Some(state.clone()),
+                _ => None,
+            })
+            .collect();
+        let expected: toml::Table = r#"underlying = ["SPX"]"#.parse().unwrap();
+        assert_eq!(
+            launched,
+            vec![Some(expected)],
+            "the press opened the pressed line's menu (SPX), not the cursor line's (NDX)"
+        );
+
+        // gpui-component's table holds the menu it builds on every right
+        // press in a cycle only its next right press breaks: press once
+        // more and close the window in the same update.
+        vcx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Right,
+                    position: at,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.remove_window();
+        });
+        vcx.run_until_parked();
     }
 
     /// The whole route: a real health report on the shell's `Diagnostics`

@@ -230,6 +230,11 @@ pub struct BlotterDelegate {
     /// Set by a cell's right press and taken by its row's, which bubbles
     /// after it, so a press on a cell is not reported twice.
     context_reported: bool,
+    /// The display cell (row, column) the last right press landed on,
+    /// recorded inside the mouse-down listener itself, so it is in place
+    /// before the shell's deferred row-menu read whatever event hops the
+    /// tile's own handling takes. `BlotterTile::press_context` takes it.
+    pub(crate) pressed_cell: Option<(usize, usize)>,
 }
 
 /// The name column `col_ix` carries a `Colour::Named` of, if it does.
@@ -474,6 +479,7 @@ impl BlotterDelegate {
             fitted: FittedWidths::new(),
             cursor_anchor: Rc::new(Cell::new(None)),
             context_reported: false,
+            pressed_cell: None,
         }
     }
 
@@ -1313,7 +1319,9 @@ impl BlotterDelegate {
             el.on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                    this.delegate_mut().context_reported = true;
+                    let d = this.delegate_mut();
+                    d.context_reported = true;
+                    d.pressed_cell = Some((row_ix, col_ix));
                     cx.emit(CellPointer::Context {
                         row: row_ix,
                         col: col_ix,
@@ -1631,6 +1639,7 @@ impl TableDelegate for BlotterDelegate {
                         return;
                     }
                     let col = d.cursor.col;
+                    d.pressed_cell = Some((row_ix, col));
                     cx.emit(CellPointer::Context { row: row_ix, col });
                 }),
             )

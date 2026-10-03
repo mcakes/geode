@@ -130,11 +130,16 @@ fn blocked_notice(name: &str, why: &str) -> SharedString {
 /// The footer after an `:rm` confirm answered anything but `y`.
 pub(crate) const NOT_REMOVED: &str = "sheet not removed";
 
-/// What an armed `:rm` asks to remove. The prompt, its focus and its blur
-/// answer are the `geode_tile::confirm` door's. Public only because it is
-/// the public `PricerTile`'s `ConfirmHost` payload; its field stays private.
-pub struct PendingRemove {
-    sheet: String,
+/// The footer after a take-over confirm answered anything but `y`.
+pub(crate) const NOT_OPENED: &str = "sheet not opened";
+
+/// What an armed confirm asks: `:rm` to remove a sheet, or `:e` to take
+/// a sheet another tile holds. The prompt, its focus and its blur answer
+/// are the `geode_tile::confirm` door's. Public only because it is the
+/// public `PricerTile`'s `ConfirmHost` payload; its fields stay private.
+pub enum PendingSheet {
+    Remove { sheet: String },
+    Take { sheet: String },
 }
 
 /// Why this tile's sheet cannot be renamed now, whatever the new name:
@@ -631,7 +636,7 @@ pub struct PricerTile {
     /// here, where it was asked for.
     forgetting: Vec<String>,
     /// The armed `:rm` confirm: `None` outside it.
-    pub(crate) confirm: Option<Confirm<PendingRemove>>,
+    pub(crate) confirm: Option<Confirm<PendingSheet>>,
     /// Loading, but the load is not submitted: this sheet's name has a
     /// save queued and unanswered (`Shared::pending_saves`), and a read
     /// now could return the generation before it. The factory's
@@ -719,6 +724,13 @@ pub struct PricerTile {
     /// press's own `DoubleClickedCell` (every press emits `SelectCell`
     /// first, which overwrites it).
     pressed: Option<Option<At>>,
+    /// The line the latest press's chevron toggled, if it was a chevron's.
+    /// Every press's `SelectCell` moves it into `pressed_chevron`, so it
+    /// lives for exactly one following press, as `click_anchor` does.
+    chevron_anchor: Option<At>,
+    /// `chevron_anchor`, taken by the latest press: a double-click whose
+    /// first press was that line's chevron toggles it no second time.
+    pressed_chevron: Option<At>,
     /// A grip drag from its press to its drop, cancel or release
     /// elsewhere (`tile::reorder`).
     pub(crate) row_drag: Option<reorder::RowDragState>,
@@ -1122,6 +1134,8 @@ impl PricerTile {
             last_press_on_name: false,
             click_anchor: None,
             pressed: None,
+            chevron_anchor: None,
+            pressed_chevron: None,
             row_drag: None,
             underlyings: Rc::from([]),
             underlyings_rev: None,
@@ -4049,7 +4063,7 @@ impl PricerTile {
                 }
                 self.ungroup(cx)
             }
-            Command::Edit(name) => self.edit_sheet(name, cx),
+            Command::Edit(name) => self.edit_sheet(name, window, cx),
             Command::New(None) => self.new_sheet(cx),
             // A named `:new` never opens an existing sheet: a typo would
             // otherwise show it empty and later save over it. This tile's
@@ -4129,16 +4143,22 @@ impl PricerTile {
 
     // ---- sheets: `:e`, `:new`, `:name`, `:rm` -------------------------
 
-    /// `:e <sheet>` is refused when another tile
-    /// holds `name` (two writers would race) or its document is being
-    /// removed; the tile's own name is a no-op, unless its load failed
-    /// (`save_blocked`): then it retries loading and discards unsaved fallback
-    /// edits. A name with a save queued
+    /// `:e <sheet>` is refused when its document is being removed; the
+    /// tile's own name is a no-op, unless its load failed (`save_blocked`):
+    /// then it retries loading and discards unsaved fallback edits. A name
+    /// another tile holds arms a y/n confirm instead of switching: two
+    /// writers would race, so `y` moves the sheet here and the holder to a
+    /// fresh sheet ([`Self::submit_take`]). A name with a save queued
     /// and not yet answered is claimed at once but its load waits for
     /// that answer (`start_load`): reads run on the query pool and saves
     /// on the ingest writer, unordered, so a read now could return the
     /// generation before the save.
-    fn edit_sheet(&mut self, name: String, cx: &mut Context<Self>) -> Result<(), String> {
+    fn edit_sheet(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         if name == self.sheet.name {
             if self.save_blocked {
                 return self.switch_sheet(name, true, cx);
@@ -4147,9 +4167,99 @@ impl PricerTile {
         }
         self.shared.refuse_retiring(&name)?;
         if self.shared.open.borrow().contains(&name) {
-            return Err(format!("sheet '{name}' is open in another tile"));
+            let prompt = format!(
+                "sheet '{name}' is open in another tile: open it here and close it there? (y/n)"
+            );
+            confirm::arm(self, PendingSheet::Take { sheet: name }, prompt, window, cx);
+            self.rebuild_chrome();
+            cx.notify();
+            return Ok(());
         }
         self.switch_sheet(name, true, cx)
+    }
+
+    /// The tile of this factory holding `name`, other than this one (which
+    /// is mid-update and cannot be read).
+    fn holder_of(&self, name: &str, cx: &Context<Self>) -> Option<Entity<PricerTile>> {
+        let me = cx.entity_id();
+        self.shared
+            .tiles
+            .borrow()
+            .iter()
+            .filter(|w| w.entity_id() != me)
+            .filter_map(gpui::WeakEntity::upgrade)
+            .find(|t| t.read(cx).sheet.name == name)
+    }
+
+    /// `y` to a take-over: this tile's own unsaved changes are queued
+    /// first (refused → nothing moves), then the holder gives the sheet up
+    /// ([`Self::give_up_sheet`]) and this tile opens it. The holder's
+    /// flush queues a save, so this tile's load waits for that answer
+    /// (`start_load`) and shows what the holder last had. The name was
+    /// checked when the question was armed; it may since have been
+    /// released, retired, or opened here, so it is re-decided now.
+    fn submit_take(&mut self, sheet: String, window: &mut Window, cx: &mut Context<Self>) {
+        let result = (|| {
+            self.shared.refuse_retiring(&sheet)?;
+            let unsaved = self.dirty || self.save_failed;
+            if unsaved && !self.save_now() {
+                return Err(format!(
+                    "sheet '{}' was not saved; still open here",
+                    self.sheet.name
+                ));
+            }
+            if let Some(holder) = self.holder_of(&sheet, cx) {
+                holder.update(cx, |t, cx| t.give_up_sheet(window, cx))?;
+            }
+            if self.shared.open.borrow().contains(&sheet) {
+                return Err("it is still open in another tile".into());
+            }
+            self.switch_sheet(sheet.clone(), true, cx)
+        })();
+        if let Err(why) = result {
+            self.footer = Some(format!("sheet '{sheet}' not opened here: {why}").into());
+        }
+        self.rebuild_chrome();
+        cx.notify();
+    }
+
+    /// Another tile took this tile's sheet: save its unsaved changes (a
+    /// refused save keeps everything here and refuses the take), drop
+    /// every field working on it (an open cell edit or entry line is
+    /// cancelled, not committed: line ids restart per sheet, so a later
+    /// commit would land on the new sheet's line), then move to a fresh
+    /// `untitled-N`.
+    fn give_up_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let name = self.sheet.name.clone();
+        // Saved before any field closes: a refused save leaves this tile
+        // exactly as it was, its open edit included.
+        if (self.save_failed || self.dirty) && !self.save_now() {
+            self.rebuild_chrome();
+            cx.notify();
+            return Err("its unsaved changes could not be saved there".into());
+        }
+        let cancelled = self.editor.is_some() || self.entry.is_some();
+        self.close_editor(window, cx);
+        self.close_entry(window, cx);
+        self.close_sheet_fields(window, cx);
+        self.close_menu(cx);
+        self.new_sheet(cx)
+            .map_err(|_| "its unsaved changes could not be saved there".to_string())?;
+        let lost = if cancelled {
+            " (an unfinished edit was dropped)"
+        } else {
+            ""
+        };
+        self.footer = Some(
+            format!(
+                "sheet '{name}' was opened in another tile; opened {}{lost}",
+                self.sheet.name
+            )
+            .into(),
+        );
+        self.rebuild_chrome();
+        cx.notify();
+        Ok(())
     }
 
     /// Put `name` in this tile: flush the outgoing sheet if it has
@@ -4294,7 +4404,13 @@ impl PricerTile {
             return Err(format!("no sheet '{name}'"));
         }
         let prompt = format!("remove sheet '{name}' and all its history? (y/n)");
-        confirm::arm(self, PendingRemove { sheet: name }, prompt, window, cx);
+        confirm::arm(
+            self,
+            PendingSheet::Remove { sheet: name },
+            prompt,
+            window,
+            cx,
+        );
         self.rebuild_chrome();
         cx.notify();
         Ok(())
@@ -4302,32 +4418,28 @@ impl PricerTile {
 
     /// `y`: forget the sheet. Whether it went reaches the store through
     /// `PricerFactory::forget_answered`, and a failure is painted here.
-    fn submit_remove(&mut self, pending: PendingRemove, cx: &mut Context<Self>) {
+    fn submit_remove(&mut self, sheet: String, cx: &mut Context<Self>) {
         // The name was checked when the question was armed; a tile may
         // have opened it, or a `:name` begun retiring it, since. Forgetting
         // then would delete a sheet in use or race that rename's forget.
-        let refusal = if self.shared.open.borrow().contains(&pending.sheet) {
+        let refusal = if self.shared.open.borrow().contains(&sheet) {
             Some("it is open in another tile")
-        } else if self.shared.retiring.borrow().contains(&pending.sheet) {
+        } else if self.shared.retiring.borrow().contains(&sheet) {
             Some("it is being removed")
         } else {
             None
         };
         if let Some(why) = refusal {
-            self.footer = Some(format!("sheet '{}' not removed: {why}", pending.sheet).into());
+            self.footer = Some(format!("sheet '{sheet}' not removed: {why}").into());
         } else {
-            match self.shared.store.forget(&pending.sheet) {
+            match self.shared.store.forget(&sheet) {
                 Ok(()) => {
                     // Reserved until the forget is answered.
-                    self.shared
-                        .retiring
-                        .borrow_mut()
-                        .insert(pending.sheet.clone());
-                    self.forgetting.push(pending.sheet);
+                    self.shared.retiring.borrow_mut().insert(sheet.clone());
+                    self.forgetting.push(sheet);
                 }
                 Err(refused) => {
-                    self.footer =
-                        Some(format!("sheet '{}' not removed: {refused}", pending.sheet).into());
+                    self.footer = Some(format!("sheet '{sheet}' not removed: {refused}").into());
                 }
             }
         }
@@ -4495,14 +4607,15 @@ impl PricerTile {
     /// The pick itself, through the command's own route (`:e`'s for
     /// Open, `:rm`'s for Remove), so every refusal the command makes
     /// applies. A refusal goes to the footer and keeps the picker open
-    /// for another pick; success closes it. `arm_remove` moves focus to
-    /// its prompt first, so that close blurs nothing.
+    /// for another pick; success closes it. `arm_remove` and a take-over
+    /// `edit_sheet` move focus to their prompt first, so that close blurs
+    /// nothing.
     fn pick_sheet(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(purpose) = self.sheet_picker.as_ref().map(|p| p.purpose) else {
             return;
         };
         let result = match purpose {
-            PickerPurpose::Open => self.edit_sheet(name, cx),
+            PickerPurpose::Open => self.edit_sheet(name, window, cx),
             PickerPurpose::Remove => self.arm_remove(name, window, cx),
         };
         match result {
@@ -5373,15 +5486,34 @@ impl PricerTile {
         &self,
         cx: &App,
     ) -> Option<geode_core::context::DimensionContext> {
-        let g = self.cursor_row()?;
-        let mut ctx = match self.underlying_at(g) {
-            Some(u) => geode_core::context::DimensionContext::of(&[("underlying_ref", &u)]),
-            None => geode_core::context::DimensionContext::default(),
-        };
+        let mut ctx = self.context_at(self.cursor_row()?);
         // Where `g .` hangs the row menu: the cursor row's painted
         // lower-left, or `None` (the tile's top-left) while it is off screen.
         ctx.anchor = self.table.read(cx).delegate().cursor_anchor.get();
         Some(ctx)
+    }
+
+    /// The context of the row the latest right press landed on (the
+    /// delegate's listener recorded it), taken: the shell reads it once,
+    /// one beat after the press, and hangs the menu at the pointer (so no
+    /// anchor). `None` when no press is pending.
+    pub(crate) fn press_context(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<geode_core::context::DimensionContext> {
+        let row = self
+            .table
+            .update(cx, |t, _| t.delegate_mut().pressed_row.take())?;
+        Some(self.context_at(row))
+    }
+
+    /// Grid row `g`'s context: its sole underlying as `underlying_ref`, or
+    /// an empty context when it names none.
+    fn context_at(&self, g: usize) -> geode_core::context::DimensionContext {
+        match self.underlying_at(g) {
+            Some(u) => geode_core::context::DimensionContext::of(&[("underlying_ref", &u)]),
+            None => geode_core::context::DimensionContext::default(),
+        }
     }
 
     /// The one underlying the cursor row names, or `None` with no cursor
@@ -5521,6 +5653,7 @@ impl PricerTile {
         // second press must still resolve the package, not the row that
         // slid up. A press takes any older anchor, as `SelectCell` does.
         self.click_anchor = self.entry.is_some().then(|| line.clone());
+        self.chevron_anchor = line.clone();
         self.close_entry(window, cx);
         self.close_editor(window, cx);
         if let Some(at) = line {
@@ -5659,6 +5792,35 @@ impl PricerTile {
                 self.close_entry(window, cx);
                 (row, col, Some(kind_for(tree)))
             }
+            CellPointer::Context { row } => {
+                // The delegate already recorded the row for the shell's row
+                // menu (`press_context`); this is the cursor's part. A right
+                // press on a row of a live `V` selection leaves the cursor
+                // and the selection alone (the menu acts on one of its
+                // rows), but closes an open editor, the bulk one included,
+                // as every gesture does, and drops the table's own
+                // right-press row outline.
+                if self
+                    .resolved
+                    .as_ref()
+                    .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row))
+                {
+                    self.close_editor(window, cx);
+                    self.table
+                        .update(cx, |t, cx| t.set_right_clicked_row(None, cx));
+                    if snapshot(self) != before {
+                        self.rebuild_chrome();
+                        cx.notify();
+                    }
+                    return;
+                }
+                // Otherwise a plain press's move. No `SelectCell` follows a
+                // right press, so the bar closes here, as on a drag; the
+                // cursor keeps its column.
+                self.clear_selection();
+                self.close_entry(window, cx);
+                (row, None, None)
+            }
         };
         if self.editor.is_some() {
             self.close_editor(window, cx);
@@ -5696,6 +5858,7 @@ impl PricerTile {
                 // two presses of one double-click: hand this press's line
                 // to the next press only, whatever row that one lands on.
                 self.pressed = self.click_anchor.take();
+                self.pressed_chevron = self.chevron_anchor.take();
                 if self.entry.is_some() {
                     self.click_anchor = Some(line.clone());
                 }
@@ -5756,6 +5919,23 @@ impl PricerTile {
                     return;
                 }
                 let Some(c) = SheetDelegate::plan_col(*col) else {
+                    // A package row's tree cell (its name) is `space` on
+                    // it. Only a package's own row: `tree_verb` takes a
+                    // leg to its parent, and a leg's name must not
+                    // collapse the package it sits in. Not when the first
+                    // press was this line's chevron: that already toggled
+                    // it (the second press lands here when closing the
+                    // entry bar slid the table up under the pointer).
+                    let chevron_toggled =
+                        self.pressed_chevron.is_some() && self.pressed_chevron == self.cursor.at;
+                    if !chevron_toggled
+                        && matches!(
+                            self.cursor_row().and_then(|g| self.model.kind(g)),
+                            Some(GridRowKind::Package { .. })
+                        )
+                    {
+                        self.tree_verb(None, cx);
+                    }
                     self.rebuild_chrome();
                     cx.notify();
                     return;
@@ -5981,18 +6161,27 @@ impl MenuHost for PricerTile {
 }
 
 impl ConfirmHost for PricerTile {
-    type Payload = PendingRemove;
+    type Payload = PendingSheet;
 
-    fn confirm_slot(&mut self) -> &mut Option<Confirm<PendingRemove>> {
+    fn confirm_slot(&mut self) -> &mut Option<Confirm<PendingSheet>> {
         &mut self.confirm
     }
 
-    fn confirmed(&mut self, pending: PendingRemove, _: &mut Window, cx: &mut Context<Self>) {
-        self.submit_remove(pending, cx);
+    fn confirmed(&mut self, pending: PendingSheet, window: &mut Window, cx: &mut Context<Self>) {
+        match pending {
+            PendingSheet::Remove { sheet } => self.submit_remove(sheet, cx),
+            PendingSheet::Take { sheet } => self.submit_take(sheet, window, cx),
+        }
     }
 
-    fn cancelled(&mut self, _: PendingRemove, _: &mut Window, cx: &mut Context<Self>) {
-        self.footer = Some(NOT_REMOVED.into());
+    fn cancelled(&mut self, pending: PendingSheet, _: &mut Window, cx: &mut Context<Self>) {
+        self.footer = Some(
+            match pending {
+                PendingSheet::Remove { .. } => NOT_REMOVED,
+                PendingSheet::Take { .. } => NOT_OPENED,
+            }
+            .into(),
+        );
         self.rebuild_chrome();
         cx.notify();
     }
@@ -8365,6 +8554,56 @@ pub(crate) mod tests {
             click(&mut vcx, sel, 2);
             assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "{sel}: and closes it again");
         }
+    }
+
+    /// A double-click on a package row's tree cell (its name, beside the
+    /// chevron) is `space` on it: the package opens, then closes.
+    #[gpui::test]
+    fn double_clicking_a_packages_tree_cell_toggles_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        assert_eq!(h.tree(&vcx).len(), 3, "the package starts closed");
+        click(&mut vcx, "pricer-cell-1-0", 1);
+        click(&mut vcx, "pricer-cell-1-0", 2);
+        assert_eq!(h.tree(&vcx).len(), 5, "a double-click opens it");
+        assert!(h.tile.read_with(&vcx, |t, _| t.editor.is_none()));
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
+        click(&mut vcx, "pricer-cell-1-0", 1);
+        click(&mut vcx, "pricer-cell-1-0", 2);
+        assert_eq!(h.tree(&vcx).len(), 3, "and closes it again");
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
+    }
+
+    /// A package row's value cells still edit on a double-click; the
+    /// package keeps its expansion.
+    #[gpui::test]
+    fn double_clicking_a_packages_value_cell_still_edits(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        click(&mut vcx, "pricer-cell-1-4", 1);
+        click(&mut vcx, "pricer-cell-1-4", 2);
+        assert_eq!(h.mode(&mut vcx), "insert", "the editor opened");
+        assert_eq!(h.tree(&vcx).len(), 3, "the package stays closed");
+    }
+
+    /// A leg's tree cell is not its package's: a double-click there never
+    /// collapses the package (`space`'s leaf-to-parent rule is not used).
+    #[gpui::test]
+    fn double_clicking_a_legs_tree_cell_does_not_collapse_its_package(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let at = centre_of(&mut vcx, "pricer-chevron-1");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.tree(&vcx).len(), 5, "fixture: the package is open");
+        click(&mut vcx, "pricer-cell-2-0", 1);
+        click(&mut vcx, "pricer-cell-2-0", 2);
+        assert_eq!(h.tree(&vcx).len(), 5, "the package stays open");
+        assert_eq!(
+            h.cursor(&vcx).map(|c| c.0),
+            Some(2),
+            "the cursor stays on the leg"
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.editor.is_none()));
     }
 
     #[gpui::test]
@@ -13185,13 +13424,15 @@ pub(crate) mod tests {
         let second = second_tile(&h, &mut vcx, TILE + 1);
         assert_eq!(command_on(&*second, &mut vcx, "e book"), Ok(()));
         assert_eq!(title_of(&*second, &mut vcx), "Pricer · book");
-        assert_eq!(
-            h.command(&mut vcx, "e book"),
-            Err("sheet 'book' is open in another tile".into())
-        );
-        // The tile's own name: nothing happens.
+        // Another tile's sheet asks before it moves anything.
+        assert_eq!(h.command(&mut vcx, "e book"), Ok(()));
+        assert!(prompt(&h, &vcx).is_some());
+        assert_eq!(title_of(&*second, &mut vcx), "Pricer · book");
+        vcx.update(|window, cx| h.tile.update(cx, |t, cx| confirm::cancel(t, window, cx)));
+        // The tile's own name: nothing happens, and nothing is asked.
         let loads = h.store.loads().len();
         assert_eq!(h.command(&mut vcx, "e other"), Ok(()));
+        assert!(prompt(&h, &vcx).is_none());
         assert_eq!(h.store.loads().len(), loads);
         assert_eq!(h.sheet_len(&vcx), 1);
     }
@@ -13405,6 +13646,185 @@ pub(crate) mod tests {
         );
         assert_eq!(prompt(&h, &vcx), None);
         assert_eq!(h.mode(&mut vcx), "normal");
+    }
+
+    const TAKE_UNTITLED: &str =
+        "sheet 'untitled-1' is open in another tile: open it here and close it there? (y/n)";
+
+    /// The fixture's second tile, which holds `untitled-1`.
+    fn holder(h: &Harness, vcx: &VisualTestContext) -> Entity<PricerTile> {
+        let me = h.tile.entity_id();
+        h.tile.read_with(vcx, |t, _| {
+            t.shared
+                .tiles
+                .borrow()
+                .iter()
+                .filter(|w| w.entity_id() != me)
+                .find_map(gpui::WeakEntity::upgrade)
+                .unwrap()
+        })
+    }
+
+    /// The holder's entry bar, open: an unfinished line.
+    fn holder_entry(other: &Entity<PricerTile>, vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| other.update(cx, |t, cx| t.open_entry(false, window, cx)));
+        assert!(other.read_with(vcx, |t, _| t.entry.is_some()));
+    }
+
+    /// An unsaved line in the holder's sheet.
+    fn holder_edit(other: &Entity<PricerTile>, vcx: &mut VisualTestContext) {
+        other
+            .update(vcx, |t, cx| {
+                t.apply_edit(
+                    Edit::Insert {
+                        place: Place::Root { at: 0 },
+                        rows: vec![
+                            crate::core::shorthand::parse_builtin("SPX Z26 5000 C").unwrap(),
+                        ],
+                    },
+                    cx,
+                )
+            })
+            .unwrap();
+    }
+
+    /// `:e` on a sheet another tile holds asks; `y` saves the holder's
+    /// unsaved lines, moves the holder to a fresh sheet with a footer
+    /// saying why, and opens the sheet here, its load waiting on that save.
+    #[gpui::test]
+    fn colon_e_on_a_sheet_open_elsewhere_asks_and_y_takes_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, second) = rm_fixture(cx);
+        let other = holder(&h, &vcx);
+        holder_edit(&other, &mut vcx);
+        holder_entry(&other, &mut vcx);
+        assert_eq!(h.command(&mut vcx, "e untitled-1"), Ok(()));
+        h.draw(&mut vcx);
+        assert_eq!(prompt(&h, &vcx).as_deref(), Some(TAKE_UNTITLED));
+        assert_eq!(h.mode(&mut vcx), "insert", "the confirm holds the keyboard");
+        assert_eq!(
+            h.title(&mut vcx),
+            "Pricer · book",
+            "nothing moves before the answer"
+        );
+        assert!(h.store.get("untitled-1").is_none());
+
+        vcx.simulate_keystrokes("y");
+        assert_eq!(prompt(&h, &vcx), None);
+        assert_eq!(h.title(&mut vcx), "Pricer · untitled-1");
+        assert_eq!(title_of(&*second, &mut vcx), "Pricer · untitled-2");
+        assert_eq!(
+            other.read_with(&vcx, |t, _| t.footer.clone()).as_deref(),
+            Some(
+                "sheet 'untitled-1' was opened in another tile; opened untitled-2 \
+                 (an unfinished edit was dropped)"
+            )
+        );
+        assert!(other.read_with(&vcx, |t, _| t.entry.is_none()));
+        assert!(
+            h.store.get("untitled-1").is_some(),
+            "the holder's lines were saved"
+        );
+        assert!(!other.read_with(&vcx, |t, _| t.dirty));
+        let open = h
+            .tile
+            .read_with(&vcx, |t, _| t.shared.open.borrow().clone());
+        assert_eq!(
+            open.into_iter().collect::<Vec<_>>(),
+            vec!["untitled-1".to_string(), "untitled-2".to_string()],
+            "book was released"
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.load_waiting),
+            "the load waits for the holder's save"
+        );
+        // The holder's save failing reaches this tile too: what loads is
+        // older than what the holder last showed.
+        save_answered(&h, &mut vcx, "untitled-1", Err("disk full".into()));
+        assert_eq!(
+            h.save_notice(&vcx).as_deref(),
+            Some("sheet 'untitled-1' was not saved: disk full; its last edits were not stored")
+        );
+        assert!(!h.tile.read_with(&vcx, |t, _| t.load_waiting));
+    }
+
+    /// This tile's own unsaved lines are saved before the holder is asked
+    /// to let go: a refused save leaves both tiles where they were.
+    #[gpui::test]
+    fn a_take_over_is_refused_when_this_tile_cannot_save(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, second) = rm_fixture(cx);
+        h.store.set_refusing(true);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
+        assert_eq!(h.command(&mut vcx, "e untitled-1"), Ok(()));
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("y");
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some(
+                "sheet 'untitled-1' not opened here: \
+                 sheet 'book' was not saved; still open here"
+            )
+        );
+        assert_eq!(h.title(&mut vcx), "Pricer · book");
+        assert_eq!(title_of(&*second, &mut vcx), "Pricer · untitled-1");
+    }
+
+    /// Any answer but `y` leaves both tiles as they were.
+    #[gpui::test]
+    fn colon_e_take_over_answered_no_moves_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, second) = rm_fixture(cx);
+        assert_eq!(h.command(&mut vcx, "e untitled-1"), Ok(()));
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("n");
+        assert_eq!(prompt(&h, &vcx), None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some(NOT_OPENED));
+        assert_eq!(h.title(&mut vcx), "Pricer · book");
+        assert_eq!(title_of(&*second, &mut vcx), "Pricer · untitled-1");
+    }
+
+    /// A holder whose unsaved lines cannot be saved keeps its sheet, and
+    /// the take is refused in this tile's footer.
+    #[gpui::test]
+    fn a_take_over_is_refused_when_the_holder_cannot_save(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, second) = rm_fixture(cx);
+        let other = holder(&h, &vcx);
+        h.store.set_refusing(true);
+        holder_edit(&other, &mut vcx);
+        holder_entry(&other, &mut vcx);
+        assert_eq!(h.command(&mut vcx, "e untitled-1"), Ok(()));
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("y");
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some(
+                "sheet 'untitled-1' not opened here: \
+                 its unsaved changes could not be saved there"
+            )
+        );
+        assert_eq!(h.title(&mut vcx), "Pricer · book");
+        assert_eq!(title_of(&*second, &mut vcx), "Pricer · untitled-1");
+        assert!(other.read_with(&vcx, |t, _| t.dirty || t.save_failed));
+        assert!(
+            other.read_with(&vcx, |t, _| t.entry.is_some()),
+            "a refused take leaves the holder's open line alone"
+        );
+    }
+
+    /// The name is re-decided at `y`: a holder that let the sheet go in
+    /// the meantime leaves nothing to take over, and the sheet opens.
+    #[gpui::test]
+    fn a_take_over_of_a_sheet_released_meanwhile_just_opens_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, second) = rm_fixture(cx);
+        assert_eq!(h.command(&mut vcx, "e untitled-1"), Ok(()));
+        h.draw(&mut vcx);
+        assert_eq!(command_on(&*second, &mut vcx, "e old"), Ok(()));
+        vcx.simulate_keystrokes("y");
+        assert_eq!(h.title(&mut vcx), "Pricer · untitled-1");
+        assert_eq!(title_of(&*second, &mut vcx), "Pricer · old");
+        assert_eq!(other_footer(&h, &vcx), None);
+    }
+
+    fn other_footer(h: &Harness, vcx: &VisualTestContext) -> Option<SharedString> {
+        holder(h, vcx).read_with(vcx, |t, _| t.footer.clone())
     }
 
     #[gpui::test]
@@ -14103,22 +14523,27 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal");
     }
 
-    /// Picking a sheet another tile holds refuses with `:e`'s words, in
-    /// the footer, and the picker stays open for another pick; `enter`
-    /// with nothing matching says so.
+    /// Picking a sheet another tile holds asks `:e`'s take-over question
+    /// and closes the picker, focus on the prompt; `enter` with nothing
+    /// matching says so and keeps the picker open.
     #[gpui::test]
-    fn picking_a_sheet_open_elsewhere_refuses_like_colon_e(cx: &mut gpui::TestAppContext) {
+    fn picking_a_sheet_open_elsewhere_asks_like_colon_e(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx, _second) = sheets_fixture(cx);
         h.dispatch(&mut vcx, "open_sheet", None);
         h.draw(&mut vcx);
         typed(&h, &mut vcx, "untitled");
         h.dispatch(&mut vcx, "commit", None);
-        assert_eq!(
-            h.footer(&vcx).as_deref(),
-            Some("sheet 'untitled-1' is open in another tile")
-        );
+        assert_eq!(prompt(&h, &vcx).as_deref(), Some(TAKE_UNTITLED));
         assert_eq!(h.title(&mut vcx), "Pricer · book");
-        assert!(picker_rows(&h, &vcx).is_some(), "the picker stays open");
+        assert!(
+            picker_rows(&h, &vcx).is_none(),
+            "the question replaces the picker"
+        );
+        assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+        vcx.simulate_keystrokes("n");
+        assert_eq!(h.footer(&vcx).as_deref(), Some(NOT_OPENED));
+        h.dispatch(&mut vcx, "open_sheet", None);
+        h.draw(&mut vcx);
         typed(&h, &mut vcx, "zzz");
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(h.footer(&vcx).as_deref(), Some(NO_SHEET_MATCHES));

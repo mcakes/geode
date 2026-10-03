@@ -165,6 +165,9 @@ with another notice behind it:
   pointer.
 - There is no `.` action menu: the header chips are clickable and the
   palette lists every action.
+- A standing `vol request refused` notice is retried by the next state
+  change (a key, a draft edit, a publication), not by a group scope change
+  that keeps the underlying.
 
 ## Invariants
 
@@ -188,11 +191,18 @@ with another notice behind it:
   records the generation it was built under, so a refused batch clears
   curves that no longer match what is loaded, even under one underlying.
 - Following is compared through `FrameView::following()` on every frame
-  notification; while following, the group's scope counts as a change. A
+  notification; while following, the group's scope counts as a change,
+  except one that still names the loaded underlying with no read out,
+  nothing staged, and the as-of and publications unmoved since the loaded
+  documents were read (both reads succeeded under them, `loaded_ok`;
+  `documents_stale`): the tile self-arrives instead of refetching, on a
+  show through the deferred door. A failed or refused read clears
+  `loaded_ok`, so the next scope change retries it. A
   change of group clears the model and moves the vol tag, so no old
   group's draft trace stays painted or lands late.
-- An arrival made from `set_visible` or `closed` is deferred past the
-  current draw: the shell calls both inside its render, where the release's
+- An arrival made from `set_visible` or `closed` goes through
+  `geode_tile::following::DeferredDoor` (`Arrival::Deferred` for the
+  requery): the shell calls both inside its render, where the release's
   notify to the frame would be dropped and every other tile would wait for
   the barrier's deadline.
 - The picker holds the keys in `insert` mode and publishes no `tilelist`:

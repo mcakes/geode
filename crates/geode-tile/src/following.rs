@@ -93,6 +93,97 @@ impl Barrier for FrameDoor<'_> {
     }
 }
 
+/// [`FrameDoor`] with its arrival put off until the current effect cycle
+/// ends. Reads answer now; `arrive` queues the arrival and reports `false`,
+/// since nothing has arrived yet when it returns.
+///
+/// Which door: [`FrameDoor`] from frame observers, deliveries, key handlers
+/// and anything else that runs outside a draw, where a release must notify
+/// in the same pass; `DeferredDoor` from everything the shell calls while it
+/// draws (`TileContent::closed`, `set_visible`, and any render path). The
+/// shell's render reads the frame, and gpui drops a notify sent during a
+/// window's draw to an entity that window read last draw: a release made
+/// through [`FrameDoor`] there is never heard, and every other tile keeps
+/// its staged result until the barrier's deadline. Deferred, the release
+/// and its notify land after the draw, where frame observers hear them.
+pub struct DeferredDoor<'a> {
+    frame: &'a FrameRef,
+    cx: &'a mut App,
+}
+
+impl<'a> DeferredDoor<'a> {
+    pub fn new(frame: &'a FrameRef, cx: &'a mut App) -> DeferredDoor<'a> {
+        DeferredDoor { frame, cx }
+    }
+}
+
+impl Barrier for DeferredDoor<'_> {
+    fn current(&self) -> FrameVersions {
+        self.frame.read(self.cx).versions()
+    }
+    fn wants(&self, key: QueryKey, versions: FrameVersions) -> bool {
+        self.frame.read(self.cx).barrier_wants(key, versions)
+    }
+    fn arrive(&mut self, key: QueryKey, versions: FrameVersions) -> bool {
+        let frame = self.frame.clone();
+        self.cx.defer(move |cx| {
+            frame.update(cx, |frame, cx| {
+                if frame.arrived(key, versions) {
+                    cx.notify();
+                }
+            });
+        });
+        false
+    }
+}
+
+/// Which door a path that runs both inside and outside the shell's draw
+/// arrives through: a tile's requery, called from its frame observer and
+/// from `set_visible`, takes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival {
+    /// [`FrameDoor`]: not during a draw.
+    Now,
+    /// [`DeferredDoor`]: during the shell's draw.
+    Deferred,
+}
+
+impl Arrival {
+    pub fn door<'a>(self, frame: &'a FrameRef, cx: &'a mut App) -> ArrivalDoor<'a> {
+        match self {
+            Arrival::Now => ArrivalDoor::Now(FrameDoor::new(frame, cx)),
+            Arrival::Deferred => ArrivalDoor::Deferred(DeferredDoor::new(frame, cx)),
+        }
+    }
+}
+
+/// The door an [`Arrival`] names.
+pub enum ArrivalDoor<'a> {
+    Now(FrameDoor<'a>),
+    Deferred(DeferredDoor<'a>),
+}
+
+impl Barrier for ArrivalDoor<'_> {
+    fn current(&self) -> FrameVersions {
+        match self {
+            ArrivalDoor::Now(door) => door.current(),
+            ArrivalDoor::Deferred(door) => door.current(),
+        }
+    }
+    fn wants(&self, key: QueryKey, versions: FrameVersions) -> bool {
+        match self {
+            ArrivalDoor::Now(door) => door.wants(key, versions),
+            ArrivalDoor::Deferred(door) => door.wants(key, versions),
+        }
+    }
+    fn arrive(&mut self, key: QueryKey, versions: FrameVersions) -> bool {
+        match self {
+            ArrivalDoor::Now(door) => door.arrive(key, versions),
+            ArrivalDoor::Deferred(door) => door.arrive(key, versions),
+        }
+    }
+}
+
 /// What a flip, or an arrival that released the barrier, did with the
 /// result held for it.
 #[derive(Debug, PartialEq)]
@@ -851,6 +942,55 @@ mod tests {
             1,
             "a release notifies, so every staged tile promotes in the same pass"
         );
+    }
+
+    /// A deferred arrival lands after the effect cycle that made it, and a
+    /// release then notifies the frame as [`FrameDoor`]'s does: the door
+    /// exists so a release made during the shell's draw is still heard.
+    #[gpui::test]
+    fn a_deferred_arrival_lands_after_the_cycle_and_notifies_its_release(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let frame = cx.update(|cx| cx.new(|_| fresh_frame()));
+        let heard = Rc::new(Cell::new(0u32));
+        let seen = heard.clone();
+        let _watch = cx.update(|cx| cx.observe(&frame, move |_, _| seen.set(seen.get() + 1)));
+        let v = frame.update(cx, |f, _| {
+            flip_scope(&mut f.shared_mut(), "a", &[K], Instant::now())
+        });
+        let tile = FrameRef::new(frame.clone(), WorkspaceIx::FIRST);
+        cx.update(|cx| {
+            let mut door = DeferredDoor::new(&tile, cx);
+            assert_eq!(door.current(), v, "reads answer now");
+            assert!(door.wants(K, v));
+            assert!(!door.arrive(K, v), "nothing has arrived yet");
+            assert!(
+                frame.read(cx).barrier_wants(K, v),
+                "the arrival waits for the cycle to end"
+            );
+        });
+        cx.run_until_parked();
+        assert!(!frame.read_with(cx, |f, _| f.barrier_open()), "it landed");
+        assert_eq!(heard.get(), 1, "and its release notified the frame");
+    }
+
+    /// An `Arrival` names its door: `Now` arrives at once, `Deferred` after
+    /// the cycle.
+    #[gpui::test]
+    fn an_arrival_names_its_door(cx: &mut gpui::TestAppContext) {
+        let frame = cx.update(|cx| cx.new(|_| fresh_frame()));
+        let v = frame.update(cx, |f, _| {
+            flip_scope(&mut f.shared_mut(), "a", &[K, OTHER], Instant::now())
+        });
+        let tile = FrameRef::new(frame.clone(), WorkspaceIx::FIRST);
+        cx.update(|cx| {
+            assert!(!Arrival::Deferred.door(&tile, cx).arrive(OTHER, v));
+            assert!(frame.read(cx).barrier_wants(OTHER, v), "deferred");
+            assert!(!Arrival::Now.door(&tile, cx).arrive(K, v));
+            assert!(!frame.read(cx).barrier_wants(K, v), "at once");
+        });
+        cx.run_until_parked();
+        assert!(!frame.read_with(cx, |f, _| f.barrier_open()));
     }
 
     /// A tile in a pinned workspace answers the barrier with its own lane's

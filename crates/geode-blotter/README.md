@@ -84,7 +84,11 @@ cargo bench -p geode-blotter   # the pure core
   hidden, unless a followed counter moved since it asked
   (`Delivered::Superseded`: dropped, not applied, not an arrival; the reshow
   asks again). `closed` (removal) cancels the query by key and answers any
-  open barrier still waiting on the tile.
+  open barrier still waiting on the tile. The shell calls `closed` and
+  `set_visible` inside its draw, so their arrivals (the close's, and a
+  reshow's refused or unconfigured requery) go through
+  `geode_tile::following::DeferredDoor`; inline, the release's notify would
+  be dropped and every other tile held to the barrier's deadline.
 - A chevron click and a row double-click are `space`: both go through
   `expand_at_cursor`, the path `zo`/`zc`/`za` take. The chevron listener
   stops propagation and ignores `click_count() > 1`.
@@ -135,7 +139,9 @@ cargo bench -p geode-blotter   # the pure core
   the cursor, so the emission follows a sort. The tile stores no group; its header reads `link_chips` from its frame
   handle at paint.
 - `g .` opens the shell's row menu on that context. A right press on a cell,
-  or on a row beside its cells, emits `CellPointer::Context`; the tile then
+  or on a row beside its cells, records the cell in the delegate's
+  `pressed_cell` inside the listener (the `press_context` contract) and
+  emits `CellPointer::Context`; the tile then
   keeps the cursor and selection when the row is inside a `V` selection, and
   otherwise clears the selection and moves the cursor there, as a plain
   press does. `press_context` answers that row's context once, with `first`

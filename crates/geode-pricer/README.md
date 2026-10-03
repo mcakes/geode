@@ -280,6 +280,12 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   on screen, so the second press of the same double-click lands on a lower
   row. A double-click (and its tree-column cursor move) uses the handed-on
   line.
+- A double-click on a package row's tree cell runs `tree_verb(None)` on it
+  (`space`); only on a package's own row, since `tree_verb` takes a leg to
+  its parent. A chevron press sets `chevron_anchor` to the line it toggled,
+  which the next press's `SelectCell` moves into `pressed_chevron`, so a
+  double-click whose first press was that line's chevron (already a toggle)
+  toggles nothing more.
 - `add_below` with the bar already open (a palette dispatch) refocuses its
   field: the palette's commit focuses the shell root first, and an open bar
   without focus reads `insert` while shell bindings take shifted letters.
@@ -362,7 +368,19 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `save_blocked` sheet, which it reloads. `:name` forgets the old name only after a save under
   the new one is confirmed, and is refused on a sheet whose load failed (its
   fallback would replace the real document). `:rm` refuses every open name.
-- The `:rm` confirmation is `geode_tile::confirm`'s: a focused prompt in
+- `:e` of a name another tile holds arms a take-over confirm
+  (`PendingSheet::Take`) instead of refusing. `submit_take` re-decides at
+  `y`: retiring names refuse, this tile's refused flush stops it before the
+  holder is touched, then the holder (found through `Shared::tiles`, never
+  this tile, which is mid-update) runs `give_up_sheet`: it saves first (a
+  refusal stops the take with the holder untouched), then closes its editor
+  and entry bar (cancelled, not committed: line ids restart per sheet),
+  sheet fields and menu, then `:new`. Only then does this tile switch; the
+  holder's flush queued a save, so the load waits on it, and
+  `PricerFactory::save_answered` paints a failure of that save on the
+  waiting tile as well as on its origin.
+- The `:rm` and take-over confirmations are `geode_tile::confirm`'s (one
+  slot, payload `PendingSheet`): a focused prompt in
   the header that consumes every key (bare `y` confirms), with the door's
   Yes/No buttons (`y` and "any other key"), the tile in `insert` mode while
   armed, cancelled by focus leaving or a pointer press anywhere but the two
@@ -537,6 +555,20 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   in the open editor's own cell, or on a chevron, sets `inner_press` so the
   row's bubbling handler does not report it; the editor's press reports
   nothing and the chevron's reports a plain press.
+- A right press on a cell, the tree cell or the row beside its cells emits
+  `CellPointer::Context` (not in the open editor's own cell, whose press is
+  the editor's; `is_editor_cell` is the one check for both buttons). The
+  table stops a cell's right press after the cell's own listener, so the row
+  hears only presses beside the cells; the shell captures its own. The
+  listener records the row in the delegate's `pressed_row` before the emit
+  (the `press_context` contract). On the event, inside a live `V` selection
+  holding the row the cursor and selection stay, an open editor (the bulk
+  one included) closes and the table's right-press row outline clears;
+  otherwise it is a plain press's move (selection cleared, editor and entry
+  bar closed, the cursor's column kept). `press_context` takes
+  `pressed_row` once and answers its context
+  (`context_at`, which `dimension_context` shares), with no anchor: the
+  shell hangs the menu at the pointer.
 
 ## Known limitations
 

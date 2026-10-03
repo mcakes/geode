@@ -18,7 +18,7 @@ use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::{kbd, scale};
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
-use geode_tile::header::{Cluster, HealthChip, LinkChip, Mode};
+use geode_tile::header::{Cluster, HealthChip, Mode, TileLinks};
 use geode_tile::notice::{Notice, Tone as NoticeTone};
 use gpui::prelude::*;
 use gpui::{App, Div, ElementId, Entity, MouseButton, MouseDownEvent, SharedString, div};
@@ -241,7 +241,7 @@ pub(crate) fn render_header(
     stack: Option<&StackHandle>,
     health: Option<&HealthChip>,
     mode: Mode,
-    links: [Option<LinkChip>; 2],
+    links: TileLinks,
 ) -> Div {
     let bare = control::paint(
         theme,

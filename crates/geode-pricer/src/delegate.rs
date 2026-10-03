@@ -217,6 +217,9 @@ pub enum CellPointer {
         col: Option<usize>,
         tree: bool,
     },
+    /// A right press on grid row `row` (a cell, the tree cell or beside
+    /// the cells): the tile records it for the shell's row menu.
+    Context { row: usize },
 }
 
 impl EventEmitter<CellPointer> for TableState<SheetDelegate> {}
@@ -510,6 +513,11 @@ pub struct SheetDelegate {
     /// drag would re-run the tile's `pointer` on every frame. Stale after
     /// a drag no cell saw released, which costs one extra emission at most.
     drag_last: Option<(usize, Option<usize>)>,
+    /// The grid row the last right press landed on, recorded inside the
+    /// mouse-down listener itself, so it is in place before the shell's
+    /// deferred row-menu read whatever event hops the tile's own handling
+    /// takes. `PricerTile::press_context` takes it.
+    pub(crate) pressed_row: Option<usize>,
     /// `Some` while the primary button is down because of a press a cell,
     /// the tree cell or the gutter of this table caught — `true` when it
     /// was the tree cell or the gutter. `None` while another element owns
@@ -580,6 +588,7 @@ impl SheetDelegate {
             numbers_stamp: None,
             fitted: FittedWidths::new(),
             drag_last: None,
+            pressed_row: None,
             drag_origin: None,
             inner_press: None,
             grips: Vec::new(),
@@ -1284,6 +1293,17 @@ impl TableDelegate for SheetDelegate {
                     });
                 }),
             )
+            // A right press beside the cells. The table stops a cell's
+            // right press before it bubbles here, so this hears only
+            // presses outside a cell; a double report (the cell's own
+            // `Context` then this) would only re-record the same row.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.delegate_mut().pressed_row = Some(row_ix);
+                    cx.emit(CellPointer::Context { row: row_ix });
+                }),
+            )
     }
 
     /// Paint loading or entry guidance in full-opacity muted text contrast-adjusted
@@ -1597,6 +1617,16 @@ impl SheetDelegate {
 }
 
 impl SheetDelegate {
+    /// Whether `(row_ix, col)` (a plan column; `None` is the tree cell)
+    /// is the open editor's own cell: a press there is the editor's.
+    fn is_editor_cell(&self, row_ix: usize, col: Option<usize>) -> bool {
+        col.is_some()
+            && self
+                .editor
+                .as_ref()
+                .is_some_and(|ed| ed.row == row_ix && Some(ed.col) == col)
+    }
+
     /// Grid row `row_ix`'s grip: the drag handle of a movable row, at the
     /// tree cell's left edge. It straddles that edge, half over the
     /// column's own left padding and half over the cell, so it clears a
@@ -1667,10 +1697,14 @@ impl SheetDelegate {
     /// modifiers, and arms no drag: the chevron toggles its package and
     /// never starts a selection.
     ///
+    /// A right press reports [`CellPointer::Context`] on its row, except
+    /// in the open editor's own cell (the editor's, as for a left press).
+    ///
     /// None of the listeners stops propagation: the table's own
     /// `SelectCell` click and the shell's tile-focus press must still
     /// arrive, and a fast double-click still reaches gpui's click-count
-    /// tracking and so `DoubleClickedCell`.
+    /// tracking and so `DoubleClickedCell`. (The table itself stops a
+    /// cell's right press after these run; the shell captures its own.)
     fn wire_pointer(
         el: Div,
         cx: &Context<TableState<Self>>,
@@ -1695,11 +1729,7 @@ impl SheetDelegate {
                     });
                     return;
                 }
-                if col.is_some()
-                    && d.editor
-                        .as_ref()
-                        .is_some_and(|ed| ed.row == row_ix && Some(ed.col) == col)
-                {
+                if d.is_editor_cell(row_ix, col) {
                     d.inner_press = Some(InnerPress::Editor);
                     return;
                 }
@@ -1710,6 +1740,18 @@ impl SheetDelegate {
                     col,
                     shift: e.modifiers.shift,
                 });
+            }),
+        )
+        // The shell's row menu reads the row this records.
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                let d = this.delegate_mut();
+                if d.is_editor_cell(row_ix, col) {
+                    return;
+                }
+                d.pressed_row = Some(row_ix);
+                cx.emit(CellPointer::Context { row: row_ix });
             }),
         )
         .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {

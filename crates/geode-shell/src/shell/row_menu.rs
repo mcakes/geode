@@ -297,6 +297,23 @@ impl ShellView {
         }
     }
 
+    /// What the tile cell's captured right press schedules: the menu, one
+    /// effect later. Every mouse-down listener, capture and bubble, runs
+    /// inside the one dispatch before any effect flushes, so an occupant
+    /// that records its pressed row in a listener (the `press_context`
+    /// contract) has done so by the time this reads it.
+    pub(crate) fn open_row_menu_after_press(
+        &mut self,
+        id: TileId,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.defer_in(window, move |view, window, cx| {
+            view.open_row_menu_from_press(id, at, window, cx);
+        });
+    }
+
     /// A right press on tile `id` at `at`: the menu on its pressed row, if
     /// the occupant opens one (`press_context`); otherwise nothing.
     pub(crate) fn open_row_menu_from_press(

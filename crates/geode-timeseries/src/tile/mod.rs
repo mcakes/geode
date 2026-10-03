@@ -62,7 +62,9 @@ use crate::popup::{
     PopupKind, RangePopup, SeriesPopup, Which, render_picker, render_range, render_series_popup,
 };
 use crate::tile::pointer::{ChartBounds, Drag};
-use geode_tile::following::{Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered};
+use geode_tile::following::{
+    Arrival, DeferredDoor, Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered,
+};
 use geode_tile::menu::{Menu, MenuHost, MenuIds, Row};
 
 mod data;
@@ -443,7 +445,10 @@ impl TimeseriesTile {
     /// retained result and changed followed versions, also query immediately.
     /// Otherwise a successful fetch completion triggers the query, including
     /// `Ok(0)` when the data tier already covers the span.
-    /// Hiding keeps the series query; closing (`closed`) cancels it.
+    /// Hiding keeps the series query; closing (`closed`) cancels it. The
+    /// shell calls this while it draws, so an arrival it makes is deferred:
+    /// a release notified during the draw would be dropped, holding every
+    /// other tile to the barrier's deadline.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
@@ -462,7 +467,7 @@ impl TimeseriesTile {
                     .following
                     .follows_changed(now, Self::differs_on_followed)
             {
-                self.requery(cx);
+                self.requery_with(Arrival::Deferred, cx);
             }
         } else {
             // Hidden tiles hear no fetch completions (the shell broadcasts
@@ -479,12 +484,14 @@ impl TimeseriesTile {
     /// The shell is removing this tile: cancel the series query by key and
     /// answer any barrier still waiting on it. Fetches run on; their
     /// completions reach no one. Runs inside the shell's occupant
-    /// reconciliation, so it updates only the frame and the data handle.
+    /// reconciliation, so it updates only the frame and the data handle,
+    /// and its arrival is deferred: a release notified during the shell's
+    /// draw would be dropped.
     pub fn closed(&mut self, cx: &mut Context<Self>) {
         let key = QueryKey(self.id.0);
         self.data.cancel(key);
         self.following
-            .close(&mut FrameDoor::new(&self.frame, cx), key);
+            .close(&mut DeferredDoor::new(&self.frame, cx), key);
     }
 
     /// This tile ignores the shell's find events; its local popup actions own

@@ -1122,10 +1122,19 @@ underlyings paints `no underlying in A`. A tile added with no underlying
 and no group prompts with the picker at once. Following is compared through
 `FrameView::following()` on every frame notification, since following a
 group whose scope was never written moves no version; while following, the
-group's scope generation counts as a change. A change of group, joining or
-leaving, clears the painted curves and moves the vol tag before asking
-again: the old group's draft, painted or still in flight, would otherwise
-sit dashed under no draft chip, and stay there if the requery failed.
+group's scope generation counts as a change. A scope change that still names
+the underlying whose documents are loaded asks nothing when no read is out,
+nothing is held for a flip, and neither the as-of nor a watched publication
+moved since the loaded documents were read (both reads succeeded, under the
+same as-of and publications): the documents depend on nothing else, so the
+tile answers the flip at once, from a show too, rather than holding it
+behind two reads of what is on screen. Documents kept on screen beside a
+failed or refused read do not qualify, so the scope change is their retry.
+A change of the underlying, or of anything else it follows, refetches. A
+change of group, joining or leaving, clears the painted curves and moves the
+vol tag before asking again, on show if the tile was hidden: the old group's
+draft, painted or still in flight, would otherwise sit dashed under no draft
+chip, and stay there if the requery failed.
 
 **Data flow.** The CVI document (full key) and the chain (one-part prefix,
 every expiry) are read in sequence under one `FollowingQuery` tag, both
@@ -1185,6 +1194,9 @@ not saved. An unreadable value drops its key with a notice.
 - Keyboard zoom anchors at the view's centre, the wheel at the pointer.
 - There is no `.` action menu; the header chips and the palette carry the
   actions.
+- A standing `vol request refused` notice is retried by the next state
+  change (a key, a draft edit, a publication), not by a group scope change
+  that keeps the underlying.
 
 See the [crate guide](../../crates/geode-volslice/README.md) for the key
 table, session keys and module map.
@@ -1466,7 +1478,9 @@ from the cursor row, with its absolute number on that row, and numbers
 absolutely when there is no cursor row.
 
 Lines and packages are rows of one table; a package row sums its legs and opens and closes like a tree node
-(`space`/`z a`, `z o`, `z c`, `z shift+r`, `z shift+m`, or its chevron). A
+(`space`/`z a`, `z o`, `z c`, `z shift+r`, `z shift+m`, its chevron, or a
+double-click on its name in the tree column; a double-click on its value
+cells edits them, and one on a leg's name changes nothing). A
 package created in the session opens so its legs show; a restored tile opens
 the packages its session record names. A package row's text columns show
 its legs' distinct values in leg order joined with `/` (a call spread reads
@@ -1515,7 +1529,7 @@ Normal-mode keys:
 |---|---|
 | `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end; a package typed inside a package lands just after that package) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
 | `shift+o` | The same bar, but the first line lands above the cursor row (on a leg, before that leg in its package; on a package or a top-level line, before it; on the first row, `at top`; on a grouping row, `at end`); each further line lands after the one just added, so a typed run reads top to bottom |
-| `i`, `enter`, double-click | Edit the cell in place with the caret at the end of text; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
+| `i`, `enter`, double-click | Edit the cell in place (a double-click on a package's tree cell, or anywhere on a group row, opens or closes it instead) with the caret at the end of text; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `I` (`shift+i`) | Edit the cell with the caret at the start of text, without selecting it; date fields and choice pickers open as usual |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
@@ -1532,10 +1546,17 @@ Normal-mode keys:
 `g m` opens a panel on the cursor row's underlying, as the `underlying_ref`
 context column the market-data panels accept: a line's or leg's own, a
 package's when its legs share one; otherwise the plain tile picker. `g .`
-opens the shell's [row menu](shell.md#row-menu) on the same context, at the
-tile's top-left (the pricer records no row anchor); a line with no single
-underlying shows `no actions for this row`. A right-click opens no row
-menu in the pricer.
+opens the shell's [row menu](shell.md#row-menu) on the same context, hung
+just under the cursor row (at the tile's top-left while that row is scrolled
+out of view); a row with no single underlying shows `no actions for this
+row`. A right-click on a row's cell, its tree cell, or the row beside its
+cells opens the same menu at the pointer, on the clicked row's underlying.
+A right-click inside a `V` row selection keeps the cursor and the
+selection, closing an open editor (a bulk edit's live steps roll back);
+anywhere else it clears any selection, closes an open editor or entry bar,
+and moves the cursor to the clicked row, keeping its column. A
+right-click inside the open editor's own cell is the editor's and opens no
+row menu; blank space below the lines opens nothing.
 
 Emitting into a [link group](#link-groups), the pricer posts the same
 underlying `g m` opens on, as the group's scope, so the two never name
@@ -1604,7 +1625,8 @@ hit. Closing the bar moves the table up on screen, so a double-click whose
 first press closed it edits the line that press hit, not the row that slid
 under the pointer; the hand-off lasts for the next press only. A chevron
 press that closes the bar hands off the same way, so the cursor stays on the
-package it toggled.
+package it toggled, and the double-click's second press does not toggle it
+back.
 Commands and search close open fields and menus. A text editor remains open
 after a click outside the grid; a typeahead closes on an outside click.
 
@@ -1686,8 +1708,22 @@ tile holds:
   the generation before the save. A restored tile waits the same way. Switching
   sheets clears undo history, package expansion, cursor, and per-sheet save
   state, and cancels pricing in flight for the outgoing sheet. A sheet open in
-  another tile is refused
-  (`sheet 'x' is open in another tile`). The tile's own name does nothing,
+  another tile is not switched to at once: two tiles never write one sheet,
+  so the header asks `sheet 'x' is open in another tile: open it here and
+  close it there? (y/n)` with the `:rm` confirm's keys, buttons and cancels
+  (any answer but `y` leaves `sheet not opened`). `y` decides again: this
+  tile's own unsaved changes are saved first, then the holding tile's. A
+  refused save on either side stops the take there (`sheet 'x' not opened
+  here: …`); the holder keeps its sheet and any open field, though this
+  tile's own save may already have gone. Otherwise the holder cancels any
+  open cell edit, entry bar, sheet field or menu and moves to the next
+  `untitled-N` (its footer says `sheet 'x' was opened in another tile;
+  opened untitled-N`, adding `(an unfinished edit was dropped)` when a
+  cell edit or entry line was open), and the sheet loads here, waiting for
+  the holder's save. If that save then fails, this tile's save slot says
+  so (`sheet 'x' was not saved: …; its last edits were not stored`): what
+  loaded is older than what the holder showed, and this tile's next save
+  replaces it. The tile's own name does nothing,
   unless its load failed (`did not load`): then `:e` of it asks again,
   which is the way to retry a refused or failed load in place. Retrying
   discards edits made in the unsaved fallback sheet.
@@ -1744,7 +1780,8 @@ default key.
   another tile holds says `open`. Typing filters (the shared fuzzy match),
   `up`/`down` step, `tab` completes the field to the highlighted name, a
   hover moves the highlight, and `enter` or a row click picks through `:e`.
-  A refusal shows in the footer and keeps the picker open; `enter` with
+  A refusal shows in the footer and keeps the picker open; a sheet another
+  tile holds closes the picker for `:e`'s take-over question; `enter` with
   nothing matching says `no sheet matches`. `escape`, a second click on the
   name, or a press outside closes it. The rows are prepared when the picker
   opens and do not follow later catalog changes; the pick itself decides.

@@ -147,6 +147,13 @@ impl TimeseriesTile {
     /// retained buckets, falling back to the range before the first result.
     /// Refusal or nothing to ask answers an open barrier and forgets the versions for retry.
     pub(super) fn requery(&mut self, cx: &mut Context<Self>) {
+        self.requery_with(Arrival::Now, cx);
+    }
+
+    /// [`Self::requery`], answering the barrier for a refusal or an empty
+    /// request through the door `arrival` names: deferred from
+    /// `set_visible`, which the shell calls while it draws.
+    pub(super) fn requery_with(&mut self, arrival: Arrival, cx: &mut Context<Self>) {
         // It also asks for the current view, so a waiting view move has
         // nothing left to ask. `begin` drops whatever was staged.
         self.view_waiting = false;
@@ -181,7 +188,7 @@ impl TimeseriesTile {
         self.following.submitted(
             submitted,
             Unanswered::Retry,
-            &mut FrameDoor::new(&self.frame, cx),
+            &mut arrival.door(&self.frame, cx),
             key,
         );
         cx.notify();

@@ -18077,14 +18077,14 @@ run_mutation "pricer names: every tile asks for a catalog" \
   '' \
   geode-pricer a_factory_with_no_catalog_asks_for_one_exactly_once
 
-run_mutation "pricer sheets: :e takes a sheet another tile holds" \
+run_mutation "pricer sheets: :e takes a sheet another tile holds without asking" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.shared.open.borrow().contains(&name) {
-            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));
-        }
-        self.switch_sheet(name, true, cx)' \
-  '        self.switch_sheet(name, true, cx)' \
-  geode-pricer colon_e_saves_the_sheet_it_leaves_and_loads_the_other
+  '            confirm::arm(self, PendingSheet::Take { sheet: name }, prompt, window, cx);
+            self.rebuild_chrome();
+            cx.notify();
+            return Ok(());' \
+  '            let _ = prompt;' \
+  geode-pricer colon_e_on_a_sheet_open_elsewhere_asks_and_y_takes_it
 
 run_mutation "pricer sheets: :e of the current name reloads it" \
   crates/geode-pricer/src/tile.rs \
@@ -18094,13 +18094,82 @@ run_mutation "pricer sheets: :e of the current name reloads it" \
             }
             return Ok(());
         }
-        self.shared.refuse_retiring(&name)?;
-        if self.shared.open.borrow().contains(&name) {
-            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));' \
-  '        self.shared.refuse_retiring(&name)?;
-        if self.shared.open.borrow().contains(&name) && name != self.sheet.name {
-            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));' \
+        self.shared.refuse_retiring(&name)?;' \
+  '        if name == self.sheet.name && self.save_blocked {
+            return self.switch_sheet(name, true, cx);
+        }
+        self.shared.refuse_retiring(&name)?;' \
   geode-pricer colon_e_saves_the_sheet_it_leaves_and_loads_the_other
+
+# A take-over's `y`: the holder lets go before this tile claims the name,
+# its refusal stops the take, and this tile's own refused flush stops it
+# before the holder is asked.
+run_mutation "pricer take: y never asks the holder to let go" \
+  crates/geode-pricer/src/tile.rs \
+  '                holder.update(cx, |t, cx| t.give_up_sheet(window, cx))?;' \
+  '                let _ = holder;' \
+  geode-pricer colon_e_on_a_sheet_open_elsewhere_asks_and_y_takes_it
+
+run_mutation "pricer take: a holder that cannot save is taken anyway" \
+  crates/geode-pricer/src/tile.rs \
+  '                holder.update(cx, |t, cx| t.give_up_sheet(window, cx))?;' \
+  '                let _ = holder.update(cx, |t, cx| t.give_up_sheet(window, cx));
+                if self.shared.open.borrow().contains(&sheet) {
+                    self.shared.open.borrow_mut().remove(&sheet);
+                }' \
+  geode-pricer a_take_over_is_refused_when_the_holder_cannot_save
+
+run_mutation "pricer take: this tile's refused flush is not checked first" \
+  crates/geode-pricer/src/tile.rs \
+  '            if unsaved && !self.save_now() {' \
+  '            if unsaved && false {' \
+  geode-pricer a_take_over_is_refused_when_this_tile_cannot_save
+
+run_mutation "pricer take: the holder is not told why its sheet went" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.footer = Some(
+            format!(
+                "sheet '"'"'{name}'"'"' was opened in another tile; opened {}{lost}",
+                self.sheet.name
+            )
+            .into(),
+        );' \
+  '        let _ = (&name, lost);' \
+  geode-pricer colon_e_on_a_sheet_open_elsewhere_asks_and_y_takes_it
+
+# The holder saves before it closes anything: a refused save leaves its
+# open line alone.
+run_mutation "pricer take: the holder drops its open line before its save is refused" \
+  crates/geode-pricer/src/tile.rs \
+  '        // Saved before any field closes: a refused save leaves this tile
+        // exactly as it was, its open edit included.
+        if (self.save_failed || self.dirty) && !self.save_now() {' \
+  '        if false {' \
+  geode-pricer a_take_over_is_refused_when_the_holder_cannot_save
+
+run_mutation "pricer take: the holder does not say its open line was dropped" \
+  crates/geode-pricer/src/tile.rs \
+  '        let cancelled = self.editor.is_some() || self.entry.is_some();' \
+  '        let cancelled = false;' \
+  geode-pricer colon_e_on_a_sheet_open_elsewhere_asks_and_y_takes_it
+
+# A save that failed after another tile took the sheet reaches the tile
+# waiting to load it: what loads is older than the holder last showed.
+run_mutation "pricer take: a taker never hears the holder's failed save" \
+  crates/geode-pricer/src/content.rs \
+  '                    if let Some(reason) = failed.clone()
+                        && origin != Some(t.id)
+                    {' \
+  '                    if let Some(reason) = failed.clone()
+                        && false
+                    {' \
+  geode-pricer colon_e_on_a_sheet_open_elsewhere_asks_and_y_takes_it
+
+run_mutation "pricer take: a no answers as a removal" \
+  crates/geode-pricer/src/tile.rs \
+  '                PendingSheet::Take { .. } => NOT_OPENED,' \
+  '                PendingSheet::Take { .. } => NOT_REMOVED,' \
+  geode-pricer colon_e_take_over_answered_no_moves_nothing
 
 run_mutation "pricer sheets: a switch drops the unsaved sheet it leaves" \
   crates/geode-pricer/src/tile.rs \
@@ -18227,7 +18296,7 @@ run_mutation "pricer rm: a modified y confirms" \
 
 run_mutation "pricer rm: y forgets nothing" \
   crates/geode-pricer/src/tile.rs \
-  '            match self.shared.store.forget(&pending.sheet) {' \
+  '            match self.shared.store.forget(&sheet) {' \
   '            match Err::<(), Refusal>(Refusal::Busy) {' \
   geode-pricer colon_rm_asks_and_y_forgets
 
@@ -18323,12 +18392,9 @@ run_mutation "pricer retiring: an answered forget keeps its name reserved" \
 
 run_mutation "pricer retiring: an rm's forget does not reserve its name" \
   crates/geode-pricer/src/tile.rs \
-  '                    self.shared
-                        .retiring
-                        .borrow_mut()
-                        .insert(pending.sheet.clone());
-                    self.forgetting.push(pending.sheet);' \
-  '                    self.forgetting.push(pending.sheet);' \
+  '                    self.shared.retiring.borrow_mut().insert(sheet.clone());
+                    self.forgetting.push(sheet);' \
+  '                    self.forgetting.push(sheet);' \
   geode-pricer a_name_removed_by_rm_is_reserved_until_answered
 
 run_mutation "pricer deferred load: :e reads past a queued save" \
@@ -18345,10 +18411,11 @@ run_mutation "pricer deferred load: a restore reads past a queued save" \
 
 run_mutation "pricer deferred load: a save answer never starts the waiting load" \
   crates/geode-pricer/src/content.rs \
-  '                if t.load_waiting && t.sheet.name == sheet {
-                    t.start_load(cx);
-                }' \
-  '                let _ = (&t.load_waiting, sheet, &cx);' \
+  '                    t.start_load(cx);
+                }
+            });' \
+  '                }
+            });' \
   geode-pricer colon_e_back_to_a_sheet_with_a_queued_save_waits_for_its_answer
 
 run_mutation "pricer save origin: an outcome goes to the tile holding the name" \
@@ -21823,13 +21890,44 @@ run_mutation "timeseries triggers: the editor keeps the range trigger open" \
 # keyboard actions.
 run_mutation "shell: a right press focuses the tile" \
   crates/geode-shell/src/shell/render.rs \
-  '                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
-                                view.leave_command_line(window, cx);
-                                if view.services.workspaces.active_mut().focus_main_tile(id) {' \
-  '                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
-                                view.leave_command_line(window, cx);
-                                if false {' \
+  $'                                    return;\n                                }\n                                view.leave_command_line(window, cx);\n                                if view.services.workspaces.active_mut().focus_main_tile(id) {' \
+  $'                                    return;\n                                }\n                                view.leave_command_line(window, cx);\n                                if false {' \
   geode-shell a_right_click_focuses_the_tile_and_never_arms_a_drag
+
+# The tile cell's right press is captured: a module that stops the press's
+# propagation (gpui-component's selectable table, on a cell) cannot hide it.
+run_mutation "shell: the tree tile's right press bubbles" \
+  crates/geode-shell/src/shell/render.rs \
+  $'                        .capture_any_mouse_down(cx.listener(\n                            move |view, event: &MouseDownEvent, window, cx| {' \
+  $'                        .on_any_mouse_down(cx.listener(\n                            move |view, event: &MouseDownEvent, window, cx| {' \
+  geode-shell a_right_press_is_seen_when_the_occupant_stops_propagation
+
+run_mutation "shell: the docked tile's right press bubbles" \
+  crates/geode-shell/src/shell/render.rs \
+  $'                            .capture_any_mouse_down(\n                                // The tree tile\'s right-press focus tail, for a' \
+  $'                            .on_any_mouse_down(\n                                // The tree tile\'s right-press focus tail, for a' \
+  geode-shell a_right_press_on_a_docked_tile_is_seen_when_the_occupant_stops_propagation
+
+# The captured listener hears every button; only a right press opens the menu.
+run_mutation "shell: the tree tile's captured press ignores the button" \
+  crates/geode-shell/src/shell/render.rs \
+  $'cx| {\n                                if event.button != MouseButton::Right {' \
+  $'cx| {\n                                if false && event.button != MouseButton::Right {' \
+  geode-shell a_left_press_never_opens_the_row_menu
+
+run_mutation "shell: the docked tile's captured press ignores the button" \
+  crates/geode-shell/src/shell/render.rs \
+  $'cx| {\n                                    if event.button != MouseButton::Right {' \
+  $'cx| {\n                                    if false && event.button != MouseButton::Right {' \
+  geode-shell a_left_press_never_opens_the_row_menu
+
+# The capture listener runs before the occupant's own listener records its
+# press; reading in the capture phase, with no defer, reads nothing.
+run_mutation "shell: a captured right press reads its context before the occupant records it" \
+  crates/geode-shell/src/shell/row_menu.rs \
+  $'        cx.defer_in(window, move |view, window, cx| {\n            view.open_row_menu_from_press(id, at, window, cx);\n        });' \
+  '        self.open_row_menu_from_press(id, at, window, cx);' \
+  geode-shell a_right_press_is_seen_when_the_occupant_stops_propagation
 
 # A verb outside the menu's own closes it first.
 run_mutation "timeseries mouse: a foreign verb closes the menu" \
@@ -22543,13 +22641,13 @@ run_mutation "pricer names: a stale catalog revives a removed sheet" \
 
 run_mutation "pricer rm: y forgets a sheet opened since the question" \
   crates/geode-pricer/src/tile.rs \
-  '        let refusal = if self.shared.open.borrow().contains(&pending.sheet) {' \
+  '        let refusal = if self.shared.open.borrow().contains(&sheet) {' \
   '        let refusal = if false {' \
   geode-pricer y_refuses_a_sheet_opened_or_retiring_since_the_rm_armed
 
 run_mutation "pricer rm: y forgets a sheet retiring since the question" \
   crates/geode-pricer/src/tile.rs \
-  '        } else if self.shared.retiring.borrow().contains(&pending.sheet) {' \
+  '        } else if self.shared.retiring.borrow().contains(&sheet) {' \
   '        } else if false {' \
   geode-pricer y_refuses_a_sheet_opened_or_retiring_since_the_rm_armed
 
@@ -24092,8 +24190,8 @@ run_mutation "row menu: a right press inside the selection drops it" \
 # press_context takes the press: a later call (a stale beat) opens nothing.
 run_mutation "row menu: the press is not consumed" \
   crates/geode-blotter/src/tile.rs \
-  '        let (row, col) = self.pressed.take()?;' \
-  '        let (row, col) = self.pressed?;' \
+  '            .update(cx, |t, _| t.delegate_mut().pressed_cell.take())?;' \
+  '            .update(cx, |t, _| t.delegate_mut().pressed_cell)?;' \
   geode-blotter a_right_press_moves_the_cursor_and_names_the_column
 
 # A press inside a V selection leaves the cursor where it was; the menu is
@@ -24129,6 +24227,20 @@ run_mutation "row menu: a right press beside the cells opens nothing" \
 
 # The row bubbles after a cell's right press; reporting it again at the old
 # cursor column overwrites the pressed column.
+# The press is recorded in the listener itself (the press_context
+# contract), at the cell and beside the cells.
+run_mutation "row menu: a cell's right press records nothing" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    d.pressed_cell = Some((row_ix, col_ix));' \
+  '                    let _ = (row_ix, col_ix);' \
+  geode-blotter a_right_press_moves_the_cursor_and_names_the_column
+
+run_mutation "row menu: a right press beside the cells records nothing" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    d.pressed_cell = Some((row_ix, col));' \
+  '                    let _ = (row_ix, col);' \
+  geode-blotter a_right_press_beside_the_cells_opens_the_rows_context
+
 run_mutation "row menu: a cell's right press is reported twice" \
   crates/geode-blotter/src/delegate.rs \
   '                    if std::mem::take(&mut d.context_reported) {' \
@@ -24240,14 +24352,14 @@ run_mutation "row menu: a right press hangs the menu at the tile" \
 # are substrings of the other's.
 run_mutation "row menu: a main-tree right press opens nothing" \
   crates/geode-shell/src/shell/render.rs \
-  $'                                let at = event.position;\n                                cx.defer_in(window, move |view, window, cx| {\n                                    view.open_row_menu_from_press(id, at, window, cx);\n                                });' \
-  '                                let _ = event;' \
+  $'is read.\n                                view.open_row_menu_after_press(id, event.position, window, cx);' \
+  $'is read.\n                                let _ = event;' \
   geode-shell a_right_press_opens_the_row_menu_at_the_pointer
 
 run_mutation "row menu: a docked right press opens nothing" \
   crates/geode-shell/src/shell/render.rs \
-  $'                                    let at = event.position;\n                                    cx.defer_in(window, move |view, window, cx| {\n                                        view.open_row_menu_from_press(id, at, window, cx);\n                                    });' \
-  '                                    let _ = event;' \
+  $'                                    cx.notify();\n                                    view.open_row_menu_after_press(id, event.position, window, cx);' \
+  $'                                    cx.notify();\n                                    let _ = event;' \
   geode-shell a_right_press_on_a_docked_tile_opens_the_row_menu_at_the_pointer
 
 # Opened while the scope bar's text field held focus, the menu hands
@@ -24831,8 +24943,8 @@ run_mutation "pricer tile: a refused load loses its kind" \
 
 run_mutation "pricer tile: a refused remove loses its kind" \
   crates/geode-pricer/src/tile.rs \
-  '                        Some(format!("sheet '"'"'{}'"'"' not removed: {refused}", pending.sheet).into());' \
-  '                        Some({ let _ = refused; format!("sheet '"'"'{}'"'"' not removed", pending.sheet).into() });' \
+  '                    self.footer = Some(format!("sheet '"'"'{sheet}'"'"' not removed: {refused}").into());' \
+  '                    self.footer = Some({ let _ = refused; format!("sheet '"'"'{sheet}'"'"' not removed").into() });' \
   geode-pricer a_stopped_remove_names_the_stopped_service
 
 run_mutation "pricer tile: a refused rename forget loses its kind" \
@@ -25197,9 +25309,101 @@ run_mutation "pricer select: a refused package qty step lets the rest land" \
 # catches it) is the editor's, never a cancel.
 run_mutation "pricer select: a press inside the editor's cell cancels it" \
   crates/geode-pricer/src/delegate.rs \
-  $'                if col.is_some()\n                    && d.editor' \
-  $'                if false\n                    && d.editor' \
+  $'        col.is_some()\n            && self\n                .editor' \
+  $'        false\n            && self\n                .editor' \
   geode-pricer a_press_on_the_date_fields_separator_keeps_the_editor_open
+
+# A right press in the open editor's cell is the editor's (its own context
+# menu); it records no row and never cancels the edit.
+run_mutation "pricer right press: the editor's cell reports a row" \
+  crates/geode-pricer/src/delegate.rs \
+  $'                if d.is_editor_cell(row_ix, col) {\n                    return;\n                }\n                d.pressed_row = Some(row_ix);' \
+  '                d.pressed_row = Some(row_ix);' \
+  geode-pricer a_right_press_inside_the_open_editor_keeps_it_open
+
+# A right press records its row for the shell's row menu in the listener
+# itself (the press_context contract): on a cell, and beside the cells.
+run_mutation "pricer right press: a cell's press records nothing" \
+  crates/geode-pricer/src/delegate.rs \
+  '                d.pressed_row = Some(row_ix);' \
+  '                let _ = &d.pressed_row;' \
+  geode-pricer a_right_press_moves_the_cursor_and_names_that_rows_underlying
+
+run_mutation "pricer right press: a press beside the cells records nothing" \
+  crates/geode-pricer/src/delegate.rs \
+  '                    this.delegate_mut().pressed_row = Some(row_ix);' \
+  '                    let _ = this.delegate_mut();' \
+  geode-pricer a_right_press_beside_the_cells_names_that_row
+
+# Inside a V selection the press still closes an open (bulk) editor.
+run_mutation "pricer right press: inside a V selection the bulk editor stays open" \
+  crates/geode-pricer/src/tile.rs \
+  $'                {\n                    self.close_editor(window, cx);\n                    self.table\n                        .update(cx, |t, cx| t.set_right_clicked_row(None, cx));' \
+  $'                {\n                    self.table\n                        .update(cx, |t, cx| t.set_right_clicked_row(None, cx));' \
+  geode-pricer a_right_press_inside_a_rows_selection_closes_the_bulk_editor
+
+# Inside a V selection the table's own right-press row outline is dropped.
+run_mutation "pricer right press: inside a V selection the row outline stays" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    self.close_editor(window, cx);\n                    self.table\n                        .update(cx, |t, cx| t.set_right_clicked_row(None, cx));' \
+  '                    self.close_editor(window, cx);' \
+  geode-pricer a_right_press_inside_a_rows_selection_drops_the_row_outline
+
+# press_context takes the press: a later call (a stale beat) opens nothing.
+run_mutation "pricer right press: the press is not consumed" \
+  crates/geode-pricer/src/tile.rs \
+  '            .update(cx, |t, _| t.delegate_mut().pressed_row.take())?;' \
+  '            .update(cx, |t, _| t.delegate_mut().pressed_row)?;' \
+  geode-pricer a_right_press_moves_the_cursor_and_names_that_rows_underlying
+
+# Inside a V selection holding the pressed row, the cursor and the
+# selection stay.
+run_mutation "pricer right press: a press inside a V selection clears it" \
+  crates/geode-pricer/src/tile.rs \
+  '                    .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row))' \
+  '                    .is_some_and(|r| false && r.contains_row(row))' \
+  geode-pricer a_right_press_inside_a_rows_selection_keeps_it
+
+# Only a row (V) selection is kept; a v block holding the row clears.
+run_mutation "pricer right press: a v block holding the row is kept" \
+  crates/geode-pricer/src/tile.rs \
+  '                    .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row))' \
+  '                    .is_some_and(|r| r.contains_row(row))' \
+  geode-pricer a_right_press_outside_the_selection_clears_it
+
+# A double-click on a package row's tree cell toggles it, as space does.
+run_mutation "pricer double-click: a package's tree cell toggles nothing" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    {\n                        self.tree_verb(None, cx);\n                    }\n                    self.rebuild_chrome();' \
+  $'                    {\n                        let _ = &cx;\n                    }\n                    self.rebuild_chrome();' \
+  geode-pricer double_clicking_a_packages_tree_cell_toggles_it
+
+# Only a package's own row: a leg's tree cell would collapse its package
+# through tree_verb's leaf-to-parent rule.
+run_mutation "pricer double-click: a leg's tree cell collapses its package" \
+  crates/geode-pricer/src/tile.rs \
+  '                            Some(GridRowKind::Package { .. })
+                        )
+                    {' \
+  '                            Some(GridRowKind::Package { .. })
+                        ) || true
+                    {' \
+  geode-pricer double_clicking_a_legs_tree_cell_does_not_collapse_its_package
+
+# A double-click whose first press was the chevron's toggles once.
+run_mutation "pricer double-click: a chevron's double-click toggles twice" \
+  crates/geode-pricer/src/tile.rs \
+  '                    if !chevron_toggled' \
+  '                    if true' \
+  geode-pricer a_chevron_double_click_while_the_bar_is_open_keeps_the_package
+
+# The pricer's TileContent forwarder is the production press_context seam;
+# the trait default (None) would leave the pricer's row menu dead.
+run_mutation "pricer right press: the content drops press_context" \
+  crates/geode-pricer/src/content.rs \
+  '        self.tile.update(cx, |t, cx| t.press_context(cx))' \
+  '        { let _ = cx; None }' \
+  geode-app a_right_press_on_a_pricer_line_opens_its_row_menu
 
 # A sheet replace clears the selection deliberately: line ids restart per
 # sheet, and a lost-anchor footer would misreport it.
@@ -25694,14 +25898,14 @@ run_mutation "pricer sheets: the name click does not toggle the picker" \
 # A pick takes `:e`'s route, refusals included.
 run_mutation "pricer sheets: an open pick skips :e's refusals" \
   crates/geode-pricer/src/tile.rs \
-  '            PickerPurpose::Open => self.edit_sheet(name, cx),' \
+  '            PickerPurpose::Open => self.edit_sheet(name, window, cx),' \
   '            PickerPurpose::Open => self.switch_sheet(name, true, cx),' \
-  geode-pricer picking_a_sheet_open_elsewhere_refuses_like_colon_e
+  geode-pricer picking_a_sheet_open_elsewhere_asks_like_colon_e
 
 run_mutation "pricer sheets: a remove pick opens the sheet" \
   crates/geode-pricer/src/tile.rs \
   '            PickerPurpose::Remove => self.arm_remove(name, window, cx),' \
-  '            PickerPurpose::Remove => self.edit_sheet(name, cx),' \
+  '            PickerPurpose::Remove => self.edit_sheet(name, window, cx),' \
   geode-pricer the_remove_picker_arms_colon_rms_confirm
 
 run_mutation "pricer sheets: tab does not complete the picker" \
@@ -26033,8 +26237,12 @@ run_mutation "mdmenu: a rebind does not reach the menu" \
 # against a scope it never followed.
 run_mutation "following: the door reads the tile's own lane" \
   crates/geode-tile/src/following.rs \
-  '        self.frame.read(self.cx).versions()' \
-  '        self.frame.entity().read(self.cx).shared().versions()' \
+  'impl Barrier for FrameDoor<'"'"'_> {
+    fn current(&self) -> FrameVersions {
+        self.frame.read(self.cx).versions()' \
+  'impl Barrier for FrameDoor<'"'"'_> {
+    fn current(&self) -> FrameVersions {
+        self.frame.entity().read(self.cx).shared().versions()' \
   geode-tile the_door_reads_the_tiles_own_lane
 
 run_mutation "following: KeepActed remembers what a local refusal answered" \
@@ -30130,7 +30338,7 @@ run_mutation "link: the chip's fill is the guarded color" \
 
 # One group both ways is one chip; the tooltip names the chooser's action,
 # the only place the chip's keyboard route is shown; the chip is as tall as
-# the chips beside it and takes no press.
+# the chips beside it, and a press on it queues the chooser on its tile.
 run_mutation "link: one group is one chip" \
   crates/geode-tile/src/header.rs \
   '        (Some(follow), Some(emit)) if follow == emit => [Some(chip(follow, LinkRole::Both)), None],' \
@@ -30158,39 +30366,64 @@ run_mutation "link: the chip is as tall as its neighbours" \
         .text_color(paint.text)' \
   geode-tile the_link_chip_paints_in_the_fixed_tail
 
-run_mutation "link: the chip takes no press" \
+run_mutation "link: a chip press queues the chooser" \
   crates/geode-tile/src/header.rs \
-  '        .debug_selector(move || format!("tile-link-{tile}-{letter}-{role}"))
-        .child(letter)' \
-  '        .debug_selector(move || format!("tile-link-{tile}-{letter}-{role}"))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(letter)' \
-  geode-tile a_press_on_the_link_chip_reaches_the_tile
+  '                    f.request_link_chooser(tile);' \
+  '                    let _ = tile;' \
+  geode-tile a_press_on_the_link_chip_queues_the_chooser_on_its_tile
+
+run_mutation "link: a chip press stops at the chip" \
+  crates/geode-tile/src/header.rs \
+  '            move |_, window, cx| {
+                cx.stop_propagation();
+                window.prevent_default();
+                let Some(tile) = frame.tile() else {' \
+  '            move |_, window, cx| {
+                window.prevent_default();
+                let Some(tile) = frame.tile() else {' \
+  geode-tile a_press_on_the_link_chip_queues_the_chooser_on_its_tile
+
+# The shell drains a chip's request: it focuses the chip's tile first, so
+# the chooser opens on that tile and not on the one that held focus.
+run_mutation "link: the frame observer drains a chip request" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            self.open_link_chooser_on(tile, window, cx);' \
+  '            let _ = tile;' \
+  geode-shell a_link_chip_request_focuses_its_tile_and_opens_the_chooser
+
+run_mutation "link: a chip request focuses its tile" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if !self.focus_pressed_tile(tile) {
+            return;
+        }
+        self.leave_command_line(window, cx);' \
+  '        self.leave_command_line(window, cx);' \
+  geode-shell a_link_chip_request_focuses_its_tile_and_opens_the_chooser
 
 # Every module's header passes the frame's answer to the shared cluster;
 # a module that drops the line shows no chip for a group it is in.
 run_mutation "link: the blotter's header shows the chip" \
   crates/geode-blotter/src/tile.rs \
   '        cluster.links = geode_tile::header::link_chips(&self.frame, cx);' \
-  '        cluster.links = [None, None];' \
+  '        cluster.links = Default::default();' \
   geode-blotter the_header_shows_the_link_group_the_tile_follows
 
 run_mutation "link: the pricer's header shows the chip" \
   crates/geode-pricer/src/tile.rs \
   '                links: geode_tile::header::link_chips(&self.frame, cx),' \
-  '                links: [None, None],' \
+  '                links: Default::default(),' \
   geode-pricer the_header_shows_the_link_group_the_tile_follows
 
 run_mutation "link: the market-data header shows the chip" \
   crates/geode-marketdata/src/tile.rs \
   '            geode_tile::header::link_chips(&self.frame, cx),' \
-  '            [None, None],' \
+  '            Default::default(),' \
   geode-marketdata the_header_shows_the_link_group_the_tile_follows
 
 run_mutation "link: the timeseries header shows the chip" \
   crates/geode-timeseries/src/tile/mod.rs \
   '                geode_tile::header::link_chips(&self.frame, cx),' \
-  '                [None, None],' \
+  '                Default::default(),' \
   geode-timeseries the_header_shows_the_link_group_the_tile_follows
 
 # A blotter posts its cursor row's one underlying, can emit before it has
@@ -32127,6 +32360,7 @@ run_mutation "volslice: the barrier sees one arrival for both documents" \
                         &underlying.clone(),
                         Ok(Arc::new(Fetched {
                             underlying,
+                            asked: self.following.acted(),
                             cvi,
                             chain: Ok(Vec::new()),
                         })),
@@ -32281,16 +32515,117 @@ run_mutation "volslice: a refused show from the draw arrives deferred" \
 # A close from inside the shell's draw defers its arrival the same way.
 run_mutation "volslice: a close from the draw arrives deferred" \
   crates/geode-volslice/src/tile/data.rs \
-  '        self.following.close(
-            &mut DeferredDoor {
-                frame: &self.frame,
-                cx,
-            },
-            key,
-        );' \
-  '        self.following
-            .close(&mut FrameDoor::new(&self.frame, cx), key);' \
+  '            .close(&mut DeferredDoor::new(&self.frame, cx), key);' \
+  '            .close(&mut FrameDoor::new(&self.frame, cx), key);' \
   geode-volslice a_close_from_the_draw_releases_the_flip_to_frame_observers
+
+# A follower whose group scope moves but still names the loaded underlying
+# answers the flip without refetching both documents.
+run_mutation "volslice: a scope change keeping the underlying asks nothing" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        let scope_only = read.as_of == now.as_of && read.data == now.data;' \
+  '        let scope_only = false;' \
+  geode-volslice a_group_scope_change_keeping_the_underlying_releases_the_flip_unasked
+
+# Only documents read successfully let the skip apply: a failed CVI read
+# installs the chain beside a notice and must be retried by the next scope
+# change, since `u` and `:underlying` are refused while following.
+run_mutation "volslice: a failed cvi read is retried by a scope change" \
+  crates/geode-volslice/src/tile/data.rs \
+  '            .filter(|_| fetched.cvi.is_ok() && fetched.chain.is_ok());' \
+  '            .filter(|_| fetched.chain.is_ok());' \
+  geode-volslice a_failed_cvi_read_is_retried_by_a_scope_change_keeping_the_underlying
+
+# A refused read after an as-of move keeps the previous as-of's picture for
+# the same underlying under the newer asked versions: the skip compares
+# what was read, never what was last asked.
+run_mutation "volslice: a refused chain after an as-of move is retried by a scope change" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        let Some(read) = self.loaded_ok else {' \
+  '        let Some(read) = self.following.acted() else {' \
+  geode-volslice a_refused_chain_after_an_as_of_move_is_retried_by_a_scope_change
+
+# A refused read under the very versions the picture answers still clears
+# `loaded_ok`, so the refusal is retried rather than skipped.
+run_mutation "volslice: a refused read under unmoved versions is retried by a scope change" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        self.loaded_ok = None;
+        if self.loaded_for.as_deref() == Some(asked) {' \
+  '        if self.loaded_for.as_deref() == Some(asked) {' \
+  geode-volslice a_refused_read_under_unmoved_versions_is_retried_by_a_scope_change
+
+# A group change recorded while hidden cleared the model; the show must ask
+# again rather than skip on documents read for the old group.
+run_mutation "volslice: a group change while hidden asks again on show" \
+  crates/geode-volslice/src/tile/data.rs \
+  '        self.loaded_ok = None;
+        cx.notify();' \
+  '        cx.notify();' \
+  geode-volslice a_group_change_while_hidden_asks_again_on_show
+
+# A show that skips the refetch still answers a waiting flip, from the draw.
+run_mutation "volslice: a show keeping the underlying answers the flip deferred" \
+  crates/geode-volslice/src/tile/data.rs \
+  '                    .self_arrive(&mut DeferredDoor::new(&self.frame, cx), key, now);' \
+  '                    .self_arrive(&mut FrameDoor::new(&self.frame, cx), key, now);' \
+  geode-volslice a_show_keeping_the_underlying_answers_the_flip_from_the_draw
+
+# ...and one naming another underlying still refetches.
+run_mutation "volslice: a scope change naming another underlying refetches" \
+  crates/geode-volslice/src/tile/data.rs \
+  '            .is_some_and(|u| self.loaded_for.as_deref() == Some(u.as_str()));' \
+  '            .is_some();' \
+  geode-volslice a_group_scope_change_flips_the_follower
+
+# The deferred door's arrival notifies the frame when it releases the
+# barrier: deferral alone would land the release where nobody hears it.
+run_mutation "deferred arrival: a deferred release notifies the frame" \
+  crates/geode-tile/src/following.rs \
+  '                if frame.arrived(key, versions) {
+                    cx.notify();
+                }' \
+  '                let _ = frame.arrived(key, versions);' \
+  geode-tile a_deferred_arrival_lands_after_the_cycle_and_notifies_its_release
+
+# The shell calls `closed` and `set_visible` inside its render, where a
+# notify to the frame is dropped: each module's arrivals from those doors
+# go through the deferred door, or the release is never heard and every
+# other tile waits for the barrier's deadline.
+run_mutation "deferred arrival: a blotter close from the draw is heard" \
+  crates/geode-blotter/src/tile.rs \
+  '            .close(&mut DeferredDoor::new(&self.frame, cx), key);' \
+  '            .close(&mut FrameDoor::new(&self.frame, cx), key);' \
+  geode-blotter a_close_from_the_draw_releases_the_flip_to_frame_observers
+
+run_mutation "deferred arrival: a blotter refused show from the draw is heard" \
+  crates/geode-blotter/src/tile.rs \
+  '                self.requery_with(Arrival::Deferred, cx);' \
+  '                self.requery_with(Arrival::Now, cx);' \
+  geode-blotter a_refused_show_from_the_draw_releases_the_flip_to_frame_observers
+
+run_mutation "deferred arrival: a timeseries close from the draw is heard" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            .close(&mut DeferredDoor::new(&self.frame, cx), key);' \
+  '            .close(&mut FrameDoor::new(&self.frame, cx), key);' \
+  geode-timeseries a_close_from_the_draw_releases_the_flip_to_frame_observers
+
+run_mutation "deferred arrival: a timeseries refused show from the draw is heard" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '                self.requery_with(Arrival::Deferred, cx);' \
+  '                self.requery_with(Arrival::Now, cx);' \
+  geode-timeseries a_refused_show_from_the_draw_releases_the_flip_to_frame_observers
+
+run_mutation "deferred arrival: a market-data close from the draw is heard" \
+  crates/geode-marketdata/src/tile.rs \
+  '            .close(&mut DeferredDoor::new(&self.frame, cx), key);' \
+  '            .close(&mut FrameDoor::new(&self.frame, cx), key);' \
+  geode-marketdata a_close_from_the_draw_releases_the_flip_to_frame_observers
+
+run_mutation "deferred arrival: a market-data refused show from the draw is heard" \
+  crates/geode-marketdata/src/tile.rs \
+  '                self.requery_with(Arrival::Deferred, cx);' \
+  '                self.requery_with(Arrival::Now, cx);' \
+  geode-marketdata a_refused_show_from_the_draw_releases_the_flip_to_frame_observers
 
 # An empty state is the muted status tone; a failure or refusal is danger.
 run_mutation "volslice: an empty state is not painted as a failure" \

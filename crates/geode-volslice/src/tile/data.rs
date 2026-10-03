@@ -22,8 +22,8 @@ use geode_core::document::{DocumentRows, join_key};
 use geode_core::link::underlying_of;
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::vol::VolSliceOutcome;
-use geode_shell::frame::{FrameRef, FrameVersions};
-use geode_tile::following::{Barrier, Delivered, FrameDoor, Promotion, Unanswered};
+use geode_shell::frame::FrameVersions;
+use geode_tile::following::{Arrival, DeferredDoor, Delivered, FrameDoor, Promotion, Unanswered};
 use gpui::{App, Context};
 
 use super::VolsliceTile;
@@ -35,6 +35,8 @@ use crate::core::model::{Loaded, strip};
 #[derive(Debug)]
 pub(super) struct Fetched {
     underlying: String,
+    /// The versions the pair was asked under.
+    asked: Option<FrameVersions>,
     cvi: Result<Option<Arc<DocumentRows>>, String>,
     chain: Result<Vec<ChainExpiry>, String>,
 }
@@ -53,46 +55,6 @@ pub(super) enum Fetch {
         underlying: String,
         cvi: Result<Option<Arc<DocumentRows>>, String>,
     },
-}
-
-/// Where an arrival the tile makes without an outcome goes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Arrival {
-    /// Through the frame now, notifying it when the arrival releases the
-    /// barrier.
-    Now,
-    /// After the current effect cycle: `set_visible` runs while the shell
-    /// draws, and a notify to the frame sent during that draw is dropped,
-    /// so every other tile would wait for the barrier's deadline.
-    Deferred,
-}
-
-/// [`FrameDoor`] with its arrival deferred past the current draw. Reads
-/// answer now; `arrive` reports `false` since the arrival has not happened
-/// yet, which no caller here depends on.
-struct DeferredDoor<'a> {
-    frame: &'a FrameRef,
-    cx: &'a mut App,
-}
-
-impl Barrier for DeferredDoor<'_> {
-    fn current(&self) -> FrameVersions {
-        self.frame.read(self.cx).versions()
-    }
-    fn wants(&self, key: QueryKey, versions: FrameVersions) -> bool {
-        self.frame.read(self.cx).barrier_wants(key, versions)
-    }
-    fn arrive(&mut self, key: QueryKey, versions: FrameVersions) -> bool {
-        let frame = self.frame.clone();
-        self.cx.defer(move |cx| {
-            frame.update(cx, |f, cx| {
-                if f.arrived(key, versions) {
-                    cx.notify();
-                }
-            });
-        });
-        false
-    }
 }
 
 /// The counters the documents depend on. The as-of and the watched
@@ -148,21 +110,8 @@ impl VolsliceTile {
         cx: &mut Context<Self>,
     ) {
         let key = self.key();
-        match arrival {
-            Arrival::Now => {
-                self.following
-                    .submitted(ok, unanswered, &mut FrameDoor::new(&self.frame, cx), key)
-            }
-            Arrival::Deferred => self.following.submitted(
-                ok,
-                unanswered,
-                &mut DeferredDoor {
-                    frame: &self.frame,
-                    cx,
-                },
-                key,
-            ),
-        }
+        self.following
+            .submitted(ok, unanswered, &mut arrival.door(&self.frame, cx), key);
     }
 
     pub(crate) fn requery(&mut self, cx: &mut Context<Self>) {
@@ -181,6 +130,7 @@ impl VolsliceTile {
             // old underlying is stale.
             self.loaded = Loaded::default();
             self.loaded_for = None;
+            self.loaded_ok = None;
             self.loaded_gen += 1;
             self.strip.clear();
             self.clear_model();
@@ -284,6 +234,9 @@ impl VolsliceTile {
                 let asked = underlying.clone();
                 let fetched = Fetched {
                     underlying,
+                    // The tag is current, so `acted` is still the versions
+                    // this pair was asked under.
+                    asked: self.following.acted(),
                     cvi,
                     chain,
                 };
@@ -330,8 +283,10 @@ impl VolsliceTile {
 
     /// A read for `asked` was refused or failed. The last good picture
     /// stays while it is `asked`'s; another underlying's goes, documents,
-    /// strip and curves, so none of it sits under the new name.
+    /// strip and curves, so none of it sits under the new name. Either way
+    /// the documents are no longer a good answer to the question asked.
     fn picture_failed_for(&mut self, asked: &str) {
+        self.loaded_ok = None;
         if self.loaded_for.as_deref() == Some(asked) {
             return;
         }
@@ -372,6 +327,11 @@ impl VolsliceTile {
             }
         };
         self.loaded_for = Some(u.clone());
+        // A failed read installs beside a notice: shown, but not an answer
+        // a scope change may keep.
+        self.loaded_ok = fetched
+            .asked
+            .filter(|_| fetched.cvi.is_ok() && fetched.chain.is_ok());
         self.loaded_gen += 1;
         self.compose_draft();
         self.restrip(cx);
@@ -490,6 +450,37 @@ impl VolsliceTile {
         cx.notify();
     }
 
+    /// Whether the documents must be asked for again: a counter they follow
+    /// moved since the last ask. A followed group's scope change that still
+    /// names the underlying whose documents are loaded is not one, when
+    /// nothing is out or held and neither the as-of nor a watched
+    /// publication moved since the loaded documents were read successfully
+    /// (`loaded_ok`): the documents depend on nothing else, and refetching
+    /// both would hold the flip behind two reads that answer what is
+    /// already on screen. Compared with what was read, not with what was
+    /// last asked: a failed or refused read leaves an older or partial
+    /// picture on screen under the newer `acted`, and skipping then would
+    /// leave the failure standing with no other retry while following. The
+    /// caller then self-arrives, which answers the flip under the new
+    /// versions; `acted` keeps the old ones, so each later notification
+    /// repeats this check rather than a fetch.
+    fn documents_stale(&self, now: FrameVersions, following: bool, cx: &App) -> bool {
+        if !self.following.follows_changed(now, differs(following)) {
+            return false;
+        }
+        let Some(read) = self.loaded_ok else {
+            return true;
+        };
+        let scope_only = read.as_of == now.as_of && read.data == now.data;
+        let settled = !self.following.in_flight()
+            && !self.following.is_staged()
+            && matches!(self.fetch, Fetch::Idle);
+        let same_underlying = self
+            .underlying(cx)
+            .is_some_and(|u| self.loaded_for.as_deref() == Some(u.as_str()));
+        !(scope_only && settled && same_underlying)
+    }
+
     /// The frame observer.
     pub(super) fn on_frame_changed(&mut self, cx: &mut Context<Self>) {
         if self.sync_following(cx) {
@@ -509,7 +500,7 @@ impl VolsliceTile {
         if !self.visible {
             return;
         }
-        if self.following.follows_changed(now, differs(following)) {
+        if self.documents_stale(now, following, cx) {
             // The barrier is answered on delivery, under the versions this
             // request was made with.
             self.requery(cx);
@@ -540,6 +531,10 @@ impl VolsliceTile {
         self.clear_model();
         self.fetch = Fetch::Idle;
         self.following.reset();
+        // The model is gone, so the documents no longer answer anything on
+        // screen: a hidden tile records this change and shows later, when
+        // only `loaded_ok` decides whether it asks again.
+        self.loaded_ok = None;
         cx.notify();
         true
     }
@@ -602,8 +597,13 @@ impl VolsliceTile {
             let changed = self.sync_following(cx);
             let now = self.versions(cx);
             let following = self.is_following(cx);
-            if changed || self.following.follows_changed(now, differs(following)) {
+            if changed || self.documents_stale(now, following, cx) {
                 self.requery_with(Arrival::Deferred, cx);
+            } else {
+                // Nothing to ask, but a flip may be waiting on this tile.
+                let key = self.key();
+                self.following
+                    .self_arrive(&mut DeferredDoor::new(&self.frame, cx), key, now);
             }
             self.sync_board(cx);
         }
@@ -619,12 +619,7 @@ impl VolsliceTile {
     pub fn closed(&mut self, cx: &mut Context<Self>) {
         let key = self.key();
         self.data.cancel(key);
-        self.following.close(
-            &mut DeferredDoor {
-                frame: &self.frame,
-                cx,
-            },
-            key,
-        );
+        self.following
+            .close(&mut DeferredDoor::new(&self.frame, cx), key);
     }
 }

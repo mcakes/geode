@@ -26,7 +26,7 @@ use geode_core::link::{DraftMark, Group};
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::{FrameRef, PublicationWatch};
+use geode_shell::frame::{FrameRef, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::link::BoardWatch;
 use geode_shell::module::StackHandle;
@@ -102,6 +102,12 @@ pub struct VolsliceTile {
     loaded: Loaded,
     /// The underlying whose documents `loaded` holds.
     loaded_for: Option<String>,
+    /// The versions the documents in `loaded` were asked under, when both
+    /// reads answered: `None` after a failed or refused read, whatever the
+    /// picture kept, and while nothing is loaded. Only documents read
+    /// successfully under the current as-of and publications let a scope
+    /// change that keeps the underlying skip the refetch.
+    loaded_ok: Option<FrameVersions>,
     /// Moves on every change to `loaded` (documents installed or cleared,
     /// a draft joining or leaving, a mark changing), so a model can be told
     /// apart from the documents now on screen even under one underlying.
@@ -275,6 +281,7 @@ impl VolsliceTile {
             last_following: None,
             loaded: Loaded::default(),
             loaded_for: None,
+            loaded_ok: None,
             loaded_gen: 0,
             strip: Vec::new(),
             plan: None,
