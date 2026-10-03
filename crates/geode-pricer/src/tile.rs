@@ -3346,9 +3346,9 @@ impl PricerTile {
                 self.open_entry(verb == "add_below", window, cx);
                 return true;
             }
-            "edit" | "edit_start" => {
-                let caret = if verb == "edit_start" {
-                    EditCaret::Start
+            "edit" | "edit_select" => {
+                let caret = if verb == "edit_select" {
+                    EditCaret::Select
                 } else {
                     EditCaret::End
                 };
@@ -10252,7 +10252,7 @@ pub(crate) mod tests {
     // ---- the cell editor ----
 
     #[gpui::test]
-    fn edit_keys_place_the_caret_at_the_requested_end(cx: &mut gpui::TestAppContext) {
+    fn edit_keys_select_the_text_or_place_the_caret_at_the_end(cx: &mut gpui::TestAppContext) {
         use geode_shell::keymap::{MatchResult, Matcher, build_keymap, parse_keystroke};
         let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C"]);
         let mut registry = geode_shell::actions::ActionRegistry::default();
@@ -10267,7 +10267,7 @@ pub(crate) mod tests {
             if let Some(verb) = selection {
                 h.dispatch(&mut vcx, verb, None);
             }
-            for (key, at_start) in [("shift+i", true), ("i", false), ("enter", false)] {
+            for (key, selects) in [("shift+i", true), ("i", false), ("enter", false)] {
                 let stack = [h.tile.read_with(&vcx, |t, _| t.key_context())];
                 let ks = parse_keystroke(key, geode_shell::defaults::default_mod()).unwrap();
                 let MatchResult::Matched { action, count } =
@@ -10282,13 +10282,13 @@ pub(crate) mod tests {
                 });
                 assert_eq!(input.read_with(&vcx, |s, _| s.value().to_string()), "1");
                 assert_eq!(
-                    input.read_with(&vcx, |s, _| s.cursor()),
-                    if at_start { 0 } else { 1 }
+                    input.read_with(&vcx, |s, _| s.selected_range()),
+                    if selects { 0..1 } else { 1..1 }
                 );
                 vcx.simulate_input("7");
                 assert_eq!(
                     editor_text(&h, &vcx).as_deref(),
-                    Some(if at_start { "71" } else { "17" })
+                    Some(if selects { "7" } else { "17" })
                 );
                 h.dispatch(&mut vcx, "cancel", None);
                 assert_eq!(h.cell(&vcx, 0, "qty"), "1", "cancel keeps the cell");

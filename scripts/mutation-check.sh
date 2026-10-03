@@ -28917,68 +28917,68 @@ run_mutation "fuzzy find: a pick survives a re-rank by identity" \
   '            .and(Some(0))' \
   geode-shell fzf_tree_folds_preserve_candidates_and_query_edits_reopen_matches
 
-# Text edit entry keeps the cell value and chooses only the initial caret.
-run_mutation "edit caret: start entry leaves the caret at the end" \
+# Text edit entry keeps the cell value; `I` selects it all, `i` puts the caret at the end.
+run_mutation "edit caret: select entry leaves the caret at the start" \
   crates/geode-tile/src/edit.rs \
+  '            input.set_selected_range(0..len, cx);' \
   '            input.set_selected_range(0..0, cx);' \
-  '            input.set_selected_range(input.value().len()..input.value().len(), cx);' \
-  geode-marketdata edit_keys_place_the_caret_at_the_requested_end
+  geode-marketdata edit_keys_select_the_text_or_place_the_caret_at_the_end
 
-run_mutation "edit caret: marketdata start action opens at the end" \
+run_mutation "edit caret: marketdata select action opens at the end" \
   crates/geode-marketdata/src/tile.rs \
-  'let caret = if verb == "edit_start" {
-                    EditCaret::Start' \
-  'let caret = if verb == "edit_start" {
+  'let caret = if verb == "edit_select" {
+                    EditCaret::Select' \
+  'let caret = if verb == "edit_select" {
                     EditCaret::End' \
-  geode-marketdata edit_keys_place_the_caret_at_the_requested_end
+  geode-marketdata edit_keys_select_the_text_or_place_the_caret_at_the_end
 
 run_mutation "edit caret: marketdata normal binds I to end placement" \
   crates/geode-marketdata/src/content.rs \
   'context = "marketdata && mode == normal"
 [bindings.keys]
-"shift+i" = "marketdata::edit_start"' \
+"shift+i" = "marketdata::edit_select"' \
   'context = "marketdata && mode == normal"
 [bindings.keys]
 "shift+i" = "marketdata::edit"' \
-  geode-marketdata edit_keys_place_the_caret_at_the_requested_end
+  geode-marketdata edit_keys_select_the_text_or_place_the_caret_at_the_end
 
 run_mutation "edit caret: marketdata visual binds I to end placement" \
   crates/geode-marketdata/src/content.rs \
   'context = "marketdata && mode == visual"
 [bindings.keys]
-"shift+i" = "marketdata::edit_start"' \
+"shift+i" = "marketdata::edit_select"' \
   'context = "marketdata && mode == visual"
 [bindings.keys]
 "shift+i" = "marketdata::edit"' \
-  geode-marketdata edit_keys_place_the_caret_at_the_requested_end
+  geode-marketdata edit_keys_select_the_text_or_place_the_caret_at_the_end
 
-run_mutation "edit caret: pricer start action opens at the end" \
+run_mutation "edit caret: pricer select action opens at the end" \
   crates/geode-pricer/src/tile.rs \
-  'let caret = if verb == "edit_start" {
-                    EditCaret::Start' \
-  'let caret = if verb == "edit_start" {
+  'let caret = if verb == "edit_select" {
+                    EditCaret::Select' \
+  'let caret = if verb == "edit_select" {
                     EditCaret::End' \
-  geode-pricer edit_keys_place_the_caret_at_the_requested_end
+  geode-pricer edit_keys_select_the_text_or_place_the_caret_at_the_end
 
 run_mutation "edit caret: pricer normal binds I to end placement" \
   crates/geode-pricer/src/content.rs \
   'context = "pricer && mode == normal"
 [bindings.keys]
-"shift+i" = "pricer::edit_start"' \
+"shift+i" = "pricer::edit_select"' \
   'context = "pricer && mode == normal"
 [bindings.keys]
 "shift+i" = "pricer::edit"' \
-  geode-pricer edit_keys_place_the_caret_at_the_requested_end
+  geode-pricer edit_keys_select_the_text_or_place_the_caret_at_the_end
 
 run_mutation "edit caret: pricer visual binds I to end placement" \
   crates/geode-pricer/src/content.rs \
   'context = "pricer && mode == visual"
 [bindings.keys]
-"shift+i" = "pricer::edit_start"' \
+"shift+i" = "pricer::edit_select"' \
   'context = "pricer && mode == visual"
 [bindings.keys]
 "shift+i" = "pricer::edit"' \
-  geode-pricer edit_keys_place_the_caret_at_the_requested_end
+  geode-pricer edit_keys_select_the_text_or_place_the_caret_at_the_end
 
 run_mutation "nemo: ids are not encoded" \
   crates/geode-nemo/src/lib.rs \

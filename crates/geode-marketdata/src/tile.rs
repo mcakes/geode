@@ -2426,9 +2426,9 @@ impl MarketDataTile {
                     false
                 }
             }
-            "edit" | "edit_start" => {
-                let caret = if verb == "edit_start" {
-                    EditCaret::Start
+            "edit" | "edit_select" => {
+                let caret = if verb == "edit_select" {
+                    EditCaret::Select
                 } else {
                     EditCaret::End
                 };
@@ -16506,7 +16506,7 @@ edits = [["2026-11-20", "-1", 9.5]]
     }
 
     #[gpui::test]
-    fn edit_keys_place_the_caret_at_the_requested_end(cx: &mut gpui::TestAppContext) {
+    fn edit_keys_select_the_text_or_place_the_caret_at_the_end(cx: &mut gpui::TestAppContext) {
         let (mut vcx, shell, tile, _rx) = open_in_shell(cx);
         let tag = tile.read_with(&vcx, |t, _| t.following.tag());
         let outcome = QueryOutcome {
@@ -16525,7 +16525,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             if !selection.is_empty() {
                 type_keys(&mut vcx, selection);
             }
-            for (key, at_start) in [("shift-i", true), ("i", false), ("enter", false)] {
+            for (key, selects) in [("shift-i", true), ("i", false), ("enter", false)] {
                 type_keys(&mut vcx, key);
                 let input = tile.read_with(&vcx, |t, _| match &t.editor {
                     Some(Editing {
@@ -16537,19 +16537,31 @@ edits = [["2026-11-20", "-1", 9.5]]
                 let before = input.read_with(&vcx, |s, _| s.value().to_string());
                 assert!(!before.is_empty());
                 assert_eq!(
-                    input.read_with(&vcx, |s, _| s.cursor()),
-                    if at_start { 0 } else { before.len() },
+                    input.read_with(&vcx, |s, _| s.selected_range()),
+                    if selects {
+                        0..before.len()
+                    } else {
+                        before.len()..before.len()
+                    },
                     "{selection} {key}"
                 );
+                if selects {
+                    type_keys(&mut vcx, "backspace");
+                    assert_eq!(
+                        input.read_with(&vcx, |s, _| s.value().to_string()),
+                        "",
+                        "one backspace clears the selected text"
+                    );
+                }
                 vcx.simulate_input("7");
                 assert_eq!(
                     input.read_with(&vcx, |s, _| s.value().to_string()),
-                    if at_start {
-                        format!("7{before}")
+                    if selects {
+                        "7".to_string()
                     } else {
                         format!("{before}7")
                     },
-                    "typing must insert without replacing the cell text"
+                    "{selection} {key}"
                 );
                 type_keys(&mut vcx, "escape");
             }

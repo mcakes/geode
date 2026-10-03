@@ -207,7 +207,8 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
 ## Input and popup contracts
 
 `i` and Enter open the cell editor with the caret at the end of its text;
-`I` (`shift+i`, `marketdata::edit_start`) opens it at the start. Both routes
+`I` (`shift+i`, `marketdata::edit_select`) opens it with the whole text
+selected, so typing replaces it and one backspace clears it. Both routes
 work in normal and selection modes and share the same edit guards. Text
 attributes follow the same rule; date fields and choice pickers open as usual.
 Text placement uses `geode_tile::edit::EditCaret`.

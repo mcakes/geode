@@ -70,8 +70,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 ## Invariants
 
 - `i` and Enter open text cell editors at the end; `I` (`shift+i`,
-  `pricer::edit_start`) opens them at the start, in normal and selection
-  modes. Both routes share the same edit guards; date fields and choice
+  `pricer::edit_select`) opens them with the whole text selected, in normal
+  and selection modes. Both routes share the same edit guards; date fields and choice
   pickers open as usual. Text placement uses `geode_tile::edit::EditCaret`.
 - A scope the pricer cannot evaluate refuses whole and hides nothing: an
   expression column `pricer` lacks, or an evaluator error on any one line

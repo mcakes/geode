@@ -594,8 +594,8 @@ to the grid at that column, uncounted to the first or last row and counted to
 row N. A live selection's motions clamp and never enter the strip.
 
 `i` and Enter open a cell or header attribute editor with the caret at the
-end of its text. `I` (`shift+i`) opens it at the start without selecting the
-text. Both routes also work over a selection and use the same edit guards;
+end of its text. `I` (`shift+i`) opens it with the whole text selected, so
+typing replaces it and one backspace clears it. Both routes also work over a selection and use the same edit guards;
 date fields and choice pickers open as usual.
 
 `[ui] line_numbers` adds a gutter beside the grid's pinned column: the row
@@ -1563,7 +1563,7 @@ Normal-mode keys:
 | `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end; a package typed inside a package lands just after that package) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
 | `shift+o` | The same bar, but the first line lands above the cursor row (on a leg, before that leg in its package; on a package or a top-level line, before it; on the first row, `at top`; on a grouping row, `at end`); each further line lands after the one just added, so a typed run reads top to bottom |
 | `i`, `enter`, double-click | Edit the cell in place (a double-click on a package's tree cell, or anywhere on a group row, opens or closes it instead) with the caret at the end of text; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
-| `I` (`shift+i`) | Edit the cell with the caret at the start of text, without selecting it; date fields and choice pickers open as usual |
+| `I` (`shift+i`) | Edit the cell with its whole text selected: typing replaces it, one backspace clears it; date fields and choice pickers open as usual |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
 | `y y` / `y c` | Copy the shorthand of what the row shows (and remember it for `p`): a line or package its own, a grouping row its lines, a split package row its legs under that group / the column's cells |

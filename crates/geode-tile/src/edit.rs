@@ -3,15 +3,16 @@
 use gpui::{Context, SharedString, Window};
 use gpui_component::input::InputState;
 
-/// Where typing begins when a text cell opens for editing.
+/// How a text cell's editor opens: caret after the text, or the whole
+/// text selected so typing replaces it and one backspace clears it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditCaret {
-    Start,
+    Select,
     End,
 }
 
 impl EditCaret {
-    /// Seed an editor without selecting or changing the cell's text.
+    /// Seed an editor with the cell's text, unchanged.
     /// The tile retains ownership of focus and the editor's lifetime.
     pub fn seed(
         self,
@@ -21,8 +22,9 @@ impl EditCaret {
         cx: &mut Context<InputState>,
     ) {
         input.set_value(text, window, cx);
-        if self == Self::Start {
-            input.set_selected_range(0..0, cx);
+        if self == Self::Select {
+            let len = input.value().len();
+            input.set_selected_range(0..len, cx);
         }
     }
 }
