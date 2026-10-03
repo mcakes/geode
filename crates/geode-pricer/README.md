@@ -448,8 +448,10 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   horizontal padding only) so the slot spans the row, and a leg that is not
   its package's last drops the row separator, so consecutive legs' lines
   join with no gap.
-- A leg's connector sits in its package's chevron lane and its text starts
-  where the package's chip starts, the edge a bare line's text shares. The
+- A leg's connector sits `delegate::LEG_SHIFT` (one and a half depth steps)
+  right of its package's chevron, under the chip's leading glyph, so the
+  legs read as nested; their text starts as far right of the chip. A bare
+  line's text starts where a package's chip starts. The
   tree cell lays out slot, chip, text and note with one `TREE_GAP` between
   each (`delegate::tree_gaps`); `fit_columns` and the `TREE_WIDTH` test
   measure the same parts. `TREE_WIDTH` fits `▾ CS Z26 4800/5200 · 2 legs` at

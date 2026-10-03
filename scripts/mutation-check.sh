@@ -26696,6 +26696,14 @@ run_mutation "pricer tree: the last leg's line stops at its stub" \
   '                el.bottom_0()' \
   geode-pricer the_tree_column_paints_connectors_a_chip_and_a_leg_count
 
+# A leg's slot sits LEG_SHIFT right of its package's, so its connector
+# hangs under the chip; without it the legs would sit in the chevron lane.
+run_mutation "pricer tree: a leg sits LEG_SHIFT right of its package" \
+  crates/geode-pricer/src/delegate.rs \
+  '        GridRowKind::Leg { .. } => depth.saturating_sub(1) as f32 * INDENT + LEG_SHIFT,' \
+  '        GridRowKind::Leg { .. } => depth.saturating_sub(1) as f32 * INDENT,' \
+  geode-pricer the_tree_column_paints_connectors_a_chip_and_a_leg_count
+
 # A leg's stub sits at mid-height, where the leg's text centres.
 run_mutation "pricer tree: the stub sits at mid-height" \
   crates/geode-pricer/src/delegate.rs \
@@ -26742,12 +26750,12 @@ run_mutation "pricer paint: the connector clears the non-text floor" \
   '            connector: theme.border,' \
   geode-pricer every_pricer_paint_is_readable_on_every_bundled_theme
 
-# A leg's connector takes its parent's lane, directly under the package's
-# chevron; at its own depth it would sit one step to the right.
-run_mutation "pricer tree: a leg's connector sits in its parent's slot" \
+# A leg measures its shift from its package's lane; from its own depth it
+# would sit a further step to the right.
+run_mutation "pricer tree: a leg's shift starts at its parent's lane" \
   crates/geode-pricer/src/delegate.rs \
-  '        GridRowKind::Leg { .. } => depth.saturating_sub(1),' \
-  '        GridRowKind::Leg { .. } => depth,' \
+  '        GridRowKind::Leg { .. } => depth.saturating_sub(1) as f32 * INDENT + LEG_SHIFT,' \
+  '        GridRowKind::Leg { .. } => depth as f32 * INDENT + LEG_SHIFT,' \
   geode-pricer the_tree_column_paints_connectors_a_chip_and_a_leg_count
 
 # The gutter is muted off the cursor row on every row kind, a package's

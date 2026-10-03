@@ -1419,7 +1419,9 @@ package's last leg the line stops at its stub. The lines take the `border`
 token floored to 3:1 non-text contrast on the leg's own, hover and selected
 grounds. The leg's full shorthand paints in muted text; a bare line shows
 its full shorthand. Every row reserves the slot, so roots share one
-leading edge, and a leg's text starts where its package's chip starts. Every
+leading edge. A leg's connector sits one and a half depth steps right of its
+package's chevron, under the chip's leading glyph, and its text starts as far
+right of the chip, so the legs read as nested inside the package. Every
 leg of a package, the last included, sits on a faint tint that marks it as
 inside its package; bare lines and package rows keep the table's ground. The
 tint is the theme's stripe token (`table_even`) where it reads at least 1.04:1

@@ -6,9 +6,9 @@
 //! is a pinned connector tree the cell cursor does not enter: a package
 //! paints a chevron, its template as a neutral chip, its shorthand summary
 //! and a muted leg count; a leg its drawn connector lines (a hairline the
-//! full row height, stopping at the stub on the last leg) in
-//! its package's chevron lane and its full shorthand; a bare line its
-//! shorthand alone, on the edge the legs' text shares.
+//! full row height, stopping at the stub on the last leg) under its
+//! package's chip and its full shorthand; a bare line its shorthand alone,
+//! on the edge a package's chip starts at.
 //!
 //! A grouping row paints a chevron and its value at medium weight
 //! (`pricer-group-{row}`). Two rows have a ground of their own, set by
@@ -69,11 +69,15 @@ const TREE_WIDTH: f32 = 230.0;
 /// One depth step, and the slot every row reserves at its lane, both on
 /// the rem scale. The slot holds a package's chevron or a leg's connector
 /// and is empty on a bare line, so roots share one leading edge whether or
-/// not they carry a chevron. A leg's connector takes its parent's lane
-/// (`lane_depth`), so it hangs directly under the package's chevron and the
-/// leg's text starts where the package's chip starts.
+/// not they carry a chevron. A leg's connector sits `LEG_SHIFT` right of
+/// its package's chevron (`lead`), so it hangs under the package's chip
+/// and the legs' text reads as nested inside the package.
 const INDENT: f32 = 14.0;
 const CHEVRON_SLOT: f32 = 14.0;
+/// How far a leg's slot sits right of its package's: one and a half depth
+/// steps, which puts the connector under the chip's leading glyph rather
+/// than under the chevron.
+pub(crate) const LEG_SHIFT: f32 = 21.0;
 /// A template chip's horizontal padding, each side, and the gap between
 /// the tree cell's parts (slot, chip, text, note), in design px.
 const CHIP_PAD_X: f32 = 4.0;
@@ -134,12 +138,12 @@ pub(crate) fn tree_gaps(chip: bool, note: bool) -> usize {
     1 + usize::from(chip) + usize::from(note)
 }
 
-/// The depth a row's tree cell indents by: a leg's connector sits in its
-/// package's chevron slot, one step out from the leg's own depth.
-fn lane_depth(kind: GridRowKind, depth: usize) -> usize {
+/// The tree cell's leading indent in design px: a row's depth steps, but a
+/// leg measures from its package's lane plus `LEG_SHIFT`.
+fn lead(kind: GridRowKind, depth: usize) -> f32 {
     match kind {
-        GridRowKind::Leg { .. } => depth.saturating_sub(1),
-        _ => depth,
+        GridRowKind::Leg { .. } => depth.saturating_sub(1) as f32 * INDENT + LEG_SHIFT,
+        _ => depth as f32 * INDENT,
     }
 }
 /// What the empty table says: the next action, not an icon.
@@ -746,9 +750,7 @@ impl SheetDelegate {
                 .child(find_row.gutter(cx))
                 .child(
                     div()
-                        .w(scale::design(
-                            lane_depth(row.kind, row.depth) as f32 * INDENT,
-                        ))
+                        .w(scale::design(lead(row.kind, row.depth)))
                         .flex_shrink_0(),
                 )
                 .child(find_row.disclosure(scale::design(CHEVRON_SLOT), "", cx))
@@ -874,7 +876,7 @@ impl SheetDelegate {
     /// Fit the tree column and every plan column to its header and the
     /// rows in the window — what the table last showed, as the blotter
     /// measures. The tree column measures exactly what `render_cell`
-    /// paints: the row's lane indent, the chevron slot, the gaps between
+    /// paints: the row's leading indent (`lead`), the chevron slot, the gaps between
     /// its parts (`tree_gaps`) and, when present, the chip (its padding
     /// and tag), then the text and the note; indent, slot, padding and
     /// gaps on the rem scale.
@@ -892,14 +894,13 @@ impl SheetDelegate {
             TREE_KEY.to_string(),
             m.fit(rows.clone().filter_map(|g| self.model.tree(g)).map(|r| {
                 let (chip, note) = (!r.tag.is_empty(), !r.note.is_empty());
-                let depth = lane_depth(r.kind, r.depth);
                 let chip_px = if chip {
                     design(2.0 * CHIP_PAD_X) + m.text_px(r.tag)
                 } else {
                     0.0
                 };
                 design(
-                    depth as f32 * INDENT + CHEVRON_SLOT + tree_gaps(chip, note) as f32 * TREE_GAP,
+                    lead(r.kind, r.depth) + CHEVRON_SLOT + tree_gaps(chip, note) as f32 * TREE_GAP,
                 ) + chip_px
                     + m.text_px(r.text)
                     + m.text_px(r.note)
@@ -1411,7 +1412,7 @@ impl SheetDelegate {
             });
         let base = base.when(tinted, |el| el.relative().child(selection_tint(cx.theme())));
         let Some(plan_col) = Self::plan_col(col_ix) else {
-            // The tree column: the lane indent, then the fixed slot (a
+            // The tree column: the leading indent (`lead`), then the fixed slot (a
             // package's chevron, a leg's connector, empty on a bare line),
             // then a package's chip, the row's text and a package's leg
             // count, one `TREE_GAP` between each (`tree_gaps`).
@@ -1422,9 +1423,8 @@ impl SheetDelegate {
                 .flex()
                 .items_center()
                 .justify_center();
-            let depth = lane_depth(row.kind, row.depth);
             let el = base
-                .pl(scale::design(depth as f32 * INDENT))
+                .pl(scale::design(lead(row.kind, row.depth)))
                 .gap(scale::design(TREE_GAP));
             let group = matches!(row.kind, GridRowKind::Group { .. });
             let (slot, text_paint) = match row.kind {
