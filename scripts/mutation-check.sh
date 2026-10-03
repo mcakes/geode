@@ -17764,13 +17764,16 @@ run_mutation "grouping dialog: a double-click's second half completes a dimensio
   geode-shell \
   a_double_click_on_an_empty_slot_opens_its_field_and_inserts_nothing
 
-# An ad hoc edit goes to the frame and never to the config writer.
+# An ad hoc edit goes to the frame and never to the config writer: without
+# the ad hoc branch the `*` draft falls through to `commit_edit`. (Keeping
+# the call and dropping only its `return` is an equivalent mutant:
+# `commit_ad_hoc` marks the draft saved, so `commit_edit` finds no edits.)
 run_mutation "grouping dialog: an ad hoc edit never reaches the config writer" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    if super::grouping_list::commit_ad_hoc(shell, cx) {
         return;
     }' \
-  '    let _ = super::grouping_list::commit_ad_hoc(shell, cx);' \
+  '    let _ = super::grouping_list::commit_ad_hoc;' \
   geode-shell \
   ticking_in_the_ad_hoc_editor_regroups_at_once
 
