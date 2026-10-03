@@ -437,6 +437,32 @@ impl VolsliceTile {
         cx.notify();
     }
 
+    /// Whether the documents must be asked for again: a counter they follow
+    /// moved since the last ask. A followed group's scope change that still
+    /// names the underlying whose documents are loaded is not one, when
+    /// nothing is out or held and neither the as-of nor a watched
+    /// publication moved: the documents depend on nothing else, and
+    /// refetching both would hold the flip behind two reads that answer
+    /// what is already on screen. The caller then self-arrives, which
+    /// answers the flip under the new versions; `acted` keeps the old ones,
+    /// so each later notification repeats this check rather than a fetch.
+    fn documents_stale(&self, now: FrameVersions, following: bool, cx: &App) -> bool {
+        if !self.following.follows_changed(now, differs(following)) {
+            return false;
+        }
+        let Some(asked) = self.following.acted() else {
+            return true;
+        };
+        let scope_only = asked.as_of == now.as_of && asked.data == now.data;
+        let settled = !self.following.in_flight()
+            && !self.following.is_staged()
+            && matches!(self.fetch, Fetch::Idle);
+        let same_underlying = self
+            .underlying(cx)
+            .is_some_and(|u| self.loaded_for.as_deref() == Some(u.as_str()));
+        !(scope_only && settled && same_underlying)
+    }
+
     /// The frame observer.
     pub(super) fn on_frame_changed(&mut self, cx: &mut Context<Self>) {
         if self.sync_following(cx) {
@@ -456,7 +482,7 @@ impl VolsliceTile {
         if !self.visible {
             return;
         }
-        if self.following.follows_changed(now, differs(following)) {
+        if self.documents_stale(now, following, cx) {
             // The barrier is answered on delivery, under the versions this
             // request was made with.
             self.requery(cx);
@@ -549,7 +575,7 @@ impl VolsliceTile {
             let changed = self.sync_following(cx);
             let now = self.versions(cx);
             let following = self.is_following(cx);
-            if changed || self.following.follows_changed(now, differs(following)) {
+            if changed || self.documents_stale(now, following, cx) {
                 self.requery_with(Arrival::Deferred, cx);
             }
             self.sync_board(cx);

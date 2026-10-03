@@ -556,6 +556,56 @@ fn a_group_scope_change_flips_the_follower(cx: &mut gpui::TestAppContext) {
     assert!(!h.barrier_open(&vcx), "the follower's arrival released it");
 }
 
+/// A group's scope change that leaves its underlying where it was asks
+/// the documents nothing: they depend only on the underlying, the as-of
+/// and their publications. The follower answers the flip at once instead
+/// of holding every other tile behind two document reads.
+#[gpui::test]
+fn a_group_scope_change_keeping_the_underlying_releases_the_flip_unasked(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_bound(cx, None);
+    h.show(&mut vcx);
+    h.follow_a(&mut vcx);
+    h.post(&mut vcx, scope_of("SPX.Z"));
+    let (doc, chains) = published();
+    let reqs = h.answer_documents(&mut vcx, &doc, &chains);
+    let params = vols(&reqs)[0].clone();
+    h.answer_vol(&mut vcx, &params);
+    let painted = h.labels(&vcx);
+    assert!(!painted.is_empty());
+    let mut wider = underlying_scope("SPX.Z");
+    wider.dimensions.push(DimensionSelection {
+        column: "book".into(),
+        values: vec!["B1".into()],
+    });
+    let bound = FrameRef::for_tile(h.frame.clone(), WorkspaceIx::FIRST, TileId(TILE));
+    bound.update(&mut vcx, |f, cx| {
+        f.post_for_test(
+            EMITTER,
+            Emission {
+                scope: Some(wider),
+                board: Vec::new(),
+            },
+        );
+        f.open_flip([KEY], Instant::now());
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let reqs = h.requests();
+    assert!(docs(&reqs).is_empty(), "nothing asked: {reqs:?}");
+    assert!(!h.barrier_open(&vcx), "the follower answered the flip");
+    assert_eq!(h.labels(&vcx), painted, "the picture stays");
+    // A later as-of change is still a new question.
+    h.frame.update(&mut vcx, |f, cx| {
+        f.shared_mut()
+            .set_as_of(geode_core::query::AsOf::At(chrono::Utc::now()));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert_eq!(docs(&h.requests()).len(), 1, "the as-of asks again");
+}
+
 /// Leaving a group returns the tile to its own underlying: the draft and
 /// the board watch go, and one requery goes out. The old documents are
 /// not repainted without the draft in the meantime.
