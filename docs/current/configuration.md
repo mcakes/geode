@@ -310,8 +310,8 @@ document dataset name to an address template:
 [sophis]
 adapter = "demo_bus"
 [sophis.documents]
-cvi_params = "marketdata/cvi/{key}"
-dividend_schedule = "marketdata/dividend/{key}"
+cvi_params = "marketdata/cvi/{key}/NOTIFY"
+dividend_schedule = "marketdata/dividend/{key}/NOTIFY"
 ```
 
 Targets replace whole named objects across layers. An override must repeat

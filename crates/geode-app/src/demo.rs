@@ -227,9 +227,11 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
 /// source paths rooted at `source_dir`.
 ///
 /// The risk CSV source polls every two seconds using sentinel readiness.
-/// CVI, dividend and option-chain (`opra_sim`) sources subscribe to
-/// `demo_bus`, coalescing updates per key over 500 ms. Chains are never
-/// uploaded, so the egress target names only CVI and dividends. `demo_kdb`
+/// CVI, dividend and option-chain (`opra_sim`) sources subscribe to the
+/// `<base>/NOTIFY` topics on `demo_bus`, recover each recorded topic's
+/// latest document at start, and coalesce updates per key over 500 ms.
+/// Chains are never uploaded, so the egress target names only CVI and
+/// dividends, at the NOTIFY topics those sources subscribe to. `demo_kdb`
 /// and `demo_rest` fetch the `series` dataset; the former offers a
 /// catalogue and the latter requires entered identities. The position
 /// service is `demo_positions`, which rewrites the risk CSVs in place.
@@ -241,13 +243,13 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          readiness = \"sentinel\"\npriority = \"latest_risk\"\npoll_interval = \"2s\"\n\
          pending_timeout = \"1m\"\nbatch_pattern = '^risk_\\d{{4}}-\\d{{2}}-\\d{{2}}_(?P<batch>.+)$'\n\
          [cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
-         topics = [\"marketdata/cvi/>\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\
+         topics = [\"marketdata/cvi/*/NOTIFY\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\
          priority = \"latest_other\"\n\
          [dividend]\nadapter = \"demo_bus\"\ndataset = \"dividend_schedule\"\n\
-         document = \"dividend_schedule\"\ntopics = [\"marketdata/dividend/>\"]\n\
+         document = \"dividend_schedule\"\ntopics = [\"marketdata/dividend/*/NOTIFY\"]\n\
          coalesce = \"500ms\"\nsource_time = \"receive\"\npriority = \"latest_other\"\n\
          [opra_sim]\nadapter = \"demo_bus\"\ndataset = \"option_chain\"\n\
-         document = \"option_chain\"\ntopics = [\"marketdata/chain/>\"]\n\
+         document = \"option_chain\"\ntopics = [\"marketdata/chain/*/NOTIFY\"]\n\
          coalesce = \"500ms\"\nsource_time = \"receive\"\npriority = \"latest_other\"\n\
          [demo_kdb]\nadapter = \"demo_kdb\"\ndataset = \"series\"\n\
          [demo_rest]\nadapter = \"demo_rest\"\ndataset = \"series\"\n\
@@ -256,12 +258,14 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
         source_dir.join("*.csv").to_string_lossy()
     );
     // The `sophis` target publishes both document kinds through the same
-    // adapter as their subscribed sources. Per-key addresses route uploads
-    // back to those sources for an echo. Builtin documents are exempt from
-    // the config-version check, so this generated document needs no header.
+    // adapter as their subscribed sources. Per-key NOTIFY addresses route
+    // uploads back to those sources for an echo; an address off the
+    // subscribed `*/NOTIFY` patterns would upload with no echo. Builtin
+    // documents are exempt from the config-version check, so this generated
+    // document needs no header.
     let egress = "[sophis]\nadapter = \"demo_bus\"\n\
-         [sophis.documents]\ncvi_params = \"marketdata/cvi/{key}\"\n\
-         dividend_schedule = \"marketdata/dividend/{key}\"\n"
+         [sophis.documents]\ncvi_params = \"marketdata/cvi/{key}/NOTIFY\"\n\
+         dividend_schedule = \"marketdata/dividend/{key}/NOTIFY\"\n"
         .to_string();
     // Moves go to the demo position system, which rewrites the risk CSVs
     // the `demo` source polls (`DemoPositions`).
@@ -299,6 +303,44 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A source's `topics` patterns, read from the demo `sources` document.
+    fn topics_of(sources: &LayerDoc, source: &str) -> Vec<String> {
+        sources.table[source]["topics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Each subscribed demo source matches the NOTIFY topic its producer
+    /// publishes on, and its patterns end at NOTIFY: recovery asks the
+    /// recorded topics that match, and a pattern reaching any other level
+    /// would ask the bus for a topic no producer notifies on.
+    #[test]
+    fn every_demo_subscription_pattern_matches_its_producers_notify_topics() {
+        let layer = layer(Path::new("/tmp/src"));
+        let sources = layer.iter().find(|d| d.name == "sources").unwrap();
+        for (prefix, source) in [
+            ("marketdata/cvi/", "cvi"),
+            ("marketdata/dividend/", "dividend"),
+            ("marketdata/chain/", "opra_sim"),
+        ] {
+            let patterns = topics_of(sources, source);
+            let topic = format!("{prefix}SPX/NOTIFY");
+            assert!(
+                patterns
+                    .iter()
+                    .any(|p| geode_data::adapter::topic_matches(p, &topic)),
+                "{source}"
+            );
+            assert!(
+                patterns.iter().all(|p| p.ends_with("/NOTIFY")),
+                "{source} recovers only NOTIFY patterns"
+            );
+        }
+    }
 
     #[test]
     fn the_demo_layer_is_complete_and_points_sources_at_the_directory() {
@@ -365,11 +407,11 @@ mod tests {
         assert_eq!(egress.table["sophis"]["adapter"].as_str(), Some("demo_bus"));
         assert_eq!(
             egress.table["sophis"]["documents"]["cvi_params"].as_str(),
-            Some("marketdata/cvi/{key}")
+            Some("marketdata/cvi/{key}/NOTIFY")
         );
         assert_eq!(
             egress.table["sophis"]["documents"]["dividend_schedule"].as_str(),
-            Some("marketdata/dividend/{key}")
+            Some("marketdata/dividend/{key}/NOTIFY")
         );
 
         let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
@@ -388,10 +430,13 @@ mod tests {
         assert_eq!(
             specs[0].documents,
             vec![
-                ("cvi_params".to_string(), "marketdata/cvi/{key}".to_string()),
+                (
+                    "cvi_params".to_string(),
+                    "marketdata/cvi/{key}/NOTIFY".to_string()
+                ),
                 (
                     "dividend_schedule".to_string(),
-                    "marketdata/dividend/{key}".to_string()
+                    "marketdata/dividend/{key}/NOTIFY".to_string()
                 ),
             ],
             "documents keep TOML order"
@@ -418,7 +463,7 @@ mod tests {
         assert_eq!(cvi["document"].as_str(), Some("cvi_params"));
         assert_eq!(
             cvi["topics"].as_array().unwrap()[0].as_str(),
-            Some("marketdata/cvi/>")
+            Some("marketdata/cvi/*/NOTIFY")
         );
         assert_eq!(cvi["coalesce"].as_str(), Some("500ms"));
         assert_eq!(cvi["priority"].as_str(), Some("latest_other"));
@@ -451,7 +496,7 @@ mod tests {
         assert_eq!(dividend["document"].as_str(), Some("dividend_schedule"));
         assert_eq!(
             dividend["topics"].as_array().unwrap()[0].as_str(),
-            Some("marketdata/dividend/>")
+            Some("marketdata/dividend/*/NOTIFY")
         );
         assert_eq!(dividend["coalesce"].as_str(), Some("500ms"));
         assert_eq!(dividend["priority"].as_str(), Some("latest_other"));
@@ -486,7 +531,7 @@ mod tests {
         assert_eq!(chain["document"].as_str(), Some("option_chain"));
         let topics = chain["topics"].as_array().unwrap();
         assert_eq!(topics.len(), 1);
-        assert_eq!(topics[0].as_str(), Some("marketdata/chain/>"));
+        assert_eq!(topics[0].as_str(), Some("marketdata/chain/*/NOTIFY"));
         assert_eq!(chain["coalesce"].as_str(), Some("500ms"));
         assert_eq!(chain["priority"].as_str(), Some("latest_other"));
 

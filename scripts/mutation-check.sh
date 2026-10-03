@@ -12291,8 +12291,8 @@ run_mutation "demo bus: publishes every key once at start" \
 
 run_mutation "demo bus: the topic format" \
   crates/geode-app/src/demo_bus.rs \
-  'let topic = format!("{topic_prefix}{key}");' \
-  'let topic = format!("marketdata/wrong/{key}");' \
+  'let topic = format!("{topic_prefix}{key}/NOTIFY");' \
+  'let topic = format!("marketdata/wrong/{key}/NOTIFY");' \
   geode-app the_bus_publishes_every_key_once_at_start_then_on_its_cadence
 
 run_mutation "demo bus: the generator's drift" \
@@ -12304,7 +12304,7 @@ run_mutation "demo bus: the generator's drift" \
 run_mutation "demo bus: the demo layer's [cvi] source" \
   crates/geode-app/src/demo.rs \
   '         [cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
-         topics = [\"marketdata/cvi/>\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\
+         topics = [\"marketdata/cvi/*/NOTIFY\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\
          priority = \"latest_other\"\n\
 ' \
   '' \
@@ -12313,7 +12313,7 @@ run_mutation "demo bus: the demo layer's [cvi] source" \
 run_mutation "demo bus: the demo layer's [dividend] source" \
   crates/geode-app/src/demo.rs \
   '         [dividend]\nadapter = \"demo_bus\"\ndataset = \"dividend_schedule\"\n\
-         document = \"dividend_schedule\"\ntopics = [\"marketdata/dividend/>\"]\n\
+         document = \"dividend_schedule\"\ntopics = [\"marketdata/dividend/*/NOTIFY\"]\n\
          coalesce = \"500ms\"\nsource_time = \"receive\"\npriority = \"latest_other\"\n\
 ' \
   '' \
@@ -34744,6 +34744,32 @@ run_mutation "recovery: open prunes topics past the max age" \
   '                crate::store::topics::prune(conn, &spec.name, spec.recover_max_age, Utc::now())' \
   '                crate::store::topics::prune(conn, &spec.name, Duration::MAX, Utc::now())' \
   geode-data topics_older_than_recover_max_age_are_pruned_at_open
+
+# ---- demo NOTIFY topics
+# The demo producers notify on `<base>/NOTIFY`; a bare `<base>` topic is
+# off the demo sources' `*/NOTIFY` patterns, so nothing is stored, recorded
+# or recovered.
+run_mutation "demo recovery: producers publish on the NOTIFY topic" \
+  crates/geode-app/src/demo_bus.rs \
+  '    let topic = format!("{topic_prefix}{key}/NOTIFY");' \
+  '    let topic = format!("{topic_prefix}{key}");' \
+  geode-app a_dividend_published_while_closed_is_recovered_at_the_next_open
+
+# A demo pattern past the NOTIFY level would record and recover topics no
+# producer notifies on.
+run_mutation "demo recovery: the CVI source subscribes to NOTIFY only" \
+  crates/geode-app/src/demo.rs \
+  '         topics = [\"marketdata/cvi/*/NOTIFY\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\' \
+  '         topics = [\"marketdata/cvi/>\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\' \
+  geode-app every_demo_subscription_pattern_matches_its_producers_notify_topics
+
+# The upload echo needs the egress address on the subscribed NOTIFY pattern;
+# a bare address uploads with no echo back to the dividend source.
+run_mutation "demo recovery: dividend egress addresses the NOTIFY topic" \
+  crates/geode-app/src/demo.rs \
+  '         dividend_schedule = \"marketdata/dividend/{key}/NOTIFY\"\n"' \
+  '         dividend_schedule = \"marketdata/dividend/{key}\"\n"' \
+  geode-app an_uploaded_dividend_document_echoes_through_the_real_data_service
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

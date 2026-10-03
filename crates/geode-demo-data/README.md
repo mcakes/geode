@@ -103,7 +103,7 @@ desk and user configuration. Its files declare:
 - `datasets.toml`: risk column names, roles and grains, document schemas,
   and the shared series cache. Among the document schemas, `option_chain`
   (key `underlying_ref, expiry`, axis `strike`) is filled by the generated
-  `opra_sim` source from the demo bus's `marketdata/chain/>` topics,
+  `opra_sim` source from the demo bus's `marketdata/chain/*/NOTIFY` topics,
   coalescing per key over 500 ms like the CVI and dividend sources. Chains
   are subscribed only; the demo egress target does not upload them.
 - `views.toml`: the default `tree` view and a 100-column `wide` view.

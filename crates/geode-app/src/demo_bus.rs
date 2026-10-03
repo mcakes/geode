@@ -30,8 +30,8 @@ pub type NextDocument = dyn FnMut(&str) -> Option<DocumentRows> + Send;
 /// A document generator and its destination topics.
 ///
 /// `kind` serializes rows into the wire format consumed by the subscribed
-/// source. Topics concatenate `topic_prefix` and the key, so a prefix such as
-/// `"marketdata/cvi/"` includes its separator. `next` owns mutable generator
+/// source. Topics are `topic_prefix`, the key, then `/NOTIFY`, so a prefix
+/// such as `"marketdata/cvi/"` includes its separator. `next` owns mutable generator
 /// state without coupling the bus to a concrete generator type.
 pub struct Producer {
     pub kind: Arc<dyn DocumentKind>,
@@ -126,8 +126,9 @@ fn sleep_checking_stop(duration: Duration, stop: &AtomicBool) -> bool {
     }
 }
 
-/// Generates and serializes one document, then publishes it to the topic
-/// formed by concatenating the prefix and key. A generator that returns
+/// Generates and serializes one document, then publishes it to the NOTIFY
+/// topic for the key, `<prefix><key>/NOTIFY` — the level the demo sources
+/// subscribe to and recover from. A generator that returns
 /// `None` (its input is not ready yet) skips this publish silently.
 /// Serialization errors log a warning and skip this publish. A full or
 /// disconnected inbound queue drops the message; the feed counts refusals
@@ -155,7 +156,7 @@ fn publish_one(
             return;
         }
     };
-    let topic = format!("{topic_prefix}{key}");
+    let topic = format!("{topic_prefix}{key}/NOTIFY");
     if !feed.publish(&topic, bytes) && !*warned_full {
         *warned_full = true;
         tracing::warn!(
@@ -400,8 +401,12 @@ mod tests {
         let (adapter, feed) = ChannelAdapter::new("demo_bus");
         let (sink, rx) = MessageSink::bounded(256);
         let mut sub = adapter.subscription().expect("channel adapters subscribe");
-        sub.subscribe(&["marketdata/chain/>".to_string()], sink, Arc::new(|_| {}))
-            .unwrap();
+        sub.subscribe(
+            &["marketdata/chain/*/NOTIFY".to_string()],
+            sink,
+            Arc::new(|_| {}),
+        )
+        .unwrap();
         let underlyings = vec!["SPX".to_string(), "NDX".to_string()];
         let anchor = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
         let _bus = spawn(
@@ -477,8 +482,8 @@ mod tests {
         let mut sub = adapter.subscription().expect("channel adapters subscribe");
         sub.subscribe(
             &[
-                "marketdata/cvi/>".to_string(),
-                "marketdata/dividend/>".to_string(),
+                "marketdata/cvi/*/NOTIFY".to_string(),
+                "marketdata/dividend/*/NOTIFY".to_string(),
             ],
             sink,
             Arc::new(|_state| {}),
@@ -509,14 +514,22 @@ mod tests {
             && Instant::now() < burst_deadline
         {
             if let Ok(m) = rx.recv_timeout(Duration::from_millis(50)) {
-                if let Some(key) = m.topic.strip_prefix("marketdata/cvi/") {
+                if let Some(key) = m
+                    .topic
+                    .strip_prefix("marketdata/cvi/")
+                    .and_then(|k| k.strip_suffix("/NOTIFY"))
+                {
                     assert!(
                         cvi_underlyings.contains(&key.to_string()),
                         "topic names an underlying the CVI generator produces"
                     );
                     CviKind.parse(&m.bytes).expect("a well-formed CVI document");
                     cvi_burst.insert(key.to_string());
-                } else if let Some(key) = m.topic.strip_prefix("marketdata/dividend/") {
+                } else if let Some(key) = m
+                    .topic
+                    .strip_prefix("marketdata/dividend/")
+                    .and_then(|k| k.strip_suffix("/NOTIFY"))
+                {
                     assert!(
                         dividend_underlyings.contains(&key.to_string()),
                         "topic names an underlying the dividend generator produces"
@@ -613,7 +626,7 @@ mod tests {
 
     /// Upload bytes must reach the subscribed source and return through an
     /// ordinary document query. The demo `sophis` target routes the upload to
-    /// `marketdata/dividend/XYZ`; the dividend subscription parses and stores it.
+    /// `marketdata/dividend/XYZ/NOTIFY`; the dividend subscription parses and stores it.
     /// Each event receive has a timeout so a silent pipeline fails the test.
     #[test]
     fn an_uploaded_dividend_document_echoes_through_the_real_data_service() {
@@ -929,6 +942,164 @@ mod tests {
         );
         assert_eq!(echo_differs(&dividend, &sent, &delivered), 0);
 
+        service.shutdown();
+    }
+
+    /// The demo producer's NOTIFY topic, the demo layer's subscription and
+    /// the bus's last value carry recovery end to end: a dividend schedule
+    /// the producer published while the app was closed goes live at the
+    /// next open with no further publish. A producer topic off the
+    /// subscribed pattern would never be recorded, and the reopened source
+    /// would serve the stale schedule until the producer's next tick.
+    #[test]
+    fn a_dividend_published_while_closed_is_recovered_at_the_next_open() {
+        use geode_core::config::{Config, ConfigSources};
+        use geode_core::query::{DocumentParams, QueryKey};
+        use geode_data::adapter::AdapterRegistry;
+        use geode_data::query::as_of::AsOf;
+        use geode_data::{DataEvent, DataService, PricerRegistry, VolModelRegistry};
+        use std::sync::Mutex;
+        use std::sync::mpsc::Receiver;
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = db_dir.path().join("geode.duckdb");
+        let config = Config::load(&ConfigSources {
+            builtin: crate::demo::layer(src_dir.path()),
+            ..ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        // One bus outlives both service runs, as the simulated broker
+        // outlives an app restart; it keeps the last message per topic.
+        let (bus, feed) = ChannelAdapter::new("demo_bus");
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(bus);
+        adapters.register(Arc::new(crate::demo::DemoPositions::new(
+            src_dir.path().to_path_buf(),
+        )));
+        let open = |adapters: AdapterRegistry| {
+            let mut pricers = PricerRegistry::default();
+            pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+            let mut vol_models = VolModelRegistry::default();
+            vol_models.register(Arc::new(geode_pricing::DemoVolModel));
+            let setup =
+                crate::bridge::data_setup(&config, db.clone(), adapters, pricers, vol_models)
+                    .expect("the demo layer opens");
+            DataService::open_channel(setup.config).expect("the store opens")
+        };
+        let timeout = Duration::from_secs(15);
+        let wait_published = |rx: &Receiver<DataEvent>| loop {
+            match rx.recv_timeout(timeout).expect("a publish arrives") {
+                DataEvent::Published { dataset, batch, .. } if dataset == "dividend_schedule" => {
+                    assert_eq!(batch, "SPX");
+                    break;
+                }
+                _ => continue,
+            }
+        };
+        let live_amounts = |service: &DataService, rx: &Receiver<DataEvent>, tag: u64| {
+            service
+                .document(&DocumentParams {
+                    key: QueryKey(2),
+                    tag,
+                    submitted: Instant::now(),
+                    dataset: "dividend_schedule".to_string(),
+                    document_key: vec!["SPX".to_string()],
+                    as_of: AsOf::Live,
+                })
+                .expect("the document request is admitted");
+            let snap = loop {
+                match rx.recv_timeout(timeout).expect("a query outcome arrives") {
+                    DataEvent::Query(o) if o.key == QueryKey(2) && o.tag == tag => {
+                        break o.snapshot.expect("the document reads back");
+                    }
+                    _ => continue,
+                }
+            };
+            let mut amounts: Vec<f64> = (0..snap.rows())
+                .map(|i| snap.f64_value("amount", i).expect("an amount"))
+                .collect();
+            amounts.sort_by(f64::total_cmp);
+            amounts
+        };
+
+        // The demo's own dividend producer, publishing through the bus's
+        // publish path; each published document is kept for comparison.
+        let anchor = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+        let mut producer = demo_producers(vec!["SPX".to_string()], anchor)
+            .into_iter()
+            .find(|p| p.topic_prefix == "marketdata/dividend/")
+            .expect("the demo publishes dividends");
+        let sent: Arc<Mutex<Vec<DocumentRows>>> = Arc::default();
+        let mut next: Box<NextDocument> = Box::new({
+            let sent = Arc::clone(&sent);
+            move |key| {
+                let rows = (producer.next)(key);
+                sent.lock().unwrap().extend(rows.clone());
+                rows
+            }
+        });
+        let mut warned = false;
+        let sent_amounts = |i: usize| {
+            let sent = sent.lock().unwrap();
+            let geode_core::document::Column::F64(amounts) = &sent[i]
+                .values
+                .iter()
+                .find(|(name, _)| name == "amount")
+                .expect("an amount column")
+                .1
+            else {
+                panic!("amount is a float column");
+            };
+            let mut amounts = amounts.clone();
+            amounts.sort_by(f64::total_cmp);
+            amounts
+        };
+
+        let (service, rx) = open(adapters.clone());
+        publish_one(
+            &feed,
+            &producer.kind,
+            producer.topic_prefix,
+            &mut next,
+            "SPX",
+            &mut warned,
+        );
+        wait_published(&rx);
+        assert_eq!(live_amounts(&service, &rx, 1), sent_amounts(0));
+        service.shutdown();
+        drop(service);
+
+        // A newer schedule while the app is closed. The throwaway
+        // subscriber proves the dispatcher took it, which records the last
+        // message per topic before any delivery.
+        let mut watcher = adapters.get("demo_bus").unwrap().subscription().unwrap();
+        let (sink, seen) = MessageSink::bounded(4);
+        watcher
+            .subscribe(&["marketdata/>".to_string()], sink, Arc::new(|_| {}))
+            .unwrap();
+        publish_one(
+            &feed,
+            &producer.kind,
+            producer.topic_prefix,
+            &mut next,
+            "SPX",
+            &mut warned,
+        );
+        seen.recv_timeout(timeout)
+            .expect("the bus dispatched the newer schedule");
+        watcher.unsubscribe();
+        assert_ne!(
+            sent_amounts(0),
+            sent_amounts(1),
+            "the producer's second schedule differs — otherwise recovery is unobservable"
+        );
+
+        // Reopened on the same store with nothing published: SPX can only
+        // go live with the newer schedule through recovery.
+        let (service, rx) = open(adapters);
+        wait_published(&rx);
+        assert_eq!(live_amounts(&service, &rx, 2), sent_amounts(1));
         service.shutdown();
     }
 }
