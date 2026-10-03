@@ -212,7 +212,18 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   three letters, e.g. USD`. A package cell maps codes onto its legs like any
   aggregated input. `Sheet::fill_currency` gives a blank line a currency
   without an undo step and never overwrites one; `lines_needing_currency`
-  lists the blank lines. A result whose currency differs from the line's
+  lists the blank lines. The tile supplies defaults from the shell's
+  `ReferenceGlobal` through `PricerSettings::payout` (`reference_currency`):
+  `commit_entry` and `put` give each blank line or leg its own underlying's
+  currency in the inserted spec, so it is part of that undo entry (a put
+  keeps a yanked currency); an instrument edit that moves a blank line to
+  another underlying (`apply_edit`/`apply_edits`, a package's legs each)
+  re-looks it up; and `fill_from_reference` fills every blank line on a
+  reference change (`observe_global`), a load (open or `loaded`) and
+  `config_changed`. Those fills go through `fill_currency`: no undo step,
+  never over a set currency, and the sheet rebuilds, reprices and saves only
+  when one landed. A line whose currency is set keeps it across an
+  underlying edit. A result whose currency differs from the line's
   fails the line (`priced in EUR, asked for USD`) and installs nothing; a
   result that lands after a currency edit answers an older revision and is
   dropped. Yank copies the currency. `pricer_sheets` stores it in

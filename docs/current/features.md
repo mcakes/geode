@@ -1470,7 +1470,19 @@ reprices the line, and a blank line is never priced. A result reported in
 another currency fails the line (`priced in EUR, asked for USD`). Until a
 line moved to another currency reprices, or while its currency is blank, its
 local measures paint `—` (its old answer is in another currency) and its
-`_usd` columns still read; a selection total counts a blank line as failed. Column 0 is a connector tree. A package row shows its
+`_usd` columns still read; a selection total counts a blank line as failed.
+A line takes its currency from reference data: a typed or put line whose
+currency is blank looks up its own underlying (each leg of a package its
+own) in the `[pricing] payout_currency` column, `underlyings.currency` by
+default, and a put line keeps the currency it was yanked with. An underlying
+the table does not list, a cell that is not a code, or no payout source
+leaves the line blank, reading `needs currency`, rather than pricing it in a
+guessed currency. Blank lines fill again whenever the reference table
+changes, a sheet loads, or a reload names a payout source; a fill never
+overwrites a currency already set, and it is not an undo step (`u` does not
+unfill), but the sheet saves it. Editing a blank line's underlying looks the
+new one up; a line whose currency is set keeps it when its underlying
+changes. Column 0 is a connector tree. A package row shows its
 chevron, its template (`CS`, `CUSTOM`) as a neutral chip, a summary of its
 legs' distinct expiries and strikes (`Z26 4800/5200`) and a muted leg count
 (`· 2 legs`). Each leg hangs from a drawn connector under the package's

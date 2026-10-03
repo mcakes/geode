@@ -738,10 +738,6 @@ impl Sheet {
     /// never overwrites a currency the user chose. Not an undo step: the
     /// fill supplies a default, and undoing past it would only leave the
     /// line blank for the next fill.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the tile's reference fill is its caller")
-    )]
     pub(crate) fn fill_currency(&mut self, row: usize, currency: Currency) -> bool {
         if !self.is_line(row) || self.currency[row].is_some() {
             return false;
