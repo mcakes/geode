@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
 use crate::dimensions::DerivedDimensions;
-use crate::schema::{ColumnRole, DatasetSpec, Grain, SchemaSpec};
+use crate::schema::{ColumnRole, ColumnSpec, ColumnType, DatasetSpec, Grain, SchemaSpec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinSpec {
@@ -555,6 +555,27 @@ impl ViewSpec {
             return diags;
         };
 
+        // A derived dimension reads its source as text: the projection probes
+        // a map of text keys, while scope narrowing binds the same keys
+        // against the column's own type. Over a non-text source the two
+        // disagree on which rows match ('1.50' narrows a DOUBLE to 1.5 but
+        // never equals its text), so totals would be plausible and wrong.
+        // Refused once per dimension, whether it is grouped, shown or both.
+        let non_text_source = |name: &str, src: &ColumnSpec, diags: &mut Vec<Diagnostic>| {
+            if src.ty == ColumnType::Utf8 {
+                return;
+            }
+            let d = bad(format!(
+                "derived dimension '{name}' maps source column '{}' of type {}; \
+                 a derived dimension needs a utf8 source",
+                src.name,
+                format!("{:?}", src.ty).to_lowercase()
+            ));
+            if !diags.iter().any(|x| x.message == d.message) {
+                diags.push(d);
+            }
+        };
+
         for j in &self.joins {
             let Some(joined) = schema.dataset(&j.dataset) else {
                 // No second diagnostic about the same line: the keys of a
@@ -647,11 +668,12 @@ impl ViewSpec {
                 other => {
                     let name = other.name();
                     if let Some(d) = dims.get(name) {
-                        if ds.column(&d.from).is_none() {
-                            diags.push(bad(format!(
+                        match ds.column(&d.from) {
+                            None => diags.push(bad(format!(
                                 "column '{name}' is derived from '{}', which dataset '{}' does not have",
                                 d.from, self.dataset
-                            )));
+                            ))),
+                            Some(src) => non_text_source(name, src, &mut diags),
                         }
                         continue;
                     }
@@ -729,11 +751,14 @@ impl ViewSpec {
                          it is also a derived dimension from '{}'. Rename one.",
                         self.dataset, d.from
                     )));
-                } else if ds.column(&d.from).is_none() {
-                    diags.push(bad(format!(
-                        "grouping '{g}' is derived from '{}', which dataset '{}' does not have",
-                        d.from, self.dataset
-                    )));
+                } else {
+                    match ds.column(&d.from) {
+                        None => diags.push(bad(format!(
+                            "grouping '{g}' is derived from '{}', which dataset '{}' does not have",
+                            d.from, self.dataset
+                        ))),
+                        Some(src) => non_text_source(g, src, &mut diags),
+                    }
                 }
                 continue;
             }
@@ -2232,6 +2257,37 @@ kind = "dimension"
             diags.iter().any(|d| d.message.contains("nosuch")),
             "{diags:?}"
         );
+    }
+
+    #[test]
+    fn a_derived_dimension_over_a_non_text_source_is_refused() {
+        // The projection matches the source's text while scope narrowing
+        // casts keys to the column's type; over a DOUBLE they disagree on
+        // which rows a label covers, so the view is refused at load.
+        let dims = dimensions("[band]\nfrom = \"delta01\"\n[band.values]\nLow = [\"1.5\"]\n");
+        let (views, _) = ViewSpec::from_doc(&doc(
+            "[v]\ndataset = \"risk_snapshot\"\ngrouping = [\"band\"]\n\
+             [[v.columns]]\nname = \"band\"\nkind = \"dimension\"\n\
+             [[v.columns]]\nname = \"vega01\"\nkind = \"measure\"\n",
+        ));
+        let diags = views[0].validate(&schema(), &dims);
+        let refusals: Vec<&Diagnostic> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error && d.message.contains("needs a utf8 source"))
+            .collect();
+        assert_eq!(refusals.len(), 1, "one refusal per dimension: {diags:?}");
+        assert!(
+            refusals[0]
+                .message
+                .contains("derived dimension 'band' maps source column 'delta01' of type f64"),
+            "{}",
+            refusals[0].message
+        );
+
+        // The same view over a utf8 source validates.
+        let dims = dimensions("[band]\nfrom = \"book\"\n[band.values]\nLow = [\"BK0\"]\n");
+        let diags = views[0].validate(&schema(), &dims);
+        assert!(diags.is_empty(), "{diags:?}");
     }
 
     #[test]

@@ -94,7 +94,8 @@ primary dataset, a `dimension` column's reachability through the grouping, a
 join, or a declared grain carrying it alongside the whole grouping (the
 unanimity rule; `ViewSpec::ungrouped_dimensions` lists those columns for both
 validation and the compiler), and grouping references. Derived dimensions
-must resolve to a source column in the primary dataset. It does not validate
+must resolve to a `utf8` source column in the primary dataset; a non-text
+source is refused (see [data path](data-path.md)). It does not validate
 derived SQL or sort keys. The compiler emits them into SQL; DuckDB binding
 and execution can reject them.
 

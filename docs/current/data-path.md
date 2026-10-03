@@ -745,15 +745,19 @@ dimensions resolve to their source columns, and derived measures inherit
 their inputs' attribution. Non-attributable results must return NULL, with
 validity preserved through `Snapshot`, as well as carry the attribution marker.
 
-A derived dimension is projected onto the scanned relation as one map probe
-per row (`map_extract_value` over a MAP literal of its configured values),
-shared by view and distinct-value queries. A source value no entry maps, and
-a NULL source, yield NULL; no row is multiplied. The probe's cost does not
-grow with the number of mapped values, which a `CASE` with one arm per value
-did (see the `query_classification` row in
+A derived dimension is projected onto the scanned relation as one scalar map
+lookup per row (`map_extract_value` over a MAP literal of its configured
+values), shared by view and distinct-value queries. A source value no entry
+maps, and a NULL source, yield NULL; no row is multiplied, and the
+distinct-value picker drops the NULL. The lookup replaced a `CASE` with one
+arm per value, which took seconds at 5,000 values; its cost still grows with
+the classification's size (see the `query_classification` row in
 [performance](performance.md#current-reference-measurements)). The source is
-read as text, so a non-text source matches by DuckDB's text spelling of its
-value (`1.5`, never `1.50`).
+read as text, so view validation refuses a derived dimension whose source
+column is not `utf8`, naming the dimension, the column and its type: scope
+narrowing binds the same keys against the column's own type, and over a
+number the two would disagree on which rows a label covers. A `utf8` source
+interned as an ENUM is read as its label.
 
 A document request names its document by key. A key with fewer parts than the
 dataset declares reads **every document under it**: `["SPX"]` on
