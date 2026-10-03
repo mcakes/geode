@@ -34867,13 +34867,13 @@ run_mutation "pricer: a state paint wins over a value color" \
   geode-pricer \
   a_values_color_sits_between_the_state_paint_and_the_columns_color
 
-# Only an own value is looked up: `mixed` and blank are not values.
+# Only an own value is looked up: a stale, `mixed` or blank cell is no value.
 run_mutation "pricer: only an own cell carries a value color" \
   crates/geode-pricer/src/grid.rs \
   '        let value_color = (t.state == CellState::Own' \
   '        let value_color = (true' \
   geode-pricer \
-  a_group_label_and_a_dimension_cell_carry_their_values_color
+  a_stale_cell_carries_no_value_color
 
 # A cell is looked up by the raw value its group label uses, not by its
 # painted text: an `expiry` mapping on `2026-12-18` colors `Z26` cells.

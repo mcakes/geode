@@ -1517,6 +1517,34 @@ mod tests {
         }
     }
 
+    /// Only an own cell carries a value color: an unpriced line's status
+    /// reads `pricing…` as its raw value too, but its cell is stale.
+    #[test]
+    fn a_stale_cell_carries_no_value_color() {
+        let s = fixture();
+        let (r, m) = build(&s, &Expansion::default());
+        let plan = plan_of(&["status"]);
+        let mut values = ValueColors::default();
+        values.insert("status", "pricing\u{2026}", "blue");
+        let src = FillSource {
+            sheet: &s,
+            rollup: &r,
+            plan: &plan,
+            clock: Clock::utc(),
+            values: &values,
+        };
+        let line = (0..m.len())
+            .find(|&g| m.sheet_row(g).is_some_and(|row| s.is_line(row)))
+            .expect("a line");
+        let cell = CellPass::new(src, &m).cell(line, 0).expect("a status cell");
+        assert_eq!(
+            (&*cell.text, cell.state),
+            ("pricing\u{2026}", CellState::Stale),
+            "fixture: an unpriced line is pricing"
+        );
+        assert_eq!(cell.value_color, None);
+    }
+
     /// A group's label takes its raw value's color, and a leg's dimension
     /// cell its value's; a measure cell, a line's shorthand and a `mixed`
     /// cell (whose text is no value) never do.
