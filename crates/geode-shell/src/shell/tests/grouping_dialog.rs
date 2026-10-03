@@ -710,8 +710,17 @@ fn d_and_r_on_the_view_default_and_r_on_the_ad_hoc_row_are_refused(cx: &mut gpui
     // Cursor opens on the view default (the active row).
     cx.simulate_keystrokes("d");
     cx.run_until_parked();
-    assert!(!notice(&shell, &cx).is_empty());
+    assert_eq!(
+        notice(&shell, &cx),
+        objectdialog::grouping_list::NOTHING_TO_CLEAR
+    );
     assert_eq!(stored(&shell, &cx), Some(chain(&["lhu"])));
+    cx.simulate_keystrokes("r");
+    cx.run_until_parked();
+    assert_eq!(
+        notice(&shell, &cx),
+        objectdialog::grouping_list::NOTHING_TO_REVERT
+    );
     cx.simulate_keystrokes("j r");
     cx.run_until_parked();
     assert_eq!(

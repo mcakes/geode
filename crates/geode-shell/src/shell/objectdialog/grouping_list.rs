@@ -26,6 +26,7 @@ pub const NO_ROW: &str = "no row is selected";
 pub const NO_AD_HOC_CHAIN: &str = "no ad hoc chain yet";
 pub const AD_HOC_NO_REVERT: &str = "the ad hoc chain has nothing to revert to";
 pub const NOTHING_TO_CLEAR: &str = "view default has nothing to clear";
+pub const NOTHING_TO_REVERT: &str = "view default has nothing to revert";
 
 /// Which row of the list a name is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,8 +87,11 @@ pub(super) fn handle_key(
         "d" if kind == Some(RowKind::ViewDefault) => {
             render::set_notice(shell, NOTHING_TO_CLEAR.to_string())
         }
-        "r" if matches!(kind, Some(RowKind::AdHoc | RowKind::ViewDefault)) => {
+        "r" if kind == Some(RowKind::AdHoc) => {
             render::set_notice(shell, AD_HOC_NO_REVERT.to_string())
+        }
+        "r" if kind == Some(RowKind::ViewDefault) => {
+            render::set_notice(shell, NOTHING_TO_REVERT.to_string())
         }
         _ => return None,
     }
@@ -99,10 +103,10 @@ pub(super) fn handle_key(
 /// text afterwards, as the key path does.
 ///
 /// A click that opened a stage instead of closing the dialog (an empty
-/// slot's or an empty ad hoc row's chain field) marks it `click_opened_stage`: the field's
-/// completion rows paint where the list was, and a double-click's second
-/// half would otherwise complete whichever dimension now sits under the
-/// pointer.
+/// slot's or an empty ad hoc row's chain field) marks it
+/// `click_opened_stage`: the field's completion rows paint where the list
+/// was, and a double-click's second half would otherwise complete
+/// whichever dimension now sits under the pointer.
 pub(super) fn click(
     shell: &mut ShellView,
     name: &str,
