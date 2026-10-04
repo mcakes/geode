@@ -36329,6 +36329,41 @@ run_mutation "config door: a rejected merge refuses its origin tiles" \
   geode-shell \
   a_rejected_door_merge_tells_its_tile
 
+# ---- Scope writes: dialog-free definition helpers ----
+
+# A write over an inherited scope forks: the shadowed copy goes to the
+# overrides sidecar in the same batch and the caller announces the copy.
+# Without the record, drift and revert never see the fork.
+run_mutation "scope writes: a fork records the sidecar" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    let notice =
+        fork_record(&config, doc, name, &mut edits).map(|_| fork_notice_of(&config, doc, name));' \
+  '    let notice: Option<String> = None;' \
+  geode-shell \
+  queue_definition_over_an_inherited_entry_forks_and_says_so
+
+# A definition queued a moment ago is already the user's. Reading the live
+# config instead would call it absent (or inherited) until the flush, so a
+# delete/revert gate or an overwrite question would answer wrongly.
+run_mutation "scope writes: the pending batch counts as the user's" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+    owner_in(&config, doc, name)' \
+  '    let config = shell.services.config.clone();
+    owner_in(&config, doc, name)' \
+  geode-shell \
+  definition_owner_counts_the_pending_batch
+
+# The frame resolves a queued scope at once; until the flush timer fires the
+# next key would otherwise see the name as missing.
+run_mutation "scope writes: refresh resolves before the flush" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        let saved_changed = f.replace_saved_scopes(saved);' \
+  '        let _ = saved;
+        let saved_changed = false;' \
+  geode-shell \
+  queue_definition_creates_a_user_entry_and_refresh_resolves_it_at_once
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
