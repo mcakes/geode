@@ -21348,7 +21348,7 @@ run_mutation "chart xy: a reversed line is fed backwards" \
 # A y axis scales over what the view shows. Scaled over the whole slot,
 # a zoom into the money leaves the smile flat against the wings' range.
 run_mutation "chart xy: the domain reads the view only" \
-  crates/geode-chart/src/xy/element.rs \
+  crates/geode-chart/src/xy/model.rs \
   '                .flat_map(|s| s.values_in(s.window(view))),' \
   '                .flat_map(|s| s.values_in((0, s.len()))),' \
   geode-chart \
@@ -34300,14 +34300,14 @@ run_mutation "volslice: the key context takes no counts" \
 # shared steps would claim the `j` and `k` its field must type.
 run_mutation "volslice: the picker publishes no tilelist" \
   crates/geode-volslice/src/tile/mod.rs \
-  '        if matches!(self.popup, Some(Popup::Diff(_))) {' \
-  '        if self.popup.is_some() {' \
+  '            Some(p @ (Popup::Diff(_) | Popup::Actions(_))) => {' \
+  '            Some(p) => {' \
   geode-volslice the_picker_types_j_and_steps_with_the_arrows
 
 run_mutation "volslice: the diff chooser publishes tilelist" \
   crates/geode-volslice/src/tile/mod.rs \
-  '        if matches!(self.popup, Some(Popup::Diff(_))) {' \
-  '        if false {' \
+  '            Some(p @ (Popup::Diff(_) | Popup::Actions(_))) => {' \
+  '            Some(p @ Popup::Actions(_)) => {' \
   geode-volslice d_chooses_a_pair_and_the_batch_carries_its_diff_jobs
 
 # The tile's `shift+d` beats the workspace's duplicate inside the tile.
@@ -34363,8 +34363,8 @@ run_mutation "volslice: keyboard zoom anchors at the centre" \
 run_mutation "volslice: a split step is a new model version" \
   crates/geode-volslice/src/tile/mod.rs \
   '        self.version += 1;
-        self.model = with_split(&self.model, split, self.version);' \
-  '        self.model = with_split(&self.model, split, self.version);' \
+        self.model = restyled(&self.model, split, self.state.diff_ylim, self.version);' \
+  '        self.model = restyled(&self.model, split, self.state.diff_ylim, self.version);' \
   geode-volslice split_keys_step_the_split_as_a_new_model_version
 
 # Wheel and drag go through the x axis's scale, so a reversed delta axis
