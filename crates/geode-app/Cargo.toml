@@ -50,8 +50,6 @@ geode-positions.workspace = true
 geode-diagnostics = { path = "../geode-diagnostics" }
 geode-guide = { path = "../geode-guide" }
 geode-demo-data = { path = "../geode-demo-data" }
-# Register concrete document parsers at the application boundary.
-geode-documents = { path = "../geode-documents" }
 # Stamp publication arrival times, seed demo document dates from the configured
 # clock, and format crash report timestamps.
 chrono = "0.4.42"
@@ -69,6 +67,10 @@ tracing-appender.workspace = true
 toml = "1.1.4"
 
 [dev-dependencies]
+# The demo tests build documents through the concrete kinds and check the
+# dividend vocabulary and ids; the parsers themselves are registered by
+# geode-compose.
+geode-documents = { path = "../geode-documents" }
 # Match workspace test features to reuse the same dependency artifacts.
 geode-core = { workspace = true, features = ["test-support"] }
 tempfile = "3.27.0"

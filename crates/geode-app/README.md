@@ -59,11 +59,12 @@ The demo transports, their behavior and the store and config paths live in
 
 ## Dependencies
 
-This composition root imports the shell, data service, feature modules,
-concrete document parsers, and pricing implementation. `geode-shell` and
-`geode-data` never depend on each other; feature crates do not depend on sibling
-features. Registering `geode-documents` here keeps parser dependencies out of
-the data service.
+This composition root imports the shell, data service, `geode-compose`,
+feature modules, and pricing implementation. `geode-shell` and `geode-data`
+never depend on each other; feature crates do not depend on sibling features.
+The concrete document parsers are registered through `geode-compose`
+(`engine_setup`), which keeps parser dependencies out of the data service;
+`geode-documents` is only a dev-dependency here, for the demo tests.
 
 `gpui-base` and `gpui-component-macros` are listed as direct dependencies
 without being imported: gpui-component names them with a caret, and the

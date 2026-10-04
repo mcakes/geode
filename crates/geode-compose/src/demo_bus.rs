@@ -48,7 +48,7 @@ pub struct Producer {
 
 /// A running demo bus thread, stopped and joined on drop.
 ///
-/// Shutdown is checked between publishes and in [`STOP_POLL`] sleep slices.
+/// Shutdown is checked between publishes and in `STOP_POLL` sleep slices.
 /// A publish already in progress must finish before the thread exits.
 pub struct DemoBus {
     stop: Arc<AtomicBool>,
@@ -79,7 +79,7 @@ impl Drop for DemoBus {
 ///
 /// Startup attempts `startup_repeats` publishes per key, in producer order
 /// then key order, without waiting for a cadence. Ingestion and delivery
-/// remain asynchronous. Subsequent publishes follow [`round_robin_schedule`],
+/// remain asynchronous. Subsequent publishes follow `round_robin_schedule`,
 /// with one wait per publish across all producers. Jitter is seeded and
 /// capped at `cadence`, giving nonnegative waits from `cadence - jitter`
 /// through `cadence + jitter` at millisecond jitter resolution. Adding

@@ -71,8 +71,9 @@ paths in tests.
   ```
 
 - `builtin_data_layer` contributes `pricer_sheets`, then `pricer`, then the
-  demo layer. Schema order is part of the store's identity, so the app's
-  builtin layer appends this layer unchanged.
+  demo layer. Dataset order is part of the schema the app's
+  equal-configuration test compares, so the app's builtin layer appends
+  this layer unchanged.
 
 ## Commands
 

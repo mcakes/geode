@@ -3050,9 +3050,9 @@ advertises identities and another requires manual entry. Document production
 and ingestion are asynchronous; starting the app does not guarantee data is
 ready for the first frame.
 
-`geode-app` is the composition root. It builds the engine configuration
-through `geode-compose` (the store-deciding builtin documents, paths,
-adapters and `engine_setup`), loads configuration, initializes GPUI
+`geode-app` is the composition root. It loads configuration, builds the
+engine configuration through `geode-compose` (the store-deciding builtin
+documents, paths, adapters and `engine_setup`), initializes GPUI
 and logging, builds registries, creates the data service and bridge, registers
 module factories and the row menu's actions (Open in Nemo, from
 `geode-nemo`, then Move LHU, from `geode-positions`), installs globals, and opens the window. Cross-layer policy

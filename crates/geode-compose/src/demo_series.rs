@@ -22,8 +22,8 @@ use rand::{Rng, SeedableRng};
 use std::sync::Arc;
 
 /// `(identity, level, drift per weekday, daily volatility)`.
-/// `level` is the reference value at [`ANCHOR`], subject to accumulated
-/// random noise. [`open_level`] compensates for drift between [`EPOCH`]
+/// `level` is the reference value at `ANCHOR`, subject to accumulated
+/// random noise. `open_level` compensates for drift between `EPOCH`
 /// and the anchor without removing that noise.
 pub const IDENTITIES: [(&str, f64, f64, f64); 24] = [
     ("SPX.close", 5600.0, 0.0003, 0.010),
@@ -128,7 +128,7 @@ fn open_level(seed: u64, identity: &str, level: f64, drift: f64, vol: f64, day: 
 
 /// Bars with timestamps in `[from, to)` for a known identity.
 /// Unknown identities return `None`; known identities return an empty result
-/// when the span contains no session bars. Dates before [`EPOCH`] have no bars.
+/// when the span contains no session bars. Dates before `EPOCH` have no bars.
 pub fn bars(
     seed: u64,
     identity: &str,
