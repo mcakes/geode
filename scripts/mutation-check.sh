@@ -34830,6 +34830,32 @@ run_mutation "link: a restored follower opens on the group's underlying" \
                 geode_core::link::underlying_of(f.scope()).map(|u| vec![u.to_owned()])' \
   geode-marketdata a_restored_follower_opens_on_the_groups_underlying
 
+# A panel following the group it emits into posts no cursor: composed over
+# its lane, `lane ∧ underlying` would overwrite a co-emitter's narrower path
+# and widen every follower of the group.
+run_mutation "link: a panel echoing its own group posts no cursor" \
+  crates/geode-marketdata/src/tile.rs \
+  '                Some(u) if !echoes_its_group => CursorScope::Path(underlying_scope(u)),' \
+  '                Some(u) => CursorScope::Path(underlying_scope(u)),' \
+  geode-marketdata a_panel_following_the_group_it_emits_into_posts_no_cursor
+
+run_mutation "link: a panel following its emit group keeps a blotter's path" \
+  crates/geode-marketdata/src/tile.rs \
+  '                Some(u) if !echoes_its_group => CursorScope::Path(underlying_scope(u)),' \
+  '                Some(u) => CursorScope::Path(underlying_scope(u)),' \
+  geode-app a_market_data_panel_following_its_emit_group_keeps_the_blotters_path
+
+# The legacy bare `draft` is the saved key's: a restored follower opening on
+# its group's underlying parks it there instead of putting it on another
+# underlying's document.
+run_mutation "link: a restored follower's legacy draft stays with its saved key" \
+  crates/geode-marketdata/src/tile.rs \
+  '                parked.entry(saved).or_insert(t);
+                None' \
+  '                let _ = saved;
+                Some(t)' \
+  geode-marketdata a_restored_followers_legacy_draft_stays_with_its_saved_underlying
+
 # ---- Vol slice viewer ----
 #
 # geode-volslice: one underlying's smiles per expiry and kind. The pure core

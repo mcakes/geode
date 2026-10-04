@@ -212,14 +212,17 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   switch sets a one-part key. While following, `u`, `:underlying`/`:key`
   and a picker opened earlier refuse with `following A — set the
   underlying there`, the add-time auto-prompt does not open, and the
-  menu's `Load underlying…` row is greyed `following A`. A panel that
-  follows and emits into one group composes over its lane, so its posting
-  (lane ∧ its underlying) replaces a co-emitter's: the last posting wins. Unfollowing keeps the
+  menu's `Load underlying…` row is greyed `following A`. While the panel
+  follows the group it emits into, `emission` posts `CursorScope::Nothing`
+  and its board alone: composed over its lane, `lane ∧ underlying` would
+  replace a co-emitter's narrower path and widen every follower; it reads
+  both memberships from its frame handle. Unfollowing keeps the
   underlying the group last gave. The session saves the underlying as
   always; session restore records the follow in the frame before the panel
   is built and notifies nothing, so `MarketDataTile::new` reads the followed
   group's underlying itself and opens on it, leaving the saved underlying's
-  draft parked. The tile stores no group; its header reads `link_chips` from its
+  draft parked (a legacy bare `draft` field is resolved against the saved
+  underlying, not the group's, and parked with it). The tile stores no group; its header reads `link_chips` from its
   frame handle at paint.
 
 ## Input and popup contracts

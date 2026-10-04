@@ -334,9 +334,9 @@ pulls:
 
 | Module | Follows | Scope it posts | Board it posts | Posts nothing when |
 |---|---|---|---|---|
-| Blotter | Yes | Its base and `:filter` layer, then the cursor row's grouping path (plus a leaf row's own single values) | None | No snapshot has arrived, or the path passes through a NULL or empty grouping value (the tile header says so) |
+| Blotter | Yes | Its base, its `:filter` layer while `[links] include_tile_filter` is on, then the cursor row's grouping path (plus a leaf row's own single values) | None | No snapshot has arrived, or the path passes through a NULL or empty grouping value (the tile header says so) |
 | Pricer | Yes | Its base, then the grouping path of the cursor's group row (a line, leg or package adds its sole `underlying_ref`) | None | The sheet has no cursor row, or the path passes through a NULL or empty grouping value (the tile header says so) |
-| Market data | Yes, by underlying | Its base, then its underlying as a one-value `underlying_ref` path | Its draft document, while the draft is not clean | The panel has no underlying |
+| Market data | Yes, by underlying | Its base, then its underlying as a one-value `underlying_ref` path | Its draft document, while the draft is not clean | The panel has no underlying, or it follows the group it emits into (its board still posts) |
 | Timeseries | No | Does not emit | | |
 | Vol slice | Yes | Does not emit | | |
 
@@ -1015,10 +1015,12 @@ its group's restored underlying instead, read when the panel is built,
 since session restore records the follow before any tile exists and
 notifies nothing.
 
-A panel that follows and emits into one group composes over its lane, as
-any such emitter does, so it posts lane ∧ its underlying and replaces
-whatever a co-emitter posted: the last posting wins, and the group then
-names the panel's underlying until another emitter moves.
+A panel that follows and emits into one group posts no scope there, only
+its board: its underlying is the group's own, and composed over its lane,
+as any such emitter is, `lane ∧ underlying` would replace a co-emitter's
+narrower path (a blotter's book and grouping levels) and widen every
+follower of the group. Following one group and emitting into another, it
+posts its underlying over the followed group's scope as before.
 
 The vol slice viewer reads a group's `cvi_params` draft from the board (see
 [Vol slice](#vol-slice)); no other tile reads the board, so a posted

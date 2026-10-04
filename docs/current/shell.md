@@ -872,8 +872,12 @@ is one of:
   underlying. A total row's path is empty.
 - `NullIn(column)`: the path passes through a NULL, or an empty value, in
   `column`. Nothing is posted (see **The NULL refusal** below).
-- `Nothing`: no snapshot or no cursor row yet, or a market-data panel with no
-  underlying. The group's scope is left as it is.
+- `Nothing`: no snapshot or no cursor row yet, a market-data panel with no
+  underlying, or a market-data panel following the group it emits into (its
+  underlying is then the group's own; composed over its lane, `lane ∧
+  underlying` would replace a co-emitter's narrower path and widen every
+  follower). The group's scope is left as it is; the panel's board still
+  posts.
 
 Only a market-data panel posts board entries: its draft document, while
 the draft is not clean (`Editing`, `Behind` and `Sent` alike). Each entry carries
@@ -1057,8 +1061,20 @@ older than the last one the group held.
 - A market-data panel follows by underlying only: it takes the group
   scope's one `underlying_ref` and ignores the rest, and a scope naming zero
   or several underlyings leaves it on none. A panel that follows and emits
-  into one group posts lane ∧ its underlying, replacing whatever a
-  co-emitter posted: the last posting wins.
+  into one group posts no scope there, only its board: the group's scope
+  is whatever its other emitters post. Following one group and emitting
+  into another, it posts its underlying over the followed group's scope.
+- A blotter or pricer that follows and emits into one group re-posts when a
+  requery moves its cursor (its cursor row vanished from the new rows), as
+  it does for a cursor move the trader made. With a second emitter in the
+  group (a linked pair), that delivery-driven re-post overwrites the other
+  emitter's selection. Telling a trader's move from a delivery's would need
+  a rule the emitters do not have yet.
+- While an emitter's NULL refusal stands, its group keeps the scope it last
+  posted, composed over the base it had then. If the emitter's base moves
+  meanwhile (a lane scope edit, a pin or unpin), the group keeps a base the
+  emitter has since left. Only the emitter's header warns; a follower shows
+  no cue that its group is stale.
 - A path level on a non-text column (the pricer's `strike`, `qty`,
   `barrier` or a shift column) is emitted like any other. A pricer
   following the group refuses it explicitly (`scope refused: 'strike' is

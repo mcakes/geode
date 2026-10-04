@@ -270,11 +270,12 @@ impl TileContent for MarketDataContent {
     fn emits(&self) -> bool {
         true
     }
-    /// The panel's underlying as a one-value scope and, while its draft is
-    /// not clean (`Editing`, `Behind` or `Sent`) and the upload builder can
-    /// assemble it, that draft document.
+    /// The panel's underlying as a one-value scope (no cursor while it
+    /// follows the group it emits into) and, while its draft is not clean
+    /// (`Editing`, `Behind` or `Sent`) and the upload builder can assemble
+    /// it, that draft document.
     fn emission(&self, cx: &App) -> geode_core::link::Emission {
-        self.tile.read(cx).emission()
+        self.tile.read(cx).emission(cx)
     }
     /// Every route that moves the underlying, the draft or the painted
     /// document notifies the tile, so observing it covers each way the

@@ -5649,6 +5649,265 @@ grain = "underlying"
         assert!(vcx.debug_bounds("tile-link-refusal-1").is_none());
     }
 
+    /// A market-data panel that follows and emits into the group a blotter
+    /// emits into never widens it. The blotter (tile 1) emits into A; the
+    /// production cvi panel (tile 2) follows A and emits into A; a second
+    /// blotter (tile 3) follows A. Each blotter cursor move switches the
+    /// panel to A's underlying, which announces a new emission; A keeps the
+    /// blotter's whole path (lane book, `lhu`, underlying) and the follower
+    /// queries under it, rather than under the panel's `lane ∧ underlying`.
+    #[gpui::test]
+    fn a_market_data_panel_following_its_emit_group_keeps_the_blotters_path(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_core::link::{Group, Membership, underlying_of};
+        use geode_core::snapshot::TestColumn;
+        use geode_marketdata::core::builtin_panel;
+
+        let (handle, rx) = DataHandle::for_tests();
+        let (mut bridge, tx) = test_bridge_with_pricer(handle.clone(), test_pricer(&handle));
+        let views = geode_core::view::ViewSpec::from_doc(&geode_core::config::merge_docs(
+            "views",
+            &[LayerDoc::builtin("views", FLAT_VIEW).unwrap()],
+        ))
+        .0;
+        bridge.factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            views,
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        bridge.panels = vec![Rc::new(MarketDataFactory::new(
+            handle,
+            builtin_panel("cvi"),
+            Duration::from_secs(900),
+        ))];
+
+        let mut services = test_shell_services();
+        let mut roster = ModuleRoster::new();
+        crate::add_bridge_modules(&mut roster, &bridge);
+        roster.register_actions(&mut services.registry);
+        let (fragments, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        let layered = geode_shell::keymap::fragments::splice(
+            &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+            &fragments,
+        );
+        let (keymap, diags) = build_keymap(&layered, services.mod_alias, &services.registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        services.keymap = keymap;
+        services.roster = roster;
+
+        let mut table = geode_shell::session::to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &geode_shell::session::PinnedRecords::new(),
+            &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
+        );
+        let ws1: toml::Table = r#"
+            focused = 1
+            [node]
+            kind = "split"
+            orientation = "horizontal"
+            ratios = [0.34, 0.33, 0.33]
+            [[node.children]]
+            kind = "leaf"
+            id = 1
+            [[node.children]]
+            kind = "leaf"
+            id = 2
+            [[node.children]]
+            kind = "leaf"
+            id = 3
+            [tiles.1]
+            module = "blotter"
+            [tiles.1.state]
+            view = "flat"
+            [tiles.2]
+            module = "cvi"
+            [tiles.3]
+            module = "blotter"
+            [tiles.3.state]
+            view = "flat"
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        table.insert(
+            "frame".to_string(),
+            toml::Value::Table(r#"dimensions = { book = ["BK001"] }"#.parse().unwrap()),
+        );
+        let restored = geode_shell::session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+        services.restored_frame = restored.frame;
+
+        init_grid_modules(cx);
+        let window = open_shell_window(cx, services);
+        cx.update(|cx| attach(&bridge, window, cx));
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+        };
+        draw(&mut vcx);
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let (blotter, panel, follower) = (TileId(1), TileId(2), TileId(3));
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| (
+                s.occupant_kind(blotter),
+                s.occupant_kind(panel),
+                s.occupant_kind(follower)
+            )),
+            (Some("blotter"), Some("cvi"), Some("blotter"))
+        );
+        let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+
+        // Every query `tile` sent so far, in order; another tile's are
+        // dropped.
+        let queries = |tile: TileId| -> Vec<geode_data::QueryParams> {
+            rx.try_iter()
+                .filter_map(|r| match r {
+                    geode_data::Request::Query(p) if p.key == QueryKey(tile.0) => Some(p),
+                    _ => None,
+                })
+                .collect()
+        };
+        let next_query = |tile: TileId| -> geode_data::QueryParams {
+            loop {
+                match rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the tile asks for its rows")
+                {
+                    geode_data::Request::Query(p) if p.key == QueryKey(tile.0) => return p,
+                    _ => continue,
+                }
+            }
+        };
+        // The root, then L1 on SPX and L2 on NDX.
+        let dict = |a: &str, b: &str| {
+            TestColumn::Dict(vec![None, Some(a.to_string()), Some(b.to_string())])
+        };
+        let snapshot = Arc::new(geode_core::snapshot::Snapshot::for_tests(
+            vec![
+                (shell_blotter_meta("lhu"), dict("L1", "L2")),
+                (shell_blotter_meta("underlying_ref"), dict("SPX", "NDX")),
+                (
+                    shell_blotter_meta("row_depth"),
+                    TestColumn::I32(vec![0, 1, 1]),
+                ),
+                (
+                    shell_blotter_meta("delta01"),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                ),
+            ],
+            1,
+        ));
+        let answer = |vcx: &mut gpui::VisualTestContext, query: &geode_data::QueryParams| {
+            tx.try_send(DataEvent::Query(geode_core::query::QueryOutcome {
+                key: query.key,
+                tag: query.tag,
+                snapshot: Ok(snapshot.clone()),
+                submitted: std::time::Instant::now(),
+            }))
+            .unwrap();
+            draw(vcx);
+        };
+        answer(&mut vcx, &next_query(blotter));
+
+        let link = |vcx: &mut gpui::VisualTestContext, row: &str| {
+            vcx.simulate_keystrokes("alt-u");
+            draw(vcx);
+            vcx.simulate_input(row);
+            vcx.simulate_keystrokes("enter");
+            draw(vcx);
+        };
+        let membership =
+            |vcx: &gpui::VisualTestContext, tile| frame.read_with(vcx, |f, _| f.membership(tile));
+        let group_sole = |vcx: &gpui::VisualTestContext, column: &str| {
+            frame.read_with(vcx, |f, _| {
+                f.group_scope(Group::A).sole(column).map(str::to_owned)
+            })
+        };
+
+        // The blotter emits into A and its cursor moves to L1.
+        link(&mut vcx, "emit a");
+        vcx.simulate_keystrokes("j");
+        draw(&mut vcx);
+        assert_eq!(group_sole(&vcx, "lhu").as_deref(), Some("L1"));
+        assert_eq!(group_sole(&vcx, "underlying_ref").as_deref(), Some("SPX"));
+
+        // The panel follows A, which switches it to SPX, then emits into A.
+        vcx.simulate_keystrokes("alt-l");
+        draw(&mut vcx);
+        link(&mut vcx, "follow a");
+        link(&mut vcx, "emit a");
+        assert_eq!(
+            membership(&vcx, panel),
+            Membership {
+                follow: Some(Group::A),
+                emit: Some(Group::A),
+            },
+            "the panel's content answers `follows` and `emits`"
+        );
+        assert_eq!(
+            group_sole(&vcx, "lhu").as_deref(),
+            Some("L1"),
+            "the panel's emission leaves the blotter's path in A"
+        );
+        assert_eq!(group_sole(&vcx, "book").as_deref(), Some("BK001"));
+
+        // The second blotter follows A: it queries under the whole path.
+        vcx.simulate_keystrokes("alt-l");
+        draw(&mut vcx);
+        link(&mut vcx, "follow a");
+        let following = queries(follower).pop().expect("following asks again");
+        assert_eq!(
+            following.scope.sole("lhu"),
+            Some("L1"),
+            "{:?}",
+            following.scope
+        );
+        answer(&mut vcx, &following);
+
+        // The blotter's cursor moves on to L2: the panel switches to NDX and
+        // announces it, and A keeps the blotter's path.
+        vcx.simulate_keystrokes("alt-h alt-h");
+        draw(&mut vcx);
+        vcx.simulate_keystrokes("j");
+        draw(&mut vcx);
+        assert_eq!(group_sole(&vcx, "underlying_ref").as_deref(), Some("NDX"));
+        assert_eq!(
+            group_sole(&vcx, "lhu").as_deref(),
+            Some("L2"),
+            "the switched panel did not overwrite the blotter's path"
+        );
+        assert_eq!(group_sole(&vcx, "book").as_deref(), Some("BK001"));
+        let last = queries(follower)
+            .pop()
+            .expect("the move requeries the follower");
+        assert_eq!(underlying_of(&last.scope), Some("NDX"));
+        assert_eq!(
+            last.scope.sole("lhu"),
+            Some("L2"),
+            "the follower's last query is the blotter's path: {:?}",
+            last.scope
+        );
+    }
+
     /// The next request on `f`'s handle that `pick` takes, skipping the
     /// rest (refreshes, catalog reads).
     fn next_request<T>(
