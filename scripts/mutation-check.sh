@@ -1419,12 +1419,46 @@ run_mutation "collector: a refused stamp read keeps waiting" \
   geode-collector \
   a_refused_stamp_read_is_busy_and_only_a_mismatch_idles
 
-run_mutation "collector: an open the app won is info" \
+run_mutation "collector: a stop the app explains is info, else an error" \
   crates/geode-collector/src/run.rs \
-  '        Severity::Error if is_open_failure(d) && app_present() => Level::INFO,' \
-  '        Severity::Error if is_open_failure(d) => Level::INFO,' \
+  $'    } else {\n        Level::ERROR\n    };' \
+  $'    } else {\n        Level::INFO\n    };' \
   geode-collector \
-  an_open_failure_is_info_only_while_an_app_is_present
+  a_stop_is_info_while_an_app_explains_it_and_an_error_otherwise
+
+# The sink holds the open failure back so the loop logs it once, at the
+# level its app probe decides.
+run_mutation "collector: the sink holds back the open failure" \
+  crates/geode-collector/src/run.rs \
+  '                    if is_open_failure(&d) {' \
+  '                    if false {' \
+  geode-collector \
+  the_sink_holds_back_the_real_open_failure_and_the_stop
+
+# A store refusing every read with no app present escalates after the
+# busy limit instead of waiting silently forever.
+run_mutation "collector: a lone refusal escalates after the busy limit" \
+  crates/geode-collector/src/run.rs \
+  '        now.saturating_duration_since(since) >= BUSY_LIMIT' \
+  '        false' \
+  geode-collector \
+  a_lone_refusal_escalates_after_the_busy_limit
+
+# A status probe holds the app lock for an instant; a release needs a
+# second sighting.
+run_mutation "collector: an app is confirmed by a second probe" \
+  crates/geode-collector/src/run.rs \
+  $'    std::thread::sleep(gap);\n    probe()' \
+  $'    std::thread::sleep(gap);\n    true' \
+  geode-collector \
+  an_app_is_confirmed_by_a_second_probe
+
+run_mutation "lease: a probe creates no lock file" \
+  crates/geode-data/src/lease.rs \
+  '    let file = match OpenOptions::new().read(true).write(true).open(&path) {' \
+  '    let file = match open_lock_file(&path) {' \
+  geode-data \
+  a_probe_leaves_no_lock_file_behind
 
 run_mutation "collector: the lease is retried before exiting" \
   crates/geode-collector/src/run.rs \

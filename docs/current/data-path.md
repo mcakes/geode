@@ -279,8 +279,9 @@ path](#supervised-threads), with `another Geode window has this store open`
 the store within N s (PID n)`, or a lock-file error prefixed with the lock
 file's path as the error. Taking the lock creates the store's directory first
 (best-effort, as `Store::open_with` does), so a fresh machine's first launch
-does not fail on a missing directory; `lease::app_present` on a missing
-directory reports no app and creates nothing. A stop during the wait ends it
+does not fail on a missing directory. The probes `lease::app_present` and
+`lease::collector_present` open an existing lock file only: a missing lock
+file or directory reports no holder, and neither probe creates anything. A stop during the wait ends it
 at the next retry and the loop returns without a diagnostic or `ThreadStopped`. The service holds
 the lease as its last field, so it is released only after the writer and
 every reader connection have closed, on shutdown and on an unwind alike: a

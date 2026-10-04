@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -30,7 +30,10 @@ use geode_core::log::{LevelControl, LogLevels};
 use geode_data::lease::{CollectorLease, app_present, try_collector};
 use geode_data::store::StoreError;
 use geode_data::store::stamp::read_format;
-use geode_data::{DataEvent, DataService, EventSink, HANDOFF_DRAIN, STORE_FORMAT, StoreRole};
+use geode_data::{
+    DEFAULT_STORE_DEADLINE, DataEvent, DataService, EventSink, HANDOFF_DRAIN, STORE_FORMAT,
+    StoreRole,
+};
 use tracing::Level;
 
 /// How often the collector looks for the app while it waits for the store.
@@ -40,6 +43,15 @@ pub const APP_POLL: Duration = Duration::from_secs(1);
 pub const HOLD_POLL: Duration = Duration::from_millis(100);
 /// How often a store stamped with another format is read again.
 pub const STAMP_RECHECK: Duration = Duration::from_secs(30);
+/// How long a refused stamp read with no app present counts as the store
+/// being busy before it is reported as unreadable and rechecked every
+/// `STAMP_RECHECK`: the app's own open deadline, past which an app that
+/// was opening the store has given up.
+pub const BUSY_LIMIT: Duration = DEFAULT_STORE_DEADLINE;
+/// The gap between the two probes that confirm an app before a release. A
+/// `status` probe holds `<db>.app.lock` for an instant only; an app holds
+/// it for its whole life.
+const CONFIRM_GAP: Duration = Duration::from_millis(20);
 /// How long a refused collector lease is retried before another collector
 /// is assumed. A dropping lease can stay shared with a child process for
 /// the instant between its spawn and its exec; a second collector, or a
@@ -128,18 +140,31 @@ pub fn run_with_levels(
     tracing::info!(target: TARGET, "collecting into {}", db.display());
     let exe = ExeStamp::current();
     let mut stamp_reported: Option<StampCheck> = None;
+    let mut busy_timer = BusyTimer::default();
     loop {
         wait_for_no_app(&db);
-        let check = stamp_check(read_format(&db));
+        let mut check = stamp_check(read_format(&db));
+        let busy = matches!(check, StampCheck::Busy(_));
+        let app = busy && app_present(&db).unwrap_or(true);
+        if busy_timer.escalate(busy && !app, clock())
+            && let StampCheck::Busy(reason) = check
+        {
+            check = StampCheck::Unreadable(reason);
+        }
         match &check {
             StampCheck::Ready => stamp_reported = None,
             StampCheck::Busy(reason) => {
                 // Usually an app that appeared since the poll. Otherwise a
-                // store this process cannot open yet: said once per reason.
-                if app_present(&db).unwrap_or(true) {
+                // store this process cannot open yet: said once per reason,
+                // and an error once it outlasts BUSY_LIMIT.
+                if app {
                     tracing::debug!(target: TARGET, "store busy: {reason}");
                 } else if stamp_reported.as_ref() != Some(&check) {
-                    tracing::warn!(target: TARGET, "cannot read the store's stamp yet, waiting: {reason}");
+                    tracing::warn!(
+                        target: TARGET,
+                        "cannot read the store's stamp yet, waiting up to {} s: {reason}",
+                        BUSY_LIMIT.as_secs()
+                    );
                     stamp_reported = Some(check.clone());
                 }
                 std::thread::sleep(APP_POLL);
@@ -245,6 +270,38 @@ pub(crate) fn stamp_check(read: Result<Option<u32>, StoreError>) -> StampCheck {
     }
 }
 
+/// How long stamp reads have been refused with no app present.
+#[derive(Debug, Default)]
+pub(crate) struct BusyTimer {
+    since: Option<Instant>,
+}
+
+impl BusyTimer {
+    /// Record one stamp check at `now`; `refused_alone` is a refused read
+    /// with no app present. True once refused reads alone have lasted
+    /// `BUSY_LIMIT` without a break: no app is opening the store, so the
+    /// refusal is the store's own fault. Any other check restarts the count.
+    pub(crate) fn escalate(&mut self, refused_alone: bool, now: Instant) -> bool {
+        if !refused_alone {
+            self.since = None;
+            return false;
+        }
+        let since = *self.since.get_or_insert(now);
+        now.saturating_duration_since(since) >= BUSY_LIMIT
+    }
+}
+
+/// True when `probe` sees an app twice, `gap` apart. One sighting can be a
+/// `status` probe holding `<db>.app.lock` for an instant; releasing on it
+/// would hand the store to nobody. A first `false` returns at once.
+pub(crate) fn confirmed(probe: &mut dyn FnMut() -> bool, gap: Duration) -> bool {
+    if !probe() {
+        return false;
+    }
+    std::thread::sleep(gap);
+    probe()
+}
+
 /// How a hold ended.
 enum Held {
     /// The store went to the app.
@@ -284,7 +341,7 @@ fn hold(
         .0
         .today(chrono::Utc::now());
 
-    let events = Arc::new(Events::new(db.to_path_buf()));
+    let events = Arc::new(Events::new());
     let started = clock();
     tracing::info!(
         target: TARGET,
@@ -300,8 +357,10 @@ fn hold(
     );
     let mut bus = feed.map(|feed| geode_compose::demo_bus::spawn_default(feed, today));
     // A probe error counts as an app present: release rather than hold a
-    // store an app may be waiting for.
-    while !events.stopped() && !app_present(db).unwrap_or(true) {
+    // store an app may be waiting for. An app is confirmed by a second
+    // probe, so a `status` probe's instant on the lock is not an app.
+    let mut probe = || app_present(db).unwrap_or(true);
+    while !events.stopped() && !confirmed(&mut probe, CONFIRM_GAP) {
         std::thread::sleep(HOLD_POLL);
     }
 
@@ -310,13 +369,18 @@ fn hold(
         if let Some(bus) = bus.as_mut() {
             bus.stop();
         }
-        let stops = events.take_stops();
-        if app_present(db).unwrap_or(false) {
-            tracing::info!(target: TARGET, "app took the store first: {}", join_stops(&stops));
+        // The one place a stop is judged: the sink held back both the stop
+        // and any open failure, so each is logged once, at this level.
+        let app = confirmed(&mut || app_present(db).unwrap_or(false), CONFIRM_GAP);
+        let (level, lines) = stop_report(&events.take_open_failures(), &events.take_stops(), app);
+        if app {
+            for line in &lines {
+                log_at(level, &format_args!("app took the store first: {line}"));
+            }
             return Held::Yielded;
         }
-        for (thread, reason) in &stops {
-            tracing::error!(target: TARGET, "{thread} stopped: {reason}");
+        for line in &lines {
+            log_at(level, line);
         }
         tracing::error!(target: TARGET, "a data thread stopped with no app present; exiting with status {EXIT_FAILED}");
         return Held::Stopped;
@@ -337,12 +401,28 @@ fn hold(
     Held::Released
 }
 
-fn join_stops(stops: &[(String, String)]) -> String {
-    stops
-        .iter()
-        .map(|(thread, reason)| format!("{thread}: {reason}"))
-        .collect::<Vec<_>>()
-        .join("; ")
+/// What the loop logs when a hold ends with a stopped thread: each open
+/// failure the sink held back, then each stop whose reason is not one of
+/// them (a failed open reports the same text as both). With an app present
+/// the stop is the app winning the race for the store, an expected yield:
+/// info. With none it is a fault: error.
+pub(crate) fn stop_report(
+    open_failures: &[Diagnostic],
+    stops: &[(String, String)],
+    app_present: bool,
+) -> (Level, Vec<String>) {
+    let level = if app_present {
+        Level::INFO
+    } else {
+        Level::ERROR
+    };
+    let mut lines: Vec<String> = open_failures.iter().map(|d| d.to_string()).collect();
+    for (thread, reason) in stops {
+        if !open_failures.iter().any(|d| &d.message == reason) {
+            lines.push(format!("{thread} stopped: {reason}"));
+        }
+    }
+    (level, lines)
 }
 
 fn apply_levels(config: &geode_core::config::Config, levels: Option<&dyn LevelControl>) {
@@ -379,56 +459,33 @@ fn log_at(level: Level, message: &dyn Display) {
     }
 }
 
-/// The level a service diagnostic is logged at. Load notes (a file loaded
-/// with extra or missing optional columns) are informational. The data
-/// service's own open failure while an app holds the store is the app
-/// winning the race for it (an expected yield, not a fault), so it is info;
-/// `app_present` is probed only for that case. Everything else keeps its
-/// severity.
-pub(crate) fn diagnostic_level(d: &Diagnostic, app_present: impl FnOnce() -> bool) -> Level {
-    if is_load_note(d) {
-        return Level::INFO;
-    }
-    match d.severity {
-        Severity::Warning => Level::WARN,
-        Severity::Error if is_open_failure(d) && app_present() => Level::INFO,
-        Severity::Error => Level::ERROR,
-    }
-}
-
+/// The data service's own open failure, which the sink holds back for the
+/// loop to judge: with an app present it is the app winning the race.
 fn is_open_failure(d: &Diagnostic) -> bool {
     d.message.starts_with(OPEN_FAILURE)
-}
-
-/// The data service's load-note warning: `'<file>' loaded into '<dataset>'
-/// with …`, or the cap notice, at path `sources.<source>` with no layer
-/// or file.
-fn is_load_note(d: &Diagnostic) -> bool {
-    d.severity == Severity::Warning
-        && d.layer.is_none()
-        && d.file.is_none()
-        && d.path.as_deref().is_some_and(|p| p.starts_with("sources."))
-        && (d.message.contains("' loaded into '")
-            || d.message.contains("distinct load-note combinations"))
 }
 
 /// The service's event sink for one hold. Every arm logs and returns at
 /// once; the locks are held only to update a map or a list.
 pub(crate) struct Events {
-    db: PathBuf,
     health: Mutex<HashMap<String, Health>>,
     stopped: AtomicBool,
     stops: Mutex<Vec<(String, String)>>,
+    open_failures: Mutex<Vec<Diagnostic>>,
 }
 
 impl Events {
-    pub(crate) fn new(db: PathBuf) -> Events {
+    pub(crate) fn new() -> Events {
         Events {
-            db,
             health: Mutex::new(HashMap::new()),
             stopped: AtomicBool::new(false),
             stops: Mutex::new(Vec::new()),
+            open_failures: Mutex::new(Vec::new()),
         }
+    }
+
+    fn take_open_failures(&self) -> Vec<Diagnostic> {
+        std::mem::take(&mut *self.open_failures.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     pub(crate) fn sink(events: &Arc<Events>) -> EventSink {
@@ -483,9 +540,16 @@ impl Events {
                 tracing::debug!(target: TARGET, "published {dataset} {batch} generation {gen_id}");
             }
             DataEvent::Diagnostics(diagnostics) => {
-                for d in &diagnostics {
-                    let level = diagnostic_level(d, || app_present(&self.db).unwrap_or(false));
-                    log_at(level, d);
+                for d in diagnostics {
+                    if is_open_failure(&d) {
+                        // Judged and logged by the loop with the stop.
+                        self.open_failures
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(d);
+                    } else {
+                        log_at(severity_level(d.severity), &d);
+                    }
                 }
             }
             DataEvent::SeriesFetched {
@@ -510,10 +574,7 @@ impl Events {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::sync::mpsc;
-
-    use geode_core::config::Layer;
 
     use super::*;
 
@@ -581,46 +642,74 @@ mod tests {
         ));
     }
 
+    /// A refused read with no app present is busy until `BUSY_LIMIT` has
+    /// passed without a break; then it escalates. A check that is not a
+    /// lone refusal (an app present, a readable stamp) restarts the count.
     #[test]
-    fn diagnostics_keep_their_severity_and_load_notes_are_info() {
-        let never = || -> bool { panic!("app_present is probed only for an open failure") };
-        assert_eq!(
-            diagnostic_level(&diagnostic(Severity::Warning, "w"), never),
-            Level::WARN
-        );
-        assert_eq!(
-            diagnostic_level(&diagnostic(Severity::Error, "e"), never),
-            Level::ERROR
-        );
-        let note = Diagnostic {
-            path: Some("sources.risk".into()),
-            ..diagnostic(
-                Severity::Warning,
-                "'a.csv' loaded into 'risk' with extra columns [x] ignored",
-            )
-        };
-        assert_eq!(diagnostic_level(&note, never), Level::INFO);
-        let cap = Diagnostic {
-            path: Some("sources.risk".into()),
-            ..diagnostic(
-                Severity::Warning,
-                "source 'risk' reached 256 distinct load-note combinations ('a.csv' into \
-                 'risk'); further ones are not reported",
-            )
-        };
-        assert_eq!(diagnostic_level(&cap, never), Level::INFO);
-        // The same words from a configuration layer are not a load note.
-        let config = Diagnostic {
-            layer: Some(Layer::User),
-            ..note.clone()
-        };
-        assert_eq!(diagnostic_level(&config, never), Level::WARN);
+    fn a_lone_refusal_escalates_after_the_busy_limit() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let limit = BUSY_LIMIT.as_millis() as u64;
+        let mut timer = BusyTimer::default();
+        assert!(!timer.escalate(true, at(0)));
+        assert!(!timer.escalate(true, at(limit - 1)));
+        assert!(timer.escalate(true, at(limit)));
+        assert!(timer.escalate(true, at(limit + 30_000)));
+        // An app appearing (or a clean read) restarts the count.
+        assert!(!timer.escalate(false, at(limit + 31_000)));
+        assert!(!timer.escalate(true, at(limit + 32_000)));
+        assert!(!timer.escalate(true, at(2 * limit + 31_999)));
+        assert!(timer.escalate(true, at(2 * limit + 32_000)));
+        assert_eq!(BUSY_LIMIT, Duration::from_secs(15));
     }
 
-    /// The service's real open-failure diagnostic: with an app present it is
-    /// the app winning the race (info); with none it is an error.
+    /// One sighting of the app lock is not an app: a `status` probe holds
+    /// it for an instant. Two sightings are.
     #[test]
-    fn an_open_failure_is_info_only_while_an_app_is_present() {
+    fn an_app_is_confirmed_by_a_second_probe() {
+        let run = |answers: &[bool]| {
+            let mut answers = answers.iter().copied();
+            let mut calls = 0;
+            let seen = confirmed(
+                &mut || {
+                    calls += 1;
+                    answers.next().unwrap()
+                },
+                Duration::from_millis(1),
+            );
+            (seen, calls)
+        };
+        assert_eq!(run(&[false]), (false, 1));
+        assert_eq!(run(&[true, false]), (false, 2));
+        assert_eq!(run(&[true, true]), (true, 2));
+    }
+
+    /// The loop alone judges a stop: info while an app explains it, error
+    /// otherwise. A failed open reports one line, not two.
+    #[test]
+    fn a_stop_is_info_while_an_app_explains_it_and_an_error_otherwise() {
+        let failure = diagnostic(
+            Severity::Error,
+            "data service failed to open: IO Error: Could not set lock on file",
+        );
+        let stops = vec![("geode-data".to_string(), failure.message.clone())];
+        let (level, lines) = stop_report(std::slice::from_ref(&failure), &stops, true);
+        assert_eq!(level, Level::INFO);
+        assert_eq!(lines, vec![failure.to_string()]);
+        let (level, lines) = stop_report(std::slice::from_ref(&failure), &stops, false);
+        assert_eq!(level, Level::ERROR);
+        assert_eq!(lines.len(), 1);
+        // A stop with no open failure behind it is named by its thread.
+        let panicked = vec![("geode-ingest".to_string(), "boom".to_string())];
+        let (level, lines) = stop_report(&[], &panicked, false);
+        assert_eq!(level, Level::ERROR);
+        assert_eq!(lines, vec!["geode-ingest stopped: boom".to_string()]);
+    }
+
+    /// The service's real open-failure diagnostic is held back by the sink
+    /// for the loop to judge, with the stop; other diagnostics are not.
+    #[test]
+    fn the_sink_holds_back_the_real_open_failure_and_the_stop() {
         let dir = tempfile::tempdir().unwrap();
         // A file where the store's directory should be: the open fails.
         let blocker = dir.path().join("blocker");
@@ -629,7 +718,7 @@ mod tests {
         let config = geode_compose::load_config(None, (None, None));
         let setup = geode_compose::engine_setup(
             &config,
-            db.clone(),
+            db,
             geode_data::adapter::AdapterRegistry::default(),
         );
         let (tx, rx) = mpsc::channel();
@@ -642,42 +731,36 @@ mod tests {
                 memory_limit: Some("64MB".into()),
             },
         );
-        let mut failure = None;
+        let events = Events::new();
         let mut stopped = false;
         while let Ok(event) = rx.recv_timeout(Duration::from_secs(10)) {
-            match event {
-                DataEvent::Diagnostics(d) => failure = d.into_iter().next(),
-                DataEvent::ThreadStopped { .. } => {
-                    stopped = true;
-                    break;
-                }
-                _ => {}
+            let stop = matches!(event, DataEvent::ThreadStopped { .. });
+            events.handle(event);
+            if stop {
+                stopped = true;
+                break;
             }
         }
         handle.shutdown();
         assert!(stopped);
-        let failure = failure.expect("an open-failure diagnostic");
-        assert!(is_open_failure(&failure), "{}", failure.message);
-        assert_eq!(diagnostic_level(&failure, || true), Level::INFO);
-        assert_eq!(diagnostic_level(&failure, || false), Level::ERROR);
-
-        // Through the sink: a thread stop is recorded, not logged.
-        let events = Arc::new(Events::new(db));
-        assert!(!events.stopped());
-        events.handle(DataEvent::ThreadStopped {
-            thread: "geode-data".into(),
-            reason: failure.message.clone(),
-        });
         assert!(events.stopped());
-        assert_eq!(
-            events.take_stops(),
-            vec![("geode-data".to_string(), failure.message)]
-        );
+        let failures = events.take_open_failures();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(is_open_failure(&failures[0]), "{}", failures[0].message);
+        let stops = events.take_stops();
+        assert_eq!(stops.len(), 1);
+        assert_eq!(stops[0].1, failures[0].message);
+
+        events.handle(DataEvent::Diagnostics(vec![diagnostic(
+            Severity::Error,
+            "a configuration error",
+        )]));
+        assert!(events.take_open_failures().is_empty());
     }
 
     #[test]
     fn health_is_logged_on_a_change_only() {
-        let events = Events::new(PathBuf::from("/x/g.duckdb"));
+        let events = Events::new();
         assert!(events.health_changed("risk", &Health::Ok));
         assert!(!events.health_changed("risk", &Health::Ok));
         assert!(events.health_changed("other", &Health::Ok));

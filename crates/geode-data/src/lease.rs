@@ -233,25 +233,27 @@ fn open_lock_file(path: &Path) -> std::io::Result<File> {
 /// True while another process (or handle) holds `<db>.app.lock`. A probe is
 /// `try_lock` then immediate unlock.
 ///
-/// A missing store directory means no app is present (an app creates it
-/// before it locks), so the probe returns `Ok(false)` and creates nothing:
-/// a probe never leaves a directory behind.
+/// A missing lock file or store directory means no app is present (an app
+/// creates both before it locks), so the probe returns `Ok(false)`. A probe
+/// creates nothing: it never leaves a lock file or a directory behind.
 pub fn app_present(db: &Path) -> std::io::Result<bool> {
     lock_held(&app_lock_path(db))
 }
 
 /// True while another process (or handle) holds `<db>.collector.lock`: a
 /// collector is running on this store, whether or not it has the store
-/// open. The same probe as [`app_present`]; a missing store directory is
-/// no collector, and the probe creates nothing.
+/// open. The same probe as [`app_present`]: a missing lock file or
+/// directory is no collector, and the probe creates nothing.
 pub fn collector_present(db: &Path) -> std::io::Result<bool> {
     lock_held(&collector_lock_path(db))
 }
 
-/// `try_lock` then immediate unlock on the lock file at `path`.
+/// `try_lock` then immediate unlock on the existing lock file at `path`.
+/// The file is opened without `create`: every holder creates its lock file
+/// before locking it, so an absent file has no holder.
 fn lock_held(path: &Path) -> std::io::Result<bool> {
     let path = path.to_path_buf();
-    let file = match open_lock_file(&path) {
+    let file = match OpenOptions::new().read(true).write(true).open(&path) {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(err) => return Err(naming(&path, err)),
@@ -788,6 +790,21 @@ mod tests {
         let _gate = test_support::lock_file_gate();
         assert!(!app_present(&db).unwrap());
         assert!(!missing.exists());
+    }
+
+    /// A missing lock file is no holder (every holder creates its file
+    /// before locking it), and neither probe creates one: `status` and the
+    /// app's handover check leave the store's directory as they found it.
+    #[test]
+    fn a_probe_leaves_no_lock_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
+        assert!(!app_present(&db).unwrap());
+        assert!(!collector_present(&db).unwrap());
+        assert!(!app_lock_path(&db).exists());
+        assert!(!collector_lock_path(&db).exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     /// A lock file that cannot be opened names itself in the error.

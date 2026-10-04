@@ -27,7 +27,7 @@ yet and exit 2.
 | Module | Holds |
 |---|---|
 | `lib.rs` | `Command`, `Args`, `parse_args`; `demo_root` and `store_for`, the store the app opens with the same arguments. |
-| `run.rs` | `run`/`run_with_levels`, the loop below; `ExeStamp` and `exe_changed`; the poll intervals; the event sink (`Events`) and the level each diagnostic is logged at. |
+| `run.rs` | `run`/`run_with_levels`, the loop below; `ExeStamp` and `exe_changed`; the poll intervals; `BusyTimer` (a refused stamp read's escalation), `confirmed` (the two-probe app check) and `stop_report` (how a stopped hold is logged); the event sink (`Events`). |
 | `status.rs` | `status(db)`: `collector: running\|not running; app: present\|absent; store: <db>`, from two lock probes. |
 | `main.rs` | Installs logging with the `collector` prefix, dispatches, drops the log guard, exits with the returned status. |
 
@@ -39,15 +39,18 @@ yet and exit 2.
 2. Wait while an app holds `<db>.app.lock`, probing every second
    (`APP_POLL`). A probe error counts as an app present.
 3. Read the store's stamp (`read_format`). A refused open (typically an app
-   that appeared since the probe) goes back to step 2: it never idles or
-   exits. A stamp of another format logs one error naming both formats and
-   idles, rechecking every 30 s (`STAMP_RECHECK`); a stamp that cannot be
-   read idles the same way.
+   that appeared since the probe) goes back to step 2: it never exits. Once
+   refusals with no app present have lasted `BUSY_LIMIT` (15 s, the app's
+   own open deadline) the store is treated as unreadable. A stamp of another
+   format logs one error naming both formats and idles, rechecking every
+   30 s (`STAMP_RECHECK`); an unreadable stamp logs one error naming the
+   store and the error and idles the same way.
 4. Load the configuration afresh, apply `[log]` levels, and spawn the data
    service as `StoreRole::Collector` with `[collector] memory_limit`, plus
    the demo bus in `--demo`.
 5. Poll every 100 ms (`HOLD_POLL`) until an app appears or a data thread
-   stops.
+   stops. An app counts only when a second probe 20 ms later sees it too:
+   a `status` probe holds `<db>.app.lock` for an instant.
 6. A stopped thread with an app present is the app winning the race for
    the store: log `app took the store first` at info and go back to step 2.
    With no app present it is an error, and the process exits 70.
@@ -63,18 +66,19 @@ description, so the lock would outlive a drop until the child's exec.
 Everything goes to `tracing` under `geode::collector`, through the daily
 `<user config>/logs/collector.YYYY-MM-DD.log` file. Health transitions per
 source are info; publishes are debug; service diagnostics keep their
-severity, except load notes (info) and the service's open failure while an
-app is present (info, step 6). A thread stop is not logged by the sink; the
-loop logs it once it knows whether an app explains it. Nothing in the sink
-waits: it logs, updates a map or a list, and returns.
+severity. The service's own open failure and every thread stop are not
+logged by the sink: it holds them back, and the loop logs each once, at
+info when an app explains it (step 6) and at error otherwise. Nothing in
+the sink waits: it logs, updates a map or a list, and returns.
 
 ## Limits
 
 - A store that refuses every read-only open (a corrupt or foreign file)
-  keeps the collector waiting at step 3, with one warning per distinct
-  error, rather than exiting.
-- Load notes are recognised by the data service's message text and path
-  (`sources.<source>`, no layer or file); a reworded note logs at warn.
+  keeps the collector idling at step 3 after one error, rather than
+  exiting; it recovers on its own once the store reads.
+- The open failure the sink holds back is recognised by the data service's
+  `data service failed to open: ` prefix, which a test pins against a real
+  failed open.
 - A changed `data.db_path` takes effect only when the collector restarts:
   it holds the lease on the store it started with, and warns at each
   acquire while the configuration names another.
