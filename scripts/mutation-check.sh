@@ -10963,6 +10963,15 @@ run_mutation "document: a topic is recorded with its publish" \
   '    if let Some(topic) = req.topic.filter(|_| false) {' \
   geode-data a_document_with_a_topic_records_it_in_its_transaction
 
+# An unchanged recovered document still records its topic: an answered GET
+# proves the topic alive. Dropping the record lets a slow-moving key that
+# each run recovers unchanged age out after recover_max_age while live.
+run_mutation "document: an unchanged recovered document refreshes its topic" \
+  crates/geode-data/src/store/document.rs \
+  '            if let Some(answered) = req.topic {' \
+  '            if let Some(answered) = req.topic.filter(|_| false) {' \
+  geode-data an_unchanged_recovered_document_refreshes_its_topic_and_spends_nothing
+
 # The live read takes its generation from the summary. Reading it from a
 # live row instead makes an empty snapshot read as nothing published.
 run_mutation "reference: the live generation comes from the summary" \
@@ -34633,7 +34642,7 @@ run_mutation "recovery: the reconnect window starts at the disconnect" \
 # leaves a source that recovered nothing looking healthy.
 run_mutation "recovery: no replies is not read as a partial answer" \
   crates/geode-data/src/ingest/recover.rs \
-  '        } else if unanswered.len() == asked.len() {' \
+  '        } else if self.answered.is_empty() {' \
   '        } else if false {' \
   geode-data no_replies_degrades_but_a_partial_answer_stays_ok
 
@@ -34657,8 +34666,8 @@ run_mutation "recovery: a NOTIFY's pending document is not marked recovered" \
 # asks only for the topics read at open.
 run_mutation "recovery: a submitted topic joins the known set" \
   crates/geode-data/src/ingest/subscribe.rs \
-  '            self.known.insert(topic.clone());' \
-  '            let _ = &topic;' \
+  '            self.known.insert(topic.to_string());' \
+  '            let _ = topic;' \
   geode-data a_notify_processed_before_the_reconnect_is_noticed_still_beats_the_reply
 
 # A recorded topic is not carried again inside RERECORD_AFTER; carried on
@@ -34668,6 +34677,24 @@ run_mutation "recovery: a topic is recorded once per run" \
   '        if fresh {' \
   '        if false {' \
   geode-data a_topics_first_document_per_run_is_recorded_once
+
+# A topic recorded this run is carried again once RERECORD_AFTER passes;
+# never carried again, a run longer than recover_max_age lets the next
+# open prune a topic that was live throughout.
+run_mutation "recovery: a topic is recorded again after RERECORD_AFTER" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            .is_some_and(|at| now.saturating_duration_since(*at) < RERECORD_AFTER);' \
+  '            .is_some();' \
+  geode-data a_recorded_topic_is_carried_again_once_rerecord_after_has_passed
+
+# A recovered submission never marks the NOTIFY record slot. Marked, an
+# equal reply spends the run's slot and the topic's first NOTIFY records
+# nothing until RERECORD_AFTER.
+run_mutation "recovery: a reply does not mark the NOTIFY record slot" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            Some(pending.topic)' \
+  '            self.topic_to_record(pending.topic.clone(), Instant::now()).or(Some(pending.topic))' \
+  geode-data an_equal_reply_records_its_topic_and_leaves_the_first_notify_to_record_it_again
 
 # A reconnect hands over the LATEST disconnect. Keeping the first outage's
 # start lets a NOTIFY received between two outages drop the reply carrying
@@ -34711,6 +34738,29 @@ run_mutation "recovery: only asked topics count as answered" \
   '        if self.asked.contains(topic) && !self.answered.contains(topic) {' \
   '        if !self.answered.contains(topic) {' \
   geode-data a_reply_on_a_topic_never_asked_answers_nothing
+
+# Only a NOTIFY received since the window's start covers a topic. Counting
+# one queued from before the outage reports a dead GET side as live.
+run_mutation "recovery: a NOTIFY from before the start covers nothing" \
+  crates/geode-data/src/ingest/recover.rs \
+  '        if received >= self.started_at' \
+  '        if true' \
+  geode-data a_notify_before_the_start_covers_nothing
+
+# A NOTIFY since the start covers its topic in the report. Without it the
+# demo launch, whose bus is empty but whose producers notify every known
+# topic, stands Degraded "no replies" for the session.
+run_mutation "recovery: a NOTIFY since the start covers its topic" \
+  crates/geode-data/src/ingest/recover.rs \
+  '            self.notified.insert(topic.to_string());' \
+  '            let _ = topic;' \
+  geode-data a_notify_since_the_start_covers_an_asked_topic_in_the_report
+
+run_mutation "recovery: the receiver's NOTIFY covers its topic in the report" \
+  crates/geode-data/src/ingest/recover.rs \
+  '            self.notified.insert(topic.to_string());' \
+  '            let _ = topic;' \
+  geode-data a_notify_inside_an_unanswered_window_keeps_recovery_ok
 
 # ---- service recovery hand-over
 # Recovery asks recorded concrete topics; patterns would be published as

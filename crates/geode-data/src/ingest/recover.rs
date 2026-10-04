@@ -13,6 +13,11 @@
 //!
 //! A reply at or after the deadline is dropped and counted by the caller:
 //! the window that could judge it is gone.
+//!
+//! The window closes early on replies only. A NOTIFY on an asked topic
+//! received at or after `started_at` covers that topic in the report, so a
+//! feed whose GET side never answers but whose NOTIFYs show it live is not
+//! reported as "no replies".
 
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
@@ -44,6 +49,9 @@ pub(crate) struct RecoveryWindow {
     asked: HashSet<String>,
     /// The subset of `asked` some reply has arrived on.
     answered: HashSet<String>,
+    /// The subset of `asked` a NOTIFY received at or after `started_at`
+    /// arrived on. Covers a topic in the report; never closes the window.
+    notified: HashSet<String>,
 }
 
 /// What the receiver does with one recovery reply.
@@ -60,17 +68,18 @@ pub(crate) enum ReplyVerdict {
 /// A finished window's outcome, as the `<source>:recovery` load lane reads it.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RecoveryReport {
+    /// Every asked topic answered or was notified since the start.
     AllAnswered,
     /// Some topics answered. Retired instruments stop answering, so this is
-    /// not a failure; `sample` names up to five of the unanswered.
+    /// not a failure; `unanswered` counts the topics neither answered nor
+    /// notified, and `sample` names up to five of them in sorted order.
     Partial {
         unanswered: usize,
         sample: Vec<String>,
     },
-    /// Not one asked topic answered.
-    NoReplies {
-        asked: usize,
-    },
+    /// Not one asked topic answered, and `asked` of them were not notified
+    /// since the start either.
+    NoReplies { asked: usize },
 }
 
 impl RecoveryWindow {
@@ -92,6 +101,7 @@ impl RecoveryWindow {
             deadline,
             asked: asked.iter().cloned().collect(),
             answered: HashSet::new(),
+            notified: HashSet::new(),
         }
     }
 
@@ -126,20 +136,49 @@ impl RecoveryWindow {
         self.deadline
     }
 
-    /// The outcome over `asked`, the same topics the window started with.
-    pub(crate) fn report(&self, asked: &[String]) -> RecoveryReport {
-        let unanswered: Vec<&String> = asked
+    /// A NOTIFY on `topic` received at `received`. An asked topic notified
+    /// at or after the window's start is live, so it counts as covered in
+    /// the report. A NOTIFY from before the start (one queued across the
+    /// outage) proves nothing about the reconnected feed and does not
+    /// count. Report only: a NOTIFY never closes the window, because a
+    /// topic carrying several keys can be notified for one while another's
+    /// reply is still on its way.
+    pub(crate) fn on_notify(&mut self, topic: &str, received: DateTime<Utc>) {
+        if received >= self.started_at
+            && self.asked.contains(topic)
+            && !self.notified.contains(topic)
+        {
+            self.notified.insert(topic.to_string());
+        }
+    }
+
+    /// How many topics the request named.
+    pub(crate) fn asked(&self) -> usize {
+        self.asked.len()
+    }
+
+    /// The outcome over the topics the window started with. A topic is
+    /// covered when it answered or was notified since the start; the rest
+    /// are sorted so the report's sample is stable. "No replies" needs both
+    /// no reply at all and an uncovered topic: a feed whose NOTIFYs cover
+    /// every asked topic is live whether or not its GET side answered.
+    pub(crate) fn report(&self) -> RecoveryReport {
+        let mut uncovered: Vec<&String> = self
+            .asked
             .iter()
-            .filter(|t| !self.answered.contains(t.as_str()))
+            .filter(|t| !self.answered.contains(t.as_str()) && !self.notified.contains(t.as_str()))
             .collect();
-        if unanswered.is_empty() {
+        uncovered.sort();
+        if uncovered.is_empty() {
             RecoveryReport::AllAnswered
-        } else if unanswered.len() == asked.len() {
-            RecoveryReport::NoReplies { asked: asked.len() }
+        } else if self.answered.is_empty() {
+            RecoveryReport::NoReplies {
+                asked: uncovered.len(),
+            }
         } else {
             RecoveryReport::Partial {
-                unanswered: unanswered.len(),
-                sample: unanswered.into_iter().take(SAMPLE).cloned().collect(),
+                unanswered: uncovered.len(),
+                sample: uncovered.into_iter().take(SAMPLE).cloned().collect(),
             }
         }
     }
@@ -203,7 +242,7 @@ mod tests {
         // A dropped-as-notified reply still answered its topic.
         w.on_reply(t0, "b", Some(utc(200)));
         assert!(w.done(t0));
-        assert!(matches!(w.report(&asked), RecoveryReport::AllAnswered));
+        assert!(matches!(w.report(), RecoveryReport::AllAnswered));
     }
 
     #[test]
@@ -215,14 +254,11 @@ mod tests {
         w.on_reply(t0, "a", None);
         assert!(w.done(end));
         assert!(matches!(
-            w.report(&asked),
+            w.report(),
             RecoveryReport::Partial { unanswered: 2, .. }
         ));
         let w = RecoveryWindow::start(t0, utc(0), Duration::from_secs(10), &asked);
-        assert!(matches!(
-            w.report(&asked),
-            RecoveryReport::NoReplies { asked: 3 }
-        ));
+        assert!(matches!(w.report(), RecoveryReport::NoReplies { asked: 3 }));
     }
 
     #[test]
@@ -236,15 +272,81 @@ mod tests {
             !w.done(t0),
             "two unasked replies do not close a two-topic window"
         );
-        assert!(matches!(
-            w.report(&asked),
-            RecoveryReport::NoReplies { asked: 2 }
-        ));
+        assert!(matches!(w.report(), RecoveryReport::NoReplies { asked: 2 }));
         w.on_reply(t0, "a", None);
         assert!(!w.done(t0));
         assert!(matches!(
-            w.report(&asked),
+            w.report(),
             RecoveryReport::Partial { unanswered: 1, .. }
         ));
+    }
+
+    #[test]
+    fn a_notify_since_the_start_covers_an_asked_topic_in_the_report() {
+        let t0 = Instant::now();
+        let asked = topics(&["a", "b"]);
+        let mut w = RecoveryWindow::start(t0, utc(100), Duration::from_secs(10), &asked);
+        w.on_notify("a", utc(100));
+        w.on_notify("b", utc(150));
+        assert!(
+            matches!(w.report(), RecoveryReport::AllAnswered),
+            "both topics notified since the start: the source is live"
+        );
+    }
+
+    #[test]
+    fn a_notify_before_the_start_covers_nothing() {
+        let t0 = Instant::now();
+        let asked = topics(&["a"]);
+        let mut w = RecoveryWindow::start(t0, utc(100), Duration::from_secs(10), &asked);
+        // Received before the outage and still queued when the window opened.
+        w.on_notify("a", utc(99));
+        assert!(matches!(w.report(), RecoveryReport::NoReplies { asked: 1 }));
+    }
+
+    #[test]
+    fn a_notify_never_closes_the_window() {
+        let t0 = Instant::now();
+        let asked = topics(&["a", "b"]);
+        let mut w = RecoveryWindow::start(t0, utc(100), Duration::from_secs(10), &asked);
+        w.on_notify("a", utc(200));
+        w.on_notify("b", utc(200));
+        assert!(
+            !w.done(t0),
+            "a multi-key topic notified for one key still waits for its reply"
+        );
+    }
+
+    #[test]
+    fn partial_notify_cover_with_no_reply_reports_the_uncovered_as_no_replies() {
+        let t0 = Instant::now();
+        let asked = topics(&["a", "b", "c"]);
+        let mut w = RecoveryWindow::start(t0, utc(100), Duration::from_secs(10), &asked);
+        w.on_notify("b", utc(200));
+        w.on_notify("z", utc(200));
+        assert!(matches!(w.report(), RecoveryReport::NoReplies { asked: 2 }));
+        w.on_reply(t0, "a", None);
+        assert_eq!(
+            w.report(),
+            RecoveryReport::Partial {
+                unanswered: 1,
+                sample: vec!["c".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_partial_report_samples_the_uncovered_in_sorted_order() {
+        let t0 = Instant::now();
+        let asked = topics(&["g", "f", "e", "d", "c", "b", "a"]);
+        let mut w = RecoveryWindow::start(t0, utc(100), Duration::from_secs(10), &asked);
+        w.on_reply(t0, "a", None);
+        assert_eq!(
+            w.report(),
+            RecoveryReport::Partial {
+                unanswered: 6,
+                sample: topics(&["b", "c", "d", "e", "f"]),
+            }
+        );
     }
 }

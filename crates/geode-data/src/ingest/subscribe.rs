@@ -22,10 +22,11 @@
 //! Recovery. A transport that can answer a GET is asked for the latest
 //! document on every concrete topic the receiver knows: the topics the
 //! service read from the store at open, plus the topic of each document
-//! submitted to the runner this run. It is asked once at start and again after each reconnect
-//! (a `Connected` report following a non-`Connected` one). Replies arrive on
-//! the same sink marked `recovered` and take the ordinary parse, source-time
-//! and coalescer path, judged by a [`RecoveryWindow`] under two rules:
+//! submitted to the runner this run. It is asked once at start and again
+//! after each reconnect (a `Connected` report following a non-`Connected`
+//! one). Replies arrive on the same sink marked `recovered` and take the
+//! ordinary parse, source-time and coalescer path, judged by a
+//! [`RecoveryWindow`] under two rules:
 //! - Rule 1: a NOTIFY for a key received at or after the window's start
 //!   beats a reply for that key, which is dropped. The window starts just
 //!   before `subscribe` at start, and at the disconnect on a reconnect, so a
@@ -36,19 +37,29 @@
 //!   store publishes it only if it differs from live. A NOTIFY replacing a
 //!   pending reply in the coalescer is unmarked and publishes as usual.
 //!
-//! A reply after its window, or with none open, is dropped and counted in
-//! the next window's end line (or the end-of-subscription line). Each window
-//! reports on the load lane under `<source>:recovery`: `Degraded` when the
-//! request failed or no topic answered, `Ok` otherwise. An open window at
-//! stop reports nothing. Only one window is open at a time: a reconnect
-//! during recovery supersedes the open window, which reports nothing, and
-//! the new window starts at the latest disconnect. Known limit: a `Message`
-//! carries no request id, so a reply to the superseded request that lands
-//! in the new window is judged by the new start; after two reconnects
-//! inside one window a key can stay stale until its next NOTIFY.
+//! A reply on a topic the request did not name, arriving while a window is
+//! open, takes the same path (rule 1 included) but does not count as
+//! answered. A reply after its window, or with none open, is dropped and
+//! counted in the end line of the window that closes next (or the
+//! end-of-subscription line). The window closes early on replies only; a
+//! NOTIFY on an asked topic received since the start covers that topic in
+//! the report. Each window reports on the load lane under
+//! `<source>:recovery`: `Degraded` when the request failed, or when no
+//! reply arrived and some asked topic was not covered; `Ok` otherwise. An
+//! open window at stop reports nothing. Only one window is open at a time:
+//! a reconnect during recovery supersedes the open window, which logs one
+//! line and makes no health report, and the new window starts at the
+//! latest disconnect. Known limit: a `Message` carries no request id, so a
+//! reply to the superseded request that lands in the new window is judged
+//! by the new start; after two reconnects inside one window a key can stay
+//! stale until its next NOTIFY.
 //!
-//! A topic is carried to the runner for recording on its first document per
-//! run, and again once its record here is `RERECORD_AFTER` old.
+//! Topic records. A NOTIFY document carries its topic to the runner for
+//! recording on its first document per run, and again once its record here
+//! is `RERECORD_AFTER` old. A recovered document always carries its topic
+//! and never marks that record: a reply proves the topic alive, so the
+//! store records it whether the reply publishes or is unchanged, and the
+//! topic's first NOTIFY this run still records it.
 //!
 //! Parsed columns move into DocumentJob without per-row copies. Shutdown
 //! unsubscribes, sets the stop flag, and joins; pending coalesced documents are
@@ -349,11 +360,10 @@ impl SubscriptionWorker {
             recover_timeout: spec.recover_timeout,
             recovery_key: crate::health::condition_key(&spec.name, crate::health::RECOVERY),
             window: None,
-            asked: Vec::new(),
             late_replies: 0,
             unsupported_logged: false,
             last_notify: HashMap::new(),
-            recorded: HashMap::new(),
+            recorded: RecordedTopics::default(),
             known: known_topics.into_iter().collect(),
             reconnected_at: Arc::clone(&reconnect.reconnected_at),
         };
@@ -501,9 +511,8 @@ struct Receiving {
     recover_timeout: Duration,
     /// `<source>:recovery`, computed once.
     recovery_key: String,
-    /// The open recovery window and the topics it asked for.
+    /// The open recovery window, which holds the topics it asked for.
     window: Option<RecoveryWindow>,
-    asked: Vec<String>,
     /// Replies no window could judge, since the last window's end line.
     late_replies: u64,
     /// "Cannot recover" is logged once per subscription.
@@ -511,8 +520,8 @@ struct Receiving {
     /// Key → `received` of its newest NOTIFY: rule 1's evidence. One entry
     /// per key, no fixed cap.
     last_notify: HashMap<String, DateTime<Utc>>,
-    /// Topic → when this run last carried it to the runner for recording.
-    recorded: HashMap<String, Instant>,
+    /// Topic → when this run last carried it to the runner on a NOTIFY.
+    recorded: RecordedTopics,
     /// Every topic a recovery asks for; sorted and unique.
     known: BTreeSet<String>,
     /// A reconnect's disconnect instant in epoch micros, set by the
@@ -604,14 +613,14 @@ impl Receiving {
             }
             return;
         };
-        self.asked = self.known.iter().cloned().collect();
+        let asked: Vec<String> = self.known.iter().cloned().collect();
         self.window = Some(RecoveryWindow::start(
             Instant::now(),
             started_at,
             self.recover_timeout,
-            &self.asked,
+            &asked,
         ));
-        if let Err(e) = recovery.recover(&self.asked, self.recover_timeout) {
+        if let Err(e) = recovery.recover(&asked, self.recover_timeout) {
             self.window = None;
             let reason = format!("recovery failed: {e}");
             self.report_recovery(
@@ -631,9 +640,12 @@ impl Receiving {
             return;
         };
         let late = std::mem::take(&mut self.late_replies);
-        let asked = self.asked.len();
-        let (health, summary) = match window.report(&self.asked) {
-            RecoveryReport::AllAnswered => (Health::Ok, format!("all {asked} topics answered")),
+        let asked = window.asked();
+        let (health, summary) = match window.report() {
+            RecoveryReport::AllAnswered => (
+                Health::Ok,
+                format!("all {asked} topics answered or notified"),
+            ),
             RecoveryReport::Partial { unanswered, sample } => (
                 Health::Ok,
                 format!(
@@ -774,10 +786,17 @@ impl Receiving {
                     return;
                 }
             }
-        } else if let Some(at) = self.last_notify.get_mut(&key) {
-            *at = message.received;
         } else {
-            self.last_notify.insert(key.clone(), message.received);
+            if let Some(at) = self.last_notify.get_mut(&key) {
+                *at = message.received;
+            } else {
+                self.last_notify.insert(key.clone(), message.received);
+            }
+            // A NOTIFY covers its topic in the open window's report, never
+            // closes it: the feed is live even if the GET side is silent.
+            if let Some(w) = self.window.as_mut() {
+                w.on_notify(&message.topic, message.received);
+            }
         }
         let pending = Pending {
             rows,
@@ -829,8 +848,18 @@ impl Receiving {
 
     /// Queue a released document under the runner's mutex and notify it.
     /// This does not wait for publication or refuse on queue capacity.
+    ///
+    /// A recovered document always carries its topic and never touches the
+    /// NOTIFY record slot: the store records a reply's topic whether it
+    /// publishes or is `Unchanged`, and a reply marking the slot would stop
+    /// the topic's first NOTIFY this run from recording it.
     fn submit(&mut self, pending: Pending) {
-        let topic = self.topic_to_record(pending.topic);
+        let topic = if pending.recovered {
+            self.know(&pending.topic);
+            Some(pending.topic)
+        } else {
+            self.topic_to_record(pending.topic, Instant::now())
+        };
         self.ingest.submit_document(DocumentJob {
             source: self.source.clone(),
             dataset: self.dataset.name.clone(),
@@ -843,25 +872,43 @@ impl Receiving {
         });
     }
 
-    /// The topic to record with this document: on its first document this
-    /// run, or once its record here is `RERECORD_AFTER` old so a long run
-    /// keeps the store's receive time current and the topic is not pruned.
-    /// Every other document carries `None` and costs the publish nothing.
-    /// The topic also joins the set later recoveries ask for.
-    fn topic_to_record(&mut self, topic: String) -> Option<String> {
-        if !self.known.contains(&topic) {
-            self.known.insert(topic.clone());
+    /// The topic a NOTIFY document carries for recording: on its first
+    /// document this run, or once its record here is `RERECORD_AFTER` old
+    /// so a long run keeps the store's receive time current and the topic
+    /// is not pruned. Every other document carries `None` and costs the
+    /// publish nothing.
+    fn topic_to_record(&mut self, topic: String, now: Instant) -> Option<String> {
+        self.know(&topic);
+        self.recorded.due(&topic, now).then_some(topic)
+    }
+
+    /// `topic` joins the set later recoveries ask for.
+    fn know(&mut self, topic: &str) {
+        if !self.known.contains(topic) {
+            self.known.insert(topic.to_string());
         }
-        let now = Instant::now();
+    }
+}
+
+/// Topic → when this run last carried it to the runner on a NOTIFY
+/// document. Recovery replies never mark it: the slot exists so the NOTIFY
+/// hot path records a topic at most once per `RERECORD_AFTER`.
+#[derive(Debug, Default)]
+struct RecordedTopics(HashMap<String, Instant>);
+
+impl RecordedTopics {
+    /// Whether a NOTIFY document on `topic` at `now` carries it, marking
+    /// the slot when it does. Pure: the caller supplies the clock.
+    fn due(&mut self, topic: &str, now: Instant) -> bool {
         let fresh = self
-            .recorded
-            .get(&topic)
+            .0
+            .get(topic)
             .is_some_and(|at| now.saturating_duration_since(*at) < RERECORD_AFTER);
         if fresh {
-            return None;
+            return false;
         }
-        self.recorded.insert(topic.clone(), now);
-        Some(topic)
+        self.0.insert(topic.to_string(), now);
+        true
     }
 }
 
@@ -1185,6 +1232,28 @@ mod tests {
             "an overflow path is never actually recorded, so it reports true again too"
         );
         assert!(u.cap_warned, "the one-time cap warning fired");
+    }
+
+    /// A topic is carried on its first NOTIFY, not again inside
+    /// `RERECORD_AFTER`, and again once that long has passed — the re-record
+    /// is what keeps a topic live through a run longer than
+    /// `recover_max_age` from being pruned at the next open.
+    #[test]
+    fn a_recorded_topic_is_carried_again_once_rerecord_after_has_passed() {
+        let mut recorded = RecordedTopics::default();
+        let t0 = Instant::now();
+        assert!(recorded.due("cvi/SPX.Z", t0), "the first NOTIFY carries it");
+        assert!(!recorded.due("cvi/SPX.Z", t0 + Duration::from_secs(3600)));
+        assert!(
+            recorded.due("cvi/NDX.Z", t0 + Duration::from_secs(3600)),
+            "slots are per topic"
+        );
+        let later = t0 + RERECORD_AFTER;
+        assert!(recorded.due("cvi/SPX.Z", later), "a day on, carried again");
+        assert!(
+            !recorded.due("cvi/SPX.Z", later + Duration::from_secs(3600)),
+            "and the slot restarts from the re-record"
+        );
     }
 
     // ---- the receiver thread, over a real ChannelAdapter ---------------
@@ -2021,6 +2090,56 @@ mod tests {
         h.worker.shutdown();
     }
 
+    /// `topic`'s `last_received_us`, or `None` when it is not recorded.
+    fn topic_last_received(conn: &duckdb::Connection, topic: &str) -> Option<i64> {
+        conn.query_row(
+            "select last_received_us from subscription_topics \
+             where source = 'cvi' and topic = ?",
+            [topic],
+            |r| r.get(0),
+        )
+        .ok()
+    }
+
+    /// An equal reply proves its topic alive: it is recorded although
+    /// nothing publishes. It must not spend the run's NOTIFY record slot,
+    /// so the topic's first NOTIFY still carries it and moves the record
+    /// to that NOTIFY's receive time.
+    #[test]
+    fn an_equal_reply_records_its_topic_and_leaves_the_first_notify_to_record_it_again() {
+        let (bus, feed) = ChannelAdapter::new("test_bus");
+        publish_before_subscribers(
+            &bus,
+            &feed,
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [0.5; 6]),
+        );
+        let mut h = Setup {
+            bus: Some((bus, feed)),
+            known_topics: vec!["cvi/SPX.Z".into()],
+            // Seeded with no topic, so any record comes from the reply.
+            seed: vec![fake_rows("SPX.Z", [0.5; 6])],
+            ..Setup::new()
+        }
+        .spawn();
+        assert!(matches!(outcome(&h.events), IngestEvent::Unchanged { .. }));
+        let by_reply =
+            topic_last_received(&h.conn, "cvi/SPX.Z").expect("the equal reply recorded its topic");
+
+        // Later by at least a publish round trip, so a NOTIFY record moves
+        // the receive time past the reply's.
+        std::thread::sleep(Duration::from_millis(5));
+        h.feed
+            .publish("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.6; 6]));
+        assert_eq!(published(&h.events).0, "SPX.Z");
+        let by_notify = topic_last_received(&h.conn, "cvi/SPX.Z").unwrap();
+        assert!(
+            by_notify > by_reply,
+            "the first NOTIFY carried its topic: {by_notify} > {by_reply}"
+        );
+        h.worker.shutdown();
+    }
+
     /// The NOTIFY for SPX.Z arrives after the connection went down and is
     /// handled before the receiver learns of the reconnect. The window
     /// starts at the disconnect, so that NOTIFY counts against the older
@@ -2152,6 +2271,31 @@ mod tests {
             recovery_reports(&h)[1].0,
             Health::Ok,
             "one of two topics answered: retired instruments must not hold a source degraded"
+        );
+        h.worker.shutdown();
+    }
+
+    /// The demo launch: the bus holds nothing yet, so recovery is never
+    /// answered, but the producers' startup burst notifies the known topic
+    /// inside the window. The source is live; reporting "no replies" would
+    /// hold it Degraded for the session.
+    #[test]
+    fn a_notify_inside_an_unanswered_window_keeps_recovery_ok() {
+        let (mut setup, script) = scripted();
+        setup.known_topics = vec!["cvi/SPX.Z".into()];
+        // A zero timeout leaves the grace second as the whole window.
+        setup.recover_timeout = Duration::ZERO;
+        let mut h = setup.spawn();
+        wait_until("the recovery request", || script.calls().len() == 1);
+        h.feed
+            .publish("cvi/SPX.Z", FakeKind::message("SPX.Z", [0.4; 6]));
+        assert_eq!(published(&h.events).0, "SPX.Z");
+        wait_until("the window's report", || !recovery_reports(&h).is_empty());
+        assert_eq!(
+            recovery_reports(&h)[0].0,
+            Health::Ok,
+            "{:?}",
+            recovery_reports(&h)
         );
         h.worker.shutdown();
     }
