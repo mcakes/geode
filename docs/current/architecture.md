@@ -118,6 +118,14 @@ request loop (see [text files](data-path.md#text-files)). Transport threads
 standing in for a vendor client (the channel adapter's dispatcher, the demo
 bus) are not.
 
+One process writes a store at a time, because DuckDB admits one writing
+process per file. The app holds `<db>.app.lock` from before its store opens
+until it exits, and a background collector process (planned) holds the store
+only while no app does; the OS drops both locks when a process dies. Taking
+the store over waits, off the UI thread, for the collector to drain and
+release it. See [store ownership and the background
+collector](data-path.md#store-ownership-and-the-background-collector).
+
 Submission reports admission or refusal without waiting for queue space; a
 refusal says whether the queue was busy (a retry can succeed) or the service
 has stopped (none can).

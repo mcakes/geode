@@ -1269,7 +1269,7 @@ segment stays on the status bar whatever the page shows.
 ### The store-waiting segment
 
 While the app's store open waits for the background collector to hand the
-store over ([the app's open](data-path.md#supervised-threads)), the status
+store over ([the app's open](data-path.md#the-apps-open)), the status
 bar's left side shows `store: waiting for collector`, after the stopped segment
 and before the count prefix. It is muted, like ingestion activity, and the
 same indeterminate strip along the bar's top edge runs while it shows (one

@@ -149,6 +149,9 @@ may still use separately configured `CC`/`CXX` wrappers.
 - TOML order is significant. Workspace-wide `preserve_order` must stay on.
 - Existing DuckDB payload tables are not migrated automatically. After a demo
   schema change, delete `$TMPDIR/geode-demo/<rows>-42/` before running it.
+- Any change to the store's own DDL (catalog, generations summary, provenance,
+  series coverage, `subscription_topics`, `geode_meta`) bumps
+  `geode_data::STORE_FORMAT`.
 - Displayed times use `geode_core::clock::Clock`; do not use `chrono::Local`.
 
 ## Performance and tests

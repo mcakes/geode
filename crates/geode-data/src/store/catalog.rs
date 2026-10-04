@@ -61,8 +61,11 @@ pub struct Catalog<'a> {
     conn: &'a Connection,
 }
 
-// Any change to this DDL, or to the series, document, reference or staging
-// DDL, bumps `STORE_FORMAT` (`store::stamp`).
+// Any change to this DDL, or to the series, document or reference table DDL,
+// bumps `STORE_FORMAT` (`store::stamp`), so a collector from another build
+// refuses this store instead of writing positionally into a different layout.
+// Staging tables are exempt: each is created or replaced per use, in one
+// process.
 const DDL: &str = "
 -- The store-format stamp (`store::stamp`); `stamp::META_DDL` is the same
 -- statement, run alone by the collector before its format check.

@@ -4,10 +4,12 @@
 //! app and the background collector). A process that writes with a layout
 //! the file was not created with would publish positionally into the wrong
 //! columns, so the layout carries a number, `STORE_FORMAT`, kept in
-//! `geode_meta`. Any change to the catalog, series, document, reference or
-//! staging DDL bumps it.
+//! `geode_meta`. Any change to the catalog, series, document or reference DDL
+//! bumps it. Staging tables are exempt: each is created or replaced per use
+//! inside one process, so no other build ever meets one.
 //!
-//! The app (`Direct`) stamps after its own DDL: it owns the layout. The
+//! The app (`App`) and a direct open (`Direct`) stamp after their own DDL:
+//! they own the layout. The
 //! collector checks before any DDL and refuses a different format, so an old
 //! collector never writes into a new store or the reverse.
 
