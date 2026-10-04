@@ -958,7 +958,9 @@ tile's emit, with a `geode::session` warning naming the tile and the edge.
 **The NULL refusal.** A scope cannot say `IS NULL`, and leaving a NULL level out of the path would widen every follower
 to all of that column's values, a plausible wrong answer. So a path through
 a NULL or an empty value posts nothing and the frame records the column for
-the tile (`Frame::link_refusal`). The tile's shared header paints it from
+the tile (`Frame::link_refusal`), with its warning text formatted once as it
+is recorded (`Frame::link_refusal_text`), so a standing refusal formats
+nothing per paint. The tile's shared header paints it from
 frame state as a warning in its cluster text, `group A not updated · book
 is NULL`, for every emitting module without plumbing; it takes no press and
 cannot be dismissed (a hidden refusal would hide its successor). It clears

@@ -24,6 +24,16 @@ use gpui::Hsla;
 use gpui_component::Theme;
 
 use crate::shell::colours::{anchors_from_theme, to_hsla, tokens_from_theme};
+
+/// The warning an emitter's header shows while a NULL in its cursor path
+/// keeps its group's scope where it was. The frame formats it once, when
+/// it records the refusal.
+pub fn refusal_text(group: Group, column: &str) -> String {
+    format!(
+        "group {} not updated \u{b7} {column} is NULL",
+        group.letter()
+    )
+}
 use crate::tiling::TileId;
 
 /// Each group's hue in degrees on the theme's own wheel, in `Group::ALL`

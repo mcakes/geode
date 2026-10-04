@@ -36,6 +36,7 @@ use geode_core::named::NamedExpressions;
 use geode_core::query::{AsOf, QueryKey};
 use geode_core::scope::{Expr, Scope};
 use geode_core::scopes::SavedScopes;
+use gpui::SharedString;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::{Deref, DerefMut};
@@ -337,11 +338,20 @@ pub struct Frame {
     bar_cache: BarCache,
     /// Current scope/grouping/as-of barrier, if one is waiting for arrivals.
     barrier: Option<FlipBarrier>,
-    /// The NULL column that stopped each emitter's last posting. Cleared
-    /// when a posting goes through, and when the tile changes or leaves
-    /// the group it emits into: a refusal names the group it failed to
-    /// update, so it must not outlive that membership.
-    link_refusals: BTreeMap<TileId, String>,
+    /// The NULL column that stopped each emitter's last posting, with the
+    /// header's text for it. Cleared when a posting goes through, and when
+    /// the tile changes or leaves the group it emits into: a refusal names
+    /// the group it failed to update, so it must not outlive that
+    /// membership.
+    link_refusals: BTreeMap<TileId, LinkRefusal>,
+}
+
+/// One emitter's standing NULL refusal: the column, and the header's text
+/// naming the group it emits into.
+#[derive(Debug, Clone)]
+struct LinkRefusal {
+    column: String,
+    text: SharedString,
 }
 
 impl Frame {
@@ -553,22 +563,38 @@ impl Frame {
     }
 
     /// Record or clear the NULL column that stopped `tile`'s last posting.
-    /// `true` when it changed. The header reads it at paint. A tile that
-    /// emits into no group records nothing: a pull deferred from before it
-    /// left would otherwise leave a refusal naming no group, which nothing
-    /// clears until it joins one again.
+    /// `true` when it changed. The header's text is formatted here, once
+    /// per refusal, naming the group the tile emits into: the header paints
+    /// it on every frame while it stands. A tile that emits into no group
+    /// records nothing: a pull deferred from before it left would otherwise
+    /// leave a refusal naming no group, which nothing clears until it joins
+    /// one again.
     pub(crate) fn set_link_refusal(&mut self, tile: TileId, column: Option<String>) -> bool {
-        let emitting = self.links.membership(tile).emit.is_some();
-        match column {
-            Some(c) if emitting => self.link_refusals.insert(tile, c.clone()) != Some(c),
-            Some(_) => false,
-            None => self.link_refusals.remove(&tile).is_some(),
+        let emit = self.links.membership(tile).emit;
+        match (column, emit) {
+            (Some(c), Some(group)) => {
+                if self.link_refusals.get(&tile).is_some_and(|r| r.column == c) {
+                    return false;
+                }
+                let text = crate::link::refusal_text(group, &c).into();
+                self.link_refusals
+                    .insert(tile, LinkRefusal { column: c, text });
+                true
+            }
+            (Some(_), None) => false,
+            (None, _) => self.link_refusals.remove(&tile).is_some(),
         }
     }
 
     /// The column whose NULL stopped `tile`'s last posting, while it emits.
     pub fn link_refusal(&self, tile: TileId) -> Option<&str> {
-        self.link_refusals.get(&tile).map(String::as_str)
+        self.link_refusals.get(&tile).map(|r| r.column.as_str())
+    }
+
+    /// The header's warning for `tile`'s standing refusal, formatted when it
+    /// was recorded; a clone is a reference count, not a format.
+    pub fn link_refusal_text(&self, tile: TileId) -> Option<&SharedString> {
+        self.link_refusals.get(&tile).map(|r| &r.text)
     }
 
     /// Drop a closed tile's membership, what it posted, and the notices it
@@ -3508,6 +3534,32 @@ mod tests {
         // A late pull for a tile that no longer emits records nothing.
         assert!(!f.set_link_refusal(tile, Some("book".into())));
         assert_eq!(f.link_refusal(tile), None, "not emitting: not recorded");
+    }
+
+    /// The header paints a refusal on every frame while it stands, so its
+    /// text is formatted once, when it is recorded, naming the group the
+    /// tile emits into; each read hands back that same allocation.
+    #[test]
+    fn a_link_refusal_is_recorded_with_its_painted_text() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let tile = TileId(1);
+        f.emit(tile, Some(Group::B));
+        assert!(f.set_link_refusal(tile, Some("book".into())));
+        let text = f.link_refusal_text(tile).cloned().expect("recorded");
+        assert_eq!(&*text, "group B not updated \u{b7} book is NULL");
+        let again = f.link_refusal_text(tile).cloned().unwrap();
+        assert!(
+            std::ptr::eq(text.as_ref().as_ptr(), again.as_ref().as_ptr()),
+            "a read formats nothing"
+        );
+        assert!(f.set_link_refusal(tile, Some("lhu".into())));
+        assert_eq!(
+            f.link_refusal_text(tile).map(|t| t.to_string()).as_deref(),
+            Some("group B not updated \u{b7} lhu is NULL"),
+            "a new column is a new text"
+        );
+        assert!(f.set_link_refusal(tile, None));
+        assert!(f.link_refusal_text(tile).is_none());
     }
 
     #[test]

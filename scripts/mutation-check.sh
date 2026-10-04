@@ -34577,9 +34577,24 @@ run_mutation "link: changing the emit group clears the refusal" \
 # that names no group and that nothing would clear.
 run_mutation "link: a tile emitting nowhere records no refusal" \
   crates/geode-shell/src/frame.rs \
-  '            Some(c) if emitting => self.link_refusals.insert(tile, c.clone()) != Some(c),' \
-  '            Some(c) if emitting || true => self.link_refusals.insert(tile, c.clone()) != Some(c),' \
+  '            (Some(_), None) => false,' \
+  '            (Some(c), None) => self.link_refusals.insert(tile, LinkRefusal { column: c, text: SharedString::default() }).is_none(),' \
   geode-shell a_link_refusal_ends_with_the_emit_membership_it_names
+
+# The header paints a standing refusal on every frame, so the frame formats
+# its text once, when it records it, naming the group the tile emits into;
+# a new column is a new text.
+run_mutation "link: a refusal's text names the group it emits into" \
+  crates/geode-shell/src/frame.rs \
+  '                let text = crate::link::refusal_text(group, &c).into();' \
+  '                let text = crate::link::refusal_text(Group::A, &c).into();' \
+  geode-shell a_link_refusal_is_recorded_with_its_painted_text
+
+run_mutation "link: a new refusal column records a new text" \
+  crates/geode-shell/src/frame.rs \
+  '                if self.link_refusals.get(&tile).is_some_and(|r| r.column == c) {' \
+  '                if self.link_refusals.get(&tile).is_some() {' \
+  geode-shell a_link_refusal_is_recorded_with_its_painted_text
 
 # Composition: base, then layer, then the cursor path, which is last.
 run_mutation "link: compose puts the path last" \
@@ -34681,8 +34696,8 @@ run_mutation "link: the chooser refuses a loop and stays open" \
 # module shows why its group kept its scope.
 run_mutation "link: the header shows a NULL refusal" \
   crates/geode-tile/src/header.rs \
-  '    let refused = membership.emit.and_then(|g| {' \
-  '    let refused = None::<Group>.and_then(|g| {' \
+  '    let refused = frame.entity().read(cx).link_refusal_text(tile).cloned();' \
+  '    let refused = None::<SharedString>;' \
   geode-tile an_emitter_header_shows_its_null_refusal
 
 # A refusal alone is text enough for the cluster: an emitter with no status

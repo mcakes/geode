@@ -126,15 +126,9 @@ pub fn link_chips(frame: &FrameRef, cx: &App) -> TileLinks {
         ],
         (None, emit) => [emit.map(|group| chip(group, LinkRole::Emit)), None],
     };
-    // Only an emitter has a group to name; the frame keeps no refusal for
-    // a tile that emits into none.
-    let refused = membership.emit.and_then(|g| {
-        frame
-            .entity()
-            .read(cx)
-            .link_refusal(tile)
-            .map(|column| SharedString::from(refusal_text(g, column)))
-    });
+    // The frame keeps no refusal for a tile that emits into none, and
+    // formats its text when it records it: a paint clones a reference.
+    let refused = frame.entity().read(cx).link_refusal_text(tile).cloned();
     TileLinks {
         frame: chips[0].is_some().then(|| frame.clone()),
         chips,
@@ -143,13 +137,9 @@ pub fn link_chips(frame: &FrameRef, cx: &App) -> TileLinks {
 }
 
 /// The warning an emitter shows while a NULL in its cursor path keeps its
-/// group's scope where it was.
-pub fn refusal_text(group: Group, column: &str) -> String {
-    format!(
-        "group {} not updated \u{b7} {column} is NULL",
-        group.letter()
-    )
-}
+/// group's scope where it was; the frame formats it when it records the
+/// refusal.
+pub use geode_shell::link::refusal_text;
 
 /// A link chip's tooltip title: its letter and arrows in words.
 pub fn link_title(chip: LinkChip) -> &'static str {
