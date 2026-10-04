@@ -194,7 +194,7 @@ pub(super) fn save_prompt(seed: Option<String>) -> NamePrompt {
     }
 }
 
-/// `s` on Current: push the save prompt, or refuse into the dialog's error
+/// `s` on Current or Saved: push the save prompt over that screen, or refuse into the dialog's error
 /// line when the scope is empty. The caller re-derives and syncs the input.
 pub(super) fn push_save(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let (empty, seed) = {
@@ -494,6 +494,10 @@ fn submit_save(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
+    // Saving a scope over an identical one changes nothing: no question.
+    if saved_unchanged(shell, &name, cx) {
+        return save_scope_as(shell, name, window, cx);
+    }
     // Pending-aware: a scope saved a moment ago is already the user's.
     match apply::definition_owner(shell, SCOPES_DOC, &name) {
         Owner::User { .. } => {
@@ -531,6 +535,14 @@ fn answer_pending(
     }
 }
 
+/// Whether the saved scope `name`, as the frame resolves it (pending writes
+/// included), is exactly the lane's scope: the test the title's `from
+/// <name>` uses.
+fn saved_unchanged(shell: &ShellView, name: &str, cx: &App) -> bool {
+    let frame = shell.target_frame().read(cx);
+    frame.saved_scopes().get(name) == Some(frame.scope())
+}
+
 /// Write the lane's scope as `name` through the pending batch, resolve it
 /// in the frame at once (so the next `s` sees it as the user's), record it
 /// as the lane's provenance and leave the step. A fork's announcement goes
@@ -546,12 +558,20 @@ fn save_scope_as(
     if scope.is_empty() {
         return set_prompt_error(shell, NOTHING_TO_SAVE.into());
     }
-    let value = toml::Value::Table(apply::scope_as_toml(&scope));
-    let fork = match apply::queue_definition(shell, SCOPES_DOC, &name, value, cx) {
-        Ok(fork) => fork,
-        Err(refusal) => return set_prompt_error(shell, refusal),
+    // Unchanged: a write would fork an inherited scope for nothing and
+    // freeze it against the lower layer's later updates. The lane still
+    // records the name, as a save would.
+    let fork = if saved_unchanged(shell, &name, cx) {
+        None
+    } else {
+        let value = toml::Value::Table(apply::scope_as_toml(&scope));
+        let fork = match apply::queue_definition(shell, SCOPES_DOC, &name, value, cx) {
+            Ok(fork) => fork,
+            Err(refusal) => return set_prompt_error(shell, refusal),
+        };
+        apply::refresh_definitions_now(shell, cx);
+        fork
     };
-    apply::refresh_definitions_now(shell, cx);
     edit_lane(shell, cx, |f| f.note_saved_as(name));
     let Some(state) = shell.scope_dialog.as_mut() else {
         return;

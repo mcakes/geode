@@ -10,7 +10,7 @@ use geode_core::scopes::SavedScopes;
 pub(crate) const SCOPES_NOTE: &str = "enter replaces the current scope";
 pub(crate) const EXPRESSIONS_NOTE: &str = "enter adds to the current scope";
 pub(crate) const NO_SCOPES: &str = "no saved scopes · s saves the current one";
-pub(crate) const NO_EXPRESSIONS: &str = "no saved expressions · mod+s names one";
+pub(crate) const NO_EXPRESSIONS: &str = "no saved expressions · n names a new one";
 
 /// A summary term longer than this is cut, so one long expression does not
 /// push the rest of the summary out of the row.

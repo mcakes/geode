@@ -433,6 +433,12 @@ fn normal_key(
             super::definition::push(shell, None, window, cx);
             return Normal::Done;
         }
+        // The empty Scopes row says `s` saves the current scope: the save
+        // prompt is pushed over this screen and returns here.
+        "s" => {
+            super::prompt::push_save(shell, cx);
+            dialog::sync_dialog_text(shell, window, cx);
+        }
         // Copy, delete and revert act on a definition: an empty row has none.
         "c" | "d" | "r" => {
             let Some(row) = state.saved.cursor_row().cloned() else {
@@ -849,6 +855,7 @@ fn hints(state: &ScopeDialogState) -> Vec<Hint> {
         enter,
         Hint::new(HintRow::Edit, &["e"], "edit expression"),
         Hint::new(HintRow::Edit, &["n"], "new expression"),
+        Hint::new(HintRow::Edit, &["s"], "save scope"),
         Hint::new(HintRow::Edit, &["c"], "copy"),
         Hint::new(HintRow::Edit, &["d"], "delete"),
         Hint::new(HintRow::Edit, &["r"], "revert"),

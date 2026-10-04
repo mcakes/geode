@@ -173,7 +173,9 @@ fn set_error(shell: &mut ShellView, error: String) {
 }
 
 /// Check the trimmed draft, then write it over the expression it edits, or
-/// hand a new expression's text to a name prompt in this step's place.
+/// hand a new expression's text to a name prompt in this step's place. An
+/// expression deleted under the step refuses, and an unchanged text leaves
+/// with nothing written.
 fn submit(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let Some((name, text)) = shell
         .scope_dialog
@@ -205,6 +207,21 @@ fn submit(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView
         }
         return;
     };
+    // Deleted while the step was open: writing would bring it back.
+    let doc = geode_core::config::EXPRESSIONS_DOC;
+    if apply::definition_owner(shell, doc, &name) == apply::Owner::Absent {
+        return set_error(shell, super::saved_view::EXPRESSION_GONE.into());
+    }
+    // Unchanged: a write would fork an inherited entry for nothing and
+    // freeze it against the lower layer's later updates.
+    if current_text(shell, &name).as_deref() == Some(text.as_str()) {
+        if let Some(state) = shell.scope_dialog.as_mut() {
+            state.definition = None;
+            let after = state.layers.commit_step();
+            super::saved_view::finish(shell, after, window, cx);
+        }
+        return;
+    }
     let fork = match write(shell, &name, &text, cx) {
         Ok(fork) => fork,
         Err(refusal) => return set_error(shell, refusal),
@@ -219,6 +236,19 @@ fn submit(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView
     if let Some(fork) = fork {
         shell.notice = Some(fork.into());
     }
+}
+
+/// `name`'s definition text as the configuration holds it now, pending
+/// writes included, trimmed as a submitted draft is.
+fn current_text(shell: &ShellView, name: &str) -> Option<String> {
+    let pending = apply::config_with_pending(shell);
+    let config = pending.as_ref().unwrap_or(&shell.services.config);
+    config
+        .doc(geode_core::config::EXPRESSIONS_DOC)
+        .and_then(|doc| doc.value.get(name))
+        .and_then(|v| v.get("expression"))
+        .and_then(|v| v.as_str())
+        .map(|t| t.trim().to_string())
 }
 
 /// Write `text` as `name`'s definition through the pending batch and

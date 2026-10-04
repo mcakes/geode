@@ -634,6 +634,16 @@ impl SaveFixture {
     }
 }
 
+impl SaveFixture {
+    /// Add a text filter on Current, keeping the lane's source: a save over
+    /// the source then changes it, so it is written (or asked about).
+    fn change_the_lane(&mut self) {
+        self.keys("t");
+        self.type_text("spx");
+        self.keys("enter");
+    }
+}
+
 fn save_step() -> Option<Layer> {
     Some(Layer::Step(
         crate::shell::scopedialog::state::Step::SaveScope,
@@ -744,6 +754,7 @@ fn saving_over_a_scope_just_created_asks(cx: &mut gpui::TestAppContext) {
     f.type_text("mine");
     f.keys("enter");
     assert!(!f.painted("scope-dialog-confirm"));
+    f.change_the_lane();
     f.keys("s");
     assert_eq!(
         f.draft().as_deref(),
@@ -761,6 +772,7 @@ fn n_answers_no_and_keeps_the_draft(cx: &mut gpui::TestAppContext) {
     let mut f = save_fixture(cx);
     f.load("eu");
     f.open_current();
+    f.change_the_lane();
     f.keys("s");
     f.keys("enter");
     assert!(f.painted("scope-dialog-confirm"));
@@ -886,6 +898,7 @@ fn a_question_keeps_editing_keys_off_the_draft(cx: &mut gpui::TestAppContext) {
     let mut f = save_fixture(cx);
     f.load("eu");
     f.open_current();
+    f.change_the_lane();
     f.keys("s");
     f.keys("enter");
     assert!(f.painted("scope-dialog-confirm"));
@@ -1740,4 +1753,163 @@ fn a_question_over_saved_ignores_the_pointer(cx: &mut gpui::TestAppContext) {
         .shell
         .read_with(&f.vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.saved.mode));
     assert_eq!(mode, Some(crate::dialogmode::DialogMode::Normal));
+}
+
+// ---- `s` on Saved, unchanged writes, a definition deleted under its step --
+
+fn owner(f: &SaveFixture, doc: &str, name: &str) -> crate::shell::objectdialog::apply::Owner {
+    f.shell.read_with(&f.vcx, |s, _| {
+        crate::shell::objectdialog::apply::definition_owner(s, doc, name)
+    })
+}
+
+/// The empty Scopes row says `s` saves the current scope, so `s` on Saved
+/// pushes the save prompt over the screen, previewing the lane's scope;
+/// `enter` saves and Saved shows again, the new scope listed.
+#[gpui::test]
+fn s_on_saved_pushes_the_save_prompt_and_returns_to_saved(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.set_lane(book("BK002"));
+    frame_of(&f.shell, &f.vcx).update(&mut f.vcx, |fr, cx| {
+        fr.replace_saved_scopes(SavedScopes::new());
+        cx.notify();
+    });
+    f.vcx.run_until_parked();
+    dispatch_action(&f.shell, "frame::scope_saved", &mut f.vcx);
+    draw(&mut f.vcx);
+    assert!(f.painted("scope-saved-empty-scopes"));
+    f.keys("s");
+    assert_eq!(f.top(), save_step());
+    assert_eq!(depth(&f.shell, &f.vcx), 2, "pushed over Saved");
+    assert!(f.painted("scope-dialog-name-field"));
+    assert!(f.painted("scope-dialog"), "the lane's scope previews");
+    f.type_text("mine");
+    f.keys("enter");
+    assert_eq!(f.top(), Some(Layer::Saved));
+    assert_eq!(f.top_kind(), Some(dialog::DialogKind::Scope));
+    assert!(visible_names(&f.shell, &f.vcx).contains(&"mine".to_string()));
+    assert_eq!(f.loaded_from().as_deref(), Some("mine"));
+    f.keys("s");
+    assert_eq!(f.top(), save_step());
+    f.keys("escape");
+    assert_eq!(f.top(), Some(Layer::Saved), "escape returns to Saved too");
+}
+
+/// The save door (`scope::save_current`, the save chip) with the dialog on
+/// top on Saved pushes the prompt over it, as `s` does there.
+#[gpui::test]
+fn the_save_door_over_saved_pushes_the_prompt(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.set_lane(book("BK002"));
+    dispatch_action(&f.shell, "frame::scope_saved", &mut f.vcx);
+    draw(&mut f.vcx);
+    assert_eq!(f.top(), Some(Layer::Saved));
+    dispatch_action(&f.shell, "scope::save_current", &mut f.vcx);
+    draw(&mut f.vcx);
+    assert_eq!(f.top(), save_step());
+    assert_eq!(depth(&f.shell, &f.vcx), 2);
+    f.keys("escape");
+    assert_eq!(f.top(), Some(Layer::Saved));
+}
+
+/// The empty Expressions row names the key that works on Saved.
+#[gpui::test]
+fn the_empty_expressions_row_names_n(cx: &mut gpui::TestAppContext) {
+    assert_eq!(
+        crate::shell::scopedialog::saved::NO_EXPRESSIONS,
+        "no saved expressions · n names a new one"
+    );
+    let (_shell, mut vcx) = saved_without_expressions(cx, true);
+    assert!(vcx.debug_bounds("scope-saved-empty-expressions").is_some());
+}
+
+/// `e` then `enter` with the text unchanged writes nothing: an inherited
+/// expression stays inherited, so later desk or builtin updates still reach
+/// this user.
+#[gpui::test]
+fn an_unchanged_definition_enter_writes_nothing(cx: &mut gpui::TestAppContext) {
+    use crate::shell::objectdialog::apply::Owner;
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("j j j e");
+    assert_eq!(f.top(), definition_step(Some("liq")));
+    f.keys("enter");
+    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(!f.queued(), "nothing queued");
+    assert_eq!(f.notice(), None, "no fork announced");
+    assert_eq!(
+        owner(&f, geode_core::config::EXPRESSIONS_DOC, "liq"),
+        Owner::Inherited(geode_core::config::Layer::Builtin)
+    );
+    f.flush();
+    assert!(
+        !f.user_expressions().contains("[liq"),
+        "{}",
+        f.user_expressions()
+    );
+}
+
+/// `s` then `enter` on a loaded scope with no changes writes nothing and
+/// asks nothing, whoever holds it; the lane still reads `from <name>`.
+#[gpui::test]
+fn an_unchanged_save_writes_nothing_and_asks_nothing(cx: &mut gpui::TestAppContext) {
+    use crate::shell::objectdialog::apply::Owner;
+    let mut f = save_fixture(cx);
+    f.load("desk_eu");
+    f.open_current();
+    f.keys("s");
+    assert_eq!(f.draft().as_deref(), Some("desk_eu"));
+    f.keys("enter");
+    assert!(!f.painted("scope-dialog-confirm"));
+    assert_eq!(f.top(), Some(Layer::Current));
+    assert_eq!(f.title().as_deref(), Some("from desk_eu"));
+    assert_eq!(f.loaded_from().as_deref(), Some("desk_eu"));
+    assert!(!f.queued(), "nothing queued");
+    assert_eq!(f.notice(), None, "no fork announced");
+    assert_eq!(
+        owner(&f, "scopes", "desk_eu"),
+        Owner::Inherited(geode_core::config::Layer::Desk)
+    );
+    f.flush();
+    assert!(!f.user_scopes().contains("[desk_eu"), "{}", f.user_scopes());
+
+    f.load("eu");
+    f.keys("s");
+    assert_eq!(f.draft().as_deref(), Some("eu"));
+    f.keys("enter");
+    assert!(
+        !f.painted("scope-dialog-confirm"),
+        "the user's own: no question"
+    );
+    assert_eq!(f.top(), Some(Layer::Current));
+    assert_eq!(f.title().as_deref(), Some("from eu"));
+    assert!(!f.queued());
+}
+
+/// An expression deleted while its definition step is open is not written
+/// back by `enter`: the step refuses, naming what happened.
+#[gpui::test]
+fn a_definition_deleted_under_the_step_refuses_and_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture_with(cx, "config_version = 1\n[mine]\nexpression = \"npv > 5\"\n");
+    f.set_lane(liq_scope());
+    f.open_current();
+    f.keys("o");
+    assert_eq!(
+        visible_names(&f.shell, &f.vcx),
+        ["desk_eu", "eu", "big", "liq", "mine"]
+    );
+    f.keys("j j j j e");
+    assert_eq!(f.top(), definition_step(Some("mine")));
+    f.keys("backspace");
+    f.type_text("6");
+    f.reload_without(geode_core::config::Layer::User, "expressions", "mine");
+    f.keys("enter");
+    assert_eq!(
+        f.definition_error().as_deref(),
+        Some("that expression no longer exists")
+    );
+    assert!(f.painted("scope-dialog-error"));
+    assert_eq!(f.top(), definition_step(Some("mine")));
+    assert!(!f.queued(), "nothing queued");
+    assert_eq!(f.named_text("mine"), None);
 }

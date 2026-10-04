@@ -18718,9 +18718,11 @@ run_mutation "scope dialog: a save records the lane's source" \
 # The frame resolves a save before the flush.
 run_mutation "scope dialog: a save refreshes the frame's definitions at once" \
   crates/geode-shell/src/shell/scopedialog/prompt.rs \
-  '    apply::refresh_definitions_now(shell, cx);
-    edit_lane(shell, cx, |f| f.note_saved_as(name));' \
-  '    edit_lane(shell, cx, |f| f.note_saved_as(name));' \
+  '        apply::refresh_definitions_now(shell, cx);
+        fork
+    };' \
+  '        fork
+    };' \
   geode-shell \
   saving_under_a_new_name_writes_it_and_records_the_source
 
@@ -19145,6 +19147,55 @@ run_mutation "scope dialog: the filter row ignores presses under a question" \
                 super::scopedialog::saved_view::enter_filter(state);' \
   geode-shell \
   a_question_over_saved_ignores_the_pointer
+
+# The empty Scopes row says `s` saves the current scope: on Saved, `s`
+# pushes the save prompt over the screen, or the row names a dead key.
+run_mutation "scope dialog: s on Saved pushes the save prompt" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        "s" => {
+            super::prompt::push_save(shell, cx);
+            dialog::sync_dialog_text(shell, window, cx);
+        }' \
+  '        "s" => {}' \
+  geode-shell \
+  s_on_saved_pushes_the_save_prompt_and_returns_to_saved
+
+# An unchanged definition writes nothing: a write would fork an inherited
+# expression and freeze it against the lower layer's later updates.
+run_mutation "scope dialog: an unchanged definition writes nothing" \
+  crates/geode-shell/src/shell/scopedialog/definition.rs \
+  '    if current_text(shell, &name).as_deref() == Some(text.as_str()) {' \
+  '    if current_text(shell, &name).as_deref() == Some("") {' \
+  geode-shell \
+  an_unchanged_definition_enter_writes_nothing
+
+# A save over an identical saved scope writes nothing: it would fork an
+# inherited scope for nothing.
+run_mutation "scope dialog: an unchanged save writes nothing" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '    let fork = if saved_unchanged(shell, &name, cx) {' \
+  '    let fork = if false && saved_unchanged(shell, &name, cx) {' \
+  geode-shell \
+  an_unchanged_save_writes_nothing_and_asks_nothing
+
+# ... and asks nothing over the user's own: there is nothing to replace.
+run_mutation "scope dialog: an unchanged save asks nothing" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '    if saved_unchanged(shell, &name, cx) {
+        return save_scope_as(shell, name, window, cx);
+    }' \
+  '' \
+  geode-shell \
+  an_unchanged_save_writes_nothing_and_asks_nothing
+
+# An expression deleted while its definition step is open refuses at
+# enter; writing would bring it back.
+run_mutation "scope dialog: a definition deleted under the step refuses" \
+  crates/geode-shell/src/shell/scopedialog/definition.rs \
+  '    if apply::definition_owner(shell, doc, &name) == apply::Owner::Absent {' \
+  '    if false && apply::definition_owner(shell, doc, &name) == apply::Owner::Absent {' \
+  geode-shell \
+  a_definition_deleted_under_the_step_refuses_and_writes_nothing
 
 # ---- Scope dialog: lane provenance, rows, saved rows and layers ----
 

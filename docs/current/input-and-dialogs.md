@@ -508,7 +508,7 @@ monospace, with an `applied` tag when the lane's scope refers to it. An
 expression whose definition does not parse paints its name and its reason in
 the danger tone. A section with no definitions paints one muted row:
 `no saved scopes · s saves the current one`, or
-`no saved expressions · mod+s names one`.
+`no saved expressions · n names a new one`.
 
 The rows derive with Current's, under the frame generation and the
 configuration version, so a save, a copy, a reload or an edit elsewhere shows
@@ -524,6 +524,7 @@ a filter that matches nothing leaves `enter` nothing to act on.
 | `enter` on an empty row | The empty Expressions row opens a new [definition](#definition-step); the empty Scopes row refuses with `narrow the current scope, then save it (s)` |
 | `e` | On an expression, its [definition](#definition-step); on a scope, refuses with `load it, change it, then save over it (s)` |
 | `n` | A new expression's definition, from anywhere off a scope row; on a scope row or the empty Scopes row, refuses with `narrow the current scope, then save it (s)` |
+| `s` | The [save prompt](#save-prompt), pushed over Saved; its commit or `escape` returns to Saved. An empty scope refuses with `nothing to save — the scope is empty` |
 | `c` | Copy the row's definition under a new name |
 | `d` | Delete the user's own definition, after a question |
 | `r` | Revert the user's copy to the lower layer's, after a question |
@@ -579,8 +580,8 @@ gives focus back.
 
 ### Save prompt
 
-`s` on Current, the scope bar's save glyph and `scope::save_current` open
-the save prompt: a field labelled `Save scope as` above Current's rows, which
+`s` on Current or Saved, the scope bar's save glyph and
+`scope::save_current` open the save prompt: a field labelled `Save scope as` above Current's rows, which
 preview what is saved and ignore the pointer. It is seeded with the saved
 scope the lane's scope was loaded from (`loaded_from`), so saving a loaded
 scope back over itself is `s` then `enter`. An empty scope refuses at the
@@ -592,7 +593,11 @@ refuse with `'<name>' is reserved`). A name the user layer holds asks
 returns to the prompt with its draft. A name only an inherited layer holds is
 written without a question, as a fork, and the status bar announces
 `copied '<name>' to your config — r restores the <layer> copy`. A new name is
-written at once. Every save goes through the pending write batch, resolves in
+written at once. A name whose saved scope is exactly the lane's scope is not
+written and asks nothing, whichever layer holds it: a no-op write would fork
+an inherited scope and freeze it against the lower layer's later updates.
+The lane still records the name, so the title reads `from <name>`. Every
+other save goes through the pending write batch, resolves in
 the frame at once (so the next `s` sees the name as the user's), and records
 the name as the lane's `loaded_from`, so the title reads `from <name>`.
 `escape` leaves the prompt and writes nothing.
@@ -619,7 +624,11 @@ the pending batch, keeping the definition's other keys, and resolved in the
 frame at once, so every scope naming it, the lane's included, reads the new
 text before the flush. Editing an inherited expression forks it without a
 question, announced on the status bar; references follow the edit, so there
-is nothing to confirm. `escape` leaves the step and writes nothing.
+is nothing to confirm. A text unchanged from the definition (both trimmed)
+leaves the step and writes nothing, so an inherited expression stays
+inherited. An expression deleted while the step was open refuses with
+`that expression no longer exists` rather than be written back. `escape`
+leaves the step and writes nothing.
 
 `n` in Saved opens the step empty, labelled `New expression`. Its `enter`
 checks the text the same way, then turns the step into a name prompt
@@ -635,7 +644,7 @@ definition: the step it replaced is gone, so the text must be typed again.
 |---|---|
 | `frame::scope` (`mod+o`), the scope bar's `+` | Current |
 | `frame::scope_saved` (unbound), the toolbar's load glyph, `config::scopes`, `config::expressions` | Saved alone; with the dialog on top on Current, Saved is pushed over it, as `o` does |
-| The scope bar's save glyph, `scope::save_current` | The save prompt alone; with the dialog on top on Current, pushed over it, as `s` does. An empty scope refuses on the status bar and opens nothing |
+| The scope bar's save glyph, `scope::save_current` | The save prompt alone; with the dialog on top on Current or Saved, pushed over that screen, as `s` does there. An empty scope refuses on the status bar and opens nothing |
 | A `≡` chip's body | That expression's definition alone; with the dialog on top on Current or Saved, pushed over it. A name nothing defines refuses on the status bar and opens nothing |
 
 A door that opens a screen or step alone makes it the bottom layer, so its

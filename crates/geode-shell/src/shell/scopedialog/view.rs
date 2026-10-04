@@ -245,15 +245,14 @@ pub(crate) fn open_saved(view: &mut ShellView, window: &mut Window, cx: &mut Con
 /// The one-shot save door (the scope bar's save chip,
 /// `scope::save_current`): the save prompt alone, so its commit or `escape`
 /// closes the dialog. An empty scope refuses on the status bar and opens
-/// nothing. With the dialog already on top on Current the prompt is pushed
-/// over it instead, as `s` does; on any other layer this is a no-op.
+/// nothing. With the dialog already on top on Current or Saved the prompt
+/// is pushed over that screen instead, as `s` does there; on any other
+/// layer this is a no-op.
 pub(crate) fn open_save(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     if view.top_kind() == Some(dialog::DialogKind::Scope) {
-        if view
-            .scope_dialog
-            .as_ref()
-            .is_some_and(|s| matches!(s.layers.top(), Layer::Current) && s.pending.is_none())
-        {
+        if view.scope_dialog.as_ref().is_some_and(|s| {
+            matches!(s.layers.top(), Layer::Current | Layer::Saved) && s.pending.is_none()
+        }) {
             super::prompt::push_save(view, cx);
             view.refresh_dialog_rows(cx);
             dialog::sync_dialog_text(view, window, cx);
