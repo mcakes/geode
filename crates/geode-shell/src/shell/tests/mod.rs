@@ -539,15 +539,7 @@ fn dialog_test_shell_in(
     });
     vcx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
-            let domain = match action {
-                OBJECT_SCOPES => Some(crate::shell::objectdialog::Domain::Scopes),
-                OBJECT_EXPRESSIONS => Some(crate::shell::objectdialog::Domain::Expressions),
-                _ => None,
-            };
-            match domain {
-                Some(domain) => crate::shell::objectdialog::render::open(shell, domain, window, cx),
-                None => shell.dispatch(&ActionId(action.to_string()), None, window, cx),
-            }
+            shell.dispatch(&ActionId(action.to_string()), None, window, cx);
         });
     });
     vcx.update(|window, cx| {
@@ -556,12 +548,6 @@ fn dialog_test_shell_in(
     (shell, vcx)
 }
 
-/// Test-only doors to the Scopes and Expressions object dialogs for
-/// [`dialog_test_shell_in_dir`] and its siblings. `config::scopes` and
-/// `config::expressions` open the Scope dialog's Saved screen, so the
-/// object dialogs' own tests open them directly until they are removed.
-pub(super) const OBJECT_SCOPES: &str = "test::object_scopes";
-pub(super) const OBJECT_EXPRESSIONS: &str = "test::object_expressions";
 /// Dispatch a platform-shaped double-click: down/up at `click_count` 1,
 /// then down/up at `click_count` 2, all at one point with the given
 /// modifiers, with a draw between the two clicks (the OS delivers them

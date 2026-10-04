@@ -2837,13 +2837,6 @@ run_mutation "object stack: the covered state parks with the stack top, not its 
   geode-shell \
   a_choice_list_between_two_object_dialogs_keeps_the_lower_one
 
-run_mutation "object stack: save-current names the covered dialog instead of Scopes" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if !dialog::can_open_object(shell, Domain::Scopes) {' \
-  '    if !dialog::can_open(shell, dialog::DialogKind::Object) {' \
-  geode-shell \
-  object_save_scope_stacks_over_views_without_touching_it
-
 run_mutation "object stack: a failed write rebuilds every open draft" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
   '        .filter(|state| pending.origins.contains(&state.domain))' \
@@ -2857,28 +2850,6 @@ run_mutation "object stack: a batch forgets a second contributing domain" \
   '        && pending.origins.is_empty()' \
   geode-shell \
   a_shared_batch_failure_rebuilds_every_contributing_draft
-
-run_mutation "object stack: a covered Scopes dialog misses its values reply" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        .find(|state| state.domain == Domain::Scopes)' \
-  '        .take(1)
-        .find(|state| state.domain == Domain::Scopes)' \
-  geode-shell \
-  a_covered_scopes_values_stage_receives_its_delivery
-
-run_mutation "object stack: a covered expression field misses its values reply" \
-  crates/geode-shell/src/shell/expr_suggest.rs \
-  '            .chain(super::dialog::parked_objects_mut(&mut view.modals))' \
-  '            .chain(super::dialog::parked_objects_mut(&mut []))' \
-  geode-shell \
-  a_covered_expression_field_receives_its_values
-
-run_mutation "object stack: a reload leaves a covered expression field stale" \
-  crates/geode-shell/src/shell/hot_reload.rs \
-  '                    .chain(super::dialog::parked_objects_mut(&mut self.modals))' \
-  '                    .chain(super::dialog::parked_objects_mut(&mut []))' \
-  geode-shell \
-  a_reload_refreshes_a_covered_object_expression_field
 
 run_mutation "object stack: a color refresh leaves the baseline behind" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
@@ -8944,17 +8915,6 @@ run_mutation "objectdialog: a shell with nowhere to write still marks the draft 
     };' \
   geode-shell an_edit_with_nowhere_to_write_leaves_the_draft_dirty
 
-# Overwriting a saved scope with the same scope reports that nothing
-# changed. `commit_edit` returns `None` for both queued and unchanged
-# edits, so this case needs a fixture whose saved scope matches the frame.
-run_mutation "objectdialog: a confirmed o that changes nothing says nothing" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    revalidate(shell);
-    let queued = if !changed {' \
-  '    revalidate(shell);
-    let queued = if false {' \
-  geode-shell o_on_a_scope_that_already_matches_the_frame_says_so
-
 # `commit_removal` flushes at zero debounce: a confirmed removal has
 # nothing to coalesce. The test advances no clock, so a debounce would
 # leave the row in browse. The removal guard distinguishes this anchor
@@ -8998,30 +8958,6 @@ run_mutation "objectdialog: d/r ask for a presentation doc even when the domain 
 # scope requires confirmation; forking a desk-owned scope writes at once
 # and announces the fork. The frame supplying the scope is unchanged.
 
-run_mutation "objectdialog: o overwrites a user-owned scope instead of asking first" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if !forks {
-        arm_confirm(shell, Confirm::Overwrite);
-        return;
-    }' \
-  '    if false {
-        arm_confirm(shell, Confirm::Overwrite);
-        return;
-    }' \
-  geode-shell o_confirms_before_overwriting
-
-run_mutation "objectdialog: o writes the frame instead of the saved scope" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let changed = draft_mut(shell).is_some_and(|draft| {
-        scopes::overwrite_with(draft, &scope, &config);
-        draft.is_dirty()
-    });' \
-  '    let changed = true;
-    shell.target_frame().update(cx, |f, _| {
-        f.set_scope(scope.clone());
-    });' \
-  geode-shell o_overwrites_the_saved_scope_with_the_frames_current_one
-
 # ---- Scope fork disclosure and source-based dirtiness -----------------
 #
 # `overwrite_scope` decides whether to fork from user-layer ownership.
@@ -9031,12 +8967,6 @@ run_mutation "objectdialog: o writes the frame instead of the saved scope" \
 # Dirtiness compares the source object because displayed summaries are
 # lossy: one value containing ", " can look identical to several values.
 # Comparing only those summaries silently suppresses a real change.
-
-run_mutation "objectdialog: o asks before forking a desk-owned scope" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let forks = target_row(shell).is_some_and(|row| row.layer != Some(Layer::User));' \
-  '    let forks = false;' \
-  geode-shell o_on_a_desk_owned_scope_forks_without_asking_and_says_so
 
 run_mutation "objectdialog: is_dirty ignores a source-only change" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
@@ -9432,147 +9362,6 @@ run_mutation "objectdialog: a create ignores a name the presentation overlay hol
   geode-shell \
   a_presentation_only_name_is_taken_even_with_no_row_to_show_for_it
 
-# `n` creates an empty scope. Seeding it from the frame would write the
-# frame's BK007 selection, which the test explicitly excludes.
-run_mutation "scopes dialog: n creates an empty scope, never the frame's" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let mut draft = domain.new_draft(&shell.services.config, &name);' \
-  '    let mut draft = domain.new_draft(&shell.services.config, &name); if domain == Domain::Scopes { let scope = shell.target_frame().read(cx).scope().clone(); scopes::overwrite_with(&mut draft, &scope, &shell.services.config); }' \
-  geode-shell \
-  n_on_scopes_creates_an_empty_scope
-
-# `c`'s whole point is that the copy is VERBATIM — dropping the source
-# table copy would leave a blank object under the new name rather than
-# `mine`'s own `book = ["BK001"]` selection.
-run_mutation "scopes dialog: c copies verbatim" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            draft.source = table;' \
-  '            let _ = table;' \
-  geode-shell \
-  c_duplicates_the_selected_scope_under_a_new_name
-
-# A copy refuses if its source disappears before naming is confirmed.
-# Defaulting a missing source to an empty table creates a blank copy; the
-# test checks the retained Naming stage, refusal, absent write, and absent
-# draft.
-run_mutation "scopes dialog: c refuses a source that vanished before enter" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                .and_then(|v| v.as_table())
-                .cloned()' \
-  '                .and_then(|v| v.as_table())
-                .cloned()
-                .or(Some(toml::Table::new()))' \
-  geode-shell \
-  c_refuses_when_the_source_vanished_before_enter
-
-# `deliver_distinct` routes `SCOPES_KEY` outcomes to the object dialog.
-# Falling through to the picker's stage check loses the result.
-run_mutation "scopes dialog: deliver_distinct routes SCOPES_KEY to the dialog" \
-  crates/geode-shell/src/shell/mod.rs \
-  '        if outcome.key == SCOPES_KEY {' \
-  '        if false {' \
-  geode-shell deliver_values_routes_by_key_and_drops_stale_outcomes
-
-# The tag half of the same staleness check: dropping it lets an outcome
-# from a superseded request (the trader left the column and re-entered
-# it before the first query returned) paint over the newer one.
-run_mutation "scopes dialog: a stale values tag is dropped" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if *column != outcome.column || outcome.tag != state.values_tag {' \
-  '    if *column != outcome.column {' \
-  geode-shell deliver_values_routes_by_key_and_drops_stale_outcomes
-
-# A saved value the `DistinctOutcome` no longer lists (the data moved
-# on) must still paint ticked, with a note saying so — dropping this
-# arm would silently un-list it from what the trader sees, though `fold`
-# would still have kept writing it.
-run_mutation "scopes dialog: a saved value the data lacks stays ticked and marked" \
-  crates/geode-shell/src/shell/objectdialog/scopes.rs \
-  '        if !values.iter().any(|(v, _)| v == value) {' \
-  '        if false {' \
-  geode-shell values_fields_tick_the_saved_ones_and_keep_a_stale_one_marked
-
-# `fold_values` must remove the key outright when every value is
-# unticked, never write `source.dimensions.<col> = []` — an empty
-# selection and no selection are different scopes to the compiler.
-run_mutation "scopes dialog: an emptied selection removes the key, never []" \
-  crates/geode-shell/src/shell/objectdialog/scopes.rs \
-  '        if ticked.is_empty() {' \
-  '        if false {' \
-  geode-shell fold_values_writes_the_ticks_and_removes_an_emptied_selection
-
-# `parse_text`'s one real check: a broken `expression` must never reach
-# `source` unparsed — dropping the guard writes whatever the trader
-# typed straight through, however the compiler would later choke on it.
-run_mutation "scopes dialog: a broken expression is refused" \
-  crates/geode-shell/src/shell/objectdialog/scopes.rs \
-  '    if key == "expression" && !text.is_empty() {' \
-  '    if false {' \
-  geode-shell text_and_expression_are_editable_and_the_expression_is_parsed
-
-# Scopes list reordering refuses in `handle_edit_key`, as well as in
-# footer hints. Removing the guard allows the generic arm to move a row.
-run_mutation "scopes dialog: reorder is refused" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        NormalCommand::MoveItem(_) if is_scopes(shell) => {' \
-  '        NormalCommand::MoveItem(_) if false => {' \
-  geode-shell ctrl_a_and_ctrl_x_tick_and_clear_and_reorder_is_refused
-
-# `draft_scope`'s whole point is "minus the column being edited" — the
-# Values stage's own distinct request must not ask the query to filter
-# by the very column it is about to offer values for.
-run_mutation "scopes dialog: the request carries the draft minus the column" \
-  crates/geode-shell/src/shell/objectdialog/scopes.rs \
-  '    scope.dimensions.retain(|d| d.column != minus);' \
-  '    let _ = minus;' \
-  geode-shell entering_the_values_stage_requests_the_columns_distinct_values
-
-# The Values stage uses the edit painter and its draft. Sending it to
-# the browse painter displays the object list while subsequent ticks
-# change values in an invisible draft.
-run_mutation "scopes dialog: the Values stage paints through build_edit" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if matches!(
-        state.stage,
-        Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }
-    ) {' \
-  '    if matches!(
-        state.stage,
-        Stage::Edit { .. } | Stage::Column { .. }
-    ) {' \
-  geode-shell the_values_stage_paints_its_rows
-
-# `set_query` writes to the draft in Values, Edit, and Column stages.
-# Writing the browse query in Values leaves its list unfiltered, so
-# `ctrl+a` selects every value instead of the requested subset.
-run_mutation "scopes dialog: the Values stage's query is the draft's" \
-  crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if matches!(
-            self.stage,
-            Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }
-        ) && let Some(draft) = self.draft.as_mut()' \
-  '        if matches!(
-            self.stage,
-            Stage::Edit { .. } | Stage::Column { .. }
-        ) && let Some(draft) = self.draft.as_mut()' \
-  geode-shell a_query_in_the_values_stage_narrows_the_rows_and_ctrl_a_ticks_only_them
-
-# Clicking a scope dimension opens Values and arms `click_opened_stage`.
-# That flag absorbs the second click of a double-click before it can act
-# on a value row painted under the pointer. `enter_values_stage` makes
-# the anchor distinct from the column-stage assignment.
-run_mutation "scopes dialog: a dimension row's click arms the double-click guard" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        enter_values_stage(shell, &column, cx);
-        if let Some(state) = shell.object_dialog.as_mut() {
-            state.click_opened_stage = true;
-        }' \
-  '        enter_values_stage(shell, &column, cx);
-        if let Some(state) = shell.object_dialog.as_mut() {
-            state.click_opened_stage = false;
-        }' \
-  geode-shell a_double_click_on_a_scopes_dimension_row_opens_its_values_and_not_a_field
-
 # ---- Saving the frame scope through naming ----------------------------
 
 # Dispatch must match `scope::save_current` before the generic
@@ -9585,17 +9374,6 @@ run_mutation "scope-save: save_current is matched before the scope:: prefix arm"
   geode-shell \
   scope_save_current_opens_the_prompt_alone_and_escape_closes
 
-# `open_save_scope`'s one gate: an empty frame scope has nothing to save,
-# so it must open browse with the notice rather than naming. Dropping
-# the check enters naming over an empty scope instead — the door never
-# refuses at all.
-run_mutation "scope-save: an empty frame scope refuses naming" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if shell.target_frame().read(cx).scope().is_empty() {' \
-  '    if false {' \
-  geode-shell \
-  object_save_scope_with_an_empty_frame_scope_opens_browse_with_a_notice
-
 # `ScopeBarModel::savable` is the scope bar's own gate on the `save`
 # chip: an always-true value would paint the chip over an empty scope,
 # where clicking it can only open naming and immediately refuse.
@@ -9605,16 +9383,6 @@ run_mutation "scope-save: the save chip's savable gate" \
   '    let savable = true;' \
   geode-shell \
   no_active_slot_labels_as_view_default
-
-# `save_current` must be unreachable as a saved scope's own name — a
-# scope by that name would be indistinguishable from this action's id
-# both in the palette and in `input.rs`'s `scope::<name>` dispatch arm.
-run_mutation "scope-save: save_current is a reserved scope name" \
-  crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            Domain::Scopes | Domain::Expressions => &geode_core::scopes::RESERVED_NAMES,' \
-  '            Domain::Scopes | Domain::Expressions => &[],' \
-  geode-shell \
-  object_save_scope_refuses_its_own_name_as_reserved
 
 # `Frame::save_scope` rejects the reserved name `save_current` at its own
 # boundary. Otherwise saving through a caller without dialog validation
@@ -10256,47 +10024,6 @@ run_mutation "objectdialog: a tick click toggles through space's path" \
   '    draft.selected = position;
     shell.refresh_dialog_rows(cx);' \
   geode-shell clicking_a_tick_hides_the_column_and_parks_the_cursor_there
-
-# Clicking an available Scopes dimension's tick opens Values through
-# `step_selected_row`, like `space`. Falling through to the generic toggle
-# adds an empty selection instead.
-run_mutation "objectdialog: a tick on an available Scopes row opens its values" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if !in_values_stage(shell) && is_scopes(shell) && !on_scopes_named_row(shell) {' \
-  '    if false {' \
-  geode-shell clicking_an_available_dimensions_tick_opens_its_values_stage
-
-# `d`, `r`, and `o` in Values leave the stage and draft untouched and
-# report the required notice. The test checks the wording for all three.
-run_mutation "objectdialog: d/r/o inside the Values stage name the escape door" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '"not a verb while picking values — escape first".to_string(),' \
-  '"not a verb here".to_string(),' \
-  geode-shell d_r_and_o_refuse_inside_the_values_stage
-
-# `space` on a selected Scopes dimension names `enter` as the way to open
-# Values. The test checks the notice text.
-run_mutation "objectdialog: space on a selected Scopes dimension names the values door" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                set_notice(shell, "enter opens this dimension'"'"'s values".to_string());' \
-  '                set_notice(shell, "nothing on this row changes with space".to_string());' \
-  geode-shell space_on_a_selected_scopes_dimension_names_the_values_door
-
-# Demoting a dimension clears its note. Otherwise the available row
-# keeps displaying the summary of values that were removed.
-run_mutation "objectdialog: x on a Scopes dimension clears its note" \
-  crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        entry.note = None;' \
-  '        entry.note = entry.note.clone();' \
-  geode-shell x_on_a_selected_scopes_dimension_removes_it_and_clears_its_note
-
-# `x` on an available Scopes row names `enter`; there is no selected
-# dimension to drop, and the generic view-membership notice is inapplicable.
-run_mutation "objectdialog: x on an available Scopes row names enter" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '"not selected — enter picks its values".to_string()' \
-  '"not in the view — space adds it".to_string()' \
-  geode-shell x_on_an_available_scopes_row_is_refused
 
 # A tick click is consumed while confirmation is armed. Removing this
 # guard lets the click change the object behind a pending operation.
@@ -14336,16 +14063,6 @@ run_mutation "objectdialog: the edit footer paints the reorder group on a row wi
   '        let reorders = true;' \
   geode-shell \
   the_edit_footer_names_only_what_the_selected_row_offers
-
-# Scope dimensions use item vocabulary but do not offer reorder hints. The
-# domain exclusion keeps that hint off Scopes even though Views items can
-# reorder.
-run_mutation "objectdialog: the reorder group is withheld on Scopes" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        let reorders = vocabulary == RowVocabulary::Item && state.domain != Domain::Scopes;' \
-  '        let reorders = vocabulary == RowVocabulary::Item;' \
-  geode-shell \
-  the_scopes_dimensions_list_offers_no_reorder_chip
 
 # The settings footer advertises tab stepping in normal mode. The window
 # test checks the shared hint's tagged tab chip.
@@ -24106,16 +23823,6 @@ run_mutation "objectdialog: a filter keystroke can leave the cursor on a header"
   geode-shell \
   a_filter_keystroke_never_leaves_the_cursor_on_a_header
 
-# The key handler's tail settle, which catches every way the row list
-# moves that is not a motion: a delivered Values list is the one an
-# existing test can see, since its rows replace the loading row wholesale.
-run_mutation "objectdialog: nothing settles the cursor after the list changes" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    draft.settle_selection(Domain::Scopes);' \
-  '    let _ = Domain::Scopes;' \
-  geode-shell \
-  ticking_a_value_writes_the_selection_and_unticking_all_removes_it
-
 # Pointer selection uses the same cursor-stop predicate as keyboard motion.
 run_mutation "objectdialog: a click lands on a row the keyboard cannot reach" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
@@ -26223,24 +25930,6 @@ run_mutation "expr suggest: a row click inserts" \
   geode-shell \
   clicking_a_row_inserts_it_and_typing_continues
 
-# The Scopes draft must learn the inserted text, or sync_dialog_text
-# restores the old query after the key.
-run_mutation "expr suggest: a Scopes insert reaches the draft" \
-  crates/geode-shell/src/shell/expr_suggest.rs \
-  '        draft.set_query(text);' \
-  '        let _ = text;' \
-  geode-shell \
-  the_scopes_expression_field_suggests_and_tab_inserts
-
-# A Scopes expression naming an unknown column is refused at Enter, not
-# saved for the reader to drop later.
-run_mutation "expr suggest: a Scopes expression refuses an unknown column" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                        return Err(format!("expression: {}", w.message));' \
-  '                        let _ = w;' \
-  geode-shell \
-  the_scopes_expression_field_refuses_an_unknown_column
-
 # One pool key, newest request wins: another column left Loading never
 # gets a reply, so it must be forgotten and asked again on return.
 run_mutation "expr suggest: a second column's request forgets the first" \
@@ -26419,23 +26108,6 @@ run_mutation "named chip: a missing name refuses and opens nothing" \
   geode-shell \
   a_missing_named_chips_body_refuses_with_a_notice
 
-# The old expression is blanked before the draft's scope is read, or an
-# unreadable one drops the selections from the values narrowing.
-run_mutation "expr suggest: Scopes narrowing survives an unreadable expression" \
-  crates/geode-shell/src/shell/objectdialog/scopes.rs \
-  '    blanked.source.remove("expression");' \
-  '    let _ = &mut blanked;' \
-  geode-shell \
-  expression_scope_keeps_the_selections_under_an_unreadable_expression
-
-# An accept is a range replace so it stays in the input's undo history.
-run_mutation "expr suggest: a Scopes insertion undoes" \
-  crates/geode-shell/src/shell/expr_suggest.rs \
-  '        s.replace(write.text.clone(), window, cx);' \
-  '        s.set_value(write.text.clone(), window, cx);' \
-  geode-shell \
-  the_scopes_expression_field_undoes_an_insertion
-
 # ---- Modal Back button: the pointer route for Escape's back rung
 
 # The shared title row paints the button only while the dialog reports a
@@ -26539,30 +26211,6 @@ run_mutation "named expr: the picker requests an unresolved scope" \
   geode-shell \
   the_picker_shows_an_unresolved_named_expression_instead_of_requesting
 
-# The Scopes fold writes only ticked named expressions.
-run_mutation "named expr: the scopes fold writes unticked names" \
-  crates/geode-shell/src/shell/objectdialog/scopes.rs \
-  '                        .filter(|i| i.included)' \
-  '                        .filter(|_| true)' \
-  geode-shell \
-  unticking_every_named_expression_drops_the_key
-
-# A scope's named-expression list may be emptied by unticking.
-run_mutation "named expr: the last named untick is refused" \
-  crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                let may_empty = self.fields[field].key == "named";' \
-  '                let may_empty = false;' \
-  geode-shell \
-  unticking_every_named_expression_drops_the_key
-
-# Space on a named expression ticks it rather than opening Values.
-run_mutation "named expr: space on a named row takes the dimensions door" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            ) => draft.fields.get(field).is_some_and(|f| f.key == "named"),' \
-  '            ) => false,' \
-  geode-shell \
-  space_on_a_named_expression_never_opens_values
-
 # The used-by sentence (the definition note, the delete question) names the
 # saved scopes that tick the expression.
 run_mutation "scope dialog: the used-by scan finds no saved scope" \
@@ -26571,30 +26219,6 @@ run_mutation "scope dialog: the used-by scan finds no saved scope" \
   '                        .is_some_and(|_| false)' \
   geode-shell \
   the_definition_note_names_each_saved_scope_that_ticks_it
-
-# `c` on a named expression seeds the copy's field from the copied table.
-run_mutation "named expr: a copy's field is built empty" \
-  crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            Domain::Expressions => expressions::fields_from_table(Some(table)),' \
-  '            Domain::Expressions => expressions::fields_from_table(None),' \
-  geode-shell \
-  c_copies_a_named_expression_with_its_text
-
-# Naming a fresh expression opens its field instead of creating an invalid one.
-run_mutation "named expr: naming a fresh expression creates it at once" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let opens_expression = domain == Domain::Expressions && seed == NameSeed::Empty;' \
-  '    let opens_expression = false;' \
-  geode-shell \
-  a_new_named_expression_is_written_to_the_user_file
-
-# The Expressions dialog's expression field turns suggestions on.
-run_mutation "named expr: the expressions field has no suggestions" \
-  crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '    matches!(state.domain, Domain::Scopes | Domain::Expressions)' \
-  '    state.domain == Domain::Scopes' \
-  geode-shell \
-  the_expressions_field_suggests_columns
 
 # The scope bar shows every name on the frame's scope, or it narrows
 # totals with nothing on screen saying so.
@@ -26638,14 +26262,6 @@ run_mutation "named expr: staging keeps the old values" \
   '    pub fn forget_values(&mut self, vocab: &ExprVocab) { return;' \
   geode-shell \
   staging_a_name_requests_values_again_under_it
-
-# A Scopes item's missing/invalid named note is danger text.
-run_mutation "named expr: a missing named note is muted" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                        && matches!(entry.note.as_deref(), Some("missing" | "invalid"));' \
-  '                        && matches!(entry.note.as_deref(), Some("never"));' \
-  geode-shell \
-  a_missing_named_expressions_note_paints_in_danger_text
 
 run_mutation "launch: a restored tile is launched" \
   crates/geode-shell/src/shell/occupants.rs \

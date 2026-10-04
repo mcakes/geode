@@ -351,7 +351,7 @@ mod tests {
         assert!(!Domain::Schema.writable(&stage));
         assert!(Domain::Views.writable(&stage));
         assert!(Domain::Groupings.writable(&stage));
-        assert!(Domain::Scopes.writable(&stage));
+        assert!(Domain::Views.writable(&stage));
     }
 
     #[test]

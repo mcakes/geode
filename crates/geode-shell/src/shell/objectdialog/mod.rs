@@ -4059,7 +4059,6 @@ mod tests {
             Domain::Groupings.name_taken(&config, "7"),
             "an unconfigured slot is still a name the roster holds"
         );
-        assert!(!Domain::Scopes.name_taken(&config, "tree"));
     }
 
     /// The middle layer is the case a two-layer fixture cannot see: a
@@ -5181,7 +5180,6 @@ mod tests {
         // have no overlay file at all.
         assert_eq!(Domain::Views.presentation_doc(), Some("view_presentation"));
         assert_eq!(Domain::Groupings.presentation_doc(), None);
-        assert_eq!(Domain::Scopes.presentation_doc(), None);
     }
 
     /// Saving accepts the draft so `s` pressed twice does not write twice.
@@ -5227,19 +5225,6 @@ mod tests {
     fn a_confirm_names_the_object_and_the_consequence() {
         assert!(Confirm::Delete.prompt("tree").contains("tree"));
         assert!(Confirm::Revert.prompt("tree").contains("tree"));
-    }
-
-    /// Overwrite confirmation describes replacement of a user-owned scope's values.
-    /// Inherited scopes instead take the announced-fork path.
-    #[test]
-    fn overwrite_prompts_tell_the_truth_about_what_it_costs() {
-        let owned = Confirm::Overwrite.prompt("mine");
-        assert!(owned.contains("mine"), "{owned}");
-        assert!(owned.contains("lost"), "{owned}");
-        assert!(
-            !owned.contains("reverts"),
-            "a user-owned scope's prompt must not claim a fork: {owned}"
-        );
     }
 
     /// Rows are ordered by name, not by the order three separate files
@@ -6733,137 +6718,6 @@ mod tests {
             before,
             "the view's own column list survived the refused re-entry"
         );
-    }
-
-    /// The Values stage is a projection like the column stage: entering
-    /// swaps the fields, leaving restores them and hands the stage's own
-    /// fields back so the adapter can fold them.
-    #[test]
-    fn entering_values_swaps_the_fields_and_leaving_restores_them() {
-        let mut draft = groupings_draft();
-        let before = draft.fields.clone();
-        let values = vec![Field {
-            key: "values".to_string(),
-            label: "Values".to_string(),
-            kind: FieldKind::OrderedList {
-                items: vec![item("BK001")],
-                available: None,
-            },
-            dest: Destination::Doc,
-            layer: None,
-        }];
-        assert!(draft.enter_values("book", values.clone()));
-        assert_eq!(draft.values(), Some("book"));
-        assert_eq!(draft.fields, values);
-        assert!(!draft.is_dirty(), "freshly installed values are not dirt");
-        // Re-entry is refused, as `enter_column` refuses it.
-        assert!(!draft.enter_values("lhu", Vec::new()));
-        let own = draft.leave_values().expect("the stage's fields");
-        assert_eq!(own, values);
-        assert_eq!(draft.values(), None);
-        assert_eq!(draft.fields, before);
-    }
-
-    /// In the Values stage the last ticked value may be unticked — an
-    /// emptied selection is "drop this dimension", not an invalid object
-    /// — where the same untick on a Groupings chain is refused.
-    #[test]
-    fn the_last_tick_may_be_removed_in_the_values_stage_alone() {
-        let mut draft = groupings_draft();
-        let values = vec![Field {
-            key: "values".to_string(),
-            label: "Values".to_string(),
-            kind: FieldKind::OrderedList {
-                items: vec![ListItem {
-                    included: true,
-                    ..item("BK001")
-                }],
-                available: None,
-            },
-            dest: Destination::Doc,
-            layer: None,
-        }];
-        assert!(draft.enter_values("book", values));
-        draft.selected = 1; // the one item row under the header
-        assert_eq!(draft.toggle_selected(), Step::Changed);
-        assert!(!draft.list_items("values").unwrap()[0].included);
-    }
-
-    /// A stage with a previous rung: `escape` from Values steps back.
-    #[test]
-    fn values_is_a_stage_escape_can_step_back_from() {
-        let mut state = ObjectDialogState::new(Domain::Scopes);
-        state.stage = Stage::Values {
-            object: "mine".into(),
-            column: "book".into(),
-        };
-        assert!(state.has_previous_stage());
-    }
-
-    /// The Column and Values stages share one stash (`Draft::values`'s own
-    /// doc: "the two stages share the stash and can never both be open"),
-    /// so `enter_column` must refuse exactly as re-entry on itself does —
-    /// entering over an open Values stage would stash ITS installed
-    /// fields as `parent_fields` and drop the object's own list for good.
-    #[test]
-    fn enter_column_is_refused_while_the_values_stage_is_open() {
-        let config = config_with_view_and_datasets();
-        let mut draft = Domain::Views.draft(&config, "tree");
-        let column_item = draft.list_items("columns").unwrap()[0].clone();
-        let column_fields = views::column_fields(&column_item, &[], Destination::Presentation);
-        let values_fields = vec![Field {
-            key: "values".to_string(),
-            label: "Values".to_string(),
-            kind: FieldKind::OrderedList {
-                items: vec![item("BK001")],
-                available: None,
-            },
-            dest: Destination::Doc,
-            layer: None,
-        }];
-        assert!(draft.enter_values("book", values_fields.clone()));
-        assert!(
-            !draft.enter_column("npv", column_fields),
-            "the values stage already holds the shared stash"
-        );
-        assert_eq!(
-            draft.fields, values_fields,
-            "the refused enter_column touched nothing"
-        );
-        assert_eq!(draft.values(), Some("book"));
-        assert_eq!(draft.column(), None);
-    }
-
-    /// Leaving Column while Values owns the shared parent stash is inert. Check the
-    /// projection discriminant before taking the stash.
-    #[test]
-    fn leave_column_does_nothing_while_the_values_stage_is_open() {
-        let mut draft = groupings_draft();
-        let before = draft.fields.clone();
-        let values = vec![Field {
-            key: "values".to_string(),
-            label: "Values".to_string(),
-            kind: FieldKind::OrderedList {
-                items: vec![item("BK001")],
-                available: None,
-            },
-            dest: Destination::Doc,
-            layer: None,
-        }];
-        assert!(draft.enter_values("book", values.clone()));
-        draft.leave_column();
-        assert_eq!(
-            draft.values(),
-            Some("book"),
-            "leave_column must not touch the Values stage"
-        );
-        assert_eq!(draft.fields, values, "leave_column touched nothing");
-        let own = draft
-            .leave_values()
-            .expect("the stage's own fields survive leave_column's no-op");
-        assert_eq!(own, values);
-        assert_eq!(draft.values(), None);
-        assert_eq!(draft.fields, before);
     }
 
     /// A path for the open column maps to its installed format field by name. Paths for

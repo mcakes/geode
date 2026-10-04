@@ -452,7 +452,6 @@ fn shell_keys_are_recognised_and_tile_keys_are_not() {
     for key in [
         PICKER_KEY,
         DIAGNOSTICS_KEY,
-        SCOPES_KEY,
         EXPR_KEY,
         ACTION_KEY,
     ] {

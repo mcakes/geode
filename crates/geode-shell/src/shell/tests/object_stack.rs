@@ -2,15 +2,10 @@
 //! parked in its own stack entry and comes back exactly as it was left; the same
 //! domain never nests.
 
-use super::objectdialog::{
-    desk_view_services, dialog_state, edit_draft, flush_config_write, open_expression_field,
-    services_with_a_saved_scope,
-};
+use super::objectdialog::{desk_view_services, dialog_state, edit_draft, flush_config_write};
 use super::*;
 use crate::shell::dialog::DialogKind;
 use crate::shell::objectdialog::{self, Domain};
-use crate::shell::{EXPR_KEY, SCOPES_KEY};
-use geode_core::query::DistinctOutcome;
 
 fn kinds(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Vec<DialogKind> {
     shell.read_with(cx, |s, _| s.modals.iter().map(|m| m.kind).collect())
@@ -253,140 +248,6 @@ fn a_shared_batch_failure_rebuilds_every_contributing_draft(cx: &mut gpui::TestA
         edit_draft(&shell, &cx, |d| d.list_items("columns").unwrap()[0]
             .included),
         "and paints the reverted value"
-    );
-}
-
-/// A Scopes Values stage covered by Colors still receives its values reply, and
-/// shows it once revealed.
-#[gpui::test]
-fn a_covered_scopes_values_stage_receives_its_delivery(cx: &mut gpui::TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) =
-        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
-    cx.simulate_keystrokes("enter"); // mine
-    cx.simulate_keystrokes("enter"); // book's Values stage
-    cx.run_until_parked();
-    let tag = dialog_state(&shell, &cx, |s| s.values_tag);
-    dispatch_action(&shell, "config::colors", &mut cx);
-    assert_eq!(domains(&shell, &cx), vec![Domain::Scopes, Domain::Colors]);
-
-    shell.update(&mut cx, |s, cx| {
-        s.deliver_distinct(
-            DistinctOutcome {
-                key: SCOPES_KEY,
-                tag,
-                column: "book".into(),
-                values: Ok(vec![("BK000".into(), 5), ("BK001".into(), 7)]),
-            },
-            cx,
-        )
-    });
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert_eq!(domains(&shell, &cx), vec![Domain::Scopes]);
-    let names: Vec<String> = edit_draft(&shell, &cx, |d| {
-        d.list_items("values")
-            .unwrap()
-            .iter()
-            .map(|i| i.name.clone())
-            .collect()
-    });
-    assert_eq!(names, ["BK000", "BK001"]);
-}
-
-/// A covered Scopes expression field receives its `EXPR_KEY` reply.
-#[gpui::test]
-fn a_covered_expression_field_receives_its_values(cx: &mut gpui::TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) =
-        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
-    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    cx.update(|_, app| {
-        let seen = seen.clone();
-        app.subscribe(&shell, move |_, e: &ShellEvent, _| {
-            if let ShellEvent::DistinctRequested(p) = e {
-                seen.borrow_mut().push(p.clone());
-            }
-        })
-        .detach();
-    });
-    open_expression_field(&shell, &mut cx);
-    cx.simulate_input("book = ");
-    cx.run_until_parked();
-    let req = seen.borrow().last().cloned().expect("a request");
-    dispatch_action(&shell, "config::colors", &mut cx);
-    assert_eq!(domains(&shell, &cx), vec![Domain::Scopes, Domain::Colors]);
-
-    let holds_value = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
-        shell.read_with(cx, |s, _| {
-            s.modals[0]
-                .parked_object
-                .as_ref()
-                .and_then(|p| p.state.expr.as_ref())
-                .is_some_and(|c| c.rows().iter().any(|r| format!("{r:?}").contains("BK777")))
-        })
-    };
-    assert!(!holds_value(&shell, &cx));
-    shell.update(&mut cx, |s, cx| {
-        s.deliver_distinct(
-            DistinctOutcome {
-                key: EXPR_KEY,
-                tag: req.tag,
-                column: req.column.clone(),
-                values: Ok(vec![("BK777".into(), 7)]),
-            },
-            cx,
-        )
-    });
-    assert!(
-        holds_value(&shell, &cx),
-        "the covered field's completion holds the delivered value"
-    );
-}
-
-/// A reload that defines a new column re-ranks a covered Scopes expression field at
-/// once: its unknown-column warning is gone while it is still covered.
-#[gpui::test]
-fn a_reload_refreshes_a_covered_object_expression_field(cx: &mut gpui::TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) =
-        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
-    open_expression_field(&shell, &mut cx);
-    cx.simulate_input("zzcol = 'x'");
-    cx.run_until_parked();
-    dispatch_action(&shell, "config::colors", &mut cx);
-    let warning = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
-        shell.read_with(cx, |s, _| {
-            s.modals[0]
-                .parked_object
-                .as_ref()
-                .and_then(|p| p.state.expr.as_ref())
-                .map(|c| c.warning().is_some())
-        })
-    };
-    assert_eq!(
-        warning(&shell, &cx),
-        Some(true),
-        "zzcol is not yet a column"
-    );
-
-    shell.update(&mut cx, |s, cx| {
-        let mut docs = s.services.config.all_docs();
-        docs.push(LayerDoc {
-            layer: Layer::User,
-            name: "datasets".to_string(),
-            file: "<test:user>".into(),
-            table: "[risk.columns.zzcol]\ntype = \"utf8\"\nrole = \"attribute\"\n\
-                    grain = \"position\"\n"
-                .parse()
-                .unwrap(),
-        });
-        s.apply_reload(Config::from_docs(docs), cx)
-    });
-    assert_eq!(
-        warning(&shell, &cx),
-        Some(false),
-        "the covered field re-ranks at reload, not at its next keystroke"
     );
 }
 
