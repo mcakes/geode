@@ -438,6 +438,13 @@ impl IngestHandle {
         q.hold_files = true;
     }
 
+    /// Whether a release has held the queued files.
+    #[cfg(test)]
+    pub(crate) fn files_held(&self) -> bool {
+        let (lock, _cvar) = &*self.queue;
+        lock.lock().unwrap_or_else(|e| e.into_inner()).hold_files
+    }
+
     /// Stop the runner for a handoff of the store and join it. After the
     /// running operation it keeps taking queued documents (local writes
     /// among them, in order), series and snapshots, in the usual priority,
@@ -1227,8 +1234,9 @@ fn run(
                     return;
                 }
                 // Documents first, then series, then snapshots, then
-                // files; `None` means every queue is empty, which is the
-                // only state that announces a drain.
+                // files; `None` means every queue is empty (files held by
+                // a release count as empty), which is the only state that
+                // announces a drain.
                 if let Some(work) = take_work(&mut q) {
                     announced_idle = false;
                     if let Some(event) = backlog_source(&work).and_then(|s| backlog_pop(&mut q, s))

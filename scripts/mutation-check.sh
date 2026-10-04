@@ -24854,6 +24854,14 @@ run_mutation "release: files are held from the start of a release" \
   '    if q.items.is_empty() {' \
   geode-data a_releasing_runner_takes_no_file_before_the_drain_begins
 
+run_mutation "release: the service holds files before stopping producers" \
+  crates/geode-data/src/service.rs \
+  '        if release_until.is_some() {
+            self.ingest.hold_files();
+        }' \
+  '' \
+  geode-data a_release_holds_the_queued_files_and_an_exit_does_not
+
 run_mutation "release: coalescers flush" \
   crates/geode-data/src/ingest/subscribe.rs \
   '        for (_key, pending) in coalescer.drain_all() {

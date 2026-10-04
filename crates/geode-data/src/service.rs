@@ -2737,8 +2737,9 @@ impl DataService {
     /// coalescer holds, stops the scheduler, and lets the runner drain the
     /// feeds' queued work until the release's deadline before the readers
     /// stop. A release holds the queued files first, before any producer
-    /// stops, so none is taken while the producers stop. Either way the app lease, the struct's last field,
-    /// drops after the service itself, once every connection is gone.
+    /// stops, so none is taken while the producers stop. Either way the
+    /// app lease, the struct's last field, drops after the service itself,
+    /// once every connection is gone.
     pub fn shutdown_with(&self, mode: crate::handle::StopMode) {
         let release_until = match mode {
             crate::handle::StopMode::Exit => None,
@@ -2829,6 +2830,23 @@ mod tests {
         std::sync::mpsc::Receiver<DataEvent>,
     ) {
         service_with(|_| {})
+    }
+
+    /// A release holds the runner's queued files before it stops any
+    /// producer, so no file load starts in the window before the drain
+    /// (`a_releasing_runner_takes_no_file_before_the_drain_begins` covers
+    /// the runner side). An exit does not hold them.
+    #[test]
+    fn a_release_holds_the_queued_files_and_an_exit_does_not() {
+        let (_dir, _feed, svc, _rx) = subscribed_service(Arc::new(FakeKind::new()), "demo_bus");
+        svc.shutdown_with(crate::handle::StopMode::Release {
+            until: Instant::now(),
+        });
+        assert!(svc.ingest.files_held());
+
+        let (_dir, _feed, svc, _rx) = subscribed_service(Arc::new(FakeKind::new()), "demo_bus");
+        svc.shutdown();
+        assert!(!svc.ingest.files_held());
     }
 
     /// `service()` with `prepare` run on the loaded store before the service
