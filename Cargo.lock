@@ -2527,8 +2527,6 @@ dependencies = [
  "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-platform",
- "rand 0.9.5",
- "serde_json",
  "tempfile",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
@@ -2584,9 +2582,15 @@ dependencies = [
 name = "geode-compose"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "geode-core",
  "geode-data",
+ "geode-demo-data",
+ "geode-documents",
+ "rand 0.9.5",
+ "serde_json",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]

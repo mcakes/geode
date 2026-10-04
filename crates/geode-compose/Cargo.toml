@@ -16,6 +16,18 @@ bench = false
 [dependencies]
 geode-core.workspace = true
 geode-data = { path = "../geode-data" }
+# The demo bus serializes documents through the concrete document kinds.
+geode-documents = { path = "../geode-documents" }
+# The demo transports' generators: risk rows, documents, series and underlyings.
+geode-demo-data = { path = "../geode-demo-data" }
+# Stamp publication arrival times and construct demo dates and series spans.
+chrono = "0.4.42"
+# Seeded demo cadence jitter and series generation.
+rand = "0.9"
+# The demo position service rewrites risk sentinels, keeping their other fields.
+serde_json = "1.0.151"
+# The demo bus thread logs publish failures.
+tracing.workspace = true
 
 # Match the support features used by workspace tests to share dependency builds.
 [dev-dependencies]

@@ -50,15 +50,11 @@ geode-positions.workspace = true
 geode-diagnostics = { path = "../geode-diagnostics" }
 geode-guide = { path = "../geode-guide" }
 geode-demo-data = { path = "../geode-demo-data" }
-# Register concrete document parsers at the application boundary. Demo producers
-# also use their writers to serialize documents for ChannelAdapter ingestion.
+# Register concrete document parsers at the application boundary.
 geode-documents = { path = "../geode-documents" }
-# Seeded demo cadence jitter and series generation.
-rand = "0.9"
-# Stamp publication arrival times and construct demo dates and series spans.
+# Stamp publication arrival times, seed demo document dates from the configured
+# clock, and format crash report timestamps.
 chrono = "0.4.42"
-# The demo position service rewrites risk sentinels, keeping their other fields.
-serde_json = "1.0.151"
 # One-slot wakeup channel for the coalescing event mailbox. Producers use
 # try_send; the foreground drain awaits notifications instead of polling.
 async-channel = "2.5"

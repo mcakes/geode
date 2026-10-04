@@ -6,10 +6,8 @@
 mod assets;
 mod bridge;
 mod crash;
-mod demo;
-mod demo_bus;
-mod demo_refdb;
-mod demo_series;
+#[cfg(test)]
+mod demo_tests;
 mod events;
 
 use std::path::{Path, PathBuf};
@@ -63,9 +61,9 @@ fn main() {
 
     // Prepare demo sources before opening a window. A warm source directory is
     // reused, keeping generation outside the UI's render work.
-    let demo_root = demo_rows.map(demo::demo_dir);
+    let demo_root = demo_rows.map(geode_compose::demo::demo_dir);
     if let (Some(rows), Some(root)) = (demo_rows, &demo_root)
-        && let Err(e) = demo::ensure_emitted(root, rows)
+        && let Err(e) = geode_compose::demo::ensure_emitted(root, rows)
     {
         tracing::error!(target: "geode::ingest", "failed to emit sample data into {root:?}: {e}");
         // Flush the file writer before exiting without unwinding.
@@ -103,25 +101,7 @@ fn main() {
 
             // Register demo transports before data setup resolves configured sources
             // and upload targets. Non-demo startup supplies an empty adapter registry.
-            let (demo_feed, adapters) = if demo_rows.is_some() {
-                let (adapter, feed) = geode_data::adapter::ChannelAdapter::new("demo_bus");
-                let mut adapters = geode_data::adapter::AdapterRegistry::default();
-                adapters.register(adapter);
-                // Use the risk generator's seed for both series sources, exercising
-                // catalogue and manual-identity discovery.
-                adapters.register(demo_series::DemoSeries::new("demo_kdb", 42, true));
-                adapters.register(demo_series::DemoSeries::new("demo_rest", 42, false));
-                // The demo reference database behind the `refdb` snapshot source.
-                adapters.register(demo_refdb::DemoRefDb::new(Duration::ZERO));
-                // The demo position service rewrites the risk CSVs the demo
-                // source polls; the demo layer's `positions.toml` names it.
-                if let Some(root) = &demo_root {
-                    adapters.register(Arc::new(demo::DemoPositions::new(root.join("src"))));
-                }
-                (Some(feed), adapters)
-            } else {
-                (None, geode_data::adapter::AdapterRegistry::default())
-            };
+            let (adapters, demo_feed) = geode_compose::adapters(demo_root.as_deref());
 
             // The mock pricing implementation is available in every build.
             let mut pricers = geode_data::PricerRegistry::default();
@@ -150,9 +130,11 @@ fn main() {
                 let today = geode_core::clock::Clock::from_config(&services.config)
                     .0
                     .today(chrono::Utc::now());
-                let producers =
-                    demo_bus::demo_producers(geode_demo_data::demo_underlyings(), today);
-                demo_bus::spawn(
+                let producers = geode_compose::demo_bus::demo_producers(
+                    geode_demo_data::demo_underlyings(),
+                    today,
+                );
+                geode_compose::demo_bus::spawn(
                     feed,
                     producers,
                     Duration::from_secs(5),
@@ -441,7 +423,7 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
             .expect("PRICER_DATASET_DECLARATION is well-formed TOML"),
     ];
     if let Some(root) = demo_root {
-        builtin.extend(demo::layer(&root.join("src")));
+        builtin.extend(geode_compose::demo::layer(&root.join("src")));
     }
     builtin
 }

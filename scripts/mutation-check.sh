@@ -4311,10 +4311,10 @@ run_mutation "bridge: db_path precedence — config wins over demo and the platf
   the_database_path_prefers_config_then_demo_then_the_platform_dir
 
 run_mutation "demo: the sources doc's paths glob is rewritten onto the emitted directory" \
-  crates/geode-app/src/demo.rs \
+  crates/geode-compose/src/demo.rs \
   '        source_dir.join("*.csv").to_string_lossy()' \
   '        "/nonexistent/*.csv".to_string()' \
-  geode-app \
+  geode-compose \
   the_demo_layer_is_complete_and_points_sources_at_the_directory
 
 # Data events must update through the window so the drain stops when the
@@ -11985,7 +11985,7 @@ run_mutation "subscribe: a subscription's refusal count reads zero rather than i
   geode-data a_subscription_whose_queue_fills_counts_what_it_could_not_take
 
 run_mutation "demo bus: publishes every key once at start" \
-  crates/geode-app/src/demo_bus.rs \
+  crates/geode-compose/src/demo_bus.rs \
   '    for producer in producers.iter_mut() {
         let keys = producer.keys.clone();
         for key in &keys {
@@ -12006,13 +12006,13 @@ run_mutation "demo bus: publishes every key once at start" \
     }
 ' \
   '' \
-  geode-app the_bus_publishes_every_key_once_at_start_then_on_its_cadence
+  geode-compose the_bus_publishes_every_key_once_at_start_then_on_its_cadence
 
 run_mutation "demo bus: the topic format" \
-  crates/geode-app/src/demo_bus.rs \
+  crates/geode-compose/src/demo_bus.rs \
   'let topic = format!("{topic_prefix}{key}/NOTIFY");' \
   'let topic = format!("marketdata/wrong/{key}/NOTIFY");' \
-  geode-app the_bus_publishes_every_key_once_at_start_then_on_its_cadence
+  geode-compose the_bus_publishes_every_key_once_at_start_then_on_its_cadence
 
 run_mutation "demo bus: the generator's drift" \
   crates/geode-demo-data/src/documents.rs \
@@ -12021,29 +12021,29 @@ run_mutation "demo bus: the generator's drift" \
   geode-demo-data successive_documents_drift
 
 run_mutation "demo bus: the demo layer's [cvi] source" \
-  crates/geode-app/src/demo.rs \
+  crates/geode-compose/src/demo.rs \
   '         [cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
          topics = [\"marketdata/cvi/*/NOTIFY\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\
          priority = \"latest_other\"\n\
 ' \
   '' \
-  geode-app the_demo_layer_declares_the_cvi_source
+  geode-compose the_demo_layer_declares_the_cvi_source
 
 run_mutation "demo bus: the demo layer's [dividend] source" \
-  crates/geode-app/src/demo.rs \
+  crates/geode-compose/src/demo.rs \
   '         [dividend]\nadapter = \"demo_bus\"\ndataset = \"dividend_schedule\"\n\
          document = \"dividend_schedule\"\ntopics = [\"marketdata/dividend/*/NOTIFY\"]\n\
          coalesce = \"500ms\"\nsource_time = \"receive\"\npriority = \"latest_other\"\n\
 ' \
   '' \
-  geode-app the_demo_layer_declares_the_dividend_source
+  geode-compose the_demo_layer_declares_the_dividend_source
 
 run_mutation "demo bus: publishes round-robin across producers" \
-  crates/geode-app/src/demo_bus.rs \
+  crates/geode-compose/src/demo_bus.rs \
   '    let schedule = round_robin_schedule(&producers);' \
   '    let schedule: Vec<(usize, String)> =
         producers.first().into_iter().flat_map(|p| p.keys.iter().cloned().map(|k| (0, k))).collect();' \
-  geode-app the_bus_publishes_every_key_once_at_start_then_on_its_cadence
+  geode-compose the_bus_publishes_every_key_once_at_start_then_on_its_cadence
 
 
 # ---- Repeated known elements cannot merge into duplicate rows ----------
@@ -17120,22 +17120,22 @@ run_mutation "vol chain generator: prices use the expiry's own time" \
   geode-demo-data an_expiry_past_the_cvi_prices_at_its_own_time_to_expiry
 
 run_mutation "vol chain bus: the startup burst repeats per key" \
-  crates/geode-app/src/demo_bus.rs \
+  crates/geode-compose/src/demo_bus.rs \
   '            for _ in 0..producer.startup_repeats.max(1) {' \
   '            for _ in 0..1 {' \
-  geode-app the_startup_burst_publishes_every_expiry_of_every_chain
+  geode-compose the_startup_burst_publishes_every_expiry_of_every_chain
 
 run_mutation "vol chain bus: a chain with no CVI yet is skipped" \
-  crates/geode-app/src/demo_bus.rs \
+  crates/geode-compose/src/demo_bus.rs \
   '        .cloned()?;' \
   '        .cloned().expect("mutant: assume a CVI");' \
-  geode-app the_chain_producer_skips_an_underlying_with_no_cvi_yet
+  geode-compose the_chain_producer_skips_an_underlying_with_no_cvi_yet
 
 run_mutation "vol chain bus: the CVI producer stores what it publishes" \
-  crates/geode-app/src/demo_bus.rs \
+  crates/geode-compose/src/demo_bus.rs \
   '        .insert(key.to_string(), doc.clone());' \
   '        .clear();' \
-  geode-app the_cvi_producer_stores_what_it_publishes
+  geode-compose the_cvi_producer_stores_what_it_publishes
 
 # ---- Tile stacks ---- A stack paints only its active member. Focus, close,
 # move, restoration and drop operations keep that member and the stack's
@@ -31637,26 +31637,26 @@ run_mutation "command outcome: the drain drops the answer" \
 
 # The demo position simulator: all or nothing, and a strictly later sentinel.
 run_mutation "demo positions: an unknown position moves the known ones" \
-  crates/geode-app/src/demo.rs \
+  crates/geode-compose/src/demo.rs \
   '        return Err(adapter_error(format!("unknown position {missing}")));' \
   '        let _ = missing;' \
-  geode-app an_unknown_position_refuses_and_changes_nothing
+  geode-compose an_unknown_position_refuses_and_changes_nothing
 
 run_mutation "demo positions: the sentinel is not later" \
-  crates/geode-app/src/demo.rs \
+  crates/geode-compose/src/demo.rs \
   '    let as_of = now.max(previous + chrono::Duration::seconds(1));' \
   '    let as_of = now;' \
-  geode-app the_sentinel_is_strictly_later_even_within_the_same_second
+  geode-compose the_sentinel_is_strictly_later_even_within_the_same_second
 
 # Move LHU: every selected row names one position, the selection moves, and
 # startup registers the action.
 # Relies on mtime resolution finer than the two writes' gap (APFS: ns); on a
 # coarse-mtime filesystem equal stamps let the swap survive.
 run_mutation "demo positions: the sentinel is written before its CSV" \
-  crates/geode-app/src/demo.rs \
+  crates/geode-compose/src/demo.rs \
   $'        replace_file(&r.csv, &r.text)?;\n        replace_file(&r.sentinel, &r.sentinel_json)?;' \
   $'        replace_file(&r.sentinel, &r.sentinel_json)?;\n        replace_file(&r.csv, &r.text)?;' \
-  geode-app a_move_rewrites_the_lhu_of_those_positions_only
+  geode-compose a_move_rewrites_the_lhu_of_those_positions_only
 
 run_mutation "move lhu: a subtotal in the selection is moved anyway" \
   crates/geode-positions/src/lib.rs \
@@ -35670,18 +35670,18 @@ run_mutation "sources: a snapshot source edit drops the keys it has no row for" 
 # skipped-unchanged polls and new generations. Revising every poll hides
 # the unchanged path entirely.
 run_mutation "demo refdb: every poll revises the table" \
-  crates/geode-app/src/demo_refdb.rs \
+  crates/geode-compose/src/demo_refdb.rs \
   '    let revision = poll / 3;' \
   '    let revision = poll;' \
-  geode-app the_table_changes_only_every_third_poll
+  geode-compose the_table_changes_only_every_third_poll
 
 # A failed query is not a poll; counted, the next success skips a revision.
 run_mutation "demo refdb: a failed query counts as a poll" \
-  crates/geode-app/src/demo_refdb.rs \
+  crates/geode-compose/src/demo_refdb.rs \
   '            return Err(AdapterError { message });' \
   '            self.polls.fetch_add(1, Ordering::Relaxed);
             return Err(AdapterError { message });' \
-  geode-app fail_next_fails_exactly_one_query
+  geode-compose fail_next_fails_exactly_one_query
 
 # A degraded snapshot source keeps the last generation live; a chip that
 # never reads source health shows those rows as healthy and current.
@@ -36283,7 +36283,7 @@ run_mutation "recovery: open prunes topics past the max age" \
 # off the demo sources' `*/NOTIFY` patterns, so nothing is stored, recorded
 # or recovered.
 run_mutation "demo recovery: producers publish on the NOTIFY topic" \
-  crates/geode-app/src/demo_bus.rs \
+  crates/geode-compose/src/demo_bus.rs \
   '    let topic = format!("{topic_prefix}{key}/NOTIFY");' \
   '    let topic = format!("{topic_prefix}{key}");' \
   geode-app a_dividend_published_while_closed_is_recovered_at_the_next_open
@@ -36291,15 +36291,15 @@ run_mutation "demo recovery: producers publish on the NOTIFY topic" \
 # A demo pattern past the NOTIFY level would record and recover topics no
 # producer notifies on.
 run_mutation "demo recovery: the CVI source subscribes to NOTIFY only" \
-  crates/geode-app/src/demo.rs \
+  crates/geode-compose/src/demo.rs \
   '         topics = [\"marketdata/cvi/*/NOTIFY\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\' \
   '         topics = [\"marketdata/cvi/>\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\' \
-  geode-app every_demo_subscription_pattern_matches_its_producers_notify_topics
+  geode-compose every_demo_subscription_pattern_matches_its_producers_notify_topics
 
 # The upload echo needs the egress address on the subscribed NOTIFY pattern;
 # a bare address uploads with no echo back to the dividend source.
 run_mutation "demo recovery: dividend egress addresses the NOTIFY topic" \
-  crates/geode-app/src/demo.rs \
+  crates/geode-compose/src/demo.rs \
   '         dividend_schedule = \"marketdata/dividend/{key}/NOTIFY\"\n"' \
   '         dividend_schedule = \"marketdata/dividend/{key}\"\n"' \
   geode-app an_uploaded_dividend_document_echoes_through_the_real_data_service
