@@ -107,6 +107,21 @@ pub fn spawn(
     }
 }
 
+/// The `--demo` bus both binaries run: the three [`demo_producers`] over
+/// the risk generator's underlyings, publishing every 5 s with 2 s of
+/// jitter from seed 42. Each process runs its own (the bus is in-process);
+/// only the one holding the store ingests what it publishes.
+pub fn spawn_default(feed: ChannelFeed, today: NaiveDate) -> DemoBus {
+    let producers = demo_producers(geode_demo_data::demo_underlyings(), today);
+    spawn(
+        feed,
+        producers,
+        Duration::from_secs(5),
+        Duration::from_secs(2),
+        42,
+    )
+}
+
 /// Sleeps `duration` in [`STOP_POLL`]-sized slices, checking `stop`
 /// between each. Returns `true` the moment `stop` is seen (the caller
 /// must not publish or sleep again), `false` once the whole duration has

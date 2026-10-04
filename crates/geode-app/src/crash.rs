@@ -1,15 +1,16 @@
-//! Panic reports and log-file retention.
+//! Panic reports and crash-file retention.
 //!
 //! [`install_panic_hook`] logs panics marked by Geode's containment boundaries
 //! and writes reports for unmarked panics. Reports snapshot the in-memory log
 //! ring and recent dispatched actions before invoking the previous panic hook.
 //! The app stores reports in the user config directory and daily logs in its
-//! `logs` subdirectory. [`trim_log_files`] bounds the daily log files at startup.
+//! `logs` subdirectory; `geode_compose::logging` installs and trims those.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use geode_compose::logging::prune_files;
 use geode_core::log::{Record, Ring};
 use geode_shell::diagnostics::ActionTail;
 
@@ -213,53 +214,11 @@ fn crash_timestamp(at: SystemTime) -> String {
     dt.format("%Y%m%d-%H%M%S-%3f").to_string()
 }
 
-/// Best-effort deletion of matching `<prefix>*<suffix>` paths beyond `keep`.
-/// The retained paths are the last `keep` names in lexicographic order; embedded
-/// UTC timestamps put later dates after earlier ones without metadata reads.
-///
-/// Used for daily logs and crash reports. Missing or unreadable directories are
-/// ignored, as are unreadable entries and individual deletion failures. Names
-/// are matched by prefix and suffix only; their timestamp fields are not parsed.
-fn prune_files(dir: &Path, prefix: &str, suffix: &str, keep: usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
-                return false;
-            };
-            name.starts_with(prefix) && name.ends_with(suffix)
-        })
-        .collect();
-    if files.len() <= keep {
-        return;
-    }
-    files.sort();
-    for old in &files[..files.len() - keep] {
-        let _ = std::fs::remove_file(old);
-    }
-}
-
-/// Prunes `geode.*.log` files to the last `keep` matching names at startup.
-/// Daily rotation creates new files but this startup cap is not reapplied during
-/// the run. Missing directories and deletion failures are ignored; see
-/// [`prune_files`] for matching and ordering.
-pub fn trim_log_files(dir: &Path, keep: usize) {
-    prune_files(dir, "geode.", ".log", keep);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use geode_core::log::Level;
     use std::time::Duration;
-
-    fn touch(dir: &Path, name: &str) {
-        std::fs::write(dir.join(name), b"").unwrap();
-    }
 
     fn record(seq: u64, target: &'static str, message: &str) -> Record {
         Record {
@@ -404,56 +363,5 @@ mod tests {
             remaining.contains(&"crash-19700101-000010-000-00.log".to_string()),
             "the newest file must survive: {remaining:?}"
         );
-    }
-
-    #[test]
-    fn trim_deletes_the_oldest_files_beyond_the_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        for day in 1..=9 {
-            touch(dir.path(), &format!("geode.2026-09-{day:02}.log"));
-        }
-        trim_log_files(dir.path(), 7);
-        let mut remaining: Vec<String> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        remaining.sort();
-        assert_eq!(
-            remaining,
-            vec![
-                "geode.2026-09-03.log",
-                "geode.2026-09-04.log",
-                "geode.2026-09-05.log",
-                "geode.2026-09-06.log",
-                "geode.2026-09-07.log",
-                "geode.2026-09-08.log",
-                "geode.2026-09-09.log",
-            ]
-        );
-    }
-
-    #[test]
-    fn trim_is_a_no_op_under_the_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        touch(dir.path(), "geode.2026-09-01.log");
-        trim_log_files(dir.path(), 7);
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn trim_ignores_files_that_are_not_named_like_a_geode_log() {
-        let dir = tempfile::tempdir().unwrap();
-        for day in 1..=9 {
-            touch(dir.path(), &format!("geode.2026-09-{day:02}.log"));
-        }
-        touch(dir.path(), "other.txt");
-        trim_log_files(dir.path(), 7);
-        assert!(dir.path().join("other.txt").exists(), "not ours to delete");
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 8); // 7 kept + other.txt
-    }
-
-    #[test]
-    fn trim_on_a_missing_directory_is_a_no_op_not_a_panic() {
-        trim_log_files(Path::new("/does/not/exist"), 7);
     }
 }

@@ -2,19 +2,22 @@
 //! background collector build their store configuration from these
 //! functions, so the two agree on what the store holds.
 
+pub mod collector;
 pub mod demo;
 pub mod demo_bus;
 pub mod demo_refdb;
 pub mod demo_series;
+pub mod logging;
 pub mod paths;
 
+pub use collector::{CollectorSettings, collector_settings};
 pub use paths::{config_dirs, db_path, user_config_dir};
 
 use geode_core::builtin::{
     PRICER_DATASET, PRICER_DATASET_DECLARATION, PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION,
 };
 use geode_core::config::{
-    Config, DIMENSIONS_DOC, Diagnostic, Layer, LayerDoc, Severity, merge_docs,
+    Config, ConfigSources, DIMENSIONS_DOC, Diagnostic, Layer, LayerDoc, Severity, merge_docs,
 };
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::DocumentKind;
@@ -71,6 +74,31 @@ pub fn builtin_data_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
         layer.extend(demo::layer(&root.join("src")));
     }
     layer
+}
+
+/// The collector's configuration: [`builtin_data_layer`] alone under the
+/// desk and user directories `dirs` (`(desk, user)`, as [`config_dirs`]
+/// returns them). The app loads its own, wider builtin layer, but both
+/// build the same schema and sources from the same directories.
+pub fn load_config(demo_root: Option<&Path>, dirs: (Option<PathBuf>, Option<PathBuf>)) -> Config {
+    let (desk, user) = dirs;
+    Config::load(&ConfigSources {
+        builtin: builtin_data_layer(demo_root),
+        desk,
+        user,
+    })
+}
+
+/// [`db_path`] with the platform fallbacks read from the environment
+/// (`LOCALAPPDATA`, then `HOME`), so the app and the collector resolve the
+/// same store from the same configuration.
+pub fn store_path(config: &Config, demo_root: Option<&Path>) -> PathBuf {
+    db_path(
+        config,
+        demo_root,
+        std::env::var("LOCALAPPDATA").ok(),
+        std::env::var("HOME").ok(),
+    )
 }
 
 /// The data engine's half of the service configuration: what decides the
@@ -221,7 +249,6 @@ fn pin_app_dataset(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geode_core::config::ConfigSources;
 
     fn load(builtin: Vec<geode_core::config::LayerDoc>) -> Config {
         Config::load(&ConfigSources {
@@ -352,5 +379,50 @@ mod tests {
             .find(|f| f[at("PositionRef")] == position)
             .unwrap();
         assert_eq!(moved[at("LHU")], target);
+    }
+
+    /// `load_config` is `Config::load` over `builtin_data_layer` with the
+    /// given desk and user directories, demo layer or not.
+    #[test]
+    fn load_config_is_config_load_over_the_data_layer() {
+        let desk = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            desk.path().join("datasets.toml"),
+            "config_version = 1\n\n[desk_marks.columns.underlying]\ntype = \"utf8\"\n\
+             role = \"dimension\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.path().join("app.toml"),
+            "config_version = 1\n\n[collector]\nmemory_limit = \"1GB\"\n",
+        )
+        .unwrap();
+        let demo = tempfile::tempdir().unwrap();
+        for demo_root in [None, Some(demo.path())] {
+            let dirs = (
+                Some(desk.path().to_path_buf()),
+                Some(user.path().to_path_buf()),
+            );
+            let expected = Config::load(&ConfigSources {
+                builtin: builtin_data_layer(demo_root),
+                desk: dirs.0.clone(),
+                user: dirs.1.clone(),
+            });
+            let loaded = load_config(demo_root, dirs);
+            for doc in ["datasets", "sources", "app"] {
+                assert_eq!(
+                    loaded.doc(doc).map(|d| &d.value),
+                    expected.doc(doc).map(|d| &d.value),
+                    "{doc}"
+                );
+            }
+            assert!(loaded.doc("datasets").is_some());
+            assert_eq!(
+                loaded.get("app", "collector.memory_limit"),
+                expected.get("app", "collector.memory_limit")
+            );
+            assert!(loaded.get("app", "collector.memory_limit").is_some());
+        }
     }
 }

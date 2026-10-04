@@ -56,11 +56,9 @@ chrono = "0.4.42"
 # One-slot wakeup channel for the coalescing event mailbox. Producers use
 # try_send; the foreground drain awaits notifications instead of polling.
 async-channel = "2.5"
-# Startup tracing with stderr, ring, and daily-file sinks and reloadable levels.
+# Logging setup lives in geode-compose (`logging::install`); the app only
+# emits records.
 tracing.workspace = true
-tracing-subscriber.workspace = true
-# The daily rolling log file layer (`tracing_appender::rolling::daily`).
-tracing-appender.workspace = true
 # The roster's restored-tile state is opaque `toml::Table` (the module
 # hosting contract, geode-shell::module); the production-roster tests read
 # a factory's launch state through it.
@@ -74,6 +72,8 @@ geode-documents = { path = "../geode-documents" }
 # Match workspace test features to reuse the same dependency artifacts.
 geode-core = { workspace = true, features = ["test-support"] }
 tempfile = "3.27.0"
+# The bridge tests capture records through a scoped ring subscriber.
+tracing-subscriber.workspace = true
 # GPUI window tests and data handles without a running service.
 gpui = { workspace = true, features = ["test-support"] }
 geode-data = { path = "../geode-data", features = ["test-support"] }

@@ -83,7 +83,9 @@ these alongside the tile factories.
 holds the builtin documents that decide the store (`builtin_data_layer`:
 the app's `pricer_sheets` and `pricer` declarations, which live in
 `geode_core::builtin`, plus the `--demo` layer), `engine_setup`, the store
-and config paths, and the demo transports. It never depends on gpui. The
+and config paths, logging setup (one daily file per process prefix in a shared
+logs directory), the collector's settings, and the demo transports. It never
+depends on gpui. The
 app's builtin layer is its own documents plus the data layer, so a process
 built from the data layer alone and the same desk and user directories has
 the app's schema and sources; `geode-app` tests that contract.

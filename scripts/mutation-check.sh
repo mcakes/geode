@@ -6376,10 +6376,30 @@ run_mutation "MessageVisitor::record_str drops a non-message field instead of ap
   geode-core a_non_message_str_field_is_not_dropped
 
 run_mutation "trim_log_files deletes the newest files beyond the cap, not the oldest" \
-  crates/geode-app/src/crash.rs \
+  crates/geode-compose/src/logging.rs \
   '    for old in &files[..files.len() - keep] {' \
   '    for old in &files[keep..] {' \
-  geode-app trim_deletes_the_oldest_files_beyond_the_cap
+  geode-compose trim_deletes_the_oldest_files_beyond_the_cap
+
+run_mutation "trim_log_files: one prefix's startup trim deletes the other process's logs" \
+  crates/geode-compose/src/logging.rs \
+  '    prune_files(dir, &format!("{prefix}."), ".log", keep);' \
+  '    prune_files(dir, "", ".log", keep);' \
+  geode-compose trim_keeps_to_its_own_prefix_in_a_shared_directory
+
+run_mutation "collector settings: an unparseable memory_limit is passed through, not warned" \
+  crates/geode-compose/src/collector.rs \
+  '        match value.as_str().filter(|v| is_memory_limit(v)) {' \
+  '        match value.as_str() {' \
+  geode-compose an_unparseable_memory_limit_warns_and_uses_the_default
+
+run_mutation "load_config: the collector's configuration drops the demo layer" \
+  crates/geode-compose/src/lib.rs \
+  '    Config::load(&ConfigSources {
+        builtin: builtin_data_layer(demo_root),' \
+  '    Config::load(&ConfigSources {
+        builtin: builtin_data_layer(None),' \
+  geode-compose load_config_is_config_load_over_the_data_layer
 
 run_mutation "[log] present but not a table is silently accepted, not a warning" \
   crates/geode-core/src/log/mod.rs \
@@ -8237,10 +8257,10 @@ run_mutation "shell: dispatch never records the dispatched action into the tail"
   geode-shell dispatching_three_actions_leaves_their_hashes_in_the_tail_in_order
 
 run_mutation "trim_log_files keeps one file more than asked (keep + 1, not keep)" \
-  crates/geode-app/src/crash.rs \
+  crates/geode-compose/src/logging.rs \
   '    for old in &files[..files.len() - keep] {' \
   '    for old in &files[..files.len() - keep - 1] {' \
-  geode-app trim_deletes_the_oldest_files_beyond_the_cap
+  geode-compose trim_deletes_the_oldest_files_beyond_the_cap
 
 # ---- Ingest panic containment and logging -----------------------------
 

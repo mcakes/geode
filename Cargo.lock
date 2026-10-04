@@ -2530,7 +2530,6 @@ dependencies = [
  "tempfile",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
- "tracing-appender",
  "tracing-subscriber",
 ]
 
@@ -2591,6 +2590,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -13,10 +13,9 @@ mod events;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use geode_core::config::{ConfigSources, Diagnostic, LayerDoc, Severity};
-use geode_core::log::{LevelControl, LogLevels, Ring, RingLayer};
+use geode_core::log::{LevelControl, LogLevels, Ring};
 use geode_diagnostics::DiagnosticsPageFactory;
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{
@@ -36,16 +35,17 @@ use geode_shell::vimfind::FindStyle;
 use gpui::App;
 use gpui::prelude::*;
 use gpui_component::{Root, TitleBar};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{Registry, fmt, reload};
 
 fn main() {
     // Install logging before configuration loading so startup failures reach the
     // ring, stderr, and any available file sink. Apply configured levels once
     // configuration is loaded. Keep `_log_guard` bound until application exit;
     // dropping it stops the background file writer.
-    let (log_ring, log_control, _log_guard) = install_logging();
+    let geode_compose::logging::Logging {
+        ring: log_ring,
+        control: log_control,
+        guard: _log_guard,
+    } = geode_compose::logging::install("geode");
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let demo_rows = match parse_args(&args) {
@@ -130,17 +130,7 @@ fn main() {
                 let today = geode_core::clock::Clock::from_config(&services.config)
                     .0
                     .today(chrono::Utc::now());
-                let producers = geode_compose::demo_bus::demo_producers(
-                    geode_demo_data::demo_underlyings(),
-                    today,
-                );
-                geode_compose::demo_bus::spawn(
-                    feed,
-                    producers,
-                    Duration::from_secs(5),
-                    Duration::from_secs(2),
-                    42,
-                )
+                geode_compose::demo_bus::spawn_default(feed, today)
             });
 
             // Install the panic hook after logging and action registration. It captures
@@ -259,69 +249,6 @@ fn main() {
             })
             .detach();
         });
-}
-
-/// Install process-wide tracing with a reloadable level filter, synchronous
-/// stderr and in-memory ring layers, and an optional background file writer.
-/// Default levels apply until configuration is loaded. The ring retains 4,096
-/// records. File setup failure leaves stderr and ring logging available.
-///
-/// Daily files live under `<user>/logs/geode.YYYY-MM-DD.log`; their date and
-/// rotation use UTC, independently of the configured display clock. Startup
-/// trims matching files to seven before opening the current log. Rotation does
-/// not prune files during the run.
-///
-/// Retain the returned [`tracing_appender::non_blocking::WorkerGuard`] for the
-/// application lifetime and drop it before explicit process exits. Dropping it
-/// stops the file writer; subsequent file-bound records are lost. Daily logs can
-/// lag behind the synchronous ring that supplies panic reports.
-fn install_logging() -> (
-    Arc<Ring>,
-    Arc<dyn LevelControl>,
-    Option<tracing_appender::non_blocking::WorkerGuard>,
-) {
-    let ring = Arc::new(Ring::new(4096));
-    let (filter, reload_handle) = reload::Layer::new(LogLevels::default().to_targets());
-
-    let (_, user) = geode_compose::config_dirs();
-    let mut log_guard = None;
-    let file_layer = user.as_ref().and_then(|dir| {
-        let logs = dir.join("logs");
-        std::fs::create_dir_all(&logs).ok()?;
-        // The seven-file cap, applied once at startup — `tracing_appender`
-        // rotates going forward but never prunes files from before this
-        // run.
-        crash::trim_log_files(&logs, 7);
-        let appender = tracing_appender::rolling::RollingFileAppender::builder()
-            .rotation(tracing_appender::rolling::Rotation::DAILY)
-            .filename_prefix("geode")
-            .filename_suffix("log")
-            .build(&logs)
-            .ok()?;
-        // File writes run on a dedicated thread. The panic hook reads the
-        // synchronous ring, so its report does not wait for this buffer to flush.
-        let (non_blocking, guard) = tracing_appender::non_blocking(appender);
-        log_guard = Some(guard);
-        Some(fmt::layer().with_writer(non_blocking).with_ansi(false))
-    });
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_writer(std::io::stderr))
-        .with(RingLayer::new(ring.clone()))
-        .with(file_layer)
-        .init();
-
-    struct ReloadControl(reload::Handle<tracing_subscriber::filter::Targets, Registry>);
-    impl LevelControl for ReloadControl {
-        fn set(&self, levels: &LogLevels) -> Result<(), String> {
-            self.0
-                .reload(levels.to_targets())
-                .map_err(|e| e.to_string())
-        }
-    }
-
-    (ring, Arc::new(ReloadControl(reload_handle)), log_guard)
 }
 
 /// Parse no arguments or `--demo [rows]`, defaulting to 100,000 demo rows.
@@ -501,12 +428,7 @@ fn build_shell_services(
     // Data-backed factories require a successful data setup. If setup is absent,
     // those kinds have no add-tile actions and restored tiles remain placeholders.
     // The builtin pricer dataset and views normally supply the required documents.
-    let db = geode_compose::db_path(
-        &config,
-        demo_root,
-        std::env::var("LOCALAPPDATA").ok(),
-        std::env::var("HOME").ok(),
-    );
+    let db = geode_compose::store_path(&config, demo_root);
     // Refused panels: printed here and carried into the shell's config
     // section, where they stay until a restart can change which panels exist.
     let mut composition_diagnostics = Vec::new();
@@ -656,6 +578,7 @@ mod tests {
     use super::*;
     use geode_core::config::Config;
     use geode_shell::module::ModuleFactory as _;
+    use std::time::Duration;
 
     /// A second CVI panel over the same dataset: another title and forward
     /// format, one action. It names every column the CVI document writes,
@@ -845,8 +768,8 @@ label = "skew"
     /// The collector and the app must agree on what the store holds, or the
     /// collector writes tables the app reads as drifted. Built from the same
     /// desk and user directories, the app's configuration (its whole builtin
-    /// layer, through `data_setup`) and the collector's (`builtin_data_layer`
-    /// alone, through `engine_setup`) have equal schemas and sources, with
+    /// layer, through `data_setup`) and the collector's (`load_config`, the
+    /// data layer alone, through `engine_setup`) have equal schemas and sources, with
     /// and without the demo layer.
     #[test]
     fn the_app_and_the_collector_build_the_same_schema_and_sources() {
@@ -930,8 +853,13 @@ label = "skew"
                     user: Some(user.path().to_path_buf()),
                 };
                 let app_config = Config::load(&sources(builtin_layer(demo_root)));
-                let collector_config =
-                    Config::load(&sources(geode_compose::builtin_data_layer(demo_root)));
+                let collector_config = geode_compose::load_config(
+                    demo_root,
+                    (
+                        Some(desk.path().to_path_buf()),
+                        Some(user.path().to_path_buf()),
+                    ),
+                );
                 let db = demo.path().join("unused.duckdb");
                 let app = bridge::data_setup(
                     &app_config,

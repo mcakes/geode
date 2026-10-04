@@ -8,7 +8,8 @@ holds.
 It holds the builtin documents that decide the store (`builtin_data_layer`:
 the app's `pricer_sheets` and `pricer` declarations, which live in
 `geode_core::builtin`, plus the `--demo` layer), `engine_setup`, the store
-and config paths, and the demo transports. It never depends on gpui. The
+and config paths, logging setup, the collector's settings, and the demo
+transports. It never depends on gpui. The
 app's builtin layer is its own documents plus the data layer, so a process
 built from the data layer alone and the same desk and user directories has
 the app's schema and sources; `geode-app` tests that contract.
@@ -20,10 +21,12 @@ Current crate boundaries:
 
 | Module | Holds |
 |---|---|
-| `lib.rs` | `builtin_data_layer`: the two app datasets and, with a demo directory, the `--demo` layer. `engine_setup`/`EngineSetup`: the engine's half of `DataServiceConfig` (schema, sources, dimensions, document kinds, clock, adapters; empty views, no pricer, vol, egress or positions), infallible, with an empty schema when there is no `datasets` doc. `pin_app_datasets`: keeps `pricer_sheets` and `pricer` as builtin declares them against a differing layer redeclaration, with an error diagnostic; the app's reload path calls it too. `adapters`: the transport registry, empty without a demo directory, otherwise the five demo transports and the bus's feed. |
+| `lib.rs` | `builtin_data_layer`: the two app datasets and, with a demo directory, the `--demo` layer. `engine_setup`/`EngineSetup`: the engine's half of `DataServiceConfig` (schema, sources, dimensions, document kinds, clock, adapters; empty views, no pricer, vol, egress or positions), infallible, with an empty schema when there is no `datasets` doc. `pin_app_datasets`: keeps `pricer_sheets` and `pricer` as builtin declares them against a differing layer redeclaration, with an error diagnostic; the app's reload path calls it too. `adapters`: the transport registry, empty without a demo directory, otherwise the five demo transports and the bus's feed. `load_config`: the collector's configuration, `builtin_data_layer` alone under the given desk and user directories. `store_path`: `db_path` with `LOCALAPPDATA` and `HOME` read from the environment; the app and the collector both call it. |
+| `logging` | `install(prefix)`: process-wide tracing with a reloadable level filter, stderr and ring layers, and a daily `<user>/logs/<prefix>.YYYY-MM-DD.log` file (UTC dates) behind a non-blocking writer, returned as `Logging { ring, control, guard }`. The app passes `geode`, the collector `collector`. `trim_log_files(dir, prefix, keep)` caps one prefix's files at startup (seven), leaving the other process's files in the shared directory alone; `prune_files` is the shared keep-the-last-N-names helper the app's crash reports also use. |
+| `collector` | `collector_settings`/`CollectorSettings`: `[collector] memory_limit` from `app.toml`, default `512MB`; a value that is not a number and a DuckDB size unit (`B`…`TB`, `KiB`…`TiB`, any case) warns at `app.collector.memory_limit` and uses the default. |
 | `paths` | Where the store and the configuration layers live on disk: `db_path` (`data.db_path`, then the demo directory, then the platform directory), `config_dirs` (reads `GEODE_DESK_CONFIG`, `APPDATA`, `HOME`) and its pure core `user_config_dir`. |
 | `demo` | Generated inputs and builtin configuration for `--demo`: the temp directory (`demo_dir`), the emitted sources (`ensure_emitted`), the compiled-in demo config layer (`layer`, including `positions.toml`), and `DemoPositions` (`demo_positions`), the demo position system. |
-| `demo_bus` | Background document publishing for `--demo`: CVI, dividend and option-chain producers publishing through `ChannelAdapter` and the normal document writers and parsers. |
+| `demo_bus` | Background document publishing for `--demo`: CVI, dividend and option-chain producers publishing through `ChannelAdapter` and the normal document writers and parsers. `spawn_default` is the bus both binaries run: the three producers over the demo underlyings, a 5 s cadence, 2 s jitter, seed 42. |
 | `demo_series` | Deterministic one-minute bars for the demo fetch sources `demo_kdb` (with a catalogue) and `demo_rest` (without). |
 | `demo_refdb` | Demo mode's reference database (`DemoRefDb`, `demo_refdb`): the `underlyings` table behind the `refdb` snapshot source. Snapshot side only. |
 

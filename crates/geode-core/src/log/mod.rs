@@ -8,7 +8,7 @@ use tracing_subscriber::filter::Targets;
 
 /// Geode tracing targets configurable by their suffix in `[log]`, such as
 /// `ingest` for `geode::ingest`.
-pub const TARGETS: [&str; 9] = [
+pub const TARGETS: [&str; 10] = [
     "geode::ingest",
     "geode::query",
     "geode::config",
@@ -18,6 +18,7 @@ pub const TARGETS: [&str; 9] = [
     "geode::pricing",
     "geode::vol",
     "geode::memory",
+    "geode::collector",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -608,7 +609,8 @@ mod tests {
 
     #[test]
     fn pricing_and_vol_are_known_log_targets() {
-        assert_eq!(TARGETS.len(), 9);
+        assert_eq!(TARGETS.len(), 10);
+        assert!(TARGETS.contains(&"geode::collector"));
         assert!(TARGETS.contains(&"geode::pricing"));
         assert!(TARGETS.contains(&"geode::vol"));
         let config = crate::config::test_support::config_from(

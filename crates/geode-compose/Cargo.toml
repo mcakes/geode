@@ -28,6 +28,10 @@ rand = "0.9"
 serde_json = "1.0.151"
 # The demo bus thread logs publish failures.
 tracing.workspace = true
+# `logging::install`: stderr, ring and daily-file sinks with reloadable
+# levels, shared by the app and the collector.
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
 
 # Match the support features used by workspace tests to share dependency builds.
 [dev-dependencies]
