@@ -70,8 +70,8 @@ registered separately:
 Registration is split by what a headless process needs.
 [`geode_compose::adapters`](../../crates/geode-compose/src/lib.rs) builds the
 `AdapterRegistry`, and `geode_compose::engine_setup` registers
-`geode_documents::builtin_kinds()`; the app and the background collector
-share both. [`crates/geode-app/src/main.rs`](../../crates/geode-app/src/main.rs)
+`geode_documents::builtin_kinds()`; the app and the planned background
+collector share both. [`crates/geode-app/src/main.rs`](../../crates/geode-app/src/main.rs)
 builds the `PricerRegistry` and `VolModelRegistry`, and
 [`bridge.rs`](../../crates/geode-app/src/bridge.rs) resolves the pricer,
 egress targets and position service against these registries.
