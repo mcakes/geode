@@ -32883,6 +32883,14 @@ run_mutation "link: a NULL blotter row refuses in production" \
   '            None => continue,' \
   geode-app the_production_blotter_emits_its_cursor_path_into_a_group_a_pricer_follows
 
+# An empty grouping value refuses as NULL does; posting `lhu = ""` would
+# narrow every follower to rows none of them holds.
+run_mutation "link: an empty blotter path value refuses" \
+  crates/geode-blotter/src/core/context.rs \
+  '        match value.as_deref().filter(|v| !v.is_empty()) {' \
+  '        match value.as_deref() {' \
+  geode-blotter an_empty_value_on_the_path_refuses_as_null_does
+
 run_mutation "link: only a blotter leaf adds its own values" \
   crates/geode-blotter/src/core/context.rs \
   '    if !path.is_empty() && path.len() == plan.grouping.len() {' \

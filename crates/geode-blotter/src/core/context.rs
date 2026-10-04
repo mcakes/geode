@@ -178,11 +178,18 @@ mod tests {
     /// [`fixture`] with `lhu` NULL on row 1 and its two leaves: rows 3
     /// (SPX) and 4 (NDX) sit under a group whose grouping value is NULL.
     fn null_lhu_fixture() -> (Snapshot, ColumnPlan) {
+        missing_lhu_fixture(None)
+    }
+
+    /// `null_lhu_fixture` with `missing` standing for each absent `lhu`
+    /// value: `None` for NULL, `Some("")` for an empty string.
+    fn missing_lhu_fixture(missing: Option<String>) -> (Snapshot, ColumnPlan) {
+        let m = || missing.clone();
         let snap = Snapshot::for_tests(
             vec![
                 (
                     meta("lhu", None),
-                    TestColumn::Dict(vec![None, None, s("L2"), None, None]),
+                    TestColumn::Dict(vec![None, m(), s("L2"), m(), m()]),
                 ),
                 (
                     meta("underlying_ref", None),
@@ -393,6 +400,25 @@ mod tests {
             path_of_scope(cursor_scope(&snap, &plan, 2)),
             pairs(&[("lhu", "L2")]),
             "a sibling under a real value still posts"
+        );
+    }
+
+    /// An empty value refuses as NULL does: a scope selecting `lhu = ""`
+    /// would narrow every follower to nothing they could name.
+    #[test]
+    fn an_empty_value_on_the_path_refuses_as_null_does() {
+        let (snap, plan) = missing_lhu_fixture(s(""));
+        assert_eq!(
+            cursor_scope(&snap, &plan, 1),
+            CursorScope::NullIn("lhu".into())
+        );
+        assert_eq!(
+            cursor_scope(&snap, &plan, 3),
+            CursorScope::NullIn("lhu".into())
+        );
+        assert_eq!(
+            path_of_scope(cursor_scope(&snap, &plan, 2)),
+            pairs(&[("lhu", "L2")])
         );
     }
 
