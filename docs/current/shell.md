@@ -239,7 +239,7 @@ rebuilds them on a configuration reload. A row standing for no single value
 (a grand total) offers none.
 
 Picking it opens a choice list titled `Color · {column} {value}` (see
-[choice lists](input-and-dialogs.md#scope-tile-log-and-column-choices)):
+[choice lists](input-and-dialogs.md#tile-log-and-column-choices)):
 one row per named color in `colors.toml`, alphabetical, each with its
 swatch, then `None`, then `Follow desk ({name})` only when the user layer
 holds an entry for this value and a lower layer holds a different, colored
@@ -708,13 +708,17 @@ that name's `≡` row. A scope whose only content is a name is not empty: the
 chips row and the save glyph paint for it.
 
 The load glyph (a folder-open icon, `scope-load-chip`) follows the `+` and
-paints whatever the scope holds, empty included; a click opens the
-saved-scope chooser (see
-[input and dialogs](input-and-dialogs.md#scope-tile-log-and-column-choices)),
-and the glyph holds its pressed fill while the chooser is open. The chooser
-has no action of its own, so its tooltip names no chord; from the keyboard it
-is `o` in the Scope dialog. The save glyph, when the scope is savable, comes
-after it, so its appearance never moves the load glyph.
+paints whatever the scope holds, empty included; a click opens the Scope
+dialog on its [Saved](input-and-dialogs.md#saved) screen, alone
+(`frame::scope_saved`), and the glyph holds its pressed fill while Saved is
+the dialog's top layer. Its tooltip, `Saved scopes and expressions`, names
+`frame::scope_saved`'s chord once one is bound; it has none by default, and
+from the keyboard Saved is also `o` in the Scope dialog. The save glyph, when
+the scope is savable, comes after it, so its appearance never moves the load
+glyph. A click on it opens the Scope dialog's
+[save prompt](input-and-dialogs.md#save-prompt) alone, as
+`scope::save_current` does, seeded with the saved scope the lane's scope was
+loaded from.
 
 The `+` verb opens the [Scope dialog](input-and-dialogs.md#scope-dialog)
 (`frame::scope`, `mod+o`), where every ingredient is added — by key, or by
@@ -863,7 +867,7 @@ still pending.
 
 **The chooser.** `tile::link_group` (`mod+u`, the palette, and a click on the
 status bar's `following` segment) opens the link chooser on the focused tile
-(see [input and dialogs](input-and-dialogs.md#scope-tile-log-and-column-choices)).
+(see [input and dialogs](input-and-dialogs.md#tile-log-and-column-choices)).
 It lists the follow rows for a tile whose module follows and the emit rows
 for one whose module emits. A tile that does neither (a timeseries tile) has
 nothing to choose: no dialog opens and the status bar reads `this tile has

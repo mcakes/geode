@@ -575,13 +575,13 @@ pub(crate) fn sync_dialog_text(
         Some(DialogKind::Scope) => {
             // Current has no field: keys reach the dialog through the shell.
             // The text step, the definition step and a name prompt own the
-            // input, their draft the
-            // source of truth. A question gives the shell root focus: the
-            // field's own bindings (backspace, delete, paste) run before the
-            // dialog's key handler could claim them, and would edit the draft
-            // behind the question. Its answer hands focus back.
-            // The Saved screen's filter is a mode dialog's: the input mirrors
-            // its query and has focus only while filtering.
+            // input, each with its draft as the source of truth. A question
+            // gives the shell root focus: the field's own bindings
+            // (backspace, delete, paste) run before the dialog's key handler
+            // could claim them, and would edit the draft behind the
+            // question. Its answer hands focus back. The Saved screen's
+            // filter is a mode dialog's: the input mirrors its query and has
+            // focus only while filtering.
             let Some(state) = shell.scope_dialog.as_ref() else {
                 return;
             };

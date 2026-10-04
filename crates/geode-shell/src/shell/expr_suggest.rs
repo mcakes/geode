@@ -1,8 +1,9 @@
 //! Suggestions for the scope expression fields: the frame's expression
 //! dialog, the Scopes dialog's open `expression` field and the Scope
-//! dialog's definition step. All edit the shared `dialog_input`. The pure state is `crate::exprcomplete`; this
-//! module feeds it the live text and caret, claims its keys, requests
-//! categorical values under [`super::EXPR_KEY`] and paints it.
+//! dialog's definition step. All edit the shared `dialog_input`. The pure
+//! state is `crate::exprcomplete`; this module feeds it the live text and
+//! caret, claims its keys, requests categorical values under
+//! [`super::EXPR_KEY`] and paints it.
 //!
 //! An accepted row is written as one range replace (select, then
 //! replace). Unlike `set_value`, that stays in the input's undo history.

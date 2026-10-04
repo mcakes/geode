@@ -6,6 +6,17 @@ adapter. See
 [configuration](configuration.md) for layer merging, file writes, and reload
 acceptance; this guide describes what editing adds to those contracts.
 
+Saved scopes and named expressions are managed from the Scope dialog's
+[Saved](input-and-dialogs.md#saved) screen, not from object dialogs:
+`config::scopes`, `config::expressions`, the toolbar's load and save glyphs,
+`scope::save_current` and a `≡` chip all open the Scope dialog. No door
+reaches the Scopes or Expressions object dialogs any longer. What this guide
+says of those two domains (their rows in the table below, their copy, save
+and delete behavior, [saved-scope values](#saved-scope-values), the
+[named expressions field](#named-expressions-field) and the
+[scope expression field](#scope-expression-field)) describes code that is
+still compiled but unreachable.
+
 ## Stages and ownership
 
 `ObjectDialogState` owns the domain, stage, mode, browse selection, notices,
@@ -105,7 +116,7 @@ its read-only summaries from configuration with pending edits included.
 A Column stage can also be entered directly from a tile. "Edit column in
 view…" (`config::view_column`) and "Edit column in schema…"
 (`config::schema_column`) list the focused tile's presented columns; see
-[input and dialogs](input-and-dialogs.md#scope-tile-log-and-column-choices).
+[input and dialogs](input-and-dialogs.md#tile-log-and-column-choices).
 A pick opens Views on the tile's view, or Schema on the dataset that owns the
 column (the view's primary dataset, then its joins in declaration order), and
 enters that column's stage. Both are resolved against configuration with
@@ -336,10 +347,9 @@ and the dialog's own Enter checks on the text, and writes
 `[name] expression = "<text>"` to the user layer of `expressions.toml`
 through this dialog's write path. In the term editor the name then
 replaces the term (see
-[input and dialogs](input-and-dialogs.md#frame-expression)). The
-Expressions dialog is also where a scope-bar named chip's click lands: a
-defined name opens in its edit stage, and a missing one opens Browse with
-`'<name>' is not defined`.
+[input and dialogs](input-and-dialogs.md#frame-expression)). A scope-bar
+named chip's click opens the expression's definition in the Scope dialog's
+[definition step](input-and-dialogs.md#definition-step), not this dialog.
 
 Delete removes a user-defined object. Revert requires an inherited object to
 restore and removes the user's definition and associated view presentation
