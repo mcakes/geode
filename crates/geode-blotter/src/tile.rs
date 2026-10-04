@@ -9124,26 +9124,34 @@ mod tests {
     fn the_emission_is_the_cursor_rows_underlying(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered_with_a_dimension(cx);
         assert!(content_of(&h).emits());
-        let on = |u: &str| Some(Scope::one("underlying_ref", u));
+        let on = |u: &str| geode_core::link::CursorScope::Path(Scope::one("underlying_ref", u));
 
         // The cursor opens on the grand total, above every underlying.
         let total = emission_of(&h, &mut cx);
-        assert_eq!(total.scope, None, "the root names no underlying");
+        assert_eq!(
+            total.cursor,
+            geode_core::link::CursorScope::Nothing,
+            "the root names no underlying"
+        );
         assert!(total.board.is_empty());
 
         assert!(content_act(&h, &mut cx, "motion::down"));
         let spx = emission_of(&h, &mut cx);
-        assert_eq!(spx.scope, on("SPX"));
+        assert_eq!(spx.cursor, on("SPX"));
         assert!(spx.board.is_empty());
 
         assert!(content_act(&h, &mut cx, "motion::down"));
         let ndx = emission_of(&h, &mut cx);
-        assert_eq!(ndx.scope, on("NDX"), "the emission follows the cursor");
+        assert_eq!(ndx.cursor, on("NDX"), "the emission follows the cursor");
         assert!(ndx.board.is_empty());
 
         assert!(content_act(&h, &mut cx, "motion::top"));
         let back = emission_of(&h, &mut cx);
-        assert_eq!(back.scope, None, "back on the group row: none again");
+        assert_eq!(
+            back.cursor,
+            geode_core::link::CursorScope::Nothing,
+            "back on the group row: none again"
+        );
         assert!(back.board.is_empty());
     }
 
@@ -9185,7 +9193,7 @@ mod tests {
     /// would show the workspace's rows under a group's chip.
     #[gpui::test]
     fn a_following_blotter_queries_under_its_groups_scope(cx: &mut gpui::TestAppContext) {
-        use geode_core::link::{Emission, Group, Membership, underlying_of, underlying_scope};
+        use geode_core::link::{Group, Membership, Posting, underlying_of, underlying_scope};
         let (h, mut vcx) = open_bound(cx);
         let (tile, emitter) = (TileId(7), TileId(9));
         // The tile's own handle, as the shell binds it.
@@ -9242,7 +9250,7 @@ mod tests {
         h.frame.update(&mut vcx, |f, cx| {
             assert!(f.post_for_test(
                 emitter,
-                Emission {
+                Posting {
                     scope: Some(underlying_scope("SPX.Z")),
                     board: Vec::new(),
                 },
@@ -9315,7 +9323,7 @@ mod tests {
     #[gpui::test]
     fn the_emission_is_the_shown_rows_underlying_under_a_sort(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered_with_a_dimension(cx);
-        let on = |u: &str| Some(Scope::one("underlying_ref", u));
+        let on = |u: &str| geode_core::link::CursorScope::Path(Scope::one("underlying_ref", u));
         // Ascending on `underlying_ref`: NDX (snapshot row 2) above SPX
         // (snapshot row 1).
         assert!(content_act(&h, &mut cx, "motion::right"));
@@ -9328,12 +9336,12 @@ mod tests {
         assert!(content_act(&h, &mut cx, "motion::top"));
         assert!(content_act(&h, &mut cx, "motion::down"));
         assert_eq!(
-            emission_of(&h, &mut cx).scope,
+            emission_of(&h, &mut cx).cursor,
             on("NDX"),
             "display row 1 is NDX's"
         );
         assert!(content_act(&h, &mut cx, "motion::down"));
-        assert_eq!(emission_of(&h, &mut cx).scope, on("SPX"));
+        assert_eq!(emission_of(&h, &mut cx).cursor, on("SPX"));
     }
 
     /// [`delivered_flat`]'s document alone: a root and one `lhu` row per
@@ -9382,9 +9390,9 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut cx) = delivered_with_a_dimension(cx);
-        let on = |u: &str| Some(Scope::one("underlying_ref", u));
+        let on = |u: &str| geode_core::link::CursorScope::Path(Scope::one("underlying_ref", u));
         assert!(content_act(&h, &mut cx, "motion::down"));
-        assert_eq!(emission_of(&h, &mut cx).scope, on("SPX"));
+        assert_eq!(emission_of(&h, &mut cx).cursor, on("SPX"));
         let content = content_of(&h);
         let calls = Rc::new(Cell::new(0u32));
         let _subscription = cx
@@ -9414,7 +9422,7 @@ mod tests {
             "sanity: the answer waits for the other tile"
         );
         assert_eq!(
-            emission_of(&h, &mut cx).scope,
+            emission_of(&h, &mut cx).cursor,
             on("SPX"),
             "held, so the painted row still names the old underlying"
         );
@@ -9428,7 +9436,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(
-            emission_of(&h, &mut cx).scope,
+            emission_of(&h, &mut cx).cursor,
             on("DAX"),
             "the promoted snapshot's cursor row"
         );

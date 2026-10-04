@@ -38,7 +38,7 @@ use crate::popup::{ChoicePopup, PickerRows, PickerState, Popup, render_picker};
 use geode_core::colour::{Rgb, contrast_ratio, readable_on};
 use geode_core::document::{DocumentRows, Value, split_key};
 use geode_core::grid::selection::{Resolved, SelectKind, Selection};
-use geode_core::link::{BoardEntry, DraftMark, Emission, underlying_scope};
+use geode_core::link::{BoardEntry, CursorScope, DraftMark, Emission, underlying_scope};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
@@ -1824,7 +1824,7 @@ impl MarketDataTile {
     }
 
     /// What the panel posts into the link group it emits into: where it is
-    /// (its underlying, as a one-value scope) and, while its draft is not
+    /// (its underlying, as a one-value path) and, while its draft is not
     /// clean (`Editing`, `Behind` or `Sent`) and the upload builder can
     /// assemble it, that whole document, marked with the draft's state so
     /// a follower can tell a live edit from a held or sent one. The same
@@ -1855,8 +1855,11 @@ impl MarketDataTile {
             // assume the same. A panel over a dataset keyed first on
             // another column would post that key's value under the wrong
             // column.
-            scope: key.first().map(|u| underlying_scope(u)),
+            cursor: key.first().map_or(CursorScope::Nothing, |u| {
+                CursorScope::Path(underlying_scope(u))
+            }),
             board,
+            ..Emission::default()
         }
     }
 
@@ -17043,8 +17046,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         (calls, subscription)
     }
 
-    fn on(underlying: &str) -> Option<Scope> {
-        Some(Scope::one("underlying_ref", underlying))
+    fn on(underlying: &str) -> CursorScope {
+        CursorScope::Path(Scope::one("underlying_ref", underlying))
     }
 
     /// A panel with nothing unsent posts where it is and no document: a
@@ -17056,7 +17059,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(h.content.emits());
         assert!(assembled(&h, &vcx).is_ok(), "sanity: there is a document");
         let emission = emission_of(&h, &mut vcx);
-        assert_eq!(emission.scope, on("SPX.Z"));
+        assert_eq!(emission.cursor, on("SPX.Z"));
         assert!(
             emission.board.is_empty(),
             "a clean draft is not a document on the board"
@@ -17080,7 +17083,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         commit_cell(&h, &mut vcx, "0.25");
 
         let emission = emission_of(&h, &mut vcx);
-        assert_eq!(emission.scope, on("SPX.Z"));
+        assert_eq!(emission.cursor, on("SPX.Z"));
         assert_eq!(emission.board.len(), 1, "one document: this panel's");
         let entry = &emission.board[0];
         assert_eq!(entry.dataset, "cvi_params");
@@ -17159,7 +17162,7 @@ edits = [["2026-11-20", "-1", 9.5]]
 
         h.command(&mut vcx, "revert").unwrap();
         let emission = emission_of(&h, &mut vcx);
-        assert_eq!(emission.scope, on("SPX.Z"));
+        assert_eq!(emission.cursor, on("SPX.Z"));
         assert!(emission.board.is_empty());
     }
 
@@ -17207,7 +17210,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
             |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.assembles.get());
         let before = assembles(&vcx);
         let emission = emission_of(&h, &mut vcx);
-        assert_eq!(emission.scope, on("SPX.Z"));
+        assert_eq!(emission.cursor, on("SPX.Z"));
         assert!(emission.board.is_empty());
         assert_eq!(assembles(&vcx), before + 1, "the builder was asked once");
 
@@ -17380,7 +17383,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         h.motion(&mut vcx, "right", None);
         commit_cell(&h, &mut vcx, "0.25");
         let spx = emission_of(&h, &mut vcx);
-        assert_eq!(spx.scope, on("SPX.Z"));
+        assert_eq!(spx.cursor, on("SPX.Z"));
         assert_eq!(spx.board[0].key, vec!["SPX.Z".to_string()]);
         let spx_draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
 
@@ -17396,7 +17399,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         );
 
         let ndx = emission_of(&h, &mut vcx);
-        assert_eq!(ndx.scope, on("NDX"));
+        assert_eq!(ndx.cursor, on("NDX"));
         assert_eq!(ndx.board.len(), 1);
         assert_eq!(ndx.board[0].key, vec!["NDX".to_string()]);
         assert!(
@@ -17410,7 +17413,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         let tag = h.document_request().unwrap().tag;
         h.deliver(&mut vcx, tag, Arc::clone(&document));
         let nky = emission_of(&h, &mut vcx);
-        assert_eq!(nky.scope, on("NKY.Z"));
+        assert_eq!(nky.cursor, on("NKY.Z"));
         assert!(nky.board.is_empty());
     }
 

@@ -31,7 +31,7 @@ use crate::tiling::{TileId, WorkspaceIx};
 use geode_core::config::Layer;
 use geode_core::document::{KEY_SEPARATOR, is_key_prefix};
 use geode_core::groupings::GroupingSlots;
-use geode_core::link::{BoardEntry, Emission, Group, Membership};
+use geode_core::link::{BoardEntry, Group, Membership, Posting};
 use geode_core::named::NamedExpressions;
 use geode_core::query::{AsOf, QueryKey};
 use geode_core::scope::{Expr, Scope};
@@ -337,6 +337,11 @@ pub struct Frame {
     bar_cache: BarCache,
     /// Current scope/grouping/as-of barrier, if one is waiting for arrivals.
     barrier: Option<FlipBarrier>,
+    /// The NULL column that stopped each emitter's last posting. Cleared
+    /// when a posting goes through, and when the tile changes or leaves
+    /// the group it emits into: a refusal names the group it failed to
+    /// update, so it must not outlive that membership.
+    link_refusals: BTreeMap<TileId, String>,
 }
 
 impl Frame {
@@ -361,6 +366,7 @@ impl Frame {
             tile_notices: Vec::new(),
             bar_cache: RefCell::new(None),
             barrier: None,
+            link_refusals: BTreeMap::new(),
         }
     }
 
@@ -473,6 +479,9 @@ impl Frame {
     pub(crate) fn emit(&mut self, tile: TileId, group: Option<Group>) -> bool {
         let changed = self.links.emit(tile, group);
         if changed {
+            // A refusal names the group it failed to update; kept across a
+            // switch it would blame the new group for the old one's refusal.
+            self.link_refusals.remove(&tile);
             fresh(&mut self.generation);
         }
         changed
@@ -500,15 +509,48 @@ impl Frame {
         self.links.scope_gens()
     }
 
-    /// Record what an emitting tile answered. `true` when its group's scope
-    /// or board changed and observers should be notified. A tile that emits
-    /// into no group, or repeats its last answer, writes nothing; a board
-    /// change never moves `data`.
-    pub(crate) fn post_emission(&mut self, tile: TileId, emission: Emission) -> bool {
+    /// Record what the shell composed for an emitting tile. `true` when its
+    /// group's scope or board changed and observers should be notified. A
+    /// tile that emits into no group, or repeats its last posting, writes
+    /// nothing; a board change never moves `data`.
+    pub(crate) fn post_emission(&mut self, tile: TileId, posting: Posting) -> bool {
         let Frame {
             links, generation, ..
         } = self;
-        links.post(tile, emission, generation)
+        links.post(tile, posting, generation)
+    }
+
+    /// The scope an emitter's posting is composed over. A tile emitting into
+    /// the group it follows composes over its lane: composed over the group
+    /// it would narrow it further on every pass, and its total row could
+    /// never widen it back. A tile following another group carries that
+    /// group's scope down the chain (cycles are refused at the doors). Any
+    /// other tile composes over its lane.
+    pub(crate) fn emit_base(&self, ws: WorkspaceIx, tile: TileId) -> Scope {
+        let m = self.links.membership(tile);
+        match m.follow {
+            Some(g) if m.emit != Some(g) => self.links.group(g).scope.clone(),
+            _ => self.view(ws).scope().clone(),
+        }
+    }
+
+    /// Every tile emitting into a group, in tile order.
+    pub(crate) fn emitters(&self) -> Vec<TileId> {
+        self.links.emitters()
+    }
+
+    /// Record or clear the NULL column that stopped `tile`'s last posting.
+    /// `true` when it changed. The header reads it at paint.
+    pub(crate) fn set_link_refusal(&mut self, tile: TileId, column: Option<String>) -> bool {
+        match column {
+            Some(c) => self.link_refusals.insert(tile, c.clone()) != Some(c),
+            None => self.link_refusals.remove(&tile).is_some(),
+        }
+    }
+
+    /// The column whose NULL stopped `tile`'s last posting, while it emits.
+    pub fn link_refusal(&self, tile: TileId) -> Option<&str> {
+        self.link_refusals.get(&tile).map(String::as_str)
     }
 
     /// Drop a closed tile's membership, what it posted, and the notices it
@@ -516,6 +558,7 @@ impl Frame {
     /// a group; the notices alone change nothing an observer reads.
     pub(crate) fn forget_tile(&mut self, tile: TileId) -> bool {
         self.tile_notices.retain(|(t, _)| *t != tile);
+        self.link_refusals.remove(&tile);
         let changed = self.links.forget(tile);
         if changed {
             fresh(&mut self.generation);
@@ -533,12 +576,13 @@ impl Frame {
         self.emit(tile, membership.emit);
     }
 
-    /// Test-only: record `emission` as `tile`'s, as the shell's pull would.
-    /// `true` when its group's scope or board changed. Production code
-    /// posts only what the shell pulled from `TileContent::emission`.
+    /// Test-only: record `posting` as `tile`'s, as the shell's pull would
+    /// after composing. `true` when its group's scope or board changed.
+    /// Production code posts only what the shell composed from
+    /// `TileContent::emission`.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn post_for_test(&mut self, tile: TileId, emission: Emission) -> bool {
-        self.post_emission(tile, emission)
+    pub fn post_for_test(&mut self, tile: TileId, posting: Posting) -> bool {
+        self.post_emission(tile, posting)
     }
 
     /// Watch one group's board for a dataset, or one document key (or key
@@ -1831,7 +1875,7 @@ mod tests {
     use crate::tiling::{TileId, WorkspaceIx};
     use geode_core::clock::Clock;
     use geode_core::document::DocumentRows;
-    use geode_core::link::{BoardEntry, DraftMark, Emission, Group};
+    use geode_core::link::{BoardEntry, DraftMark, Group, Posting};
     use geode_core::scope::{DimensionSelection, Scope};
     use std::sync::Arc;
 
@@ -3391,8 +3435,8 @@ mod tests {
         })
     }
 
-    fn draft(u: &str, rows: &Arc<DocumentRows>) -> Emission {
-        Emission {
+    fn draft(u: &str, rows: &Arc<DocumentRows>) -> Posting {
+        Posting {
             scope: Some(Scope::one("underlying_ref", u)),
             board: vec![BoardEntry {
                 dataset: "cvi_params".into(),
@@ -3406,6 +3450,33 @@ mod tests {
     fn on_board(f: &Frame, g: Group, u: &str) -> Option<Arc<DocumentRows>> {
         f.board_entry(g, "cvi_params", &[u.to_string()])
             .map(|e| e.rows)
+    }
+
+    /// A link refusal names the group it failed to update, so it lives
+    /// only while the tile emits into that group: a switch, leaving or
+    /// closing drops it rather than blaming another group for it.
+    #[test]
+    fn a_link_refusal_ends_with_the_emit_membership_it_names() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let tile = TileId(1);
+        f.emit(tile, Some(Group::A));
+        assert!(f.set_link_refusal(tile, Some("book".into())));
+        assert!(!f.set_link_refusal(tile, Some("book".into())), "unchanged");
+        assert_eq!(f.link_refusal(tile), Some("book"));
+        assert!(!f.emit(tile, Some(Group::A)), "the same group is no change");
+        assert_eq!(f.link_refusal(tile), Some("book"), "and keeps it");
+        assert!(f.emit(tile, Some(Group::B)));
+        assert_eq!(f.link_refusal(tile), None, "switching clears");
+
+        assert!(f.set_link_refusal(tile, Some("book".into())));
+        assert!(f.emit(tile, None));
+        assert_eq!(f.link_refusal(tile), None, "leaving clears");
+
+        f.emit(tile, Some(Group::A));
+        assert!(f.set_link_refusal(tile, Some("book".into())));
+        f.forget_tile(tile);
+        assert_eq!(f.link_refusal(tile), None, "closing clears");
+        assert!(!f.set_link_refusal(tile, None), "nothing left to clear");
     }
 
     #[test]
@@ -3472,13 +3543,13 @@ mod tests {
         f.emit(blotter, Some(Group::A));
         f.post_emission(
             blotter,
-            Emission {
+            Posting {
                 scope: Some(Scope::one("underlying_ref", "SPX.Z")),
                 board: vec![],
             },
         );
         assert!(
-            !f.post_emission(blotter, Emission::default()),
+            !f.post_emission(blotter, Posting::default()),
             "the cursor names no single value"
         );
         assert_eq!(
@@ -3492,7 +3563,7 @@ mod tests {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
         let panel = TileId(1);
         let rows = doc("SPX.Z");
-        let scope_only = || Emission {
+        let scope_only = || Posting {
             scope: Some(Scope::one("underlying_ref", "SPX.Z")),
             board: vec![],
         };
@@ -3687,7 +3758,7 @@ mod tests {
     fn a_tile_emitting_the_scope_it_follows_writes_nothing() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
         let tile = TileId(1);
-        let scoped = |u: &str| Emission {
+        let scoped = |u: &str| Posting {
             scope: Some(Scope::one("underlying_ref", u)),
             board: vec![],
         };
@@ -3718,7 +3789,7 @@ mod tests {
     fn a_repeated_emission_does_not_restore_a_scope_another_writer_moved() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
         let (p1, p2) = (TileId(1), TileId(2));
-        let scoped = |u: &str| Emission {
+        let scoped = |u: &str| Posting {
             scope: Some(Scope::one("underlying_ref", u)),
             board: vec![],
         };

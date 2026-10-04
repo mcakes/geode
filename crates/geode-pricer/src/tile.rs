@@ -7329,15 +7329,15 @@ pub(crate) mod tests {
     fn the_emission_is_the_cursor_lines_underlying(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 20000 C"]);
         assert!(h.content.emits());
-        let on = |u: &str| Some(Scope::one("underlying_ref", u));
+        let on = |u: &str| geode_core::link::CursorScope::Path(Scope::one("underlying_ref", u));
 
         let first = emission_of(&h, &mut vcx);
-        assert_eq!(first.scope, on("SPX"));
+        assert_eq!(first.cursor, on("SPX"));
         assert!(first.board.is_empty());
 
         assert!(h.motion(&mut vcx, "down", None));
         let second = emission_of(&h, &mut vcx);
-        assert_eq!(second.scope, on("NDX"), "the emission follows the cursor");
+        assert_eq!(second.cursor, on("NDX"), "the emission follows the cursor");
         assert!(second.board.is_empty());
     }
 
@@ -7347,8 +7347,8 @@ pub(crate) mod tests {
     fn a_package_across_two_underlyings_emits_no_scope(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 20000 C"]);
         assert_eq!(
-            emission_of(&h, &mut vcx).scope,
-            Some(Scope::one("underlying_ref", "SPX")),
+            emission_of(&h, &mut vcx).cursor,
+            geode_core::link::CursorScope::Path(Scope::one("underlying_ref", "SPX")),
             "a line, before it is packaged"
         );
         h.dispatch(&mut vcx, "group", Some(2));

@@ -672,6 +672,13 @@ pub struct ShellView {
     /// frame-wide, so a switch changes none of them, and re-seeding there
     /// would swallow a group change whose notification is still pending.
     last_flip_groups: [u64; 4],
+    /// The frame generation emitters were last re-pulled at. An emitter
+    /// composes over its lane or followed group, which move without the
+    /// tile announcing anything, so the frame observer re-pulls every
+    /// emitter once the generation passes this.
+    last_emit_generation: u64,
+    /// Whether a posting composes the emitter's own `:filter` layer in.
+    link_include_tile_filter: bool,
     /// Who lives in each tile. Created lazily in `ensure_occupants` and
     /// dropped when the tile is gone from every workspace.
     occupants: HashMap<TileId, TileOccupant>,
@@ -1475,6 +1482,7 @@ impl ShellView {
             .view(services.workspaces.active_ix())
             .versions();
         let last_flip_groups = frame.read(cx).group_scope_gens();
+        let last_emit_generation = frame.read(cx).generation();
 
         // The docs the data engine actually starts with — see
         // `sources_baseline`'s field doc.
@@ -1554,6 +1562,8 @@ impl ShellView {
             default_source,
             last_flip_versions,
             last_flip_groups,
+            last_emit_generation,
+            link_include_tile_filter: true,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
             emit_subs: HashMap::new(),
@@ -1852,6 +1862,13 @@ impl ShellView {
                 });
             }
         }
+        // Emitters compose over their lane or followed group, which move
+        // without the tile hearing it. After this observer: the pull reads
+        // tiles and writes the frame.
+        let weak = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let _ = weak.update(cx, |view, cx| view.repull_emitters(cx));
+        });
         // A pressed header link chip opens the chooser on its own tile.
         if let Some(tile) = frame.update(cx, |f, _| f.take_pending_link_chooser()) {
             self.open_link_chooser_on(tile, window, cx);

@@ -3,7 +3,7 @@
 //! The frame owns one `Links` and draws every scope generation from its
 //! own counter, so a number names one scope in any lane or group.
 //!
-//! A board holds draft documents. It is derived from the last emission of
+//! A board holds draft documents. It is derived from the last posting of
 //! every tile emitting into the group, so a draft leaves the moment its
 //! emitter stops listing it, leaves the group or closes. Board changes move
 //! their own revisions ([`BoardWatch`]) and never the frame's publish
@@ -18,7 +18,7 @@ use std::rc::{Rc, Weak};
 
 use geode_core::colour::{Definition, Tone, resolve};
 use geode_core::document::{is_key_prefix, join_key};
-use geode_core::link::{BoardEntry, Emission, Group, Membership};
+use geode_core::link::{BoardEntry, Group, Membership, Posting};
 use geode_core::scope::Scope;
 use gpui::Hsla;
 use gpui_component::Theme;
@@ -60,7 +60,7 @@ type BoardKey = (String, Vec<String>);
 struct Posted {
     /// The entry as posted: its rows by allocation and its mark.
     entry: BoardEntry,
-    /// The tile whose emission put it there. Recorded for diagnostics;
+    /// The tile whose posting put it there. Recorded for diagnostics;
     /// nothing reads it.
     #[allow(dead_code)]
     emitter: TileId,
@@ -73,7 +73,7 @@ pub(crate) struct GroupLane {
     pub(crate) scope: Scope,
     pub(crate) scope_gen: u64,
     board: BTreeMap<BoardKey, Posted>,
-    /// Counts this board's changes; a repeated emission leaves it alone.
+    /// Counts this board's changes; a repeated posting leaves it alone.
     board_gen: u64,
 }
 
@@ -82,10 +82,10 @@ pub(crate) struct Links {
     groups: [GroupLane; 4],
     following: BTreeMap<TileId, Group>,
     emitting: BTreeMap<TileId, Group>,
-    /// Each emitter's last emission and the order it was posted in. A
+    /// Each emitter's last posting and the order it was posted in. A
     /// group's board is derived from these, so an emitter that leaves
     /// uncovers a key another emitter still lists.
-    last: HashMap<TileId, (u64, Emission)>,
+    last: HashMap<TileId, (u64, Posting)>,
     seq: u64,
     /// Board watches, held weakly: a closed tile drops its watch and the
     /// next registration reaps the entry.
@@ -156,7 +156,7 @@ impl Links {
         assign(&mut self.following, tile, to)
     }
 
-    /// Point `tile`'s emissions at `to`. A tile that leaves or switches
+    /// Point `tile`'s postings at `to`. A tile that leaves or switches
     /// group takes what it posted with it: its drafts leave the old board
     /// at once and nothing reaches the new one until its next post. The
     /// old group's scope stays as last written.
@@ -198,34 +198,40 @@ impl Links {
         [0, 1, 2, 3].map(|i| self.groups[i].scope_gen)
     }
 
-    /// Record `tile`'s emission. `true` when the group's scope or board
-    /// changed. An emission equal to the tile's last is not a write: the
-    /// shell re-pulls on every notify of an emitting tile.
-    pub(crate) fn post(&mut self, tile: TileId, emission: Emission, generation: &mut u64) -> bool {
+    /// Record `tile`'s posting. `true` when the group's scope or board
+    /// changed. A posting equal to the tile's last is not a write: the
+    /// shell re-pulls on every notify of an emitting tile and on every
+    /// frame move.
+    pub(crate) fn post(&mut self, tile: TileId, posting: Posting, generation: &mut u64) -> bool {
         let Some(&g) = self.emitting.get(&tile) else {
             return false;
         };
-        if self.last.get(&tile).is_some_and(|(_, e)| *e == emission) {
+        if self.last.get(&tile).is_some_and(|(_, p)| *p == posting) {
             return false;
         }
         // Compared before it is cloned: a draft edited at typing speed posts
         // a changed board under the scope the group already holds.
-        let changed = match &emission.scope {
+        let changed = match &posting.scope {
             Some(scope) if self.groups[g.index()].scope != *scope => {
                 self.set_scope(g, scope.clone(), generation)
             }
             _ => false,
         };
         self.seq += 1;
-        self.last.insert(tile, (self.seq, emission));
+        self.last.insert(tile, (self.seq, posting));
         changed | self.rebuild_board(g)
     }
 
-    /// Derive `g`'s board from its emitters' last emissions, later posts
+    /// Every tile emitting into a group, in tile order.
+    pub(crate) fn emitters(&self) -> Vec<TileId> {
+        self.emitting.keys().copied().collect()
+    }
+
+    /// Derive `g`'s board from its emitters' last postings, later posts
     /// winning a key, and bump the watches of every key that changed.
     /// `true` when the board changed.
     fn rebuild_board(&mut self, g: Group) -> bool {
-        let mut posts: Vec<(u64, TileId, &Emission)> = self
+        let mut posts: Vec<(u64, TileId, &Posting)> = self
             .last
             .iter()
             .filter(|(tile, _)| self.emitting.get(tile) == Some(&g))
@@ -233,8 +239,8 @@ impl Links {
             .collect();
         posts.sort_by_key(|p| p.0);
         let mut next: BTreeMap<BoardKey, Posted> = BTreeMap::new();
-        for (_, emitter, emission) in posts {
-            for entry in &emission.board {
+        for (_, emitter, posting) in posts {
+            for entry in &posting.board {
                 next.insert(
                     (entry.dataset.clone(), entry.key.clone()),
                     Posted {
@@ -344,8 +350,8 @@ mod tests {
         })
     }
 
-    fn posting(dataset: &str, key: &[&str]) -> Emission {
-        Emission {
+    fn posting(dataset: &str, key: &[&str]) -> Posting {
+        Posting {
             scope: None,
             board: vec![BoardEntry {
                 dataset: dataset.into(),

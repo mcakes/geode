@@ -463,13 +463,15 @@ pub trait TileContent {
     fn emits(&self) -> bool {
         false
     }
-    /// What this tile posts into the link group it emits into: the scope its
-    /// cursor names and the draft documents it holds. Pulled by the shell
-    /// when the tile joins a group and after `watch_emission`'s callback
-    /// fires, never from inside an update of this tile. Read-only, and cheap
-    /// when nothing changed: return the same `Arc` for an unchanged draft,
-    /// since the frame compares drafts by allocation and an equal emission
-    /// is not a write.
+    /// What this tile answers for the link group it emits into: where its
+    /// cursor stands, its own `:filter` layer and `:unscoped` flag, and the
+    /// draft documents it holds. The shell composes these over the tile's
+    /// base into what the group receives. Pulled by the shell when the
+    /// tile joins a group, after `watch_emission`'s callback fires and
+    /// when the frame moves, never from inside an update of this tile.
+    /// Read-only, and cheap when nothing changed: return the same `Arc` for
+    /// an unchanged draft, since the frame compares drafts by allocation
+    /// and an equal posting is not a write.
     fn emission(&self, _cx: &App) -> geode_core::link::Emission {
         geode_core::link::Emission::default()
     }

@@ -200,19 +200,46 @@ impl ShellView {
         self.pull_emission(tile, cx);
     }
 
-    /// Read what `tile` emits now and post it. An emission equal to the
-    /// tile's last writes nothing and notifies nobody, so a pull is safe
-    /// on every notification of an emitting tile.
+    /// Read what `tile` emits now, compose it over the tile's base and post
+    /// it. A posting equal to the tile's last writes nothing and notifies
+    /// nobody, so a pull is safe on every notification of an emitting tile
+    /// and on every frame move.
     fn pull_emission(&mut self, tile: TileId, cx: &mut Context<Self>) {
         let Some(o) = self.occupants.get(&tile) else {
             return;
         };
         let emission = o.content.emission(cx);
+        let ws = self
+            .services
+            .workspaces
+            .workspace_of(tile)
+            .unwrap_or_else(|| self.active_ix());
+        let include_layer = self.link_include_tile_filter;
         self.frame.update(cx, |f, cx| {
-            if f.post_emission(tile, emission) {
+            let base = f.emit_base(ws, tile);
+            let (posting, refused) = geode_core::link::compose(emission, &base, include_layer);
+            let refusal_changed = f.set_link_refusal(tile, refused);
+            if f.post_emission(tile, posting) | refusal_changed {
                 cx.notify();
             }
         });
+    }
+
+    /// Pull every emitter again when the frame has moved since the last
+    /// re-pull. An emitter's base is its lane's or its followed group's
+    /// scope, which move without the tile announcing anything; the frame's
+    /// generation advances on every such write (and on membership and pin
+    /// changes). Equal postings write nothing, and the doors refuse cycles,
+    /// so a chain settles after one extra pass.
+    pub(super) fn repull_emitters(&mut self, cx: &mut Context<Self>) {
+        let generation = self.frame.read(cx).generation();
+        if generation == self.last_emit_generation {
+            return;
+        }
+        self.last_emit_generation = generation;
+        for tile in self.frame.read(cx).emitters() {
+            self.pull_emission(tile, cx);
+        }
     }
 
     /// Notify a tile's own view when its membership changes: its header

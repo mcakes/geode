@@ -32080,13 +32080,13 @@ run_mutation "link: forgetting a tile advances the generation" \
 # since, and pull the group back to a scope another writer has replaced.
 run_mutation "link: a repeated emission does not retake a key" \
   crates/geode-shell/src/link.rs \
-  '        if self.last.get(&tile).is_some_and(|(_, e)| *e == emission) {' \
+  '        if self.last.get(&tile).is_some_and(|(_, p)| *p == posting) {' \
   '        if false {' \
   geode-shell a_repeated_emission_does_not_retake_a_key_from_a_later_post
 
 run_mutation "link: a repeated emission does not restore a scope" \
   crates/geode-shell/src/link.rs \
-  '        if self.last.get(&tile).is_some_and(|(_, e)| *e == emission) {' \
+  '        if self.last.get(&tile).is_some_and(|(_, p)| *p == posting) {' \
   '        if false {' \
   geode-shell a_repeated_emission_does_not_restore_a_scope_another_writer_moved
 
@@ -32830,15 +32830,13 @@ run_mutation "link: the timeseries header shows the chip" \
   '                Default::default(),' \
   geode-timeseries the_header_shows_the_link_group_the_tile_follows
 
-# A blotter posts its cursor row's one underlying, can emit before it has
+# A blotter posts its cursor row's one underlying as its cursor path, can emit before it has
 # rows (the shell drops a restored membership for a tile that answers
 # false right after create), and tells the shell on every cursor move.
 run_mutation "link: the blotter emits the cursor's underlying" \
   crates/geode-blotter/src/content.rs \
-  '                .cursor_underlying(cx)
-                .map(|u| geode_core::link::underlying_scope(&u)),' \
-  '                .cursor_underlying(cx)
-                .and_then(|_| None),' \
+  '                    CursorScope::Path(underlying_scope(&u))' \
+  '                    { let _ = &u; CursorScope::Nothing }' \
   geode-blotter the_emission_is_the_cursor_rows_underlying
 
 run_mutation "link: the blotter emission follows the cursor row" \
@@ -32880,10 +32878,8 @@ run_mutation "link: a promoted snapshot tells the shell the emission changed" \
 # A pricer posts its cursor line's underlying, the one `g m` opens on.
 run_mutation "link: the pricer emits the cursor line's underlying" \
   crates/geode-pricer/src/content.rs \
-  '                .cursor_underlying()
-                .map(|u| geode_core::link::underlying_scope(&u)),' \
-  '                .cursor_underlying()
-                .and_then(|_| None),' \
+  '                    CursorScope::Path(underlying_scope(&u))' \
+  '                    { let _ = &u; CursorScope::Nothing }' \
   geode-pricer the_emission_is_the_cursor_lines_underlying
 
 run_mutation "link: the pricer can emit before it holds a line" \
@@ -32918,8 +32914,8 @@ run_mutation "link: a package across underlyings emits no scope" \
 # pull hands back the same allocation, which the frame reads as no change.
 run_mutation "link: a panel posts its underlying as the scope" \
   crates/geode-marketdata/src/tile.rs \
-  '            scope: key.first().map(|u| underlying_scope(u)),' \
-  '            scope: None,' \
+  '                CursorScope::Path(underlying_scope(u))' \
+  '                { let _ = u; CursorScope::Nothing }' \
   geode-marketdata a_clean_panel_emits_its_underlying_and_no_board
 
 run_mutation "link: a clean panel posts no board" \
@@ -33017,10 +33013,8 @@ run_mutation "link: the production roster emits" \
 
 run_mutation "link: the production pricer emits its cursor line" \
   crates/geode-pricer/src/content.rs \
-  '                .cursor_underlying()
-                .map(|u| geode_core::link::underlying_scope(&u)),' \
-  '                .cursor_underlying()
-                .and_then(|_| None),' \
+  '                    CursorScope::Path(underlying_scope(&u))' \
+  '                    { let _ = &u; CursorScope::Nothing }' \
   geode-app the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows
 
 run_mutation "link: the production follower reads its group through its own handle" \
@@ -33169,10 +33163,10 @@ run_mutation "link: the emitted column is underlying_ref" \
 # opens the barrier over the followers.
 run_mutation "link: a post that changed something notifies the frame" \
   crates/geode-shell/src/shell/link.rs \
-  '            if f.post_emission(tile, emission) {
+  '            if f.post_emission(tile, posting) | refusal_changed {
                 cx.notify();
             }' \
-  '            if f.post_emission(tile, emission) {
+  '            if f.post_emission(tile, posting) | refusal_changed {
                 let _ = &cx;
             }' \
   geode-shell an_emitters_change_flips_the_groups_followers_and_not_the_emitter
@@ -34405,6 +34399,77 @@ run_mutation "link: a mark change alone moves the board" \
   '            if !next.get(key).is_some_and(|new| new.entry == old.entry) {' \
   '            if !next.get(key).is_some_and(|new| std::sync::Arc::ptr_eq(&new.entry.rows, &old.entry.rows)) {' \
   geode-shell a_mark_change_alone_is_a_board_change
+
+# An emitter composes over its lane when it emits into the group it
+# follows: over the group it would ratchet narrower on every pass.
+run_mutation "link: a self-linked emitter composes over its lane" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(g) if m.emit != Some(g) => self.links.group(g).scope.clone(),' \
+  '            Some(g) => self.links.group(g).scope.clone(),' \
+  geode-shell a_self_linked_tile_widens_the_group_from_its_total_row
+
+# A tile following one group and emitting into another carries the
+# followed group's scope down the chain, not its own lane's.
+run_mutation "link: a chained emitter carries its followed group's scope" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(g) if m.emit != Some(g) => self.links.group(g).scope.clone(),' \
+  '            Some(g) if m.emit != Some(g) => self.view(ws).scope().clone(),' \
+  geode-shell a_chained_emitter_composes_over_the_group_it_follows
+
+# An emitter's base moves without the tile announcing anything; the frame
+# observer re-pulls every emitter once the frame's generation moves.
+run_mutation "link: the lane moving re-pulls emitters" \
+  crates/geode-shell/src/shell/link.rs \
+  '        if generation == self.last_emit_generation {' \
+  '        if true {' \
+  geode-shell a_lane_scope_change_repulls_the_emitter
+
+# The shell records the column that stopped a posting; dropped, the header
+# could never say why the group did not move.
+run_mutation "link: a refused posting is recorded on the tile" \
+  crates/geode-shell/src/shell/link.rs \
+  '            let refusal_changed = f.set_link_refusal(tile, refused);' \
+  '            let refusal_changed = f.set_link_refusal(tile, None); let _ = refused;' \
+  geode-shell a_null_path_keeps_the_group_and_records_the_refusal
+
+# A refusal names the group it failed to update: a switch or leave drops it.
+run_mutation "link: changing the emit group clears the refusal" \
+  crates/geode-shell/src/frame.rs \
+  '            self.link_refusals.remove(&tile);
+            fresh(&mut self.generation);' \
+  '            fresh(&mut self.generation);' \
+  geode-shell a_link_refusal_ends_with_the_emit_membership_it_names
+
+# Composition: base, then layer, then the cursor path, which is last.
+run_mutation "link: compose puts the path last" \
+  crates/geode-core/src/link.rs \
+  '            (Some(layered.and_then(&path)), None)' \
+  '            (Some(path), None)' \
+  geode-core compose_puts_base_then_layer_then_path
+
+run_mutation "link: compose includes the layer when the setting is on" \
+  crates/geode-core/src/link.rs \
+  '                base.and_then(&layer)' \
+  '                base.clone()' \
+  geode-core compose_puts_base_then_layer_then_path
+
+run_mutation "link: compose leaves the layer out when the setting is off" \
+  crates/geode-core/src/link.rs \
+  '            let layered = if include_layer {' \
+  '            let layered = if true {' \
+  geode-core compose_leaves_the_layer_out_when_the_setting_is_off
+
+run_mutation "link: an unscoped emitter composes on an empty base" \
+  crates/geode-core/src/link.rs \
+  '            let base = if unscoped { &empty } else { base };' \
+  '            let base = if false { &empty } else { base };' \
+  geode-core an_unscoped_emitter_composes_on_an_empty_base
+
+run_mutation "link: a NULL path names its column" \
+  crates/geode-core/src/link.rs \
+  '        CursorScope::NullIn(column) => (None, Some(column)),' \
+  '        CursorScope::NullIn(_) => (None, None),' \
+  geode-core nothing_and_a_null_path_post_no_scope_but_keep_the_board
 
 # ---- Vol slice viewer ----
 #
