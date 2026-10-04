@@ -9774,6 +9774,34 @@ grain = "underlying"
         }
     }
 
+    /// The production market-data panel follows: its link chooser, opened
+    /// by the shell's own chord, lists the follow rows beside the emit
+    /// rows, because the shell reads the panel content's `follows`.
+    #[gpui::test]
+    fn the_link_chooser_offers_a_market_data_panel_follow_rows(cx: &mut gpui::TestAppContext) {
+        init_grid_modules(cx);
+        let (services, _) = shell_with_one_grid_tile("cvi", None);
+        let window = open_shell_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+        };
+        draw(&mut vcx);
+        vcx.simulate_keystrokes("alt-u");
+        draw(&mut vcx);
+        for row in [
+            "link-choice-follow \u{00b7} workspace",
+            "link-choice-follow \u{00b7} A",
+            "link-choice-emit \u{00b7} A",
+        ] {
+            assert!(vcx.debug_bounds(row).is_some(), "{row} is listed");
+        }
+    }
+
     /// An override written against the retired `marketdata::down` keeps
     /// working in the market-data panel, only there, and warns naming both.
     #[gpui::test]

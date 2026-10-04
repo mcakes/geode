@@ -6,12 +6,13 @@
 use crate::core::draft::{DraftBadge, UpdatePolicy, local_hhmm};
 use crate::core::spec::KindAction;
 use geode_core::clock::Clock;
+use geode_core::link::Group;
 use geode_shell::actions::ActionId;
 use geode_tile::menu::{ActionRow, Hint, Row};
 use gpui::SharedString;
 
 /// Inputs for [`rows`]: draft state, upload availability, current update
-/// policy, and the kind's advertised actions. The tile can impose further
+/// policy, the kind's advertised actions, and the followed link group. The tile can impose further
 /// execution guards beyond this menu's enablement.
 pub struct MenuInputs<'a> {
     pub badge: DraftBadge,
@@ -19,6 +20,9 @@ pub struct MenuInputs<'a> {
     pub policy: UpdatePolicy,
     pub kind_title: &'a str,
     pub kind_actions: &'a [KindAction],
+    /// The link group the panel follows: its underlying is the group's, so
+    /// loading one is refused with the group's letter.
+    pub following: Option<Group>,
 }
 
 fn action(
@@ -55,17 +59,25 @@ fn policy_rows(policy: UpdatePolicy) -> impl Iterator<Item = Row<ActionId>> {
 
 /// Ordered actions: load, upload, rebase while behind, and revert; then
 /// update-policy choices and any kind-specific actions. Load stays enabled
-/// because the tile parks drafts by underlying. Policy choices are always
+/// with a dirty draft because the tile parks drafts by underlying; it is
+/// greyed only while the panel follows a group. Policy choices are always
 /// enabled because they configure later deliveries rather than edit the draft.
 pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<Row<ActionId>> {
     let dirty = !matches!(i.badge, DraftBadge::Clean);
     // Upload stays live while Behind: its confirm names the update it overrides.
     let mut out = vec![
-        action(
-            "marketdata::load_underlying",
-            "Load underlying…",
-            Hint::chord("marketdata::load_underlying"),
-            Ok(()),
+        // While following, the group sets the underlying; the row stays
+        // listed, greyed with the reason, so the trader sees where to go.
+        Row::Action(
+            ActionRow::new(
+                ActionId("marketdata::load_underlying".into()),
+                "Load underlying…",
+            )
+            .hint(Hint::chord("marketdata::load_underlying"))
+            .enabled(match i.following {
+                Some(g) => Err(format!("following {}", g.letter()).into()),
+                None => Ok(()),
+            }),
         ),
         action(
             "marketdata::upload",
@@ -136,6 +148,7 @@ mod tests {
             policy: UpdatePolicy::Hold,
             kind_title: "CVI",
             kind_actions: &CVI.actions,
+            following: None,
         }
     }
     fn checked(rows: &[Row<ActionId>]) -> Vec<(String, Option<bool>)> {
@@ -206,6 +219,31 @@ mod tests {
             Clock::utc(),
         );
         assert_eq!(enabled(&clean, "Upload"), Err("nothing to upload".into()));
+    }
+
+    /// A following panel's underlying is the group's: the row stays on the
+    /// list, greyed with the reason, so the trader sees why it does nothing.
+    #[test]
+    fn load_underlying_is_disabled_while_following() {
+        let rows = rows(
+            &MenuInputs {
+                following: Some(Group::A),
+                ..inputs(DraftBadge::Clean)
+            },
+            Clock::utc(),
+        );
+        assert_eq!(
+            enabled(&rows, "Load underlying…"),
+            Err("following A".into())
+        );
+        assert_eq!(
+            enabled(
+                &super::rows(&inputs(DraftBadge::Clean), Clock::utc()),
+                "Load underlying…"
+            ),
+            Ok(()),
+            "not following: live"
+        );
     }
 
     #[test]

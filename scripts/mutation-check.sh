@@ -13261,9 +13261,9 @@ run_mutation "mdpark: a key change parks the current draft instead of refusing" 
 run_mutation "mdpark: returning to an underlying restores its parked draft" \
   crates/geode-marketdata/src/tile.rs \
   '        self.unresolved_restore = !self.draft.is_empty();
-        self.key = Some(key);' \
+        self.key = key;' \
   '        self.unresolved_restore = false;
-        self.key = Some(key);' \
+        self.key = key;' \
   geode-marketdata \
   returning_to_an_underlying_restores_its_parked_draft
 
@@ -14758,10 +14758,11 @@ run_mutation "mdmenu: a command line closes the popup" \
 # preserves unsent work.
 run_mutation "mdpark: the menu's load row stays live on a dirty draft" \
   crates/geode-marketdata/src/core/menu.rs \
-  '            Hint::chord("marketdata::load_underlying"),
-            Ok(()),' \
-  '            Hint::chord("marketdata::load_underlying"),
-            if dirty { Err("revert or upload first") } else { Ok(()) },' \
+  '                None => Ok(()),
+            }),' \
+  '                None if dirty => Err("revert or upload first".into()),
+                None => Ok(()),
+            }),' \
   geode-marketdata a_dirty_draft_leaves_load_live_and_a_built_upload_is_live
 
 # Blur, THEN drop (`close_editor`'s own order, here for the picker):
@@ -26312,8 +26313,8 @@ run_mutation "launch: a pick reads the context at commit" \
 
 run_mutation "launch: a panel with a key is prompted anyway" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.key.is_none() && self.popup.is_none() {' \
-  '        if self.popup.is_none() {' \
+  '        if self.key.is_none() && self.popup.is_none() && self.frame.read(cx).following().is_none() {' \
+  '        if self.popup.is_none() && self.frame.read(cx).following().is_none() {' \
   geode-marketdata a_launched_panel_on_an_underlying_opens_no_picker
 
 run_mutation "launch: a mixed package names its first leg's underlying" \
@@ -34737,6 +34738,86 @@ run_mutation "link: the settings row sets the filter" \
   '                shell.set_link_filter(on, cx);' \
   '                let _ = on;' \
   geode-shell tab_steps_the_link_filter_row
+
+# ---- Market data follows a link group ----
+#
+# A panel following a group takes the group scope's one `underlying_ref` as
+# its key, switching through `set_key` (draft parked); its own underlying
+# controls refuse while it follows.
+
+run_mutation "link: market data follows" \
+  crates/geode-marketdata/src/content.rs \
+  '    fn follows(&self) -> bool {
+        true
+    }' \
+  '    fn follows(&self) -> bool {
+        false
+    }' \
+  geode-app the_link_chooser_offers_a_market_data_panel_follow_rows
+
+run_mutation "link: a following panel switches on the group's move" \
+  crates/geode-marketdata/src/tile.rs \
+  '            if this.sync_followed_underlying(window, cx) {' \
+  '            if false {' \
+  geode-marketdata a_following_panel_takes_the_groups_underlying
+
+run_mutation "link: a following panel's switch answers the flip on delivery" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.set_key(target.map(|u| vec![u]), window, cx);
+        self.visible && self.key.is_some()' \
+  '        self.set_key(target.map(|u| vec![u]), window, cx);
+        false' \
+  geode-marketdata a_following_panel_takes_the_groups_underlying
+
+run_mutation "link: a group naming no underlying empties the panel" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let current = self.key.as_ref().and_then(|k| k.first());
+        if target.as_ref() == current {' \
+  '        let current = self.key.as_ref().and_then(|k| k.first());
+        if target.is_none() || target.as_ref() == current {' \
+  geode-marketdata a_following_panel_shows_nothing_when_the_group_names_no_single_underlying
+
+run_mutation "link: a keyless switch self-arrives" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.visible && self.key.is_some() {
+            self.requery(cx);' \
+  '        if self.visible {
+            self.requery(cx);' \
+  geode-marketdata a_following_panel_shows_nothing_when_the_group_names_no_single_underlying
+
+run_mutation "link: a following panel refuses u" \
+  crates/geode-marketdata/src/tile.rs \
+  '            "load_underlying" => {
+                if let Some(g) = self.frame.read(cx).following() {' \
+  '            "load_underlying" => {
+                if let Some(g) = None::<Group> {' \
+  geode-marketdata the_underlying_controls_refuse_while_following
+
+run_mutation "link: a following panel refuses :underlying" \
+  crates/geode-marketdata/src/tile.rs \
+  '            Command::Key(key) => {
+                if let Some(g) = self.frame.read(cx).following() {' \
+  '            Command::Key(key) => {
+                if let Some(g) = None::<Group> {' \
+  geode-marketdata the_underlying_controls_refuse_while_following
+
+run_mutation "link: a keyless following panel is not prompted" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.key.is_none() && self.popup.is_none() && self.frame.read(cx).following().is_none() {' \
+  '        if self.key.is_none() && self.popup.is_none() {' \
+  geode-marketdata the_underlying_controls_refuse_while_following
+
+run_mutation "link: the menu greys load while following" \
+  crates/geode-marketdata/src/tile.rs \
+  '                following: self.frame.read(cx).following(),' \
+  '                following: None,' \
+  geode-marketdata the_underlying_controls_refuse_while_following
+
+run_mutation "link: the load row names the followed group" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '                Some(g) => Err(format!("following {}", g.letter()).into()),' \
+  '                Some(_) => Ok(()),' \
+  geode-marketdata load_underlying_is_disabled_while_following
 
 # ---- Vol slice viewer ----
 #

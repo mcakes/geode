@@ -258,13 +258,15 @@ impl TileContent for MarketDataContent {
     fn launched(&self, window: &mut Window, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.launched(window, cx))
     }
+    /// A panel takes its underlying from a group it follows: the group
+    /// scope's one `underlying_ref`, or none.
+    fn follows(&self) -> bool {
+        true
+    }
     /// A panel can always emit: the answer is the kind's capability, not
     /// whether an underlying is named or a document has arrived. The shell
     /// drops a restored membership for a tile that answers `false` right
-    /// after create, before either can have happened. `follows` keeps its
-    /// default, false: a panel shows the document its own underlying names
-    /// and never reads the frame's scope, so a group would change nothing
-    /// it shows.
+    /// after create, before either can have happened.
     fn emits(&self) -> bool {
         true
     }

@@ -198,11 +198,21 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   that moves the underlying, the draft or the painted document must notify
   it: a one-cell commit, which refills its cell through the table entity,
   notifies the tile as well.
-- A panel emits only. `follows` keeps its default, false: the panel does
-  not read the frame's scope and does not take its underlying from a group,
-  so the shell offers it no follow row and refuses to set it following. The
-  tile stores no group; its header reads `link_chips` from its frame handle
-  at paint.
+- A panel follows as well as emits (`follows` is true). While it follows a
+  group, its underlying is the group scope's one `underlying_ref`
+  (`geode_core::link::underlying_of`), or none (the empty state) when the
+  scope names zero or several. The frame observer compares it on every
+  notification (`sync_followed_underlying`) and switches through `set_key`,
+  so a dirty draft is parked as on any switch; the switch's requery answers
+  the flip barrier on delivery, and a move that keeps the underlying, or
+  leaves none, self-arrives. While following, `u`, `:underlying`/`:key`, a
+  picker opened earlier and the add-time auto-prompt refuse with
+  `following A — set the underlying there`, and the menu's `Load
+  underlying…` row is greyed `following A`. Unfollowing keeps the
+  underlying the group last gave. The session saves the underlying as
+  always; a restored follower is switched when the shell restores its
+  follow. The tile stores no group; its header reads `link_chips` from its
+  frame handle at paint.
 
 ## Input and popup contracts
 

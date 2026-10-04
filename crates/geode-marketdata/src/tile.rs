@@ -6,7 +6,8 @@
 //! appear in the table header.
 //!
 //! Requests follow as-of and publication versions for this dataset and key. Scope,
-//! grouping, and flip changes do not trigger document queries. The tile still answers
+//! grouping, and flip changes do not trigger document queries, except that a panel
+//! following a link group takes the group scope's one underlying as its key. The tile still answers
 //! flip barriers: deliveries can wait for a coordinated promotion, while changes
 //! requiring no query are acknowledged directly. Promotion checks the followed
 //! versions, so an unrelated barrier replacement cannot discard the only staged answer
@@ -38,7 +39,7 @@ use crate::popup::{ChoicePopup, PickerRows, PickerState, Popup, render_picker};
 use geode_core::colour::{Rgb, contrast_ratio, readable_on};
 use geode_core::document::{DocumentRows, Value, split_key};
 use geode_core::grid::selection::{Resolved, SelectKind, Selection};
-use geode_core::link::{BoardEntry, CursorScope, DraftMark, Emission, underlying_scope};
+use geode_core::link::{BoardEntry, CursorScope, DraftMark, Emission, Group, underlying_scope};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
@@ -686,6 +687,12 @@ pub struct MarketDataTile {
     assembles: StdCell<usize>,
 }
 
+/// The refusal a following panel's own underlying controls give: the group
+/// sets the underlying, so the trader is sent there.
+fn following_refusal(g: Group) -> String {
+    format!("following {} \u{2014} set the underlying there", g.letter())
+}
+
 impl MarketDataTile {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -842,7 +849,13 @@ impl MarketDataTile {
             |this, _, event: &CellPointer, window, cx| this.pointer(*event, window, cx),
         )
         .detach();
-        cx.observe(frame.entity(), |this, _frame, cx| {
+        cx.observe_in(frame.entity(), window, |this, _frame, window, cx| {
+            // A followed group's move switches the document first; the
+            // switch's requery answers the barrier on delivery, so nothing
+            // below applies.
+            if this.sync_followed_underlying(window, cx) {
+                return;
+            }
             // Promote before the visibility check, so a panel hidden after
             // staging still lands its answer. A flip releases prepared
             // results; it never triggers a document query.
@@ -2626,8 +2639,14 @@ impl MarketDataTile {
                 true
             }
             "load_underlying" => {
-                self.open_picker(window, cx);
-                false
+                if let Some(g) = self.frame.read(cx).following() {
+                    // The group sets the underlying: the header says where.
+                    self.notice = Some(following_refusal(g).into());
+                    true
+                } else {
+                    self.open_picker(window, cx);
+                    false
+                }
             }
             // Step a choice cell forward or backward without opening its popup.
             "step" | "step_back" => {
@@ -3618,6 +3637,7 @@ impl MarketDataTile {
                 policy: self.policy,
                 kind_title: &self.spec.title,
                 kind_actions: &self.spec.actions,
+                following: self.frame.read(cx).following(),
             },
             self.clock,
         );
@@ -3665,7 +3685,7 @@ impl MarketDataTile {
     /// launched panel that already has a key (a context launch, a
     /// duplicate) does nothing. Escape leaves the empty panel, as `u` does.
     pub(crate) fn launched(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.key.is_none() && self.popup.is_none() {
+        if self.key.is_none() && self.popup.is_none() && self.frame.read(cx).following().is_none() {
             self.open_picker(window, cx);
         }
     }
@@ -3741,7 +3761,14 @@ impl MarketDataTile {
         };
         let key = p.rows.all()[i].clone();
         self.close_popup_with_window(window, cx);
-        self.set_key(parse_display_key(&key), window, cx);
+        // A picker opened before the panel joined a group must not set the
+        // underlying the group now owns.
+        if let Some(g) = self.frame.read(cx).following() {
+            self.notice = Some(following_refusal(g).into());
+            self.changed(cx);
+            return;
+        }
+        self.set_key(Some(parse_display_key(&key)), window, cx);
     }
 
     // Choice-cell typeahead and stepping.
@@ -4428,7 +4455,10 @@ impl MarketDataTile {
         }
         match command {
             Command::Key(key) => {
-                self.set_key(key, window, cx);
+                if let Some(g) = self.frame.read(cx).following() {
+                    return Err(following_refusal(g));
+                }
+                self.set_key(Some(key), window, cx);
                 Ok(())
             }
             Command::Revert => self.revert(cx),
@@ -4566,9 +4596,10 @@ impl MarketDataTile {
     ///
     /// Cancel uncommitted editor text before parking. Otherwise a same-label target
     /// could commit that text into the next key's draft. Drafts without an outgoing key
-    /// remain available for the first named key to claim.
-    fn set_key(&mut self, key: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.key.as_deref() == Some(key.as_slice()) {
+    /// remain available for the first named key to claim. `None` leaves the panel on
+    /// no underlying (a followed group naming none), its draft parked.
+    fn set_key(&mut self, key: Option<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.key == key {
             return;
         }
         if self.editor.is_some() {
@@ -4596,11 +4627,13 @@ impl MarketDataTile {
             self.capture_groups_if_base(&mut draft);
             self.parked.insert(outgoing, draft.to_toml());
         }
-        if let Some(table) = self.parked.remove(&key) {
+        if let Some(k) = &key
+            && let Some(table) = self.parked.remove(k)
+        {
             self.draft = Draft::from_toml(&table);
         }
         self.unresolved_restore = !self.draft.is_empty();
-        self.key = Some(key);
+        self.key = key;
         self.title = Self::compute_title(&self.spec, self.key.as_deref());
         // What an echo said belongs to the outgoing underlying's upload.
         self.echo = None;
@@ -4616,11 +4649,32 @@ impl MarketDataTile {
         self.cursor = Cursor::Cell { row: 0, col: 0 };
         self.last_grid_col = 0;
         self.rebuild_model(cx);
-        if self.visible {
+        if self.visible && self.key.is_some() {
             self.requery(cx);
         } else {
             self.changed(cx);
         }
+    }
+
+    /// While following, the panel's underlying is the group scope's one
+    /// `underlying_ref`, or none when it names zero or several. A change goes
+    /// through `set_key`, so a dirty draft is parked as on any switch. `true`
+    /// when it issued a requery, which answers the flip barrier on delivery;
+    /// otherwise the caller must still answer it.
+    fn sync_followed_underlying(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let target = {
+            let frame = self.frame.read(cx);
+            if frame.following().is_none() {
+                return false;
+            }
+            geode_core::link::underlying_of(frame.scope()).map(str::to_owned)
+        };
+        let current = self.key.as_ref().and_then(|k| k.first());
+        if target.as_ref() == current {
+            return false;
+        }
+        self.set_key(target.map(|u| vec![u]), window, cx);
+        self.visible && self.key.is_some()
     }
 
     /// Prepare picker marks from parked draft count phrases once per open. The current
@@ -17284,14 +17338,13 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         assert_eq!(mark(&h, &mut vcx), DraftMark::Sent);
     }
 
-    /// A panel shows the document its own underlying names and never reads
-    /// the frame's scope, so it cannot follow a link group; it emits its
-    /// underlying and its draft. The chooser offers each row on these
-    /// answers.
+    /// A panel can follow a link group (its underlying is then the
+    /// group's) and emits its underlying and its draft. The chooser offers
+    /// each row on these answers.
     #[gpui::test]
-    fn a_panel_emits_and_does_not_follow(cx: &mut gpui::TestAppContext) {
+    fn a_panel_emits_and_follows(cx: &mut gpui::TestAppContext) {
         let (h, _vcx) = open(cx);
-        assert!(!h.content.follows());
+        assert!(h.content.follows());
         assert!(h.content.emits());
     }
 
@@ -17415,6 +17468,269 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         let nky = emission_of(&h, &mut vcx);
         assert_eq!(nky.cursor, on("NKY.Z"));
         assert!(nky.board.is_empty());
+    }
+
+    // ---- Following a link group --------------------------------------
+
+    /// The tile that emits into group A in these tests: another tile, as a
+    /// blotter would be.
+    const EMITTER: TileId = TileId(9);
+
+    fn path(pairs: &[(&str, &str)]) -> geode_core::scope::Scope {
+        geode_core::link::path_scope(
+            &pairs
+                .iter()
+                .map(|(c, v)| (c.to_string(), v.to_string()))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Group A's scope moves to `scope`, posted by the emitter, and the
+    /// shell enrols the panel in the flip under its own reading (the
+    /// group's scope generation), as `extend_flip` does, then notifies:
+    /// the delivery route a follower sees.
+    fn move_group_a(
+        h: &Harness,
+        vcx: &mut gpui::VisualTestContext,
+        scope: geode_core::scope::Scope,
+    ) {
+        let bound = FrameRef::for_tile(h.frame.clone(), WorkspaceIx::FIRST, TileId(TILE));
+        bound.update(vcx, |f, cx| {
+            f.post_for_test(
+                EMITTER,
+                geode_core::link::Posting {
+                    scope: Some(scope),
+                    board: Vec::new(),
+                },
+            );
+            f.open_flip([QueryKey(TILE)], Instant::now());
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+
+    /// The emitter emits into A, A names `scope`, then the panel follows A.
+    fn follow_a(h: &Harness, vcx: &mut gpui::VisualTestContext, scope: geode_core::scope::Scope) {
+        use geode_core::link::{Group, Membership};
+        h.frame.update(vcx, |f, cx| {
+            f.link_for_test(
+                EMITTER,
+                Membership {
+                    follow: None,
+                    emit: Some(Group::A),
+                },
+            );
+            f.post_for_test(
+                EMITTER,
+                geode_core::link::Posting {
+                    scope: Some(scope),
+                    board: Vec::new(),
+                },
+            );
+            f.link_for_test(
+                TileId(TILE),
+                Membership {
+                    follow: Some(Group::A),
+                    emit: None,
+                },
+            );
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+
+    fn key_of(h: &Harness, vcx: &gpui::VisualTestContext) -> Option<Vec<String>> {
+        h.tile.read_with(vcx, |t, _| t.key.clone())
+    }
+
+    /// A following panel's underlying is the group scope's one
+    /// `underlying_ref`, whatever else the scope selects; the switch asks
+    /// for that document and its delivery answers the flip.
+    #[gpui::test]
+    fn a_following_panel_takes_the_groups_underlying(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_bound(cx);
+        assert!(h.content.follows(), "the chooser offers follow rows");
+        h.with_document(&mut vcx);
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+        assert!(h.document_request().is_none(), "already on SPX.Z");
+
+        move_group_a(
+            &h,
+            &mut vcx,
+            path(&[("book", "X"), ("underlying_ref", "NDX")]),
+        );
+        assert_eq!(key_of(&h, &vcx), Some(vec!["NDX".to_string()]));
+        let req = h.document_request().expect("the switch asks for NDX");
+        assert_eq!(req.document_key, vec!["NDX".to_string()]);
+        assert!(
+            h.barrier_open(&vcx),
+            "the panel has asked and has nothing to paint yet"
+        );
+        h.deliver(&mut vcx, req.tag, Arc::new(cvi(BASE)));
+        assert!(!h.barrier_open(&vcx), "the delivery is the arrival");
+    }
+
+    /// A group scope that names no single underlying leaves the panel on
+    /// none: the empty state, not the last underlying under a group that
+    /// no longer selects it. It asks nothing, so it answers the flip at
+    /// once.
+    #[gpui::test]
+    fn a_following_panel_shows_nothing_when_the_group_names_no_single_underlying(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_bound(cx);
+        h.with_document(&mut vcx);
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+        assert!(h.rows(&vcx) > 0, "sanity: SPX.Z is painted");
+        assert!(
+            h.header_texts(&vcx).iter().any(|t| t.contains("SPX.Z")),
+            "sanity: the header names SPX.Z"
+        );
+
+        move_group_a(&h, &mut vcx, path(&[("book", "X")]));
+        assert_eq!(key_of(&h, &vcx), None);
+        assert_eq!(h.rows(&vcx), 0, "the empty state");
+        assert!(h.document_request().is_none(), "nothing to ask for");
+        assert!(!h.barrier_open(&vcx), "the panel answered the flip itself");
+        let header = h.header_texts(&vcx);
+        assert!(
+            !header.iter().any(|t| t.contains("SPX.Z")),
+            "the header no longer names SPX.Z: {header:?}"
+        );
+    }
+
+    /// A group move that keeps the underlying asks nothing: the document
+    /// depends only on the underlying and the as-of. The panel answers the
+    /// flip itself instead of holding every other tile to the deadline.
+    #[gpui::test]
+    fn a_following_panel_answers_a_flip_that_keeps_its_underlying(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_bound(cx);
+        h.with_document(&mut vcx);
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+        let _ = h.document_request();
+
+        move_group_a(
+            &h,
+            &mut vcx,
+            path(&[("book", "X"), ("underlying_ref", "SPX.Z")]),
+        );
+        assert_eq!(key_of(&h, &vcx), Some(vec!["SPX.Z".to_string()]));
+        assert!(h.document_request().is_none(), "nothing asked");
+        assert!(!h.barrier_open(&vcx), "the follower answered the flip");
+    }
+
+    /// The group's move is a key switch like any other: the outgoing
+    /// underlying's edits are parked, and coming back restores them as
+    /// Editing.
+    #[gpui::test]
+    fn a_following_panel_parks_its_draft_when_the_group_moves(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_bound(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.9");
+        h.dispatch(&mut vcx, "commit", None);
+        h.command(&mut vcx, "set spot_ref 4520").unwrap();
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 2);
+        // An editor open when the group moves is cancelled by the switch,
+        // inside the frame observer: its text reaches no draft.
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "1.1");
+
+        move_group_a(&h, &mut vcx, path(&[("underlying_ref", "NDX")]));
+        assert_eq!(h.editor_value(&vcx), None, "the switch closed the editor");
+        assert_eq!(h.mode(&vcx), "normal");
+        let (len, parked) = h.tile.read_with(&vcx, |t, _| (t.draft().len(), t.parked()));
+        assert_eq!(len, 0, "NDX starts clean");
+        assert_eq!(
+            parked,
+            vec![("SPX.Z".to_string(), "1 cell, spot_ref".to_string())],
+            "SPX.Z's edits are parked under SPX.Z"
+        );
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        move_group_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+        assert!(h.tile.read_with(&vcx, |t, _| t.parked()).is_empty());
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        let (text, edited) = h.cell(&vcx, 0, 0);
+        assert_eq!(text, "9.90");
+        assert!(edited, "the cell edit is back on its cell");
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().state.clone()),
+            DraftState::Editing
+        );
+    }
+
+    /// While following, the panel's own underlying controls refuse: `u`
+    /// says where the underlying is set, `:underlying` returns the same
+    /// refusal, the menu row is greyed, and a launched keyless panel opens
+    /// no picker.
+    #[gpui::test]
+    fn the_underlying_controls_refuse_while_following(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_bound(cx);
+        h.with_document(&mut vcx);
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+        let refusal = "following A \u{2014} set the underlying there";
+        let picker_open = |vcx: &gpui::VisualTestContext| {
+            h.tile
+                .read_with(vcx, |t, _| matches!(t.popup, Some(Popup::Picker(_))))
+        };
+
+        h.dispatch(&mut vcx, "load_underlying", None);
+        assert!(!picker_open(&vcx), "no picker");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(refusal.to_string())
+        );
+
+        assert_eq!(
+            h.command(&mut vcx, "underlying NDX"),
+            Err(refusal.to_string())
+        );
+        assert_eq!(key_of(&h, &vcx), Some(vec!["SPX.Z".to_string()]));
+
+        h.dispatch(&mut vcx, "menu", None);
+        let reason = h.tile.read_with(&vcx, |t, _| match &t.popup {
+            Some(Popup::Menu(m)) => m
+                .rows()
+                .iter()
+                .find_map(|r| {
+                    r.action()
+                        .filter(|a| a.title().as_ref() == "Load underlying…")
+                })
+                .and_then(|a| a.reason().map(|r| r.to_string())),
+            _ => panic!("the menu is open"),
+        });
+        assert_eq!(reason.as_deref(), Some("following A"));
+        h.dispatch(&mut vcx, "menu_close", None);
+
+        move_group_a(&h, &mut vcx, path(&[("book", "X")]));
+        assert_eq!(key_of(&h, &vcx), None);
+        h.launched(&mut vcx);
+        assert!(
+            !picker_open(&vcx),
+            "a keyless follower is not asked for one"
+        );
+    }
+
+    /// Leaving the group keeps the underlying it last gave, and the
+    /// panel's own controls work again.
+    #[gpui::test]
+    fn unfollowing_keeps_the_groups_last_underlying(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_bound(cx);
+        h.with_document(&mut vcx);
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "NDX")]));
+        let _ = h.document_request();
+        h.frame.update(&mut vcx, |f, cx| {
+            f.link_for_test(TileId(TILE), geode_core::link::Membership::default());
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(key_of(&h, &vcx), Some(vec!["NDX".to_string()]));
+        assert_eq!(h.command(&mut vcx, "underlying NKY.Z"), Ok(()));
     }
 
     mod selection;
