@@ -24,8 +24,9 @@ pub use handle::{DataHandle, REQUEST_BOUND, Refusal, Request};
 pub use pricing::{PricerConfig, PricerRegistry};
 pub use service::{
     ContextColumns, DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget,
-    QueryParams,
+    QueryParams, StoreRole,
 };
+pub use store::stamp::STORE_FORMAT;
 pub use vol::{VolConfig, VolModelRegistry};
 
 #[cfg(test)]

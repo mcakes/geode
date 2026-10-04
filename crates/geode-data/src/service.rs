@@ -27,7 +27,7 @@ use crate::query::read::{ReadConfig, ReadQuery};
 use crate::query::series::compile_series;
 use crate::source::SourceSpec;
 use crate::store::catalog::BookFreshness;
-use crate::store::{Catalog, Store, StoreError};
+use crate::store::{Catalog, Store, StoreError, StoreOptions, stamp};
 use crate::vol::{VolConfig, VolSink, VolWorker};
 use chrono::{DateTime, Utc};
 use geode_core::config::{Diagnostic, Severity};
@@ -58,6 +58,18 @@ use std::time::{Duration, Instant, SystemTime};
 /// startup, read per query, and a request would need its own arm in every
 /// request match.
 pub type ContextColumns = Arc<Mutex<Vec<String>>>;
+
+/// Which process opens the store, and so how the store-format stamp is
+/// treated (`store::stamp`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreRole {
+    /// Today's open plus the stamp write: this build's DDL defines the
+    /// layout, so it stamps after creating its tables. `spawn` uses this.
+    Direct,
+    /// The background collector: the stamp must match before any DDL runs
+    /// (an unstamped store is stamped); `memory_limit` is set on the writer.
+    Collector { memory_limit: Option<String> },
+}
 
 pub struct DataServiceConfig {
     pub db_path: PathBuf,
@@ -955,10 +967,36 @@ pub struct DataService {
 
 impl DataService {
     pub fn open(config: DataServiceConfig, sink: EventSink) -> Result<DataService, StoreError> {
+        Self::open_as(config, sink, &StoreRole::Direct)
+    }
+
+    fn open_as(
+        config: DataServiceConfig,
+        sink: EventSink,
+        role: &StoreRole,
+    ) -> Result<DataService, StoreError> {
         // Captured before every closure below clones `sink` for its own
         // use, so `publish`'s refusal path can send through it directly.
         let stored_sink = Arc::clone(&sink);
-        let mut store = Store::open(&config.db_path)?;
+        let options = match role {
+            StoreRole::Direct => StoreOptions::default(),
+            StoreRole::Collector { memory_limit } => StoreOptions {
+                memory_limit: memory_limit.clone(),
+            },
+        };
+        let mut store = Store::open_with(&config.db_path, &options)?;
+        // The collector checks the stamp before any other DDL, so a store of
+        // another format gains no table from it.
+        if matches!(role, StoreRole::Collector { .. }) {
+            store
+                .writer()
+                .execute_batch(stamp::META_DDL)
+                .map_err(|source| StoreError::Sql {
+                    statement: stamp::META_DDL.to_string(),
+                    source,
+                })?;
+            stamp::check(store.writer())?;
+        }
         // A computed dataset is answered by a module in process; it owns no
         // table and so has no generation summary to rebuild.
         for ds in config.schema.datasets.iter().filter(|d| !d.computed) {
@@ -970,6 +1008,9 @@ impl DataService {
             }
         }
         Catalog::new(store.writer()).ensure_tables()?;
+        if *role == StoreRole::Direct {
+            stamp::write(store.writer())?;
+        }
         // Pruned and read before the runner takes the writer: the only store
         // access a subscription's recovery needs. A failure costs the recovery,
         // never the open; the source still subscribes. Only topics a pattern
@@ -8060,6 +8101,95 @@ source_name = "NPV"
              publish must not double-send Ok"
         );
         svc.shutdown();
+    }
+
+    #[test]
+    fn a_direct_open_stamps_the_store_with_this_builds_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("geode.duckdb");
+        let (svc, _rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db_path.clone(),
+            schema: SchemaSpec::default(),
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+            positions: None,
+        })
+        .unwrap();
+        svc.shutdown();
+        assert_eq!(
+            stamp::read_format(&db_path).unwrap(),
+            Some(stamp::STORE_FORMAT)
+        );
+    }
+
+    #[test]
+    fn a_collector_open_refuses_another_format_before_any_ddl() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("geode.duckdb");
+        {
+            let store = crate::store::Store::open(&db_path).unwrap();
+            store
+                .writer()
+                .execute_batch(&format!(
+                    "{} insert into geode_meta values ('store_format', '{}');",
+                    stamp::META_DDL,
+                    stamp::STORE_FORMAT + 1
+                ))
+                .unwrap();
+        }
+        let ds = crate::store::ddl::tests_support::sample_dataset();
+        let dataset = ds.name.clone();
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let sink: EventSink = Arc::new(|_| true);
+        let opened = DataService::open_as(
+            DataServiceConfig {
+                db_path: db_path.clone(),
+                schema,
+                views: Vec::new(),
+                dimensions: DerivedDimensions::default(),
+                query_workers: 1,
+                sources: Vec::new(),
+                adapters: Default::default(),
+                documents: Default::default(),
+                egress: Vec::new(),
+                clock: geode_core::clock::Clock::utc(),
+                pricer: PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
+                positions: None,
+            },
+            sink,
+            &StoreRole::Collector { memory_limit: None },
+        );
+        match opened {
+            Err(StoreError::FormatMismatch { found, expected }) => {
+                assert_eq!(
+                    (found, expected),
+                    (stamp::STORE_FORMAT + 1, stamp::STORE_FORMAT)
+                );
+            }
+            Err(other) => panic!("expected FormatMismatch, got {other}"),
+            Ok(_) => panic!("a collector opened a store of another format"),
+        }
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        let count = |pattern: &str| -> i64 {
+            conn.query_row(
+                "select count(*) from duckdb_tables() where table_name like ?",
+                [pattern],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count(&format!("{dataset}%")), 0, "no payload table created");
+        assert_eq!(count("file_generations"), 0, "no catalog table created");
     }
 
     #[test]

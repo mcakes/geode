@@ -1274,6 +1274,36 @@ run_mutation "catalog: a partition's live generation is its own" \
   geode-data \
   live_generation_is_the_partitions_newest_and_moves_on_a_same_time_republish
 
+# The store-format stamp (store/stamp.rs). A collector built for one layout
+# must not write into a store of another; the app stamps what it opens.
+run_mutation "stamp: a different format refuses the collector" \
+  crates/geode-data/src/store/stamp.rs \
+  'Some(found) if found != STORE_FORMAT => Err(StoreError::FormatMismatch {' \
+  'Some(found) if false => Err(StoreError::FormatMismatch {' \
+  geode-data \
+  a_check_refuses_a_different_format_naming_both
+
+run_mutation "stamp: the collector checks before any DDL" \
+  crates/geode-data/src/service.rs \
+  '            stamp::check(store.writer())?;' \
+  '            let _ = store.writer();' \
+  geode-data \
+  a_collector_open_refuses_another_format_before_any_ddl
+
+run_mutation "stamp: a direct open stamps the store" \
+  crates/geode-data/src/service.rs \
+  '            stamp::write(store.writer())?;' \
+  '            let _ = store.writer();' \
+  geode-data \
+  a_direct_open_stamps_the_store_with_this_builds_format
+
+run_mutation "store: the memory limit escapes a quote" \
+  crates/geode-data/src/store/mod.rs \
+  $'limit.replace(\'\\\'\', "\'\'")' \
+  $'limit.replace(\'\\\'\', "\'")' \
+  geode-data \
+  open_with_sets_the_memory_limit_for_the_writer_and_its_readers
+
 run_mutation "catalog: a generation that never went live is not fresh" \
   crates/geode-data/src/store/catalog.rs \
   '                       where fg.dataset = ?

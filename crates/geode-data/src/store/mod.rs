@@ -12,6 +12,7 @@ pub mod publish;
 pub mod reference;
 pub mod retention;
 pub mod series;
+pub mod stamp;
 pub mod topics;
 
 pub use catalog::{AttributeConflict, Catalog, FileGeneration, FileId};
@@ -50,6 +51,17 @@ pub enum StoreError {
     /// The dataset's payload tables drifted from its declaration at open
     /// (`store::drift`). The reason names the differences and the recovery.
     Drift(String),
+    /// The store was stamped by a build with a different on-disk layout
+    /// (`stamp::STORE_FORMAT`). Raised before any DDL runs against it.
+    FormatMismatch { found: u32, expected: u32 },
+}
+
+/// How `Store::open_with` configures the writer before readers clone it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoreOptions {
+    /// DuckDB's `memory_limit` (for example `512MB`); `None` keeps DuckDB's
+    /// default. Set on the writer, so every reader cloned from it shares it.
+    pub memory_limit: Option<String>,
 }
 
 impl std::fmt::Display for StoreError {
@@ -68,6 +80,11 @@ impl std::fmt::Display for StoreError {
             StoreError::Series(reason) => write!(f, "series: {reason}"),
             StoreError::Scope(reason) => write!(f, "scope: {reason}"),
             StoreError::Drift(reason) => write!(f, "{reason}"),
+            StoreError::FormatMismatch { found, expected } => write!(
+                f,
+                "the store has format {found}, this build reads format {expected}; \
+                 open it with a matching build or delete the store to rebuild it"
+            ),
         }
     }
 }
@@ -101,6 +118,11 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Store, StoreError> {
+        Store::open_with(path, &StoreOptions::default())
+    }
+
+    /// Open with `options` applied to the writer before any reader is cloned.
+    pub fn open_with(path: impl AsRef<Path>, options: &StoreOptions) -> Result<Store, StoreError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -109,6 +131,12 @@ impl Store {
             path: path.clone(),
             source,
         })?;
+        if let Some(limit) = &options.memory_limit {
+            let statement = format!("SET memory_limit = '{}'", limit.replace('\'', "''"));
+            writer
+                .execute_batch(&statement)
+                .map_err(|source| StoreError::Sql { statement, source })?;
+        }
         Ok(Store {
             writer,
             path,
@@ -215,6 +243,51 @@ pub(crate) fn managed_tables(ds: &DatasetSpec) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_with_sets_the_memory_limit_for_the_writer_and_its_readers() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = StoreOptions {
+            memory_limit: Some("256MB".into()),
+        };
+        let store = Store::open_with(dir.path().join("geode.duckdb"), &options).unwrap();
+        let limit = |conn: &Connection| -> String {
+            conn.query_row("select current_setting('memory_limit')", [], |r| r.get(0))
+                .unwrap()
+        };
+        let set = limit(store.writer());
+        assert_ne!(
+            set,
+            limit(&Connection::open_in_memory().unwrap()),
+            "the default"
+        );
+        assert_eq!(limit(&store.reader().unwrap()), set);
+        // A quote in the value is escaped: the whole value is refused as a
+        // bad limit, and nothing after the quote runs as SQL.
+        let other = dir.path().join("other.duckdb");
+        Store::open(&other)
+            .unwrap()
+            .writer()
+            .execute_batch("create table x(i integer)")
+            .unwrap();
+        let bad = StoreOptions {
+            memory_limit: Some("1GB'; drop table x; --".into()),
+        };
+        let err = Store::open_with(&other, &bad)
+            .err()
+            .expect("an unparsable limit is refused");
+        assert!(matches!(err, StoreError::Sql { .. }), "{err}");
+        let tables: i64 = Store::open(&other)
+            .unwrap()
+            .writer()
+            .query_row(
+                "select count(*) from duckdb_tables() where table_name = 'x'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 1, "the text after the quote did not run");
+    }
 
     #[test]
     fn opens_a_persistent_database_that_survives_reopen() {

@@ -186,6 +186,7 @@ pub fn existing_enum_types(
     rows.collect::<Result<Vec<_>, _>>().map_err(err)
 }
 
+// Any change to this DDL bumps `STORE_FORMAT` (`store::stamp`).
 pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> String {
     let mut cols: Vec<String> = Vec::new();
 
@@ -245,6 +246,7 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
 /// and `source_time` so outgoing rows retain their historical identity.
 /// Document-level attributes repeat on each row because documents are published,
 /// replaced, and read as a whole.
+// Any change to this DDL bumps `STORE_FORMAT` (`store::stamp`).
 pub fn create_document_table_sql(ds: &DatasetSpec, kind: TableKind) -> String {
     payload_table_sql(ds, TablePair::for_document(&ds.name).of(kind))
 }
@@ -252,6 +254,7 @@ pub fn create_document_table_sql(ds: &DatasetSpec, kind: TableKind) -> String {
 /// Create a reference table: the document table's shape under the
 /// reference pair's name. `batch` is the dataset name — a reference table is
 /// one partition, published and replaced whole — and `book` is NULL.
+// Any change to this DDL bumps `STORE_FORMAT` (`store::stamp`).
 pub fn create_reference_table_sql(ds: &DatasetSpec, kind: TableKind) -> String {
     payload_table_sql(ds, TablePair::for_reference(&ds.name).of(kind))
 }

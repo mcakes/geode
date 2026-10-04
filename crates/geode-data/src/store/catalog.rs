@@ -61,7 +61,12 @@ pub struct Catalog<'a> {
     conn: &'a Connection,
 }
 
+// Any change to this DDL, or to the series, document, reference or staging
+// DDL, bumps `STORE_FORMAT` (`store::stamp`).
 const DDL: &str = "
+-- The store-format stamp (`store::stamp`); `stamp::META_DDL` is the same
+-- statement, run alone by the collector before its format check.
+CREATE TABLE IF NOT EXISTS geode_meta (key VARCHAR PRIMARY KEY, value VARCHAR NOT NULL);
 CREATE TABLE IF NOT EXISTS file_generations (
   file_id BIGINT PRIMARY KEY,
   dataset VARCHAR,
