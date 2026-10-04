@@ -454,9 +454,10 @@ build is never read. A mutation entry checks that a mismatch refuses.
   and writes in its own layout.
 - A handoff during a large file load misses the 500 ms target and the 2 s
   drain cap: the release lets the running load finish, so the handoff lasts
-  the rest of that load (about 1.9 s at 1,000,000 rows, 4.5 s at
-  2,000,000, measured with a `memory_limit` of 512MB and 1GB). A load longer than the app's 15 s deadline fails the app's
-  open. Right after a collector opens, draining its startup burst takes
+  the rest of that load (about 1.9 s at 1,000,000 rows and 4.5 s at
+  2,000,000, measured with a `memory_limit` of 512MB and 1GB
+  respectively). A load longer than the app's 15 s deadline fails the
+  app's open. Right after a collector opens, draining its startup burst takes
   about 0.8 s; idle, a handoff takes about 0.2 s. See
   [performance](performance.md).
 - A handoff gap loses intermediate versions only. Recovery on subscribe

@@ -51,7 +51,7 @@ cargo bench --workspace --no-run
 cargo check -p geode-shell --features test-support --all-targets
 cargo run -p geode-collector -- --demo [ROWS]           # background collector loop
 cargo run -p geode-collector -- install --dry-run       # print the login-job plan only
-cargo run -p geode-collector -- status [--demo [ROWS]] # who holds the store
+cargo run -p geode-collector -- status [--demo [ROWS]]  # who holds the store
 
 bash scripts/mutation-check.sh "name substring"   # targeted mutation entries
 bash scripts/mutation-check.sh --changed           # entries for changed files

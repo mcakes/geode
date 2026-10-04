@@ -1275,8 +1275,9 @@ and before the count prefix. It is muted, like ingestion activity, and the
 same indeterminate strip along the bar's top edge runs while it shows (one
 strip, whether a load, the wait, or both are under way): the open is
 progressing, not failing. Its tooltip reads `the background collector
-(PID n) is handing the store over`, without the PID when DuckDB named none. It has no click
-action and nothing to act on, so it needs no keyboard route.
+(PID n) is handing the store over`, without the PID when DuckDB named
+none. It has no click action and nothing to act on, so it needs no
+keyboard route.
 
 `Diagnostics::note_store_waiting` (from `DataEvent::StoreWaiting`) records the
 wait and prepares the `StoreWaitingSegment` text and tooltip;
