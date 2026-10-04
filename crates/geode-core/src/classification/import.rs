@@ -2,6 +2,11 @@
 //! source's label, a blank label clears it, and sources absent from the file
 //! keep their label. The header must name `<from>,<name>` exactly, so a file
 //! exported from one classification cannot load into another by mistake.
+//!
+//! An unquoted field is trimmed; a quoted one is taken as written, so a
+//! source with padding (which export quotes) imports onto its own key rather
+//! than a trimmed one. Labels are then trimmed for storage by the model's
+//! rule, quoted or not: only sources keep quoted padding.
 
 use super::{Change, UndoEntry, csv, normalized, set_label};
 use crate::dimensions::DerivedDimension;
@@ -67,6 +72,15 @@ impl ImportPlan {
     }
 }
 
+/// Field `i` as the file says it: verbatim when quoted, trimmed otherwise.
+fn field(record: &csv::Record, i: usize) -> &str {
+    if record.quoted[i] {
+        &record.fields[i]
+    } else {
+        record.fields[i].trim()
+    }
+}
+
 /// Plan merging CSV `text` into `dim`. `Err` refuses the whole file (empty,
 /// unparseable, wrong header, too many rows); row problems are `rejected`.
 pub fn plan_import(dim: &DerivedDimension, text: &str) -> Result<ImportPlan, String> {
@@ -74,7 +88,7 @@ pub fn plan_import(dim: &DerivedDimension, text: &str) -> Result<ImportPlan, Str
     let Some((header, rows)) = records.split_first() else {
         return Err("file is empty".into());
     };
-    let got: Vec<&str> = header.fields.iter().map(|f| f.trim()).collect();
+    let got: Vec<&str> = (0..header.fields.len()).map(|i| field(header, i)).collect();
     if got != [dim.from.as_str(), dim.name.as_str()] {
         return Err(format!(
             "file is {}; this classification is {},{}",
@@ -100,7 +114,7 @@ pub fn plan_import(dim: &DerivedDimension, text: &str) -> Result<ImportPlan, Str
         // Excel keeps a cleared row inside the used range as bare commas;
         // like a blank line it says nothing, so it is neither planned nor
         // rejected.
-        if record.fields.iter().all(|f| f.trim().is_empty()) {
+        if (0..record.fields.len()).all(|i| field(record, i).is_empty()) {
             continue;
         }
         if record.fields.len() != 2 {
@@ -110,7 +124,7 @@ pub fn plan_import(dim: &DerivedDimension, text: &str) -> Result<ImportPlan, Str
             });
             continue;
         }
-        let source = record.fields[0].trim().to_string();
+        let source = field(record, 0).to_string();
         if source.is_empty() {
             plan.rejected.push(Rejected {
                 line: record.line,
@@ -291,6 +305,42 @@ mod tests {
         }
         let err = plan_import(&sector(&[]), &text).unwrap_err();
         assert!(err.contains("100000"), "{err}");
+    }
+
+    #[test]
+    fn a_quoted_padded_source_round_trips_onto_its_own_key() {
+        let dim = sector(&[(" AAPL", "Tech")]);
+        let text = crate::classification::export(&dim, None);
+        let plan = plan_import(&dim, &text).unwrap();
+        assert!(plan.is_noop(), "{plan:?}");
+    }
+
+    /// Unquoted padding is trimmed from sources; labels are trimmed by the
+    /// model's rule whether quoted or not, so only a quoted source keeps
+    /// its spaces.
+    #[test]
+    fn unquoted_fields_are_still_trimmed() {
+        let plan = plan_import(&sector(&[]), "underlying_ref,sector\n  AAPL ,  Tech \n").unwrap();
+        assert_eq!(plan.changes[0].source, "AAPL");
+        assert_eq!(plan.changes[0].after.as_deref(), Some("Tech"));
+    }
+
+    #[test]
+    fn a_quoted_label_is_still_trimmed_for_storage() {
+        let plan = plan_import(&sector(&[]), "underlying_ref,sector\nA,\" Tech \"\n").unwrap();
+        assert_eq!(plan.changes[0].after.as_deref(), Some("Tech"));
+    }
+
+    #[test]
+    fn a_quoted_all_space_source_is_kept_not_skipped() {
+        let plan = plan_import(&sector(&[]), "underlying_ref,sector\n\" \",X\n").unwrap();
+        assert!(plan.rejected.is_empty(), "{:?}", plan.rejected);
+        assert_eq!(plan.changes[0].source, " ");
+    }
+
+    #[test]
+    fn a_quoted_padded_header_is_refused() {
+        assert!(plan_import(&sector(&[]), "\" underlying_ref\",sector\n").is_err());
     }
 
     #[test]

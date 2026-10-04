@@ -35948,10 +35948,19 @@ run_mutation "classification: conflicting duplicates are rejected" \
 # read as a rejected "empty source".
 run_mutation "classification: blank rows are skipped" \
   crates/geode-core/src/classification/import.rs \
-  '        if record.fields.iter().all(|f| f.trim().is_empty()) {' \
+  '        if (0..record.fields.len()).all(|i| field(record, i).is_empty()) {' \
   '        if false {' \
   geode-core \
   an_all_blank_row_is_skipped_like_a_blank_line
+
+# Export quotes a padded source; trimming it on import would land the row
+# on another key and leave the padded one as it was.
+run_mutation "classification: a quoted source keeps its spaces" \
+  crates/geode-core/src/classification/import.rs \
+  '    if record.quoted[i] {' \
+  '    if false {' \
+  geode-core \
+  a_quoted_padded_source_round_trips_onto_its_own_key
 
 # DuckDB resolves identifiers case-insensitively, so `Book` beside the column
 # `book` would be ambiguous in the compiled SQL.
@@ -36293,6 +36302,27 @@ run_mutation "classifications: a foreign reload drops the pending copy" \
         }' \
   geode-classifications \
   a_reload_changing_this_classification_otherwise_drops_the_pending_edit
+
+# A plan that changes nothing must not leave an undo step that undoes
+# nothing, nor a pending object no reload will answer.
+run_mutation "classifications: an empty recorded plan records nothing" \
+  crates/geode-classifications/src/core/history.rs \
+  '        if entry.is_empty() {
+            return;
+        }' \
+  '' \
+  geode-classifications \
+  recording_an_empty_entry_records_nothing
+
+# A recorded plan is a new edit: redo left standing would re-apply an entry
+# undone over an object the plan replaced.
+run_mutation "classifications: a recorded plan clears redo" \
+  crates/geode-classifications/src/core/history.rs \
+  '        self.undo.push(entry);
+        self.redo.clear();' \
+  '        self.undo.push(entry);' \
+  geode-classifications \
+  a_recorded_plan_clears_redo_and_is_in_flight
 
 # The editor paints on the cursor's row and writes its targets: a resting
 # cursor keeping its index across a reorder would paint one row and write

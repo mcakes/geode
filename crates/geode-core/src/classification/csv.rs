@@ -2,13 +2,17 @@
 //! export. Fields may be quoted; a quoted field may hold commas, doubled
 //! quotes and line breaks. CRLF and LF both end a record, a leading UTF-8 BOM
 //! is ignored, and blank lines are skipped. `Record::line` is the physical
-//! line the record starts on, for rejection messages.
+//! line the record starts on, for rejection messages. `Record::quoted` says
+//! which fields were quoted: a quoted field's spaces are what the file says,
+//! an unquoted field's padding is layout the import trims.
 
 /// One parsed record and the physical line it starts on (1-based).
+/// `quoted[i]` is whether `fields[i]` was quoted; the two are the same length.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
     pub line: usize,
     pub fields: Vec<String>,
+    pub quoted: Vec<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,13 +29,23 @@ impl std::fmt::Display for CsvError {
 
 /// Close the current field and record. A blank line parses as one empty
 /// field and is skipped, so it never becomes a one-field row to reject.
-fn end_record(out: &mut Vec<Record>, fields: &mut Vec<String>, field: &mut String, start: usize) {
+fn end_record(
+    out: &mut Vec<Record>,
+    fields: &mut Vec<String>,
+    marks: &mut Vec<bool>,
+    field: &mut String,
+    was_quoted: bool,
+    start: usize,
+) {
     fields.push(std::mem::take(field));
+    marks.push(was_quoted);
     let record = std::mem::take(fields);
+    let quoted = std::mem::take(marks);
     if !(record.len() == 1 && record[0].is_empty()) {
         out.push(Record {
             line: start,
             fields: record,
+            quoted,
         });
     }
 }
@@ -42,6 +56,7 @@ pub fn read(text: &str) -> Result<Vec<Record>, CsvError> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut out = Vec::new();
     let mut fields: Vec<String> = Vec::new();
+    let mut marks: Vec<bool> = Vec::new(); // `Record::quoted` for `fields`
     let mut field = String::new();
     let mut quoted = false; // inside a quoted field
     let mut was_quoted = false; // the current field started with a quote
@@ -79,11 +94,19 @@ pub fn read(text: &str) -> Result<Vec<Record>, CsvError> {
             }
             ',' => {
                 fields.push(std::mem::take(&mut field));
+                marks.push(was_quoted);
                 was_quoted = false;
             }
             '\r' if chars.peek() == Some(&'\n') => {}
             '\n' => {
-                end_record(&mut out, &mut fields, &mut field, start);
+                end_record(
+                    &mut out,
+                    &mut fields,
+                    &mut marks,
+                    &mut field,
+                    was_quoted,
+                    start,
+                );
                 was_quoted = false;
                 line += 1;
                 start = line;
@@ -106,7 +129,14 @@ pub fn read(text: &str) -> Result<Vec<Record>, CsvError> {
         });
     }
     if !field.is_empty() || !fields.is_empty() || was_quoted {
-        end_record(&mut out, &mut fields, &mut field, start);
+        end_record(
+            &mut out,
+            &mut fields,
+            &mut marks,
+            &mut field,
+            was_quoted,
+            start,
+        );
     }
     Ok(out)
 }
@@ -210,6 +240,13 @@ mod tests {
         let got = read("h1,h2\r\n\"two\r\nlines\",x\r\nlast,y\r\n").unwrap();
         assert_eq!(got[1].fields[0], "two\nlines");
         assert_eq!(got[2].line, 4);
+    }
+
+    #[test]
+    fn records_say_which_fields_were_quoted() {
+        let got = read("a,\" b \",c\n").unwrap();
+        assert_eq!(got[0].fields, vec!["a", " b ", "c"]);
+        assert_eq!(got[0].quoted, vec![false, true, false]);
     }
 
     #[test]
