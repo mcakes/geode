@@ -298,8 +298,16 @@ second. Whether a refused open is a lock conflict is decided by DuckDB's
 message text (`Conflicting lock is held in` on Unix, `File is already open in`
 on Windows), pinned against a real conflict from a child process: a DuckDB
 upgrade that rewords it fails that test rather than turning every wait into
-an open error. Any other open error, including the same Unix prefix for a
-file system without locks, fails at once.
+an open error. While a collector holds `<db>.collector.lock`
+(`lease::collector_present`), any open refusal is also waited out: on
+Windows DuckDB names the holder only after `CreateFileW` fails, so a
+collector that closes the file in that gap leaves a refusal with no marker.
+The wait is still reported once, and a marker-less refusal that lasts to the
+deadline fails as its own open error rather than as `Held`. With no
+collector, any other open error, including the same Unix prefix for a file
+system without locks, fails at once. While a collector runs, a persistent
+open error such as a denied permission therefore surfaces only at the
+deadline.
 
 ### Release
 
@@ -392,8 +400,9 @@ build is never read. A mutation entry checks that a mismatch refuses.
 - An adapter call that never returns delays `release`, as it delays
   `shutdown`, and the app's wait then runs to its deadline.
 - On Windows, when DuckDB cannot name the holder (the Restart Manager's
-  `RmGetList` finds none), the refusal carries no DuckDB marker, so a
-  conflict fails the open at once instead of waiting.
+  `RmGetList` finds none), the refusal carries no DuckDB marker. It is
+  waited out while a collector holds its lease; a conflict with any other
+  process fails the open at once.
 - On a Unix other than macOS and Linux, DuckDB names no holder and writes no
   marker, so a conflict fails the open at once.
 - A second Geode window on the same store fails its open after about 1 s

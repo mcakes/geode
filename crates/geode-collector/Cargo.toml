@@ -1,0 +1,34 @@
+[package]
+name = "geode-collector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+[[bin]]
+name = "geode-collector"
+path = "src/main.rs"
+bench = false
+
+# The headless background collector: holds the store while no app has it and
+# hands it over when one appears. Never depends on gpui or any UI crate.
+[dependencies]
+geode-core.workspace = true
+# The lease, the store-format stamp and the data service it runs.
+geode-data = { path = "../geode-data" }
+# Configuration, store path, logging, settings and the demo bus, shared with
+# the app so both build the same store.
+geode-compose.workspace = true
+# Events are logged under `geode::collector`.
+tracing.workspace = true
+# Today's date for the demo bus, from the configured clock.
+chrono = "0.4.42"
+
+# Match the support features used by workspace tests to share dependency builds.
+[dev-dependencies]
+geode-core = { workspace = true, features = ["test-support"] }
+geode-data = { path = "../geode-data", features = ["test-support"] }
+tempfile = "3.27.0"

@@ -10,7 +10,8 @@
 //!
 //! The app's open waits: once it holds `<db>.app.lock` it retries the
 //! DuckDB open while the refusal is DuckDB's own lock conflict (the
-//! collector is still draining), until a deadline, and reports the wait
+//! collector is still draining), or any open refusal while a collector
+//! holds `<db>.collector.lock`, until a deadline, and reports the wait
 //! once. A stop request ends the wait at the next retry.
 
 use std::fs::{File, OpenOptions, TryLockError};
@@ -113,8 +114,11 @@ impl LeaseError {
 
 /// Take `<db>.app.lock`, retrying `try_lock` for up to 1 s; then open the
 /// store with `open`, retrying every 100 ms while the error is a lock
-/// conflict, until `deadline`. `on_wait(holder)` runs once, at the first
-/// refused open.
+/// conflict, or any open error while a collector holds its lease (see
+/// `collector_handing_over`), until `deadline`. `on_wait(holder)` runs
+/// once, at the first refused open; `holder` is the PID DuckDB named, if
+/// any refusal so far named one. At the deadline a refusal with DuckDB's
+/// conflict marker is `Held`; one without it is returned as `Open`.
 ///
 /// `deadline` is measured from the start of the open phase, after the lock
 /// is taken, so the whole call can last up to `deadline` plus the 1 s lock
@@ -142,23 +146,44 @@ pub fn acquire_app<T>(
             Ok(value) => return Ok((lease, value)),
             Err(err) => err,
         };
-        let Some(text) = conflict_text(&err) else {
+        let conflict = conflict_text(&err);
+        if conflict.is_none() && !collector_handing_over(db, &err) {
             return Err(LeaseError::Open(err));
-        };
-        holder = holder_pid(&text).or(holder);
+        }
+        if let Some(text) = &conflict {
+            holder = holder_pid(text).or(holder);
+        }
         if !reported {
             reported = true;
             on_wait(holder);
         }
         let waited = start.elapsed();
         if waited >= deadline {
-            return Err(LeaseError::Held { waited, holder });
+            // A last refusal without DuckDB's marker is reported as itself:
+            // nothing confirmed the collector was still holding the file.
+            return Err(match conflict {
+                Some(_) => LeaseError::Held { waited, holder },
+                None => LeaseError::Open(err),
+            });
         }
         std::thread::sleep(OPEN_STEP.min(deadline - waited));
         if should_stop() {
             return Err(LeaseError::Cancelled);
         }
     }
+}
+
+/// A refused open that is the collector's handover although DuckDB's text
+/// does not say so: any `StoreError::Open` while `<db>.collector.lock` is
+/// held. On Windows DuckDB names the holder through the Restart Manager
+/// only after `CreateFileW` fails, so a collector that closes the file in
+/// that gap leaves a sharing violation with no marker; without this the
+/// app would fail at once on a handover that was about to complete. The
+/// lock is the protocol's own signal, so no message text is read. A probe
+/// that cannot read the lock is no collector, and the refusal fails as
+/// itself.
+fn collector_handing_over(db: &Path, err: &StoreError) -> bool {
+    matches!(err, StoreError::Open { .. }) && collector_present(db).unwrap_or(false)
 }
 
 /// `<db>.app.lock`, retried for `APP_LOCK_RETRY`: a collector's probe holds
@@ -212,7 +237,20 @@ fn open_lock_file(path: &Path) -> std::io::Result<File> {
 /// before it locks), so the probe returns `Ok(false)` and creates nothing:
 /// a probe never leaves a directory behind.
 pub fn app_present(db: &Path) -> std::io::Result<bool> {
-    let path = app_lock_path(db);
+    lock_held(&app_lock_path(db))
+}
+
+/// True while another process (or handle) holds `<db>.collector.lock`: a
+/// collector is running on this store, whether or not it has the store
+/// open. The same probe as [`app_present`]; a missing store directory is
+/// no collector, and the probe creates nothing.
+pub fn collector_present(db: &Path) -> std::io::Result<bool> {
+    lock_held(&collector_lock_path(db))
+}
+
+/// `try_lock` then immediate unlock on the lock file at `path`.
+fn lock_held(path: &Path) -> std::io::Result<bool> {
+    let path = path.to_path_buf();
     let file = match open_lock_file(&path) {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -261,12 +299,13 @@ fn naming(path: &Path, err: std::io::Error) -> std::io::Error {
 ///   `Cannot open file` alone is not a conflict: a missing file or a denied
 ///   permission reads the same.
 ///
-/// Known gap: on Windows, when the Restart Manager finds no holder, the
-/// message carries only the localized OS text and no DuckDB marker, so it
-/// is not classified as a conflict and the open fails at once as
-/// `LeaseError::Open` instead of waiting. On a Unix other than macOS and
-/// Linux, DuckDB names no holder and writes no marker, so a conflict there
-/// fails at once in the same way.
+/// On Windows, when the Restart Manager finds no holder, the message
+/// carries only the localized OS text and no DuckDB marker, so it is not
+/// classified as a conflict. `acquire_app` still waits it out while a
+/// collector holds its lease (the handover gap); with no collector it
+/// fails at once as `LeaseError::Open`. Known gap: on a Unix other than
+/// macOS and Linux, DuckDB names no holder and writes no marker, so a
+/// conflict with a process that is not a collector fails at once.
 pub fn is_lock_conflict_message(message: &str) -> bool {
     message.contains("Conflicting lock is held in") || message.contains("File is already open in")
 }
@@ -792,6 +831,149 @@ mod tests {
         let _gate = test_support::lock_file_gate();
         let _collector = try_collector(&db).unwrap().unwrap();
         assert!(!app_present(&db).unwrap());
+    }
+
+    #[test]
+    fn collector_present_reads_the_collector_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
+        assert!(!collector_present(&db).unwrap());
+        let lease = try_collector(&db).unwrap().unwrap();
+        assert!(collector_present(&db).unwrap());
+        // An app lease is not a collector.
+        drop(lease);
+        let (_app, ()) = acquire(&db).unwrap();
+        assert!(!collector_present(&db).unwrap());
+        // A probe leaves the lock free for a collector.
+        assert!(try_collector(&db).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_collector_probe_of_a_missing_directory_is_no_collector_and_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("a");
+        let db = missing.join("b").join("g.duckdb");
+        let _gate = test_support::lock_file_gate();
+        assert!(!collector_present(&db).unwrap());
+        assert!(!missing.exists());
+    }
+
+    /// On Windows DuckDB names the holder only after `CreateFileW` fails; a
+    /// collector closing the file in that gap leaves a refusal with no
+    /// marker. While the collector's lease is held, any open refusal is
+    /// its handover and is waited out; the wait is reported once, with no
+    /// holder.
+    #[test]
+    fn a_non_conflict_open_error_is_retried_while_a_collector_holds_its_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
+        let collector = try_collector(&db).unwrap().unwrap();
+        let violation = "IO Error: Cannot open file \"/x/g.duckdb\": The process cannot access \
+                         the file because it is being used by another process.";
+        let mut refusals = 3;
+        let mut waits = Vec::new();
+        let (_lease, value) = acquire_app(
+            &db,
+            Duration::from_secs(5),
+            &never,
+            &mut |holder| waits.push(holder),
+            &mut || {
+                if refusals > 0 {
+                    refusals -= 1;
+                    Err(open_error("/x/g.duckdb", violation))
+                } else {
+                    Ok(7)
+                }
+            },
+        )
+        .expect("the handover's refusal is waited out");
+        assert_eq!(value, 7);
+        assert_eq!(refusals, 0);
+        assert_eq!(waits, vec![None]);
+        drop(collector);
+    }
+
+    /// The holder DuckDB named at an earlier refusal is kept through a
+    /// later marker-less one, and the wait is still reported once. A
+    /// refusal that outlasts the deadline without a marker returns its own
+    /// error, not a conflict DuckDB never confirmed.
+    #[test]
+    fn a_handover_refusal_keeps_the_holder_and_reports_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
+        let _collector = try_collector(&db).unwrap().unwrap();
+        let mut opens = 0;
+        let mut waits = Vec::new();
+        let start = Instant::now();
+        let err = acquire_app(
+            &db,
+            Duration::from_millis(300),
+            &never,
+            &mut |holder| waits.push(holder),
+            &mut || {
+                opens += 1;
+                if opens == 1 {
+                    Err::<(), _>(conflict(812))
+                } else {
+                    Err(open_error("/x/g.duckdb", "IO Error: Cannot open file"))
+                }
+            },
+        )
+        .expect_err("a refusal that never clears fails at the deadline");
+        assert!(start.elapsed() >= Duration::from_millis(300));
+        assert_eq!(waits, vec![Some(812)]);
+        assert!(opens > 2, "{opens}");
+        assert!(
+            matches!(err, LeaseError::Open(StoreError::Open { .. })),
+            "{err:?}"
+        );
+    }
+
+    /// Without a collector lease a marker-less refusal is not a handover
+    /// and fails at once; a non-open error fails at once even with one.
+    #[test]
+    fn a_non_conflict_error_fails_at_once_without_a_collector_or_when_not_an_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
+        let attempt = |db: &Path, err: fn() -> StoreError| {
+            let mut opens = 0;
+            let mut waited = false;
+            let start = Instant::now();
+            let result = acquire_app(
+                db,
+                Duration::from_secs(5),
+                &never,
+                &mut |_| waited = true,
+                &mut || {
+                    opens += 1;
+                    Err::<(), _>(err())
+                },
+            );
+            (result, opens, waited, start.elapsed())
+        };
+        let refused = || open_error("/x/g.duckdb", "IO Error: Cannot open file");
+        let (result, opens, waited, elapsed) = attempt(&db, refused);
+        assert!(
+            matches!(result, Err(LeaseError::Open(StoreError::Open { .. }))),
+            "{result:?}"
+        );
+        assert_eq!(opens, 1);
+        assert!(!waited);
+        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+
+        let _collector = try_collector(&db).unwrap().unwrap();
+        let drift = || StoreError::Drift("columns changed".into());
+        let (result, opens, waited, _) = attempt(&db, drift);
+        assert!(
+            matches!(result, Err(LeaseError::Open(StoreError::Drift(_)))),
+            "{result:?}"
+        );
+        assert_eq!(opens, 1);
+        assert!(!waited);
     }
 
     #[test]

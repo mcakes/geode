@@ -1393,10 +1393,59 @@ run_mutation "lease: a stop cancels the lock retry" \
 
 run_mutation "lease: only a lock conflict is retried" \
   crates/geode-data/src/lease.rs \
-  '        let Some(text) = conflict_text(&err) else {' \
-  '        let Some(text) = Some(err.to_string()) else {' \
+  '        let conflict = conflict_text(&err);' \
+  '        let conflict = Some(err.to_string());' \
   geode-data \
   a_non_lock_open_error_is_not_retried
+
+# Windows names the holder only after CreateFileW fails, so a collector
+# closing the file in that gap leaves a refusal with no marker: while the
+# collector's lease is held any open refusal is its handover and is waited
+# out, but only an open refusal, and only while that lease is held.
+run_mutation "lease: an open refusal is waited out while a collector holds its lease" \
+  crates/geode-data/src/lease.rs \
+  '        if conflict.is_none() && !collector_handing_over(db, &err) {' \
+  '        if conflict.is_none() {' \
+  geode-data \
+  a_non_conflict_open_error_is_retried_while_a_collector_holds_its_lease
+
+# The collector (geode-collector run.rs). A refused stamp read is an app
+# opening the store: wait for it, never idle or exit. An open the app won
+# is a yield logged at info. A lease held for an instant is retried.
+run_mutation "collector: a refused stamp read keeps waiting" \
+  crates/geode-collector/src/run.rs \
+  '        Err(err @ StoreError::Open { .. }) => StampCheck::Busy(err.to_string()),' \
+  '        Err(err @ StoreError::Open { .. }) => StampCheck::Unreadable(err.to_string()),' \
+  geode-collector \
+  a_refused_stamp_read_is_busy_and_only_a_mismatch_idles
+
+run_mutation "collector: an open the app won is info" \
+  crates/geode-collector/src/run.rs \
+  '        Severity::Error if is_open_failure(d) && app_present() => Level::INFO,' \
+  '        Severity::Error if is_open_failure(d) => Level::INFO,' \
+  geode-collector \
+  an_open_failure_is_info_only_while_an_app_is_present
+
+run_mutation "collector: the lease is retried before exiting" \
+  crates/geode-collector/src/run.rs \
+  'const LEASE_RETRY: Duration = Duration::from_secs(1);' \
+  'const LEASE_RETRY: Duration = Duration::ZERO;' \
+  geode-collector \
+  the_lease_is_retried_before_another_collector_is_assumed
+
+run_mutation "collector: a changed executable is detected" \
+  crates/geode-collector/src/run.rs \
+  '    before != after' \
+  '    before.map(|s| s.size) != after.map(|s| s.size)' \
+  geode-collector \
+  a_changed_size_or_mtime_is_a_changed_executable
+
+run_mutation "lease: only an open refusal is a collector's handover" \
+  crates/geode-data/src/lease.rs \
+  '    matches!(err, StoreError::Open { .. }) && collector_present(db).unwrap_or(false)' \
+  '    collector_present(db).unwrap_or(false)' \
+  geode-data \
+  a_non_conflict_error_fails_at_once_without_a_collector_or_when_not_an_open
 
 run_mutation "lease: the Windows holder marker is a conflict" \
   crates/geode-data/src/lease.rs \
@@ -1446,8 +1495,8 @@ run_mutation "lease: a probe of a missing directory is no app" \
 
 run_mutation "lease: the holder is read from DuckDB's text alone" \
   crates/geode-data/src/lease.rs \
-  '        holder = holder_pid(&text).or(holder);' \
-  '        holder = holder_pid(&err.to_string()).or(holder);' \
+  '            holder = holder_pid(text).or(holder);' \
+  '            holder = holder_pid(&err.to_string()).or(holder);' \
   geode-data \
   a_pid_in_the_store_path_is_not_the_holder
 

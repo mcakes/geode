@@ -2578,6 +2578,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "geode-collector"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "geode-compose",
+ "geode-core",
+ "geode-data",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "geode-compose"
 version = "0.1.0"
 dependencies = [
