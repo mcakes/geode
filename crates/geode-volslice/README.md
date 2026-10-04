@@ -11,26 +11,33 @@ data tier's vol door; the crate computes none of them.
   launch table `{ underlying = "<u>" }`), the tile's `TileContent` door
   (`follows()` is `true`), `ACTIONS` and the `DEFAULT_KEYMAP` fragment.
 - `commands.rs`: the `:` line (`underlying <ref>`, `x <coordinate>`,
-  `diff <kind> - <kind> | none`, or with the Unicode minus) and its
-  completions.
+  `diff <kind> - <kind> | off`, or with the Unicode minus, and `ylim <lo>
+  <hi> | off`) and its completions.
 - `core/`: pure state, tested without gpui. `build.rs` turns a batch's
   answers into the xy model (a failed job is a notice, a short outcome
   builds nothing); `session.rs` round-trips the session table, dropping an
   unreadable key with a notice and clamping the split to the chart's bounds.
+  `model.rs`'s `toggle_pair` is the one door that turns a difference on or
+  off, keeping turn-on order and never a pair beside its reverse.
+  `menu.rs` builds the `.` action menu's rows from the state.
 - `tile/`: the hosted entity and its tests. `tile/data.rs` is the data
   flow: the two document reads, the followed group's board, the vol batch
   and the model swap. `tile/picker.rs` holds the two choosers: the
   underlying picker (a field over the diagnostics catalog's `cvi_params` and
-  `option_chain` underlyings) and the diff chooser (`none` and every ordered
-  pair of loaded kinds). `tile/pointer.rs` holds the chart's wheel, drag
-  and divider gestures and the strip's presses.
+  `option_chain` underlyings) and the diff chooser (every ordered pair of
+  loaded kinds, ticked), and the popup enum the action menu shares.
+  `tile/menu.rs` is the action menu's lifecycle (`MenuHost`, `.`, `⋯`, the
+  chart's right press) and the differences axis's fixed domain
+  (`fix_diff_y`, `set_diff_ylim`). `tile/pointer.rs` holds the chart's
+  wheel, drag and divider gestures and the strip's presses.
 - `header.rs`: the header (underlying, coordinate, a chip per loaded kind
-  with its digit, the diff chip, link chips, the two datasets' health, the
-  shell's × last) and the footer (the first notice with a count of the rest,
+  with its digit, the diff chip, the fixed-domain chip while one is set,
+  link chips, the two datasets' health, the action menu's `⋯`, the shell's
+  × last) and the footer (the first notice with a count of the rest,
   the key hints).
 - `strip.rs`: the expiry strip beside the chart: a dot in the expiry's
-  palette color (filled when active), the date and a digit per kind that
-  has the expiry.
+  color (filled when active), the date and a digit per kind that has the
+  expiry.
 
 ## Commands
 
@@ -40,9 +47,10 @@ cargo bench -p geode-volslice
 ```
 
 The `model_build` bench times `core::build::model` alone over twelve active
-expiries, the three kinds, densities and a `cvi draft − chain` difference,
-with the batch answered once outside the loop. Its target is under 1 ms; it
-measured about 100 µs with 1,000-point curves (see the performance guide).
+expiries, the three kinds, densities and two differences (`cvi draft −
+chain` and `cvi − cvi draft`), with the batch answered once outside the
+loop. Its target is under 1 ms; it measured about 200 µs with 1,000-point
+curves (see the performance guide).
 
 ## What it paints
 
@@ -56,8 +64,18 @@ expiry (`Grid::Dense { cover }`, from `core::build::cover`). The cover is
 asked whether or not the chain is shown, so toggling the chain does not move
 a curve's x extent; an expiry with no chain covers nothing. The chain is its
 mid vols as points with the bid-ask range as a bar, a one-sided quote as a
-half bar. Each active expiry takes the chart palette color of its strip
-position, so twelve expiries cycle the theme's five chart colors. `shift+d`
+half bar.
+
+Each expiry takes the `HuePalette` color of its strip position: the theme's
+first chart color's hue plus one golden angle (about 137.5°) per position,
+so neighbouring expiries are far apart in hue and no hue repeats. The
+published curve and the draft paint in that color (the draft dashed); the
+chain paints in the position's companion, a lighter-weight shade of the
+same hue, moved the same way for every expiry of a theme (paler where all
+the first 24 can stay readable that way, otherwise toward the foreground).
+`core::build::model` resolves each active expiry's color and companion
+once per build.
+`shift+d`
 adds each visible curve's density on the right axis at `DENSITY_ALPHA` of
 the expiry color, shaded down to zero (a filled xy line, so a negative lobe
 shades up to zero), per unit of the shown coordinate (a gap where delta
@@ -66,19 +84,36 @@ demo model packs it toward the forward on the scale of σ√t, so a
 short-dated density keeps 25 or more points per σ√t·F however wide the
 chain and reads as a smooth hump.
 
-A difference pair (`d`) paints in a lower pane under the vol pane:
+Difference pairs (`d`) paint in a lower pane under the vol pane, several at
+once, expiry by expiry in the order they were turned on. A pair and its
+reverse are never both on. The pane's axis (`build::DIFF_AXIS`, the lower
+left) autoscales to what the view shows unless a fixed domain is set
+(`State::diff_ylim`, `:ylim`, the menu's `Fix difference y-axis`); values
+past a
+fixed domain clip to the pane and still read in the tooltip.
 
 - Curve minus curve is at equal strike: the minuend is evaluated dense and
   the subtrahend at the minuend's strikes (`Grid::Job`), plotted at the
   minuend's x as a line.
 - Curve minus chain is at the chain's strikes: the curve is evaluated `At`
-  them and the difference sits at the chain's x as points, negated when the
-  chain is the minuend.
+  them and the difference sits at the chain's x as points with whiskers:
+  `curve − chain` is `curve − mid` from `curve − ask` to `curve − bid`,
+  `chain − curve` is `mid − curve` from `bid − curve` to `ask − curve`; a
+  one-sided quote leaves a half bar.
+- A job two pairs share (a dense curve, the chain's map, a curve at the
+  chain's strikes) is asked once per expiry; `Role::DiffCurve { at }` names
+  whose strikes an evaluation is at.
+- Each difference keeps its expiry's hue (`core::build::diff_color`). Two
+  pairs at one expiry differ by mark (line or points with whiskers), and
+  the two pairs with the chain by color: `cvi`'s in the expiry's color, the
+  draft's in its companion.
 - A hidden kind's own trace is not asked, but a pair that names it still
   gets its jobs, so hiding a kind to read the difference works.
 
 The strip is the sorted union of every loaded kind's expiries, with none
 before today, each row marked with the digits of the kinds that have it.
+A curve paints at every strip expiry, not only at its document's terms: the
+vol model interpolates between terms and extrapolates past them.
 The first strip fronts its first row; a restored set that names no listed
 expiry fronts the first row too, and an empty strip keeps the set for when
 data returns.
@@ -88,46 +123,89 @@ data returns.
 | Key | Action |
 |---|---|
 | `j` / `k`, `down` / `up` | Strip cursor |
-| `enter` | Show only the cursor's expiry |
-| `space` | Show or hide the cursor's expiry (the last active one stays) |
+| `space`, `enter` | Show only the cursor's expiry |
+| `ctrl+space`, `shift+space` | Add the cursor's expiry, or take it out (the last active one stays) |
 | `1`..`3` | Show or hide a kind (`4`..`9` are bound and do nothing) |
 | `x` | Cycle the coordinate: moneyness, log-moneyness, delta, strike |
 | `shift+d` | Densities on or off (beats the workspace's duplicate in the tile) |
-| `d` | Difference chooser: `none` and every ordered pair of loaded kinds |
+| `d` | Difference chooser: every ordered pair of loaded kinds, ticked |
 | `u` | Underlying picker (refused while following) |
 | `h` / `l` | Pan by a tenth of the view, the way the axis reads |
 | `=` / `-` | Zoom about the view's centre |
 | `0` | Reset the view to the data's extent |
 | `[` / `]` | Shrink or grow the upper pane by a twentieth, within 0.2..0.8 |
+| `.` | Action menu (open or close) |
+
+The action menu (`.`, the header's `⋯`, a right press on the chart's plot
+of a focused tile, or `.` in the diff chooser, which it replaces) lists
+`Underlying…`, `Coordinate: <current>`, the three kinds and `Densities` as
+ticked toggles (a kind with nothing loaded reads `(not loaded)` and still
+toggles, as its digit does), `Difference…`, `Fix difference y-axis`
+(`volslice::fix_diff_y`, no default key: its lane names `:ylim`) and
+`Reset view`. Each row names the key that reaches its action in normal
+mode; while the menu is up those keys are inert (the menu holds the keys
+in `menu` mode), so a row is picked from the menu or its key is pressed
+once the menu is closed. The shared `j`/`k` or arrows step its enabled
+rows, `enter` or a click picks, `escape` or `.` closes it. A pick closes
+the menu and dispatches the row's action; a disabled row (`Underlying…`
+while following, `Fix difference y-axis` with no difference shown) gives
+its reason as the refusal notice and the menu stays.
 
 In the picker, `enter` commits, `escape` cancels, `up`/`down` step and every
-other bare key types; `tab` completes. In the chooser, `enter` commits,
-`escape` cancels and the shared `j`/`k` or arrows step. A strip click solos
-its row and a ctrl+click toggles it, on a focused tile; a kind chip click is
-its digit and the diff chip `d`; the wheel zooms about the pointer or pans,
-a plot drag pans and a divider drag sets the split.
+other bare key types; `tab` completes. In the chooser the shared `j`/`k` or
+arrows step, `space` ticks or unticks the highlighted pair (unticking its
+reverse), `ctrl+x` unticks every pair (a touch, so `ctrl+x enter` shows
+none), `enter` applies the ticks and `escape` discards them; it opens
+with the shown pairs ticked, and an untouched, empty tick set applies the
+highlighted pair alone, as the shell's dimension picker does. A row click
+is `space` and the Apply row `enter`. A strip click solos its row and a
+ctrl+click, shift+click or right press adds or removes it, on a focused
+tile (macOS delivers ctrl+click as a right press with control cleared; the
+tile answers no `press_context`, so the shell's right-press route only
+focuses; a left press holding alt or cmd is the shell's); a kind chip click is its digit and the
+diff chip `d`, the fixed-domain chip `volslice::fix_diff_y` (freeing it)
+and `⋯` is `.`; the wheel zooms about the pointer or pans, a plot drag pans,
+a right press on a plot opens the action menu on a focused tile, and a
+divider drag sets the split.
 
 ## Commands and session
 
 The `:` line takes `underlying <ref>` (refused while following), `x
-<strike|moneyness|log-moneyness|delta>` and `diff <kind> - <kind> | none`,
-where the minus is ` - ` or `−`; a pair naming a kind that is not loaded is
-refused `<kind> is not loaded`.
+<strike|moneyness|log-moneyness|delta>`, `ylim <lo> <hi> | off` and `diff
+<kind> - <kind> | off`,
+where the minus is ` - ` or `−`: a pair toggles that difference (turning it
+on turns its reverse off) and `off` turns every pair off; `none` is read as
+`off`. Turning on a pair naming a kind that is not loaded is refused
+`<kind> is not loaded`; turning one off never is. `ylim` fixes the
+differences axis's y domain in its own units, or with a `%` suffix per
+value (`-2% 2%` is `-0.02 0.02`); `off` or `auto` autoscales it again. It
+refuses a lower end not strictly below the upper (`the lower limit must be
+below the upper`), a value that is not a finite number, and any other
+count of values (`usage: :ylim <lo> <hi> | off`). `0` resets the x view and
+keeps the fixed domain.
 
 The session table holds `version = 1`, `coordinate`, `hidden`, `density`
-and `split` always, and `underlying`, `expiries`, `diff` and `view` while
-set; the cursor is not saved. A value that cannot be read drops its key
-with `session: dropped <key>: <why>`; a split outside the chart's bounds is
-clamped with a notice. The launch table `{ underlying = "<u>" }` restores
-through the same reader.
+and `split` always, and `underlying`, `expiries`, `diffs` (a list of
+`[minuend, subtrahend]` pairs in turn-on order), `view` and `ylim` (the
+fixed differences domain, `[lo, hi]`) while set; the cursor is not saved.
+A session holding the single-pair `diff` key of an older build restores
+it as one pair; `diffs` wins beside it. A value that
+cannot be read drops its key with `session: dropped <key>: <why>`, and so
+does a `diffs` list naming a pair twice or a pair and its reverse; a split
+outside the chart's bounds is clamped with a notice. The launch table
+`{ underlying = "<u>" }` restores through the same reader.
 
 ## Failure states
 
-The footer shows the first notice and how many more stand behind it. An
-empty state alone (the first item below) is painted in the muted status
-tone the sibling modules use for an empty state; every other notice is a
-failure or a refusal, painted in the danger tone, and so is an empty state
-with another notice behind it:
+The footer shows the first notice and how many more stand behind it. A
+refusal of the last verb comes first: it holds one slot, replaced by the
+next refusal and cleared by the next verb that acts on the tile (a key, a
+`:` line, a menu pick, a strip press), so it never outlives the next try.
+The data-side notices follow, cleared when documents next install, then
+the model's. An empty state alone (the first item below) is painted in the
+muted status tone the sibling modules use for an empty state; every other
+notice is a failure or a refusal, painted in the danger tone, and so is an
+empty state with another notice behind it:
 
 - `no underlying`, or `no underlying in A` while following a group whose
   scope names none or several.
@@ -147,16 +225,20 @@ with another notice behind it:
   coordinates for <m> quotes`. One cause behind every job is said once, in
   the outcome's words (`vol model "demo" is not built into this binary`,
   `the vol queue is full; resubmit`).
-- `diff <pair>: <kind> is not loaded` when a restored or kept pair names a
-  kind with nothing loaded (a draft that left with its group): no
-  difference is asked, and the pair stays set for when the kind returns.
+- `diff <pair>: <kind> is not loaded`, once per pair, when a restored or
+  kept pair names a kind with nothing loaded (a draft that left with its
+  group): that pair asks no difference, the others paint, and the pair
+  stays on for when the kind returns.
 - `vol request refused: …`: the painted model stays only when it was
   built from exactly the documents on screen (same underlying, CVI
   document, chain and draft with its mark), and the next change retries.
   Curves built from anything else (another underlying's documents, a
   draft that since left or changed mark, a superseded publication) clear
   under the new strip and chips.
-- `following A — set the underlying there` for `u` while following.
+- Refusals (the refusal slot): `following A — set the underlying there`
+  for `u` while following; `no differences shown` for
+  `volslice::fix_diff_y` while the differences axis shows nothing to
+  freeze; a disabled menu row's reason when it is picked.
 
 ## Known limitations
 
@@ -168,13 +250,13 @@ with another notice behind it:
   so the painted curves swap one vol round trip after the flip releases;
   for that round trip the header, chips and strip already name the new
   underlying over the old curves.
-- Expiry colors cycle the five chart colors by strip position, so two
-  expiries five rows apart share a color, and a draft that adds a term
-  shifts the colors of the rows after it.
+- Expiry colors follow the strip position, so a draft that adds a term
+  shifts the colors of the rows after it. Positions 21 rows apart sit about
+  8° apart in hue (13 apart, 12°) and can look alike when both are shown.
+- On macOS `ctrl+space` may be taken by the system's input-source shortcut;
+  `shift+space` is the same verb.
 - Keyboard zoom anchors at the view's centre; only the wheel anchors at the
   pointer.
-- There is no `.` action menu: the header chips are clickable and the
-  palette lists every action.
 - A standing `vol request refused` notice is retried by the next state
   change (a key, a draft edit, a publication), not by a group scope change
   that keeps the underlying.
@@ -217,11 +299,31 @@ with another notice behind it:
   the barrier's deadline.
 - The picker holds the keys in `insert` mode and publishes no `tilelist`:
   its field types `j` and `k`, which the shared list steps would claim; the
-  arrows step it. The diff chooser has no field: it reports `mode == menu`
-  and publishes `tilelist`, so the shell's `j`/`k` step it and the strip's
-  own `j`/`k` stay out.
-- `space` refuses to deactivate the last active expiry; `enter` on another
-  row moves off it.
+  arrows step it. The diff chooser and the action menu have no field: each
+  reports `mode == menu` and publishes `tilelist`, so the shell's `j`/`k`
+  step it and the strip's own `j`/`k` stay out. Each also reports `popup`
+  (`diff` or `actions`), and their bindings are scoped by it, so the
+  chooser's `space` tick never reaches the action menu.
+- One popup is up at a time. A popup's outside-press closer closes only
+  the popup it was painted for (`outside_press`): the `⋯` button toggles in
+  the capture phase and may already have swapped the action menu in.
+- The fixed differences domain lives in the chart model
+  (`XyModel::with_y_limit`), so it is applied under a new model version
+  (`build::restyled`, and every built model) and the element's chrome cache
+  cannot keep the old scale. `fix_diff_y` freezes `XyModel::side_domain` at
+  the painted view, the very domain the element scales over, widened
+  outward to the axis's tick step (`scale::nice_outward` at the lower
+  pane's painted tick count): the frozen axis holds all it showed and its
+  ends are tick values. The header chip prints the stored ends as they are,
+  to four significant digits, never rounded to a coarser step.
+- `ctrl+space` and `shift+space` refuse to deactivate the last active
+  expiry; `space` or `enter` on another row moves off it.
+- `space` belongs to the strip in `normal` mode and to the chooser's tick
+  in `menu` mode: the chooser's binding is scoped by mode, so a tick never
+  solos an expiry.
+- `State::diffs` never holds a pair beside its reverse or twice: the
+  chooser, `:diff` and the session reader all go through `toggle_pair` or
+  refuse such a list.
 - While following, the underlying is the group's: `u` and `:underlying` are
   refused, and a launched follower is not prompted.
 - Paint formats nothing. The header text, the strip rows and the footer
@@ -231,11 +333,15 @@ with another notice behind it:
   chords change. `set_focused` sends no notify for the same reason: the
   flag is painted in that frame because the tile's view is an uncached
   child of the shell's.
-- Every pointer action has its key: a strip press is `enter` (ctrl: `space`),
-  a kind chip its digit, the diff chip `d`, the wheel `=`/`-` and `h`/`l`, a
-  drag `h`/`l`, the divider `[`/`]`. A strip press acts only on a tile the
+- Every pointer action has its key: a strip press is `space` (ctrl or
+  shift: `ctrl+space`/`shift+space`), a kind chip its digit, the diff chip
+  `d`, a chooser row `space` and its Apply row `enter`, a strip right press
+  `ctrl+space`, a chart plot right press and `⋯` `.`, an action menu row
+  `enter`, the fixed-domain chip `:ylim off`, the wheel `=`/`-`
+  and `h`/`l`, a drag `h`/`l`, the divider `[`/`]`. A strip press acts only on a tile the
   shell had already told it is focused (`TileContent::set_focused`), so the
-  press that focuses a tile changes nothing else.
+  press that focuses a tile changes nothing else; so does a chart right
+  press, which opens the action menu only on a focused tile.
 - Pans and zooms go through the x axis's scale (`pan_sign`, `about`), so a
   reversed delta axis moves the way it reads. Keyboard zoom anchors at the
   view's centre, wheel zoom at the pointer.

@@ -58,7 +58,7 @@ fn a_frame_dialog_commits_into_the_lane_active_when_it_opened(cx: &mut gpui::Tes
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     let ws1 = WorkspaceIx::FIRST;
     frame.update(&mut vcx, |f, _| assert!(f.pin(ws1)));
-    dispatch_and_draw(&shell, &mut vcx, "frame::scope_expression");
+    dispatch_and_draw(&shell, &mut vcx, "frame::add_expression");
     assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
     vcx.simulate_input("book = 'BK000'");
     vcx.simulate_keystrokes("enter");
@@ -87,7 +87,7 @@ fn switching_and_pinning_are_refused_behind_a_dialog(cx: &mut gpui::TestAppConte
             "frame::pin_workspace",
         ),
     ] {
-        dispatch_and_draw(&shell, &mut vcx, "frame::scope_expression");
+        dispatch_and_draw(&shell, &mut vcx, "frame::add_expression");
         assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
         vcx.simulate_keystrokes("ctrl-k");
         vcx.simulate_input(query);

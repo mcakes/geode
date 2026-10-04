@@ -96,6 +96,8 @@ fn main() {
             // context overrides Root focus cycling while the popup is active.
             geode_timeseries::init(cx);
             geode_volslice::init(cx);
+            // The classifications grid keeps its own keys from the table.
+            geode_classifications::init(cx);
             // Keep table bindings from consuming the pricer's editing keys.
             geode_pricer::init(cx);
 
@@ -374,6 +376,7 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
     }
     roster.add(Box::new(bridge.timeseries.clone()));
     roster.add(Box::new(bridge.volslice.clone()));
+    roster.add(Box::new(bridge.classifications.clone()));
     roster.add(Box::new(bridge.pricer.clone()));
     // Dimension actions: Open in Nemo on a position or an instrument, and
     // Move LHU on a position.

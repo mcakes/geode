@@ -424,7 +424,9 @@ impl VolsliceTile {
         };
         let narrowest = min_span(plan.coordinate, &self.loaded);
         self.version += 1;
-        self.model = built.model;
+        self.model = built
+            .model
+            .with_y_limit(crate::core::build::DIFF_AXIS, self.state.diff_ylim);
         // Every change to `loaded` either submits (moving the tag) or
         // clears the model, so an answer under the current tag was planned
         // from the documents now loaded.

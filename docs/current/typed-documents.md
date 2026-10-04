@@ -100,6 +100,12 @@ the groupings, views, saved scopes and named expressions that name a
 classification; `validate::references` counts them so the confirmation can
 say how many will break.
 
+The Classifications tile is `dimensions`' runtime writer, and it writes each
+entry whole: the classification's `from` and every label's source list, as
+`classification::to_toml` renders it (labels and sources sorted), through
+the config door. A hand-written entry's comments and key order inside that
+object do not survive an edit from the tile; the rest of the file does.
+
 ## Views and presentation
 
 [`ViewSpec`](../../crates/geode-core/src/view.rs) reads dataset, joins,

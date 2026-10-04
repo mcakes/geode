@@ -144,7 +144,10 @@ impl Ink {
 }
 
 /// About how many y ticks a pane of `h` pixels is worth.
-pub(crate) fn y_tick_hint(h: f32, rem_px: f32) -> usize {
+/// How many y ticks a plot `h` pixels tall asks for: one per tick gap,
+/// two at least. Public so a host freezing a domain can round it to the
+/// step the axis would take.
+pub fn y_tick_hint(h: f32, rem_px: f32) -> usize {
     (h / design_px(Y_TICK_GAP, rem_px)).max(2.0) as usize
 }
 

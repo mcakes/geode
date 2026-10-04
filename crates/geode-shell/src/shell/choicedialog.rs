@@ -1175,7 +1175,7 @@ const SCOPE_HINTS: &[Hint] = &[
     Hint::Text("close"),
 ];
 
-/// The scope picker's footer with no saved scope: no row to move over and
+/// The saved-scope chooser's footer with no saved scope: no row to move over and
 /// nothing for Enter to load, so only the way out is offered.
 const SCOPE_EMPTY_HINTS: &[Hint] = &[Hint::Key("escape"), Hint::Text("close")];
 
@@ -2361,7 +2361,7 @@ fn value_color_leads(target: &Target, cx: &App) -> Vec<Option<AnyElement>> {
         .collect()
 }
 
-/// The scope picker's empty state: how to save the first scope. Names the
+/// The saved-scope chooser's empty state: how to save the first scope. Names the
 /// `scope::save_current` chord from the live keymap when one is bound
 /// (none is by default), else the palette row's title. Painted only while
 /// the picker is open on an empty set, so the one lookup is not per-frame

@@ -2696,6 +2696,18 @@ formats the needs-currency failure for each one with a blank leg.
 expiries, both CVI kinds with densities, the chain and a difference; the
 batch is answered outside the timed loop.
 
+## Vol slice: several differences and hue colors (2026-10-03)
+
+`cargo bench -p geode-volslice --bench model_build -- --warm-up-time 1
+--measurement-time 3`, load average 50 to 62 from other sessions' builds:
+`model_twelve_expiries_three_kinds` 205 µs (188 to 226), against 99.8 µs
+before. The bench now carries two differences (`cvi draft − chain` with
+whiskers and `cvi − cvi draft`) instead of one, and every slot's color comes
+from `HuePalette` (a gamut-clipped OKLCH color and a `readable_on` bisection
+per call) rather than an indexed array. The load was several times the
+earlier run's; the split between the second pair and the color cost was not
+measured. Still well under the 1 ms target.
+
 ## Grouping by a classification: `CASE` against a map probe (2026-10-03)
 
 `cargo bench -p geode-data --bench query -- query_classification`. One
@@ -2730,3 +2742,27 @@ just over 50 ms on this loaded machine. Not established: whether the growth
 is the per-row key search or parsing and binding the 5,000-pair literal on
 every requery. An idle re-measure is owed; if it stays over budget, a keyed
 lookup table joined on the unique source value is the next candidate.
+
+## Classifications rebuild after an edit (2026-10-03)
+
+`cargo bench -p geode-classifications --bench grid`. 5,000 observed source
+values (`SRC00000`..`SRC04999`, row counts spread over 0..999), the first
+2,500 labelled across twelve labels, the rest unclassified. The grid holds a
+`rows` descending sort and the `/` filter `src1`. One label edit is timed
+from a fresh `History` through `History::apply` (undo entry and next
+object), `classification::to_toml` (the object the config door writes),
+`classification::rows` (the map joined with the values) and
+`GridModel::relabelled` (re-order and re-filter, cursor kept by index). Table
+preparation (`Prepared::build`) and paint are not timed.
+
+Conditions: Apple M5 Pro (18 cores, 48 GB), rustc 1.96.0, bench profile,
+Criterion defaults. Load average 4.5 at the start (down from 23 over the
+previous quarter hour).
+
+| bench | median (low to high) |
+| --- | ---: |
+| `classifications_rebuild_after_edit_5k` | 1.53 ms (1.52 to 1.55) |
+| `classifications_rows_and_grid_5k` | 1.21 ms (1.19 to 1.23) |
+
+Both sit well inside the 8 ms UI budget: the edit itself (history, the TOML
+object) adds about 0.3 ms to the rows rebuild a values answer or reload pays.

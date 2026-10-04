@@ -1154,21 +1154,47 @@ only arithmetic the module does.
 the followed group's board draft for the underlying, read now whatever the
 as-of; and `chain` (`3`), the option chain's mid vols as points with the
 bid-ask range as a bar. A one-sided quote (an absent side is NaN) paints as
-a half bar. The published curve is solid and the draft dashed. A chip per
+a half bar. The published curve is solid and the draft dashed, both in the
+expiry's color; the chain takes the expiry's companion, a lighter-weight
+shade of the same hue (less chroma, a step of lightness away), so the
+published curve and the quotes are told apart at a glance. The step goes
+toward the background (paler) on a theme where every one of the first 24
+expiries can keep its contrast that way, and toward the foreground for
+every expiry otherwise (darker on most light themes, lighter on dark
+ones): one chart never mixes the two. Both curves are the vol model's
+slices at the expiry, whether or not the document has params there: the
+model interpolates between terms and extrapolates past them, so every
+strip expiry has a curve (the strip's kind digits still mark where each
+document has its own terms). A chip per
 loaded kind sits in the header; a hidden kind's chip is muted and its own
 jobs leave the batch. Source identity is absent from the chain's rows, so
 there is one chain kind however many sources publish chains.
 
 **Strip.** A column beside the chart lists the sorted union of every loaded
 kind's expiries, none before today, each with the digits of the kinds that
-have it and a dot in its palette color, filled when the expiry is active.
-`j`/`k` move the cursor, `enter` solos the cursor's row and `space` toggles
-it; the last active expiry cannot be toggled off. On a focused tile a click
-solos a row and a ctrl+click toggles it; the click that merely focuses the
-tile changes nothing else (`TileContent::set_focused`). An expiry's color is
-its strip position's, so it keeps its color as others are toggled; twelve
-expiries cycle the theme's five chart colors. The first strip, and a
-restored set naming no listed expiry, front the first row.
+have it and a dot in its color, filled when the expiry is active.
+`j`/`k` move the cursor; `space` (or `enter`) solos the cursor's row, and
+`ctrl+space` or `shift+space` adds it to the shown set or takes it out; the
+last active expiry cannot be taken out, and the refused key asks nothing.
+On a focused tile a click solos a row and a ctrl+click, shift+click or
+right-click adds or removes it. On macOS the platform delivers ctrl+click as
+a right press with control cleared, so the right press is what makes
+ctrl+click work there; the tile offers no row menu, so the shell's
+right-press route only focuses. A left press holding alt or cmd is left to
+the shell (its `mod` drags tiles), and the click that merely focuses the
+tile changes nothing else (`TileContent::set_focused`). The first strip, and a restored set
+naming no listed expiry, front the first row.
+
+**Expiry colors.** An expiry's color comes from its strip position, so it
+keeps its color as others are toggled. Neighbouring expiries, the ones that
+look most alike as curves, are made to look least alike in color: position
+`p` takes the OKLCH hue of the theme's first chart color plus `p` golden
+angles (about 137.5°), at the mean lightness and the median chroma of the
+theme's five chart colors (chroma floored at 0.10), each passed through the
+readable
+floor against the background (`geode_chart::core::palette::HuePalette`).
+Adjacent expiries are about 137.5° apart and no hue repeats; positions 8, 13
+and 21 apart come closest (about 20°, 12° and 8°).
 
 **Coordinates.** `x` cycles moneyness, log-moneyness, delta and strike, and
 `:x` names one. Delta runs reversed, puts on the left; pans and zooms go
@@ -1195,16 +1221,50 @@ packs a curve's points toward the forward on the scale of σ√t, so a
 short-dated density keeps dozens of points across its width however wide
 the chain, and reads as a smooth hump.
 
-**Difference.** `d` opens a chooser of `none` and every ordered pair of
-loaded kinds (`:diff <kind> - <kind> | none` too). The pair paints in a lower
-pane, its split stepped with `[`/`]` or the divider:
+**Difference.** Several ordered pairs of loaded kinds can be shown at once,
+in a lower pane under the vol pane, its split stepped with
+`[`/`]` or the divider. A pair and its reverse are never both on: turning
+one on turns the other off. `d` opens a ticked chooser of every ordered
+pair, following the shell's dimension picker: it opens with the shown pairs
+ticked, `space` or a row click ticks or unticks the highlighted pair,
+`ctrl+x` unticks every pair, `enter` or the Apply row applies the ticks,
+and `escape` or a click outside discards them. An untouched, empty tick set
+applies the highlighted pair alone; `ctrl+x` counts as a touch, so
+`ctrl+x enter` shows none. The header chip names one or two pairs and reads
+`diff · N pairs` past two. `:diff <kind> - <kind>` toggles one pair and `:diff off` turns every
+pair off (`none` is read as `off`). Pairs paint, and list in the legend and
+tooltip, expiry by expiry in the order they were turned on, each labelled
+`<pair> <expiry>`.
+
+The differences axis autoscales to what the view shows, so a pan or a zoom
+rescales it. Fixed, it keeps one y domain whatever the view: `:ylim <lo>
+<hi>` sets it in the axis's own units (`-0.02 0.02` is ±2 vol points) or
+with a `%` suffix per value (`-2% 2%`), refusing a range whose lower end is
+not below its upper or a value that is not a finite number, and `:ylim off`
+(or `auto`) frees it. The action menu's `Fix difference y-axis` row
+(`volslice::fix_diff_y`, also in the palette) freezes the domain the axis
+shows at that moment, widened outward to the axis's tick step so the frozen
+axis holds everything shown and ends on tick values, or frees a fixed one;
+with no difference shown it refuses `no differences shown`. While fixed,
+the header shows a chip such as `y −2%…2%`, the stored ends to four
+significant digits, whose click frees it. Values past the domain are clipped to
+the pane and still read in the tooltip. `0` resets the x view only. The
+density axes always autoscale.
 
 - Curve minus curve is at equal strike: the minuend is evaluated dense and
   the subtrahend at the minuend's strikes through `Grid::Job`, so the two
   never interpolate; it is a line at the minuend's x.
 - Curve minus chain is at the chain's strikes: the curve is evaluated `At`
-  them and the difference sits at the chain's x as points, negated when the
-  chain is the minuend.
+  them and the difference sits at the chain's x as points with whiskers.
+  `curve − chain` is `curve − mid` with a bar from `curve − ask` to
+  `curve − bid`; `chain − curve` is `mid − curve`, from `bid − curve` to
+  `ask − curve`. A one-sided quote's missing side leaves a half bar.
+- Jobs two pairs share are asked once per expiry: the dense curves, the
+  chain's map, and a curve's evaluation at the chain's strikes.
+- Every difference keeps its expiry's hue. Pairs at one expiry are told
+  apart by mark first (two curves are a line, a pair with the chain is
+  points with whiskers); of the two pairs with the chain, `cvi`'s takes the
+  expiry's color and the draft's the companion.
 - A pair keeps its jobs when one of its kinds is hidden.
 
 **Underlying and following.** The tile reads its own underlying (`u` opens
@@ -1243,12 +1303,14 @@ beside its own underlying's documents. Hiding keeps the reads in flight;
 closing cancels by key, the vol batch included.
 
 **Failures.** The footer shows the first notice and a count of the rest,
-in the danger tone; `no underlying` and `no underlying in A` alone are an
+in the danger tone. A refusal (`u` while following, a fix with no
+difference shown, a disabled menu row) leads, in one slot that the next
+verb acting on the tile clears; `no underlying` and `no underlying in A` alone are an
 empty state, painted muted. A failed job is one notice (`no cvi curve at
 <date>: <why>`) and the rest of the batch paints; one cause behind every
 job is said once, in the outcome's words, and a difference failing only
-because its source curve failed adds none. A pair naming a kind that is not
-loaded is the notice `diff <pair>: <kind> is not loaded` rather than an
+because its source curve failed adds none. Each pair naming a kind that is
+not loaded is the notice `diff <pair>: <kind> is not loaded` rather than an
 empty lower pane.
 
 The header names the underlying whose documents are on screen, not one
@@ -1270,9 +1332,28 @@ whose picture is on screen:
   publication that reinstalled the documents) clear; the strip, chips and
   header stay, so the next change still has a batch to ask.
 
+**Action menu.** `.` (in the diff chooser too, which it replaces), the
+header's `⋯` button, or a right press on the chart's plot of a focused tile
+opens the shared tile menu (a right press
+that only focuses the tile does nothing else; the strip's right press keeps
+adding or removing a row). Its rows, each naming the key that reaches its
+action in normal mode: `Underlying…` (disabled while following, naming the
+group), `Coordinate: <current>`, the three kinds as ticked toggles (a kind
+with nothing loaded reads `(not loaded)` and still toggles, as its digit
+does), `Densities`, `Difference…`, `Fix difference y-axis` (ticked while
+fixed) and `Reset view`. While the menu is up those keys are inert: the
+menu holds the keys, and a row's key acts once it is closed. The shared `j`/`k` and arrows step its enabled rows, `enter`
+or a click picks, and `escape` or `.` closes it; a pick closes the menu and
+dispatches the row's action through the path its key takes, and a disabled
+row's pick shows its reason as the refusal notice while the menu stays. The strip's keys stay out while
+it is up.
+
 **Session.** The tile saves its coordinate, hidden kinds, densities, split,
-and while set its underlying, active expiries, pair and view; the cursor is
-not saved. An unreadable value drops its key with a notice.
+and while set its underlying, active expiries, shown pairs (`diffs`, in
+order), view and fixed differences domain (`ylim = [lo, hi]`); the cursor
+is not saved. An unreadable value drops its key
+with a notice. A session saved with a single `diff` pair restores it as the
+one pair shown.
 
 **Limitations.**
 
@@ -1282,18 +1363,210 @@ not saved. An unreadable value drops its key with a notice.
   the curves swap one vol round trip after the flip releases; for that
   round trip the header, chips and strip already name the new underlying
   over the old curves.
-- An expiry's color is its strip position's, cycling every five rows, not
-  its place among the active expiries. A draft that adds a term shifts every
-  row after it, so those expiries change color while the draft is loaded.
+- An expiry's color is its strip position's, not its place among the
+  active expiries. A draft that adds a term shifts every row after it, so
+  those expiries change color while the draft is loaded. Positions 21 apart
+  sit about 8° apart in hue and can look alike if both are shown.
+- On macOS, `ctrl+space` may be taken by the system's input-source
+  shortcut and never reach the tile; `shift+space` is the same verb.
 - Keyboard zoom anchors at the view's centre, the wheel at the pointer.
-- There is no `.` action menu; the header chips and the palette carry the
-  actions.
 - A standing `vol request refused` notice is retried by the next state
   change (a key, a draft edit, a publication), not by a group scope change
   that keeps the underlying.
 
 See the [crate guide](../../crates/geode-volslice/README.md) for the key
 table, session keys and module map.
+
+## Classifications
+
+`geode-classifications` edits one classification per tile: a derived
+dimension in `dimensions.toml` that maps a source column's values to labels
+(`region` over `underlying_ref`, say). The tile lists every source value
+with its label and writes the whole object back through the shell's
+[config door](shell.md#the-config-door); the editing model itself is
+`geode_core::classification`. It opens from the add-tile picker; a new tile
+opens its switcher at once.
+
+**Header.** `Classification: <name> ▾` is the switch control (a press, or
+`g c`): the switcher lists every classification alphabetically with the
+shown one ticked. Beside it the source column, `<n> values`, `<k>
+unclassified`, and the winning layer's badge, then the shared cluster with
+`⋯` and ×. A tile showing nothing says why in its empty state; with no
+classification defined it names `Classification: New…`. A reload that
+removes the shown classification leaves an empty state naming it and opens
+the switcher.
+
+**Grid.** Three columns: the source value, its label (`—`, muted, when
+unclassified; `not in data` beside a mapped value the data does not hold)
+and the row count. The values come from one `DataHandle::distinct` read
+keyed by the tile, sent when a classification is shown, when a reload
+changes its source column, and on `shift+r`; an answer another read has
+overtaken is dropped. A refused or failed read keeps the map's own rows on
+screen with a header notice (`values not loaded: … — shift+r retries`);
+while a read is on its way the header says `loading values…` beside the
+count. The
+default order is unclassified rows first, then by label. A label blank
+after trimming is unclassified everywhere: in the counts, the sort and the
+paint, including a hand-written `''`. `:sort <source|label|rows>
+[asc|desc]` orders the grid and bare `:sort` restores the default; a header
+sort control cycles desc → asc → default as every grid tile's does.
+Unclassified labels and values not in the data sort last either way. `/`
+narrows over source and label, keeping the order.
+
+The shell's grid motions move a cursor held by source value, so a rebuild
+keeps it on its row; `v`/`shift+v` start a row selection, `escape` ends it.
+A label verb is the exception: after one the cursor keeps its visible
+index, so labelling the top unclassified row leaves the cursor on the next
+one. A rebuild that removes the cursor's row ends a live selection rather
+than let its span re-resolve to rows nobody chose. A right press on a row
+moves the cursor there (a row inside a live selection keeps the selection)
+and opens the `⋯` menu at the pointer, as `.` opens it from the header.
+
+**Labels.** The verbs act on the selection, else the cursor's row.
+`enter`/`c` (or a double-click) open the label editor in the label cell,
+prefilled only when every target shares one label; `up`/`down` move the
+typeahead's highlight over the labels in use. Enter writes the highlighted
+label when the highlight was moved or equals the typed text ignoring case
+(Unicode lowercasing), else the typed text trimmed and never re-cased, so
+`tech` typed over an existing `Tech` takes `Tech`; blank clears. `x` clears,
+`y y` copies the cursor row's label, `p` pastes it, `u` undoes and `ctrl+r`
+redoes. Every write first checks the classification's source column: a
+hand-written definition over a column no classification may map is never
+written (`not saved: …`), since the door writes even when the reload then
+rejects the object. A written edit shows at once as a pending object, and
+every verb builds on it, so two edits before the reload compose; a reload
+carrying an earlier write of the tile's own keeps the later ones, and any
+other change to the object is the truth and drops them. Undo and redo
+replay row by row over what is current: a row another surface changed
+since is left as it is, and the notice says how many; a row the tile's own
+refused write touched is reported as not saved rather than changed
+elsewhere. Opening the editor puts the cursor on its row, so a reload or a
+values answer that reorders the rows keeps the field on the row it writes.
+A verb that changes
+nothing (`x` on unclassified rows, `u` with nothing to undo, a replay that
+skips every row) keeps the selection and a waiting cursor.
+
+**New, rename, delete, revert.** Registered actions, reached from the
+palette and the `⋯` menu, never `:` commands and with no default chord.
+New asks a name, then a source column from a closed choice, and writes an
+empty classification; rename asks the new name. Each answer is validated
+before anything is written, and a refusal stays under the field. Rename,
+delete and revert then ask y/n on the confirm bar, naming how many
+groupings, views, saved scopes and named expressions still name the
+classification; revert's question names the lower layer it restores
+instead, since the name stays defined. A rename writes the new object and
+removes the old in one batch; delete and revert remove the user definition.
+Until the revert's reload lands, the label verbs on that classification
+are refused with `reverting <name>…`: an edit built on the user copy would
+replace the removal in the shell's batch and undo the revert. Rename and delete act only on a
+classification the user layer owns outright: a desk or builtin one is
+refused (`<name> is defined in desk config; Geode cannot …`), as is a user
+copy over a lower one (Revert… removes that) and one whose layer is
+unknown. The `⋯` menu shows each refusal in its row's lane and in full
+when picked, and lists Revert… only over a shadowed user copy.
+
+**Notices.** The tile hears the door's outcome on its frame
+notification. A fork (`copied '<name>' to your config — Revert… restores
+the <layer> copy`, naming the layer it shadows) shows as status: editing a
+desk or builtin classification copies it whole into the user layer. A refusal shows as danger and drops the
+pending edit, whether the door refused it, the write failed (`config not
+saved — reverted: …`) or the merge rejected it (`saved to disk · rejected
+by the merge — showing the configuration in force`); a create, rename or delete that was refused shows what was
+shown before. A verb's notices last until the next verb or another
+classification is shown; the session restore's until the trader's first key
+or press in the tile.
+
+**Export CSV.** `Classification: Export CSV…` and `Classification: Export
+CSV with unclassified…` are registered actions, in the palette and at the
+foot of the `⋯` menu, with no default chord. Each opens the platform's save
+dialog on `<name>.csv` in the folder of the last file this tile exported or
+imported (the home folder before that); a cancelled dialog does nothing.
+The file is `<from>,<name>` then one row per mapped source, sorted by
+source, written as the tile shows the classification when the dialog is
+answered, so a label edit not yet reloaded is in it. With unclassified, every
+observed value the classification does not map gets a row with a blank
+label: the "fill this in and send it back" file. That variant is refused
+(`values not loaded yet` / `values not current — shift+r reloads them`)
+until the values are loaded and current, since stale or missing values
+would leave rows out of a file that looks complete. The dialog is modeless,
+so the export is bound to the classification it was asked for: another
+classification shown by the time it is answered writes nothing (`<name> is
+no longer shown — nothing exported`). The write goes through the data
+service's file worker ([text files](data-path.md#text-files)), atomically;
+success says `exported <n> rows to <file>`, a failure `export failed: …`,
+and a busy service `… — try again`.
+
+**Import CSV.** `Classification: Import CSV…` (palette and `⋯`, no chord)
+opens the platform's open dialog for one file and reads it through the file
+worker with a 10 MiB limit (`MAX_IMPORT_BYTES`); more than 100,000 data rows
+is refused too. The file must be UTF-8: Excel's plain "CSV" is not, and is
+refused as `import failed: <file> is not UTF-8 text` — save as "CSV UTF-8"
+instead (a leading BOM is fine). The header must be exactly `<from>,<name>`
+after trimming, case-sensitive, else the whole file is refused naming both
+(`import refused: file is underlying_ref,sector; this classification is
+underlying_ref,region`); a quoted header field is taken as written, so a
+quoted padded header is refused. Unquoted fields are trimmed; a quoted
+source keeps its spaces, so a padded source export quoted lands back on its
+own key. The file merges: each row sets its source's label, a blank label
+clears it, and sources the file does not name keep theirs. Bare-comma rows
+are skipped; a row without two fields, with an empty source, or naming a
+source twice with different labels (every such line) is rejected and the
+rest still plan. Planning runs off the UI thread over the object shown when
+the file was read, then the confirm bar asks `import <file>: <a> changed,
+<b> new, <c> cleared, <d> rejected — y applies` (the rejected count only
+when there are any). Rejected rows show beside it as one warning, `rejected:
+line <n>: <reason>; …`, listing the first 20 then `and <k> more`. A file
+that changes nothing says `import: nothing to change` and asks nothing.
+`n` says `<file> not imported`.
+
+`y` applies the plan over the object shown then, as one write through the
+config door and one undo step (`u` reverts the whole import), and says
+`imported <n> rows into <name>`. Only the rows the plan counted are
+applied: a label written meanwhile on a row the file does not name stays,
+a row the plan found already equal is not re-asserted, and a counted row
+that now already says what the file says is skipped, so `<n>` can differ
+from the question's counts. The import passes the label verbs' gates: a
+classification over a column no classification may map is never written
+(`not saved: …`), and one being reverted is refused. Each step is bound to
+the classification the import began on: a dialog, read, plan or `y` that
+arrives after another classification is shown applies nothing (`import of
+<file> was for <name> — not applied`), as does `y` after a reload changed
+the source column (`… was for <from> values — not applied`), since the
+plan's sources are the old column's values. Only the latest file operation
+is answered, so a newer import or export supersedes an older one at any
+step (its read, its plan, or a held plan) and says `import of <file>
+replaced by a newer file operation`. The question takes the keyboard, so a
+plan is asked about only while the tile is the focused tile and nothing
+holds the keys: not while another tile is focused, a `/` search, the label
+editor, a name prompt or another question is open, or a shell input (the
+palette, the command line) has focus. Otherwise it waits, saying `import of
+<file> ready — focus this tile to answer`, and is asked when the tile is
+next focused or its own search, field or question closes, after the same
+classification and source-column checks; a stray `y` typed elsewhere never
+applies it. One plan waits at a time: a newer import replaces it.
+
+**Session.** The table saves the classification's name, the sort and the
+cursor's source value. An unreadable key is dropped with a notice and the
+rest kept; a restored cursor waits for the values that hold its row.
+
+Known limitations:
+
+- The values come from `distinct`, which skips computed datasets: a column
+  only a computed dataset carries shows its mapped values alone.
+- Rename and delete do not rewrite references; the confirm only counts
+  them. The count misses ad hoc lane chains, pricer views and view sort
+  keys.
+- A desk or builtin classification cannot be deleted from the tile, and
+  classifications do not chain.
+- The import's open dialog starts where the platform puts it; only the save
+  dialog opens in the last-used folder.
+- A plan waiting for the keyboard is not asked about when a palette or
+  command line closes over the focused tile; focusing the tile again asks.
+- Applying an import at `y` runs on the UI thread (see
+  [performance](performance.md#known-gaps)); planning does not.
+
+See the [crate guide](../../crates/geode-classifications/README.md) for the
+module map.
 
 ## Diagnostics
 

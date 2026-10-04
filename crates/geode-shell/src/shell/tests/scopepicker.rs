@@ -1,7 +1,7 @@
-//! Scope-picker integration: `frame::scope` (`mod+o`), the toolbar's load
-//! glyph, typeahead, row clicks, undo, live saved scopes, a name vanishing
-//! under the open picker, and the empty state. The fixture's default
-//! modifier is Alt, so the chord is dispatched as `alt-o`.
+//! Scope-picker integration: the toolbar's load glyph, typeahead, row
+//! clicks, undo, live saved scopes, a name vanishing under the open picker,
+//! and the empty state. `mod+o` opens the Scope dialog instead
+//! (`scope_dialog.rs`), so these tests open the picker through the glyph.
 
 use super::scopebar::services_with_builtin_docs;
 use super::*;
@@ -42,15 +42,24 @@ fn text_scope(text: &str) -> Scope {
     }
 }
 
-/// `mod+o` opens the picker; typing narrows it and `enter` loads that
-/// saved scope and closes; `mod+z` then restores the scope before it —
+/// Open the picker through the toolbar's load glyph.
+fn open_picker(vcx: &mut gpui::VisualTestContext) {
+    let glyph = vcx
+        .debug_bounds("scope-load-chip")
+        .expect("the load glyph paints");
+    vcx.simulate_click(glyph.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+}
+
+/// The load glyph opens the picker; typing narrows it and `enter` loads
+/// that saved scope and closes; `mod+z` then restores the scope before it —
 /// the pick went through the undoable `load_scope` path.
 #[gpui::test]
-fn mod_o_then_typing_and_enter_loads_the_scope_undoably(cx: &mut gpui::TestAppContext) {
+fn the_load_glyph_then_typing_and_enter_loads_the_scope_undoably(cx: &mut gpui::TestAppContext) {
     let (mut vcx, shell, frame) = open_with_scopes(cx);
     assert_eq!(scope_text(&frame, &vcx), None);
 
-    vcx.simulate_keystrokes("alt-o");
+    open_picker(&mut vcx);
     vcx.run_until_parked();
     assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
     assert!(vcx.debug_bounds("scope-choice-list").is_some());
@@ -86,7 +95,7 @@ fn the_picker_opens_on_the_current_scope_and_enter_keeps_it(cx: &mut gpui::TestA
     vcx.run_until_parked();
     let before = frame.read_with(&vcx, |f, _| f.shared().versions().scope);
 
-    vcx.simulate_keystrokes("alt-o");
+    open_picker(&mut vcx);
     vcx.run_until_parked();
     assert_eq!(
         shell.read_with(&vcx, |s, _| s
@@ -120,7 +129,7 @@ fn a_scope_saved_after_startup_is_listed_and_loads(cx: &mut gpui::TestAppContext
     });
     vcx.run_until_parked();
 
-    vcx.simulate_keystrokes("alt-o");
+    open_picker(&mut vcx);
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("scope-choice-later").is_some());
     vcx.simulate_input("later");
@@ -171,7 +180,7 @@ fn clicking_the_load_glyph_opens_a_typeable_picker(cx: &mut gpui::TestAppContext
 #[gpui::test]
 fn a_row_click_loads_that_scope(cx: &mut gpui::TestAppContext) {
     let (mut vcx, shell, frame) = open_with_scopes(cx);
-    vcx.simulate_keystrokes("alt-o");
+    open_picker(&mut vcx);
     vcx.run_until_parked();
     let row = vcx.debug_bounds("scope-choice-eu").expect("the eu row");
     vcx.simulate_click(row.center(), gpui::Modifiers::default());
@@ -185,7 +194,7 @@ fn a_row_click_loads_that_scope(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn picking_a_scope_removed_under_the_picker_says_so(cx: &mut gpui::TestAppContext) {
     let (mut vcx, shell, frame) = open_with_scopes(cx);
-    vcx.simulate_keystrokes("alt-o");
+    open_picker(&mut vcx);
     vcx.run_until_parked();
     frame.update(&mut vcx, |f, cx| {
         let mut saved: SavedScopes = f.saved_scopes().clone();
@@ -211,7 +220,7 @@ fn picking_a_scope_removed_under_the_picker_says_so(cx: &mut gpui::TestAppContex
 fn with_no_saved_scopes_the_picker_says_how_to_save_one(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
-    vcx.simulate_keystrokes("alt-o");
+    open_picker(&mut vcx);
     vcx.run_until_parked();
     assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
     assert!(vcx.debug_bounds("scope-empty-hint").is_some());
@@ -226,9 +235,10 @@ fn with_no_saved_scopes_the_picker_says_how_to_save_one(cx: &mut gpui::TestAppCo
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
-/// Hovering the load glyph names the action and its chord.
+/// Hovering the load glyph names the chooser with no chord: `mod+o`
+/// (`frame::scope`) opens the Scope dialog, not this chooser.
 #[gpui::test]
-fn hovering_the_load_glyph_names_the_chord(cx: &mut gpui::TestAppContext) {
+fn hovering_the_load_glyph_names_no_chord(cx: &mut gpui::TestAppContext) {
     let (mut vcx, _shell, _frame) = open_with_scopes(cx);
     let glyph = vcx.debug_bounds("scope-load-chip").expect("glyph painted");
     vcx.simulate_mouse_move(
@@ -242,10 +252,11 @@ fn hovering_the_load_glyph_names_the_chord(cx: &mut gpui::TestAppContext) {
     assert!(vcx.debug_bounds("tip-scope-load-chip").is_some());
     assert!(
         vcx.debug_bounds("tip-scope-load-chip-chord-mod+o")
-            .is_some()
-            || vcx
+            .is_none()
+            && vcx
                 .debug_bounds("tip-scope-load-chip-chord-alt+o")
-                .is_some()
+                .is_none(),
+        "the load glyph's tip names no chord"
     );
 }
 
@@ -254,7 +265,7 @@ fn hovering_the_load_glyph_names_the_chord(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn enter_with_no_match_does_nothing_and_escape_closes(cx: &mut gpui::TestAppContext) {
     let (mut vcx, shell, frame) = open_with_scopes(cx);
-    vcx.simulate_keystrokes("alt-o");
+    open_picker(&mut vcx);
     vcx.simulate_input("zzz");
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
@@ -272,7 +283,7 @@ fn enter_with_no_match_does_nothing_and_escape_closes(cx: &mut gpui::TestAppCont
 #[gpui::test]
 fn enter_re_feeds_the_fields_live_text_before_picking(cx: &mut gpui::TestAppContext) {
     let (mut vcx, shell, frame) = open_with_scopes(cx);
-    vcx.simulate_keystrokes("alt-o");
+    open_picker(&mut vcx);
     vcx.run_until_parked();
     vcx.update(|window, cx| {
         let input = shell.read(cx).dialog_input.clone();
@@ -291,7 +302,7 @@ fn enter_re_feeds_the_fields_live_text_before_picking(cx: &mut gpui::TestAppCont
 #[gpui::test]
 fn tab_completes_the_field_to_the_highlighted_row(cx: &mut gpui::TestAppContext) {
     let (mut vcx, shell, _frame) = open_with_scopes(cx);
-    vcx.simulate_keystrokes("alt-o");
+    open_picker(&mut vcx);
     vcx.simulate_input("e");
     vcx.simulate_keystrokes("tab");
     vcx.run_until_parked();

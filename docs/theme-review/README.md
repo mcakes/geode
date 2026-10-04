@@ -1,7 +1,9 @@
 # Theme contrast proposal — individual palettes
 
-Open `index.html` in a browser and use the theme selector. All 44 bundled named
-variants have an explicit palette and a rationale in `palettes.json`. Light and
+Open `index.html` in a browser and use the theme selector. The 44 named
+variants from this contrast review have an explicit palette and a rationale in
+`palettes.json`. Later additions are documented in the
+[theme catalogue](../../assets/themes/README.md). Light and
 dark variants are considered separately. This supersedes the generic light/dark
 palettes in the first mockup. The reviewed palette colors are now installed in `assets/themes`. The snapshot
 in `before.json` preserves the original inputs for the comparisons.

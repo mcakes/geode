@@ -337,8 +337,8 @@ one, restored from its factory's `launch_state` of the context, as a
 `tile::open_with` pick does. When a dismissal (`escape`, a press outside)
 closes it, focus returns to the scope bar's text field only if that field
 held focus and a key opened the menu; otherwise to the shell root. Opening
-the menu closes the palette, the command line, the stack list and the
-add-a-filter menu, and takes the shell root's focus.
+the menu closes the palette, the command line and the stack list, and takes
+the shell root's focus.
 
 A crate adds a row by implementing `dimension::DimensionAction`: `id`,
 `title`, the `column` whose section it sits in, `available` (enabled, or
@@ -757,29 +757,27 @@ and a click on it opens the Expressions dialog on that name
 (`objectdialog::render::open_object`): a defined name opens in its edit
 stage, an invalid one included, since editing it is how it gets fixed; a
 missing name opens the Browse list with the notice `'<name>' is not
-defined`. The keyboard route to one name's removal is the scope expression
-dialog: `frame::scope_expression` opens it in Whole mode with the frame's
-names staged as chips, backspace at the field's start removes the last one,
-and Enter applies the rest (see
-[input and dialogs](input-and-dialogs.md#frame-expression)). A scope whose
-only content is a name is not empty: the chips row and the save glyph paint
-for it.
+defined`. The keyboard route to one name's removal, and to every other
+chip's, is the [Scope dialog](input-and-dialogs.md#scope-dialog): `d` on
+that name's `≡` row. A scope whose only content is a name is not empty: the
+chips row and the save glyph paint for it.
 
 The load glyph (a folder-open icon, `scope-load-chip`) follows the `+` and
-paints whatever the scope holds, empty included; a click opens the scope
-picker (`frame::scope`, `mod+o`; see
+paints whatever the scope holds, empty included; a click opens the
+saved-scope chooser (see
 [input and dialogs](input-and-dialogs.md#scope-tile-log-and-column-choices)),
-and the glyph holds its pressed fill while the picker is open. The save
-glyph, when the scope is savable, comes after it, so its appearance never
-moves the load glyph.
+and the glyph holds its pressed fill while the chooser is open. The chooser
+has no action of its own, so its tooltip names no chord; from the keyboard it
+is `o` in the Scope dialog. The save glyph, when the scope is savable, comes
+after it, so its appearance never moves the load glyph.
 
-The `+` verb opens the "Add a filter" menu under itself: "Dimension…"
-dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression` (whose dialog offers the
-named expressions beside typed text), and each row shows its action's live
-binding, if any. The `+` holds its
-pressed fill while the menu is open. The menu is shell-owned transient state
-(`shell/addfilter.rs`), not gpui-component's `PopupMenu`, because its rows
-dispatch the shell's string actions and label them from the shell keymap.
+The `+` verb opens the [Scope dialog](input-and-dialogs.md#scope-dialog)
+(`frame::scope`, `mod+o`), where every ingredient is added — by key, or by
+pointer through each section header's `add` control or an empty section's
+row — and holds its pressed fill while that dialog is open; its tooltip names `frame::scope`'s
+chord. It paints on an empty scope too, since adding a filter is how a scope
+starts. Opened while the scope text field held focus, the dialog hands focus
+back to the field when it closes.
 
 ### Link groups
 
@@ -1003,7 +1001,7 @@ neither built nor painted, and the page takes the tile surface's rect: from
 the sidebar's right edge to the window's, and from below the toolbar (and
 the historical as-of stripe) to the status bar. The toolbar, which is also
 the window's title bar, the stripe, the sidebar, and the status bar stay,
-and every toolbar control (scope field, chips, `+` menu, as-of chip,
+and every toolbar control (scope field, chips, `+`, as-of chip,
 grouping readout, pin) stays live over the page, so the frame's scope and
 as-of stay visible and editable beside it. Modals, the palette, which-key,
 the performance overlay, and notifications paint above the page as they do
@@ -1430,22 +1428,51 @@ rename exposes either the old or new complete file to the reload poll.
 
 ### The config door
 
-A module never writes configuration: it queues whole-object edits on the
-frame with `Frame::queue_config_edits` and notifies. Each `ConfigEdit` names a
-document, an object, and the whole new value, or `None` to remove the user
-layer's object. On its frame observation the shell drains the queue into the
-object dialogs' pending batch, with the same 250 ms debounce, user-layer
-promotion and revert on failure, so a burst of edits from a tile becomes one
-write and one reload, and a later edit to the same object replaces an earlier
-one. The write reaches tiles through the reload it causes; queuing moves no
-frame version. With no writable user directory nothing is queued and the
-refusal shows as the status bar's configuration write error.
+A module never writes configuration: it queues whole-object edits through its
+tile's handle with `FrameRef::queue_config_edits`, which stamps the tile as
+each edit's `origin` and notifies the frame, so no caller forgets the notify.
+Each `ConfigEdit` names a document, an object, and the whole new value, or
+`None` to remove the user layer's object. On its frame observation the shell
+drains the queue into the object dialogs' pending batch, with the same 250 ms
+debounce, user-layer promotion and revert on failure, so a burst of edits from
+a tile becomes one write and one reload, and a later edit to the same object
+replaces an earlier one. The write reaches tiles through the reload it causes;
+queuing moves no frame version.
+
+Setting an object whose winning copy comes from the desk or builtin layer
+forks it as an object-dialog edit does: the shadowed copy is recorded in the
+user `overrides.toml` sidecar in the same batch, so drift and the `r` revert
+see it. Whether an object is inherited is read with the pending batch folded
+in, and with earlier edits of the same drain applied, so an object forked a
+moment ago is already the user's and a second edit neither forks again nor
+overwrites the recorded baseline.
+
+The tile that asked hears the outcome through the frame: a fork posts
+`TileNotice::Forked` (`copied '<name>' to your config — Revert… restores the
+<layer> copy`, naming the layer the copy shadows; not the dialogs' wording,
+whose `r` no tile binds), and a refusal posts
+`TileNotice::Refused` once per tile per drain. The shell posts from a deferred
+update and then notifies the frame once; the tile drains its own notices with
+`Frame::take_tile_notices` on that notification. Notices live on the frame,
+not a lane, so a pin or unpin keeps them; closing the tile drops the ones it
+never took, so they neither accumulate nor reach a later occupant under the
+same id. An edit with no origin forks the
+same way but tells no one. With no writable user directory nothing is queued
+and the refusal also shows as the status bar's configuration write error.
 
 The door does not validate. A caller validates the object before queuing it
 (a classification through `geode_core::classification::validate`). An edit
 whose in-memory reload is rejected, keeping the last good configuration, is
 still written to the user file; the status bar then reports
 `saved to disk · rejected by the merge` with the error count.
+
+A tile shows its edit before the write, so the batch remembers each origin
+tile once and tells it when its edit is not what is in force: a failed write,
+which reverts memory to the batch's start, posts `TileNotice::Refused` with
+the status bar's `config not saved — reverted: …`, and a written batch whose
+merge was rejected posts `saved to disk · rejected by the merge — showing the
+configuration in force`. Either goes to every tile whose edits joined the
+batch, deferred and followed by one frame notification, as the drain posts.
 
 Hot reload keeps the last valid configuration when a changed document is
 rejected by the file, modifier, clock, or keymap checks. Later typed readers

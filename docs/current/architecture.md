@@ -65,7 +65,7 @@ lives there. The menu and popover implementations live in `geode-shell`,
 which also uses them for its row menu; `geode-tile` re-exports them for tiles.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
-`geode-timeseries`, `geode-volslice`, and
+`geode-timeseries`, `geode-volslice`, `geode-classifications`, and
 `geode-pricer` implement the shell's module contract and may ask the data
 service through `DataHandle`. They do not depend on sibling features. `geode-app` constructs shared
 services, registers module factories (one market-data factory per accepted
@@ -165,7 +165,7 @@ provenance. Reload retains the active configuration for errors collected
 before its acceptance decision; later typed-reader failures do not roll back
 the whole candidate. Runtime edits write the user layer through an ordered,
 atomic write path. A module never writes configuration itself: it queues
-whole-object edits on the frame (`Frame::queue_config_edits`), and the
+whole-object edits through its frame handle (`FrameRef::queue_config_edits`), and the
 shell folds them into the same debounced, user-layer batch the configuration
 dialogs use (see [the config door](shell.md#the-config-door)). The session
 file holds layout, occupants, frame state, and palette usage, with separate

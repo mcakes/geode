@@ -64,6 +64,8 @@ pub enum DialogKind {
     Picker,
     AsOf,
     ScopeExpr,
+    /// The Scope dialog (`scopedialog/view.rs`): the lane's scope by ingredient.
+    Scope,
     /// Every `choicedialog` target (tile kinds, grouping, log level): they share
     /// the one `choice_dialog` field.
     Choice,
@@ -85,6 +87,7 @@ impl DialogKind {
             DialogKind::Picker => "the picker is already open underneath",
             DialogKind::AsOf => "as-of is already open underneath",
             DialogKind::ScopeExpr => "the expression dialog is already open underneath",
+            DialogKind::Scope => "the scope dialog is already open underneath",
             DialogKind::Choice => "a choice list is already open underneath",
             DialogKind::Object => "a configuration dialog is already open underneath",
             DialogKind::Plain => "a dialog is already open underneath",
@@ -92,12 +95,13 @@ impl DialogKind {
     }
 
     /// Every kind, for [`is_already_open_notice`].
-    const ALL: [DialogKind; 8] = [
+    const ALL: [DialogKind; 9] = [
         DialogKind::Settings,
         DialogKind::Keybindings,
         DialogKind::Picker,
         DialogKind::AsOf,
         DialogKind::ScopeExpr,
+        DialogKind::Scope,
         DialogKind::Choice,
         DialogKind::Object,
         DialogKind::Plain,
@@ -225,7 +229,6 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
             | "frame::pick"
             | "scope::save_current"
             | "frame::as_of"
-            | "frame::scope_expression"
             | "frame::add_expression"
             | "frame::grouping"
             | "frame::scope"
@@ -451,9 +454,6 @@ pub fn open_shell_dialog_with_key<F>(
     // Cancel the command line before the modal takes its key route; otherwise the line
     // would remain visible but unable to receive its own controls.
     view.cancel_command_line(window, cx);
-    // The scope bar's add-a-filter menu is transient chrome under a modal's
-    // key route; it never survives one opening.
-    view.add_filter_menu = None;
     view.close_row_menu(cx);
 
     // Recorded after the palette close above (which may itself have just
@@ -571,6 +571,24 @@ pub(crate) fn sync_dialog_text(
             };
             (state.mode, false, state.effective_query())
         }
+        Some(DialogKind::Scope) => {
+            // Current has no field: keys reach the dialog through the shell.
+            // The text step owns the input, its draft the source of truth.
+            let Some(state) = shell.scope_dialog.as_ref() else {
+                return;
+            };
+            let input = shell.dialog_input.clone();
+            if super::scopedialog::view::in_text_step(state) {
+                let draft = state.text_draft.clone();
+                if input.read(cx).text() != draft.as_str() {
+                    input.update(cx, |i, cx| i.set_value(draft, window, cx));
+                }
+                input.read(cx).focus_handle(cx).focus(window, cx);
+            } else {
+                shell.focus_handle.focus(window, cx);
+            }
+            return;
+        }
         // Filter-only dialogs keep their own focus path (see `refocus_top`).
         _ => return,
     };
@@ -615,7 +633,11 @@ pub(crate) fn refocus_top(view: &mut ShellView, window: &mut Window, cx: &mut Co
             handle.focus(window, cx);
         }
         DialogKind::Plain => {}
-        DialogKind::Settings | DialogKind::Keybindings | DialogKind::Object | DialogKind::AsOf => {
+        DialogKind::Settings
+        | DialogKind::Keybindings
+        | DialogKind::Object
+        | DialogKind::AsOf
+        | DialogKind::Scope => {
             sync_dialog_text(view, window, cx);
         }
     }

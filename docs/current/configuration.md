@@ -575,15 +575,17 @@ separate outcomes. See [configuration dialogs](configuration-dialogs.md) for
 inherited objects, presentation routing, reload interaction, and write failures.
 
 Modules write configuration only through the shell's config door
-(`Frame::queue_config_edits`, see [the config door](shell.md#the-config-door)),
-which joins the object dialogs' pending batch. `dimensions` has a runtime
-writer this way: a classification edited in a tile is written as its whole
-`dimensions.toml` object, never as one changed key, because the document
-replaces whole named objects across layers. Editing a desk or builtin
-classification therefore forks it: the user layer receives the complete
-object, which shadows the lower layer's from then on, including later desk
-changes to it. Removing the object removes only the user layer's copy, which
-reveals the lower layer's again; it cannot delete a desk classification.
+(`FrameRef::queue_config_edits`, see [the config
+door](shell.md#the-config-door)), which joins the object dialogs' pending
+batch. `dimensions` has a runtime writer this way, the Classifications tile
+(see [features](features.md#classifications)): a classification edited in a
+tile is written as its whole `dimensions.toml` object, never as one changed
+key, because the document replaces whole named objects across layers. Editing
+a desk or builtin classification therefore forks it: the user layer receives
+the complete object, which shadows the lower layer's from then on, including
+later desk changes to it. Removing the object removes only the user layer's
+copy, which reveals the lower layer's again; it cannot delete a desk
+classification.
 
 An inherited object can be edited by creating a user override. Deleting that
 override reveals the lower-layer value again. `overrides.toml` records accepted
@@ -696,6 +698,12 @@ mode toggle. Named data colors resolve from theme anchors in OKLCH and seek
 a 3:1 contrast ratio. Custom themes can prevent the available lightness range
 from reaching that target; untinted semantic tokens retain their exact color.
 See [color resolution](typed-documents.md#colors-and-numeric-formatting).
+
+The bundled choices include Kanagawa Wave, Dragon, and Lotus; Rosé Pine,
+Rosé Pine Moon, and Rosé Pine Dawn; and GitHub Light and GitHub Dark Dimmed.
+Use the complete displayed name in `[theme] name`, Settings, or the command
+palette. Lotus, Dawn, and GitHub Light are light themes. Theme assets and
+upstream attribution are documented in [the theme catalogue](../../assets/themes/README.md).
 
 Default chart series use an explicit five-color palette chosen for each named
 variant. Bundled palettes are checked for at least 3:1 background contrast

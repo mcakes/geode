@@ -226,17 +226,18 @@ impl ShellView {
         self.occupants.retain(|id, _| all.contains(id));
         // A closed tile is in no link group. Unlinked after `closed`: a
         // closing follower answers the flip barrier under its group's
-        // identity, which it reads only while still a member. The frame is
-        // written only for a tile that was in a group, so an ordinary render
-        // writes nothing, and that write waits until this render is over.
-        // While a window draws, GPUI drops a notification for any entity
-        // that window read in its last draw. The frame is one, because the
-        // shell's render reads it, so notified here the tiles reading the
-        // group's board would not hear a draft leave.
+        // identity, which it reads only while still a member. Every closed
+        // tile is unlinked, linked or not, so the config-door notices it
+        // will never take are dropped too. The frame is written only when a
+        // tile closed, so an ordinary render writes nothing, and that write
+        // waits until this render is over. While a window draws, GPUI drops
+        // a notification for any entity that window read in its last draw.
+        // The frame is one, because the shell's render reads it, so notified
+        // here the tiles reading the group's board would not hear a draft
+        // leave.
         for id in &gone {
             self.emit_subs.remove(id);
         }
-        gone.retain(|id| !self.frame.read(cx).membership(*id).is_empty());
         if !gone.is_empty() {
             cx.defer_in(window, move |view, _, cx| {
                 for id in gone {

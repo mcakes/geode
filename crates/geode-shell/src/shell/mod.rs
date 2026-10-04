@@ -4,7 +4,6 @@
 //! input routing, persistence, and occupant lifecycle live in sibling modules.
 
 mod add_tile;
-pub mod addfilter;
 pub mod aggregates;
 pub mod asof_rows;
 pub mod asof_view;
@@ -38,8 +37,6 @@ pub mod row_menu;
 mod rows;
 pub mod scale;
 pub mod scope_expr_view;
-// Read only by its tests until the dialog view is built on it.
-#[allow(dead_code)]
 mod scopedialog;
 mod session_io;
 pub mod settings_view;
@@ -727,15 +724,10 @@ pub struct ShellView {
     /// `notice`), and dropped by `render`'s generic staleness check when
     /// its tile stops being the focused member.
     stack_list: Option<stacklist::StackList>,
-    /// The scope bar's open "Add a filter" menu, or `None` when closed.
-    /// Owns the keyboard while open (`handle_key_down`'s own branch),
-    /// closed by any dispatch (which is also how a row commits), by the
-    /// palette or a dialog opening, and by a click outside it.
-    add_filter_menu: Option<addfilter::AddFilterMenu>,
     /// The row menu (`tile::context_menu`), or `None` when closed. Owns
-    /// the keyboard while open, as `add_filter_menu` does, and closes the
-    /// same ways: any dispatch, the palette or a dialog opening, a press
-    /// outside it.
+    /// the keyboard while open (`handle_key_down`'s own branch) and
+    /// closes on any dispatch, the palette or a dialog opening, or a
+    /// press outside it.
     row_menu: Option<row_menu::RowMenu>,
     /// Reusable storage for the per-frame tile diff. Each reconciliation
     /// clears and refills it, retaining capacity between renders.
@@ -821,6 +813,8 @@ pub struct ShellView {
     /// State for the open scope expression dialog. Created by
     /// [`scope_expr_view::open`] and cleared when its kind pops.
     scope_expr_dialog: Option<scope_expr_view::ScopeExprState>,
+    /// The Scope dialog's state while it is in the stack.
+    pub(crate) scope_dialog: Option<scopedialog::view::ScopeDialogState>,
     /// State for the open choice dialog: the scope, tile-kind, column,
     /// log-level, action-value or link-group picker. Created by one of
     /// `choicedialog`'s `open_*` doors, and cleared when its kind pops.
@@ -1054,6 +1048,12 @@ impl ShellView {
                         // The field IS the value; typing clears the last
                         // failed commit's message.
                         scope_expr_view::on_query_changed(state);
+                    }
+                }
+                Some(dialog::DialogKind::Scope) => {
+                    if let Some(state) = view.scope_dialog.as_mut() {
+                        // Only the text step types; Current ignores the field.
+                        scopedialog::view::on_query_changed(state, &query);
                     }
                 }
                 Some(dialog::DialogKind::Plain) | None => {}
@@ -1572,7 +1572,6 @@ impl ShellView {
             focused_sent: None,
             notice: None,
             stack_list: None,
-            add_filter_menu: None,
             row_menu: None,
             scratch_all_tiles: HashSet::new(),
             scratch_active_tiles: HashSet::new(),
@@ -1595,6 +1594,7 @@ impl ShellView {
             as_of_scroll: ScrollHandle::new(),
             as_of_data_version: 0,
             scope_expr_dialog: None,
+            scope_dialog: None,
             choice_dialog: None,
             choice_dialog_scroll: ScrollHandle::new(),
             hue_slider: None,
@@ -1647,6 +1647,7 @@ impl ShellView {
             DialogKind::Picker => self.picker = None,
             DialogKind::AsOf => self.as_of_dialog = None,
             DialogKind::ScopeExpr => self.scope_expr_dialog = None,
+            DialogKind::Scope => self.scope_dialog = None,
             DialogKind::Choice => {
                 self.choice_dialog = None;
                 self.hue_slider = None;
@@ -1818,12 +1819,48 @@ impl ShellView {
             .detach();
         }
         // Whole-object config edits queued by a module tile join the object
-        // dialogs' pending batch: one debounce, one write, one reload. With
-        // no user directory the refusal shows on the status bar.
+        // dialogs' pending batch: one debounce, one write, one reload. The
+        // tile that asked hears of a fork or a refusal through the frame;
+        // with no user directory the refusal also shows on the status bar.
         let edits = frame.update(cx, |f, _| f.take_pending_config_edits());
-        if let Err(e) = objectdialog::apply::queue_edits(self, edits, cx) {
-            self.config_write_error = Some(e.into());
-            cx.notify();
+        if !edits.is_empty() {
+            let mut origins: Vec<TileId> = edits.iter().filter_map(|e| e.origin).collect();
+            let posted: Vec<(TileId, crate::frame::TileNotice)> =
+                match objectdialog::apply::queue_edits(self, edits, cx) {
+                    Ok(notices) => notices
+                        .into_iter()
+                        .map(|(t, n)| (t, crate::frame::TileNotice::Forked(n)))
+                        .collect(),
+                    Err(e) => {
+                        self.config_write_error = Some(e.clone().into());
+                        cx.notify();
+                        // One refusal per tile, however many of its edits
+                        // the drain refused together.
+                        origins.sort_unstable();
+                        origins.dedup();
+                        origins
+                            .into_iter()
+                            .map(|t| (t, crate::frame::TileNotice::Refused(e.clone())))
+                            .collect()
+                    }
+                };
+            if !posted.is_empty() {
+                // Deferred: this runs inside the frame's own observer, and a
+                // tile reads its notices on the frame notification below.
+                // That notification re-enters this observer; it is harmless
+                // because the edit queue was drained above, and posting moves
+                // no frame version, so it opens no flip and starts no
+                // requery.
+                let frame = frame.clone();
+                cx.defer(move |cx| {
+                    frame.update(cx, |f, cx| {
+                        for (tile, notice) in posted {
+                            f.post_tile_notice(tile, notice);
+                        }
+                        cx.notify();
+                    })
+                });
+            }
         }
         // A pressed header link chip opens the chooser on its own tile.
         if let Some(tile) = frame.update(cx, |f, _| f.take_pending_link_chooser()) {
@@ -1854,12 +1891,14 @@ impl ShellView {
         }
         // A dialog whose list reads the frame (the Groupings list's leading
         // rows) re-derives when the frame changes under it; a stale `*` row
-        // would offer a chain that no longer exists. Last, after every
-        // `frame.update` above, so the key carries the final generation.
+        // would offer a chain that no longer exists, and the Scope dialog,
+        // whose rows are the lane's scope. Last, after every `frame.update`
+        // above, so the key carries the final generation.
         if self
             .object_dialog
             .as_ref()
             .is_some_and(|state| state.domain.applies_from_browse())
+            || self.scope_dialog.is_some()
         {
             self.refresh_dialog_rows(cx);
         }
@@ -1986,7 +2025,7 @@ impl ShellView {
     /// Load saved scope `name` into [`Self::target_frame`]'s lane through
     /// `load_scope` (so it is one undoable `set_scope` step and honours a
     /// workspace pin), notifying on a change. The one path both the
-    /// `scope::<name>` actions and the scope picker take. `Err` when no
+    /// `scope::<name>` actions and the saved-scope chooser take. `Err` when no
     /// saved scope has that name; `Ok(false)` when it is already current.
     pub(crate) fn load_saved_scope(
         &mut self,

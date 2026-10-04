@@ -177,7 +177,7 @@ fn a_kind_already_in_the_stack_is_refused(cx: &mut gpui::TestAppContext) {
 /// Revealed, the text and caret come back and the field has focus.
 #[gpui::test]
 fn a_covered_expression_dialog_gets_its_typed_text_back(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = dialog_test_shell(cx, "frame::scope_expression");
+    let (shell, mut vcx) = dialog_test_shell(cx, "frame::add_expression");
     vcx.simulate_input("book = ");
     let before = shell.read_with(&vcx, |s, _| {
         format!("{:?}", s.scope_expr_dialog.as_ref().unwrap().completion)
@@ -255,7 +255,7 @@ fn accept_in_a_pushed_dialog_does_not_touch_a_covered_object_draft(cx: &mut gpui
         "boo"
     );
 
-    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
     assert_eq!(
         kinds(&shell, &mut vcx),
         vec![DialogKind::Object, DialogKind::ScopeExpr]
@@ -813,7 +813,7 @@ fn a_reload_refreshes_a_covered_expression_dialogs_suggestions(cx: &mut gpui::Te
     let (shell, mut vcx) = dialog_test_shell_with(
         cx,
         services_with_one_dataset_column(),
-        "frame::scope_expression",
+        "frame::add_expression",
     );
     vcx.simulate_input("zzcol = 'x'");
     vcx.run_until_parked();

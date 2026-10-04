@@ -80,35 +80,36 @@ keybindings dialog (from the palette) rebinds anything.
 
 ```
 crates/
-  geode-core         shared vocabulary: config, schema, scope, snapshot, colour, log
-  geode-data         DataService: sources, ingest, DuckDB store, query path, health
-  geode-shell        tiling WM, keymap engine, palette, frame, dialogs, module contract
-  geode-tile         shared tile headers, interaction, caches and query coordination
-  geode-widgets      shared application controls below shell and feature crates
-  geode-chart        chart geometry, preparation and painting
-  geode-blotter      any view as a collapsible keyboard-driven hierarchy
-  geode-marketdata   market-data document panels with an edit draft (CVI)
-  geode-timeseries   fetchable series, expressions, statistics and chart tile
-  geode-volslice     vol smiles per expiry: CVI, a group's draft and the chain
-  geode-diagnostics  the diagnostics page over health, generations, config and the log
-  geode-guide        offline user-guide tile with section navigation and find
-  geode-documents    typed parsers and writers per document wire format
-  geode-pricing      implementations of the pricing trait
-  geode-pricer       the line pricer: pure sheet core and its tile
-  geode-nemo         row-menu links to the external Nemo app
-  geode-positions    row-menu commands for a configured position service
-  geode-demo-data    deterministic synthetic risk data and documents
-  geode-app          the `geode` binary: wires everything together
+  geode-core             shared vocabulary: config, schema, scope, snapshot, colour, log
+  geode-data             DataService: sources, ingest, DuckDB store, query path, health
+  geode-shell            tiling WM, keymap engine, palette, frame, dialogs, module contract
+  geode-tile             shared tile headers, interaction, caches and query coordination
+  geode-widgets          shared application controls below shell and feature crates
+  geode-chart            chart geometry, preparation and painting
+  geode-blotter          any view as a collapsible keyboard-driven hierarchy
+  geode-marketdata       market-data document panels with an edit draft (CVI)
+  geode-timeseries       fetchable series, expressions, statistics and chart tile
+  geode-volslice         vol smiles per expiry: CVI, a group's draft and the chain
+  geode-classifications  one classification's source values and labels, edited in place
+  geode-diagnostics      the diagnostics page over health, generations, config and the log
+  geode-guide            offline user-guide tile with section navigation and find
+  geode-documents        typed parsers and writers per document wire format
+  geode-pricing          implementations of the pricing trait
+  geode-pricer           the line pricer: pure sheet core and its tile
+  geode-nemo             row-menu links to the external Nemo app
+  geode-positions        row-menu commands for a configured position service
+  geode-demo-data        deterministic synthetic risk data and documents
+  geode-app              the `geode` binary: wires everything together
 docs/
-  PHILOSOPHY.md      the charter
-  README.md          current guides and historical records
-  current/           current subsystem behavior and rationale
-  phase-history.md   archived phase and review history
-  perf.md            what is measured and what the numbers are
-  superpowers/       archived implementation documents
-examples/demo-config the config layer `--demo` runs on
-scripts/             the mutation harness
-assets/              bundled fonts and themes
+  PHILOSOPHY.md          the charter
+  README.md              current guides and historical records
+  current/               current subsystem behavior and rationale
+  phase-history.md       archived phase and review history
+  perf.md                what is measured and what the numbers are
+  superpowers/           archived implementation documents
+examples/demo-config     the config layer `--demo` runs on
+scripts/                 the mutation harness
+assets/                  bundled fonts and themes
 ```
 
 Each crate has its own README with a module map and the rules it pins.

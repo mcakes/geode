@@ -79,8 +79,9 @@ after the anchor. Each `next_document` call for an underlying returns its next
 expiry in rotation, keyed `[underlying, YYYY-MM-DD]`, so twelve calls cover
 the whole chain and the thirteenth wraps. The caller passes the underlying's
 latest CVI document: the generator slices it with `DemoVolModel` at the expiry
-(clamped to the CVI's first and last terms, so an expiry past the last term
-takes that term's smile) to get the forward and each strike's curve vol. That
+(the model extrapolates past either end of the terms, so an expiry past the
+last term is priced off the curve the viewer paints there) to get the forward
+and each strike's curve vol. That
 keeps the chain near the surface the vol viewer draws. Sixty strikes sit on
 the 1-2-5 increment nearest 0.55% of the forward, 44 below the at-the-money
 strike and 15 above, less any that would not be positive. Each strike's mid
@@ -107,7 +108,10 @@ desk and user configuration. Its files declare:
   coalescing per key over 500 ms like the CVI and dividend sources. Chains
   are subscribed only; the demo egress target does not upload them.
 - `views.toml`: the default `tree` view and a 100-column `wide` view.
-- `dimensions.toml` and `groupings.toml`: book-to-desk mapping and grouping slots.
+- `dimensions.toml` and `groupings.toml`: book-to-desk mapping, the
+  `region` classification over `underlying_ref` (`SMI` and `KOSPI2` left
+  unclassified, so a Classifications tile opens with rows to label), and
+  grouping slots.
 - `app.toml`: blotter staleness, the default series source, and pricer
   underlying suggestions matching `demo_underlyings`.
 
