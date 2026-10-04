@@ -262,6 +262,17 @@ publication. `source_time = "document:<field>"` requires a document-level
 string must parse as RFC 3339 with its offset. Schema validation cannot ensure
 that a particular message supplies a valid value.
 
+Two subscription settings govern [recovery on
+subscribe](data-path.md#recovery-on-subscribe), which asks the transport for
+the latest document on each recorded topic at start and after a reconnect.
+`recover_timeout` (default `"10s"`) is how long the receiver waits for
+replies; one second of grace is added, so `"0"` leaves a one-second window
+and requests still go out. `recover_max_age` (default `"7d"`) prunes, at
+open, recorded topics last received longer ago than this; they are not
+asked for. `"0"` prunes every recorded topic, so nothing is recovered at
+start. Both are subscription-only settings, warned and ignored on other
+shapes.
+
 The snapshot default is `poll_interval = "5m"`. A zero interval warns and uses
 `5m`, because it would reread the whole table in a tight loop. A missing or
 empty `table` rejects the source. `table` warns and is ignored on every other
