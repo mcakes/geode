@@ -3,45 +3,37 @@
 
 use geode_core::config::{Config, Diagnostic, Severity};
 
-/// DuckDB's `memory_limit` for the collector's writer when `[collector]
-/// memory_limit` is absent or unusable. Provisional: the collector runs
-/// unattended beside the app, so it stays well under DuckDB's own default
-/// (80% of physical memory).
-pub const DEFAULT_MEMORY_LIMIT: &str = "512MB";
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The collector's settings. The default sets no DuckDB `memory_limit`
+/// (DuckDB's own default, as the app): a finite 512MB limit made DuckDB
+/// abort the collector with an internal assertion on large CSV loads
+/// (`docs/perf.md`, 2026-10-04), which a service manager would restart into
+/// the same load. A value can be set once the overnight footprint
+/// measurement chooses one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CollectorSettings {
-    /// A DuckDB size string (`512MB`, `1.5 GiB`), set on the writer at open.
-    pub memory_limit: String,
+    /// A DuckDB size string (`1GB`, `1.5 GiB`) set on the writer at open;
+    /// `None` leaves DuckDB's default.
+    pub memory_limit: Option<String>,
 }
 
-impl Default for CollectorSettings {
-    fn default() -> Self {
-        CollectorSettings {
-            memory_limit: DEFAULT_MEMORY_LIMIT.to_string(),
-        }
-    }
-}
-
-/// `[collector]` from `app.toml`. An absent `memory_limit` uses
-/// [`DEFAULT_MEMORY_LIMIT`] silently. A value that is not a string, or not a
-/// number followed by one of DuckDB's size units (`B`, `KB`…`TB`,
-/// `KiB`…`TiB`, any case, optional space), warns at
-/// `app.collector.memory_limit` and uses the default, so the collector never
-/// hands DuckDB a value it would refuse at open.
+/// `[collector]` from `app.toml`. An absent `memory_limit` sets none. A
+/// value that is not a string, or not a number followed by one of DuckDB's
+/// size units (`B`, `KB`…`TB`, `KiB`…`TiB`, any case, optional space),
+/// warns at `app.collector.memory_limit` and sets none, so the collector
+/// never hands DuckDB a value it would refuse at open.
 pub fn collector_settings(config: &Config) -> (CollectorSettings, Vec<Diagnostic>) {
     let mut settings = CollectorSettings::default();
     let mut diagnostics = Vec::new();
     if let Some(value) = config.get("app", "collector.memory_limit") {
         match value.as_str().filter(|v| is_memory_limit(v)) {
-            Some(limit) => settings.memory_limit = limit.to_string(),
+            Some(limit) => settings.memory_limit = Some(limit.to_string()),
             None => diagnostics.push(Diagnostic {
                 severity: Severity::Warning,
                 layer: config.explain("app", "collector.memory_limit"),
                 file: None,
                 message: format!(
-                    "[collector] memory_limit = {value} is not a size such as \"512MB\" \
-                     or \"1GiB\"; using {DEFAULT_MEMORY_LIMIT}"
+                    "[collector] memory_limit = {value} is not a size such as \"1GB\" \
+                     or \"1GiB\"; setting no limit (DuckDB's default)"
                 ),
                 path: Some("app.collector.memory_limit".to_string()),
             }),
@@ -74,9 +66,9 @@ mod tests {
     use geode_core::config::test_support::config_from;
 
     #[test]
-    fn the_memory_limit_defaults_to_512mb() {
+    fn the_memory_limit_defaults_to_none() {
         let (settings, diags) = collector_settings(&config_from("app", ""));
-        assert_eq!(settings.memory_limit, "512MB");
+        assert_eq!(settings.memory_limit, None);
         assert!(diags.is_empty(), "{diags:?}");
     }
 
@@ -84,16 +76,16 @@ mod tests {
     fn the_memory_limit_reads_collector_memory_limit() {
         let config = config_from("app", "[collector]\nmemory_limit = \"1GB\"\n");
         let (settings, diags) = collector_settings(&config);
-        assert_eq!(settings.memory_limit, "1GB");
+        assert_eq!(settings.memory_limit.as_deref(), Some("1GB"));
         assert!(diags.is_empty(), "{diags:?}");
     }
 
     #[test]
-    fn an_unparseable_memory_limit_warns_and_uses_the_default() {
+    fn an_unparseable_memory_limit_warns_and_sets_none() {
         for value in ["\"lots\"", "512", "\"MB\"", "\"1.GB\""] {
             let config = config_from("app", &format!("[collector]\nmemory_limit = {value}\n"));
             let (settings, diags) = collector_settings(&config);
-            assert_eq!(settings.memory_limit, "512MB", "{value}");
+            assert_eq!(settings.memory_limit, None, "{value}");
             assert_eq!(diags.len(), 1, "{value}: {diags:?}");
             assert_eq!(diags[0].severity, Severity::Warning);
             assert_eq!(diags[0].path.as_deref(), Some("app.collector.memory_limit"));

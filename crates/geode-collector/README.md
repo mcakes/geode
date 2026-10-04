@@ -100,7 +100,8 @@ reaches `launchctl`, `schtasks` or the real `~/Library/LaunchAgents`.
    30 s (`STAMP_RECHECK`); an unreadable stamp logs one error naming the
    store and the error and idles the same way.
 4. Load the configuration afresh, apply `[log]` levels, and spawn the data
-   service as `StoreRole::Collector` with `[collector] memory_limit`, plus
+   service as `StoreRole::Collector` with `[collector] memory_limit` if
+   set (unset by default: DuckDB's own limit, as the app), plus
    the demo bus in `--demo`.
 5. Poll every 100 ms (`HOLD_POLL`) until an app appears or a data thread
    stops. An app counts only when a second probe 20 ms later sees it too:
@@ -144,10 +145,12 @@ the sink waits: it logs, updates a map or a list, and returns.
 - The release lets a file load under way finish, so a handoff during a
   large CSV load lasts the rest of that load (about 1.9 s at 1,000,000
   rows, 4.5 s at 2,000,000), past the 2 s drain; a load longer than the
-  app's 15 s open deadline fails the app's open. Under the default
-  `memory_limit` (512MB) DuckDB can abort the collector on large CSV loads
-  (an assertion in its temporary memory manager); the service manager
-  restarts it. See `docs/current/performance.md`.
+  app's 15 s open deadline fails the app's open. See
+  `docs/current/performance.md`.
+- `[collector] memory_limit` is unset by default. A finite limit of 512MB
+  made DuckDB abort the collector with an internal assertion on large CSV
+  loads, and a service manager would restart it into the same load; a
+  value can be set once the overnight footprint measurement chooses one.
 - A changed binary takes effect at the collector's next release (exit 75).
   launchd restarts it after its 10 s throttle. On Windows a running
   executable cannot be replaced, so a new build needs `install` again,

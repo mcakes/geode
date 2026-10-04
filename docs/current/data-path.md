@@ -257,7 +257,11 @@ the store; when one appears, the collector releases it with
 `DataHandle::release(HANDOFF_DRAIN)` (2 s) and the app's waiting open takes
 it. `StoreRole::Collector` is that process's open: it checks the
 [store-format stamp](#the-store-format-stamp) before any DDL and sets the
-writer's `memory_limit`.
+writer's `memory_limit` when `[collector] memory_limit` names one. By
+default it sets none (DuckDB's default, as the app): a finite 512MB limit
+made DuckDB abort the collector with an internal assertion on large CSV
+loads. A value can be set once the overnight footprint measurement chooses
+one.
 
 ### The app's open
 

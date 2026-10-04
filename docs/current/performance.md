@@ -141,7 +141,7 @@ the measurement log for fixture and hardware details.
 | Warm database reopen | populated demo store | 5.0 ms |
 | Store handoff, collector idle | `--demo 100000`: `acquire_app` to `Store::open` | 222 ms |
 | Store handoff, collector just opened | the same, its bus's startup burst in flight (about 130 documents drained) | 828 ms |
-| Store handoff, a large file loading | 1,000,000-row CSV under way; 2,000,000 rows (1GB `memory_limit`) | 1.93 s; 4.46 s |
+| Store handoff, a large file loading | 1,000,000-row CSV under way (512MB `memory_limit`); 2,000,000 rows (1GB) | 1.93 s; 4.46 s |
 | View requery | 1,000,000 rows, no text filter, depth two | 2.51 ms |
 | View requery, no context columns | 1,000,000 rows, underlying-grain measures only, depth two | 20.5 ms |
 | View requery, roster's context columns | the same view with `underlying_ref`, `position_ref`, `instrument_ref` | 35.0 ms |
@@ -376,11 +376,13 @@ joined on the unique source value, if the idle figure stays over budget.
   drain cap; a load longer than 15 s fails the app's open. Idle, it is
   about 0.1 to 0.25 s, quantized by the collector's 100 ms hold poll and the
   app's 100 ms open retry.
-- Under the default `[collector] memory_limit` (512MB) DuckDB aborts the
+- A finite `[collector] memory_limit` of 512MB made DuckDB abort the
   collector on large CSV loads (an internal assertion in its temporary
   memory manager): on the second 2,000,000-row file in one process, and
-  intermittently after about 3,000,000 rows of 1,000,000-row files. The
-  service manager restarts it. 1GB loaded the same files.
+  intermittently after about 3,000,000 rows of 1,000,000-row files. 1GB
+  and 8GB loaded the same files. The limit is therefore unset by default
+  (DuckDB's own, as the app); the overnight footprint measurement is owed
+  before a value is chosen.
 - The vol slice `model_build` bench (`cargo bench -p geode-volslice`) measured
   about 200 µs with 1,000-point curves under heavy machine load (see the
   measurement log). It times `core::build::model` alone, the work a repaint

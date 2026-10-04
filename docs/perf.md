@@ -2828,7 +2828,7 @@ in that next run the collector aborted in its large-file case (below).
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `--demo 100000`, collector idle (2 s with no publish before each run) | 222 ms | 119 ms | 231 ms | 0 to 1 | 29 to 106 ms |
 | `--demo 100000`, right after the collector opened (its bus's startup burst and recovery in flight) | 828 ms | 762 ms | 890 ms | 112 to 138 | 631 to 805 ms |
-| three 1,000,000-row CSVs, the first loading (default `memory_limit` 512MB) | 1,927 ms | 1,682 ms | 2,366 ms | 1 | 1,448 to 2,115 ms |
+| three 1,000,000-row CSVs, the first loading (`memory_limit` 512MB, then the default) | 1,927 ms | 1,682 ms | 2,366 ms | 1 | 1,448 to 2,115 ms |
 | three 2,000,000-row CSVs, the first loading (`memory_limit` 1GB) | 4,458 ms | 3,781 ms | 4,831 ms | 1 | 3,250 to 4,234 ms |
 
 Idle sits in two bands, about 120 ms and about 225 ms: the collector's
@@ -2845,7 +2845,7 @@ files), so the handoff is the remainder of one file's load: about 1.9 s at
 more than 15 s would make the app's open fail with `the background
 collector did not release the store within 15 s`. Not tuned here.
 
-Under the default `[collector] memory_limit` of 512MB, DuckDB aborts the
+Under the then-default `[collector] memory_limit` of 512MB, DuckDB aborts the
 collector process (`Assertion failed: (new_remaining_size != 0), function
 SetRemainingSizeAndUpdateReservation, file temporary_memory_manager.cpp,
 line 28`, SIGABRT): on the second 2,000,000-row file loaded in one process,
@@ -2853,6 +2853,9 @@ four times out of four, and in one of two runs of the 1,000,000-row case,
 on the fourth file (3,000,000 rows already loaded by that process). At 1GB
 and at 8GB three 2,000,000-row files load in one process; the 1GB case
 above ran to completion. The app sets no limit. Under launchd the abort is
-a failed exit, so the collector restarts and the next file loads in a
-fresh process.
+a failed exit, so the collector restarts; one file large enough to abort
+a fresh process would crash-loop. On this evidence the default became
+unset (no `SET memory_limit`, DuckDB's own default, as the app), with
+`[collector] memory_limit` kept as an opt-in until the overnight footprint
+measurement chooses a value.
 

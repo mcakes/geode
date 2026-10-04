@@ -3,8 +3,8 @@
 //!
 //! Every test builds a temp world: `HOME` points into a temp directory,
 //! `APPDATA` and `LOCALAPPDATA` are removed, `GEODE_DESK_CONFIG` names a temp
-//! desk directory and `TMPDIR` a temp directory (the `--demo` store lives
-//! there). The user `app.toml` sets `data.db_path` and `[log] collector =
+//! desk directory and `TMPDIR`, `TMP` and `TEMP` a temp directory (the
+//! `--demo` store lives there; Windows' `temp_dir` reads `TMP`/`TEMP`). The user `app.toml` sets `data.db_path` and `[log] collector =
 //! "debug"`, so the collector's publish lines reach
 //! `<temp home>/.config/geode/logs/collector.*.log`, which the tests read.
 //! `GEODE_SERVICE=1` drops the collector's stderr log layer, so a child's
@@ -25,10 +25,10 @@
 //!   could stay held for that instant. Within a test, a lease the test
 //!   asserts on is taken only after the children it concerns are spawned.
 //!
-//! Unix only: the lock and sharing semantics on Windows (DuckDB's sharing
-//! violation, Task Scheduler) have not been run on a Windows machine, and
-//! the lost-race test needs a FIFO.
-#![cfg(unix)]
+//! Platforms: the tests run on Windows CI too, but have only been run on
+//! macOS. Two are Unix only: the lost-race test needs a FIFO, and the pulse
+//! test's margin (a 2 ms pulse against the 20 ms confirmation gap) does not
+//! survive Windows' ~15.6 ms timer granularity.
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 use geode_data::STORE_FORMAT;
 use geode_data::lease::{self, AppLease, acquire_app, collector_present};
 use geode_data::store::stamp::read_format;
-use geode_data::store::{Catalog, Store};
+use geode_data::store::{Catalog, Store, StoreError};
 use tempfile::TempDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_geode-collector");
@@ -54,6 +54,7 @@ const POLL: Duration = Duration::from_millis(25);
 
 /// The collector's log text for each event the tests wait on.
 const RELEASED: &str = "released the store to the app";
+#[cfg(unix)]
 const YIELDED: &str = "app took the store first";
 /// Logged once per hold, after the store opened and discovery ran: the
 /// health of the temp world's one directory source.
@@ -117,10 +118,22 @@ const DATASETS: &str = "config_version = 1\n\
 
 const CSV_HEADER: &str = "Book,LHU,PositionRef,Counterparty,NPV";
 
+/// `path` with symlinks resolved on Unix (macOS's temp directory is under
+/// the `/var` -> `/private/var` link, and the collector logs the resolved
+/// store path). On Windows `canonicalize` gives a `\\?\` verbatim path,
+/// which the configuration and DuckDB need not accept, so it is kept as is.
+fn real_path(path: &Path) -> PathBuf {
+    if cfg!(windows) {
+        path.to_path_buf()
+    } else {
+        path.canonicalize().unwrap()
+    }
+}
+
 impl World {
     fn dirs() -> (TempDir, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
+        let root = real_path(dir.path());
         let home = root.join("home");
         let user = home.join(".config").join("geode");
         let desk = root.join("desk");
@@ -141,12 +154,7 @@ impl World {
     /// [`World::files`] with `app_extra` appended to the user `app.toml`.
     fn files_with(app_extra: &str) -> World {
         let (dir, home, user, desk, inbox, tmp) = World::dirs();
-        let db = dir
-            .path()
-            .canonicalize()
-            .unwrap()
-            .join("store")
-            .join("g.duckdb");
+        let db = real_path(dir.path()).join("store").join("g.duckdb");
         std::fs::write(
             user.join("app.toml"),
             format!(
@@ -212,6 +220,8 @@ impl World {
             .env("GEODE_SERVICE", "1")
             .env("GEODE_DESK_CONFIG", &self.desk)
             .env("TMPDIR", &self.tmp)
+            .env("TMP", &self.tmp)
+            .env("TEMP", &self.tmp)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(self.stderr_file());
@@ -307,6 +317,12 @@ impl World {
             self.status()
         );
         match read_format(&self.db) {
+            // On Windows DuckDB names the holder (the conflict marker) only
+            // when the Restart Manager finds it; a bare sharing violation is
+            // still a refused open.
+            Err(err) if cfg!(windows) => {
+                assert!(matches!(err, StoreError::Open { .. }), "{err}")
+            }
             Err(err) => assert!(lease::is_lock_conflict(&err), "{err}"),
             Ok(found) => panic!("the store opened read-only ({found:?}): no one holds it"),
         }
@@ -529,8 +545,16 @@ fn a_killed_app_returns_the_store() {
     app.0.kill().unwrap();
     app.0.wait().unwrap();
     let killed = Instant::now();
-    world.wait_published("risk", "r2", Duration::from_secs(3));
-    assert!(killed.elapsed() < Duration::from_secs(3));
+    // 2 s plus one discovery poll. Windows releases a dead process's
+    // `LockFileEx` locks after a delay that "depends upon available system
+    // resources" (the `LockFileEx` documentation), so it gets more room.
+    let bound = if cfg!(windows) {
+        Duration::from_secs(8)
+    } else {
+        Duration::from_secs(3)
+    };
+    world.wait_published("risk", "r2", bound);
+    assert!(killed.elapsed() < bound);
     assert!(collector.exited().is_none());
 }
 
@@ -544,8 +568,9 @@ fn a_killed_app_returns_the_store() {
 /// build publishes about 40 documents a second, and the burst is over a
 /// hundred), dropping the rest by design;
 /// either would test the demo bus's timing, not the handoff. A cadence
-/// publish still held by a coalescer is flushed by the release's drain;
-/// those lines are logged before the release line and are checked too.
+/// publish still held by a coalescer at the handoff would be flushed by the
+/// release's drain and checked too, but the quiet wait means one rarely is:
+/// the flush on release is covered by A4's unit test alone, not here.
 #[test]
 fn a_handoff_keeps_the_documents_the_collector_received() {
     let _serial = serial();
@@ -617,8 +642,9 @@ fn a_mismatched_stamp_idles_the_collector() {
     // Give a repeat, a publish or an exit time to show.
     std::thread::sleep(Duration::from_secs(1));
     let log = world.log();
-    assert_eq!(log.matches(&mismatch).count(), 1, "{log}");
-    assert!(log.contains(" ERROR geode::collector:"), "{log}");
+    let lines: Vec<&str> = log.lines().filter(|l| l.contains(&mismatch)).collect();
+    assert_eq!(lines.len(), 1, "{log}");
+    assert!(lines[0].contains(" ERROR geode::collector:"), "{log}");
     assert!(collector.exited().is_none());
     assert!(world.status().starts_with("collector: running"));
 
@@ -638,8 +664,13 @@ fn a_mismatched_stamp_idles_the_collector() {
 
 /// A `status` probe, or anything else, holding `<db>.app.lock` for an
 /// instant is not an app: the collector releases only on an app confirmed
-/// by a second probe. Five seconds of 10 ms pulses every 50 ms must leave
-/// the store with the collector.
+/// by a second probe. Five seconds of 2 ms pulses with 40 ms between must
+/// leave the store with the collector: even an overshot sleep keeps a pulse
+/// well under the 20 ms confirmation gap.
+///
+/// Unix only: Windows' timer granularity (about 15.6 ms) turns a 2 ms sleep
+/// into one that eats most of the margin against the 20 ms gap.
+#[cfg(unix)]
 #[test]
 fn a_momentary_app_lock_does_not_release_the_store() {
     let _serial = serial();
@@ -662,7 +693,7 @@ fn a_momentary_app_lock_does_not_release_the_store() {
         // The collector's own probe holds the lock for an instant.
         wait_until("the app lock between probes", WAIT, || lock.try_lock().ok());
         let held = Instant::now();
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(2));
         lock.unlock().unwrap();
         longest = longest.max(held.elapsed());
         std::thread::sleep(Duration::from_millis(40));
@@ -680,11 +711,12 @@ fn a_momentary_app_lock_does_not_release_the_store() {
 /// while no reader has the FIFO open, rather than blocking.
 #[cfg(target_os = "linux")]
 const O_NONBLOCK: i32 = 0o4000;
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 const O_NONBLOCK: i32 = 0x0004;
 
 /// The FIFO's write end, if a reader has the FIFO open (or is blocked
 /// opening it); `None` while no reader does.
+#[cfg(unix)]
 fn fifo_writer(path: &Path) -> Option<File> {
     use std::os::unix::fs::OpenOptionsExt;
     OpenOptions::new()
@@ -708,7 +740,8 @@ fn fifo_writer(path: &Path) -> Option<File> {
 ///
 /// The FIFO appears only after the start-up load: until then a raw lock on
 /// `<db>.app.lock`, taken before the spawn and released long after it,
-/// keeps the collector waiting for the app.
+/// keeps the collector waiting for the app. Unix only: it needs a FIFO.
+#[cfg(unix)]
 #[test]
 fn a_lost_race_is_a_yield_not_an_exit() {
     let _serial = serial();
@@ -783,10 +816,11 @@ fn a_lost_race_is_a_yield_not_an_exit() {
 /// waits are longer than the tests'; each is still bounded.
 ///
 /// The large-file cases are 1,000,000-row files under the default
-/// `[collector] memory_limit` (512MB) and 2,000,000-row files under 1GB: at
-/// 512MB DuckDB aborts the collector on the second 2,000,000-row load
-/// (`temporary_memory_manager.cpp` assertion), so that shape cannot run at
-/// the default.
+/// `[collector] memory_limit` (unset: DuckDB's own) and 2,000,000-row files
+/// under 1GB. The 1,000,000-row figures in `docs/perf.md` were recorded at
+/// 512MB, the default then; at 512MB DuckDB aborted the collector on large
+/// loads (`temporary_memory_manager.cpp` assertion), which is why the
+/// default is now unset.
 #[test]
 #[ignore = "a measurement: set GEODE_MEASURE_HANDOFF=1 and build with --release"]
 fn measure_handoff() {

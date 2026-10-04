@@ -358,13 +358,16 @@ fn hold(
     tracing::info!(
         target: TARGET,
         "acquiring the store (memory_limit {})",
-        settings.memory_limit
+        settings
+            .memory_limit
+            .as_deref()
+            .unwrap_or("unset, DuckDB's default")
     );
     let handle = DataService::spawn_as(
         setup.config,
         Events::sink(&events),
         StoreRole::Collector {
-            memory_limit: Some(settings.memory_limit),
+            memory_limit: settings.memory_limit,
         },
     );
     let mut bus = feed.map(|feed| geode_compose::demo_bus::spawn_default(feed, today));

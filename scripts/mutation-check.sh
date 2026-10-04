@@ -6567,7 +6567,7 @@ run_mutation "collector settings: an unparseable memory_limit is passed through,
   crates/geode-compose/src/collector.rs \
   '        match value.as_str().filter(|v| is_memory_limit(v)) {' \
   '        match value.as_str() {' \
-  geode-compose an_unparseable_memory_limit_warns_and_uses_the_default
+  geode-compose an_unparseable_memory_limit_warns_and_sets_none
 
 run_mutation "load_config: the collector's configuration drops the demo layer" \
   crates/geode-compose/src/lib.rs \
