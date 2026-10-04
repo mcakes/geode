@@ -45,6 +45,14 @@ cargo bench -p geode-timeseries
   clamps over its enabled rows. The tile never publishes `grid`, so its own
   `h`/`l` pan and `g`/`shift+g` jump are never shadowed by a grid motion.
 - `:` remains local to this tile.
+- The notice line under the header is a danger notice through
+  `geode_tile::notice`. A handled verb replaces it, as before; a click on
+  it, or `escape` with no popup up (bound to `timeseries::cancel` in
+  normal mode, behind every popup's own `escape`), dismisses it without
+  clearing it (`Dismissals`): it stays hidden while the tile keeps
+  reporting the same text and shows again once it stopped and came back.
+  The self-observer (and `set_visible`, whose notify the draw drops)
+  prunes the dismissals, never render.
 - A series is named by its label (`Slot::label`); slot numbers never reach
   the screen, a notice, or the `:` vocabulary. `:rule`, `:color`, `:yaxis`,
   and `:remove` take an optional series name first and otherwise act on the

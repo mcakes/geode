@@ -4229,3 +4229,75 @@ fn the_header_shows_the_edit_icon_while_a_field_holds_the_keys(cx: &mut gpui::Te
     h.dispatch(&mut vcx, "cancel", None);
     assert_eq!(shown(&h, &mut vcx), (false, false), "esc closed it");
 }
+
+// ---- the notice line's dismissal ----
+
+const NOT_EXPR: &str = "SPX.close is not an expression";
+
+fn notice_painted(h: &Harness, vcx: &mut gpui::VisualTestContext) -> bool {
+    h.is_painted(vcx, &format!("timeseries-notice-{TILE}"))
+}
+
+fn nothing_dismissed(h: &Harness, vcx: &gpui::VisualTestContext) -> bool {
+    h.tile.read_with(vcx, |t, _| t.dismissed.is_empty())
+}
+
+/// A press on the notice line hides it; the tile still reports it, so
+/// the same refusal again stays hidden. A handled verb takes it away, and
+/// the refusal coming back shows.
+#[gpui::test]
+fn a_click_dismisses_the_notice_line_until_it_stops_and_returns(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.keys(&mut vcx, "e");
+    assert_eq!(h.notice(&vcx).as_deref(), Some(NOT_EXPR));
+    assert!(notice_painted(&h, &mut vcx), "fixture: the line paints");
+    h.click(&mut vcx, &format!("timeseries-notice-{TILE}"));
+    assert!(!notice_painted(&h, &mut vcx), "dismissed");
+    assert_eq!(h.notice(&vcx).as_deref(), Some(NOT_EXPR), "still reported");
+    assert!(h.popup_is_none(&vcx), "the press opened nothing");
+
+    h.keys(&mut vcx, "e");
+    assert_eq!(h.notice(&vcx).as_deref(), Some(NOT_EXPR));
+    assert!(!notice_painted(&h, &mut vcx), "reported unchanged: hidden");
+
+    h.keys(&mut vcx, "h");
+    assert_eq!(h.notice(&vcx), None, "a handled verb took it away");
+    h.keys(&mut vcx, "e");
+    assert!(notice_painted(&h, &mut vcx), "back: it shows again");
+}
+
+/// With no popup up, `escape` dismisses the notice line and leaves the
+/// tile's notice in place.
+#[gpui::test]
+fn escape_dismisses_the_notice_line(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.keys(&mut vcx, "e");
+    assert!(notice_painted(&h, &mut vcx), "fixture: the line paints");
+    h.keys(&mut vcx, "escape");
+    assert!(!notice_painted(&h, &mut vcx), "dismissed");
+    assert_eq!(h.notice(&vcx).as_deref(), Some(NOT_EXPR), "still reported");
+}
+
+/// An open menu takes `escape` first and dismisses nothing: closing it is
+/// a handled verb, which (as every handled verb does here) replaces the
+/// notice rather than hiding it. A new notice then shows, and the next
+/// `escape` dismisses that.
+#[gpui::test]
+fn escape_closes_an_open_menu_before_it_dismisses(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.click(&mut vcx, &format!("timeseries-menu-button-{TILE}"));
+    let remove = h.menu_row_index(&vcx, "Remove");
+    h.click(&mut vcx, &format!("ts-menu-row-{TILE}-{remove}"));
+    assert!(h.popup_is_menu(&vcx), "fixture: the menu stays up");
+    assert!(notice_painted(&h, &mut vcx), "fixture: the line paints");
+    h.keys(&mut vcx, "escape");
+    assert!(h.popup_is_none(&vcx), "the menu closed");
+    assert!(nothing_dismissed(&h, &vcx), "escape dismissed nothing");
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.keys(&mut vcx, "e");
+    assert!(notice_painted(&h, &mut vcx));
+    h.keys(&mut vcx, "escape");
+    assert!(!notice_painted(&h, &mut vcx), "the next escape dismisses");
+}

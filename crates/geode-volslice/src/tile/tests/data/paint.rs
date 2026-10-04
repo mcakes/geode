@@ -684,3 +684,5 @@ fn the_done_state_in_one_frame(cx: &mut gpui::TestAppContext) {
 }
 
 mod menu;
+
+mod notice;

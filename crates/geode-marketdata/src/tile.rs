@@ -65,6 +65,7 @@ use geode_tile::following::{
 };
 use geode_tile::header::HealthWatch;
 use geode_tile::menu::{Menu, MenuHost, MenuIds};
+use geode_tile::notice::Dismissals;
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, Focusable as _, Hsla, IntoElement,
@@ -592,6 +593,10 @@ pub struct MarketDataTile {
     /// or is not built yet. `SharedString` rather than `String`: `render`
     /// clones it, and a `String` clone is an allocation per frame.
     notice: Option<SharedString>,
+    /// The header notices the trader dismissed (a click, or `escape` with
+    /// nothing else to do), each hidden while the header still reports it.
+    /// Pruned in [`Self::rebuild_chrome`], never in render.
+    pub(crate) dismissed: Dismissals,
     stale_after: Rc<StdCell<Duration>>,
     /// The prepared header, rebuilt by [`Self::rebuild_chrome`] — the one
     /// door every mutation on this tile ends at — so `render` clones
@@ -966,6 +971,7 @@ impl MarketDataTile {
             find: None,
             fuzzy_find: None,
             notice: None,
+            dismissed: Dismissals::default(),
             stale_after,
             header: HeaderModel {
                 title: "".into(),
@@ -2293,6 +2299,9 @@ impl MarketDataTile {
             incomplete: self.draft.incomplete_rows(&self.spec, &self.model.columns),
             clock: self.clock,
         });
+        // A dismissed notice the header stopped reporting shows again
+        // when it returns.
+        self.dismissed.prune(self.header.notices());
     }
 
     fn stale_slot(t: &mut Self) -> &mut geode_tile::stale::StaleTimer {
@@ -2368,7 +2377,7 @@ impl MarketDataTile {
         // insert navigation retain their active popup so they can act on it. Use the
         // window-aware close to blur a focused picker or choice field before dropping
         // it.
-        if !matches!(
+        let popup_closed = !matches!(
             verb,
             "menu"
                 | "menu_down"
@@ -2381,8 +2390,8 @@ impl MarketDataTile {
                 | "insert_down"
                 | "insert_up_big"
                 | "insert_down_big"
-        ) && self.popup.is_some()
-        {
+        ) && self.popup.is_some();
+        if popup_closed {
             self.close_popup_with_window(window, cx);
         }
         let n = count.unwrap_or(1).max(1) as isize;
@@ -2491,18 +2500,30 @@ impl MarketDataTile {
                 self.start_selection(kind);
                 true
             }
+            // Escape peels one layer per press: a popup (closed above, a
+            // palette arrival), the selection, the find, and last the
+            // header's notices.
             "escape" => {
-                if self.selection.is_some() {
+                if popup_closed {
+                    false
+                } else if self.selection.is_some() {
                     // The first escape ends only the selection; find and
                     // the notice wait for the next one. The tail's
                     // `sync_cursor` hands the delegate the cleared tint.
                     self.clear_selection();
                     false
-                } else {
+                } else if self.find.is_some() {
                     self.find = None;
-                    // Only when there WAS one: `escape` on a clean header
+                    false
+                } else {
+                    // Nothing else answered: the transient notice clears
+                    // and every other warning or danger notice (the upload
+                    // error) is dismissed, hidden until it changes. Only
+                    // when there WAS one: `escape` on a clean header
                     // changes nothing the chips show.
-                    self.notice.take().is_some()
+                    let took = self.notice.take().is_some();
+                    let hid = self.dismissed.dismiss_all(self.header.notices());
+                    took || hid
                 }
             }
             "menu" => {
@@ -5117,6 +5138,7 @@ impl gpui::Render for MarketDataTile {
             self.health.chip(),
             geode_tile::header::Mode::from_key_mode(self.mode()),
             geode_tile::header::link_chips(&self.frame, cx),
+            &self.dismissed,
         );
         // Anchor the popup at the header's right edge using a positioned sibling and
         // the wrapper's relative coordinate system.
@@ -15388,7 +15410,8 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
             "{:?}",
             h.header_texts(&vcx)
         );
-        // Escape clears a notice; the failure stays until the next edit.
+        // Escape dismisses the failure from the header, but the tile
+        // keeps reporting it until the next edit.
         h.dispatch(&mut vcx, "escape", None);
         assert!(h.header_texts(&vcx).contains(&err));
         h.motion(&mut vcx, "down", None);
@@ -15398,6 +15421,149 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
             "{:?}",
             h.header_texts(&vcx)
         );
+    }
+
+    // ---- dismissing a header notice ----
+
+    /// The header's first notice, as painted.
+    const NOTICE_0: &str = "tile-notice-3-0";
+    const UPLOAD_FAILED: &str = "upload failed: sophis is down";
+
+    fn notice_painted(vcx: &mut gpui::VisualTestContext, selector: &'static str) -> bool {
+        vcx.run_until_parked();
+        draw(vcx);
+        vcx.debug_bounds(selector).is_some()
+    }
+
+    /// An upload answered with a failure: the upload error stands.
+    fn failed_upload(h: &Harness, vcx: &mut gpui::VisualTestContext) {
+        h.command(vcx, "upload").unwrap();
+        draw(vcx);
+        type_keys(vcx, "y");
+        let tag = h.upload_request().unwrap().tag;
+        h.deliver_upload(vcx, tag, Err("sophis is down".into()));
+        assert!(
+            h.header_texts(vcx).contains(&UPLOAD_FAILED.to_string()),
+            "fixture: {:?}",
+            h.header_texts(vcx)
+        );
+    }
+
+    fn click_at_notice(vcx: &mut gpui::VisualTestContext, selector: &'static str) {
+        draw(vcx);
+        let at = vcx
+            .debug_bounds(selector)
+            .expect("the notice is painted")
+            .center();
+        vcx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        });
+        vcx.simulate_event(gpui::MouseUpEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 1,
+        });
+    }
+
+    /// `escape` resolved through the panel's real keymap fragment under the
+    /// tile's live key context and dispatched through the shell's door.
+    fn press_escape(h: &Harness, vcx: &mut gpui::VisualTestContext) {
+        use geode_shell::keymap::{MatchResult, Matcher, build_keymap, parse_keystroke};
+        let mut registry = geode_shell::actions::ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
+        for (id, title) in crate::content::ACTIONS {
+            let _ = registry.register(geode_shell::actions::ActionDef {
+                id: ActionId((*id).to_string()),
+                title: (*title).to_string(),
+                category: "Market data".to_string(),
+            });
+        }
+        let doc = geode_shell::keymap::fragments::fragment_doc(
+            "marketdata",
+            crate::content::DEFAULT_KEYMAP,
+        )
+        .unwrap();
+        let (keymap, diags) = build_keymap(&[doc], geode_shell::defaults::default_mod(), &registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        let stack = [h.tile.read_with(vcx, |t, _| t.key_context())];
+        let ks = parse_keystroke("escape", geode_shell::defaults::default_mod()).unwrap();
+        let MatchResult::Matched { action, count } = Matcher::default().press(&keymap, ks, &stack)
+        else {
+            panic!("escape is bound in {:?}", stack[0]);
+        };
+        vcx.update(|window, cx| h.content.dispatch(&action, count, window, cx));
+        vcx.run_until_parked();
+    }
+
+    /// A click hides the upload error while the tile still reports it, and
+    /// stops at the notice; a fresh upload (the error stops) failing the
+    /// same way shows it again.
+    #[gpui::test]
+    fn clicking_the_upload_error_hides_it_until_it_returns(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        failed_upload(&h, &mut vcx);
+        let clicks = h.clicks.get();
+        click_at_notice(&mut vcx, NOTICE_0);
+        assert!(!notice_painted(&mut vcx, NOTICE_0), "dismissed");
+        assert_eq!(h.clicks.get(), clicks, "the press stops at the notice");
+        assert!(
+            h.header_texts(&vcx).contains(&UPLOAD_FAILED.to_string()),
+            "still reported"
+        );
+        // A rebuild that still reports it keeps it hidden.
+        h.motion(&mut vcx, "down", None);
+        assert!(!notice_painted(&mut vcx, NOTICE_0), "unchanged: hidden");
+        failed_upload(&h, &mut vcx);
+        assert!(notice_painted(&mut vcx, NOTICE_0), "back: shows again");
+    }
+
+    /// `escape` through the keymap, with nothing else to do, clears the
+    /// transient notice and dismisses the upload error.
+    #[gpui::test]
+    fn escape_clears_the_notice_and_dismisses_the_upload_error(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        failed_upload(&h, &mut vcx);
+        h.motion(&mut vcx, "up", None);
+        h.dispatch(&mut vcx, "yank_col", None);
+        assert!(notice_painted(&mut vcx, "tile-notice-3-1"), "fixture: two");
+        press_escape(&h, &mut vcx);
+        assert!(!notice_painted(&mut vcx, NOTICE_0), "neither paints");
+        assert!(h.tile.read_with(&vcx, |t, _| t.notice().is_none()));
+        assert!(
+            h.header_texts(&vcx).contains(&UPLOAD_FAILED.to_string()),
+            "the error is hidden, not cleared"
+        );
+    }
+
+    /// `escape` is last in line: a live find takes the first press and
+    /// the notice stays; the next press clears it.
+    #[gpui::test]
+    fn escape_ends_a_find_before_it_touches_a_notice(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.motion(&mut vcx, "up", None);
+        h.dispatch(&mut vcx, "yank_col", None);
+        h.motion(&mut vcx, "down", None);
+        vcx.update(|window, cx| h.content.find(FindEvent::Changed("11".into()), window, cx));
+        assert!(h.tile.read_with(&vcx, |t, _| t.find.is_some()), "fixture");
+        assert!(notice_painted(&mut vcx, NOTICE_0), "fixture: the notice");
+        press_escape(&h, &mut vcx);
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.find.is_none()),
+            "find ended"
+        );
+        assert!(notice_painted(&mut vcx, NOTICE_0), "the notice waits");
+        press_escape(&h, &mut vcx);
+        assert!(!notice_painted(&mut vcx, NOTICE_0));
     }
 
     #[gpui::test]

@@ -121,6 +121,9 @@ context = "timeseries && mode == normal"
 "g" = "timeseries::jump_start"
 "shift+g" = "timeseries::jump_end"
 "." = "timeseries::menu"
+# Last in line: with no popup up, `escape` dismisses the notice line.
+# The popups' own `escape` (below) wins while one is open.
+"escape" = "timeseries::cancel"
 
 [[bindings]]
 context = "timeseries && mode == normal && popup == series"
@@ -422,6 +425,26 @@ mod tests {
         }
     }
 
+    /// With no popup up, `escape` is the tile's `cancel`: last in line, it
+    /// dismisses the notice line.
+    #[test]
+    fn escape_with_no_popup_is_cancel() {
+        use geode_shell::keymap::{KeyContext, MatchResult, Matcher, parse_keystroke};
+        let keymap = test_keymap(None);
+        let stack = [
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("timeseries")
+                .pair("mode", "normal")
+                .counts(),
+        ];
+        let ks = parse_keystroke("escape", geode_shell::defaults::default_mod()).unwrap();
+        match Matcher::default().press(&keymap, ks, &stack) {
+            MatchResult::Matched { action, .. } => assert_eq!(action.0, "timeseries::cancel"),
+            other => panic!("expected a match, got {other:?}"),
+        }
+    }
+
     /// The popups' steps are the builtin keymap's shared menu keys under
     /// `tilelist`; the fragment keeps each popup's enter, escape and dot.
     #[test]
@@ -447,6 +470,7 @@ mod tests {
             (&series, "up", "motion::menu_up"),
             (&series, "enter", "timeseries::list_close"),
             (&series, "escape", "timeseries::list_close"),
+            (&menu, "escape", "timeseries::list_close"),
             (&menu, "j", "motion::menu_down"),
             (&menu, "k", "motion::menu_up"),
             (&menu, "enter", "timeseries::menu_pick"),

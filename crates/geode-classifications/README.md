@@ -138,6 +138,16 @@ the tile; the switcher's `no classifications to switch to` while that
 holds. The switcher opens by itself only on the first snapshot and when
 the shown classification goes away.
 
+A warning or danger notice can be dismissed: a click on it, or `escape` in
+normal mode (`classifications::cancel`, which first closes a menu and ends
+a selection) when nothing else answers it. A dismissed notice is hidden,
+not cleared: it stays hidden while `rebuild_chrome` keeps reporting it and
+shows again once it stops and returns (`geode_tile::notice::Dismissals`,
+pruned in `rebuild_chrome`). Status notices (`nothing copied…`) are never
+hidden. `escape` with nothing to dismiss is unhandled; like any dispatched
+verb it still counts as the trader's first action and clears the
+session-restore notices.
+
 ## New, rename, delete and revert
 
 Registered actions only (the palette and the `⋯` menu), never `:`

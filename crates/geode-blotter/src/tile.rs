@@ -41,7 +41,7 @@ use geode_tile::following::{
     Arrival, DeferredDoor, Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered,
 };
 use geode_tile::header::{Cluster, HealthWatch, TimeRun};
-use geode_tile::notice::Notice;
+use geode_tile::notice::{self, Dismissals, Notice};
 use gpui::prelude::*;
 use gpui::{
     App, ClipboardItem, Context, ElementId, Entity, IntoElement, SharedString, Window, div,
@@ -195,6 +195,9 @@ pub struct BlotterTile {
     /// Header notice. Dropped sorts and selections are warnings; query and
     /// configuration failures are danger.
     pub error: Option<Notice>,
+    /// The header notices the trader dismissed (click or `escape`), hidden
+    /// while `error` keeps reporting them; pruned in `set_error`.
+    dismissed: Dismissals,
     /// The refusal a restored view over a computed dataset opened with,
     /// pending the first delivery. That delivery is the fallback view's
     /// own snapshot, landing before the trader could read the header, so
@@ -515,6 +518,7 @@ impl BlotterTile {
             delivered_at: None,
             visible: false,
             error: restored_view_computed.clone().map(Notice::danger),
+            dismissed: Dismissals::default(),
             restored_view_refusal: restored_view_computed,
             find: None,
             fuzzy_find: None,
@@ -771,7 +775,7 @@ impl BlotterTile {
         // Raised before the notices below so a fresher one about this very
         // snapshot (a dropped sort or selection) still wins the one slot.
         if let Some(refusal) = self.restored_view_refusal.take() {
-            self.error = Some(Notice::danger(refusal));
+            self.set_error(Some(Notice::danger(refusal)));
         }
         if let Some(view) = self.view() {
             // The plan is (re)built from `view` here, so the definitions
@@ -796,9 +800,9 @@ impl BlotterTile {
                 t.delegate_mut().dropped_sort.take()
             });
             if let Some(name) = dropped_sort {
-                self.error = Some(Notice::warning(format!(
+                self.set_error(Some(Notice::warning(format!(
                     "sort on '{name}' dropped: the column is no longer in this view"
-                )));
+                ))));
             }
             self.take_selection_notice(cx);
             self.prepare_header(cx);
@@ -846,10 +850,10 @@ impl BlotterTile {
             // its late outcome cannot clear this error. `acted` stays set:
             // the reload that defines the view again bumps the config
             // version, which is the retry.
-            self.error = Some(Notice::danger(format!(
+            self.set_error(Some(Notice::danger(format!(
                 "view '{}' is not configured",
                 self.view_name
-            )));
+            ))));
             self.fail_fuzzy_find(format!("View '{}' is not configured", self.view_name), cx);
             // No query goes out, so no delivery will ever consume a
             // refusal pending from the record; the unconfigured view is
@@ -901,7 +905,7 @@ impl BlotterTile {
                 // set: redefining the name bumps the config version, which
                 // is the retry.
                 self.fail_fuzzy_find(message.clone(), cx);
-                self.error = Some(Notice::danger(message));
+                self.set_error(Some(Notice::danger(message)));
                 // Supersede any query still in flight: its outcome is for the
                 // previous scope and must not paint over this error.
                 self.following.begin(versions, Instant::now());
@@ -950,7 +954,7 @@ impl BlotterTile {
             // A stopped refusal retries on the next frame change too: each
             // attempt costs nothing and re-reports the same kind. The last
             // snapshot stays.
-            self.error = Some(Notice::danger(format!("query refused: {refusal}")));
+            self.set_error(Some(Notice::danger(format!("query refused: {refusal}"))));
             self.fail_fuzzy_find(format!("Search failed: {refusal}"), cx);
         }
         self.following.submitted(
@@ -998,10 +1002,10 @@ impl BlotterTile {
         match delivered {
             Delivered::Stale => {}
             Delivered::Apply((snapshot, grouping)) => {
-                self.error = None;
+                self.set_error(None);
                 self.apply(snapshot, grouping, cx);
             }
-            Delivered::Held => self.error = None,
+            Delivered::Held => self.set_error(None),
             // Asked under a scope, grouping, as-of, watched publication or
             // configuration this tile has since moved past while hidden:
             // neither painted nor a verdict on the current question, so the
@@ -1010,7 +1014,7 @@ impl BlotterTile {
             // The last good snapshot stays; the failure has already arrived.
             Delivered::Failed(e) => {
                 self.fail_fuzzy_find(e.clone(), cx);
-                self.error = Some(Notice::danger(e));
+                self.set_error(Some(Notice::danger(e)));
             }
         }
         cx.notify();
@@ -1318,10 +1322,13 @@ impl BlotterTile {
                 self.table.update(cx, |_, cx| cx.notify());
                 cx.notify();
             }
+            // One layer per press: the selection, then the `/` narrowing
+            // and the find, and only when neither had anything to undo, the
+            // header's warning and danger notices.
             "escape" => {
                 if self.with_delegate(cx, |d| d.selection.is_some()) {
                     self.with_delegate(cx, |d| d.clear_selection());
-                } else {
+                } else if self.find.is_some() || self.with_delegate(cx, |d| d.narrowed.is_some()) {
                     self.with_delegate(cx, |d| {
                         if d.narrowed.is_some() {
                             d.set_narrowed(None);
@@ -1329,6 +1336,8 @@ impl BlotterTile {
                     });
                     self.find = None;
                     self.table.update(cx, |t, cx| t.refresh(cx));
+                } else if self.dismissed.dismiss_all(self.error.iter()) {
+                    cx.notify();
                 }
             }
             "yank" => {
@@ -1418,13 +1427,26 @@ impl BlotterTile {
     /// shown — `selection_lost` is taken, not read, so the same loss is
     /// never reported twice. The anchor is whichever end the selection
     /// started from, not necessarily the range's first row.
+    /// The header's notice seam: every change to `error` comes through
+    /// here, and the dismissals forget whatever it no longer reports, so a
+    /// dismissed notice that stops and later returns shows again.
+    fn set_error(&mut self, error: Option<Notice>) {
+        self.error = error;
+        self.dismissed.prune(self.error.iter());
+    }
+
+    /// The notices the header reports, before the dismissal filter.
+    fn reported_notices(&self) -> impl Iterator<Item = &Notice> {
+        self.error.iter()
+    }
+
     fn take_selection_notice(&mut self, cx: &mut Context<Self>) {
         if let Some(lost) = self.with_delegate(cx, |d| d.selection_lost.take()) {
             let text = match lost {
                 Lost::Row => "selection cleared: anchor row no longer shown",
                 Lost::Column => "selection cleared: anchor column no longer shown",
             };
-            self.error = Some(Notice::warning(text));
+            self.set_error(Some(Notice::warning(text)));
         }
     }
 
@@ -2251,7 +2273,10 @@ impl gpui::Render for BlotterTile {
         let mut cluster = Cluster::new(self.tile);
         cluster.close = self.close.clone();
         cluster.mode = geode_tile::header::Mode::from_key_mode(self.mode(cx));
-        cluster.notices.extend(self.error.clone());
+        cluster.notices = self.dismissed.visible(self.reported_notices().cloned());
+        cluster.on_dismiss = Some(notice::on_dismiss(&cx.entity(), |t: &mut Self| {
+            &mut t.dismissed
+        }));
         cluster.times = self
             .header
             .times
@@ -4586,6 +4611,120 @@ mod tests {
         assert!(h.tile.read_with(&cx, |t, cx| {
             t.table().read(cx).delegate().narrowed.is_none()
         }));
+    }
+
+    /// A delivered query failure: the header's danger notice.
+    fn failed(h: &Harness, cx: &mut gpui::VisualTestContext, why: &str) {
+        h.tile.update(cx, |t, cx| t.requery(cx));
+        let p = next_query(&h.requests);
+        deliver(h, cx, p.tag, Err(why.into()));
+        cx.run_until_parked();
+    }
+
+    fn notice_painted(cx: &mut gpui::VisualTestContext) -> bool {
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.debug_bounds("tile-notice-7-0").is_some()
+    }
+
+    /// `escape` as the shell resolves it: the real fragment over the
+    /// builtin layer, under the tile's live key context, dispatched through
+    /// the tile's `TileContent` door.
+    fn press_escape(h: &Harness, cx: &mut gpui::VisualTestContext) {
+        use geode_shell::keymap::{
+            KeyContext, MatchResult, Matcher, build_keymap, parse_keystroke,
+        };
+        let doc =
+            geode_shell::keymap::fragments::fragment_doc("blotter", crate::content::DEFAULT_KEYMAP)
+                .unwrap();
+        let builtin =
+            geode_core::config::LayerDoc::builtin("keymap", geode_shell::defaults::BUILTIN_KEYMAP)
+                .unwrap();
+        let docs = geode_shell::keymap::fragments::splice(&[builtin], &[doc]);
+        let mut registry = geode_shell::actions::ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
+        for (id, title) in ACTIONS {
+            let _ = registry.register(geode_shell::actions::ActionDef {
+                id: ActionId((*id).to_string()),
+                title: (*title).to_string(),
+                category: "Blotter".to_string(),
+            });
+        }
+        let (keymap, diags) = build_keymap(&docs, geode_shell::defaults::default_mod(), &registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        let content = crate::content::BlotterContent::for_tile(h.tile.clone());
+        let stack = [
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            cx.update(|_, cx| content.key_context(cx)),
+        ];
+        let ks = parse_keystroke("escape", geode_shell::defaults::default_mod()).unwrap();
+        let MatchResult::Matched { action, count } = Matcher::default().press(&keymap, ks, &stack)
+        else {
+            panic!("escape binds nothing over the blotter");
+        };
+        assert_eq!(action.0, "blotter::escape");
+        cx.update(|window, cx| content.dispatch(&action, count, window, cx));
+        cx.run_until_parked();
+    }
+
+    /// A click on the header's danger notice hides it; the tile still
+    /// holds the error. The same failure again stays hidden; once a good
+    /// delivery clears it, its return shows.
+    #[gpui::test]
+    fn clicking_the_error_notice_hides_it_until_it_changes(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        failed(&h, &mut cx, "binder error");
+        assert!(notice_painted(&mut cx), "fixture: the error paints");
+        let at = centre(&mut cx, "tile-notice-7-0");
+        click_at(&mut cx, at, 1);
+        cx.run_until_parked();
+        assert!(!notice_painted(&mut cx), "the click dismissed it");
+        assert_eq!(
+            h.tile.read_with(&cx, |t, _| t.error.clone()),
+            Some(Notice::danger("binder error")),
+            "the tile still reports it"
+        );
+        failed(&h, &mut cx, "binder error");
+        assert!(!notice_painted(&mut cx), "re-reported unchanged: hidden");
+        failed(&h, &mut cx, "another error");
+        assert!(notice_painted(&mut cx), "a changed notice shows");
+        let at = centre(&mut cx, "tile-notice-7-0");
+        click_at(&mut cx, at, 1);
+        h.tile.update(&mut cx, |t, cx| t.requery(cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        assert!(
+            !notice_painted(&mut cx),
+            "fixture: the good delivery cleared it"
+        );
+        failed(&h, &mut cx, "another error");
+        assert!(notice_painted(&mut cx), "stopped and returned: shows again");
+    }
+
+    /// `escape` is last in line: a live selection (then the narrowing)
+    /// takes a press of its own and leaves the notice; the next escape,
+    /// with nothing else to undo, dismisses it.
+    #[gpui::test]
+    fn escape_dismisses_the_notice_only_after_every_other_layer(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        failed(&h, &mut cx, "binder error");
+        h.tile.update(&mut cx, |t, cx| {
+            t.table()
+                .update(cx, |t, _| t.delegate_mut().set_narrowed(Some(vec![1, 2])))
+        });
+        act(&h, &mut cx, "blotter::visual_rows");
+        press_escape(&h, &mut cx);
+        assert!(notice_painted(&mut cx), "the selection went first");
+        press_escape(&h, &mut cx);
+        assert!(notice_painted(&mut cx), "then the narrowing");
+        assert!(h.tile.read_with(&cx, |t, cx| {
+            t.table().read(cx).delegate().narrowed.is_none()
+        }));
+        press_escape(&h, &mut cx);
+        assert!(!notice_painted(&mut cx), "then the notice");
+        assert!(h.tile.read_with(&cx, |t, _| t.error.is_some()));
     }
 
     #[gpui::test]

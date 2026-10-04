@@ -62,7 +62,7 @@ use geode_tile::confirm::{self, Confirm, ConfirmHost};
 use geode_tile::edit::EditCaret;
 use geode_tile::header::{HEADER_HEIGHT, Mode, link_chips};
 use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, MenuPick, Row};
-use geode_tile::notice::Notice;
+use geode_tile::notice::{self, Dismissals, Notice};
 use gpui::prelude::*;
 use gpui::{
     AnchoredPositionMode, AnyWindowHandle, App, Context, Entity, Focusable as _, PathPromptOptions,
@@ -305,6 +305,10 @@ pub struct ClassificationsTile {
     /// tell a classification going away from one never shown.
     was_shown: bool,
     chrome: Chrome,
+    /// The header notices the trader dismissed (a click, or `escape` with
+    /// nothing else to do), each hidden while `chrome.notices` still
+    /// reports it. Pruned in `rebuild_chrome`, never in render.
+    dismissed: Dismissals,
     menu_selector: SharedString,
     menu_tip: SharedString,
     switch_tip: SharedString,
@@ -419,6 +423,7 @@ impl ClassificationsTile {
             settled: false,
             was_shown: false,
             chrome: Chrome::default(),
+            dismissed: Dismissals::default(),
             menu_selector: format!("classifications-menu-button-{}", id.0).into(),
             menu_tip: format!("tip-classifications-menu-{}", id.0).into(),
             switch_tip: format!("tip-classifications-switch-{}", id.0).into(),
@@ -829,6 +834,8 @@ impl ClassificationsTile {
             .chain(n.outcome.iter().cloned())
             .chain(self.values_notice.iter().cloned().map(Notice::warning))
             .collect();
+        // A dismissed notice no longer reported shows again when it returns.
+        self.dismissed.prune(&self.chrome.notices);
     }
 
     /// The classification on screen: the one the tile names, while the
@@ -2323,6 +2330,16 @@ impl ClassificationsTile {
                 self.sync_table(false, cx);
                 cx.notify();
             }
+            // Last in line: nothing above had anything to cancel, so
+            // `escape` dismisses the header's warning and danger notices,
+            // hidden until they change. Nothing to dismiss: unhandled, as
+            // a normal-mode escape always was.
+            "classifications::cancel" => {
+                if !self.dismissed.dismiss_all(&self.chrome.notices) {
+                    return false;
+                }
+                cx.notify();
+            }
             "classifications::visual_rows" if self.menu.is_none() => {
                 if self.grid.selecting() {
                     self.grid.clear_selection();
@@ -2656,7 +2673,10 @@ impl Render for ClassificationsTile {
                 close: self.close.as_ref(),
                 mode: Mode::from_key_mode(self.mode()),
                 links: link_chips(&self.frame, cx),
-                notices: self.chrome.notices.clone(),
+                notices: self.dismissed.visible(self.chrome.notices.iter().cloned()),
+                on_dismiss: notice::on_dismiss(&tile, |t: &mut ClassificationsTile| {
+                    &mut t.dismissed
+                }),
                 actions_open: actions.is_some() || row_actions.is_some(),
                 switcher,
                 menu_selector: self.menu_selector.clone(),

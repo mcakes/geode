@@ -116,6 +116,9 @@ context = "volslice && mode == normal"
 "[" = "volslice::split_shrink"
 "]" = "volslice::split_grow"
 "." = "volslice::menu"
+# Last in line: with nothing else to cancel, `escape` dismisses the
+# footer's danger notice.
+"escape" = "volslice::cancel"
 
 # The underlying picker: a field, so only these keys are claimed and
 # every other bare key types.
@@ -352,7 +355,7 @@ mod tests {
                 bound += 1;
             }
         }
-        assert_eq!(bound, 41);
+        assert_eq!(bound, 42);
         // And the registry the app builds accepts every binding.
         let (data, _rx) = DataHandle::for_tests();
         let mut registry = ActionRegistry::default();

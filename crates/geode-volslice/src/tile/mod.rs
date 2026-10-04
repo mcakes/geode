@@ -141,6 +141,9 @@ pub struct VolsliceTile {
     refusal: Option<String>,
     /// The painted model's own notices (failed jobs), or a vol refusal.
     model_notices: Vec<String>,
+    /// The footer notices the trader dismissed, each hidden while the
+    /// tile keeps reporting it; pruned in `refresh_chrome`.
+    dismissed: geode_tile::notice::Dismissals,
     /// "Today" for tests, whose fixtures are dated: the strip and the chain
     /// drop expiries before today.
     #[cfg(test)]
@@ -321,6 +324,7 @@ impl VolsliceTile {
             notices,
             refusal: None,
             model_notices: Vec::new(),
+            dismissed: Default::default(),
             focused: false,
             chart_bounds: ChartBounds::default(),
             drag: None,
@@ -426,6 +430,10 @@ impl VolsliceTile {
                 self.chrome.builds += 1;
             }
         }
+        // The footer notice's dismissal lasts while it is reported: one
+        // the tile stopped reporting shows again when it returns. Here,
+        // never in render; cheap with nothing hidden.
+        self.dismissed.prune(self.chrome.notice.iter());
         self.refresh_menu(cx);
     }
 
@@ -506,6 +514,9 @@ impl VolsliceTile {
         };
         #[cfg(test)]
         self.dispatch_log.push(action.clone());
+        // A refusal the verb clears is that verb's visible change: `escape`
+        // clearing one goes no further.
+        let refused = self.refusal.is_some();
         self.clear_refusal(cx);
         if !matches!(
             verb,
@@ -565,7 +576,17 @@ impl VolsliceTile {
             "commit" => self.commit_popup(window, cx),
             "tick" => self.tick_popup(cx),
             "clear_ticks" => self.clear_popup_ticks(cx),
-            "cancel" => self.close_popup(window, cx),
+            // Last in line: with no popup to close and no refusal cleared,
+            // `escape` dismisses the footer's notice, and is handled only
+            // when it did.
+            "cancel" if self.popup.is_some() => self.close_popup(window, cx),
+            "cancel" if refused => {}
+            "cancel" => {
+                if !self.dismissed.dismiss_all(self.chrome.notice.iter()) {
+                    return false;
+                }
+                cx.notify();
+            }
             "list_down" => {
                 self.step_popup(1, cx);
             }
@@ -1023,7 +1044,13 @@ impl Render for VolsliceTile {
             )
             .child(body)
             .child(header::render_footer(
-                self.chrome.notice.as_ref(),
+                self.chrome
+                    .notice
+                    .as_ref()
+                    .filter(|n| self.dismissed.shows(n)),
+                &geode_tile::notice::on_dismiss(&cx.entity(), |t: &mut VolsliceTile| {
+                    &mut t.dismissed
+                }),
                 &self.chrome.hints,
                 theme,
                 id,

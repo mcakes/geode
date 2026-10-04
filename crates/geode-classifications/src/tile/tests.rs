@@ -3120,3 +3120,108 @@ fn the_import_row_says_why_with_nothing_shown(cx: &mut gpui::TestAppContext) {
         "{menu:?}"
     );
 }
+
+// ---- dismissing a header notice ----
+
+/// The header's first notice, as painted.
+const NOTICE: &str = "tile-notice-7-0";
+const NO_SUCH_COLUMN: &str = "values not loaded: no such column \u{2014} shift+r retries";
+
+/// The map alone under a failed values read: one warning notice.
+fn failed_values(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), restored("region"));
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Err("no such column"));
+    assert_eq!(h.notices(&vcx), [NO_SUCH_COLUMN], "fixture");
+    (h, vcx)
+}
+
+fn painted(h: &Harness, vcx: &mut gpui::VisualTestContext, selector: &'static str) -> bool {
+    vcx.run_until_parked();
+    h.draw(vcx);
+    vcx.debug_bounds(selector).is_some()
+}
+
+fn click_notice(h: &Harness, vcx: &mut gpui::VisualTestContext) {
+    h.draw(vcx);
+    let at = vcx
+        .debug_bounds(NOTICE)
+        .expect("the notice is painted")
+        .center();
+    vcx.simulate_event(gpui::MouseDownEvent {
+        position: at,
+        modifiers: gpui::Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+        first_mouse: false,
+    });
+    vcx.simulate_event(gpui::MouseUpEvent {
+        position: at,
+        modifiers: gpui::Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+    });
+}
+
+/// A click hides the notice while the tile still reports it; a rebuild
+/// that still reports it keeps it hidden; once the read is retried (the
+/// notice stops) and fails the same way, it shows again.
+#[gpui::test]
+fn clicking_a_values_notice_hides_it_until_it_returns(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = failed_values(cx);
+    click_notice(&h, &mut vcx);
+    assert!(!painted(&h, &mut vcx, NOTICE), "dismissed");
+    assert_eq!(h.notices(&vcx), [NO_SUCH_COLUMN], "still reported");
+    h.tile.update(&mut vcx, |t, cx| {
+        t.rebuild_chrome();
+        cx.notify();
+    });
+    assert!(!painted(&h, &mut vcx, NOTICE), "unchanged: still hidden");
+    h.press(&mut vcx, "shift-r");
+    let tag = h.distinct_requests()[0].tag;
+    assert!(h.notices(&vcx).is_empty(), "fixture: the retry cleared it");
+    h.deliver(&mut vcx, tag, "underlying_ref", Err("no such column"));
+    assert!(painted(&h, &mut vcx, NOTICE), "back: shows again");
+}
+
+/// A status notice is never dismissed: neither a click nor `escape`
+/// hides `nothing copied`.
+#[gpui::test]
+fn a_status_notice_is_not_dismissed(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.press(&mut vcx, "p");
+    assert_eq!(h.notices(&vcx), ["nothing copied: y y copies a label"]);
+    click_notice(&h, &mut vcx);
+    assert!(painted(&h, &mut vcx, NOTICE), "a click leaves it");
+    h.press(&mut vcx, "escape");
+    assert!(painted(&h, &mut vcx, NOTICE), "escape leaves it");
+}
+
+/// `escape` in normal mode, with nothing else to cancel, dismisses the
+/// header's warning notice through the real keymap.
+#[gpui::test]
+fn escape_dismisses_a_warning_notice(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = failed_values(cx);
+    assert!(painted(&h, &mut vcx, NOTICE));
+    h.press(&mut vcx, "escape");
+    assert!(!painted(&h, &mut vcx, NOTICE), "dismissed");
+    assert_eq!(h.notices(&vcx), [NO_SUCH_COLUMN], "still reported");
+}
+
+/// `escape` is last in line: a live selection takes the first press and
+/// the notice stays; the next press dismisses it.
+#[gpui::test]
+fn escape_ends_a_selection_before_it_dismisses_a_notice(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = failed_values(cx);
+    h.press(&mut vcx, "v");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("visual"), "fixture");
+    h.press(&mut vcx, "escape");
+    assert_eq!(
+        h.mode(&vcx).as_deref(),
+        Some("normal"),
+        "the selection ended"
+    );
+    assert!(painted(&h, &mut vcx, NOTICE), "the notice waits");
+    h.press(&mut vcx, "escape");
+    assert!(!painted(&h, &mut vcx, NOTICE));
+}
