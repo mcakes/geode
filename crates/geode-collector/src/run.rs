@@ -64,14 +64,19 @@ const LEASE_STEP: Duration = Duration::from_millis(20);
 /// failure start it again, throttled.
 pub const EXIT_FAILED: i32 = 70;
 
+/// The exit status after a release when the executable changed (EX_TEMPFAIL).
+/// Nonzero so launchd's `KeepAlive { SuccessfulExit = false }` starts the
+/// new build; an exit 0 would leave the collector down until the next login.
+pub const EXIT_RESTART: i32 = 75;
+
 const TARGET: &str = "geode::collector";
 
 /// The reason the data service gives when its open fails, before the error.
 const OPEN_FAILURE: &str = "data service failed to open: ";
 
 /// The executable's size and modification time, recorded at start and
-/// compared after each release: a rebuilt or upgraded binary exits so the
-/// service manager starts the new one.
+/// compared after each release: a rebuilt or upgraded binary exits with
+/// [`EXIT_RESTART`] so the service manager starts the new one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExeStamp {
     pub size: u64,
@@ -100,9 +105,16 @@ pub fn exe_changed(before: Option<ExeStamp>, after: Option<ExeStamp>) -> bool {
     before != after
 }
 
+/// What the loop does after a release: exit with [`EXIT_RESTART`] when the
+/// executable changed, else `None` (go back to waiting for the app).
+pub fn after_release(changed: bool) -> Option<i32> {
+    if changed { Some(EXIT_RESTART) } else { None }
+}
+
 /// The collector loop. Returns the process exit status: 0 when another
-/// collector has the store or the executable changed, [`EXIT_FAILED`] when
-/// a data thread stopped with no app to explain it, or setup failed.
+/// collector has the store (it stays down), [`EXIT_RESTART`] when the
+/// executable changed, [`EXIT_FAILED`] when a data thread stopped with no
+/// app to explain it, or setup failed.
 /// `clock` times the holds and releases it logs.
 pub fn run(demo_rows: Option<usize>, clock: &dyn Fn() -> Instant) -> i32 {
     run_with_levels(demo_rows, clock, None)
@@ -200,9 +212,9 @@ pub fn run_with_levels(
         }
         match hold(&db, demo_root, clock, levels) {
             Held::Released => {
-                if exe_changed(exe, ExeStamp::current()) {
-                    tracing::info!(target: TARGET, "the collector executable changed; exiting so the new build runs");
-                    return 0;
+                if let Some(code) = after_release(exe_changed(exe, ExeStamp::current())) {
+                    tracing::info!(target: TARGET, "the collector executable changed; exiting with status {code} so the new build runs");
+                    return code;
                 }
             }
             Held::Yielded => {}
@@ -604,6 +616,16 @@ mod tests {
         // times is not.
         assert!(exe_changed(stamp(10, 5), None));
         assert!(!exe_changed(None, None));
+    }
+
+    /// A changed binary must exit nonzero: launchd's KeepAlive restarts only
+    /// an unsuccessful exit, and 0 would leave the collector down.
+    #[test]
+    fn a_changed_executable_exits_for_a_restart() {
+        assert_eq!(after_release(true), Some(75));
+        assert_eq!(EXIT_RESTART, 75);
+        assert_ne!(EXIT_RESTART, 0);
+        assert_eq!(after_release(false), None);
     }
 
     #[test]

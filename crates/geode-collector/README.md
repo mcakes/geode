@@ -20,13 +20,21 @@ geode-collector status [--demo [rows]]             who holds the store
 
 `--demo` takes the app's grammar (default 100,000 rows) and names the same
 demo store. A usage error exits 2; a failed `install` or `uninstall` exits
-1 with the failing step.
+1 with the failing step. Only `run` installs logging; the other commands
+print to stdout and stderr, so a dry run or a status probe writes no file.
+
+Exit statuses of `run`: 0 when another collector has the store (it stays
+down), 75 (`EXIT_RESTART`, EX_TEMPFAIL) when the executable changed, so the
+service manager starts the new build, and 70 (`EXIT_FAILED`) when a data
+thread stopped with no app present or setup failed.
 
 ## Install
 
 `install` registers the running binary (its absolute, canonical path) to
 start at login and starts it now; `uninstall` reverses it. Install is the
-only opt-in: the app never starts a collector. `--dry-run` prints every file
+only opt-in: the app never starts a collector. A successful install prints
+the registered executable, and warns on stderr when it lies under a Cargo
+`target` directory. `--dry-run` prints every file
 the plan would create, write or remove, the document it would write, and
 each command, and does none of it. On macOS even a dry run asks `id -u` for
 the `gui/<uid>` domain it prints.
@@ -34,12 +42,15 @@ the `gui/<uid>` domain it prints.
 **macOS.** A LaunchAgent, label `com.geode.collector` (`.demo-<rows>` for a
 demo store), in `~/Library/LaunchAgents/<label>.plist`: `ProgramArguments`
 = the binary, `run`, and `--demo <rows>` for a demo store; `RunAtLoad`;
-`KeepAlive = { SuccessfulExit = false }`, so launchd restarts a crash or an
-exit 70 but not an exit 0 (a second collector, a changed binary);
-`ProcessType = Background`; `LowPriorityIO`. launchd's stdout and stderr go
+`KeepAlive = { SuccessfulExit = false }`, so launchd restarts a crash, an
+exit 70 or an exit 75 (a changed binary), but not an exit 0 (a second
+collector); `ProcessType = Background`; `LowPriorityIO`;
+`EnvironmentVariables = { GEODE_SERVICE = 1 }`, which makes the collector
+install logging without its stderr layer. launchd's stdout and stderr go
 to `collector-stdout.log` and `collector-stderr.log` in the logs directory;
 their names fall outside the daily `collector.*.log` trim, so they are never
-pruned and grow until removed by hand. The sequence: create the logs
+pruned. With `GEODE_SERVICE` set, stderr holds only panics and failures
+from before logging started. The sequence: create the logs
 directory, write the plist, `launchctl bootout gui/<uid>/<label>` (a job not
 loaded, exit 3 or 113, is ignored; any other failure stops the install),
 then `launchctl bootstrap gui/<uid> <plist>`. Uninstall boots the job out
@@ -53,8 +64,10 @@ logon trigger and an interactive-token principal for `USERDOMAIN\USERNAME`,
 removed afterwards whatever the outcome. The sequence: `schtasks /End`
 (any failure ignored), `schtasks /Create /TN <task> /XML <file> /F`, then
 `schtasks /Run` so it starts now, as launchd's `RunAtLoad` does. Uninstall
-ends the task and runs `schtasks /Delete /TN <task> /F`, which fails when
-no such task exists.
+ends the task and runs `schtasks /Delete /TN <task> /F`; a task that does
+not exist ("cannot find") is not an error, so uninstalling twice succeeds
+as on macOS. Task Scheduler captures no stderr, so the task sets no
+`GEODE_SERVICE`.
 
 Other platforms refuse with `install is supported on macOS and Windows`.
 The plans are pure (`install_plan`, `uninstall_plan`) and run through a
@@ -95,8 +108,9 @@ reaches `launchctl`, `schtasks` or the real `~/Library/LaunchAgents`.
    the store: log `app took the store first` at info and go back to step 2.
    With no app present it is an error, and the process exits 70.
 7. Otherwise `release(HANDOFF_DRAIN)`, stop the bus, and log the release
-   time. If the executable's size or mtime changed since start, exit 0 so
-   the service manager starts the new build; otherwise go back to step 2.
+   time. If the executable's size or mtime changed since start, exit 75
+   (`EXIT_RESTART`) so the service manager starts the new build; otherwise
+   go back to step 2.
 
 The collector spawns no child process: a fork shares the lease's open file
 description, so the lock would outlive a drop until the child's exec.
@@ -123,8 +137,20 @@ the sink waits: it logs, updates a map or a list, and returns.
   it holds the lease on the store it started with, and warns at each
   acquire while the configuration names another.
 - The registered path is the binary that ran `install`. Installing from
-  `target/debug` registers that build; a later `cargo build` replaces it in
-  place, which the loop's changed-binary exit then picks up.
+  `target/debug` registers that build, and `cargo clean` or removing the
+  checkout deletes it while the service manager keeps retrying; install
+  prints a warning for a path under `target`.
+- A changed binary takes effect at the collector's next release (exit 75).
+  launchd restarts it after its 10 s throttle. On Windows a running
+  executable cannot be replaced, so a new build needs `install` again,
+  which ends the task first.
+- A reinstall's `launchctl bootout` or `schtasks /End` terminates a running
+  collector without the release drain, so documents still pending in its
+  coalescers can be lost. Recovery on subscribe restores each key's latest
+  document in the next owner.
+- On some macOS versions `launchctl bootstrap` right after `bootout` fails
+  with `5: Input/output error` while the old job finishes exiting; run
+  `install` again.
 - Task Scheduler's `RestartOnFailure` restarts a task that fails to start;
   whether a nonzero exit code counts as a failure is Task Scheduler's
   decision and has not been checked on a Windows machine. Registering the

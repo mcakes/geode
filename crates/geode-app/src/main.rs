@@ -45,7 +45,7 @@ fn main() {
         ring: log_ring,
         control: log_control,
         guard: _log_guard,
-    } = geode_compose::logging::install("geode");
+    } = geode_compose::logging::install("geode", true);
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let demo_rows = match parse_args(&args) {

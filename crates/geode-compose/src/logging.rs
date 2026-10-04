@@ -26,10 +26,15 @@ pub struct Logging {
     pub guard: Option<WorkerGuard>,
 }
 
-/// Install process-wide tracing with a reloadable level filter, synchronous
-/// stderr and in-memory ring layers, and an optional background file writer.
-/// Default levels apply until configuration is loaded. The ring retains 4,096
-/// records. File setup failure leaves stderr and ring logging available.
+/// Install process-wide tracing with a reloadable level filter, a synchronous
+/// stderr layer when `stderr` is true, an in-memory ring layer, and an
+/// optional background file writer. Default levels apply until configuration
+/// is loaded. The ring retains 4,096 records. File setup failure leaves the
+/// stderr (if any) and ring logging available.
+///
+/// A process whose stderr a service manager captures to an unpruned file
+/// (the collector under launchd) passes `false`, so that file holds only
+/// panics and failures from before logging started, not every record twice.
 ///
 /// Daily files live under `<user>/logs/<prefix>.YYYY-MM-DD.log`; their date
 /// and rotation use UTC, independently of the configured display clock.
@@ -41,7 +46,7 @@ pub struct Logging {
 /// process lifetime and drop it before explicit process exits. Dropping it
 /// stops the file writer; subsequent file-bound records are lost. Daily logs can
 /// lag behind the synchronous ring that supplies panic reports.
-pub fn install(prefix: &str) -> Logging {
+pub fn install(prefix: &str, stderr: bool) -> Logging {
     let ring = Arc::new(Ring::new(4096));
     let (filter, reload_handle) = reload::Layer::new(LogLevels::default().to_targets());
 
@@ -69,7 +74,7 @@ pub fn install(prefix: &str) -> Logging {
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer().with_writer(std::io::stderr))
+        .with(stderr.then(|| fmt::layer().with_writer(std::io::stderr)))
         .with(RingLayer::new(ring.clone()))
         .with(file_layer)
         .init();

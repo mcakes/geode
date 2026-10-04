@@ -1454,9 +1454,10 @@ run_mutation "collector: an app is confirmed by a second probe" \
   an_app_is_confirmed_by_a_second_probe
 
 # The login job (geode-collector install.rs). launchd restarts only a
-# failed exit: a second collector and a changed binary exit 0 and must stay
-# down. Paths in the job documents are XML-escaped. A bootout of a job not
-# loaded is ignored, any other bootout failure stops the install.
+# failed exit: a second collector exits 0 and must stay down, while a
+# changed binary exits 75 so it restarts. Paths in the job documents are
+# XML-escaped. A bootout of a job not loaded is ignored, any other bootout
+# failure stops the install.
 run_mutation "collector install: KeepAlive restarts only a failed exit" \
   crates/geode-collector/src/install.rs \
   '    key_bool(&mut out, 2, "SuccessfulExit", false);' \
@@ -1477,6 +1478,37 @@ run_mutation "collector install: only a not-loaded bootout is ignored" \
   '                Tolerate::NotLoaded => true,' \
   geode-collector \
   a_failed_bootout_other_than_not_loaded_stops_the_install
+
+run_mutation "collector install: a missing task is not an uninstall error" \
+  crates/geode-collector/src/install.rs \
+  '                Tolerate::NoTask => no_task(&exit),' \
+  '                Tolerate::NoTask => false,' \
+  geode-collector \
+  a_schtasks_uninstall_ends_then_deletes
+
+# Under launchd the collector's log records stay out of the unpruned
+# stderr file: the plist sets the marker and the marker turns stderr off.
+run_mutation "collector install: the plist sets the service marker" \
+  crates/geode-collector/src/install.rs \
+  '    key_string(&mut out, 2, SERVICE_ENV, "1");' \
+  '    // no service marker' \
+  geode-collector \
+  the_plist_marks_the_collector_as_a_service
+
+run_mutation "collector install: a service logs nothing to stderr" \
+  crates/geode-collector/src/install.rs \
+  '    service.is_none()' \
+  '    true' \
+  geode-collector \
+  the_plist_marks_the_collector_as_a_service
+
+# A changed binary exits nonzero, or launchd's KeepAlive leaves it down.
+run_mutation "collector: a changed binary exits for a restart" \
+  crates/geode-collector/src/run.rs \
+  '    if changed { Some(EXIT_RESTART) } else { None }' \
+  '    if changed { Some(0) } else { None }' \
+  geode-collector \
+  a_changed_executable_exits_for_a_restart
 
 run_mutation "lease: a probe creates no lock file" \
   crates/geode-data/src/lease.rs \

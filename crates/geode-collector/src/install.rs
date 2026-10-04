@@ -18,6 +18,15 @@ pub const TASK: &str = "Geode\\Collector";
 /// them as old daily logs.
 pub const STDOUT_LOG: &str = "collector-stdout.log";
 pub const STDERR_LOG: &str = "collector-stderr.log";
+/// Set to `1` in the LaunchAgent's environment. The collector then installs
+/// logging without its stderr layer, so launchd's unpruned stderr file holds
+/// only panics and failures from before logging started.
+pub const SERVICE_ENV: &str = "GEODE_SERVICE";
+
+/// Whether the collector logs to stderr: not when started as a service.
+pub fn log_to_stderr(service: Option<std::ffi::OsString>) -> bool {
+    service.is_none()
+}
 
 /// One registration: the collector's identity, command line and log files.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,8 +68,10 @@ pub fn task_name(job: &Job) -> String {
 
 /// The LaunchAgent property list (spec §4): `RunAtLoad`, restart unless the
 /// collector exited 0 (`KeepAlive.SuccessfulExit = false`: a second
-/// collector and a changed binary exit 0; a crash or exit 70 restarts),
-/// background scheduling and I/O, and stdout/stderr in the logs directory.
+/// collector exits 0 and stays down; a changed binary exits 75 and a crash
+/// or a stopped thread 70, and launchd restarts them), background
+/// scheduling and I/O, stdout/stderr in the logs directory, and
+/// [`SERVICE_ENV`] so the collector keeps its log records out of stderr.
 pub fn launchd_plist(job: &Job) -> String {
     let mut out = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -81,6 +92,9 @@ pub fn launchd_plist(job: &Job) -> String {
     out.push_str("\t</dict>\n");
     key_string(&mut out, 1, "ProcessType", "Background");
     key_bool(&mut out, 1, "LowPriorityIO", true);
+    out.push_str("\t<key>EnvironmentVariables</key>\n\t<dict>\n");
+    key_string(&mut out, 2, SERVICE_ENV, "1");
+    out.push_str("\t</dict>\n");
     let stdout = job.log_dir.join(STDOUT_LOG);
     let stderr = job.log_dir.join(STDERR_LOG);
     key_string(&mut out, 1, "StandardOutPath", &stdout.to_string_lossy());
@@ -115,6 +129,9 @@ fn key_bool(out: &mut String, depth: usize, name: &str, value: bool) {
 /// as that user with an interactive token, restart on failure every minute
 /// up to three times, and no time limit. The declaration names UTF-16, the
 /// encoding `schtasks /XML` reads reliably; [`utf16_with_bom`] encodes it.
+///
+/// Task Scheduler captures neither stdout nor stderr, so the task sets no
+/// [`SERVICE_ENV`]: stderr records go nowhere and the daily file has them.
 pub fn schtasks_xml(job: &Job, user: &str) -> String {
     let user = xml_escape(user);
     let uri = xml_escape(&format!("\\{}", task_name(job)));
@@ -322,6 +339,9 @@ pub enum Tolerate {
     NotLoaded,
     /// Any exit, e.g. `schtasks /End` of a task that is missing or idle.
     Anything,
+    /// `schtasks /Delete` of a task that does not exist: "cannot find" in
+    /// its output. Uninstalling twice is then not an error.
+    NoTask,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -408,9 +428,10 @@ pub fn install_plan(platform: Platform, job: &Job, host: &Host) -> Plan {
                 ],
                 cleanup: Vec::new(),
                 done: format!(
-                    "installed {}: {} (started now and at each login)",
+                    "installed {}: {} (started now and at each login)\nruns {}",
                     job.label,
-                    plist.display()
+                    plist.display(),
+                    job.exe.display()
                 ),
             }
         }
@@ -437,7 +458,10 @@ pub fn install_plan(platform: Platform, job: &Job, host: &Host) -> Plan {
                     step("schtasks", &["/Run", "/TN", &task], Tolerate::Nothing),
                 ],
                 cleanup: vec![staged],
-                done: format!("installed task {task} (started now and at each logon)"),
+                done: format!(
+                    "installed task {task} (started now and at each logon)\nruns {}",
+                    job.exe.display()
+                ),
             }
         }
     }
@@ -445,8 +469,8 @@ pub fn install_plan(platform: Platform, job: &Job, host: &Host) -> Plan {
 
 /// Stop `job` and remove its registration: launchd boots the job out (one
 /// not loaded is fine) and removes the plist (a missing one is fine); Task
-/// Scheduler ends the task (any failure ignored) and deletes it, which
-/// fails when no such task exists.
+/// Scheduler ends the task (any failure ignored) and deletes it (a missing
+/// task is fine). Uninstalling twice succeeds on both.
 pub fn uninstall_plan(platform: Platform, job: &Job, host: &Host) -> Plan {
     match platform {
         Platform::Launchd => {
@@ -469,7 +493,7 @@ pub fn uninstall_plan(platform: Platform, job: &Job, host: &Host) -> Plan {
                     step(
                         "schtasks",
                         &["/Delete", "/TN", &task, "/F"],
-                        Tolerate::Nothing,
+                        Tolerate::NoTask,
                     ),
                 ],
                 cleanup: Vec::new(),
@@ -480,6 +504,27 @@ pub fn uninstall_plan(platform: Platform, job: &Job, host: &Host) -> Plan {
 }
 
 /// `launchctl bootout`'s answers for a job that is not loaded.
+fn no_task(exit: &Exit) -> bool {
+    [&exit.stderr, &exit.stdout]
+        .iter()
+        .any(|out| out.to_ascii_lowercase().contains("cannot find"))
+}
+
+/// A warning for an executable under a Cargo `target` directory: a clean
+/// or a worktree removal deletes the registered path, and the service
+/// manager keeps retrying a binary that is gone.
+pub fn target_warning(exe: &Path) -> Option<String> {
+    let in_target = exe.components().any(|c| c.as_os_str() == "target");
+    in_target.then(|| {
+        format!(
+            "warning: {} is under a Cargo target directory; `cargo clean` or removing the \
+             checkout deletes it, and the service manager keeps retrying. Install a copy \
+             outside the checkout for a lasting registration.",
+            exe.display()
+        )
+    })
+}
+
 fn not_loaded(exit: &Exit) -> bool {
     matches!(exit.code, Some(3) | Some(113))
         || ["No such process", "Could not find specified service"]
@@ -518,6 +563,7 @@ impl Plan {
                         Tolerate::Nothing => "",
                         Tolerate::NotLoaded => "  (a job not loaded is ignored)",
                         Tolerate::Anything => "  (a failure is ignored)",
+                        Tolerate::NoTask => "  (a missing task is ignored)",
                     };
                     out.push_str(&format!("run: {}{note}\n", display(step)));
                 }
@@ -576,6 +622,7 @@ fn perform(action: &Action, runner: &mut dyn Runner) -> Result<(), String> {
                 Tolerate::Nothing => false,
                 Tolerate::NotLoaded => not_loaded(&exit),
                 Tolerate::Anything => true,
+                Tolerate::NoTask => no_task(&exit),
             };
             if tolerated {
                 return Ok(());
@@ -779,7 +826,8 @@ mod tests {
             code: Some(if call[1] == "bootout" { 113 } else { 0 }),
             ..Exit::default()
         });
-        install_with(Platform::Launchd, &job, false, &host, &mut fake).unwrap();
+        let done = install_with(Platform::Launchd, &job, false, &host, &mut fake).unwrap();
+        assert!(done.ends_with("runs /opt/geode/geode-collector"), "{done}");
         assert_eq!(
             std::fs::read_to_string(&plist).unwrap(),
             launchd_plist(&job)
@@ -913,6 +961,25 @@ mod tests {
                 ]),
             ]
         );
+        // Not installed: schtasks' "cannot find" is not an error.
+        let mut fake = Fake::with(|call| Exit {
+            code: Some(1),
+            stderr: if call[1] == "/Delete" {
+                "ERROR: The system cannot find the file specified.".to_string()
+            } else {
+                "ERROR: The specified task name does not exist.".to_string()
+            },
+            ..Exit::default()
+        });
+        uninstall_with(Platform::Schtasks, &job, false, &host, &mut fake).unwrap();
+        // Any other refusal still fails.
+        let mut fake = Fake::with(|_| Exit {
+            code: Some(1),
+            stderr: "ERROR: Access is denied.".to_string(),
+            ..Exit::default()
+        });
+        let err = uninstall_with(Platform::Schtasks, &job, false, &host, &mut fake).unwrap_err();
+        assert!(err.contains("Access is denied"), "{err}");
     }
 
     #[test]
@@ -992,6 +1059,7 @@ mod tests {
             r#""RunAtLoad":true"#,
             r#""LowPriorityIO":true"#,
             r#""ProcessType":"Background""#,
+            r#""EnvironmentVariables":{"GEODE_SERVICE":"1"}"#,
             r#""ProgramArguments":["\/opt\/R&D\/geode-collector","run","--demo","7"]"#,
         ] {
             assert!(json.contains(part), "{part} in {json}");
@@ -1060,6 +1128,35 @@ mod tests {
             logs.join("collector-stderr.log").display()
         )));
         assert!(plist.trim_end().ends_with("</dict>\n</plist>"));
+    }
+
+    /// The service marker keeps log records out of launchd's unpruned
+    /// stderr file.
+    #[test]
+    fn the_plist_marks_the_collector_as_a_service() {
+        let plist = launchd_plist(&demo_job());
+        assert!(plist.contains(
+            "\t<key>EnvironmentVariables</key>\n\t<dict>\n\
+             \t\t<key>GEODE_SERVICE</key>\n\t\t<string>1</string>\n\
+             \t</dict>\n"
+        ));
+        assert!(log_to_stderr(None));
+        assert!(!log_to_stderr(Some("1".into())));
+    }
+
+    #[test]
+    fn a_target_directory_executable_is_warned_about() {
+        let warning = target_warning(Path::new("/r/geode/target/debug/geode-collector"));
+        assert!(warning.unwrap().contains("Cargo target directory"));
+        assert_eq!(
+            target_warning(Path::new("/opt/geode/geode-collector")),
+            None
+        );
+        // A name merely containing "target" is not the directory.
+        assert_eq!(
+            target_warning(Path::new("/opt/targets/geode-collector")),
+            None
+        );
     }
 
     #[test]

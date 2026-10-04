@@ -12,7 +12,8 @@ mod status;
 use std::path::{Path, PathBuf};
 
 pub use run::{
-    APP_POLL, EXIT_FAILED, ExeStamp, HOLD_POLL, STAMP_RECHECK, exe_changed, run, run_with_levels,
+    APP_POLL, EXIT_FAILED, EXIT_RESTART, ExeStamp, HOLD_POLL, STAMP_RECHECK, after_release,
+    exe_changed, run, run_with_levels,
 };
 pub use status::status;
 
