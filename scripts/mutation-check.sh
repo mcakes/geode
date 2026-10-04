@@ -8953,9 +8953,10 @@ run_mutation "objectdialog: d/r ask for a presentation doc even when the domain 
 
 # ---- Source-based dirtiness -------------------------------------------
 #
-# Dirtiness compares the source object because displayed summaries are
-# lossy: one value containing ", " can look identical to several values.
-# Comparing only those summaries silently suppresses a real change.
+# Dirtiness compares the source object as well as the fields: a seed (the
+# value-color list's Colors definition) can replace the source under fields
+# whose painted summary reads the same. Comparing only the fields silently
+# suppresses a real change.
 
 run_mutation "objectdialog: is_dirty ignores a source-only change" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
@@ -26076,6 +26077,14 @@ run_mutation "named chip: a missing name refuses and opens nothing" \
   '        .unwrap_or_default();' \
   geode-shell \
   a_missing_named_chips_body_refuses_with_a_notice
+
+# An accept is a range replace so it stays in the input's undo history.
+run_mutation "expr suggest: an insertion undoes" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '        s.replace(write.text.clone(), window, cx);' \
+  '        s.set_value(write.text.clone(), window, cx);' \
+  geode-shell \
+  undo_takes_an_insertion_back
 
 # ---- Modal Back button: the pointer route for Escape's back rung
 

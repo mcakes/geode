@@ -2417,7 +2417,7 @@ fn n_refuses_a_name_only_the_presentation_overlay_holds(cx: &mut gpui::TestAppCo
     );
 }
 
-/// `c` is Scopes-only: elsewhere it is an unbound letter.
+/// `c` is no object-dialog verb: an unbound letter changes nothing.
 #[gpui::test]
 fn c_is_not_a_verb_on_views(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

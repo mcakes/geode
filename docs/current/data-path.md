@@ -820,8 +820,8 @@ dataset has no relation: the compiler refuses a view or join over it, and
 distinct-value requests skip it.
 
 A distinct-value answer carries the key it was asked under, and the app
-routes it by that key. The shell's reserved keys (the picker, saved scopes,
-expression suggestions, action values, diagnostics) stay with the shell, and
+routes it by that key. The shell's reserved keys (the picker, expression
+suggestions, action values, diagnostics) stay with the shell, and
 only the picker's key feeds the picker; any other key is a tile's, delivered
 to that tile as `Delivery::Distinct`. A tile's tag counter can equal the
 picker's, so routing by tag alone could fill the picker with a tile's values.

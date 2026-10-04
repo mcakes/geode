@@ -1022,10 +1022,11 @@ fn mod_s_refuses_a_taken_name(cx: &mut gpui::TestAppContext) {
     assert!(!dir.path().join("expressions.toml").exists());
 }
 
-/// A name saved a moment ago is taken at once: the check reads the
-/// configuration the save produced, not the one loaded before it.
+/// A name saved a moment ago is taken at once: the second save of the same
+/// name in one visit refuses. (The pending-batch window itself is guarded by
+/// `scope_writes::definition_owner_counts_the_pending_batch`.)
 #[gpui::test]
-fn mod_s_refuses_a_name_queued_a_moment_ago(cx: &mut gpui::TestAppContext) {
+fn mod_s_refuses_a_name_saved_a_moment_ago(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut vcx) = saving_shell(cx, &dir);
     vcx.simulate_input("npv > 1");

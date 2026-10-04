@@ -1083,7 +1083,7 @@ fn jump_to_slot(shell: &mut ShellView, slot: u8, cx: &mut Context<ShellView>) {
     enter_edit_stage(shell, &name, None, cx);
 }
 
-/// Shared routing for object, column, and Values editing. An armed confirmation owns
+/// Shared routing for object and column editing. An armed confirmation owns
 /// input first; an open value field uses its own text/completion handler. Filter mode
 /// routes navigation and stepping while leaving text to the input. Normal mode uses the
 /// command table and consumes unrecognized keys.

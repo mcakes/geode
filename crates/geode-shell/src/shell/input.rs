@@ -494,7 +494,7 @@ impl ShellView {
         } else if action.0 == "scope::save_current" {
             // `scope::save_current` must precede the generic `scope::` prefix match,
             // otherwise it would load a scope named `save_current`. That name is reserved
-            // by the Scopes domain. Opens the Scope dialog's save prompt alone.
+            // (`geode_core::scopes::RESERVED_NAMES`). Opens the Scope dialog's save prompt alone.
             super::scopedialog::view::open_save(self, window, cx);
         } else if let Some(name) = action.0.strip_prefix("scope::") {
             // Load a saved scope through `FrameViewMut::set_scope`, making the change undoable.

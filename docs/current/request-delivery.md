@@ -161,7 +161,7 @@ the matching shell occupant;
 absent occupants are ignored. Fetch completion broadcasts to visible
 occupants, whose modules decide whether they watch that source/identity.
 Distinct results are routed by key. A shell key (`shell::is_shell_key`: the
-picker, saved scopes, expression suggestions, action values, diagnostics) goes
+picker, expression suggestions, action values, diagnostics) goes
 to the shell's own consumers, and only the picker's key reaches the picker,
 which checks its current tag, column, and open state; a tile's tag counter can
 equal the picker's, so a tag check alone would let a tile's values fill it.

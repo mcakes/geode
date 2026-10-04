@@ -2092,9 +2092,8 @@ impl Draft {
 
     /// Step the selected value, or return `Inert` when there is no change. Refuse the
     /// final untick of a definition list that cannot represent emptiness; removing its
-    /// user key would inherit the lower object instead. Values-stage lists may become
-    /// empty to drop that dimension's constraint. Presentation lists may hide every
-    /// column.
+    /// user key would inherit the lower object instead. Presentation lists may hide
+    /// every column.
     fn step_selected(&mut self, direction: StepDirection) -> Step {
         let Some(row) = self.selected_row() else {
             return Step::Inert;
@@ -2574,8 +2573,8 @@ impl Draft {
                         Some(EditRow::Field(i))
                     }
                 }
-                // A list keyed by member name (a scope's `named.<name>` or
-                // `dimensions.<column>`) flags that member's row; a name the list
+                // A list keyed by member name (a view's `columns.<name>`) flags
+                // that member's row; a name the list
                 // no longer holds falls back to the field row.
                 (FieldKind::OrderedList { items, .. }, None) => Some(
                     segment
@@ -2781,8 +2780,8 @@ impl Domain {
     }
 
     /// Create a validated draft from the adapter's default fields and empty source.
-    /// Copying a scope or saving current frame scope replaces these initial fields
-    /// through its separate naming seed before committing creation.
+    /// A naming seed (a Colors definition from the value-color list) replaces these
+    /// initial fields before committing creation.
     pub fn new_draft(self, config: &Config, name: &str) -> Draft {
         let mut draft = Draft::new_object(name, self.fields(config, None), toml::Table::new());
         draft.diagnostics = self.validate(&draft, config);
