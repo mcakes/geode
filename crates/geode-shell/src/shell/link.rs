@@ -16,6 +16,11 @@ use super::{ShellView, status};
 use crate::module::placeholder::PLACEHOLDER_KIND;
 use crate::tiling::TileId;
 
+/// What the status bar says when a pick would close a loop of groups.
+pub(crate) fn cycle_refusal(from: Group, to: Group) -> String {
+    format!("would link {} back into {}", from.letter(), to.letter())
+}
+
 /// What the status bar's `following` label was built from: the focused
 /// tile, the group it follows and that group's scope generation.
 pub(super) type LinkLabelKey = (TileId, Group, u64);
@@ -69,7 +74,9 @@ impl ShellView {
     /// offer it, and a membership that reached the frame some other way (a
     /// session written when the module did) is cleared instead of left
     /// showing a group's chip over content the group does not select. A
-    /// tile no module occupies is refused and the frame is not touched.
+    /// tile no module occupies is refused and the frame is not touched, and
+    /// so is a follow that would close a loop of groups with what the tile
+    /// emits into: the status bar says which link it refused.
     ///
     /// Writes the frame: call this from the shell's own handlers, never
     /// from inside an update of the frame.
@@ -95,6 +102,12 @@ impl ShellView {
             );
         }
         let group = group.filter(|_| follows);
+        let emit = self.frame.read(cx).membership(tile).emit;
+        if let Some((from, to)) = self.frame.read(cx).closing_cycle(tile, group, emit) {
+            self.notice = Some(cycle_refusal(from, to).into());
+            cx.notify();
+            return;
+        }
         // The tile's own workspace, the one its frame handle was bound to
         // at creation: that lane supplies the rest of its identity.
         let ws = self
@@ -126,7 +139,9 @@ impl ShellView {
     /// set emitting: the chooser does not offer it, and a membership that
     /// reached the frame some other way (a session written when the module
     /// could) is cleared instead of left subscribing to nothing. A tile no
-    /// module occupies is refused and the frame is not touched.
+    /// module occupies is refused and the frame is not touched, and so is
+    /// an emit that would close a loop of groups with the group the tile
+    /// follows: the status bar says which link it refused.
     ///
     /// Joining pulls the tile's emission at once, which reads the tile and
     /// writes the frame: call this from the shell's own handlers, never
@@ -150,6 +165,12 @@ impl ShellView {
             );
         }
         let group = group.filter(|_| can);
+        let follow = self.frame.read(cx).membership(tile).follow;
+        if let Some((from, to)) = self.frame.read(cx).closing_cycle(tile, follow, group) {
+            self.notice = Some(cycle_refusal(from, to).into());
+            cx.notify();
+            return;
+        }
         let changed = self.frame.update(cx, |f, cx| {
             let changed = f.emit(tile, group);
             if changed {
@@ -229,8 +250,10 @@ impl ShellView {
     /// re-pull. An emitter's base is its lane's or its followed group's
     /// scope, which move without the tile announcing anything; the frame's
     /// generation advances on every such write (and on membership and pin
-    /// changes). Equal postings write nothing, and the doors refuse cycles,
-    /// so a chain settles after one extra pass.
+    /// changes). Equal postings write nothing, and a loop of groups is
+    /// refused at the doors and on restore, so a chain settles after one
+    /// extra pass. Emitters are re-pulled oldest posting first, so a group
+    /// two tiles emit into stays on the one that moved last.
     pub(super) fn repull_emitters(&mut self, cx: &mut Context<Self>) {
         let generation = self.frame.read(cx).generation();
         if generation == self.last_emit_generation {

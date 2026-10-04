@@ -34479,6 +34479,63 @@ run_mutation "link: a NULL path names its column" \
   '        CursorScope::NullIn(_) => (None, None),' \
   geode-core nothing_and_a_null_path_post_no_scope_but_keep_the_board
 
+# Closing a tile drops its refusal with its membership: `Links::forget`
+# leaves the group without passing the frame's emit door that clears it.
+run_mutation "link: closing a tile clears its refusal" \
+  crates/geode-shell/src/frame.rs \
+  '        self.tile_notices.retain(|(t, _)| *t != tile);
+        self.link_refusals.remove(&tile);' \
+  '        self.tile_notices.retain(|(t, _)| *t != tile);' \
+  geode-shell a_link_refusal_ends_with_the_emit_membership_it_names
+
+# A re-pull runs oldest posting first, so the latest mover re-posts last
+# and keeps a group two tiles emit into; in tile order the higher id wins.
+run_mutation "link: a re-pull leaves the group on the latest mover" \
+  crates/geode-shell/src/link.rs \
+  '        tiles.sort_by_key(|t| self.last.get(t).map(|(seq, _)| *seq));' \
+  '        let _ = &self.last;' \
+  geode-shell a_lane_move_keeps_the_group_on_the_latest_mover
+
+# A loop of groups would narrow every group on it on each pass.
+run_mutation "link: a two-group loop is refused" \
+  crates/geode-shell/src/link.rs \
+  '            if g == from {
+                return Some((from, to));
+            }' \
+  '            if g == from && false {
+                return Some((from, to));
+            }' \
+  geode-shell a_two_group_loop_is_a_cycle_and_a_self_link_is_not
+
+# The tile's own current edge is replaced by the new membership; counted,
+# re-pointing a chain's first tile would read as a loop.
+run_mutation "link: a tile's own old edge does not count" \
+  crates/geode-shell/src/link.rs \
+  '            if *t == tile {
+                continue;
+            }' \
+  '            let _ = tile;' \
+  geode-shell a_longer_loop_is_found_and_the_tiles_own_old_edge_is_ignored
+
+run_mutation "link: the emit door refuses a loop" \
+  crates/geode-shell/src/shell/link.rs \
+  '        if let Some((from, to)) = self.frame.read(cx).closing_cycle(tile, follow, group) {' \
+  '        if let Some((from, to)) = None::<(Group, Group)> {' \
+  geode-shell a_pick_that_closes_a_loop_is_refused_with_a_notice
+
+run_mutation "link: the follow door refuses a loop" \
+  crates/geode-shell/src/shell/link.rs \
+  '        if let Some((from, to)) = self.frame.read(cx).closing_cycle(tile, group, emit) {' \
+  '        if let Some((from, to)) = None::<(Group, Group)> {' \
+  geode-shell a_follow_that_closes_a_loop_is_refused_with_a_notice
+
+# A session holding a loop restores without the later tile's emit.
+run_mutation "link: a restored loop drops the later emit" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                            f.closing_cycle(tile, record.link.follow, record.link.emit)' \
+  '                            None::<(geode_core::link::Group, geode_core::link::Group)>' \
+  geode-shell a_restored_cycle_drops_the_later_emit
+
 # ---- Vol slice viewer ----
 #
 # geode-volslice: one underlying's smiles per expiry and kind. The pure core

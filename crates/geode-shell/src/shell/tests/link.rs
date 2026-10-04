@@ -574,6 +574,8 @@ struct Emitter {
     emission: Rc<RefCell<Emission>>,
     /// How many times the shell pulled.
     pulls: Rc<Cell<usize>>,
+    /// Per-tile answers, overriding `emission` for the tiles listed.
+    by_tile: Rc<RefCell<std::collections::HashMap<TileId, Emission>>>,
 }
 
 /// Services whose "rec" tiles can emit, answering `emission`.
@@ -584,6 +586,7 @@ fn emitting_services(emission: Emission) -> (ShellServices, Emitter) {
     let emitter = Emitter {
         emission: rec.emission.clone(),
         pulls: rec.pulls.clone(),
+        by_tile: rec.emission_by_tile.clone(),
     };
     (services_with_recorders(vec![rec]), emitter)
 }
@@ -3049,5 +3052,129 @@ fn a_null_path_keeps_the_group_and_records_the_refusal(cx: &mut gpui::TestAppCon
     set_emit(&shell, &mut vcx, TileId(1), None);
     frame.read_with(&vcx, |f, _| {
         assert_eq!(f.link_refusal(TileId(1)), None, "leaving clears")
+    });
+}
+
+/// Two tiles emitting into one group: a lane move re-pulls both, and the
+/// one that posted last re-posts last, so the group stays on the latest
+/// mover's cursor. Re-pulled in tile order, the higher tile id would take
+/// the group from whoever moved most recently.
+#[gpui::test]
+fn a_lane_move_keeps_the_group_on_the_latest_mover(cx: &mut gpui::TestAppContext) {
+    let (services, emitter) = emitting_services(Emission::default());
+    let model = |code: &str| Emission {
+        cursor: path(&[("model_code", code)]),
+        ..Emission::default()
+    };
+    emitter.by_tile.borrow_mut().insert(TileId(1), model("ONE"));
+    emitter.by_tile.borrow_mut().insert(TileId(2), model("TWO"));
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    let a_model = |vcx: &gpui::VisualTestContext| {
+        frame.read_with(vcx, |f, _| {
+            let scope = f.group_scope(Group::A);
+            (
+                scope.sole("model_code").map(str::to_owned),
+                scope.text.clone(),
+            )
+        })
+    };
+    let lane_text = |vcx: &mut gpui::VisualTestContext, text: &str| {
+        frame.update(vcx, |f, cx| {
+            assert!(f.shared_mut().set_text(Some(text.into())));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    };
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+    set_emit(&shell, &mut vcx, TileId(2), Some(Group::A));
+    assert_eq!(a_model(&vcx).0.as_deref(), Some("TWO"));
+
+    // Tile 1 moves after tile 2 posted: it is the latest mover.
+    emitter
+        .by_tile
+        .borrow_mut()
+        .insert(TileId(1), model("ONE_B"));
+    tile_changed(&shell, &mut vcx, TileId(1));
+    assert_eq!(a_model(&vcx).0.as_deref(), Some("ONE_B"));
+    lane_text(&mut vcx, "ndx");
+    assert_eq!(
+        a_model(&vcx),
+        (Some("ONE_B".into()), Some("ndx".into())),
+        "the latest mover keeps the group across a lane move"
+    );
+
+    // Now tile 2 moves last.
+    emitter
+        .by_tile
+        .borrow_mut()
+        .insert(TileId(2), model("TWO_B"));
+    tile_changed(&shell, &mut vcx, TileId(2));
+    assert_eq!(a_model(&vcx).0.as_deref(), Some("TWO_B"));
+    lane_text(&mut vcx, "rut");
+    assert_eq!(a_model(&vcx), (Some("TWO_B".into()), Some("rut".into())));
+}
+
+// --- Loops of groups -------------------------------------------------
+
+/// A pick that would close a loop of groups is refused at the door and
+/// says why: on a loop, each group would narrow the next on every pass.
+#[gpui::test]
+fn a_pick_that_closes_a_loop_is_refused_with_a_notice(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services_that(true, true));
+    set_follow(&shell, &mut vcx, TileId(1), Some(Group::A));
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::B));
+    set_follow(&shell, &mut vcx, TileId(2), Some(Group::B));
+    set_emit(&shell, &mut vcx, TileId(2), Some(Group::A));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(2)).emit),
+        None
+    );
+    assert_eq!(
+        notice(&shell, &vcx).as_deref(),
+        Some("would link B back into A")
+    );
+}
+
+/// The follow door refuses the same loop from the other side: tile 2
+/// emits into A first, then asks to follow B.
+#[gpui::test]
+fn a_follow_that_closes_a_loop_is_refused_with_a_notice(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services_that(true, true));
+    set_follow(&shell, &mut vcx, TileId(1), Some(Group::A));
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::B));
+    set_emit(&shell, &mut vcx, TileId(2), Some(Group::A));
+    set_follow(&shell, &mut vcx, TileId(2), Some(Group::B));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(2)).follow),
+        None
+    );
+    assert_eq!(
+        notice(&shell, &vcx).as_deref(),
+        Some("would link B back into A")
+    );
+}
+
+/// A session holding a loop (written before the doors refused one, or by
+/// hand) restores without it: the later tile's emit is dropped and its
+/// follow kept.
+#[gpui::test]
+fn a_restored_cycle_drops_the_later_emit(cx: &mut gpui::TestAppContext) {
+    let services = two_restored(
+        services_that(true, true),
+        "module = \"rec\"\nfollow = \"a\"\nemit = \"b\"",
+        "module = \"rec\"\nfollow = \"b\"\nemit = \"a\"",
+    );
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    frame.read_with(&vcx, |f, _| {
+        assert_eq!(f.membership(TileId(1)).follow, Some(Group::A));
+        assert_eq!(f.membership(TileId(1)).emit, Some(Group::B));
+        assert_eq!(f.membership(TileId(2)).follow, Some(Group::B));
+        assert_eq!(
+            f.membership(TileId(2)).emit,
+            None,
+            "the later emit is dropped"
+        );
     });
 }

@@ -524,8 +524,9 @@ impl Frame {
     /// the group it follows composes over its lane: composed over the group
     /// it would narrow it further on every pass, and its total row could
     /// never widen it back. A tile following another group carries that
-    /// group's scope down the chain (cycles are refused at the doors). Any
-    /// other tile composes over its lane.
+    /// group's scope down the chain; a loop of groups is refused at the
+    /// doors and on restore (`closing_cycle`), so the chain ends. Any other
+    /// tile composes over its lane.
     pub(crate) fn emit_base(&self, ws: WorkspaceIx, tile: TileId) -> Scope {
         let m = self.links.membership(tile);
         match m.follow {
@@ -534,9 +535,21 @@ impl Frame {
         }
     }
 
-    /// Every tile emitting into a group, in tile order.
+    /// Every tile emitting into a group, oldest posting first, so a
+    /// re-pull leaves each group on its most recent mover.
     pub(crate) fn emitters(&self) -> Vec<TileId> {
         self.links.emitters()
+    }
+
+    /// The edge `from → to` that giving `tile` this membership would add
+    /// when it closes a loop of groups; see `Links::closing_cycle`.
+    pub(crate) fn closing_cycle(
+        &self,
+        tile: TileId,
+        follow: Option<Group>,
+        emit: Option<Group>,
+    ) -> Option<(Group, Group)> {
+        self.links.closing_cycle(tile, follow, emit)
     }
 
     /// Record or clear the NULL column that stopped `tile`'s last posting.

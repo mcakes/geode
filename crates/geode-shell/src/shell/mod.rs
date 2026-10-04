@@ -1468,7 +1468,21 @@ impl ShellView {
                         && services.workspaces.workspace_of(tile).is_some()
                     {
                         f.follow(tile, record.link.follow);
-                        f.emit(tile, record.link.emit);
+                        // A loop of groups would narrow every group on it
+                        // on each pass; tiles restore in id order, so the
+                        // later tile's emit is the one dropped.
+                        if let Some((from, to)) =
+                            f.closing_cycle(tile, record.link.follow, record.link.emit)
+                        {
+                            tracing::warn!(
+                                target: "geode::session",
+                                "tile {id}: emit into {} dropped: {}",
+                                to.letter(),
+                                crate::shell::link::cycle_refusal(from, to)
+                            );
+                        } else {
+                            f.emit(tile, record.link.emit);
+                        }
                     }
                 }
             });

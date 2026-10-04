@@ -172,6 +172,53 @@ impl Links {
         true
     }
 
+    /// The edge `from → to` that giving `tile` this membership would add,
+    /// when it closes a loop through two or more groups. An edge runs from
+    /// the group a tile follows to the group it emits into; a tile emitting
+    /// into the group it follows is no edge (it composes over its lane).
+    /// The tile's own current edge is left out: the new membership replaces
+    /// it. A loop would narrow every group on it a little more on each
+    /// pass, with no row able to widen them back.
+    pub(crate) fn closing_cycle(
+        &self,
+        tile: TileId,
+        follow: Option<Group>,
+        emit: Option<Group>,
+    ) -> Option<(Group, Group)> {
+        let (from, to) = (follow?, emit?);
+        if from == to {
+            return None;
+        }
+        let mut edges = [[false; 4]; 4];
+        for (t, &f) in &self.following {
+            if *t == tile {
+                continue;
+            }
+            if let Some(&e) = self.emitting.get(t)
+                && e != f
+            {
+                edges[f.index()][e.index()] = true;
+            }
+        }
+        // Can `to` reach `from`? Four nodes: a plain search.
+        let mut seen = [false; 4];
+        let mut stack = vec![to];
+        while let Some(g) = stack.pop() {
+            if g == from {
+                return Some((from, to));
+            }
+            if std::mem::replace(&mut seen[g.index()], true) {
+                continue;
+            }
+            stack.extend(
+                Group::ALL
+                    .into_iter()
+                    .filter(|n| edges[g.index()][n.index()]),
+            );
+        }
+        None
+    }
+
     /// Drop a closed tile's membership and what it posted. `true` when it
     /// was in a group.
     pub(crate) fn forget(&mut self, tile: TileId) -> bool {
@@ -222,9 +269,15 @@ impl Links {
         changed | self.rebuild_board(g)
     }
 
-    /// Every tile emitting into a group, in tile order.
+    /// Every tile emitting into a group, oldest posting first: tiles that
+    /// have not posted since joining lead (in tile order), then the rest by
+    /// the order of their last posts. Re-pulled in this order, the most
+    /// recent mover re-posts last and keeps the group it shares; in tile
+    /// order, a lane move would hand the group to the higher tile id.
     pub(crate) fn emitters(&self) -> Vec<TileId> {
-        self.emitting.keys().copied().collect()
+        let mut tiles: Vec<TileId> = self.emitting.keys().copied().collect();
+        tiles.sort_by_key(|t| self.last.get(t).map(|(seq, _)| *seq));
+        tiles
     }
 
     /// Derive `g`'s board from its emitters' last postings, later posts
@@ -360,6 +413,56 @@ mod tests {
                 mark: DraftMark::Editing,
             }],
         }
+    }
+
+    fn linked(pairs: &[(u64, Option<Group>, Option<Group>)]) -> Links {
+        let mut l = Links::default();
+        for &(t, f, e) in pairs {
+            l.follow(TileId(t), f);
+            l.emit(TileId(t), e);
+        }
+        l
+    }
+
+    /// A tile following B and emitting into A beside one following A and
+    /// emitting into B would narrow both groups on every pass. Emitting
+    /// into the followed group is no edge: it composes over the lane.
+    #[test]
+    fn a_two_group_loop_is_a_cycle_and_a_self_link_is_not() {
+        let l = linked(&[(1, Some(Group::A), Some(Group::B))]);
+        assert_eq!(
+            l.closing_cycle(TileId(2), Some(Group::B), Some(Group::A)),
+            Some((Group::B, Group::A))
+        );
+        assert_eq!(
+            l.closing_cycle(TileId(2), Some(Group::A), Some(Group::A)),
+            None
+        );
+        assert_eq!(
+            l.closing_cycle(TileId(2), Some(Group::B), Some(Group::C)),
+            None
+        );
+    }
+
+    /// A loop through every group is found, and the tile being re-pointed
+    /// does not count its own old edge: that edge goes when the new one
+    /// arrives.
+    #[test]
+    fn a_longer_loop_is_found_and_the_tiles_own_old_edge_is_ignored() {
+        let l = linked(&[
+            (1, Some(Group::A), Some(Group::B)),
+            (2, Some(Group::B), Some(Group::C)),
+            (3, Some(Group::C), Some(Group::D)),
+        ]);
+        assert_eq!(
+            l.closing_cycle(TileId(4), Some(Group::D), Some(Group::A)),
+            Some((Group::D, Group::A))
+        );
+        // Tile 1 re-pointing its own edge removes A→B first: no loop.
+        assert_eq!(
+            l.closing_cycle(TileId(1), Some(Group::D), Some(Group::A)),
+            None
+        );
     }
 
     /// Two tiles watching the same key share one revision cell, and a
