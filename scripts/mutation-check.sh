@@ -32899,7 +32899,7 @@ run_mutation "link: a blotter group row posts its levels only" \
   crates/geode-blotter/src/core/context.rs \
   '    if !path.is_empty() && path.len() == plan.grouping.len() {' \
   '    if !path.is_empty() {' \
-  geode-blotter the_blotter_emits_the_cursor_path_its_filter_and_unscoped
+  geode-blotter a_group_row_emits_its_path_and_nothing_unanimous
 
 run_mutation "link: the blotter can emit before it has rows" \
   crates/geode-blotter/src/content.rs \

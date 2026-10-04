@@ -309,12 +309,48 @@ mod tests {
         assert_eq!(path_of_scope(cursor_scope(&snap, &plan, 0)), pairs(&[]));
     }
 
-    /// Row 1 (L1) carries P1 under a set mixed flag: a group row never
-    /// adds a value of its own, so neither that nor any other column
-    /// joins the path.
+    /// A group row posts its levels only, even where a hidden context
+    /// column is unanimous below it today: a follower must see the whole
+    /// group, not the one position it happens to hold.
     #[test]
     fn a_group_row_emits_its_path_and_nothing_unanimous() {
         let (snap, plan) = fixture();
+        assert_eq!(
+            path_of_scope(cursor_scope(&snap, &plan, 1)),
+            pairs(&[("lhu", "L1")])
+        );
+
+        // Root; L1 (unanimous on P7); L1/SPX (P7).
+        let snap = Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu", None),
+                    TestColumn::Dict(vec![None, s("L1"), s("L1")]),
+                ),
+                (
+                    meta("underlying_ref", None),
+                    TestColumn::Dict(vec![None, None, s("SPX")]),
+                ),
+                (meta("row_depth", None), TestColumn::I32(vec![0, 1, 2])),
+                (
+                    meta("position_ref", Some(4)),
+                    TestColumn::Str(vec![None, Some("P7"), Some("P7")]),
+                ),
+                (
+                    meta("position_ref#mixed", None),
+                    TestColumn::Bool(vec![Some(true), Some(false), Some(false)]),
+                ),
+            ],
+            2,
+        );
+        let view = view("[t]\ndataset = \"d\"\ngrouping = [\"lhu\", \"underlying_ref\"]\n");
+        let grouping = vec!["lhu".to_string(), "underlying_ref".to_string()];
+        let plan = ColumnPlan::build(&view, &grouping, &snap);
+        assert_eq!(
+            values_at(&snap, &plan, 1),
+            pairs(&[("lhu", "L1"), ("position_ref", "P7")]),
+            "sanity: the context reads P7 as unanimous on L1"
+        );
         assert_eq!(
             path_of_scope(cursor_scope(&snap, &plan, 1)),
             pairs(&[("lhu", "L1")])
