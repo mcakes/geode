@@ -1309,17 +1309,45 @@ run_mutation "lease: the app lock retries to absorb a probe" \
 
 run_mutation "lease: a stop cancels the wait" \
   crates/geode-data/src/lease.rs \
-  '        if should_stop() {' \
-  '        if false {' \
+  $'        std::thread::sleep(OPEN_STEP.min(deadline - waited));\n        if should_stop() {' \
+  $'        std::thread::sleep(OPEN_STEP.min(deadline - waited));\n        if false {' \
   geode-data \
   a_stop_during_the_wait_cancels_promptly
 
+run_mutation "lease: a stop cancels the lock retry" \
+  crates/geode-data/src/lease.rs \
+  $'        std::thread::sleep(APP_LOCK_STEP);\n        if should_stop() {' \
+  $'        std::thread::sleep(APP_LOCK_STEP);\n        if false {' \
+  geode-data \
+  a_stop_while_another_app_holds_the_lock_cancels_promptly
+
 run_mutation "lease: only a lock conflict is retried" \
   crates/geode-data/src/lease.rs \
-  '            Err(err) if is_lock_conflict(&err) => err,' \
-  '            Err(err) if true => err,' \
+  '        let Some(text) = conflict_text(&err) else {' \
+  '        let Some(text) = Some(err.to_string()) else {' \
   geode-data \
   a_non_lock_open_error_is_not_retried
+
+run_mutation "lease: the Windows holder marker is a conflict" \
+  crates/geode-data/src/lease.rs \
+  '        || message.contains("File is already open in")' \
+  '        || false' \
+  geode-data \
+  the_windows_conflict_text_is_a_conflict_only_with_duckdbs_marker
+
+run_mutation "lease: the holder is the last PID in the text" \
+  crates/geode-data/src/lease.rs \
+  'message.rmatch_indices("(PID ")' \
+  'message.match_indices("(PID ")' \
+  geode-data \
+  a_pid_in_the_store_path_is_not_the_holder
+
+run_mutation "lease: the holder is read from DuckDB's text alone" \
+  crates/geode-data/src/lease.rs \
+  '        holder = holder_pid(&text).or(holder);' \
+  '        holder = holder_pid(&err.to_string()).or(holder);' \
+  geode-data \
+  a_pid_in_the_store_path_is_not_the_holder
 
 run_mutation "store: the memory limit escapes a quote" \
   crates/geode-data/src/store/mod.rs \

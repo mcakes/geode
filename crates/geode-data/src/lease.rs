@@ -100,7 +100,16 @@ impl std::error::Error for LeaseError {}
 /// Take `<db>.app.lock`, retrying `try_lock` for up to 1 s; then open the
 /// store with `open`, retrying every 100 ms while the error is a lock
 /// conflict, until `deadline`. `on_wait(holder)` runs once, at the first
-/// refused open. `should_stop` is checked between retries.
+/// refused open.
+///
+/// `deadline` is measured from the start of the open phase, after the lock
+/// is taken, so the whole call can last up to `deadline` plus the 1 s lock
+/// retry.
+///
+/// `should_stop` is checked between lock retries and between open retries,
+/// and a stop there returns `Cancelled`. It is not checked before an open
+/// that then succeeds: a stop arriving just before that open still returns
+/// `Ok`, so the caller re-checks its own stop flag after a success.
 pub fn acquire_app<T>(
     db: &Path,
     deadline: Duration,
@@ -109,7 +118,7 @@ pub fn acquire_app<T>(
     open: &mut dyn FnMut() -> Result<T, StoreError>,
 ) -> Result<(AppLease, T), LeaseError> {
     let lease = AppLease {
-        _file: take_app_lock(db)?,
+        _file: take_app_lock(db, should_stop)?,
     };
     let start = Instant::now();
     let mut holder = None;
@@ -117,10 +126,12 @@ pub fn acquire_app<T>(
     loop {
         let err = match open() {
             Ok(value) => return Ok((lease, value)),
-            Err(err) if is_lock_conflict(&err) => err,
-            Err(err) => return Err(LeaseError::Open(err)),
+            Err(err) => err,
         };
-        holder = holder_pid(&err.to_string()).or(holder);
+        let Some(text) = conflict_text(&err) else {
+            return Err(LeaseError::Open(err));
+        };
+        holder = holder_pid(&text).or(holder);
         if !reported {
             reported = true;
             on_wait(holder);
@@ -138,7 +149,7 @@ pub fn acquire_app<T>(
 
 /// `<db>.app.lock`, retried for `APP_LOCK_RETRY`: a collector's probe holds
 /// it for an instant, so one refusal does not mean another app.
-fn take_app_lock(db: &Path) -> Result<File, LeaseError> {
+fn take_app_lock(db: &Path, should_stop: &dyn Fn() -> bool) -> Result<File, LeaseError> {
     let file = open_lock(&app_lock_path(db)).map_err(LeaseError::Io)?;
     let start = Instant::now();
     loop {
@@ -151,6 +162,9 @@ fn take_app_lock(db: &Path) -> Result<File, LeaseError> {
             return Err(LeaseError::OtherInstance);
         }
         std::thread::sleep(APP_LOCK_STEP);
+        if should_stop() {
+            return Err(LeaseError::Cancelled);
+        }
     }
 }
 
@@ -191,24 +205,54 @@ pub fn try_collector(db: &Path) -> std::io::Result<Option<CollectorLease>> {
 /// DuckDB's refusal to open a file another process holds. Pinned against a
 /// real conflict by a cross-process test; a DuckDB upgrade that rewords it
 /// fails that test rather than turning every wait into an open error.
+///
+/// - Unix: DuckDB takes an fcntl lock and reports `Could not set lock on
+///   file "<path>": Conflicting lock is held in <exe> (PID n) …`.
+/// - Windows: DuckDB opens with share mode 0, so `CreateFileW` itself fails
+///   with `Cannot open file "<path>": <OS sharing-violation message>`. When
+///   the Restart Manager finds the holder, DuckDB appends `File is already
+///   open in` and `<exe> (PID n)`; that marker is what matches here.
+///   `Cannot open file` alone is not a conflict: a missing file or a denied
+///   permission reads the same.
+///
+/// Known gap: on Windows, when the Restart Manager finds no holder, the
+/// message carries only the localized OS text and no DuckDB marker, so it
+/// is not classified as a conflict and the open fails at once as
+/// `LeaseError::Open` instead of waiting.
 pub fn is_lock_conflict_message(message: &str) -> bool {
-    message.contains("Could not set lock on file") || message.contains("Conflicting lock is held")
+    message.contains("Could not set lock on file")
+        || message.contains("Conflicting lock is held")
+        || message.contains("File is already open in")
 }
 
 /// `is_lock_conflict_message` through an open error's source text. Only an
 /// open can conflict; any other store error is not retried.
 pub fn is_lock_conflict(err: &StoreError) -> bool {
+    conflict_text(err).is_some()
+}
+
+/// DuckDB's own text for a conflicting open: the `duckdb::Error` display,
+/// without the `opening database at {path}:` prefix, so the store path in
+/// that prefix is never read as the holder.
+fn conflict_text(err: &StoreError) -> Option<String> {
     match err {
-        StoreError::Open { source, .. } => is_lock_conflict_message(&source.to_string()),
-        _ => false,
+        StoreError::Open { source, .. } => {
+            let text = source.to_string();
+            is_lock_conflict_message(&text).then_some(text)
+        }
+        _ => None,
     }
 }
 
 /// The holder's PID from DuckDB's conflict text: `(PID 123)` gives 123.
+/// DuckDB names the holder after the file path it quotes, so the last
+/// `(PID n)` that parses wins over one inside the path.
 pub fn holder_pid(message: &str) -> Option<u32> {
-    let (_, rest) = message.split_once("(PID ")?;
-    let (digits, _) = rest.split_once(')')?;
-    digits.trim().parse().ok()
+    message.rmatch_indices("(PID ").find_map(|(at, marker)| {
+        let rest = &message[at + marker.len()..];
+        let (digits, _) = rest.split_once(')')?;
+        digits.trim().parse().ok()
+    })
 }
 
 /// A child process holding a DuckDB store open, for cross-process tests.
@@ -217,8 +261,23 @@ pub(crate) mod test_support {
     use std::io::{BufRead, BufReader};
     use std::path::Path;
     use std::process::{Child, Command, Stdio};
-    use std::sync::mpsc;
+    use std::sync::{RwLock, RwLockReadGuard, mpsc};
     use std::time::Duration;
+
+    /// Spawning a process briefly shares every open file description with
+    /// the child until its exec closes them (close-on-exec), and a flock
+    /// belongs to the description, so a lock dropped in that window stays
+    /// held until the exec. `spawn_holder` takes this gate exclusively
+    /// around the spawn; a test that asserts a lock file is free after a
+    /// drop holds `lock_file_gate()` for its whole life.
+    static SPAWN_GATE: RwLock<()> = RwLock::new(());
+
+    /// Shared hold on the spawn gate: no child is spawned while it lives.
+    pub(crate) fn lock_file_gate() -> RwLockReadGuard<'static, ()> {
+        SPAWN_GATE
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// The env var naming the store `lock_holder_child` opens.
     pub(crate) const HOLD_DB_ENV: &str = "GEODE_TEST_HOLD_DB";
@@ -249,6 +308,9 @@ pub(crate) mod test_support {
     /// return once it reports `HOLDING`. Panics if it does not within 10 s.
     pub(crate) fn spawn_holder(db: &Path) -> Holder {
         let exe = std::env::current_exe().expect("test binary path");
+        let gate = SPAWN_GATE
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut child = Command::new(exe)
             .args(["--ignored", "--exact", CHILD_TEST, "--nocapture"])
             .env(HOLD_DB_ENV, db)
@@ -257,6 +319,7 @@ pub(crate) mod test_support {
             .stderr(Stdio::inherit())
             .spawn()
             .expect("spawn the lock holder child");
+        drop(gate);
         let stdout = child.stdout.take().expect("child stdout");
         // The guard exists before the wait, so a panic below kills the child.
         let holder = Holder { child };
@@ -296,9 +359,17 @@ mod tests {
              /bin/geode (PID {pid}) by user mch. See also \
              https://duckdb.org/docs/stable/connect/concurrency"
         );
+        open_error("/x/g.duckdb", &message)
+    }
+
+    /// An open error at `path` whose DuckDB text is `message`.
+    fn open_error(path: &str, message: &str) -> StoreError {
         StoreError::Open {
-            path: PathBuf::from("/x/g.duckdb"),
-            source: duckdb::Error::DuckDBFailure(duckdb::ffi::Error::new(1), Some(message)),
+            path: PathBuf::from(path),
+            source: duckdb::Error::DuckDBFailure(
+                duckdb::ffi::Error::new(1),
+                Some(message.to_string()),
+            ),
         }
     }
 
@@ -330,6 +401,7 @@ mod tests {
     fn a_second_app_lease_in_one_process_is_other_instance_after_a_second() {
         let dir = tempfile::tempdir().unwrap();
         let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
         let (_lease, ()) = acquire(&db).expect("first lease");
         let start = Instant::now();
         let err = acquire(&db).expect_err("second lease must be refused");
@@ -346,6 +418,7 @@ mod tests {
     fn a_probe_does_not_refuse_the_app() {
         let dir = tempfile::tempdir().unwrap();
         let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
         // A probe that is descheduled while it holds the lock: the app's
         // first attempts collide with it and the retry must absorb them.
         let slow_probe = OpenOptions::new()
@@ -391,6 +464,7 @@ mod tests {
     fn a_dropped_lease_frees_the_lock() {
         let dir = tempfile::tempdir().unwrap();
         let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
         let (lease, ()) = acquire(&db).unwrap();
         assert!(app_present(&db).unwrap());
         drop(lease);
@@ -403,6 +477,7 @@ mod tests {
     fn a_conflicting_open_waits_reports_once_and_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
         let mut refusals = 3;
         let mut waits = Vec::new();
         let (_lease, value) = acquire_app(
@@ -429,6 +504,7 @@ mod tests {
     fn an_open_that_never_frees_is_held_at_the_deadline() {
         let dir = tempfile::tempdir().unwrap();
         let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
         let start = Instant::now();
         let err = acquire_app(
             &db,
@@ -478,6 +554,7 @@ mod tests {
     fn a_stop_during_the_wait_cancels_promptly() {
         let dir = tempfile::tempdir().unwrap();
         let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
         let start = Instant::now();
         let stop = || start.elapsed() >= Duration::from_millis(100);
         let err = acquire_app(
@@ -500,6 +577,7 @@ mod tests {
     fn a_non_lock_open_error_is_not_retried() {
         let dir = tempfile::tempdir().unwrap();
         let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
         let mut opens = 0;
         let mut waited = false;
         let err = acquire_app(
@@ -519,12 +597,65 @@ mod tests {
         );
         assert_eq!(opens, 1);
         assert!(!waited);
+
+        // An open error that is not DuckDB's conflict is not retried either.
+        let mut opens = 0;
+        let err = acquire_app(
+            &db,
+            Duration::from_secs(5),
+            &never,
+            &mut |_| waited = true,
+            &mut || {
+                opens += 1;
+                Err::<(), _>(open_error(
+                    "/x/g.duckdb",
+                    "IO Error: Cannot open file \"/x/g.duckdb\": Permission denied",
+                ))
+            },
+        )
+        .expect_err("a non-conflict open error is returned");
+        assert!(
+            matches!(err, LeaseError::Open(StoreError::Open { .. })),
+            "{err:?}"
+        );
+        assert_eq!(opens, 1);
+        assert!(!waited);
+    }
+
+    #[test]
+    fn a_stop_while_another_app_holds_the_lock_cancels_promptly() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
+        let (_lease, ()) = acquire(&db).unwrap();
+        let start = Instant::now();
+        let stop = || start.elapsed() >= Duration::from_millis(100);
+        let mut opened = false;
+        let err = acquire_app(
+            &db,
+            Duration::from_secs(15),
+            &stop,
+            &mut |_| {},
+            &mut || {
+                opened = true;
+                Ok(())
+            },
+        )
+        .expect_err("a stop during the lock retry cancels");
+        assert!(matches!(err, LeaseError::Cancelled), "{err:?}");
+        assert!(
+            start.elapsed() < Duration::from_millis(600),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(!opened);
     }
 
     #[test]
     fn a_second_collector_gets_none() {
         let dir = tempfile::tempdir().unwrap();
         let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
         let first = try_collector(&db).unwrap();
         assert!(first.is_some());
         assert!(try_collector(&db).unwrap().is_none());
@@ -536,6 +667,7 @@ mod tests {
     fn the_collector_lock_does_not_mark_an_app_present() {
         let dir = tempfile::tempdir().unwrap();
         let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
         let _collector = try_collector(&db).unwrap().unwrap();
         assert!(!app_present(&db).unwrap());
     }
@@ -558,6 +690,64 @@ mod tests {
         )));
     }
 
+    /// DuckDB's Windows form (`local_file_system.cpp`): the sharing
+    /// violation, with the Restart Manager's holder appended when found.
+    #[test]
+    fn the_windows_conflict_text_is_a_conflict_only_with_duckdbs_marker() {
+        let violation = "Cannot open file \"C:\\x\\g.duckdb\": The process cannot access the \
+                         file because it is being used by another process.";
+        let with_holder =
+            format!("{violation}\nFile is already open in \nC:\\bin\\geode.exe (PID 812)");
+        assert!(is_lock_conflict_message(&with_holder));
+        assert_eq!(holder_pid(&with_holder), Some(812));
+        assert!(is_lock_conflict(&open_error(
+            "C:\\x\\g.duckdb",
+            &with_holder
+        )));
+        // Without the holder there is no DuckDB marker: the documented gap.
+        assert!(!is_lock_conflict_message(violation));
+        // `Cannot open file` alone is a missing file or a denied permission.
+        assert!(!is_lock_conflict_message(
+            "Cannot open file \"C:\\x\\g.duckdb\": The system cannot find the path specified."
+        ));
+        assert!(!is_lock_conflict_message(
+            "IO Error: Cannot open file \"/x/g.duckdb\": Permission denied"
+        ));
+    }
+
+    #[test]
+    fn a_pid_in_the_store_path_is_not_the_holder() {
+        let path = "/x/(PID 5)/g.duckdb";
+        let text = format!(
+            "IO Error: Could not set lock on file \"{path}\": Conflicting lock is held in \
+             /bin/geode (PID 812) by user mch."
+        );
+        assert_eq!(holder_pid(&text), Some(812));
+
+        // The holder `on_wait` reports comes from DuckDB's text alone, never
+        // from the `opening database at {path}:` prefix `StoreError::Open`
+        // displays.
+        let reported = |err: StoreError| {
+            let dir = tempfile::tempdir().unwrap();
+            let db = db_in(&dir);
+            let _gate = test_support::lock_file_gate();
+            let mut pending = Some(err);
+            let mut waits = Vec::new();
+            acquire_app(
+                &db,
+                Duration::from_secs(5),
+                &never,
+                &mut |holder| waits.push(holder),
+                &mut || pending.take().map_or(Ok(()), Err),
+            )
+            .unwrap();
+            waits
+        };
+        assert_eq!(reported(open_error(path, &text)), vec![Some(812)]);
+        let anonymous = "IO Error: Could not set lock on file \"/x/g.duckdb\": busy";
+        assert_eq!(reported(open_error(path, anonymous)), vec![None]);
+    }
+
     #[test]
     fn the_classifier_matches_a_real_duckdb_conflict_from_another_process() {
         let dir = tempfile::tempdir().unwrap();
@@ -567,8 +757,18 @@ mod tests {
             Ok(_) => panic!("the store must be held by the child"),
             Err(err) => err,
         };
-        let text = err.to_string();
+        let StoreError::Open { source, .. } = &err else {
+            panic!("expected an open error, got {err:?}");
+        };
+        let text = source.to_string();
         eprintln!("duckdb conflict text: {text}");
+        // The marker each platform's DuckDB file system writes.
+        let marker = if cfg!(windows) {
+            "File is already open in"
+        } else {
+            "Conflicting lock is held in"
+        };
+        assert!(text.contains(marker), "{text}");
         assert!(is_lock_conflict(&err), "{text}");
         assert_eq!(holder_pid(&text), Some(holder.pid()), "{text}");
         drop(holder);
