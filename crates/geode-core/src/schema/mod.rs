@@ -228,7 +228,7 @@ impl DatasetSpec {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SchemaSpec {
     pub datasets: Vec<DatasetSpec>,
 }

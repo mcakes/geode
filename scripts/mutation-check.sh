@@ -28740,7 +28740,7 @@ run_mutation "pickables: a computed dataset is skipped" \
 # order; a column declared out of order would let a view name a column
 # the grid cannot paint where the declaration says it is.
 run_mutation "pricer dataset: declaration mirrors COLUMNS" \
-  crates/geode-pricer/src/core/dataset.rs \
+  crates/geode-core/src/builtin.rs \
   '[pricer.columns.expiry]
 type = "utf8"
 role = "dimension"

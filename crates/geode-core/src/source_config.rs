@@ -87,7 +87,7 @@ pub enum SourceShape {
     Snapshot,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SourceSpec {
     pub name: String,
     pub dataset: String,

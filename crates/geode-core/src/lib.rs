@@ -4,6 +4,7 @@
 //! panels, and editor nudging.
 
 pub mod attribution;
+pub mod builtin;
 pub mod classification;
 pub mod clock;
 pub mod colour;
