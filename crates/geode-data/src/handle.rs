@@ -535,7 +535,9 @@ impl DataService {
     /// and then `StoreOpened`; requests are admitted (up to the channel
     /// bound) and answered once it opens. A stop during the wait ends it
     /// quietly. Every lease failure takes the open-failure path, with the
-    /// reason `data service failed to open: <LeaseError>`.
+    /// reason `data service failed to open: <LeaseError>`. Requests admitted
+    /// during a wait that then fails are never answered, as for any failed
+    /// open; only the failure diagnostic and `ThreadStopped` report it.
     pub fn spawn_as(config: DataServiceConfig, sink: EventSink, role: StoreRole) -> DataHandle {
         Self::spawn_with_probe(config, sink, role, no_probe)
     }
@@ -3230,6 +3232,20 @@ mod tests {
         h.shutdown();
         assert!(!crate::lease::app_present(&db).unwrap());
         crate::store::Store::open(&db).expect("the store opens at once after shutdown");
+    }
+
+    /// A fresh machine: the store's directory does not exist yet, and the
+    /// app lease (taken before the store opens) must not fail on it.
+    #[test]
+    fn the_app_opens_a_store_whose_directory_does_not_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_dir = dir.path().join("a").join("b");
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(&store_dir, Duration::from_secs(10));
+        catalog_request(&h, 12).unwrap();
+        events_until(&rx, Duration::from_secs(10), |e| is_catalog(e, 12));
+        assert!(store_dir.join("geode.duckdb").exists());
+        h.shutdown();
     }
 
     /// Review focus: a handoff loses nothing the feed delivered, not even

@@ -241,7 +241,7 @@ store between them through two advisory lock files beside the database
 
 | File | Held by | Meaning |
 |---|---|---|
-| `<db>.app.lock` | the app's data service, from before the store opens until the service stops (quit, or a failed open, after which a collector may keep the store) | an app wants or has the store |
+| `<db>.app.lock` | the app's data service, from before the store opens until the service stops (quit, or a failed open, after which a collector may hold the store) | an app wants or has the store |
 | `<db>.collector.lock` | a collector, for its life | one collector per store; `lease::try_collector` gives a second one `None` |
 
 The locks are `std::fs::File::try_lock` (`flock` on macOS and Linux,
@@ -274,9 +274,13 @@ neither. `StoreOpened` comes before the DDL and workers run, so a later
 failure of the rest of the open still ends in `ThreadStopped`.
 Requests are admitted during the wait, up to the channel bound, and answered
 once the store opens. A failure takes the [open-failure
-path](#supervised-threads), with `another Geode window has this store open` (the app lock stayed held for
-1 s) or `the background collector did not release the store within N s
-(PID n)` as the error. A stop during the wait ends it at the next retry and
+path](#supervised-threads), with `another Geode window has this store open`
+(the app lock stayed held for 1 s), `the background collector did not release
+the store within N s (PID n)`, or a lock-file error prefixed with the lock
+file's path as the error. Taking the lock creates the store's directory first
+(best-effort, as `Store::open_with` does), so a fresh machine's first launch
+does not fail on a missing directory; `lease::app_present` on a missing
+directory reports no app and creates nothing. A stop during the wait ends it at the next retry and
 the loop returns without a diagnostic or `ThreadStopped`. The service holds
 the lease as its last field, so it is released only after the writer and
 every reader connection have closed, on shutdown and on an unwind alike: a
@@ -394,6 +398,17 @@ build is never read. A mutation entry checks that a mismatch refuses.
   marker, so a conflict fails the open at once.
 - A second Geode window on the same store fails its open after about 1 s
   with `another Geode window has this store open`, in the stopped segment.
+- The store must live on a local disk. On a file system without locking
+  (some network shares), `try_lock` on `<db>.app.lock` fails with an OS error
+  such as `ENOTSUP`, and the app's open fails at once with that error after
+  the lock file's path (`<db>.app.lock: …`), where DuckDB's own lock alone
+  once decided. The open is not retried and there is no fallback.
+- Requests admitted during a wait that then fails (`Held`, another window, a
+  lock-file error) are never answered: the request loop takes the
+  open-failure path without draining them, as for any failed open, so a tile
+  that asked during the up to 15 s wait has no outcome for that request and
+  learns of the failure only through the open-failure diagnostic and
+  `ThreadStopped`.
 - The collector reads configuration when it takes the store, with no live
   reload: a hand edit to `sources.toml` made while the app is closed takes
   effect at its next acquire, its restart, or login.

@@ -1414,10 +1414,35 @@ run_mutation "lease: a Unix conflict needs DuckDB's holder marker" \
 
 run_mutation "lease: the holder is the last PID in the text" \
   crates/geode-data/src/lease.rs \
-  '.rmatch_indices("(PID ")' \
-  '.match_indices("(PID ")' \
+  '.rmatch_indices("PID ")' \
+  '.match_indices("PID ")' \
   geode-data \
   a_pid_in_the_store_path_is_not_the_holder
+
+# DuckDB writes a bare `PID n` when it cannot read the process name.
+run_mutation "lease: the bare PID form names the holder" \
+  crates/geode-data/src/lease.rs \
+  ".is_none_or(|c| c == '(' || c.is_whitespace());" \
+  ".is_none_or(|c| c == '(');" \
+  geode-data \
+  holder_pid_parses_the_bare_form_without_a_process_name
+
+# The lock is taken before the store opens: on a fresh machine the lock's
+# open creates the store's directory, or every launch ends stopped.
+run_mutation "lease: the lock open creates the store directory" \
+  crates/geode-data/src/lease.rs \
+  $'    if let Some(parent) = path.parent() {\n        let _ = std::fs::create_dir_all(parent);\n    }\n    open_lock_file(path)' \
+  '    open_lock_file(path)' \
+  geode-data \
+  the_app_lease_creates_a_missing_store_directory
+
+# A probe of a missing directory is no app, not an error.
+run_mutation "lease: a probe of a missing directory is no app" \
+  crates/geode-data/src/lease.rs \
+  '        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),' \
+  '' \
+  geode-data \
+  a_probe_of_a_missing_directory_is_no_app_and_creates_nothing
 
 run_mutation "lease: the holder is read from DuckDB's text alone" \
   crates/geode-data/src/lease.rs \
@@ -24918,10 +24943,10 @@ run_mutation "release: the service flushes the subscriptions" \
 
 run_mutation "lease: a zero PID does not fall through to the path" \
   crates/geode-data/src/lease.rs \
-  '            digits.trim().parse::<u32>().ok()
+  '            rest[..end].parse::<u32>().ok()
         })
         .filter(|&pid| pid != 0)' \
-  '            digits.trim().parse::<u32>().ok().filter(|&pid| pid != 0)
+  '            rest[..end].parse::<u32>().ok().filter(|&pid| pid != 0)
         })' \
   geode-data a_pid_of_zero_names_no_holder_and_keeps_the_last_known_one
 

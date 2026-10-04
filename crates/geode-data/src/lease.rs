@@ -70,7 +70,12 @@ pub enum LeaseError {
     /// A stop was requested while waiting.
     Cancelled,
     Open(StoreError),
-    Io(std::io::Error),
+    /// Opening or locking a lock file failed. `path` is the lock file, so
+    /// the failure names it (a file system without locking reads as this).
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 impl std::fmt::Display for LeaseError {
@@ -90,12 +95,21 @@ impl std::fmt::Display for LeaseError {
             }
             LeaseError::Cancelled => write!(f, "stopped while waiting for the store"),
             LeaseError::Open(err) => write!(f, "{err}"),
-            LeaseError::Io(err) => write!(f, "{err}"),
+            LeaseError::Io { path, source } => write!(f, "{}: {source}", path.display()),
         }
     }
 }
 
 impl std::error::Error for LeaseError {}
+
+impl LeaseError {
+    fn io(path: &Path) -> impl FnOnce(std::io::Error) -> LeaseError + '_ {
+        move |source| LeaseError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
 
 /// Take `<db>.app.lock`, retrying `try_lock` for up to 1 s; then open the
 /// store with `open`, retrying every 100 ms while the error is a lock
@@ -150,13 +164,14 @@ pub fn acquire_app<T>(
 /// `<db>.app.lock`, retried for `APP_LOCK_RETRY`: a collector's probe holds
 /// it for an instant, so one refusal does not mean another app.
 fn take_app_lock(db: &Path, should_stop: &dyn Fn() -> bool) -> Result<File, LeaseError> {
-    let file = open_lock(&app_lock_path(db)).map_err(LeaseError::Io)?;
+    let path = app_lock_path(db);
+    let file = open_lock(&path).map_err(LeaseError::io(&path))?;
     let start = Instant::now();
     loop {
         match file.try_lock() {
             Ok(()) => return Ok(file),
             Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(err)) => return Err(LeaseError::Io(err)),
+            Err(TryLockError::Error(err)) => return Err(LeaseError::io(&path)(err)),
         }
         if start.elapsed() >= APP_LOCK_RETRY {
             return Err(LeaseError::OtherInstance);
@@ -168,8 +183,20 @@ fn take_app_lock(db: &Path, should_stop: &dyn Fn() -> bool) -> Result<File, Leas
     }
 }
 
-/// Open (creating) a lock file without touching its content.
+/// Open (creating) a lock file without touching its content. The store's
+/// directory is created first, best-effort as `Store::open_with` does: the
+/// lock is taken before the store is opened, so on a fresh machine nothing
+/// else has created it yet. A failure to create it surfaces as the open's
+/// own error.
 fn open_lock(path: &Path) -> std::io::Result<File> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    open_lock_file(path)
+}
+
+/// Open (creating) a lock file in an existing directory.
+fn open_lock_file(path: &Path) -> std::io::Result<File> {
     OpenOptions::new()
         .create(true)
         .read(true)
@@ -180,26 +207,41 @@ fn open_lock(path: &Path) -> std::io::Result<File> {
 
 /// True while another process (or handle) holds `<db>.app.lock`. A probe is
 /// `try_lock` then immediate unlock.
+///
+/// A missing store directory means no app is present (an app creates it
+/// before it locks), so the probe returns `Ok(false)` and creates nothing:
+/// a probe never leaves a directory behind.
 pub fn app_present(db: &Path) -> std::io::Result<bool> {
-    let file = open_lock(&app_lock_path(db))?;
+    let path = app_lock_path(db);
+    let file = match open_lock_file(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(naming(&path, err)),
+    };
     match file.try_lock() {
         Ok(()) => {
-            file.unlock()?;
+            file.unlock().map_err(|err| naming(&path, err))?;
             Ok(false)
         }
         Err(TryLockError::WouldBlock) => Ok(true),
-        Err(TryLockError::Error(err)) => Err(err),
+        Err(TryLockError::Error(err)) => Err(naming(&path, err)),
     }
 }
 
 /// `Ok(None)` when another collector holds the lock.
 pub fn try_collector(db: &Path) -> std::io::Result<Option<CollectorLease>> {
-    let file = open_lock(&collector_lock_path(db))?;
+    let path = collector_lock_path(db);
+    let file = open_lock(&path).map_err(|err| naming(&path, err))?;
     match file.try_lock() {
         Ok(()) => Ok(Some(CollectorLease { _file: file })),
         Err(TryLockError::WouldBlock) => Ok(None),
-        Err(TryLockError::Error(err)) => Err(err),
+        Err(TryLockError::Error(err)) => Err(naming(&path, err)),
     }
+}
+
+/// `err` with the lock file's path in front, keeping its kind.
+fn naming(path: &Path, err: std::io::Error) -> std::io::Error {
+    std::io::Error::new(err.kind(), format!("{}: {err}", path.display()))
 }
 
 /// DuckDB's refusal to open a file another process holds. Pinned against a
@@ -248,9 +290,12 @@ fn conflict_text(err: &StoreError) -> Option<String> {
     }
 }
 
-/// The holder's PID from DuckDB's conflict text: `(PID 123)` gives 123.
-/// DuckDB names the holder after the file path it quotes, so the last
-/// `(PID n)` that parses wins over one inside the path. PID 0 is no
+/// The holder's PID from DuckDB's conflict text: `(PID 123)` gives 123, and
+/// so does the bare `PID 123` DuckDB writes when it cannot read the
+/// holder's process name. DuckDB names the holder after the file path it
+/// quotes, so the last `PID n` that parses wins over one inside the path.
+/// `PID` counts only at a word start (after `(`, whitespace, or the text's
+/// start). PID 0 is no
 /// holder: on macOS, when `F_GETLK` finds the lock already released (a
 /// handover racing the open), DuckDB names PID 0, and a caller keeping
 /// the last known holder (`holder_pid(..).or(holder)`) must keep it. The
@@ -258,11 +303,20 @@ fn conflict_text(err: &StoreError) -> Option<String> {
 /// through to a `(PID n)` inside the quoted path.
 pub fn holder_pid(message: &str) -> Option<u32> {
     message
-        .rmatch_indices("(PID ")
+        .rmatch_indices("PID ")
         .find_map(|(at, marker)| {
-            let rest = &message[at + marker.len()..];
-            let (digits, _) = rest.split_once(')')?;
-            digits.trim().parse::<u32>().ok()
+            let at_word_start = message[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| c == '(' || c.is_whitespace());
+            if !at_word_start {
+                return None;
+            }
+            let rest = message[at + marker.len()..].trim_start();
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            rest[..end].parse::<u32>().ok()
         })
         .filter(|&pid| pid != 0)
 }
@@ -663,6 +717,62 @@ mod tests {
         assert!(!opened);
     }
 
+    /// The lock is taken before the store opens, so on a fresh machine the
+    /// lock's open must create the store's directory itself.
+    #[test]
+    fn the_app_lease_creates_a_missing_store_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("a").join("b").join("g.duckdb");
+        let _gate = test_support::lock_file_gate();
+        let (_lease, ()) = acquire(&db).expect("a missing directory is created");
+        assert!(app_lock_path(&db).exists());
+        assert!(app_present(&db).unwrap());
+    }
+
+    #[test]
+    fn the_collector_lease_creates_a_missing_store_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("a").join("b").join("g.duckdb");
+        let _gate = test_support::lock_file_gate();
+        let lease = try_collector(&db).expect("a missing directory is created");
+        assert!(lease.is_some());
+        assert!(collector_lock_path(&db).exists());
+    }
+
+    /// No app can hold a lock in a directory that does not exist, and the
+    /// probe leaves nothing behind.
+    #[test]
+    fn a_probe_of_a_missing_directory_is_no_app_and_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("a");
+        let db = missing.join("b").join("g.duckdb");
+        let _gate = test_support::lock_file_gate();
+        assert!(!app_present(&db).unwrap());
+        assert!(!missing.exists());
+    }
+
+    /// A lock file that cannot be opened names itself in the error.
+    #[test]
+    fn a_lock_file_error_names_the_lock_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db_in(&dir);
+        let _gate = test_support::lock_file_gate();
+        // A directory where the lock file should be: the open fails.
+        std::fs::create_dir(app_lock_path(&db)).unwrap();
+        let err = acquire(&db).expect_err("a directory is not a lock file");
+        let LeaseError::Io { path, .. } = &err else {
+            panic!("expected Io, got {err:?}");
+        };
+        assert_eq!(path, &app_lock_path(&db));
+        let shown = err.to_string();
+        let prefix = format!("{}: ", app_lock_path(&db).display());
+        assert!(shown.starts_with(&prefix), "{shown}");
+        std::fs::create_dir(collector_lock_path(&db)).unwrap();
+        let err = try_collector(&db).expect_err("a directory is not a lock file");
+        let prefix = format!("{}: ", collector_lock_path(&db).display());
+        assert!(err.to_string().starts_with(&prefix), "{err}");
+    }
+
     #[test]
     fn a_second_collector_gets_none() {
         let dir = tempfile::tempdir().unwrap();
@@ -700,6 +810,28 @@ mod tests {
         assert!(!is_lock_conflict(&StoreError::Drift(
             "Could not set lock on file".into()
         )));
+    }
+
+    /// DuckDB writes a bare `PID n` when it cannot read the holder's
+    /// process name (`local_file_system.cpp`).
+    #[test]
+    fn holder_pid_parses_the_bare_form_without_a_process_name() {
+        let bare = "IO Error: Could not set lock on file \"/x/g.duckdb\": Conflicting lock is \
+                    held in PID 812 by user mch. See also \
+                    https://duckdb.org/docs/stable/connect/concurrency";
+        assert!(is_lock_conflict_message(bare));
+        assert_eq!(holder_pid(bare), Some(812));
+        assert_eq!(holder_pid("Conflicting lock is held in PID 812"), Some(812));
+        // The last match wins over one inside the quoted path, in either form.
+        let in_path = "IO Error: Could not set lock on file \"/x/PID 5/g.duckdb\": \
+                       Conflicting lock is held in PID 812 by user mch.";
+        assert_eq!(holder_pid(in_path), Some(812));
+        // PID 0 is no holder, and does not fall through to the path's PID.
+        let zero = "IO Error: Could not set lock on file \"/x/(PID 5)/g.duckdb\": \
+                    Conflicting lock is held in PID 0 by user mch.";
+        assert_eq!(holder_pid(zero), None);
+        // `PID` inside a word is not the marker.
+        assert_eq!(holder_pid("held in XPID 7 by user mch"), None);
     }
 
     #[test]

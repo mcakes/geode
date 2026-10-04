@@ -122,9 +122,9 @@ One process writes a store at a time, because DuckDB admits one writing
 process per file. The app holds `<db>.app.lock` from before its store opens
 until its data service stops (quit, or a failed open), and a background
 collector process (planned) holds the store only while no app does, so after
-a failed open a collector may keep it; the OS drops both locks when a process dies. Taking
-the store over waits, off the UI thread, for the collector to drain and
-release it. See [store ownership and the background
+a failed open a collector may hold it; the OS drops both locks when a process
+dies. Taking the store over waits, off the UI thread, for the collector to
+drain and release it. See [store ownership and the background
 collector](data-path.md#store-ownership-and-the-background-collector).
 
 Submission reports admission or refusal without waiting for queue space; a
