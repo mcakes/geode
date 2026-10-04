@@ -1054,7 +1054,8 @@ impl DataService {
     }
 
     /// The rest of the open, once, on the store `open_store` returned: the
-    /// stamp, the DDL and every worker.
+    /// DDL (after the stamp check, for the collector), the stamp write (for
+    /// the app and a direct open) and every worker.
     pub(crate) fn open_with_store(
         config: DataServiceConfig,
         sink: EventSink,

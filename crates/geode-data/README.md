@@ -214,11 +214,16 @@ often tripped:
   runs queued documents, series and snapshots, and queued files are left for
   the next owner's discovery. Local writes run even past the deadline. See
   [release](../../docs/current/data-path.md#release).
-- Any change to the store's own DDL (catalog, generations summary,
-  provenance, series coverage, `subscription_topics`, `geode_meta`) or to the
-  payload table builders bumps `STORE_FORMAT`, so a collector from another
-  build refuses the store instead of writing positionally into a different
-  layout. Staging tables are exempt: each is created or replaced per use. See
+- Any change to the store's DDL — its own tables (catalog, generations
+  summary, provenance, `subscription_topics`, `geode_meta`) or the payload
+  table builders in `store/ddl.rs` and `store/series.rs` (series payload and
+  coverage) — bumps `STORE_FORMAT`, so a collector from another build refuses
+  the store instead of writing positionally into a different layout. The
+  drift check does not cover the builders: it compares only column names,
+  types and order, and blames the dataset. Staging tables are exempt: each is
+  created or replaced before every use, so a leftover from another build is
+  never read. Only a collector checks the stamp; an app or direct open
+  overwrites it. See
   [the store-format stamp](../../docs/current/data-path.md#the-store-format-stamp).
 - Discovery compares path, size, and source time, not CSV contents. A pattern
   that matches nothing has its literal prefix opened once; a missing,

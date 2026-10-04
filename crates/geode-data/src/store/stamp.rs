@@ -5,8 +5,8 @@
 //! the file was not created with would publish positionally into the wrong
 //! columns, so the layout carries a number, `STORE_FORMAT`, kept in
 //! `geode_meta`. Any change to the catalog, series, document or reference DDL
-//! bumps it. Staging tables are exempt: each is created or replaced per use
-//! inside one process, so no other build ever meets one.
+//! bumps it. Staging tables are exempt: each is created or replaced before
+//! every use, so a leftover from another build is never read.
 //!
 //! The app (`App`) and a direct open (`Direct`) stamp after their own DDL:
 //! they own the layout. The

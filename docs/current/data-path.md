@@ -241,7 +241,7 @@ store between them through two advisory lock files beside the database
 
 | File | Held by | Meaning |
 |---|---|---|
-| `<db>.app.lock` | the app, from before its store opens until it exits | an app wants or has the store |
+| `<db>.app.lock` | the app's data service, from before the store opens until the service stops (quit, or a failed open, after which a collector may keep the store) | an app wants or has the store |
 | `<db>.collector.lock` | a collector, for its life | one collector per store; `lease::try_collector` gives a second one `None` |
 
 The locks are `std::fs::File::try_lock` (`flock` on macOS and Linux,
@@ -268,8 +268,10 @@ with its own lock conflict (the background collector still has the file) it
 retries only the DuckDB open every 100 ms until `deadline`
 (`DEFAULT_STORE_DEADLINE`, 15 s), then runs the rest of the open (DDL, stamp,
 workers) once. The first refused open sends `DataEvent::StoreWaiting {
-holder }` (DuckDB's PID for the holder, when it names one), and a successful
-open after it sends `StoreOpened`; an open that never waited sends neither.
+holder }` (DuckDB's PID for the holder, when it names one), and DuckDB's
+successful open after it sends `StoreOpened`; an open that never waited sends
+neither. `StoreOpened` comes before the DDL and workers run, so a later
+failure of the rest of the open still ends in `ThreadStopped`.
 Requests are admitted during the wait, up to the channel bound, and answered
 once the store opens. A failure takes the [open-failure
 path](#supervised-threads), with `another Geode window has this store open` (the app lock stayed held for
@@ -308,10 +310,12 @@ it. In order:
    finishes.
 2. The file, egress and position workers, then the fetch and snapshot
    workers, stop as at `shutdown`.
-3. Each subscription worker unsubscribes and sets its flush flag: its
+3. Each subscription worker sets its flush flag, then unsubscribes: its
    receiver handles the messages already queued to it and submits every
    document its coalescer holds, with current contents and ignoring its
-   release deadline, then exits.
+   release deadline, then exits. The flag goes first so that a receiver
+   that ends on the disconnection, rather than the stop flag, still
+   flushes.
 4. Discovery stops, so no poll submits files the drain would only drop.
 5. The ingest runner, after its current operation, runs queued documents,
    series and reference snapshots in the usual priority order until those
@@ -333,9 +337,10 @@ collector's subscriptions start after it takes the store. See
 
 ### The store-format stamp
 
-Two builds can now write one store in turn, such as an upgraded app with an
-older collector still running. Payload tables have the drift check, but the
-store's own tables do not, and publication writes positionally. The store
+Two builds can write one store in turn, such as an upgraded app with an
+older collector still running, and publication writes positionally. The
+store's own tables have no drift check, and the payload tables' check sees
+too little (below). The store
 therefore carries `geode_data::STORE_FORMAT` in `geode_meta(key, value)`
 ([`stamp.rs`](../../crates/geode-data/src/store/stamp.rs)):
 
@@ -351,15 +356,23 @@ therefore carries `geode_data::STORE_FORMAT` in `geode_meta(key, value)`
   stamp through a read-only open that never creates the file, for a check
   before any service starts.
 
-Any change to the store's own DDL (catalog, generations summary,
-provenance, series coverage, `subscription_topics`, `geode_meta`) or to the
-payload table builders bumps `STORE_FORMAT` by hand; a comment at each DDL
-site says so. Staging tables are exempt: each is created or replaced per use
-inside one process, so no other build ever meets one. A mutation entry checks
-that a mismatch refuses.
+Any change to the store's DDL bumps `STORE_FORMAT` by hand: its own tables
+(catalog, generations summary, provenance, `subscription_topics`,
+`geode_meta`) or the payload table builders in `store/ddl.rs` and
+`store/series.rs` (series payload and coverage). A comment at each DDL site
+says so. The builders bump even though their tables are drift-checked,
+because the drift check compares only column names, types and order (not
+keys or constraints, such as the series primary key) and blames the
+dataset's configuration rather than the build. Staging tables are exempt:
+each is created or replaced before every use, so a leftover from another
+build is never read. A mutation entry checks that a mismatch refuses.
 
-### Limits
+### Store ownership limits
 
+- Only a collector is protected by the stamp. `StoreRole::Direct` and `App`
+  never check it; they overwrite it after their DDL. An older app opening a
+  store written by a newer build therefore restamps it with its own format
+  and writes in its own layout.
 - A handoff gap loses intermediate versions only. Recovery on subscribe
   restores each key's latest document after every subscribe; a key that
   publishes more than once inside the gap (handoff time plus subscription

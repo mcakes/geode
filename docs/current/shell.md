@@ -1282,8 +1282,10 @@ action and nothing to act on, so it needs no keyboard route.
 wait and prepares the `StoreWaitingSegment` text and tooltip;
 `note_store_opened` (from `StoreOpened`) clears both and advances the version
 only when a wait was recorded. Both events share one mailbox key, so a burst
-that ends in `StoreOpened` shows nothing. A wait that fails ends in the
-request loop's `ThreadStopped` instead: `note_thread_stopped` for `geode-data`
+that ends in `StoreOpened` shows nothing. `StoreOpened` is sent when
+DuckDB's open succeeds, before the DDL and workers run, so a failure after it
+still ends in `ThreadStopped`. A wait that fails ends in the request loop's
+`ThreadStopped` instead: `note_thread_stopped` for `geode-data`
 clears the wait, and the danger stopped segment's tooltip carries the lease
 error as `data service failed to open: …`, followed by `another Geode window
 has this store open` or `the background collector did not release the store
