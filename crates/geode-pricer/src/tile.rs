@@ -3399,12 +3399,14 @@ impl PricerTile {
         self.footer = None;
         // Whether `escape` finds a layer of its own to close below: then it
         // closes that alone and leaves the find and the notices.
-        let layer = verb == "escape"
-            && (self.entry.is_some()
-                || self.editor.is_some()
-                || self.sheet_picker.is_some()
-                || self.rename_field.is_some()
-                || self.menu.is_some());
+        let open = [
+            self.entry.is_some(),
+            self.editor.is_some(),
+            self.sheet_picker.is_some(),
+            self.rename_field.is_some(),
+            self.menu.is_some(),
+        ];
+        let layer = verb == "escape" && open.contains(&true);
         // A verb arriving under an armed `:rm` (a palette dispatch; a key
         // never gets here, the prompt consumes it) answers "no" first.
         let answered = confirm::cancel(self, window, cx);

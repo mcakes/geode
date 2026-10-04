@@ -4220,9 +4220,9 @@ run_mutation "tile: the depth bound is requested, not everything" \
 run_mutation "tile: a query error keeps the last snapshot" \
   crates/geode-blotter/src/tile.rs \
   '                self.fail_fuzzy_find(e.clone(), cx);
-                self.error = Some(Notice::danger(e));' \
+                self.set_error(Some(Notice::danger(e)));' \
   '                self.fail_fuzzy_find(e.clone(), cx);
-                self.error = Some(Notice::danger(e));
+                self.set_error(Some(Notice::danger(e)));
                 self.table
                     .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());' \
   geode-blotter \
@@ -27475,8 +27475,8 @@ run_mutation "bridge: refused submissions are not read" \
 
 run_mutation "blotter: a stopped query refusal reads as something else" \
   crates/geode-blotter/src/tile.rs \
-  '            self.error = Some(Notice::danger(format!("query refused: {refusal}")));' \
-  '            self.error = Some(Notice::danger({ let _ = refusal; "query refused".to_string() }));' \
+  '            self.set_error(Some(Notice::danger(format!("query refused: {refusal}"))));' \
+  '            self.set_error(Some(Notice::danger({ let _ = refusal; "query refused".to_string() })));' \
   geode-blotter a_refused_query_says_busy_or_stopped
 
 run_mutation "mdtile: a document refusal loses its kind" \
@@ -31433,8 +31433,8 @@ run_mutation "tile header: a long notice leaves the left side its share" \
 # wrap, a long error runs out of the 22 px strip.
 run_mutation "tile header: a long notice stays one line" \
   crates/geode-tile/src/notice.rs \
-  '        .truncate()' \
-  '        .overflow_hidden()' \
+  '    let el = render(notice, theme).id(id).min_w_0().truncate();' \
+  '    let el = render(notice, theme).id(id).min_w_0().overflow_hidden();' \
   geode-tile an_overlong_notice_cuts_and_leaves_the_tail_and_left_side
 
 # A pending-too-long source has no reason of its own; without the detail
