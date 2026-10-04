@@ -5774,7 +5774,7 @@ run_mutation "objectdialog: an edit carries the previous config's diagnostics fo
 # dialog-only notice cannot reach the user on that path.
 run_mutation "objectdialog: a failed write reports only through the dialog notice" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    shell.config_write_error = Some(format!("config not saved — reverted: {message}").into());' \
+  '    shell.config_write_error = Some(failure.clone().into());' \
   '' \
   geode-shell \
   a_write_that_fails_after_the_dialog_closed_still_reports_itself
@@ -35786,6 +35786,56 @@ run_mutation "classifications: a refused rename shows the old name" \
   '                Some(name) => drop(name),' \
   geode-classifications \
   a_refused_rename_shows_the_old_name_again
+
+# A reload carrying neither the pending object, the base nor an in-flight
+# one is another surface's write: keeping the copy would paint labels that
+# overwrite it on the next edit.
+run_mutation "classifications: a foreign reload drops the pending copy" \
+  crates/geode-classifications/src/core/history.rs \
+  '            self.base = Some(config.clone());
+        } else {
+            self.drop_pending();
+        }' \
+  '            self.base = Some(config.clone());
+        } else {
+        }' \
+  geode-classifications \
+  a_reload_changing_this_classification_otherwise_drops_the_pending_edit
+
+# The editor paints on the cursor's row and writes its targets: a resting
+# cursor keeping its index across a reorder would paint one row and write
+# another.
+run_mutation "classifications: the open editor pins its row" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        self.grid.put_cursor();' \
+  '        let _ = &self.grid;' \
+  geode-classifications \
+  a_reload_reordering_rows_keeps_the_open_editor_on_its_row
+
+# A verb in a revert's debounce window would queue the user copy over the
+# removal in the shell's batch, undoing the revert.
+run_mutation "classifications: a revert on its way refuses label verbs" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                self.reverting = Some(name);' \
+  '                drop(name);' \
+  geode-classifications \
+  a_verb_while_a_revert_is_on_its_way_does_not_undo_it
+
+# A door tile shows its edit before the write: a failed write must reach it,
+# or its labels look saved.
+run_mutation "config door: a failed write refuses its origin tiles" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    refuse_door_tiles(shell, pending.tiles.clone(), failure, cx);' \
+  '    drop(failure);' \
+  geode-shell \
+  a_failed_door_write_tells_its_tile_once
+
+run_mutation "config door: a rejected merge refuses its origin tiles" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '                    refuse_door_tiles(shell, tiles, DOOR_REJECTED_NOTICE.to_string(), cx);' \
+  '                    drop(tiles);' \
+  geode-shell \
+  a_rejected_door_merge_tells_its_tile
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
