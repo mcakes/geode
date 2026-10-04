@@ -1153,21 +1153,47 @@ only arithmetic the module does.
 the followed group's board draft for the underlying, read now whatever the
 as-of; and `chain` (`3`), the option chain's mid vols as points with the
 bid-ask range as a bar. A one-sided quote (an absent side is NaN) paints as
-a half bar. The published curve is solid and the draft dashed. A chip per
+a half bar. The published curve is solid and the draft dashed, both in the
+expiry's color; the chain takes the expiry's companion, a lighter-weight
+shade of the same hue (less chroma, a step of lightness away), so the
+published curve and the quotes are told apart at a glance. The step goes
+toward the background (paler) on a theme where every one of the first 24
+expiries can keep its contrast that way, and toward the foreground for
+every expiry otherwise (darker on most light themes, lighter on dark
+ones): one chart never mixes the two. Both curves are the vol model's
+slices at the expiry, whether or not the document has params there: the
+model interpolates between terms and extrapolates past them, so every
+strip expiry has a curve (the strip's kind digits still mark where each
+document has its own terms). A chip per
 loaded kind sits in the header; a hidden kind's chip is muted and its own
 jobs leave the batch. Source identity is absent from the chain's rows, so
 there is one chain kind however many sources publish chains.
 
 **Strip.** A column beside the chart lists the sorted union of every loaded
 kind's expiries, none before today, each with the digits of the kinds that
-have it and a dot in its palette color, filled when the expiry is active.
-`j`/`k` move the cursor, `enter` solos the cursor's row and `space` toggles
-it; the last active expiry cannot be toggled off. On a focused tile a click
-solos a row and a ctrl+click toggles it; the click that merely focuses the
-tile changes nothing else (`TileContent::set_focused`). An expiry's color is
-its strip position's, so it keeps its color as others are toggled; twelve
-expiries cycle the theme's five chart colors. The first strip, and a
-restored set naming no listed expiry, front the first row.
+have it and a dot in its color, filled when the expiry is active.
+`j`/`k` move the cursor; `space` (or `enter`) solos the cursor's row, and
+`ctrl+space` or `shift+space` adds it to the shown set or takes it out; the
+last active expiry cannot be taken out, and the refused key asks nothing.
+On a focused tile a click solos a row and a ctrl+click, shift+click or
+right-click adds or removes it. On macOS the platform delivers ctrl+click as
+a right press with control cleared, so the right press is what makes
+ctrl+click work there; the tile offers no row menu, so the shell's
+right-press route only focuses. A left press holding alt or cmd is left to
+the shell (its `mod` drags tiles), and the click that merely focuses the
+tile changes nothing else (`TileContent::set_focused`). The first strip, and a restored set
+naming no listed expiry, front the first row.
+
+**Expiry colors.** An expiry's color comes from its strip position, so it
+keeps its color as others are toggled. Neighbouring expiries, the ones that
+look most alike as curves, are made to look least alike in color: position
+`p` takes the OKLCH hue of the theme's first chart color plus `p` golden
+angles (about 137.5°), at the mean lightness and the median chroma of the
+theme's five chart colors (chroma floored at 0.10), each passed through the
+readable
+floor against the background (`geode_chart::core::palette::HuePalette`).
+Adjacent expiries are about 137.5° apart and no hue repeats; positions 8, 13
+and 21 apart come closest (about 20°, 12° and 8°).
 
 **Coordinates.** `x` cycles moneyness, log-moneyness, delta and strike, and
 `:x` names one. Delta runs reversed, puts on the left; pans and zooms go
@@ -1194,16 +1220,35 @@ packs a curve's points toward the forward on the scale of σ√t, so a
 short-dated density keeps dozens of points across its width however wide
 the chain, and reads as a smooth hump.
 
-**Difference.** `d` opens a chooser of `none` and every ordered pair of
-loaded kinds (`:diff <kind> - <kind> | none` too). The pair paints in a lower
-pane, its split stepped with `[`/`]` or the divider:
+**Difference.** Several ordered pairs of loaded kinds can be shown at once,
+in a lower pane under the vol pane, its split stepped with
+`[`/`]` or the divider. A pair and its reverse are never both on: turning
+one on turns the other off. `d` opens a ticked chooser of every ordered
+pair, following the shell's dimension picker: it opens with the shown pairs
+ticked, `space` or a row click ticks or unticks the highlighted pair,
+`ctrl+x` unticks every pair, `enter` or the Apply row applies the ticks,
+and `escape` or a click outside discards them. An untouched, empty tick set
+applies the highlighted pair alone; `ctrl+x` counts as a touch, so
+`ctrl+x enter` shows none. The header chip names one or two pairs and reads
+`diff · N pairs` past two. `:diff <kind> - <kind>` toggles one pair and `:diff off` turns every
+pair off (`none` is read as `off`). Pairs paint, and list in the legend and
+tooltip, expiry by expiry in the order they were turned on, each labelled
+`<pair> <expiry>`.
 
 - Curve minus curve is at equal strike: the minuend is evaluated dense and
   the subtrahend at the minuend's strikes through `Grid::Job`, so the two
   never interpolate; it is a line at the minuend's x.
 - Curve minus chain is at the chain's strikes: the curve is evaluated `At`
-  them and the difference sits at the chain's x as points, negated when the
-  chain is the minuend.
+  them and the difference sits at the chain's x as points with whiskers.
+  `curve − chain` is `curve − mid` with a bar from `curve − ask` to
+  `curve − bid`; `chain − curve` is `mid − curve`, from `bid − curve` to
+  `ask − curve`. A one-sided quote's missing side leaves a half bar.
+- Jobs two pairs share are asked once per expiry: the dense curves, the
+  chain's map, and a curve's evaluation at the chain's strikes.
+- Every difference keeps its expiry's hue. Pairs at one expiry are told
+  apart by mark first (two curves are a line, a pair with the chain is
+  points with whiskers); of the two pairs with the chain, `cvi`'s takes the
+  expiry's color and the draft's the companion.
 - A pair keeps its jobs when one of its kinds is hidden.
 
 **Underlying and following.** The tile reads its own underlying (`u` opens
@@ -1246,8 +1291,8 @@ in the danger tone; `no underlying` and `no underlying in A` alone are an
 empty state, painted muted. A failed job is one notice (`no cvi curve at
 <date>: <why>`) and the rest of the batch paints; one cause behind every
 job is said once, in the outcome's words, and a difference failing only
-because its source curve failed adds none. A pair naming a kind that is not
-loaded is the notice `diff <pair>: <kind> is not loaded` rather than an
+because its source curve failed adds none. Each pair naming a kind that is
+not loaded is the notice `diff <pair>: <kind> is not loaded` rather than an
 empty lower pane.
 
 The header names the underlying whose documents are on screen, not one
@@ -1270,8 +1315,10 @@ whose picture is on screen:
   header stay, so the next change still has a batch to ask.
 
 **Session.** The tile saves its coordinate, hidden kinds, densities, split,
-and while set its underlying, active expiries, pair and view; the cursor is
-not saved. An unreadable value drops its key with a notice.
+and while set its underlying, active expiries, shown pairs (`diffs`, in
+order) and view; the cursor is not saved. An unreadable value drops its key
+with a notice. A session saved with a single `diff` pair restores it as the
+one pair shown.
 
 **Limitations.**
 
@@ -1281,9 +1328,12 @@ not saved. An unreadable value drops its key with a notice.
   the curves swap one vol round trip after the flip releases; for that
   round trip the header, chips and strip already name the new underlying
   over the old curves.
-- An expiry's color is its strip position's, cycling every five rows, not
-  its place among the active expiries. A draft that adds a term shifts every
-  row after it, so those expiries change color while the draft is loaded.
+- An expiry's color is its strip position's, not its place among the
+  active expiries. A draft that adds a term shifts every row after it, so
+  those expiries change color while the draft is loaded. Positions 21 apart
+  sit about 8° apart in hue and can look alike if both are shown.
+- On macOS, `ctrl+space` may be taken by the system's input-source
+  shortcut and never reach the tile; `shift+space` is the same verb.
 - Keyboard zoom anchors at the view's centre, the wheel at the pointer.
 - There is no `.` action menu; the header chips and the palette carry the
   actions.

@@ -128,7 +128,8 @@ pub struct MapRequest {
 pub struct VolError(pub String);
 
 /// An evaluator of one document kind. `slice` evaluates a document at
-/// any expiry inside its term range and `coordinates` places given
+/// any expiry, interpolating between its terms and extrapolating past
+/// them as the model defines, and `coordinates` places given
 /// points; both are calculation and neither is a module's to do.
 pub trait VolModel: Send + Sync {
     fn name(&self) -> &str;

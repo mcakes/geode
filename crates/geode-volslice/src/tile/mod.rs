@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use chrono::NaiveDate;
 
-use geode_chart::core::palette::Palette;
+use geode_chart::core::palette::HuePalette;
 use geode_chart::core::view::View;
 use geode_chart::xy::{XyElement, XyModel};
 use geode_core::document::DocumentRows;
@@ -41,11 +41,11 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, Theme, h_flex, v_flex};
 
-use crate::commands::{self, Command};
+use crate::commands::{self, Command, Diff};
 use crate::content::ACTIONS;
 use crate::core::build::{Plan, with_split};
 use crate::core::docs::{CHAIN, CVI};
-use crate::core::model::{Kind, Loaded, Pair, State, StripRow};
+use crate::core::model::{Kind, Loaded, Pair, State, StripRow, toggle_pair};
 use crate::core::session;
 use crate::header::{self, FooterHint, HeaderModel};
 use crate::strip::{self, StripPaint};
@@ -128,7 +128,7 @@ pub struct VolsliceTile {
     view: Option<View>,
     full: (f64, f64),
     reset_view: bool,
-    palette: Palette,
+    palette: HuePalette,
     /// The theme colors `palette` was derived from.
     palette_key: [Hsla; 7],
     /// Data-side notices: restore, refusals, missing documents, failures.
@@ -163,7 +163,7 @@ struct HeaderKey {
     kinds: Vec<Kind>,
     mark: Option<DraftMark>,
     hidden: BTreeSet<Kind>,
-    diff: Option<Pair>,
+    diffs: Vec<Pair>,
 }
 
 /// What the strip's rows were built from: the rows, the active set and
@@ -197,8 +197,8 @@ fn palette_key(theme: &Theme) -> [Hsla; 7] {
     ]
 }
 
-fn palette_of(key: &[Hsla; 7]) -> Palette {
-    Palette::from_theme([key[0], key[1], key[2], key[3], key[4]], key[5], key[6])
+fn palette_of(key: &[Hsla; 7]) -> HuePalette {
+    HuePalette::from_theme([key[0], key[1], key[2], key[3], key[4]], key[5], key[6])
 }
 
 impl VolsliceTile {
@@ -330,7 +330,7 @@ impl VolsliceTile {
                     .eq(Kind::ALL.into_iter().filter(|kind| self.loaded.has(*kind)))
                 || k.mark != self.loaded.draft.as_ref().map(|(_, m)| *m)
                 || k.hidden != self.state.hidden
-                || k.diff != self.state.diff
+                || k.diffs != self.state.diffs
         });
         if header_stale {
             let key = HeaderKey {
@@ -339,7 +339,7 @@ impl VolsliceTile {
                 kinds: self.loaded.kinds(),
                 mark: self.loaded.draft.as_ref().map(|(_, m)| *m),
                 hidden: self.state.hidden.clone(),
-                diff: self.state.diff,
+                diffs: self.state.diffs.clone(),
             };
             self.chrome.header = Some(HeaderModel::prepare(
                 key.underlying.as_deref(),
@@ -461,7 +461,10 @@ impl VolsliceTile {
         };
         #[cfg(test)]
         self.dispatch_log.push(action.clone());
-        if !matches!(verb, "commit" | "cancel" | "list_down" | "list_up") {
+        if !matches!(
+            verb,
+            "commit" | "cancel" | "list_down" | "list_up" | "tick" | "clear_ticks"
+        ) {
             self.close_popup(window, cx);
         }
         match verb {
@@ -505,6 +508,8 @@ impl VolsliceTile {
             "split_shrink" => self.step_split(-SPLIT_STEP, cx),
             "split_grow" => self.step_split(SPLIT_STEP, cx),
             "commit" => self.commit_popup(window, cx),
+            "tick" => self.tick_popup(cx),
+            "clear_ticks" => self.clear_popup_ticks(cx),
             "cancel" => self.close_popup(window, cx),
             "list_down" => {
                 self.step_popup(1, cx);
@@ -550,20 +555,28 @@ impl VolsliceTile {
                     self.resubmit(cx);
                 }
             }
-            Command::Diff(pair) => {
-                // A pair naming a kind with nothing loaded would ask nothing
-                // and paint nothing, silently.
-                if let Some(p) = pair {
+            Command::Diff(Diff::Off) => {
+                self.close_popup(window, cx);
+                if !self.state.diffs.is_empty() {
+                    self.state.diffs.clear();
+                    self.resubmit(cx);
+                }
+            }
+            Command::Diff(Diff::Toggle(p)) => {
+                // A pair turned on naming a kind with nothing loaded would
+                // ask nothing and paint nothing, silently. Turning one off
+                // is never refused: a pair kept while its kind left must
+                // still be removable.
+                if !self.state.diffs.contains(&p) {
                     for k in [p.minuend, p.subtrahend] {
                         if !self.loaded.has(k) {
                             return Err(format!("{} is not loaded", k.label()));
                         }
                     }
                 }
-                if self.state.diff != pair {
-                    self.state.diff = pair;
-                    self.resubmit(cx);
-                }
+                self.close_popup(window, cx);
+                toggle_pair(&mut self.state.diffs, p);
+                self.resubmit(cx);
             }
         }
         Ok(())
