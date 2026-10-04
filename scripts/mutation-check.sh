@@ -38164,6 +38164,58 @@ run_mutation "value colors: the tone click warms the track" \
   geode-shell \
   a_tone_change_warms_the_track_before_the_paint
 
+# A dismissed warning or danger notice is filtered from the paint; a status
+# notice never is; the prune forgets what is no longer reported, so a notice
+# that stops and returns shows again.
+run_mutation "notice dismissal: a dismissed notice is filtered" \
+  crates/geode-tile/src/notice.rs \
+  '        !self.hidden.contains(notice)' \
+  '        true' \
+  geode-tile \
+  a_dismissed_notice_is_filtered_and_a_status_never_is
+
+run_mutation "notice dismissal: a status notice is never hidden" \
+  crates/geode-tile/src/notice.rs \
+  '        if !notice.dismissable() || self.hidden.contains(notice) {' \
+  '        if self.hidden.contains(notice) {' \
+  geode-tile \
+  a_dismissed_notice_is_filtered_and_a_status_never_is
+
+run_mutation "notice dismissal: the prune forgets a notice no longer reported" \
+  crates/geode-tile/src/notice.rs \
+  '        self.hidden.retain(|h| reported.contains(&h));' \
+  '        let _ = reported;' \
+  geode-tile \
+  a_notice_that_stops_and_returns_shows_again
+
+run_mutation "notice dismissal: the header prune lets a returning notice show" \
+  crates/geode-tile/src/notice.rs \
+  '        self.hidden.retain(|h| reported.contains(&h));' \
+  '        let _ = reported;' \
+  geode-tile \
+  a_dismissed_notice_shows_again_after_it_stops_and_returns
+
+run_mutation "notice dismissal: a click on a notice dismisses it" \
+  crates/geode-tile/src/notice.rs \
+  '            on_dismiss(&pressed, window, cx);' \
+  '            let _ = (&pressed, &on_dismiss);' \
+  geode-tile \
+  clicking_a_warning_or_danger_notice_dismisses_it
+
+run_mutation "notice dismissal: the click stops at the notice" \
+  crates/geode-tile/src/notice.rs \
+  $'            cx.stop_propagation();\n            window.prevent_default();\n            on_dismiss(&pressed, window, cx);' \
+  $'            window.prevent_default();\n            on_dismiss(&pressed, window, cx);' \
+  geode-tile \
+  clicking_a_warning_or_danger_notice_dismisses_it
+
+run_mutation "notice dismissal: a status notice takes no press" \
+  crates/geode-tile/src/notice.rs \
+  '    let Some(on_dismiss) = on_dismiss.filter(|_| notice.dismissable()).cloned() else {' \
+  '    let Some(on_dismiss) = on_dismiss.cloned() else {' \
+  geode-tile \
+  a_status_notice_or_one_without_a_dismiss_takes_no_press
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
