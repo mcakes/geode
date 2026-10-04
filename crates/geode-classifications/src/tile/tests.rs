@@ -7,6 +7,7 @@ use geode_core::log::LogLevels;
 use geode_core::query::{AsOf, DistinctOutcome, DistinctParams, QueryKey};
 use geode_core::scope::Scope;
 use geode_core::scopes::SavedScopes;
+use geode_core::textfile::{TextFileOp, TextFileOutcome, TextFileParams, TextFileResult};
 use geode_data::DataHandle;
 use geode_data::Request;
 use geode_shell::actions::ActionRegistry;
@@ -174,6 +175,8 @@ struct Harness {
     factory: Rc<ClassificationsFactory>,
     /// What the tile asked of the data tier: the test is the service.
     requests: Receiver<Request>,
+    /// The tile's data handle, to fill its queue mid-test.
+    data: DataHandle,
     /// The frame the tile queues its config writes on and hears back from.
     frame: Entity<Frame>,
     shell_focus: gpui::FocusHandle,
@@ -203,7 +206,7 @@ fn open_over(
     if busy {
         data.fill_for_tests();
     }
-    let factory = Rc::new(ClassificationsFactory::new(data));
+    let factory = Rc::new(ClassificationsFactory::new(data.clone()));
     cx.update(|cx| factory.set_config(config, cx));
     let keymap = Rc::new(app_keymap(&factory));
     let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
@@ -259,6 +262,7 @@ fn open_over(
             content: built.content,
             factory,
             requests,
+            data,
             frame: built.frame,
             shell_focus: built.shell_focus,
         },
@@ -1839,6 +1843,12 @@ fn the_dot_menu_lists_actions_with_disabled_reasons(cx: &mut gpui::TestAppContex
             ),
             ("Delete".into(), Some("defined in desk config".into())),
             s("Refresh values"),
+            s("---"),
+            s("Export CSV\u{2026}"),
+            (
+                "Export CSV with unclassified\u{2026}".into(),
+                Some("values not loaded".into())
+            ),
         ]
     );
     // A disabled row says why in full and keeps the menu open.
@@ -2138,4 +2148,247 @@ fn undo_after_a_refusal_says_the_row_was_not_saved(cx: &mut gpui::TestAppContext
         h.notices(&vcx),
         ["1 row was not saved and is left as it is"]
     );
+}
+
+// ---- export ----
+
+const EXPORT: &str = "classifications::export";
+const EXPORT_ALL: &str = "classifications::export_all";
+
+impl Harness {
+    /// The file requests asked since the last call, in order.
+    fn file_requests(&self) -> Vec<TextFileParams> {
+        self.requests
+            .try_iter()
+            .filter_map(|r| match r {
+                Request::TextFile(p) => Some(p),
+                _ => None,
+            })
+            .collect()
+    }
+    /// Answer the save dialog with `name` in the directory it opened on,
+    /// or cancel it with `None`, then let the tile's wait run.
+    fn save_as(&self, vcx: &mut gpui::VisualTestContext, name: Option<&str>) {
+        vcx.simulate_new_path_selection(|dir| name.map(|n| dir.join(n)));
+        vcx.run_until_parked();
+        self.draw(vcx);
+    }
+    /// Answer a file request through the shell's door, as the bridge
+    /// routes it.
+    fn answer_file(
+        &self,
+        vcx: &mut gpui::VisualTestContext,
+        p: &TextFileParams,
+        result: TextFileResult,
+    ) {
+        let outcome = TextFileOutcome {
+            key: p.key,
+            tag: p.tag,
+            path: p.path.clone(),
+            result,
+        };
+        vcx.update(|window, cx| {
+            self.content
+                .deliver(Delivery::TextFile(outcome), window, cx)
+        });
+        self.draw(vcx);
+    }
+}
+
+/// `region` as the export fixture maps it: SPX, SX5E and DAX.
+fn edit_region() -> DerivedDimension {
+    region(&[("SPX", "Americas"), ("SX5E", "Europe"), ("DAX", "Europe")])
+}
+
+fn observed(values: &[(&str, u64)]) -> Vec<(String, u64)> {
+    values.iter().map(|(s, n)| (s.to_string(), *n)).collect()
+}
+
+#[gpui::test]
+fn export_asks_for_a_path_then_writes_the_mapped_rows(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.file_requests();
+    h.act(&mut vcx, EXPORT);
+    assert!(vcx.did_prompt_for_new_path(), "a save dialog is up");
+    assert!(
+        h.file_requests().is_empty(),
+        "nothing written before a path"
+    );
+    h.save_as(&mut vcx, Some("region.csv"));
+    let asked = h.file_requests();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let p = &asked[0];
+    assert_eq!(p.key, QueryKey(TILE));
+    assert_eq!(p.path.file_name().unwrap(), "region.csv");
+    assert_eq!(
+        p.op,
+        TextFileOp::Write {
+            text: classification::export(&edit_region(), None)
+        }
+    );
+    assert!(h.notices(&vcx).is_empty(), "nothing said before the answer");
+    h.answer_file(&mut vcx, p, TextFileResult::Written(Ok(())));
+    assert_eq!(h.notices(&vcx), ["exported 3 rows to region.csv"]);
+}
+
+/// The export reads the object as the tile shows it: a label edit still on
+/// its way to the configuration is in the file.
+#[gpui::test]
+fn export_writes_an_edit_not_yet_reloaded(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "x");
+    h.edits(&mut vcx);
+    h.file_requests();
+    h.act(&mut vcx, EXPORT);
+    h.save_as(&mut vcx, Some("region.csv"));
+    let asked = h.file_requests();
+    let cleared = region(&[("SX5E", "Europe"), ("DAX", "Europe")]);
+    assert_eq!(
+        asked[0].op,
+        TextFileOp::Write {
+            text: classification::export(&cleared, None)
+        }
+    );
+}
+
+#[gpui::test]
+fn export_with_unclassified_adds_blank_rows_for_observed_values(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.file_requests();
+    h.act(&mut vcx, EXPORT_ALL);
+    h.save_as(&mut vcx, Some("region.csv"));
+    let asked = h.file_requests();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let all = observed(&EDIT_VALUES);
+    let text = classification::export(&edit_region(), Some(&all));
+    assert!(text.contains("NKY,") && text.contains("HSI,"), "{text}");
+    assert_eq!(asked[0].op, TextFileOp::Write { text });
+    h.answer_file(&mut vcx, &asked[0], TextFileResult::Written(Ok(())));
+    assert_eq!(h.notices(&vcx), ["exported 5 rows to region.csv"]);
+}
+
+#[gpui::test]
+fn export_with_unclassified_refuses_before_values_load(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(EDIT), restored("region"));
+    h.act(&mut vcx, EXPORT_ALL);
+    assert!(!vcx.did_prompt_for_new_path());
+    assert_eq!(
+        h.notices(&vcx),
+        ["values not loaded yet \u{2014} shift+r loads them"]
+    );
+    // The menu says so on the row, and the plain export stays open.
+    h.press(&mut vcx, ".");
+    let menu = h.action_menu(&vcx).expect("the menu");
+    assert!(
+        menu.contains(&(
+            "Export CSV with unclassified\u{2026}".into(),
+            Some("values not loaded".into())
+        )),
+        "{menu:?}"
+    );
+    assert!(
+        menu.contains(&("Export CSV\u{2026}".into(), None)),
+        "{menu:?}"
+    );
+}
+
+/// A failed values read is no answer to export: the observed values are
+/// not known.
+#[gpui::test]
+fn export_with_unclassified_refuses_after_a_failed_read(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(EDIT), restored("region"));
+    let asked = h.distinct_requests();
+    h.deliver(&mut vcx, asked[0].tag, "underlying_ref", Err("no table"));
+    h.act(&mut vcx, EXPORT_ALL);
+    assert!(!vcx.did_prompt_for_new_path());
+}
+
+#[gpui::test]
+fn a_cancelled_save_dialog_does_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.file_requests();
+    h.act(&mut vcx, EXPORT);
+    h.save_as(&mut vcx, None);
+    assert!(h.file_requests().is_empty());
+    assert!(h.notices(&vcx).is_empty());
+}
+
+#[gpui::test]
+fn a_failed_write_shows_the_error(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.file_requests();
+    h.act(&mut vcx, EXPORT);
+    h.save_as(&mut vcx, Some("region.csv"));
+    let asked = h.file_requests();
+    h.answer_file(
+        &mut vcx,
+        &asked[0],
+        TextFileResult::Written(Err("region.csv: Permission denied".into())),
+    );
+    let notices = h.tile.read_with(&vcx, |t, _| t.chrome.notices.clone());
+    assert_eq!(
+        notices,
+        [Notice::danger(
+            "export failed: region.csv: Permission denied"
+        )]
+    );
+}
+
+#[gpui::test]
+fn a_busy_service_refuses_the_export(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.act(&mut vcx, EXPORT);
+    h.data.fill_for_tests();
+    h.save_as(&mut vcx, Some("region.csv"));
+    assert!(h.file_requests().is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["the data service is busy \u{2014} try again"]
+    );
+}
+
+/// Two exports: the first's answer was overtaken and says nothing; the
+/// second dialog opens where the first file went.
+#[gpui::test]
+fn only_the_latest_file_operation_is_answered(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.file_requests();
+    let dir = std::env::temp_dir().join("geode-export-test");
+    h.act(&mut vcx, EXPORT);
+    let first = dir.join("first.csv");
+    vcx.simulate_new_path_selection(|_| Some(first.clone()));
+    vcx.run_until_parked();
+    h.act(&mut vcx, EXPORT);
+    vcx.simulate_new_path_selection(|opened_on| {
+        assert_eq!(opened_on, dir.as_path(), "the last file's directory");
+        Some(dir.join("second.csv"))
+    });
+    vcx.run_until_parked();
+    let asked = h.file_requests();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert!(asked[1].tag > asked[0].tag);
+    h.answer_file(&mut vcx, &asked[0], TextFileResult::Written(Ok(())));
+    assert!(h.notices(&vcx).is_empty(), "overtaken: dropped");
+    h.answer_file(&mut vcx, &asked[1], TextFileResult::Written(Ok(())));
+    assert_eq!(h.notices(&vcx), ["exported 3 rows to second.csv"]);
+    // Answered once: the same answer again says nothing more.
+    h.tile.update(&mut vcx, |t, _| {
+        t.notices.outcome.clear();
+        t.rebuild_chrome();
+    });
+    h.answer_file(&mut vcx, &asked[1], TextFileResult::Written(Ok(())));
+    assert!(h.notices(&vcx).is_empty());
+}
+
+#[gpui::test]
+fn export_with_nothing_shown_is_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), None);
+    h.act(&mut vcx, "classifications::cancel");
+    h.act(&mut vcx, EXPORT);
+    assert!(!vcx.did_prompt_for_new_path());
+    assert_eq!(h.notices(&vcx), ["choose a classification to export"]);
+    h.act(&mut vcx, EXPORT_ALL);
+    assert!(!vcx.did_prompt_for_new_path());
+    assert_eq!(h.notices(&vcx), ["choose a classification to export"]);
 }

@@ -29,7 +29,7 @@ use crate::tile::ClassificationsTile;
 
 /// Registered actions and their palette titles. The palette lists every
 /// one; [`DEFAULT_KEYMAP`] binds all but the configuration-level verbs
-/// (new, rename, delete, revert), which are reached from the palette and
+/// (new, rename, delete, revert, export), which are reached from the palette and
 /// the `⋯` menu like the other config-level actions.
 pub const ACTIONS: &[(&str, &str)] = &[
     ("classifications::switch", "Classification: Switch\u{2026}"),
@@ -38,6 +38,14 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("classifications::delete", "Classification: Delete"),
     ("classifications::revert", "Classification: Revert\u{2026}"),
     ("classifications::refresh", "Classification: Refresh values"),
+    (
+        "classifications::export",
+        "Classification: Export CSV\u{2026}",
+    ),
+    (
+        "classifications::export_all",
+        "Classification: Export CSV with unclassified\u{2026}",
+    ),
     ("classifications::edit", "Classification: Set label"),
     ("classifications::clear", "Classification: Clear label"),
     ("classifications::yank", "Classification: Copy label"),
@@ -189,6 +197,9 @@ impl TileContent for ClassificationsContent {
             // The source column's values, routed by this tile's key; the
             // tile drops one a later read overtook.
             Delivery::Distinct(outcome) => self.tile.update(cx, |t, cx| t.on_distinct(outcome, cx)),
+            // A file operation's answer, routed the same way; the tile
+            // drops one a later operation overtook.
+            Delivery::TextFile(outcome) => self.tile.update(cx, |t, cx| t.on_file(outcome, cx)),
             // The tile asks the data tier for nothing else, so no other
             // answer is this tile's; one that arrived would answer nothing
             // it asked.
@@ -198,7 +209,6 @@ impl TileContent for ClassificationsContent {
             Delivery::SeriesFetched { .. } => {}
             Delivery::Upload(_) => {}
             Delivery::VolSlices(_) => {}
-            Delivery::TextFile(_) => {}
         }
     }
 
@@ -354,7 +364,7 @@ mod tests {
         }
         assert_eq!(count, 24);
         // The config-level verbs are reached from the palette and the menu.
-        for unbound in ["new", "rename", "delete", "revert"] {
+        for unbound in ["new", "rename", "delete", "revert", "export", "export_all"] {
             assert!(
                 !bound.contains(format!("classifications::{unbound}").as_str()),
                 "{unbound} has no default chord"

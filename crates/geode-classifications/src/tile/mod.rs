@@ -20,6 +20,10 @@
 //! batch; the tile shows where it will land at once and goes back if the
 //! shell refuses the write.
 //!
+//! Export CSV asks for a path in the platform's save dialog, awaited off
+//! the update, then asks the data tier to write the classification as the
+//! tile shows it; only the latest file operation's answer is acted on.
+//!
 //! What paint reads is prepared in `Chrome` and the table's `Prepared`
 //! whenever the configuration, the values, the filter or the sort change,
 //! never in render.
@@ -28,6 +32,7 @@ mod editor;
 mod header;
 mod table;
 
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -38,6 +43,7 @@ use geode_core::dimensions::DerivedDimension;
 use geode_core::query::{AsOf, DistinctOutcome, DistinctParams, QueryKey};
 use geode_core::scope::Scope;
 use geode_core::sort::SortOrder;
+use geode_core::textfile::{TextFileOp, TextFileOutcome, TextFileParams, TextFileResult};
 use geode_data::{DataHandle, Refusal};
 use geode_shell::actions::ActionId;
 use geode_shell::frame::{ConfigEdit, FrameRef, TileNotice};
@@ -61,6 +67,7 @@ use gpui_component::table::{TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, v_flex};
 
 use crate::content::{ClassificationsConfig, Shared, action_title};
+use crate::core::files::{self, FileOp};
 use crate::core::grid::{GridModel, label_text};
 use crate::core::history::History;
 use crate::core::prompt::{self, Prompt, Step};
@@ -101,6 +108,8 @@ const RENAME_ACTION: &str = "classifications::rename";
 const DELETE_ACTION: &str = "classifications::delete";
 const REVERT_ACTION: &str = "classifications::revert";
 const REFRESH_ACTION: &str = "classifications::refresh";
+const EXPORT_ACTION: &str = "classifications::export";
+const EXPORT_ALL_ACTION: &str = "classifications::export_all";
 
 /// What an armed confirm does on `y`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +202,17 @@ pub struct ClassificationsTile {
     asked: Option<Asked>,
     /// The source column's values and row counts, as last answered.
     observed: Vec<(String, u64)>,
+    /// Whether `observed` is an answer for the shown source column: an
+    /// export with unclassified rows written before one would leave every
+    /// unmapped value out of the file without saying so.
+    values_loaded: bool,
+    /// The file operation waiting for its answer; any other is stale.
+    file_op: Option<FileOp>,
+    /// The last file operation's tag.
+    file_tag: u64,
+    /// The directory of the last file exported or imported here, where the
+    /// next save dialog opens. In memory only.
+    file_dir: Option<PathBuf>,
     /// Why the values are not on screen: a refused or failed read.
     values_notice: Option<String>,
     /// The filter in force when a `/` search began, which a cancelled
@@ -325,6 +345,10 @@ impl ClassificationsTile {
             tag: 0,
             asked: None,
             observed: Vec::new(),
+            values_loaded: false,
+            file_op: None,
+            file_tag: 0,
+            file_dir: None,
             values_notice: None,
             find_entry: None,
             last_rem: 0.0,
@@ -549,6 +573,7 @@ impl ClassificationsTile {
         }
         if now.as_ref().map(|a| &a.from) != self.asked.as_ref().map(|a| &a.from) {
             self.observed.clear();
+            self.values_loaded = false;
         }
         self.asked = now.clone();
         self.values_notice = None;
@@ -591,6 +616,7 @@ impl ClassificationsTile {
         let answered = match outcome.values {
             Ok(values) => {
                 self.observed = values;
+                self.values_loaded = true;
                 self.values_notice = None;
                 true
             }
@@ -834,6 +860,9 @@ impl ClassificationsTile {
             REFRESH_ACTION,
             shown.map(|_| ()).ok_or(Blocked::same(NOTHING_SHOWN)),
         ));
+        rows.push(Row::Separator);
+        rows.push(row(EXPORT_ACTION, self.exportable(false).map(|_| ())));
+        rows.push(row(EXPORT_ALL_ACTION, self.exportable(true).map(|_| ())));
         rows
     }
 
@@ -891,6 +920,113 @@ impl ClassificationsTile {
             });
         }
         Ok(name)
+    }
+
+    /// The shown classification when it can be exported, `all` with a
+    /// blank row for every observed value it does not map; else why not.
+    /// Those rows need the values: without them the file would leave every
+    /// unmapped value out and look complete.
+    fn exportable(&self, all: bool) -> Result<String, Blocked> {
+        let Some(name) = self.shown() else {
+            return Err(Blocked {
+                short: NOTHING_SHOWN,
+                long: "choose a classification to export".into(),
+            });
+        };
+        if all && !self.values_loaded {
+            return Err(Blocked {
+                short: "values not loaded",
+                long: "values not loaded yet \u{2014} shift+r loads them".into(),
+            });
+        }
+        Ok(name)
+    }
+
+    /// Export: ask where to save, in the directory of the last file this
+    /// tile wrote or read, else the home directory. The dialog is awaited
+    /// off the update; its answer writes what is shown then, so an edit
+    /// made while it stood is in the file. A cancelled dialog does nothing.
+    fn ask_export_path(&mut self, all: bool, cx: &mut Context<Self>) {
+        let name = match self.exportable(all) {
+            Ok(name) => name,
+            Err(b) => return self.refuse(b.long, cx),
+        };
+        self.notices.outcome.clear();
+        self.rebuild_chrome();
+        cx.notify();
+        let dir = self.file_dir.clone().unwrap_or_else(home_dir);
+        let answer = cx.prompt_for_new_path(&dir, Some(&format!("{name}.csv")));
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(path))) = answer.await {
+                this.update(cx, |t, cx| t.export_to(path, all, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Queue the write of the shown classification, as the tile shows it
+    /// (a label edit not yet reloaded included), to `path`. Checked again:
+    /// the classification or its values may have gone while the dialog
+    /// stood.
+    fn export_to(&mut self, path: PathBuf, all: bool, cx: &mut Context<Self>) {
+        let name = match self.exportable(all) {
+            Ok(name) => name,
+            Err(b) => return self.refuse(b.long, cx),
+        };
+        let Some(config_dim) = self.config_dim() else {
+            return;
+        };
+        let dim = self.history.current(&config_dim);
+        let observed = all.then_some(self.observed.as_slice());
+        let text = classification::export(dim, observed);
+        let rows = files::export_rows(dim, observed);
+        self.file_tag += 1;
+        let params = TextFileParams {
+            key: QueryKey(self.id.0),
+            tag: self.file_tag,
+            path: path.clone(),
+            op: TextFileOp::Write { text },
+        };
+        match self.data.text_file(params) {
+            Ok(()) => {
+                self.file_dir = path.parent().map(Path::to_path_buf);
+                self.file_op = Some(FileOp::Export {
+                    tag: self.file_tag,
+                    name,
+                    path,
+                    rows,
+                });
+            }
+            Err(refusal) => self.refuse(busy_text(refusal), cx),
+        }
+    }
+
+    /// A file operation's answer. One carrying any tag but the waiting
+    /// operation's was overtaken (or already answered) and is dropped.
+    pub fn on_file(&mut self, outcome: TextFileOutcome, cx: &mut Context<Self>) {
+        if self.file_op.as_ref().map(FileOp::tag) != Some(outcome.tag) {
+            return;
+        }
+        let Some(op) = self.file_op.take() else {
+            return;
+        };
+        let notice = match (op, outcome.result) {
+            (FileOp::Export { rows, path, .. }, TextFileResult::Written(Ok(()))) => {
+                Notice::status(files::exported(rows, &path))
+            }
+            (FileOp::Export { .. }, TextFileResult::Written(Err(why))) => {
+                Notice::danger(format!("export failed: {why}"))
+            }
+            // A write answered as a read, or an import's answer: neither
+            // is an export's, and no import is asked for here.
+            (FileOp::Export { .. }, TextFileResult::Read(_)) | (FileOp::Import { .. }, _) => {
+                return;
+            }
+        };
+        self.notices.outcome.clear();
+        self.notices.outcome(notice);
+        self.rebuild_chrome();
+        cx.notify();
     }
 
     /// The shown classification and the layer of the copy under the
@@ -1787,6 +1923,10 @@ impl ClassificationsTile {
                 self.rebuild_chrome();
                 cx.notify();
             }
+            EXPORT_ACTION | EXPORT_ALL_ACTION => {
+                self.close_menu(cx);
+                self.ask_export_path(action.0 == EXPORT_ALL_ACTION, cx);
+            }
             // The classification's own verbs, from the palette or the menu.
             NEW_ACTION => {
                 self.close_menu(cx);
@@ -2245,6 +2385,22 @@ const NOTHING_SHOWN: &str = "no classification shown";
 
 /// What `p` says with nothing copied.
 const NOTHING_COPIED: &str = "nothing copied: y y copies a label";
+
+/// What a refused file request says.
+fn busy_text(refusal: Refusal) -> String {
+    match refusal {
+        Refusal::Busy => format!("{refusal} \u{2014} try again"),
+        Refusal::Stopped => refusal.to_string(),
+    }
+}
+
+/// Where the first save dialog opens: the home directory, else the
+/// working one.
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
+}
 
 /// The whole object `dim`, written.
 fn set_edit(dim: &DerivedDimension) -> ConfigEdit {
