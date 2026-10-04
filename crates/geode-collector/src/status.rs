@@ -47,6 +47,8 @@ mod tests {
 
     #[test]
     fn held_leases_read_running_and_present() {
+        // Asserts a dropped lease reads free at once.
+        let _gate = crate::spawn_gate();
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("g.duckdb");
         let collector = try_collector(&db).unwrap().expect("collector lease");

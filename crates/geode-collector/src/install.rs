@@ -1036,6 +1036,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn plutil_accepts_the_plist() {
+        let _gate = crate::spawn_gate();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("job.plist");
         let job = job(

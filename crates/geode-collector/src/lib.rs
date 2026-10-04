@@ -134,6 +134,17 @@ pub fn store_for(demo_root: Option<&Path>) -> PathBuf {
     geode_compose::store_path(&config, demo_root)
 }
 
+/// Serializes unit tests that spawn a process with unit tests that assert a
+/// lock is free after a drop. A child shares this process's open file
+/// descriptions between its spawn and its exec, so a lease dropped while
+/// another test spawns can stay held for that instant and a probe reads it
+/// as held.
+#[cfg(test)]
+pub(crate) fn spawn_gate() -> std::sync::MutexGuard<'static, ()> {
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GATE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
