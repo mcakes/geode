@@ -36369,9 +36369,9 @@ run_mutation "classifications: an import dialog is bound to its classification" 
 run_mutation "classifications: a no-op import asks nothing" \
   crates/geode-classifications/src/tile/mod.rs \
   '        if !plan.is_noop() {
-            self.close_menu(cx);' \
+            let held = HeldImport {' \
   '        if true {
-            self.close_menu(cx);' \
+            let held = HeldImport {' \
   geode-classifications \
   nothing_to_change_says_so_without_a_confirm
 
@@ -36390,14 +36390,8 @@ run_mutation "classifications: a newer import supersedes an older plan" \
 # shown now, with the first one's file.
 run_mutation "classifications: a landing plan is bound to its classification" \
   crates/geode-classifications/src/tile/mod.rs \
-  '        if tag != self.file_tag {
-            return;
-        }
-        if self.shown().as_deref() != Some(name.as_str()) {' \
-  '        if tag != self.file_tag {
-            return;
-        }
-        if false {' \
+  '        if self.shown().as_deref() != Some(name) {' \
+  '        if false {' \
   geode-classifications \
   a_plan_landing_after_a_switch_is_dropped
 
@@ -36405,10 +36399,119 @@ run_mutation "classifications: a landing plan is bound to its classification" \
 # trader's work in hand.
 run_mutation "classifications: a landing plan never displaces an open edit" \
   crates/geode-classifications/src/tile/mod.rs \
-  '            && (self.editor.is_some() || self.prompt.is_some() || self.confirm.is_some())' \
-  '            && (self.prompt.is_some() || self.confirm.is_some())' \
+  '            || self.editor.is_some()
+            || self.prompt.is_some()' \
+  '            || self.prompt.is_some()' \
   geode-classifications \
-  a_plan_landing_on_an_open_editor_drops_the_import
+  a_plan_landing_on_an_open_editor_is_held
+
+# Arming takes focus: a plan landing while another tile is focused would
+# take its keys, and a stray y would apply the import.
+run_mutation "classifications: a landing plan waits for the focused tile" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if !self.focused
+            || self.find_entry.is_some()' \
+  '        if false
+            || self.find_entry.is_some()' \
+  geode-classifications \
+  a_plan_landing_on_an_unfocused_tile_is_held_until_focused
+
+# A / search holds the keyboard though no tile field is open: a y typed
+# into it must not answer the import.
+run_mutation "classifications: a landing plan waits for a search to end" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            || self.find_entry.is_some()
+            || self.editor.is_some()' \
+  '            || self.editor.is_some()' \
+  geode-classifications \
+  a_plan_landing_during_a_search_is_held
+
+# A shell input (palette, command line) holds the keys over the focused
+# tile; the tile sees only that focus is not on the shell root or within it.
+run_mutation "classifications: a landing plan waits for a shell input" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        window.focused(cx).is_none() || self.table.focus_handle(cx).within_focused(window, cx)' \
+  '        true' \
+  geode-classifications \
+  a_plan_landing_while_a_shell_input_holds_the_keyboard_is_held
+
+# A held plan is asked about when the tile gains focus; without the offer
+# it waits forever.
+run_mutation "classifications: focusing the tile asks a held plan" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        self.focused = focused;
+        if focused {
+            self.offer_held_later(cx);
+        }' \
+  '        self.focused = focused;' \
+  geode-classifications \
+  a_plan_landing_on_an_unfocused_tile_is_held_until_focused
+
+# A held plan may outlive its classification: asked on focus without the
+# re-check, it would apply one classification's file to another.
+run_mutation "classifications: a held plan is checked again when asked" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if let Err(notice) = self.import_current(&held.name, &held.from, &held.file) {' \
+  '        if let Err(notice) = Ok::<(), Notice>(()) {' \
+  geode-classifications \
+  a_held_plan_for_a_switched_classification_is_refused_on_focus
+
+# The plan is made off the UI thread: a reload moving the source column
+# before it lands makes its sources another column's values.
+run_mutation "classifications: a landing plan refuses a moved source column" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if self.config_dim().is_none_or(|d| d.from != from) {' \
+  '        if false {' \
+  geode-classifications \
+  a_plan_landing_after_the_source_column_moved_is_refused
+
+# An import overtaken by a newer file operation must say so, not vanish.
+run_mutation "classifications: an overtaken import says so" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        waiting.or(planning).or(held)' \
+  '        planning.or(held)' \
+  geode-classifications \
+  a_newer_file_operation_replacing_a_waiting_import_says_so
+
+# Only the waiting operation's answer is acted on: an overtaken one would
+# be reported as the newer one's.
+run_mutation "classifications: only the latest file answer is acted on" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if self.file_op.as_ref().map(FileOp::tag) != Some(outcome.tag) {
+            return;
+        }' \
+  '' \
+  geode-classifications \
+  only_the_latest_file_operation_is_answered
+
+# The save dialog is modeless: a classification switched to while it
+# stood would be written under the first one's file name.
+run_mutation "classifications: an export is bound to its classification" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '    fn export_to(&mut self, name: String, path: PathBuf, all: bool, cx: &mut Context<Self>) {
+        if self.shown().as_deref() != Some(name.as_str()) {' \
+  '    fn export_to(&mut self, name: String, path: PathBuf, all: bool, cx: &mut Context<Self>) {
+        if false {' \
+  geode-classifications \
+  an_export_answered_after_a_switch_is_refused
+
+# Without the values, an export with unclassified rows leaves every
+# unmapped value out and looks complete.
+run_mutation "classifications: export with unclassified needs the values" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if all && !self.values_loaded {' \
+  '        if false {' \
+  geode-classifications \
+  export_with_unclassified_refuses_before_values_load
+
+# Values from an older answer, while a newer read is on its way or after
+# one failed, may miss what the data holds now.
+run_mutation "classifications: export with unclassified needs current values" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if all && (self.loading || self.values_notice.is_some()) {' \
+  '        if false {' \
+  geode-classifications \
+  export_with_unclassified_waits_for_current_values
 
 # A plan's sources are its source column's values: written into an object
 # a reload moved onto another column, they would label the wrong values.
