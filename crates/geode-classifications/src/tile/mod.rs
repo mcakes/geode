@@ -130,9 +130,11 @@ pub enum Pending {
     Revert {
         name: String,
     },
-    /// Apply `plan`, read from `file`, to classification `name`.
+    /// Apply `plan`, read from `file`, to classification `name`, whose
+    /// sources were `from`'s values when it was planned.
     Import {
         name: String,
+        from: String,
         file: String,
         plan: ImportPlan,
     },
@@ -1058,7 +1060,7 @@ impl ClassificationsTile {
                 Notice::danger(format!("export failed: {why}"))
             }
             (FileOp::Import { name, path, .. }, TextFileResult::Read(read)) => {
-                return self.import_read(name, &path, read, window, cx);
+                return self.import_read(outcome.tag, name, &path, read, window, cx);
             }
             // A write answered as a read or a read as a write: not the
             // answer to what was asked.
@@ -1139,12 +1141,13 @@ impl ClassificationsTile {
         }
     }
 
-    /// The file read for classification `name`: planned over the object
-    /// the tile shows, then asked about. Nothing is written until `y`;
-    /// a file that changes nothing or is refused whole asks nothing.
-    /// Rejected rows are listed whatever the plan.
+    /// The file read for classification `name`: planned off the UI thread
+    /// over a copy of the object the tile shows now (a file at the size
+    /// limit takes tens of milliseconds to plan), then asked about in
+    /// [`Self::import_planned`].
     fn import_read(
         &mut self,
+        tag: u64,
         name: String,
         path: &Path,
         read: Result<String, String>,
@@ -1160,12 +1163,57 @@ impl ClassificationsTile {
             Err(why) => return self.refuse(format!("import failed: {why}"), cx),
         };
         let Some(config_dim) = self.config_dim() else {
-            return;
+            return self.refuse(Notice::status(files::not_applied(&file, &name)), cx);
         };
-        let plan = match plan_import(self.history.current(&config_dim), &text) {
+        let dim = self.history.current(&config_dim).clone();
+        let from = dim.from.clone();
+        let planning = cx.background_spawn(async move { plan_import(&dim, &text) });
+        cx.spawn_in(window, async move |this, cx| {
+            let planned = planning.await;
+            this.update_in(cx, |t, window, cx| {
+                t.import_planned(tag, name, from, file, planned, window, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A plan has landed. Asked about only while it is still the latest
+    /// file operation's, for the classification and source column it was
+    /// made over. Nothing is written until `y`; a file that changes nothing
+    /// or is refused whole asks nothing. Rejected rows are listed whatever
+    /// the plan. An open label field, name prompt or question is the
+    /// trader's work in hand: the import is dropped rather than take the
+    /// keyboard from it.
+    #[allow(clippy::too_many_arguments)]
+    fn import_planned(
+        &mut self,
+        tag: u64,
+        name: String,
+        from: String,
+        file: String,
+        planned: Result<ImportPlan, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if tag != self.file_tag {
+            return;
+        }
+        if self.shown().as_deref() != Some(name.as_str()) {
+            return self.refuse(Notice::status(files::not_applied(&file, &name)), cx);
+        }
+        if self.config_dim().is_none_or(|d| d.from != from) {
+            return self.refuse(Notice::status(files::not_applied_from(&file, &from)), cx);
+        }
+        let plan = match planned {
             Ok(plan) => plan,
             Err(why) => return self.refuse(format!("import refused: {why}"), cx),
         };
+        if !plan.is_noop()
+            && (self.editor.is_some() || self.prompt.is_some() || self.confirm.is_some())
+        {
+            return self.refuse(Notice::status(files::not_shown(&file)), cx);
+        }
         self.notices.outcome.clear();
         if plan.is_noop() {
             self.notices
@@ -1178,16 +1226,16 @@ impl ClassificationsTile {
                 .outcome(Notice::warning(files::rejected_notice(&plan.rejected)));
         }
         if !plan.is_noop() {
-            // The question takes the keyboard: a label field or a name
-            // prompt left open under it would no longer hold it.
-            self.release_editor(cx);
-            self.release_prompt(cx);
             self.close_menu(cx);
-            self.sync_editor(cx);
             let question = files::import_question(&file, &plan);
             confirm::arm(
                 self,
-                Pending::Import { name, file, plan },
+                Pending::Import {
+                    name,
+                    from,
+                    file,
+                    plan,
+                },
                 question,
                 window,
                 cx,
@@ -1200,9 +1248,12 @@ impl ClassificationsTile {
     /// `y` on an import: the plan applied over the object shown now (a
     /// label written meanwhile on a row the file does not name stays), as
     /// one write and one undo step, through the label verbs' gates.
+    /// A reload that changed the source column meanwhile is refused: the
+    /// plan's sources are the old column's values.
     fn apply_import(
         &mut self,
         name: String,
+        from: String,
         file: String,
         plan: ImportPlan,
         cx: &mut Context<Self>,
@@ -1213,10 +1264,13 @@ impl ClassificationsTile {
         if self.refuse_while_reverting(cx) {
             return;
         }
-        self.notices.outcome.clear();
         let Some(config_dim) = self.config_dim() else {
-            return;
+            return self.refuse(Notice::status(files::not_applied(&file, &name)), cx);
         };
+        if config_dim.from != from {
+            return self.refuse(Notice::status(files::not_applied_from(&file, &from)), cx);
+        }
+        self.notices.outcome.clear();
         let checked = self.source_writable(&config_dim);
         if let Err(why) = checked {
             return self.refuse(format!("not saved: {why}"), cx);
@@ -2541,7 +2595,12 @@ impl ConfirmHost for ClassificationsTile {
                     cx,
                 );
             }
-            Pending::Import { name, file, plan } => self.apply_import(name, file, plan, cx),
+            Pending::Import {
+                name,
+                from,
+                file,
+                plan,
+            } => self.apply_import(name, from, file, plan, cx),
             Pending::Revert { name } => {
                 self.notices.outcome.clear();
                 self.frame.queue_config_edits(vec![remove_edit(&name)], cx);

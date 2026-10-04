@@ -109,6 +109,18 @@ pub fn imported(rows: usize, name: &str) -> String {
     format!("imported {rows} {noun} into {name}")
 }
 
+/// What an import planned over `from`'s values says when a reload changed
+/// the classification's source column before it was applied.
+pub fn not_applied_from(file: &str, from: &str) -> String {
+    format!("import of {file} was for {from} values \u{2014} not applied")
+}
+
+/// What an import says when its plan landed while the trader had a field
+/// or question open, which it does not take the keyboard from.
+pub fn not_shown(file: &str) -> String {
+    format!("import of {file} not shown: finish the open edit and import again")
+}
+
 /// What an import answered after another classification was shown says.
 pub fn not_applied(file: &str, name: &str) -> String {
     format!("import of {file} was for {name} \u{2014} not applied")
@@ -240,6 +252,14 @@ mod tests {
         assert_eq!(
             not_applied("r.csv", "region"),
             "import of r.csv was for region \u{2014} not applied"
+        );
+        assert_eq!(
+            not_applied_from("r.csv", "book"),
+            "import of r.csv was for book values \u{2014} not applied"
+        );
+        assert_eq!(
+            not_shown("r.csv"),
+            "import of r.csv not shown: finish the open edit and import again"
         );
     }
 }

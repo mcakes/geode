@@ -36369,11 +36369,55 @@ run_mutation "classifications: an import dialog is bound to its classification" 
 run_mutation "classifications: a no-op import asks nothing" \
   crates/geode-classifications/src/tile/mod.rs \
   '        if !plan.is_noop() {
-            // The question takes the keyboard' \
+            self.close_menu(cx);' \
   '        if true {
-            // The question takes the keyboard' \
+            self.close_menu(cx);' \
   geode-classifications \
   nothing_to_change_says_so_without_a_confirm
+
+# A plan made off the UI thread lands later: one a newer file operation
+# overtook must not ask about the older file.
+run_mutation "classifications: a newer import supersedes an older plan" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if tag != self.file_tag {
+            return;
+        }' \
+  '' \
+  geode-classifications \
+  a_newer_import_supersedes_an_older_plan
+
+# A plan landing after a switch would be asked about over the classification
+# shown now, with the first one's file.
+run_mutation "classifications: a landing plan is bound to its classification" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if tag != self.file_tag {
+            return;
+        }
+        if self.shown().as_deref() != Some(name.as_str()) {' \
+  '        if tag != self.file_tag {
+            return;
+        }
+        if false {' \
+  geode-classifications \
+  a_plan_landing_after_a_switch_is_dropped
+
+# Arming over an open field or question takes the keyboard from the
+# trader's work in hand.
+run_mutation "classifications: a landing plan never displaces an open edit" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            && (self.editor.is_some() || self.prompt.is_some() || self.confirm.is_some())' \
+  '            && (self.prompt.is_some() || self.confirm.is_some())' \
+  geode-classifications \
+  a_plan_landing_on_an_open_editor_drops_the_import
+
+# A plan's sources are its source column's values: written into an object
+# a reload moved onto another column, they would label the wrong values.
+run_mutation "classifications: y refuses a changed source column" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if config_dim.from != from {' \
+  '        if false {' \
+  geode-classifications \
+  y_after_the_source_column_changed_is_refused
 
 # The file is authoritative for its rows only: applied over anything but
 # the object shown at y, a label written meanwhile would be lost.

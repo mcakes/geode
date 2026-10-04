@@ -2488,6 +2488,12 @@ impl Harness {
     /// Answer `p` with the file's text.
     fn read_as(&self, vcx: &mut gpui::VisualTestContext, p: &TextFileParams, text: &str) {
         self.answer_file(vcx, p, TextFileResult::Read(Ok(text.to_string())));
+        self.land(vcx);
+    }
+    /// Let a plan made off the UI thread land.
+    fn land(&self, vcx: &mut gpui::VisualTestContext) {
+        vcx.run_until_parked();
+        self.draw(vcx);
     }
     fn notice_list(&self, vcx: &gpui::VisualTestContext) -> Vec<Notice> {
         self.tile.read_with(vcx, |t, _| t.chrome.notices.clone())
@@ -2773,5 +2779,153 @@ fn a_busy_service_refuses_the_import(cx: &mut gpui::TestAppContext) {
     assert_eq!(
         h.notices(&vcx),
         ["the data service is busy \u{2014} try again"]
+    );
+}
+
+/// The plan is made off the UI thread: one landing after a switch is not
+/// asked about over the classification shown now.
+#[gpui::test]
+fn a_plan_landing_after_a_switch_is_dropped(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.answer_file(
+        &mut vcx,
+        &p,
+        TextFileResult::Read(Ok("underlying_ref,region\nNKY,Asia\n".into())),
+    );
+    // The switch is dispatched before the plan lands.
+    h.press(&mut vcx, "g c k enter");
+    h.land(&mut vcx);
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("desk"));
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["import of region.csv was for region \u{2014} not applied"]
+    );
+}
+
+/// A newer file operation supersedes a plan still being made: only the
+/// latest import is asked about.
+#[gpui::test]
+fn a_newer_import_supersedes_an_older_plan(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let first = h.import(&mut vcx, "a.csv");
+    h.answer_file(
+        &mut vcx,
+        &first,
+        TextFileResult::Read(Ok(IMPORT_TEXT.into())),
+    );
+    // The second dialog's answer, ahead of the first plan landing: the
+    // dialog route would race the plan on the executor.
+    let b = std::env::temp_dir().join("b.csv");
+    h.tile
+        .update(&mut vcx, |t, cx| t.import_from("region".into(), b, cx));
+    let second = h.file_requests();
+    assert_eq!(second.len(), 1, "{second:?}");
+    assert!(second[0].tag > first.tag);
+    h.land(&mut vcx);
+    assert_eq!(h.confirm(&vcx), None, "the first plan was overtaken");
+    assert!(h.notices(&vcx).is_empty());
+    h.read_as(&mut vcx, &second[0], "underlying_ref,region\nNKY,Asia\n");
+    assert_eq!(
+        h.confirm(&vcx).as_deref(),
+        Some("import b.csv: 0 changed, 1 new, 0 cleared \u{2014} y applies")
+    );
+}
+
+const NOT_SHOWN: &str = "import of region.csv not shown: finish the open edit and import again";
+
+/// A plan landing on an open label field leaves the field as it is: the
+/// trader's typing is never discarded for a question.
+#[gpui::test]
+fn a_plan_landing_on_an_open_editor_drops_the_import(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.goto(&mut vcx, "NKY");
+    h.press(&mut vcx, "enter");
+    vcx.simulate_input("Pac");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), None);
+    let (text, _, _) = h.editor(&vcx).expect("the editor stays open");
+    assert_eq!(text, "Pac");
+    assert_eq!(h.notices(&vcx), [NOT_SHOWN]);
+    assert!(h.edits(&mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn a_plan_landing_on_an_open_prompt_drops_the_import(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.act(&mut vcx, "classifications::new");
+    assert!(h.prompt(&vcx).is_some());
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.prompt(&vcx).is_some(), "the prompt stays open");
+    assert_eq!(h.notices(&vcx), [NOT_SHOWN]);
+}
+
+#[gpui::test]
+fn a_plan_landing_on_another_question_drops_the_import(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(EDIT, &["region"], &[]),
+        restored("region"),
+    );
+    let p = h.import(&mut vcx, "region.csv");
+    h.act(&mut vcx, "classifications::delete");
+    let asked = h.confirm(&vcx).expect("the delete question");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), Some(asked), "the delete question stands");
+    assert_eq!(h.notices(&vcx), [NOT_SHOWN]);
+}
+
+/// A reload that moved the classification onto another source column while
+/// the question stood: the plan's sources are the old column's values.
+#[gpui::test]
+fn y_after_the_source_column_changed_is_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert!(h.confirm(&vcx).is_some());
+    let moved = EDIT.replace("from = \"underlying_ref\"", "from = \"book\"");
+    vcx.update(|_, cx| h.factory.set_config(config(&moved), cx));
+    assert!(h.confirm(&vcx).is_some(), "the question stands");
+    vcx.simulate_keystrokes("y");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["import of region.csv was for underlying_ref values \u{2014} not applied"]
+    );
+}
+
+/// A reload renaming the shown classification while the question stood
+/// withdraws it: `y` then writes nothing under either name.
+#[gpui::test]
+fn y_after_the_classification_was_renamed_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, "underlying_ref,region\nNKY,Asia\n");
+    assert!(h.confirm(&vcx).is_some());
+    let renamed = EDIT.replace("region", "area");
+    vcx.update(|_, cx| h.factory.set_config(config(&renamed), cx));
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(h.notices(&vcx), ["the classification asked about is gone"]);
+    h.press(&mut vcx, "y");
+    assert!(h.edits(&mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn the_import_row_says_why_with_nothing_shown(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), None);
+    h.act(&mut vcx, "classifications::cancel");
+    h.press(&mut vcx, ".");
+    let menu = h.action_menu(&vcx).expect("the menu");
+    assert!(
+        menu.contains(&(
+            "Import CSV\u{2026}".into(),
+            Some("no classification shown".into())
+        )),
+        "{menu:?}"
     );
 }
