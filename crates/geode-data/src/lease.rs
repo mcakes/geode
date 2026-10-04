@@ -250,12 +250,15 @@ fn conflict_text(err: &StoreError) -> Option<String> {
 
 /// The holder's PID from DuckDB's conflict text: `(PID 123)` gives 123.
 /// DuckDB names the holder after the file path it quotes, so the last
-/// `(PID n)` that parses wins over one inside the path.
+/// `(PID n)` that parses wins over one inside the path. PID 0 is no
+/// holder: on macOS, when `F_GETLK` finds the lock already released (a
+/// handover racing the open), DuckDB names PID 0, and a caller keeping
+/// the last known holder (`holder_pid(..).or(holder)`) must keep it.
 pub fn holder_pid(message: &str) -> Option<u32> {
     message.rmatch_indices("(PID ").find_map(|(at, marker)| {
         let rest = &message[at + marker.len()..];
         let (digits, _) = rest.split_once(')')?;
-        digits.trim().parse().ok()
+        digits.trim().parse().ok().filter(|&pid| pid != 0)
     })
 }
 
@@ -692,6 +695,15 @@ mod tests {
         assert!(!is_lock_conflict(&StoreError::Drift(
             "Could not set lock on file".into()
         )));
+    }
+
+    #[test]
+    fn a_pid_of_zero_names_no_holder_and_keeps_the_last_known_one() {
+        let text = "IO Error: Could not set lock on file \"/x/g.duckdb\": Conflicting lock is \
+                    held in  (PID 0) by user mch.";
+        assert!(is_lock_conflict_message(text));
+        assert_eq!(holder_pid(text), None);
+        assert_eq!(holder_pid(text).or(Some(812)), Some(812));
     }
 
     /// DuckDB's Windows form (`local_file_system.cpp`): the sharing

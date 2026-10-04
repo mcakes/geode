@@ -63,7 +63,10 @@
 //!
 //! Parsed columns move into DocumentJob without per-row copies. Shutdown
 //! unsubscribes, sets the stop flag, and joins; pending coalesced documents are
-//! not flushed. Blocking adapter/parser code can delay shutdown.
+//! not flushed. A flushing shutdown (a handoff of the store) first sets the
+//! flush flag: the receiver then handles the messages already queued to it and
+//! submits every coalescer-pending document with its current contents before
+//! it exits. Blocking adapter/parser code can delay either.
 
 use crate::adapter::{
     AdapterError, ConnectionState, HealthSink, MESSAGE_BOUND, Message, MessageSink, Recovery,
@@ -290,6 +293,9 @@ impl Reconnect {
 pub struct SubscriptionWorker {
     subscription: Box<dyn Subscription>,
     stop: Arc<AtomicBool>,
+    /// Set by `shutdown_flushing`, before it unsubscribes: the receiver
+    /// reads it once its loop has ended, however it ended.
+    flush: Arc<AtomicBool>,
     /// Keep only the refusal counter, not a MessageSink clone. Retaining a sender
     /// here would prevent unsubscribe from disconnecting the receiver.
     refused: Arc<AtomicU64>,
@@ -342,6 +348,7 @@ impl SubscriptionWorker {
         subscription.subscribe(&spec.topics, sink, reconnect.watch(on_connection))?;
         let recovery = subscription.recovery();
         let stop = Arc::new(AtomicBool::new(false));
+        let flush = Arc::new(AtomicBool::new(false));
         let mut receiving = Receiving {
             source: spec.name.clone(),
             dataset,
@@ -350,6 +357,7 @@ impl SubscriptionWorker {
             ingest,
             report_load,
             stop: Arc::clone(&stop),
+            flush: Arc::clone(&flush),
             unknown: UnknownPaths::new(spec.name.clone()),
             failed_topics: HashSet::new(),
             refused: Arc::clone(&refused),
@@ -377,6 +385,7 @@ impl SubscriptionWorker {
             Ok(thread) => Ok(SubscriptionWorker {
                 subscription,
                 stop,
+                flush,
                 refused,
                 thread: Some(thread),
             }),
@@ -410,7 +419,7 @@ impl SubscriptionWorker {
     }
 
     /// Unsubscribe, set the stop flag, and join. Idempotent. Pending coalesced
-    /// documents are not flushed. Disconnection wakes an idle receiver; the stop
+    /// documents are not flushed (`shutdown_flushing` flushes them). Disconnection wakes an idle receiver; the stop
     /// flag also handles adapters that retain a sender after unsubscribe.
     /// In-progress adapter/parser calls must return before shutdown can complete.
     pub fn shutdown(&mut self) {
@@ -419,6 +428,20 @@ impl SubscriptionWorker {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+impl SubscriptionWorker {
+    /// [`SubscriptionWorker::shutdown`] for a handoff of the store: the
+    /// receiver handles what the adapter had already queued to it, then
+    /// submits every document its coalescer holds, each with its current
+    /// contents and ahead of its release deadline, then exits. The flag is
+    /// set before the unsubscribe, so a receiver that ends on the
+    /// disconnection rather than the stop flag still flushes. An open
+    /// recovery window is abandoned, as in `shutdown`.
+    pub fn shutdown_flushing(&mut self) {
+        self.flush.store(true, Ordering::Release);
+        self.shutdown();
     }
 }
 
@@ -492,6 +515,8 @@ struct Receiving {
     ingest: Arc<IngestHandle>,
     report_load: LoadReportSink,
     stop: Arc<AtomicBool>,
+    /// Read once the receive loop ends: submit what is held, don't drop it.
+    flush: Arc<AtomicBool>,
     /// Element paths this source's parser has already complained about,
     /// capped so an adversarial or buggy feed's own element names cannot
     /// grow it without bound — see [`UnknownPaths`].
@@ -563,6 +588,9 @@ impl Receiving {
             }
             self.watch_drops();
         }
+        if self.flush.load(Ordering::Acquire) {
+            self.flush_held(&rx, &mut coalescer);
+        }
         if self.late_replies > 0 {
             tracing::info!(
                 target: "geode::ingest",
@@ -572,6 +600,18 @@ impl Receiving {
             );
         }
         self.end_drops();
+    }
+
+    /// A handoff's last step: handle the messages already queued (at most
+    /// the queue's bound, so an adapter still sending after unsubscribe
+    /// cannot keep this going), then submit everything the coalescer holds.
+    fn flush_held(&mut self, rx: &Receiver<Message>, coalescer: &mut Coalescer<Pending>) {
+        for message in rx.try_iter().take(MESSAGE_BOUND) {
+            self.handle_message(&message, coalescer);
+        }
+        for (_key, pending) in coalescer.drain_all() {
+            self.submit(pending);
+        }
     }
 
     /// Start a recovery if the connection came back since the last turn.
@@ -1752,6 +1792,85 @@ mod tests {
             .expect("only `shutdown` ever takes this, and it was not called")
             .join()
             .unwrap();
+    }
+
+    /// The next publication's key within 10 s, skipping progress events.
+    fn published_within(rx: &Receiver<IngestEvent>) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .expect("a publish within 10 s");
+            match rx.recv_timeout(left) {
+                Ok(IngestEvent::Published { batch, .. }) => return batch,
+                Ok(IngestEvent::PlanComplete) | Ok(IngestEvent::Started { .. }) => continue,
+                Ok(other) => panic!("expected a publish: {other:?}"),
+                Err(e) => panic!("no publish: {e}"),
+            }
+        }
+    }
+
+    /// A handoff stop hands the coalescer's held documents to the runner,
+    /// each with its latest contents, instead of dropping them: the next
+    /// owner's subscription will not see them again.
+    #[test]
+    fn a_flushing_shutdown_submits_the_coalescers_pending_documents() {
+        let mut h = harness(
+            Duration::from_secs(10),
+            Arc::new(FakeKind::new()),
+            SourceTime::Receive,
+        );
+        h.feed.publish(
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+        );
+        h.feed.publish(
+            "cvi/NDX.Z",
+            FakeKind::message("NDX.Z", [7., 7., 7., 7., 7., 7.]),
+        );
+        let mut first = vec![published_within(&h.events), published_within(&h.events)];
+        first.sort();
+        assert_eq!(
+            first,
+            ["NDX.Z", "SPX.Z"],
+            "a key's first document goes at once"
+        );
+        // Held for ten seconds: the window is still open for both keys.
+        h.feed.publish(
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [10., 20., 30., 40., 50., 60.]),
+        );
+        h.feed.publish(
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [11., 21., 31., 41., 51., 61.]),
+        );
+        h.feed.publish(
+            "cvi/NDX.Z",
+            FakeKind::message("NDX.Z", [8., 8., 8., 8., 8., 8.]),
+        );
+        // A third key goes at once. The bus routes and the receiver handles
+        // in order, so once it is published the held versions are in the
+        // coalescer, not still on the bus, where an unsubscribe drops them.
+        h.feed.publish(
+            "cvi/VIX.Z",
+            FakeKind::message("VIX.Z", [9., 9., 9., 9., 9., 9.]),
+        );
+        assert_eq!(published_within(&h.events), "VIX.Z");
+        h.worker.shutdown_flushing();
+        let mut held = vec![published_within(&h.events), published_within(&h.events)];
+        held.sort();
+        assert_eq!(
+            held,
+            ["NDX.Z", "SPX.Z"],
+            "both held documents were submitted"
+        );
+        assert_eq!(
+            live_params(&h.conn, "SPX.Z"),
+            vec![11., 21., 31., 41., 51., 61.],
+            "the held key's latest contents"
+        );
+        assert_eq!(live_params(&h.conn, "NDX.Z"), vec![8.; 6]);
+        nothing_more(&h.events, Duration::from_millis(200));
     }
 
     #[test]

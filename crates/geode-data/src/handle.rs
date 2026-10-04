@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Maximum waiting requests on the service channel. This bound includes
 /// queries, cancellation, and other ordinary requests; it does not bound work
@@ -108,7 +108,22 @@ pub enum Request {
     },
     /// Wake the service to apply its latest pending view configuration.
     ReplaceViews,
-    Shutdown,
+    /// Stop the service, the way `mode` says.
+    Shutdown(StopMode),
+}
+
+/// How the service stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopMode {
+    /// Process exit: queued local writes run, every other queued job is
+    /// dropped (its source resends it after a restart).
+    Exit,
+    /// A handoff of the store to another process: subscriptions flush
+    /// their coalescers, and the ingest runner runs every queued document,
+    /// series and snapshot until they are empty or `drain` has passed since
+    /// the stop began. Queued files are left for the next owner's
+    /// discovery.
+    Release { drain: Duration },
 }
 
 #[derive(Debug)]
@@ -156,14 +171,32 @@ impl Inner {
         }
     }
 
-    /// Close admission before joining. Offer Shutdown best-effort, then drop the
-    /// sender so even a full queue eventually disconnects after queued requests
-    /// are dispatched. Downstream shutdown can still wait on running I/O.
+    /// An exit stop. See [`Inner::stop_with`].
     fn stop(&self) {
+        self.stop_with(StopMode::Exit);
+    }
+
+    /// Close admission before joining. An exit offers Shutdown best-effort,
+    /// then drops the sender, so even a full queue eventually disconnects
+    /// after queued requests are dispatched (and stops as an exit). A
+    /// release waits for queue space instead: a queue that disconnected
+    /// without its sentinel would stop as an exit and drop the work the
+    /// release must hand over. The loop is draining the queue, so the wait
+    /// lasts as long as the requests ahead of it, and it ends at once if the
+    /// loop has already gone. Downstream shutdown can still wait on running
+    /// I/O.
+    fn stop_with(&self, mode: StopMode) {
         self.stop_requested.store(true, Ordering::Release);
         let taken = self.tx.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(tx) = taken {
-            let _ = tx.try_send(Request::Shutdown);
+            match mode {
+                StopMode::Exit => {
+                    let _ = tx.try_send(Request::Shutdown(mode));
+                }
+                StopMode::Release { .. } => {
+                    let _ = tx.send(Request::Shutdown(mode));
+                }
+            }
             drop(tx);
         }
         if let Some(t) = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -420,6 +453,19 @@ impl DataHandle {
     /// while a write is still running. Call off the UI thread.
     pub fn shutdown(&self) {
         self.inner.stop();
+    }
+
+    /// Stop the service to hand the store to another process, and join it.
+    /// Like [`DataHandle::shutdown`] it blocks; call it off any UI thread.
+    /// Unlike it, nothing the feeds delivered is dropped while `drain`
+    /// lasts: each subscription unsubscribes and submits the documents its
+    /// coalescer was holding, and the ingest runner runs every queued
+    /// document, series and snapshot until they are empty or `drain` has
+    /// passed since this call. What is left then is dropped with one
+    /// warning; queued files are left for the next owner's discovery. The
+    /// store and the app lease close before this returns.
+    pub fn release(&self, drain: Duration) {
+        self.inner.stop_with(StopMode::Release { drain });
     }
 
     /// A handle with no service behind it: the test is the service, and
@@ -773,7 +819,7 @@ impl PanicAnswer {
             Request::Poll { .. } => ("poll", PanicAnswer::Unanswered),
             Request::Cancel { .. } => ("cancel", PanicAnswer::Unanswered),
             Request::ReplaceViews => ("view replacement", PanicAnswer::Unanswered),
-            Request::Shutdown => ("shutdown", PanicAnswer::Unanswered),
+            Request::Shutdown(_) => ("shutdown", PanicAnswer::Unanswered),
         }
     }
 
@@ -1023,6 +1069,8 @@ fn serve(
     }
 
     let _declare = StoppedOnUnwind(Arc::clone(&stopped));
+    // A queue that disconnects without its sentinel stops as an exit.
+    let mut stop = StopMode::Exit;
     while let Ok(req) = rx.recv() {
         probe(ServePoint::Loop(&req));
         // Check before every request: a full request queue is already a wakeup.
@@ -1050,7 +1098,8 @@ fn serve(
                 let _ = sink(DataEvent::Diagnostics(diags));
             }
         }
-        if matches!(req, Request::Shutdown) {
+        if let Request::Shutdown(mode) = req {
+            stop = mode;
             break;
         }
         // One request's panic is that request's error, answered once through
@@ -1075,7 +1124,7 @@ fn serve(
             );
         }
     }
-    service.shutdown();
+    service.shutdown_with(stop);
 }
 
 /// Run one request's arm. Every failure an arm returns is answered here on
@@ -1150,7 +1199,7 @@ fn dispatch(service: &DataService, sink: &EventSink, req: Request) {
         }
         Request::Cancel { key } => service.cancel(key),
         // Both are handled in `serve` before dispatch.
-        Request::ReplaceViews | Request::Shutdown => {}
+        Request::ReplaceViews | Request::Shutdown(_) => {}
     }
 }
 
@@ -2332,7 +2381,7 @@ mod tests {
             Request::Forget(f) => f.dataset == "marked",
             Request::Identities { source } => source == "marked",
             Request::Cancel { key } => *key == MARKED,
-            Request::ReplaceViews | Request::Shutdown => false,
+            Request::ReplaceViews | Request::Shutdown(_) => false,
         }
     }
 
@@ -3142,5 +3191,81 @@ mod tests {
         h.shutdown();
         assert!(!crate::lease::app_present(&db).unwrap());
         crate::store::Store::open(&db).expect("the store opens at once after shutdown");
+    }
+
+    /// Review focus: a handoff loses nothing the feed delivered, not even
+    /// a document a coalescer was still holding back. Three keys publish
+    /// at once; a second version of one is held by a 10 s window when the
+    /// release begins, and is live when the store is reopened.
+    #[test]
+    fn release_publishes_what_the_feed_delivered_before_it() {
+        use crate::store::ddl::tests_support::FakeKind;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("geode.duckdb");
+        let _gate = lock_file_gate();
+        let (bus, feed) = crate::adapter::ChannelAdapter::new("demo_bus");
+        let mut config = empty_config(dir.path());
+        config.adapters.register(bus);
+        config.documents.register(Arc::new(FakeKind::new()));
+        config.schema.datasets.push(cvi_dataset());
+        config.sources.push(crate::source::SourceSpec {
+            adapter: "demo_bus".into(),
+            document: Some("fake_cvi".into()),
+            topics: vec!["cvi/>".into()],
+            coalesce: Duration::from_secs(10),
+            ..crate::source::SourceSpec::directory("cvi", "cvi_params", Vec::new())
+        });
+        let (tx, rx) = channel();
+        let tx = Mutex::new(tx);
+        let sink: EventSink = Arc::new(move |e| tx.lock().unwrap().send(e).is_ok());
+        let h = DataService::spawn(config, sink);
+        // Answered only once the service is open, so the source has
+        // subscribed: the bus drops what it routes to nobody.
+        catalog_request(&h, 1).unwrap();
+        events_until(&rx, Duration::from_secs(10), |e| is_catalog(e, 1));
+        let is_publish_of = |e: &DataEvent, key: &str| matches!(e, DataEvent::Published { batch, .. } if batch == key);
+        for key in ["SPX.Z", "NDX.Z"] {
+            assert!(feed.publish(&format!("cvi/{key}"), FakeKind::message(key, [1.; 6])));
+            events_until(&rx, Duration::from_secs(10), |e| is_publish_of(e, key));
+        }
+        // Held: SPX.Z's window has ten seconds to run.
+        assert!(feed.publish(
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [2., 3., 4., 5., 6., 7.])
+        ));
+        // The bus routes and the receiver handles in order, so once the
+        // third key is published the held version is in the coalescer,
+        // not still on the bus, where the unsubscribe would drop it.
+        assert!(feed.publish("cvi/VIX.Z", FakeKind::message("VIX.Z", [1.; 6])));
+        events_until(&rx, Duration::from_secs(10), |e| is_publish_of(e, "VIX.Z"));
+        let began = Instant::now();
+        h.release(crate::HANDOFF_DRAIN);
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            began.elapsed()
+        );
+
+        let store = crate::store::Store::open(&db).expect("the store is free after release");
+        let conn = store.reader().unwrap();
+        let live = |key: &str| -> Vec<f64> {
+            let mut stmt = conn
+                .prepare(
+                    "select param from cvi_params_document_live \
+                     where underlying_ref = ? order by term, node",
+                )
+                .unwrap();
+            stmt.query_map(duckdb::params![key], |r| r.get::<_, f64>(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(live("NDX.Z"), vec![1.; 6]);
+        assert_eq!(live("VIX.Z"), vec![1.; 6]);
+        assert_eq!(
+            live("SPX.Z"),
+            vec![2., 3., 4., 5., 6., 7.],
+            "the held version was published before the store closed"
+        );
     }
 }

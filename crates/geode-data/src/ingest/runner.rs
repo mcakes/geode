@@ -18,7 +18,12 @@
 //! queued local document work (`local`-source publishes and forgets) in
 //! queue order, each answering as usual, and drops the rest: feed
 //! documents, series, snapshots and files are resent by their sources
-//! after a restart. See `docs/current/data-path.md` for delivery and health
+//! after a restart. A draining shutdown (a handoff of the store, where the
+//! next owner's feeds do not resend) keeps taking documents, series and
+//! snapshots in the usual order until they are empty or its deadline
+//! passes, never runs a queued file (the next owner's discovery finds it
+//! again), then stops as a shutdown does, with one warning naming what it
+//! dropped. See `docs/current/data-path.md` for delivery and health
 //! contracts.
 
 use crate::adapter::SeriesRows;
@@ -245,6 +250,10 @@ struct Queue {
     references: VecDeque<ReferenceJob>,
     items: Vec<WorkItem>,
     shutdown: bool,
+    /// Set by `shutdown_draining`: run the queued documents, series and
+    /// snapshots until they are empty or this instant passes, drop the
+    /// queued files, then stop.
+    drain_until: Option<std::time::Instant>,
     /// The file the runner has popped and is loading (or is about to skip
     /// as stale) right now, if any — keyed the same way `enqueue`'s dedupe
     /// is, `(csv_path, size, source_time)`, so the two agree on what
@@ -413,6 +422,26 @@ impl IngestHandle {
     }
 }
 
+impl IngestHandle {
+    /// Stop the runner for a handoff of the store and join it. After the
+    /// running operation it keeps taking queued documents (local writes
+    /// among them, in order), series and snapshots, in the usual priority,
+    /// until those queues are empty or `until` passes; queued files are
+    /// never run. What is left then is dropped as at `shutdown`, except the
+    /// local writes, which still run.
+    pub fn shutdown_draining(&self, until: std::time::Instant) {
+        {
+            let (lock, cvar) = &*self.queue;
+            let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+            q.drain_until = Some(until);
+            cvar.notify_all();
+        }
+        if let Some(t) = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = t.join();
+        }
+    }
+}
+
 impl Drop for IngestHandle {
     fn drop(&mut self) {
         self.shutdown();
@@ -477,6 +506,57 @@ fn take_local_writes(q: &mut Queue) -> Vec<DocumentWork> {
             DocumentWork::Forget(_) => true,
         })
         .collect()
+}
+
+/// What a drain left queued when it ended, and the local writes still to
+/// run.
+struct DrainEnd {
+    local: Vec<DocumentWork>,
+    documents: usize,
+    series: usize,
+    snapshots: usize,
+    files: usize,
+}
+
+/// End a drain: take the queued local writes, which still run as at an
+/// exit stop, and drop and count everything else.
+fn end_drain(q: &mut Queue) -> DrainEnd {
+    let queued = q.documents.len();
+    let local = take_local_writes(q);
+    let end = DrainEnd {
+        documents: queued - local.len(),
+        series: q.series.len(),
+        snapshots: q.references.len(),
+        files: q.items.len(),
+        local,
+    };
+    q.series.clear();
+    q.references.clear();
+    q.items.clear();
+    q.queued_per_source.clear();
+    q.backlogged.clear();
+    end
+}
+
+/// The drain's one warning, only when it dropped feed work, and a debug
+/// line for the files it left to discovery.
+fn log_drain_end(end: &DrainEnd) {
+    if end.documents + end.series + end.snapshots > 0 {
+        tracing::warn!(
+            target: "geode::ingest",
+            "release: dropped {} documents, {} series, {} snapshots at the deadline",
+            end.documents,
+            end.series,
+            end.snapshots,
+        );
+    }
+    if end.files > 0 {
+        tracing::debug!(
+            target: "geode::ingest",
+            "release: {} queued files left for the next discovery",
+            end.files,
+        );
+    }
 }
 
 /// Takes the next unit of work, **documents first, then series, then
@@ -1097,6 +1177,28 @@ fn run(
             let (lock, cvar) = &*queue;
             let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
             loop {
+                if let Some(until) = q.drain_until {
+                    // A handoff: the feeds' queued work is not resent to
+                    // the next owner, so it runs until the deadline. Files
+                    // never run; `take_work` reaches them only once these
+                    // three are empty, which ends the drain first.
+                    let fed =
+                        !(q.documents.is_empty() && q.series.is_empty() && q.references.is_empty());
+                    if !fed || std::time::Instant::now() >= until {
+                        let end = end_drain(&mut q);
+                        drop(q);
+                        log_drain_end(&end);
+                        run_local_writes(
+                            &store,
+                            &schema,
+                            &sink,
+                            publish,
+                            &refusal_logged,
+                            end.local,
+                        );
+                        return;
+                    }
+                }
                 if q.shutdown {
                     let local = take_local_writes(&mut q);
                     drop(q);
@@ -1105,21 +1207,7 @@ fn run(
                     // run them, in order, each answering as usual, before
                     // stopping. Feed documents, series and files are dropped;
                     // their sources resend them after a restart.
-                    for work in local {
-                        match work {
-                            DocumentWork::Forget(job) => {
-                                forget_one_document(&store, &schema, &sink, &refusal_logged, job)
-                            }
-                            DocumentWork::Publish(job) => publish_one_document(
-                                &store,
-                                &schema,
-                                &sink,
-                                publish,
-                                &refusal_logged,
-                                job,
-                            ),
-                        }
-                    }
+                    run_local_writes(&store, &schema, &sink, publish, &refusal_logged, local);
                     return;
                 }
                 // Documents first, then series, then snapshots, then
@@ -1349,6 +1437,28 @@ fn run(
                 &refusal_logged,
                 &format!("the load outcome for {}/{}", item.dataset, item.batch),
             );
+        }
+    }
+}
+
+/// Run the local writes a stop takes from the queue, in order, each
+/// answering as usual.
+fn run_local_writes(
+    store: &Store,
+    schema: &SchemaSpec,
+    sink: &IngestSink,
+    publish: PublishFn,
+    refusal_logged: &AtomicBool,
+    local: Vec<DocumentWork>,
+) {
+    for work in local {
+        match work {
+            DocumentWork::Forget(job) => {
+                forget_one_document(store, schema, sink, refusal_logged, job)
+            }
+            DocumentWork::Publish(job) => {
+                publish_one_document(store, schema, sink, publish, refusal_logged, job)
+            }
         }
     }
 }
@@ -2009,7 +2119,7 @@ mod tests {
     /// thread-local, so it cannot observe calls on the spawned ingest thread.
     fn logged(f: impl FnOnce()) -> Vec<geode_core::log::Record> {
         use tracing_subscriber::layer::SubscriberExt;
-        let ring = Arc::new(geode_core::log::Ring::new(8));
+        let ring = Arc::new(geode_core::log::Ring::new(64));
         let sub =
             tracing_subscriber::registry().with(geode_core::log::RingLayer::new(ring.clone()));
         tracing::subscriber::with_default(sub, f);
@@ -2896,6 +3006,235 @@ mod tests {
         assert_eq!(
             count_in(&path, "select count(*) from sheets_document_live"),
             1 + 3
+        );
+    }
+
+    /// Publishes that wait for their test to open a gate, so the test can
+    /// queue work behind a busy writer and stop the runner before anything
+    /// queued is popped. One gate per test: a `PublishFn` is a plain `fn`.
+    static STOP_GATES: [(Mutex<bool>, Condvar); 2] = [
+        (Mutex::new(false), Condvar::new()),
+        (Mutex::new(false), Condvar::new()),
+    ];
+
+    fn wait_gate(gate: usize) {
+        let (lock, opened) = &STOP_GATES[gate];
+        let mut open = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !*open {
+            let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                break;
+            };
+            open = opened.wait_timeout(open, left).unwrap().0;
+        }
+    }
+
+    fn open_gate(gate: usize) {
+        let (lock, opened) = &STOP_GATES[gate];
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        opened.notify_all();
+    }
+
+    fn gated_stop_publish_0(
+        store: &Store,
+        req: &DocumentPublishRequest,
+    ) -> Result<DocumentOutcome, StoreError> {
+        wait_gate(0);
+        publish_document(store, req)
+    }
+
+    fn gated_stop_publish_1(
+        store: &Store,
+        req: &DocumentPublishRequest,
+    ) -> Result<DocumentOutcome, StoreError> {
+        wait_gate(1);
+        publish_document(store, req)
+    }
+
+    /// Spins until `f` holds on the runner's queue, for at most 10 s.
+    fn wait_for_queue(handle: &IngestHandle, what: &str, f: impl Fn(&Queue) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            {
+                let q = handle.queue.0.lock().unwrap_or_else(|e| e.into_inner());
+                if f(&q) {
+                    return;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The finished jobs, one line each, and every `Started` path.
+    fn outcomes(rx: &Receiver<IngestEvent>) -> (Vec<String>, Vec<String>) {
+        let mut done = Vec::new();
+        let mut started = Vec::new();
+        for event in rx.try_iter() {
+            match event {
+                IngestEvent::Published { dataset, batch, .. } => {
+                    done.push(format!("published {dataset}/{batch}"))
+                }
+                IngestEvent::SeriesAppended {
+                    dataset, identity, ..
+                } => done.push(format!("appended {dataset}/{identity}")),
+                IngestEvent::Failed {
+                    dataset,
+                    batch,
+                    reason,
+                    ..
+                } => panic!("{dataset}/{batch}: {reason}"),
+                IngestEvent::Started { path, .. } => started.push(path),
+                _ => {}
+            }
+        }
+        (done, started)
+    }
+
+    /// A handoff stop runs every queued document, series and snapshot, in
+    /// the usual order, and leaves the files for the next owner's
+    /// discovery. The writer is parked on the first document until the
+    /// drain is requested, so nothing queued is popped before it.
+    #[test]
+    fn a_draining_runner_runs_queued_documents_series_and_snapshots_and_drops_files() {
+        let (_db, _src, store, risk, mut plan) = harness();
+        assert!(plan.items.len() >= 2, "need two files");
+        plan.items.truncate(2);
+        let reference = geode_core::reference::test_support::reference_dataset();
+        for ds in [cvi_dataset(), series_dataset(), reference.clone()] {
+            store.apply_schema(&ds).unwrap();
+        }
+        let mut schema = schema_of(risk);
+        schema.datasets.push(cvi_dataset());
+        schema.datasets.push(series_dataset());
+        schema.datasets.push(reference);
+        let (handle, rx) = spawn_channel_with_publish(store, schema, gated_stop_publish_0);
+        handle.submit_document(job("cvi_params", spx()));
+        handle.submit_document(job(
+            "cvi_params",
+            cvi_doc("NDX.Z", [1., 2., 3., 4., 5., 6.]),
+        ));
+        handle.submit_series(series_job(
+            "SPX.close",
+            series_rows("2026-01-05T14:30:00Z", 3, 100.0),
+        ));
+        handle.submit_reference(reference_job("u"));
+        assert_eq!(handle.submit(plan), 2);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                handle.shutdown_draining(std::time::Instant::now() + Duration::from_secs(2))
+            });
+            wait_for_queue(&handle, "the drain request", |q| q.drain_until.is_some());
+            open_gate(0);
+        });
+        let (done, started) = outcomes(&rx);
+        assert_eq!(
+            done,
+            [
+                "published cvi_params/SPX.Z",
+                "published cvi_params/NDX.Z",
+                "appended series/SPX.close",
+                "published u/u",
+            ],
+            "every queued document, series and snapshot ran, in order"
+        );
+        assert!(
+            started.iter().all(|p| !p.ends_with(".csv")),
+            "no file was loaded: {started:?}"
+        );
+    }
+
+    fn sleepy_publish(
+        store: &Store,
+        req: &DocumentPublishRequest,
+    ) -> Result<DocumentOutcome, StoreError> {
+        std::thread::sleep(Duration::from_millis(150));
+        publish_document(store, req)
+    }
+
+    /// The drain stops taking work once its deadline passes and names what
+    /// it left in one warning. `run` is called directly, inside the scoped
+    /// log capture on its own thread, so the capture sees its warning and
+    /// the test still bounds its wait.
+    #[test]
+    fn a_draining_runner_stops_at_the_deadline_and_counts_what_is_left() {
+        let (_dir, store) = document_store();
+        let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
+        let began = std::time::Instant::now();
+        {
+            let mut q = queue.0.lock().unwrap();
+            for _ in 0..20 {
+                q.documents.push_back(job("cvi_params", spx()).into());
+            }
+            q.drain_until = Some(began + Duration::from_millis(400));
+        }
+        let (tx, rx) = channel();
+        let sink: IngestSink = Arc::new(move |e| tx.send(e).is_ok());
+        let (done_tx, done_rx) = channel();
+        let worker_queue = Arc::clone(&queue);
+        std::thread::spawn(move || {
+            let records = logged(|| {
+                run(
+                    store,
+                    schema_of(cvi_dataset()),
+                    worker_queue,
+                    sink,
+                    load_file,
+                    sleepy_publish,
+                )
+            });
+            let _ = done_tx.send(records);
+        });
+        let records = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the drain returns within 10 s");
+        let took = began.elapsed();
+        let (done, _) = outcomes(&rx);
+        assert!(!done.is_empty(), "the drain ran something");
+        assert!(done.len() < 20, "the deadline stopped the drain");
+        assert!(took < Duration::from_secs(1), "returned after {took:?}");
+        let warnings: Vec<_> = records
+            .iter()
+            .filter(|r| r.level == tracing::Level::WARN)
+            .collect();
+        assert_eq!(warnings.len(), 1, "{records:?}");
+        assert_eq!(
+            warnings[0].message,
+            format!(
+                "release: dropped {} documents, 0 series, 0 snapshots at the deadline",
+                20 - done.len()
+            )
+        );
+    }
+
+    /// The app's quit is unchanged: a feed document still queued when it
+    /// stops is dropped; only the one already publishing finishes.
+    #[test]
+    fn a_plain_shutdown_still_drops_feed_documents() {
+        let (_dir, store) = document_store();
+        let (handle, rx) =
+            spawn_channel_with_publish(store, schema_of(cvi_dataset()), gated_stop_publish_1);
+        handle.submit_document(job("cvi_params", spx()));
+        wait_for_queue(&handle, "the first document to be taken", |q| {
+            q.documents.is_empty()
+        });
+        handle.submit_document(job(
+            "cvi_params",
+            cvi_doc("NDX.Z", [1., 2., 3., 4., 5., 6.]),
+        ));
+        std::thread::scope(|s| {
+            s.spawn(|| handle.shutdown());
+            wait_for_queue(&handle, "the stop request", |q| q.shutdown);
+            open_gate(1);
+        });
+        let (done, _) = outcomes(&rx);
+        assert_eq!(
+            done,
+            ["published cvi_params/SPX.Z"],
+            "the queued feed document is dropped"
         );
     }
 

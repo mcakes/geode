@@ -24827,6 +24827,42 @@ run_mutation "runner: shutdown also runs a feed's queued document" \
   '            DocumentWork::Publish(_job) => true,' \
   geode-data shutdown_runs_queued_local_writes_and_drops_the_rest
 
+# A release (the store handed to another process) runs the feeds' queued
+# documents, series and snapshots until its deadline, since the next owner's
+# feeds do not resend them, and leaves queued files to its discovery.
+run_mutation "release: queued feed work drains" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    if !fed || std::time::Instant::now() >= until {' \
+  '                    if true {' \
+  geode-data a_draining_runner_runs_queued_documents_series_and_snapshots_and_drops_files
+
+run_mutation "release: the deadline bounds the drain" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    if !fed || std::time::Instant::now() >= until {' \
+  '                    if !fed {' \
+  geode-data a_draining_runner_stops_at_the_deadline_and_counts_what_is_left
+
+run_mutation "release: files are left for discovery" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                        !(q.documents.is_empty() && q.series.is_empty() && q.references.is_empty());' \
+  '                        !(q.documents.is_empty() && q.series.is_empty() && q.references.is_empty() && q.items.is_empty());' \
+  geode-data a_draining_runner_runs_queued_documents_series_and_snapshots_and_drops_files
+
+run_mutation "release: coalescers flush" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        for (_key, pending) in coalescer.drain_all() {
+            self.submit(pending);
+        }' \
+  '        coalescer.drain_all();' \
+  geode-data a_flushing_shutdown_submits_the_coalescers_pending_documents
+
+# DuckDB names PID 0 when the lock was already released; that is no holder.
+run_mutation "lease: PID 0 names no holder" \
+  crates/geode-data/src/lease.rs \
+  'digits.trim().parse().ok().filter(|&pid| pid != 0)' \
+  'digits.trim().parse().ok()' \
+  geode-data a_pid_of_zero_names_no_holder_and_keeps_the_last_known_one
+
 # At quit every unsaved sheet is saved before the data service stops.
 run_mutation "quit: the data hook stops the service without flushing sheets" \
   crates/geode-app/src/bridge.rs \

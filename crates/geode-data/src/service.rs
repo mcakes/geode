@@ -235,9 +235,11 @@ pub enum DataEvent {
     StoreWaiting {
         holder: Option<u32>,
     },
-    /// The wait announced by `StoreWaiting` is over: the store is open.
-    /// Sent only after a `StoreWaiting`; a wait that ends in failure ends
-    /// with `ThreadStopped` instead, and a stop during the wait sends
+    /// The wait announced by `StoreWaiting` is over: DuckDB opened the
+    /// store. Sent only after a `StoreWaiting`, as soon as that open
+    /// succeeds, so the rest of the service's open can still fail and
+    /// follow it with `ThreadStopped`. A wait that ends without an open
+    /// sends `ThreadStopped` alone, and a stop during the wait sends
     /// neither.
     StoreOpened,
 }
@@ -2724,7 +2726,23 @@ impl DataService {
         Ok(oldest)
     }
 
+    /// An exit stop: [`DataService::shutdown_with`] with `StopMode::Exit`.
     pub fn shutdown(&self) {
+        self.shutdown_with(crate::handle::StopMode::Exit);
+    }
+
+    /// Stop every worker. An exit stops the producers, then the readers,
+    /// then the ingest runner, which runs only the queued local writes. A
+    /// release stops the producers, has each subscription submit what its
+    /// coalescer holds, stops the scheduler, and lets the runner drain the
+    /// feeds' queued work until the deadline (`drain` from now) before the
+    /// readers stop. Either way the app lease, the struct's last field,
+    /// drops after the service itself, once every connection is gone.
+    pub fn shutdown_with(&self, mode: crate::handle::StopMode) {
+        let release_until = match mode {
+            crate::handle::StopMode::Exit => None,
+            crate::handle::StopMode::Release { drain } => Some(Instant::now() + drain),
+        };
         // The file worker first: it answers only the sink.
         self.files.shutdown();
         // Upload workers next: they answer only the sink, and an upload
@@ -2758,20 +2776,36 @@ impl DataService {
         // workers above: each one's receiver thread submits documents
         // into the ingest runner, so stopping the runner while a worker
         // is still delivering would leave work queued behind a shut-down
-        // consumer.
+        // consumer. A release also submits what each coalescer holds.
         for worker in self
             .subscriptions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter_mut()
         {
-            worker.shutdown();
+            match release_until {
+                None => worker.shutdown(),
+                Some(_) => worker.shutdown_flushing(),
+            }
         }
-        self.pool.shutdown();
-        self.pricing.shutdown();
-        self.vol.shutdown();
-        self.scheduler.shutdown();
-        self.ingest.shutdown();
+        match release_until {
+            None => {
+                self.pool.shutdown();
+                self.pricing.shutdown();
+                self.vol.shutdown();
+                self.scheduler.shutdown();
+                self.ingest.shutdown();
+            }
+            Some(until) => {
+                // The scheduler before the drain, so no poll submits files
+                // the drain would only drop; the readers after it.
+                self.scheduler.shutdown();
+                self.ingest.shutdown_draining(until);
+                self.pool.shutdown();
+                self.pricing.shutdown();
+                self.vol.shutdown();
+            }
+        }
     }
 }
 

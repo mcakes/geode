@@ -83,6 +83,15 @@ impl<T> Coalescer<T> {
         out
     }
 
+    /// Every pending item, released regardless of its deadline, leaving
+    /// nothing pending. For a stop that hands the store over: what the
+    /// window was holding back is the newest state of its key, and the
+    /// next owner's feed does not resend it.
+    pub fn drain_all(&mut self) -> Vec<(String, T)> {
+        self.due_at.clear();
+        self.pending.drain().collect()
+    }
+
     pub fn next_deadline(&self) -> Option<Instant> {
         self.due_at.keys().next().copied()
     }
@@ -156,6 +165,30 @@ mod tests {
         let mut d = c.due(t0 + Duration::from_millis(500));
         d.sort();
         assert_eq!(d, vec![("NDX".into(), 11), ("SPX".into(), 2)]);
+    }
+
+    #[test]
+    fn drain_all_returns_every_pending_item_and_empties() {
+        let mut c = Coalescer::new(Duration::from_secs(10));
+        let t0 = Instant::now();
+        for key in ["SPX", "NDX", "VIX"] {
+            assert!(c.offer(t0, key.into(), 1).is_some(), "a first offer goes");
+        }
+        let t1 = t0 + Duration::from_millis(10);
+        assert_eq!(c.offer(t1, "SPX".into(), 2), None);
+        assert_eq!(c.offer(t1, "SPX".into(), 3), None);
+        assert_eq!(c.offer(t1, "NDX".into(), 2), None);
+        assert_eq!(c.offer(t1, "VIX".into(), 2), None);
+        assert_eq!(c.pending(), 3);
+        let mut drained = c.drain_all();
+        drained.sort();
+        assert_eq!(
+            drained,
+            vec![("NDX".into(), 2), ("SPX".into(), 3), ("VIX".into(), 2)],
+            "every held key, each with its latest contents"
+        );
+        assert_eq!(c.pending(), 0);
+        assert_eq!(c.next_deadline(), None);
     }
 
     #[test]

@@ -21,7 +21,7 @@ pub mod supervise;
 pub mod vol;
 
 pub use egress::{UploadOutcome, UploadParams};
-pub use handle::{DataHandle, REQUEST_BOUND, Refusal, Request};
+pub use handle::{DataHandle, REQUEST_BOUND, Refusal, Request, StopMode};
 pub use pricing::{PricerConfig, PricerRegistry};
 pub use service::{
     ContextColumns, DEFAULT_STORE_DEADLINE, DataEvent, DataService, DataServiceConfig, EventSink,
@@ -29,6 +29,11 @@ pub use service::{
 };
 pub use store::stamp::STORE_FORMAT;
 pub use vol::{VolConfig, VolModelRegistry};
+
+/// How long a release keeps running the feeds' queued work before it drops
+/// the rest: the drain a background collector grants when the app takes the
+/// store over.
+pub const HANDOFF_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[cfg(test)]
 mod consistency_tests;
