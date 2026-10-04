@@ -284,6 +284,16 @@ impl ShellView {
         }
     }
 
+    /// Re-pull every emitter now, whatever the frame's generation: a change
+    /// of the composition rule moves no frame number, so the generation
+    /// gate in [`Self::repull_emitters`] would leave every group on the old
+    /// rule. Same oldest-posting-first order as that gate's pass.
+    pub(super) fn force_repull_emitters(&mut self, cx: &mut Context<Self>) {
+        for tile in self.frame.read(cx).emitters() {
+            self.pull_emission(tile, cx);
+        }
+    }
+
     /// Notify a tile's own view when its membership changes: its header
     /// shows the membership, and whatever observes the view hears that it
     /// changed. Tile views are not cached, so the shell's own repaint

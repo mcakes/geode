@@ -531,6 +531,7 @@ fn slash_enters_settings_filter_mode_and_typing_narrows(cx: &mut gpui::TestAppCo
             s.add_direction,
             s.default_source.as_deref(),
             &cx.global::<crate::series::SeriesSettings>().names(),
+            s.link_include_tile_filter,
         );
         (
             state.query.clone(),
@@ -2185,6 +2186,31 @@ fn tab_steps_the_line_numbers_row_and_publishes_the_global(cx: &mut gpui::TestAp
     assert_eq!(
         cx.update(|_, cx| cx.global::<UiSettings>().line_numbers),
         LineNumbers::Off,
+        "the row wraps"
+    );
+}
+
+/// The Links row is the last: six downs reach it and `tab` steps the
+/// shell's composition rule On → Off → On, the setter every key and click
+/// on the row goes through.
+#[gpui::test]
+fn tab_steps_the_link_filter_row(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.link_include_tile_filter),
+        "sanity: the filter is included by default"
+    );
+    cx.simulate_keystrokes("down down down down down down");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.settings.as_ref().unwrap().selected),
+        6,
+        "sanity: six downs land on the Links row"
+    );
+    cx.simulate_keystrokes("tab");
+    assert!(!shell.read_with(&cx, |shell, _| shell.link_include_tile_filter));
+    cx.simulate_keystrokes("tab");
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.link_include_tile_filter),
         "the row wraps"
     );
 }

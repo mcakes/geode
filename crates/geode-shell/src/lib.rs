@@ -25,6 +25,7 @@ pub mod keymap;
 pub mod keymap_edit;
 pub mod linenumbers;
 pub mod link;
+pub mod linkfilter;
 pub mod listfilter;
 pub mod log_persist;
 pub mod memory;

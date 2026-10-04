@@ -677,7 +677,10 @@ pub struct ShellView {
     /// tile announcing anything, so the frame observer re-pulls every
     /// emitter once the generation passes this.
     last_emit_generation: u64,
-    /// Whether a posting composes the emitter's own `:filter` layer in.
+    /// Whether a posting composes the emitter's own `:filter` layer in:
+    /// `[links] include_tile_filter`, seeded from config, written by
+    /// `set_link_filter` and hot reload, each of which re-pulls every
+    /// emitter on a change.
     link_include_tile_filter: bool,
     /// Who lives in each tile. Created lazily in `ensure_occupants` and
     /// dropped when the tile is gone from every workspace.
@@ -1253,6 +1256,7 @@ impl ShellView {
         let add_direction = crate::tileadd::AddDirection::from_config(&services.config);
         let line_numbers = crate::linenumbers::LineNumbers::from_config(&services.config);
         cx.set_global(crate::linenumbers::UiSettings { line_numbers });
+        let link_include_tile_filter = crate::linkfilter::from_config(&services.config);
 
         // `[timeseries] default_source` plus the fetch sources it names,
         // one of the workspace's five globals (see `series`'s module doc). Set
@@ -1577,7 +1581,7 @@ impl ShellView {
             last_flip_versions,
             last_flip_groups,
             last_emit_generation,
-            link_include_tile_filter: true,
+            link_include_tile_filter,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
             emit_subs: HashMap::new(),

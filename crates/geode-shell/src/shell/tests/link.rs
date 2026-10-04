@@ -3215,3 +3215,68 @@ fn the_chooser_refuses_a_loop_and_stays_open(cx: &mut gpui::TestAppContext) {
         Some("would link B back into A")
     );
 }
+
+/// The region under the emitter's own `:filter` layer, as group A sees it.
+fn group_region(frame: &Entity<Frame>, vcx: &gpui::VisualTestContext) -> Option<String> {
+    frame.read_with(vcx, |f, _| {
+        f.group_scope(Group::A).sole("region").map(str::to_owned)
+    })
+}
+
+/// Turning `[links] include_tile_filter` off re-pulls every emitter at
+/// once: the rule changed, the frame did not, so a re-pull keyed on the
+/// frame's generation alone would leave the group on the old composition.
+#[gpui::test]
+fn turning_the_filter_setting_off_repulls_without_the_layer(cx: &mut gpui::TestAppContext) {
+    let (services, _emitter) = emitting_services(Emission {
+        cursor: CursorScope::Path(Scope::default()),
+        layer: Scope::one("region", "EU"),
+        ..Emission::default()
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+    assert_eq!(group_region(&frame, &vcx).as_deref(), Some("EU"));
+    shell.update(&mut vcx, |s, cx| s.set_link_filter(false, cx));
+    vcx.run_until_parked();
+    assert_eq!(group_region(&frame, &vcx), None);
+    shell.update(&mut vcx, |s, cx| s.set_link_filter(true, cx));
+    vcx.run_until_parked();
+    assert_eq!(
+        group_region(&frame, &vcx).as_deref(),
+        Some("EU"),
+        "and back on, the layer returns"
+    );
+}
+
+/// A hot reload that changes the setting re-pulls the same way; one that
+/// leaves it alone keeps the composition.
+#[gpui::test]
+fn a_reload_that_turns_the_filter_off_repulls_without_the_layer(cx: &mut gpui::TestAppContext) {
+    let (services, _emitter) = emitting_services(Emission {
+        cursor: CursorScope::Path(Scope::default()),
+        layer: Scope::one("region", "EU"),
+        ..Emission::default()
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+    assert_eq!(group_region(&frame, &vcx).as_deref(), Some("EU"));
+    let reload_with = |app: &str| {
+        Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+                LayerDoc::builtin("app", app).unwrap(),
+            ],
+            desk: None,
+            user: None,
+        })
+    };
+    let unchanged = reload_with("[links]\ninclude_tile_filter = true\n");
+    shell.update(&mut vcx, |s, cx| s.apply_reload(unchanged, cx));
+    vcx.run_until_parked();
+    assert_eq!(group_region(&frame, &vcx).as_deref(), Some("EU"));
+    let off = reload_with("[links]\ninclude_tile_filter = false\n");
+    shell.update(&mut vcx, |s, cx| s.apply_reload(off, cx));
+    vcx.run_until_parked();
+    assert!(!shell.read_with(&vcx, |s, _| s.link_include_tile_filter));
+    assert_eq!(group_region(&frame, &vcx), None);
+}

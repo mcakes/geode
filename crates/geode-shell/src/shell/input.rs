@@ -784,6 +784,24 @@ impl ShellView {
         .detach();
     }
 
+    /// Set `[links] include_tile_filter`, persist it, and re-pull every
+    /// emitter so groups follow the new rule at once. A hot reload writes
+    /// the field and re-pulls itself, since it must not persist what it
+    /// just read.
+    pub(crate) fn set_link_filter(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.link_include_tile_filter = on;
+        if let Some(dir) = self.user_dir.clone() {
+            crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
+                if let Err(e) = crate::linkfilter::persist_to_user_config(&dir, on) {
+                    tracing::warn!(target: "geode::config", "link filter setting not saved: {e}");
+                }
+            })
+            .detach();
+        }
+        self.force_repull_emitters(cx);
+        cx.notify();
+    }
+
     /// Set `[timeseries] default_source`, publish it through the
     /// `series::SeriesSettings` global (the fetch-source list is
     /// re-derived with it — sources are restart-gated, so it is

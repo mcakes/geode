@@ -34566,6 +34566,34 @@ run_mutation "link: the cluster text paints the refusal" \
   '            .children(None::<&notice::Notice>.map(|n| {' \
   geode-tile a_quiet_emitter_header_shows_its_null_refusal
 
+# `[links] include_tile_filter`: on by default, and every change of it
+# (settings row, hot reload) re-pulls the emitters at once, since the rule
+# moves no frame generation.
+run_mutation "link: the filter setting defaults on" \
+  crates/geode-shell/src/linkfilter.rs \
+  '        .unwrap_or(true)' \
+  '        .unwrap_or(false)' \
+  geode-shell the_setting_defaults_on_and_reads_off
+
+run_mutation "link: changing the filter setting re-pulls" \
+  crates/geode-shell/src/shell/input.rs \
+  '        self.force_repull_emitters(cx);
+        cx.notify();' \
+  '        cx.notify();' \
+  geode-shell turning_the_filter_setting_off_repulls_without_the_layer
+
+run_mutation "link: a reload that changes the filter setting re-pulls" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                self.force_repull_emitters(cx);' \
+  '                let _ = ();' \
+  geode-shell a_reload_that_turns_the_filter_off_repulls_without_the_layer
+
+run_mutation "link: the settings row sets the filter" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '                shell.set_link_filter(on, cx);' \
+  '                let _ = on;' \
+  geode-shell tab_steps_the_link_filter_row
+
 # ---- Vol slice viewer ----
 #
 # geode-volslice: one underlying's smiles per expiry and kind. The pure core

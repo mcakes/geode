@@ -15,7 +15,7 @@
 //! so bare letters act as commands.
 //!
 //! Visible settings are Theme, Font size, Line numbers, Find style, Add tile direction,
-//! and timeseries default source. With no configured sources, its only option is
+//! timeseries default source, and whether a linked scope includes the tile filter. With no configured sources, its only option is
 //! `(none)`. Theme names include appearance, so there is no separate mode row.
 
 use std::rc::Rc;
@@ -57,6 +57,7 @@ pub enum SettingId {
     LineNumbers,
     AddDirection,
     DefaultSource,
+    LinkFilter,
 }
 
 /// One row of the settings dialog: an enumerated setting — its displayed
@@ -73,7 +74,7 @@ pub struct SettingRow {
 }
 
 /// Build rows from plain inputs in fixed order: Theme, Font size, Find style, Line
-/// numbers, Add tile direction, and Default series source. The source row always
+/// numbers, Add tile direction, Default series source, and the linked-scope filter. The source row always
 /// includes `(none)`, even with no configured sources. `rows_for` supplies the live
 /// shell values.
 ///
@@ -89,6 +90,7 @@ pub fn derive_rows(
     add_direction: AddDirection,
     default_source: Option<&str>,
     fetch_sources: &[String],
+    link_filter: bool,
 ) -> Vec<SettingRow> {
     vec![
         SettingRow {
@@ -163,6 +165,19 @@ pub fn derive_rows(
             current: default_source
                 .and_then(|d| fetch_sources.iter().position(|s| s == d))
                 .map_or(0, |i| i + 1),
+        },
+        SettingRow {
+            id: SettingId::LinkFilter,
+            title: "Linked scope includes tile filter",
+            category: "Links",
+            values: crate::linkfilter::ALL
+                .iter()
+                .map(|&b| crate::linkfilter::label(b).to_string())
+                .collect(),
+            current: crate::linkfilter::ALL
+                .iter()
+                .position(|&b| b == link_filter)
+                .expect("a bool is in linkfilter::ALL"),
         },
     ]
 }
@@ -464,6 +479,11 @@ fn apply_setting(
                 shell.set_default_source(Some(name), cx);
             }
         }
+        SettingId::LinkFilter => {
+            if let Some(&on) = crate::linkfilter::ALL.get(value_ix) {
+                shell.set_link_filter(on, cx);
+            }
+        }
     }
 }
 
@@ -565,6 +585,7 @@ fn rows_for(shell: &ShellView, cx: &App) -> Vec<SettingRow> {
         shell.add_direction,
         shell.default_source.as_deref(),
         &fetch_source_names(cx),
+        shell.link_include_tile_filter,
     )
 }
 
@@ -1098,6 +1119,7 @@ mod tests {
             AddDirection::Auto,
             None,
             &names(&["demo_kdb", "demo_rest"]),
+            true,
         )
     }
 
@@ -1121,6 +1143,11 @@ mod tests {
                     "Default series source",
                     "Timeseries"
                 ),
+                (
+                    SettingId::LinkFilter,
+                    "Linked scope includes tile filter",
+                    "Links"
+                ),
             ]
         );
     }
@@ -1140,6 +1167,8 @@ mod tests {
         assert_eq!(rows[4].current, 2, "AddDirection::Auto is ALL[2]");
         assert_eq!(rows[5].values, names(&["(none)", "demo_kdb", "demo_rest"]));
         assert_eq!(rows[5].current, 0, "no default source is `(none)`");
+        assert_eq!(rows[6].values, names(&["On", "Off"]));
+        assert_eq!(rows[6].current, 0, "the filter included is ALL[0]");
     }
 
     #[test]
@@ -1154,6 +1183,7 @@ mod tests {
                 AddDirection::Auto,
                 default,
                 &names(sources),
+                true,
             )[5]
             .clone()
         };
@@ -1184,10 +1214,12 @@ mod tests {
             AddDirection::Auto,
             None,
             &[],
+            false,
         );
         assert_eq!(rows[1].current, 0, "FontSize::Small is ALL[0]");
         assert_eq!(rows[2].current, 1, "FindStyle::Fzf is ALL[1]");
         assert_eq!(rows[3].current, 2, "LineNumbers::Relative is ALL[2]");
+        assert_eq!(rows[6].current, 1, "the filter left out is ALL[1]");
     }
 
     #[test]
@@ -1211,6 +1243,7 @@ mod tests {
             AddDirection::Auto,
             None,
             &[],
+            true,
         );
         assert_eq!(
             rows[0].current, 0,
@@ -1229,8 +1262,9 @@ mod tests {
             AddDirection::Vertical,
             None,
             &[],
+            true,
         );
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 7);
         let row = &rows[4];
         assert_eq!(row.id, SettingId::AddDirection);
         assert_eq!(row.title, "Add tile");
