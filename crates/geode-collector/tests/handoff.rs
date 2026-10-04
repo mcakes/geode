@@ -312,6 +312,26 @@ impl World {
         }
     }
 
+    /// Wait until the log contains `needle`, failing with the log (and the
+    /// collector's stderr, if it exited) after `limit`.
+    fn wait_log(&self, collector: &mut Proc, needle: &str, limit: Duration) {
+        let start = Instant::now();
+        loop {
+            if self.log().contains(needle) {
+                return;
+            }
+            if let Some(status) = collector.exited() {
+                panic!("{}", self.exited_message(status));
+            }
+            assert!(
+                start.elapsed() < limit,
+                "timed out after {limit:?} waiting for '{needle}'\n{}",
+                self.log()
+            );
+            std::thread::sleep(POLL);
+        }
+    }
+
     /// The generation the collector logged for `dataset`/`batch`, once it
     /// has published it.
     fn wait_published(&self, dataset: &str, batch: &str, limit: Duration) -> i64 {
@@ -515,13 +535,17 @@ fn a_killed_app_returns_the_store() {
 }
 
 /// Review Focus 4, across processes: every document the collector
-/// published before or during the handoff is live for the app. The test
-/// waits until the startup burst's CVI documents are all logged as
-/// published before taking the store: a channel adapter drops messages it
-/// has not yet routed when its subscription closes, so taking the store
-/// earlier would test the demo bus's timing, not the handoff. The release's
-/// own drain publishes whatever the coalescers still hold; those lines are
-/// logged before the release line and are checked too.
+/// published before or during the handoff is live for the app, and the
+/// release dropped none. The test waits until the startup burst's CVI
+/// documents are all logged as published and the collector has published
+/// nothing for a second before taking the store: a channel adapter drops
+/// messages it has not yet routed when its subscription closes, and a
+/// release in the middle of the burst can meet its 2 s deadline (a debug
+/// build publishes about 40 documents a second, and the burst is over a
+/// hundred), dropping the rest by design;
+/// either would test the demo bus's timing, not the handoff. A cadence
+/// publish still held by a coalescer is flushed by the release's drain;
+/// those lines are logged before the release line and are checked too.
 #[test]
 fn a_handoff_keeps_the_documents_the_collector_received() {
     let _serial = serial();
@@ -538,6 +562,7 @@ fn a_handoff_keeps_the_documents_the_collector_received() {
             .all(|u| done.contains_key(&("cvi_params".to_string(), u.clone())))
             .then_some(())
     });
+    wait_quiet(&world, Duration::from_secs(1), WAIT);
 
     let (lease, store, _, _) = take_store(&world.db);
     wait_until("the release line", WAIT, || {
@@ -585,9 +610,10 @@ fn a_mismatched_stamp_idles_the_collector() {
     let mut collector = world.collector();
     let mismatch =
         format!("is stamped store format {other}; this collector writes format {STORE_FORMAT}");
-    wait_until("the mismatch error", Duration::from_secs(3), || {
-        world.log().contains(&mismatch).then_some(())
-    });
+    // Timed from the collector's first line: the first launch of a freshly
+    // linked binary can take seconds on macOS before `main` runs.
+    world.wait_log(&mut collector, "collecting into", WAIT);
+    world.wait_log(&mut collector, &mismatch, Duration::from_secs(3));
     // Give a repeat, a publish or an exit time to show.
     std::thread::sleep(Duration::from_secs(1));
     let log = world.log();
@@ -629,16 +655,22 @@ fn a_momentary_app_lock_does_not_release_the_store() {
         .open(lease::app_lock_path(&world.db))
         .unwrap();
     let start = Instant::now();
+    // The longest pulse: one past the collector's 20 ms confirmation gap
+    // would be an app by its rule, and a release then would be right.
+    let mut longest = Duration::ZERO;
     while start.elapsed() < Duration::from_secs(5) {
-        lock.try_lock().expect("nothing else holds the app lock");
+        // The collector's own probe holds the lock for an instant.
+        wait_until("the app lock between probes", WAIT, || lock.try_lock().ok());
+        let held = Instant::now();
         std::thread::sleep(Duration::from_millis(10));
         lock.unlock().unwrap();
+        longest = longest.max(held.elapsed());
         std::thread::sleep(Duration::from_millis(40));
     }
     drop(lock);
 
     let log = world.log();
-    assert!(!log.contains(RELEASED), "{log}");
+    assert!(!log.contains(RELEASED), "longest pulse {longest:?}\n{log}");
     assert!(collector_present(&world.db).unwrap());
     assert!(collector.exited().is_none());
     assert_eq!(world.count(FILES_OK), 1, "one hold, never released");
@@ -651,18 +683,15 @@ const O_NONBLOCK: i32 = 0o4000;
 #[cfg(not(target_os = "linux"))]
 const O_NONBLOCK: i32 = 0x0004;
 
-/// The FIFO's write end, opened once the collector is blocked opening it
-/// for reading. While the test holds it the collector's read stays blocked;
-/// dropping it ends the read with an empty document.
-fn fifo_writer_when_read(path: &Path) -> File {
+/// The FIFO's write end, if a reader has the FIFO open (or is blocked
+/// opening it); `None` while no reader does.
+fn fifo_writer(path: &Path) -> Option<File> {
     use std::os::unix::fs::OpenOptionsExt;
-    wait_until("the collector to read its configuration", WAIT, || {
-        OpenOptions::new()
-            .write(true)
-            .custom_flags(O_NONBLOCK)
-            .open(path)
-            .ok()
-    })
+    OpenOptions::new()
+        .write(true)
+        .custom_flags(O_NONBLOCK)
+        .open(path)
+        .ok()
 }
 
 /// An app that takes the store between the collector's checks and its open
@@ -671,31 +700,57 @@ fn fifo_writer_when_read(path: &Path) -> File {
 /// lease.
 ///
 /// The race is made deterministic with a FIFO in the desk directory: the
-/// collector reads every desk `*.toml` when it loads its configuration, once
-/// at start and again at each acquire after the stamp check, and blocks on
-/// the FIFO until the test opens and closes its write end. The test takes
-/// the store as the app while the collector is blocked there, then lets it
-/// go on to its open.
+/// collector reads every desk `*.toml` when it loads its configuration at
+/// each acquire, after the app probe and the stamp check, and blocks
+/// opening the FIFO until a writer opens it. The test takes the store as
+/// the app while the collector is blocked there, then lets it go on to its
+/// open.
+///
+/// The FIFO appears only after the start-up load: until then a raw lock on
+/// `<db>.app.lock`, taken before the spawn and released long after it,
+/// keeps the collector waiting for the app.
 #[test]
 fn a_lost_race_is_a_yield_not_an_exit() {
     let _serial = serial();
     let world = World::files();
     let gate = world.desk.join("gate.toml");
-    let made = Command::new("mkfifo").arg(&gate).status().expect("mkfifo");
-    assert!(made.success());
+    std::fs::create_dir_all(world.db.parent().unwrap()).unwrap();
+    let app_lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lease::app_lock_path(&world.db))
+        .unwrap();
+    app_lock.try_lock().unwrap();
     let mut collector = world.collector();
-    // The start-up load. The lease line is logged after that read reached
-    // the FIFO's end, so the next reader is the acquire's load.
-    drop(fifo_writer_when_read(&gate));
     wait_until("the lease", WAIT, || {
         world.log().contains("collecting into").then_some(())
     });
-    // The collector found no app and no stamp and is blocked in the
-    // acquire's load: the app takes the store now, then lets it go on.
-    let held = fifo_writer_when_read(&gate);
+    let made = Command::new("mkfifo").arg(&gate).status().expect("mkfifo");
+    assert!(made.success());
+    app_lock.unlock().unwrap();
+    drop(app_lock);
+
+    // Within a second the collector sees no app, finds no stamp and blocks
+    // in the acquire's load: the app takes the store now.
+    let held = wait_until("the collector to load its configuration", WAIT, || {
+        fifo_writer(&gate)
+    });
     let (lease, store, _, waited) = take_store(&world.db);
     assert!(!waited, "the collector had not opened the store");
     drop(held);
+    // A writer that closes before the blocked reader has woken can leave
+    // it asleep (macOS), so open and close the write end again until the
+    // collector moves on. No other read of the FIFO can begin before the
+    // yield: the next load waits for the app to go.
+    wait_until("the collector to acquire", WAIT, || {
+        if world.log().contains("acquiring the store") {
+            return Some(());
+        }
+        drop(fifo_writer(&gate));
+        None
+    });
     wait_until("the yield", WAIT, || {
         if let Some(status) = collector.exited() {
             panic!("{}", world.exited_message(status));
