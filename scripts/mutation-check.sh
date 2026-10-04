@@ -36403,7 +36403,7 @@ run_mutation "classifications: a landing plan never displaces an open edit" \
             || self.prompt.is_some()' \
   '            || self.prompt.is_some()' \
   geode-classifications \
-  a_plan_landing_on_an_open_editor_is_held
+  a_plan_landing_on_an_open_editor_off_its_field_is_held
 
 # Arming takes focus: a plan landing while another tile is focused would
 # take its keys, and a stray y would apply the import.

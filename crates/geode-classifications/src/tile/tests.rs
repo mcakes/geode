@@ -2882,6 +2882,23 @@ fn a_plan_landing_on_an_open_editor_is_held(cx: &mut gpui::TestAppContext) {
     assert!(!h.notices(&vcx).contains(&READY.to_string()));
 }
 
+/// The open editor holds the import even when window focus is back on the
+/// shell root (its field is not the only sign of work in hand): arming
+/// there would close nothing but answer the trader's next key.
+#[gpui::test]
+fn a_plan_landing_on_an_open_editor_off_its_field_is_held(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.goto(&mut vcx, "NKY");
+    h.press(&mut vcx, "enter");
+    assert!(h.editor(&vcx).is_some());
+    vcx.update(|window, cx| h.shell_focus.focus(window, cx));
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.editor(&vcx).is_some(), "the editor stays open");
+    assert!(h.notices(&vcx).contains(&READY.to_string()));
+}
+
 #[gpui::test]
 fn a_plan_landing_on_an_open_prompt_is_held(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = editing(cx);
