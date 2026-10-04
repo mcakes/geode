@@ -466,7 +466,12 @@ impl Events {
                 detail,
             } => {
                 if self.health_changed(&source, &worst) {
-                    tracing::info!(target: TARGET, "{source}: {} — {detail}", worst.label());
+                    let label = worst.label();
+                    if detail.is_empty() {
+                        tracing::info!(target: TARGET, "{source}: {label}");
+                    } else {
+                        tracing::info!(target: TARGET, "{source}: {label} — {detail}");
+                    }
                 }
             }
             DataEvent::Published {
