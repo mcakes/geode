@@ -207,7 +207,11 @@ pub fn try_collector(db: &Path) -> std::io::Result<Option<CollectorLease>> {
 /// fails that test rather than turning every wait into an open error.
 ///
 /// - Unix: DuckDB takes an fcntl lock and reports `Could not set lock on
-///   file "<path>": Conflicting lock is held in <exe> (PID n) …`.
+///   file "<path>": Conflicting lock is held in <exe> (PID n) …`. The
+///   `Conflicting lock is held in` marker is what matches: the same `Could
+///   not set lock on file` prefix also carries a file system without locks
+///   (`File locks are not supported…`) and a failed `F_GETLK` (strerror's
+///   text), and neither clears by waiting, so both fail at once.
 /// - Windows: DuckDB opens with share mode 0, so `CreateFileW` itself fails
 ///   with `Cannot open file "<path>": <OS sharing-violation message>`. When
 ///   the Restart Manager finds the holder, DuckDB appends `File is already
@@ -218,11 +222,11 @@ pub fn try_collector(db: &Path) -> std::io::Result<Option<CollectorLease>> {
 /// Known gap: on Windows, when the Restart Manager finds no holder, the
 /// message carries only the localized OS text and no DuckDB marker, so it
 /// is not classified as a conflict and the open fails at once as
-/// `LeaseError::Open` instead of waiting.
+/// `LeaseError::Open` instead of waiting. On a Unix other than macOS and
+/// Linux, DuckDB names no holder and writes no marker, so a conflict there
+/// fails at once in the same way.
 pub fn is_lock_conflict_message(message: &str) -> bool {
-    message.contains("Could not set lock on file")
-        || message.contains("Conflicting lock is held")
-        || message.contains("File is already open in")
+    message.contains("Conflicting lock is held in") || message.contains("File is already open in")
 }
 
 /// `is_lock_conflict_message` through an open error's source text. Only an
@@ -715,6 +719,22 @@ mod tests {
         ));
     }
 
+    /// DuckDB's Unix lock failures that are not another process's lock:
+    /// waiting on them would only spend the deadline before the same error.
+    #[test]
+    fn a_unix_lock_failure_without_a_holder_is_not_a_conflict() {
+        let unsupported = "IO Error: Could not set lock on file \"/x/g.duckdb\": File locks are \
+                           not supported for this file system, cannot open the file in read-write \
+                           mode. Try opening the file in read-only mode. See also \
+                           https://duckdb.org/docs/stable/connect/concurrency";
+        assert!(!is_lock_conflict_message(unsupported));
+        assert!(!is_lock_conflict(&open_error("/x/g.duckdb", unsupported)));
+        // F_GETLK failing as well leaves only strerror's text.
+        let getlk = "IO Error: Could not set lock on file \"/x/g.duckdb\": No locks available. \
+                     See also https://duckdb.org/docs/stable/connect/concurrency";
+        assert!(!is_lock_conflict_message(getlk));
+    }
+
     #[test]
     fn a_pid_in_the_store_path_is_not_the_holder() {
         let path = "/x/(PID 5)/g.duckdb";
@@ -744,7 +764,8 @@ mod tests {
             waits
         };
         assert_eq!(reported(open_error(path, &text)), vec![Some(812)]);
-        let anonymous = "IO Error: Could not set lock on file \"/x/g.duckdb\": busy";
+        let anonymous = "IO Error: Could not set lock on file \"/x/g.duckdb\": Conflicting lock \
+                         is held in /bin/geode by user mch.";
         assert_eq!(reported(open_error(path, anonymous)), vec![None]);
     }
 

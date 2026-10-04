@@ -1330,10 +1330,17 @@ run_mutation "lease: only a lock conflict is retried" \
 
 run_mutation "lease: the Windows holder marker is a conflict" \
   crates/geode-data/src/lease.rs \
-  '        || message.contains("File is already open in")' \
-  '        || false' \
+  ' || message.contains("File is already open in")' \
+  ' || false' \
   geode-data \
   the_windows_conflict_text_is_a_conflict_only_with_duckdbs_marker
+
+run_mutation "lease: a Unix conflict needs DuckDB's holder marker" \
+  crates/geode-data/src/lease.rs \
+  '    message.contains("Conflicting lock is held in") ||' \
+  '    message.contains("Could not set lock on file") ||' \
+  geode-data \
+  a_unix_lock_failure_without_a_holder_is_not_a_conflict
 
 run_mutation "lease: the holder is the last PID in the text" \
   crates/geode-data/src/lease.rs \
