@@ -234,57 +234,6 @@ fn a_covered_picker_receives_its_delivery(cx: &mut gpui::TestAppContext) {
     assert!(vcx.debug_bounds("picker-value-BK000").is_some());
 }
 
-/// A `ScopeExpr` dialog pushed over the Scopes object dialog's open
-/// `expression` field: accepting a suggestion in the top field must write
-/// only the top field's own completion, never the covered field's draft.
-/// Popping reveals the covered field exactly as it was left.
-#[gpui::test]
-fn accept_in_a_pushed_dialog_does_not_touch_a_covered_object_draft(cx: &mut gpui::TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let (shell, mut vcx) = dialog_test_shell_in_dir(
-        cx,
-        super::objectdialog::services_with_a_saved_scope(),
-        dir.path(),
-        OBJECT_SCOPES,
-    );
-    super::objectdialog::open_expression_field(&shell, &mut vcx);
-    vcx.simulate_input("boo");
-    vcx.run_until_parked();
-    assert_eq!(
-        super::objectdialog::edit_draft(&shell, &vcx, |d| d.query.clone()),
-        "boo"
-    );
-
-    dispatch_action(&shell, "frame::add_expression", &mut vcx);
-    assert_eq!(
-        kinds(&shell, &mut vcx),
-        vec![DialogKind::Object, DialogKind::ScopeExpr]
-    );
-
-    vcx.simulate_input("np");
-    vcx.simulate_keystrokes("tab");
-    vcx.run_until_parked();
-    assert_eq!(
-        input_text(&shell, &mut vcx),
-        "npv ",
-        "the top field accepted its own suggestion"
-    );
-    assert_eq!(
-        super::objectdialog::edit_draft(&shell, &vcx, |d| d.query.clone()),
-        "boo",
-        "an accept in the top dialog must not overwrite the covered object draft"
-    );
-
-    vcx.simulate_keystrokes("escape");
-    draw(&mut vcx);
-    assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Object]);
-    assert_eq!(
-        input_text(&shell, &mut vcx),
-        "boo",
-        "the revealed field has its typed text back, not the top field's accepted text"
-    );
-}
-
 /// A dialog-opening chord pushes over an open dialog: `mod+t` (alt under the test
 /// mod alias) opens as-of, and `ctrl+,` opens Settings.
 #[gpui::test]
@@ -389,19 +338,19 @@ fn a_dialog_chord_pushes_over_settings_in_normal_mode(cx: &mut gpui::TestAppCont
 
 /// The object dialog's edit stage is a second Normal-mode catch-all beside
 /// browse: `a_dialog_chord_pushes_over_an_open_dialog` only reaches the
-/// browse-stage decline, so this pushes over `mine`'s open edit stage.
+/// browse-stage decline, so this pushes over `tree`'s open edit stage.
 #[gpui::test]
 fn a_dialog_chord_pushes_over_the_object_edit_stage(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell_with(
         cx,
-        super::objectdialog::services_with_a_saved_scope(),
-        OBJECT_SCOPES,
+        super::objectdialog::services_with_a_desk_view(),
+        "config::views",
     );
-    vcx.simulate_keystrokes("enter"); // open `mine`'s edit stage
+    vcx.simulate_keystrokes("enter"); // open `tree`'s edit stage
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.object_dialog.as_ref().unwrap().stage.clone()),
         crate::shell::objectdialog::Stage::Edit {
-            object: "mine".to_string()
+            object: "tree".to_string()
         }
     );
     vcx.simulate_keystrokes("alt-t");
@@ -649,12 +598,12 @@ fn a_click_outside_the_palette_over_a_dialog_closes_only_the_palette(
 fn a_click_on_a_dialog_row_under_the_palette_does_not_open_it(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell_with(
         cx,
-        super::objectdialog::services_with_a_saved_scope(),
-        OBJECT_SCOPES,
+        super::objectdialog::services_with_a_desk_view(),
+        "config::views",
     );
     let row = vcx
-        .debug_bounds("objectdialog-row-mine")
-        .expect("the mine row paints");
+        .debug_bounds("objectdialog-row-tree")
+        .expect("the tree row paints");
     vcx.simulate_keystrokes("ctrl-k");
     draw(&mut vcx);
     assert!(shell.read_with(&vcx, |s, _| s.palette.is_some()));

@@ -19063,6 +19063,16 @@ run_mutation "scope dialog: revert needs a lower copy" \
   geode-shell \
   r_without_changes_refuses
 
+# The accept writes the definition draft only while the Scope dialog is
+# the top layer: a ScopeExpr pushed over the step owns the shared input,
+# and its accepted text must not land in the covered draft.
+run_mutation "scope dialog: an accept in a pushed dialog writes the covered definition draft" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '    } else if view.top_kind() == Some(DialogKind::Scope)' \
+  '    } else if true' \
+  geode-shell \
+  accept_in_a_pushed_dialog_does_not_touch_a_covered_definition_draft
+
 # Deleting an expression says under the question who uses it.
 run_mutation "scope dialog: deleting an expression names its users" \
   crates/geode-shell/src/shell/scopedialog/prompt.rs \

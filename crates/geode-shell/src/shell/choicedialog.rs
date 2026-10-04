@@ -2570,10 +2570,12 @@ mod tests {
     /// list, not the declared one — after a filter the two differ.
     #[test]
     fn a_click_resolves_through_the_ranked_order() {
-        let saved = saved(&[("asia", "asia"), ("eu", "eu")]);
-        let mut state = ChoiceDialogState::scopes(&saved, &text_scope("none"));
-        state.list.set_query("eu");
-        assert_eq!(state.pick_at_ranked(0), Some(Pick::Scope("eu".to_string())));
+        let mut state = ChoiceDialogState::tile_kinds(["blotter", "cvi", "diagnostics"]);
+        state.list.set_query("diag");
+        assert_eq!(
+            state.pick_at_ranked(0),
+            Some(Pick::Kind("diagnostics".into()))
+        );
         assert_eq!(state.pick_at_ranked(1), None);
     }
 
@@ -3056,13 +3058,13 @@ mod tests {
     /// change, as `ChoiceList::set_query` does.
     #[test]
     fn other_targets_keep_the_highlight_by_text() {
-        let saved = saved(&[("asia", "asia"), ("australasia", "aus")]);
-        // Opens lit on `australasia`, the scope equal to the current one.
-        let mut state = ChoiceDialogState::scopes(&saved, &text_scope("aus"));
-        assert!(state.set_query("a"));
+        let mut state = ChoiceDialogState::tile_kinds(["blotter", "cvi", "diagnostics"]);
+        // Lit on `Diagnostics`, the last row.
+        assert!(state.list.set_highlighted(2));
+        assert!(state.set_query("i"));
         assert_eq!(
             state.highlighted_pick(),
-            Some(Pick::Scope("australasia".to_string())),
+            Some(Pick::Kind("diagnostics".into())),
             "it still matches and stays lit"
         );
         assert_ne!(

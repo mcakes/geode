@@ -330,7 +330,7 @@ fn a_config_with_no_views_says_so(cx: &mut gpui::TestAppContext) {
 /// every write these tests make goes to the user layer, so "the desk's
 /// view was not forked" is the assertion that a user-layer `views.toml`
 /// never comes into existence.
-fn services_with_a_desk_view() -> ShellServices {
+pub(super) fn services_with_a_desk_view() -> ShellServices {
     desk_view_services(&[])
 }
 
@@ -8650,26 +8650,24 @@ fn i_and_n_have_buttons_that_do_what_their_keys_do(cx: &mut gpui::TestAppContext
     );
 }
 
-/// The i button follows the selected row's typing vocabulary. A Scopes dimension is a
-/// cursor stop for ticking and opening Values, but offers no typed-entry command. This
-/// distinguishes row-based availability from a domain-wide i button.
+/// The i button follows the selected row's typing vocabulary. A Views column item is a
+/// cursor stop for ticking and opening its column, but offers no typed-entry command.
+/// This distinguishes row-based availability from a domain-wide i button.
 #[gpui::test]
 fn the_i_button_is_withheld_on_a_list_item_row(cx: &mut gpui::TestAppContext) {
-    let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) =
-        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
-    // Open mine, the only saved scope, on its first dimension, book.
+    let (shell, mut cx) = dialog_test_shell_with(cx, services_with_a_desk_view(), "config::views");
+    // The first column item is selected on entry.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert_eq!(
+    assert!(matches!(
         edit_draft(&shell, &cx, |d| d.selected_row()),
-        Some(objectdialog::EditRow::Item { field: 0, item: 0 })
-    );
+        Some(objectdialog::EditRow::Item { .. })
+    ));
     assert_eq!(
         edit_draft(&shell, &cx, |d| d
-            .selected_vocabulary(objectdialog::Domain::Scopes)),
+            .selected_vocabulary(objectdialog::Domain::Views)),
         objectdialog::RowVocabulary::Item,
-        "a list entry ticks with space and opens its values with enter — never i"
+        "a list entry ticks with space and opens with enter — never i"
     );
     assert!(
         cx.debug_bounds("objectdialog-action-i").is_none(),
@@ -9949,7 +9947,7 @@ fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
     // extra rows in particular, which a directory source never paints.
     // The fourth is the keys that open the first object: Groupings' list
     // leads with two rows that are not objects, so slot 3 is row 4.
-    let cases: [(&str, Fixture, &str, &str); 8] = [
+    let cases: [(&str, Fixture, &str, &str); 6] = [
         (
             "config::views",
             services_with_a_desk_view,
@@ -9974,19 +9972,7 @@ fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
             "dimensions",
             "j j j j e",
         ),
-        (
-            OBJECT_SCOPES,
-            services_with_a_saved_scope,
-            "dimensions",
-            "enter",
-        ),
         ("config::colors", services_with_colours, "token", "enter"),
-        (
-            OBJECT_EXPRESSIONS,
-            services_with_expressions,
-            "expression",
-            "enter",
-        ),
         (
             "config::schema",
             services_with_schema,

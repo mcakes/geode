@@ -1123,6 +1123,46 @@ fn the_definition_note_names_each_saved_scope_that_ticks_it(cx: &mut gpui::TestA
     );
 }
 
+/// A `ScopeExpr` dialog pushed over the definition step: accepting a
+/// suggestion in the top field writes only the top field's completion,
+/// never the covered definition draft, and popping reveals the field
+/// exactly as it was left.
+#[gpui::test]
+fn accept_in_a_pushed_dialog_does_not_touch_a_covered_definition_draft(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("j j j e");
+    assert_eq!(f.top(), definition_step(Some("liq")));
+    f.keys("backspace");
+    assert_eq!(f.definition_draft().as_deref(), Some("npv > "));
+
+    dispatch_action(&f.shell, "frame::add_expression", &mut f.vcx);
+    draw(&mut f.vcx);
+    assert_eq!(f.top_kind(), Some(dialog::DialogKind::ScopeExpr));
+    f.type_text("np");
+    f.keys("tab");
+    assert_eq!(
+        f.input_text(),
+        "npv ",
+        "the top field accepted its own suggestion"
+    );
+    assert_eq!(
+        f.definition_draft().as_deref(),
+        Some("npv > "),
+        "an accept in the top dialog must not overwrite the covered definition draft"
+    );
+
+    f.keys("escape");
+    assert_eq!(f.top_kind(), Some(dialog::DialogKind::Scope));
+    assert_eq!(
+        f.input_text(),
+        "npv > ",
+        "the revealed field has its own text back"
+    );
+}
+
 /// The lane still names `liq`, and its effective scope now reads the new
 /// definition: references follow an edit in place.
 #[gpui::test]
