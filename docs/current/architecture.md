@@ -74,9 +74,10 @@ adapters. `geode-app` adds the UI-facing services: it registers module
 factories (one market-data factory per accepted `panels` entry), kind
 actions, and pricers, and opens the window. Market-data panels are
 configuration checked there against the registered document kinds and kind
-actions; a kind action's behavior is code in the module that dispatches it. Diagnostics implements `PageFactory`
-and `PageContent`; `geode-nemo` and `geode-positions` implement row-menu
-`DimensionAction`s. The app registers these alongside the tile factories.
+actions; a kind action's behavior is code in the module that dispatches it.
+Diagnostics implements `PageFactory` and `PageContent`; `geode-nemo` and
+`geode-positions` implement row-menu `DimensionAction`s. The app registers
+these alongside the tile factories.
 
 `geode-compose` is the part of composition a headless process can use. It
 holds the builtin documents that decide the store (`builtin_data_layer`:

@@ -51,7 +51,7 @@ method returns a fresh handle per call, or `None` when the adapter lacks it.
 
 | Capability | `Adapter` method → trait | Owning worker | Configured in | Simulator today |
 |---|---|---|---|---|
-| Subscribed documents | `subscription()` → `Subscription` (+ optional `Recovery`) | `SubscriptionWorker` (`ingest/subscribe.rs`), one per source | `sources.toml` (`topics`, `document`) | `ChannelAdapter` `demo_bus` fed by `geode-app`'s `demo_bus` |
+| Subscribed documents | `subscription()` → `Subscription` (+ optional `Recovery`) | `SubscriptionWorker` (`ingest/subscribe.rs`), one per source | `sources.toml` (`topics`, `document`) | `ChannelAdapter` `demo_bus` fed by `geode-compose`'s `demo_bus` |
 | Uploads | `egress()` → `Egress` | One egress worker per target (`egress.rs`) | `egress.toml` | `ChannelAdapter` `demo_bus` (publishes back onto the bus) |
 | History series | `fetch()` → `Fetch` | `FetchWorker` (`ingest/fetch.rs`), one per source | `sources.toml` over a `series` dataset | `DemoSeries` (`demo_kdb`, `demo_rest`) |
 | Reference tables | `snapshot()` → `SnapshotQuery` | `SnapshotWorker` (`ingest/snapshot.rs`), one per source | `sources.toml` (`table`, `poll_interval`) | `DemoRefDb` (`demo_refdb`) |
@@ -67,12 +67,14 @@ registered separately:
 | Vol surface evaluation | `geode_core::vol::VolModel` ([`vol.rs`](../../crates/geode-core/src/vol.rs)) | `geode_data::VolModelRegistry` | `app.toml` `[vol] model` (default `demo`) | `geode_pricing::DemoVolModel` |
 | Document wire format | `geode_core::document::DocumentKind` ([`document.rs`](../../crates/geode-core/src/document.rs)) | `geode_data::documents::DocumentRegistry`, filled from `geode_documents::builtin_kinds()` | `sources.toml` `document`, `panels.toml` | `CviKind`, `DividendKind`, `OptionChainKind` (real code, guessed tags) |
 
-Registration happens in one place:
-[`crates/geode-app/src/main.rs`](../../crates/geode-app/src/main.rs) builds
-the `AdapterRegistry`, `PricerRegistry` and `VolModelRegistry` before
-`build_shell_services`; [`bridge.rs`](../../crates/geode-app/src/bridge.rs)
-registers the document kinds and resolves the pricer, egress targets and
-position service against those registries.
+Registration is split by what a headless process needs.
+[`geode_compose::adapters`](../../crates/geode-compose/src/lib.rs) builds the
+`AdapterRegistry`, and `geode_compose::engine_setup` registers
+`geode_documents::builtin_kinds()`; the app and the background collector
+share both. [`crates/geode-app/src/main.rs`](../../crates/geode-app/src/main.rs)
+builds the `PricerRegistry` and `VolModelRegistry`, and
+[`bridge.rs`](../../crates/geode-app/src/bridge.rs) resolves the pricer,
+egress targets and position service against these registries.
 
 ## Source families
 
@@ -83,8 +85,8 @@ position service against those registries.
 **Simulator:** `geode-demo-data`'s `generate` and `emit` modules write
 seeded CSVs and `.done` sentinels into `$TMPDIR/geode-demo/<rows>-42/src/`
 when `--demo` starts with an empty directory. The demo layer
-(`demo::layer` in [`demo.rs`](../../crates/geode-app/src/demo.rs)) generates
-the `[demo]` source: `paths = ["…/*.csv"]`, `readiness = "sentinel"`,
+(`demo::layer` in [`demo.rs`](../../crates/geode-compose/src/demo.rs))
+generates the `[demo]` source: `paths = ["…/*.csv"]`, `readiness = "sentinel"`,
 `poll_interval = "2s"`, `batch_pattern = '^risk_\d{4}-\d{2}-\d{2}_(?P<batch>.+)$'`.
 
 **Seam:** none to write. Directory discovery is built in (`csv_dir`, the
@@ -123,7 +125,7 @@ vol slice viewer read them.
 
 **Simulator:** a `ChannelAdapter` named `demo_bus`
 ([`channel.rs`](../../crates/geode-data/src/adapter/channel.rs)), fed by the
-producers in [`demo_bus.rs`](../../crates/geode-app/src/demo_bus.rs) using
+producers in [`demo_bus.rs`](../../crates/geode-compose/src/demo_bus.rs) using
 `geode-demo-data`'s `CviGenerator`, `DividendGenerator` and `ChainGenerator`.
 Producers serialize through the same `DocumentKind::write` the real path
 would parse, and publish on `marketdata/{cvi,dividend,chain}/<key>/NOTIFY`.
@@ -259,7 +261,7 @@ is replaced by key parts joined with `/`, unescaped). Restart-required.
 cached in a `series` dataset.
 
 **Simulator:** `DemoSeries` in
-[`demo_series.rs`](../../crates/geode-app/src/demo_series.rs), registered
+[`demo_series.rs`](../../crates/geode-compose/src/demo_series.rs), registered
 twice: `demo_kdb` (enumerates 24 identities) and `demo_rest` (no catalogue,
 manual entry). Deterministic one-minute bars, weekday sessions 14:30–21:00
 UTC, no holidays or DST. Enabled by `--demo`.
@@ -300,7 +302,7 @@ exchange, multiplier), read by the pricer's payout currency and the
 diagnostics Reference page through `ReferenceGlobal`.
 
 **Simulator:** `DemoRefDb` in
-[`demo_refdb.rs`](../../crates/geode-app/src/demo_refdb.rs) (`demo_refdb`),
+[`demo_refdb.rs`](../../crates/geode-compose/src/demo_refdb.rs) (`demo_refdb`),
 ten hand-written rows; every third poll renames one. The demo layer's
 `[refdb]` source polls `table = "underlyings"` every `30s`.
 
@@ -333,9 +335,9 @@ payout_currency` (defaults to `underlyings.currency`).
 **For:** the blotter row menu's Move LHU.
 
 **Simulator:** `DemoPositions` (`demo_positions`) in
-[`demo.rs`](../../crates/geode-app/src/demo.rs) rewrites the `LHU` field in
-the demo risk CSVs and advances the sentinel, so the move arrives as a newer
-file generation.
+[`demo.rs`](../../crates/geode-compose/src/demo.rs) rewrites the `LHU` field
+in the demo risk CSVs and advances the sentinel, so the move arrives as a
+newer file generation.
 
 **Seam:** implement `PositionCommands::move_lhu(positions, lhu)` and return
 it from `Adapter::positions()`. `Ok` means accepted; an `Err` message is
@@ -395,15 +397,25 @@ they are constants in that crate, not config.
    --all-targets` and `cargo test --workspace` on macOS and Windows with
    default features, so any SDK reachable without a feature breaks CI.
    Without the feature the crate still builds its pure parts (topic mapping,
-   symbol mapping, config parsing) and their tests. `geode-app` exposes a
-   matching feature, for example `solace = ["dep:geode-adapter-solace",
-   "geode-adapter-solace/sdk"]`.
-3. **Registration.** In `main.rs`, the `AdapterRegistry` is built only under
-   `--demo` today; non-demo startup passes an empty registry. Build it in
-   both paths, register real adapters under `#[cfg(feature = "…")]`, and
-   register the demo adapters only under `--demo`. Real pricers and vol
-   models go into `PricerRegistry` and `VolModelRegistry` beside the mock
-   ones. New document kinds go into `geode_documents::builtin_kinds()`.
+   symbol mapping, config parsing) and their tests. `geode-compose` owns the
+   optional vendor dependency and its feature, for example
+   `solace = ["dep:geode-adapter-solace", "geode-adapter-solace/sdk"]`.
+   Every binary that links `geode-compose` forwards the feature, for example
+   `solace = ["geode-compose/solace"]` in `geode-app`, so the app and the
+   background collector register the same adapters.
+3. **Registration.** Register real adapters in `geode_compose::adapters`
+   under `#[cfg(feature = "…")]`, in both the demo and non-demo paths: today
+   the function returns an empty registry early when there is no demo
+   directory, so a real adapter goes before that return. Register the demo
+   adapters only when there is a demo directory. An adapter registered only
+   in the app leaves the collector unable to serve that source, and the
+   test holding the app and the collector to equal configuration cannot
+   catch it: `SourceSpec` equality does not check that the named adapter is
+   registered. Real pricers and vol models stay in the app's `main.rs`,
+   beside the mock ones in `PricerRegistry` and `VolModelRegistry`, because
+   the collector prices nothing. New document kinds go into
+   `geode_documents::builtin_kinds()`, which `engine_setup` registers for
+   both binaries.
 4. **Names.** `Adapter::name()` is what `sources.toml`, `egress.toml` and
    `positions.toml` select. Real names must differ from `demo_bus`,
    `demo_kdb`, `demo_rest`, `demo_refdb` and `demo_positions`; a duplicate

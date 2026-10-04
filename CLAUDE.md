@@ -87,8 +87,8 @@ may still use separately configured `CC`/`CXX` wrappers.
   on `geode-shell` and `geode-core`, never on `geode-data` or a feature
   module; `geode-shell` never depends on it.
 - `geode-compose` is the gpui-free half of the composition root: the builtin
-  data layer, `engine_setup`, store and config paths, and the demo
-  transports. It depends on `geode-core`, `geode-data`, `geode-documents` and
+  data layer, `engine_setup`, the adapter registry (`adapters`), store and
+  config paths, and the demo transports. It depends on `geode-core`, `geode-data`, `geode-documents` and
   `geode-demo-data`, never on gpui, `geode-shell`, `geode-tile` or a feature
   module (check: `cargo tree -p geode-compose -e normal | grep -c gpui` is 0).
 - `geode-app` is the only composition root that adds UI: it builds on

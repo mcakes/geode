@@ -472,7 +472,7 @@ mod demo_bus {
         let mut adapters = AdapterRegistry::default();
         let (bus, _feed) = ChannelAdapter::new("demo_bus");
         adapters.register(bus);
-        // The demo layer's `positions.toml` names it, as `main.rs` registers.
+        // The demo layer's `positions.toml` names it, as `geode_compose::adapters` registers.
         adapters.register(Arc::new(geode_compose::demo::DemoPositions::new(
             src_dir.path().to_path_buf(),
         )));
