@@ -24,8 +24,8 @@ pub use egress::{UploadOutcome, UploadParams};
 pub use handle::{DataHandle, REQUEST_BOUND, Refusal, Request};
 pub use pricing::{PricerConfig, PricerRegistry};
 pub use service::{
-    ContextColumns, DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget,
-    QueryParams, StoreRole,
+    ContextColumns, DEFAULT_STORE_DEADLINE, DataEvent, DataService, DataServiceConfig, EventSink,
+    FetchParams, LocalForget, QueryParams, StoreRole,
 };
 pub use store::stamp::STORE_FORMAT;
 pub use vol::{VolConfig, VolModelRegistry};

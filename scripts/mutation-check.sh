@@ -1297,6 +1297,44 @@ run_mutation "stamp: a direct open stamps the store" \
   geode-data \
   a_direct_open_stamps_the_store_with_this_builds_format
 
+run_mutation "stamp: the collector's check precedes its DDL" \
+  crates/geode-data/src/service.rs \
+  '            stamp::check(store.writer())?;' \
+  '            for ds in &config.schema.datasets { let _ = store.apply_schema(ds); } stamp::check(store.writer())?;' \
+  geode-data \
+  a_collector_open_refuses_another_format_before_any_ddl
+
+run_mutation "stamp: an app open stamps the store" \
+  crates/geode-data/src/service.rs \
+  '        if !matches!(role, StoreRole::Collector { .. }) {' \
+  '        if matches!(role, StoreRole::Direct) {' \
+  geode-data \
+  an_app_open_stamps_the_store_with_this_builds_format
+
+# The app's open-with-wait (handle.rs, service.rs): the wait is announced and
+# its end too, a stop ends it, and the app lease is released only after
+# DuckDB has let go of the file.
+run_mutation "open-with-wait: StoreOpened follows StoreWaiting" \
+  crates/geode-data/src/handle.rs \
+  '    if waited {' \
+  '    if false {' \
+  geode-data \
+  a_held_store_sends_waiting_then_opened_and_answers_queued_requests
+
+run_mutation "open-with-wait: the lease outlives the store" \
+  crates/geode-data/src/service.rs \
+  $'    conn: duckdb::Connection,\n    /// The app\'s `<db>.app.lock` (`StoreRole::App` only). Declared last so\n    /// it drops last, on `shutdown`\'s path and on an unwind alike: every\n    /// field above holds or joins a store connection, and a collector that\n    /// sees the lock free opens the file at once, so the lock must not be\n    /// released while DuckDB still has the file.\n    lease: Option<HeldLease>,' \
+  $'    lease: Option<HeldLease>,\n    conn: duckdb::Connection,' \
+  geode-data \
+  the_app_lease_drops_after_every_store_connection
+
+run_mutation "open-with-wait: a stop ends the wait" \
+  crates/geode-data/src/handle.rs \
+  '        self.stop_requested.store(true, Ordering::Release);' \
+  '        let _ = &self.stop_requested;' \
+  geode-data \
+  stopping_while_waiting_returns_promptly
+
 # The store lease (lease.rs). The app and the collector hand the store over
 # through lock files; a probe must not read as a second app, a stop must end
 # the wait, and only DuckDB's own lock conflict is waited out.

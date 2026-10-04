@@ -9,9 +9,10 @@
 //! the UI thread. See `docs/current/request-delivery.md`.
 
 use crate::egress::{UploadOutcome, UploadParams};
+use crate::lease::LeaseError;
 use crate::service::{
     ContextColumns, DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget,
-    QueryParams,
+    QueryParams, StoreRole,
 };
 use crate::supervise::REQUEST_LOOP;
 use geode_core::config::{Diagnostic, Severity};
@@ -128,6 +129,10 @@ struct Inner {
     /// dying loop is refused `Stopped` rather than admitted to a queue that
     /// nothing will read. A deliberate shutdown does not set it.
     stopped: Arc<AtomicBool>,
+    /// Set by `stop` before it offers `Shutdown`. The app's open-with-wait
+    /// reads it between retries, so a stop during the wait ends it without
+    /// the loop ever reaching the channel.
+    stop_requested: Arc<AtomicBool>,
     /// Shared with the running service, which copies them onto each query.
     context_columns: ContextColumns,
 }
@@ -155,6 +160,7 @@ impl Inner {
     /// sender so even a full queue eventually disconnects after queued requests
     /// are dispatched. Downstream shutdown can still wait on running I/O.
     fn stop(&self) {
+        self.stop_requested.store(true, Ordering::Release);
         let taken = self.tx.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(tx) = taken {
             let _ = tx.try_send(Request::Shutdown);
@@ -429,6 +435,7 @@ impl DataHandle {
                     thread: Mutex::new(None),
                     dropped: AtomicU64::new(0),
                     stopped: Arc::default(),
+                    stop_requested: Arc::default(),
                     context_columns: Arc::default(),
                 }),
             },
@@ -467,24 +474,46 @@ impl DataService {
     /// Requests admitted before that failure have no individual outcomes. Failure
     /// to spawn the thread itself panics at the expect below.
     pub fn spawn(config: DataServiceConfig, sink: EventSink) -> DataHandle {
-        Self::spawn_with_probe(config, sink, no_probe)
+        Self::spawn_as(config, sink, StoreRole::Direct)
     }
 
-    /// [`DataService::spawn`] with a probe `serve` calls at each
+    /// [`DataService::spawn`] opening the store in `role`. For
+    /// `StoreRole::App` the request loop takes the app lease and waits for
+    /// the store while another process holds it, sending `StoreWaiting`
+    /// and then `StoreOpened`; requests are admitted (up to the channel
+    /// bound) and answered once it opens. A stop during the wait ends it
+    /// quietly. Every lease failure takes the open-failure path, with the
+    /// reason `data service failed to open: <LeaseError>`.
+    pub fn spawn_as(config: DataServiceConfig, sink: EventSink, role: StoreRole) -> DataHandle {
+        Self::spawn_with_probe(config, sink, role, no_probe)
+    }
+
+    /// [`DataService::spawn_as`] with a probe `serve` calls at each
     /// [`ServePoint`]; production passes [`no_probe`].
-    fn spawn_with_probe(config: DataServiceConfig, sink: EventSink, probe: Probe) -> DataHandle {
+    fn spawn_with_probe(
+        config: DataServiceConfig,
+        sink: EventSink,
+        role: StoreRole,
+        probe: Probe,
+    ) -> DataHandle {
         let (tx, rx) = sync_channel(REQUEST_BOUND);
         let pending_views = PendingViews::default();
         let service_views = Arc::clone(&pending_views);
         let stopped = Arc::new(AtomicBool::new(false));
         let loop_stopped = Arc::clone(&stopped);
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let opening = Opening {
+            config,
+            role,
+            stop_requested: Arc::clone(&stop_requested),
+        };
         let loop_sink = Arc::clone(&sink);
         let context_columns = ContextColumns::default();
         let service_context = Arc::clone(&context_columns);
         let thread =
             crate::supervise::spawn_supervised(REQUEST_LOOP.to_string(), sink, move || {
                 serve(
-                    config,
+                    opening,
                     loop_sink,
                     rx,
                     service_views,
@@ -501,6 +530,7 @@ impl DataService {
                 thread: Mutex::new(Some(thread)),
                 dropped: AtomicU64::new(0),
                 stopped,
+                stop_requested,
                 context_columns,
             }),
         }
@@ -896,8 +926,71 @@ impl PanicAnswer {
     }
 }
 
-fn serve(
+/// What the request loop opens and how: the configuration, the store role,
+/// and the stop flag an app's wait for the store watches.
+struct Opening {
     config: DataServiceConfig,
+    role: StoreRole,
+    stop_requested: Arc<AtomicBool>,
+}
+
+/// Why the request loop has no service.
+enum OpenFailure {
+    /// A stop arrived while the app waited for the store: no event.
+    Stopped,
+    /// Reported as a failed open.
+    Failed(String),
+}
+
+/// Open the service in `opening.role`. The app's open takes the lease and
+/// retries only the DuckDB open while another process holds the store; the
+/// rest of the open runs once, on the store that open returned. The lease
+/// moves into the service, which drops it after its last connection.
+fn open_service(opening: Opening, sink: &EventSink) -> Result<DataService, OpenFailure> {
+    let Opening {
+        config,
+        role,
+        stop_requested,
+    } = opening;
+    let StoreRole::App { deadline } = role else {
+        return DataService::open_as(config, Arc::clone(sink), &role)
+            .map_err(|e| OpenFailure::Failed(e.to_string()));
+    };
+    let should_stop = || stop_requested.load(Ordering::Acquire);
+    let mut waited = false;
+    let acquired = crate::lease::acquire_app(
+        &config.db_path,
+        deadline,
+        &should_stop,
+        &mut |holder| {
+            waited = true;
+            let _ = sink(DataEvent::StoreWaiting { holder });
+        },
+        &mut || DataService::open_store(&config, &role),
+    );
+    let (lease, store) = match acquired {
+        Ok(acquired) => acquired,
+        Err(LeaseError::Cancelled) => return Err(OpenFailure::Stopped),
+        Err(e) => return Err(OpenFailure::Failed(e.to_string())),
+    };
+    // `acquire_app` does not check for a stop before an open that then
+    // succeeds: a quit that arrived meanwhile must not start the service.
+    if should_stop() {
+        drop(store);
+        drop(lease);
+        return Err(OpenFailure::Stopped);
+    }
+    if waited {
+        let _ = sink(DataEvent::StoreOpened);
+    }
+    let mut service = DataService::open_with_store(config, Arc::clone(sink), store, &role)
+        .map_err(|e| OpenFailure::Failed(e.to_string()))?;
+    service.hold_lease(lease);
+    Ok(service)
+}
+
+fn serve(
+    opening: Opening,
     sink: EventSink,
     rx: Receiver<Request>,
     pending_views: PendingViews,
@@ -905,9 +998,10 @@ fn serve(
     context_columns: ContextColumns,
     probe: Probe,
 ) {
-    let mut service = match DataService::open(config, Arc::clone(&sink)) {
+    let mut service = match open_service(opening, &sink) {
         Ok(s) => s,
-        Err(e) => {
+        Err(OpenFailure::Stopped) => return,
+        Err(OpenFailure::Failed(e)) => {
             // The service never became available: refuse later submissions
             // `Stopped` from now, and declare the loop gone although nothing
             // unwound, so the status bar says so.
@@ -1116,7 +1210,11 @@ mod tests {
         // The service starts only after the queue filled and both reloads arrived.
         let service = std::thread::spawn(move || {
             serve(
-                config,
+                Opening {
+                    config,
+                    role: StoreRole::Direct,
+                    stop_requested: Arc::default(),
+                },
                 sink,
                 requests,
                 pending,
@@ -2279,7 +2377,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = channel();
         let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
-        let handle = DataService::spawn_with_probe(empty_config(dir.path()), sink, probe);
+        let handle =
+            DataService::spawn_with_probe(empty_config(dir.path()), sink, StoreRole::Direct, probe);
         (dir, handle, rx)
     }
 
@@ -2775,7 +2874,12 @@ mod tests {
         }));
         let (tx, rx) = channel();
         let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
-        let h = DataService::spawn_with_probe(config, sink, panic_marked_cancel_outside);
+        let h = DataService::spawn_with_probe(
+            config,
+            sink,
+            StoreRole::Direct,
+            panic_marked_cancel_outside,
+        );
         // Rebound after `h` so a failing assertion drops it first: the held
         // pricer is released before `h`'s drop joins the dying loop, and a
         // failure is reported instead of hanging.
@@ -2840,5 +2944,203 @@ mod tests {
         assert_eq!(thread, "geode-pricing");
         assert!(reason.contains("injected delivery panic"), "{reason}");
         h.shutdown();
+    }
+
+    // The app's open: lease, open-with-wait, and the two store events.
+    // Every test that takes a lock file holds `lock_file_gate` shared, and
+    // takes it only after its `spawn_holder` call (the spawn takes the gate
+    // exclusively).
+
+    use crate::lease::test_support::{lock_file_gate, spawn_holder};
+
+    /// A `spawn_as(App)` service on `dir`'s store, recording every event.
+    fn app_service(dir: &std::path::Path, deadline: Duration) -> (DataHandle, Receiver<DataEvent>) {
+        let (tx, rx) = channel();
+        let tx = Mutex::new(tx);
+        let sink: EventSink = Arc::new(move |e| tx.lock().unwrap().send(e).is_ok());
+        let handle = DataService::spawn_as(empty_config(dir), sink, StoreRole::App { deadline });
+        (handle, rx)
+    }
+
+    fn catalog_request(handle: &DataHandle, tag: u64) -> Result<(), Refusal> {
+        handle.catalog(CatalogParams {
+            key: QueryKey(tag),
+            tag,
+            as_of: AsOf::Live,
+        })
+    }
+
+    /// Events up to and including the first that `done` accepts, which
+    /// must arrive within `within`.
+    fn events_until(
+        rx: &Receiver<DataEvent>,
+        within: Duration,
+        done: impl Fn(&DataEvent) -> bool,
+    ) -> Vec<DataEvent> {
+        let end = Instant::now() + within;
+        let mut seen = Vec::new();
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(e) => {
+                    let last = done(&e);
+                    seen.push(e);
+                    if last {
+                        return seen;
+                    }
+                }
+                Err(_) => panic!("no awaited event within {within:?}; saw {seen:?}"),
+            }
+        }
+    }
+
+    fn is_catalog(e: &DataEvent, tag: u64) -> bool {
+        matches!(e, DataEvent::Catalog(o) if o.tag == tag)
+    }
+
+    fn is_store_event(e: &DataEvent) -> bool {
+        matches!(e, DataEvent::StoreWaiting { .. } | DataEvent::StoreOpened)
+    }
+
+    fn stopped_reason(seen: &[DataEvent]) -> Option<&str> {
+        seen.iter().find_map(|e| match e {
+            DataEvent::ThreadStopped { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn an_app_open_with_no_holder_sends_no_store_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(dir.path(), Duration::from_secs(10));
+        catalog_request(&h, 7).unwrap();
+        let seen = events_until(&rx, Duration::from_secs(10), |e| {
+            is_catalog(e, 7) || matches!(e, DataEvent::ThreadStopped { .. })
+        });
+        assert_eq!(stopped_reason(&seen), None, "{seen:?}");
+        assert!(!seen.iter().any(is_store_event), "{seen:?}");
+        h.shutdown();
+        assert!(!rx.try_iter().any(|e| is_store_event(&e)));
+    }
+
+    #[test]
+    fn a_held_store_sends_waiting_then_opened_and_answers_queued_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("geode.duckdb");
+        let holder = spawn_holder(&db);
+        let child = holder.pid();
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(dir.path(), Duration::from_secs(10));
+        // Admitted while the loop waits for the store.
+        catalog_request(&h, 8).expect("a request is admitted during the wait");
+        let seen = events_until(&rx, Duration::from_secs(10), |e| {
+            matches!(
+                e,
+                DataEvent::StoreWaiting { .. } | DataEvent::ThreadStopped { .. }
+            )
+        });
+        assert!(
+            matches!(seen.last(), Some(DataEvent::StoreWaiting { holder: Some(pid) }) if *pid == child),
+            "{seen:?}"
+        );
+        drop(holder);
+        let seen = events_until(&rx, Duration::from_secs(5), |e| {
+            is_catalog(e, 8) || matches!(e, DataEvent::ThreadStopped { .. })
+        });
+        assert_eq!(stopped_reason(&seen), None, "{seen:?}");
+        let opened = seen
+            .iter()
+            .position(|e| matches!(e, DataEvent::StoreOpened))
+            .unwrap_or_else(|| panic!("no StoreOpened before the answer: {seen:?}"));
+        assert!(opened < seen.len() - 1, "{seen:?}");
+        assert_eq!(seen.iter().filter(|e| is_store_event(e)).count(), 1);
+        h.shutdown();
+    }
+
+    #[test]
+    fn a_second_window_fails_with_other_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let _gate = lock_file_gate();
+        let (first, first_rx) = app_service(dir.path(), Duration::from_secs(10));
+        catalog_request(&first, 9).unwrap();
+        events_until(&first_rx, Duration::from_secs(10), |e| is_catalog(e, 9));
+
+        let started = Instant::now();
+        let (second, rx) = app_service(dir.path(), Duration::from_secs(10));
+        let seen = events_until(&rx, Duration::from_secs(3), |e| {
+            matches!(e, DataEvent::ThreadStopped { .. })
+        });
+        assert_eq!(
+            stopped_reason(&seen),
+            Some("data service failed to open: another Geode window has this store open")
+        );
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(!seen.iter().any(is_store_event), "{seen:?}");
+        second.shutdown();
+        first.shutdown();
+    }
+
+    #[test]
+    fn a_held_store_past_the_deadline_names_the_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let holder = spawn_holder(&dir.path().join("geode.duckdb"));
+        let child = holder.pid();
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(dir.path(), Duration::from_millis(500));
+        let seen = events_until(&rx, Duration::from_secs(10), |e| {
+            matches!(e, DataEvent::ThreadStopped { .. })
+        });
+        let reason = stopped_reason(&seen).unwrap();
+        assert!(
+            reason.starts_with("data service failed to open: "),
+            "{reason}"
+        );
+        assert!(reason.contains("did not release the store"), "{reason}");
+        assert!(reason.contains(&format!("(PID {child})")), "{reason}");
+        assert_eq!(catalog_request(&h, 10), Err(Refusal::Stopped));
+        h.shutdown();
+        drop(holder);
+    }
+
+    #[test]
+    fn stopping_while_waiting_returns_promptly() {
+        let dir = tempfile::tempdir().unwrap();
+        let holder = spawn_holder(&dir.path().join("geode.duckdb"));
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(dir.path(), Duration::from_secs(15));
+        events_until(&rx, Duration::from_secs(10), |e| {
+            matches!(e, DataEvent::StoreWaiting { .. })
+        });
+        let (done_tx, done_rx) = channel();
+        std::thread::spawn(move || {
+            h.shutdown();
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a stop during the wait returns within 2 s");
+        let after: Vec<DataEvent> = rx.try_iter().collect();
+        assert_eq!(stopped_reason(&after), None, "{after:?}");
+        assert!(
+            !after.iter().any(|e| matches!(e, DataEvent::Diagnostics(d)
+                if d.iter().any(|d| d.severity == Severity::Error))),
+            "{after:?}"
+        );
+        drop(holder);
+    }
+
+    #[test]
+    fn the_app_lease_is_released_after_the_store_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("geode.duckdb");
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(dir.path(), Duration::from_secs(10));
+        catalog_request(&h, 11).unwrap();
+        events_until(&rx, Duration::from_secs(10), |e| is_catalog(e, 11));
+        assert!(crate::lease::app_present(&db).unwrap());
+        h.shutdown();
+        assert!(!crate::lease::app_present(&db).unwrap());
+        crate::store::Store::open(&db).expect("the store opens at once after shutdown");
     }
 }

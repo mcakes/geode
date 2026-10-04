@@ -1706,6 +1706,26 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             }
                         });
                     }
+                    // The app's open is waiting for the collector to hand the
+                    // store over, and then has it; shown by the status segment.
+                    DataEvent::StoreWaiting { holder } => {
+                        diagnostics.update(cx, |d, cx| {
+                            let before = d.version();
+                            d.note_store_waiting(holder);
+                            if d.version() != before {
+                                cx.notify();
+                            }
+                        });
+                    }
+                    DataEvent::StoreOpened => {
+                        diagnostics.update(cx, |d, cx| {
+                            let before = d.version();
+                            d.note_store_opened();
+                            if d.version() != before {
+                                cx.notify();
+                            }
+                        });
+                    }
                 }
             });
             if handled.is_err() {

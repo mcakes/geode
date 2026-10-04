@@ -138,6 +138,26 @@ two threads stopping before one UI drain are both delivered. The status bar
 shows every stopped thread until the app restarts; see
 [stopped threads and refusals](shell.md#stopped-threads-and-refusals).
 
+`DataService::spawn_as(config, sink, StoreRole::App { deadline })` is the
+app's open (`spawn` is the direct open). The request loop takes
+`<db>.app.lock` through `lease::acquire_app`; while DuckDB refuses the open
+with its own lock conflict (the background collector still has the file) it
+retries only the DuckDB open every 100 ms until `deadline`
+(`DEFAULT_STORE_DEADLINE`, 15 s), then runs the rest of the open (stamp, DDL,
+workers) once. The first refused open sends `DataEvent::StoreWaiting {
+holder }` (DuckDB's PID for the holder, when it names one), and a successful
+open after it sends `StoreOpened`; an open that never waited sends neither.
+Requests are admitted during the wait, up to the channel bound, and answered
+once the store opens. A failure takes the open-failure path above, with
+`another Geode window has this store open` (the app lock stayed held for
+1 s) or `the background collector did not release the store within N s
+(PID n)` as the error. A stop during the wait ends it at the next retry and
+the loop returns without a diagnostic or `ThreadStopped`. The service holds
+the lease as its last field, so it is released only after the writer and
+every reader connection have closed, on shutdown and on an unwind alike: a
+collector that sees the lock free can open the file at once. The app mailbox
+keys both store events on one key, so an open replaces a pending wait.
+
 ### The request loop
 
 The loop contains each request's arm, and the view-replacement step, in its
