@@ -1382,8 +1382,8 @@ run_mutation "lease: a Unix conflict needs DuckDB's holder marker" \
 
 run_mutation "lease: the holder is the last PID in the text" \
   crates/geode-data/src/lease.rs \
-  'message.rmatch_indices("(PID ")' \
-  'message.match_indices("(PID ")' \
+  '.rmatch_indices("(PID ")' \
+  '.match_indices("(PID ")' \
   geode-data \
   a_pid_in_the_store_path_is_not_the_holder
 
@@ -24848,6 +24848,12 @@ run_mutation "release: files are left for discovery" \
   '                        !(q.documents.is_empty() && q.series.is_empty() && q.references.is_empty() && q.items.is_empty());' \
   geode-data a_draining_runner_runs_queued_documents_series_and_snapshots_and_drops_files
 
+run_mutation "release: files are held from the start of a release" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if q.items.is_empty() || q.hold_files {' \
+  '    if q.items.is_empty() {' \
+  geode-data a_releasing_runner_takes_no_file_before_the_drain_begins
+
 run_mutation "release: coalescers flush" \
   crates/geode-data/src/ingest/subscribe.rs \
   '        for (_key, pending) in coalescer.drain_all() {
@@ -24856,11 +24862,36 @@ run_mutation "release: coalescers flush" \
   '        coalescer.drain_all();' \
   geode-data a_flushing_shutdown_submits_the_coalescers_pending_documents
 
+# The release reaches the service: the sentinel's mode is kept, and the
+# service flushes the subscriptions for it.
+run_mutation "release: the request loop keeps the release mode" \
+  crates/geode-data/src/handle.rs \
+  '            stop = mode;' \
+  '            let _ = mode;' \
+  geode-data release_publishes_what_the_feed_delivered_before_it
+
+run_mutation "release: the service flushes the subscriptions" \
+  crates/geode-data/src/service.rs \
+  '                Some(_) => worker.shutdown_flushing(),' \
+  '                Some(_) => worker.shutdown(),' \
+  geode-data release_publishes_what_the_feed_delivered_before_it
+
+run_mutation "lease: a zero PID does not fall through to the path" \
+  crates/geode-data/src/lease.rs \
+  '            digits.trim().parse::<u32>().ok()
+        })
+        .filter(|&pid| pid != 0)' \
+  '            digits.trim().parse::<u32>().ok().filter(|&pid| pid != 0)
+        })' \
+  geode-data a_pid_of_zero_names_no_holder_and_keeps_the_last_known_one
+
 # DuckDB names PID 0 when the lock was already released; that is no holder.
 run_mutation "lease: PID 0 names no holder" \
   crates/geode-data/src/lease.rs \
-  'digits.trim().parse().ok().filter(|&pid| pid != 0)' \
-  'digits.trim().parse().ok()' \
+  '        .filter(|&pid| pid != 0)
+}' \
+  '
+}' \
   geode-data a_pid_of_zero_names_no_holder_and_keeps_the_last_known_one
 
 # At quit every unsaved sheet is saved before the data service stops.

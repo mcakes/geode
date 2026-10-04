@@ -120,10 +120,12 @@ pub enum StopMode {
     Exit,
     /// A handoff of the store to another process: subscriptions flush
     /// their coalescers, and the ingest runner runs every queued document,
-    /// series and snapshot until they are empty or `drain` has passed since
-    /// the stop began. Queued files are left for the next owner's
-    /// discovery.
-    Release { drain: Duration },
+    /// series and snapshot until they are empty or `until` passes. Queued
+    /// files are left for the next owner's discovery. `until` is fixed
+    /// when the release is asked for (`DataHandle::release`), so requests
+    /// still queued ahead of the stop spend the drain rather than extend
+    /// it.
+    Release { until: Instant },
 }
 
 #[derive(Debug)]
@@ -463,9 +465,13 @@ impl DataHandle {
     /// document, series and snapshot until they are empty or `drain` has
     /// passed since this call. What is left then is dropped with one
     /// warning; queued files are left for the next owner's discovery. The
-    /// store and the app lease close before this returns.
+    /// queued local writes (the app's own publishes and forgets) always
+    /// run, as at `shutdown`, even past the deadline. The store and the
+    /// app lease close before this returns.
     pub fn release(&self, drain: Duration) {
-        self.inner.stop_with(StopMode::Release { drain });
+        self.inner.stop_with(StopMode::Release {
+            until: Instant::now() + drain,
+        });
     }
 
     /// A handle with no service behind it: the test is the service, and
@@ -3176,6 +3182,39 @@ mod tests {
                 if d.iter().any(|d| d.severity == Severity::Error))),
             "{after:?}"
         );
+        drop(holder);
+    }
+
+    /// A release waits for queue space rather than drop its sentinel. With
+    /// the queue full while the loop waits for the store, that wait must
+    /// still end promptly: the stop flag cancels the open, the loop drops
+    /// its receiver, and the blocked send returns.
+    #[test]
+    fn release_returns_promptly_when_the_queue_is_full_during_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let holder = spawn_holder(&dir.path().join("geode.duckdb"));
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(dir.path(), Duration::from_secs(15));
+        events_until(&rx, Duration::from_secs(10), |e| {
+            matches!(e, DataEvent::StoreWaiting { .. })
+        });
+        let mut admitted = 0;
+        let refusal = loop {
+            match catalog_request(&h, admitted) {
+                Ok(()) => admitted += 1,
+                Err(refusal) => break refusal,
+            }
+            assert!(admitted <= REQUEST_BOUND as u64, "the queue never filled");
+        };
+        assert_eq!(refusal, Refusal::Busy);
+        let (done_tx, done_rx) = channel();
+        std::thread::spawn(move || {
+            h.release(crate::HANDOFF_DRAIN);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a release during the wait returns within 2 s");
         drop(holder);
     }
 

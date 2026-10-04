@@ -2735,14 +2735,18 @@ impl DataService {
     /// then the ingest runner, which runs only the queued local writes. A
     /// release stops the producers, has each subscription submit what its
     /// coalescer holds, stops the scheduler, and lets the runner drain the
-    /// feeds' queued work until the deadline (`drain` from now) before the
-    /// readers stop. Either way the app lease, the struct's last field,
+    /// feeds' queued work until the release's deadline before the readers
+    /// stop. A release holds the queued files first, before any producer
+    /// stops, so none is taken while the producers stop. Either way the app lease, the struct's last field,
     /// drops after the service itself, once every connection is gone.
     pub fn shutdown_with(&self, mode: crate::handle::StopMode) {
         let release_until = match mode {
             crate::handle::StopMode::Exit => None,
-            crate::handle::StopMode::Release { drain } => Some(Instant::now() + drain),
+            crate::handle::StopMode::Release { until } => Some(until),
         };
+        if release_until.is_some() {
+            self.ingest.hold_files();
+        }
         // The file worker first: it answers only the sink.
         self.files.shutdown();
         // Upload workers next: they answer only the sink, and an upload

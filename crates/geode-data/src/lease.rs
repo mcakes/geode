@@ -253,13 +253,18 @@ fn conflict_text(err: &StoreError) -> Option<String> {
 /// `(PID n)` that parses wins over one inside the path. PID 0 is no
 /// holder: on macOS, when `F_GETLK` finds the lock already released (a
 /// handover racing the open), DuckDB names PID 0, and a caller keeping
-/// the last known holder (`holder_pid(..).or(holder)`) must keep it.
+/// the last known holder (`holder_pid(..).or(holder)`) must keep it. The
+/// zero is filtered after the last match is chosen, so it never falls
+/// through to a `(PID n)` inside the quoted path.
 pub fn holder_pid(message: &str) -> Option<u32> {
-    message.rmatch_indices("(PID ").find_map(|(at, marker)| {
-        let rest = &message[at + marker.len()..];
-        let (digits, _) = rest.split_once(')')?;
-        digits.trim().parse().ok().filter(|&pid| pid != 0)
-    })
+    message
+        .rmatch_indices("(PID ")
+        .find_map(|(at, marker)| {
+            let rest = &message[at + marker.len()..];
+            let (digits, _) = rest.split_once(')')?;
+            digits.trim().parse::<u32>().ok()
+        })
+        .filter(|&pid| pid != 0)
 }
 
 /// A child process holding a DuckDB store open, for cross-process tests.
@@ -704,6 +709,10 @@ mod tests {
         assert!(is_lock_conflict_message(text));
         assert_eq!(holder_pid(text), None);
         assert_eq!(holder_pid(text).or(Some(812)), Some(812));
+        // A `(PID 5)` inside the quoted path is not the holder either.
+        let in_path = "IO Error: Could not set lock on file \"/x/(PID 5)/g.duckdb\": \
+                       Conflicting lock is held in  (PID 0) by user mch.";
+        assert_eq!(holder_pid(in_path), None);
     }
 
     /// DuckDB's Windows form (`local_file_system.cpp`): the sharing

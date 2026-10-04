@@ -254,6 +254,12 @@ struct Queue {
     /// snapshots until they are empty or this instant passes, drop the
     /// queued files, then stop.
     drain_until: Option<std::time::Instant>,
+    /// Set by `hold_files` when a release begins: no queued file is popped
+    /// from then on, while documents, series and snapshots run as usual.
+    /// A release stops the producers before it drains, and a file popped
+    /// in that window would run a load the release must leave to the next
+    /// owner's discovery, spending the drain's deadline on it.
+    hold_files: bool,
     /// The file the runner has popped and is loading (or is about to skip
     /// as stale) right now, if any — keyed the same way `enqueue`'s dedupe
     /// is, `(csv_path, size, source_time)`, so the two agree on what
@@ -423,6 +429,15 @@ impl IngestHandle {
 }
 
 impl IngestHandle {
+    /// Begin a release: from now on no queued file is popped (the next
+    /// owner's discovery finds it again); documents, series and snapshots
+    /// keep running. The file being loaded, if any, finishes.
+    pub fn hold_files(&self) {
+        let (lock, _cvar) = &*self.queue;
+        let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+        q.hold_files = true;
+    }
+
     /// Stop the runner for a handoff of the store and join it. After the
     /// running operation it keeps taking queued documents (local writes
     /// among them, in order), series and snapshots, in the usual priority,
@@ -567,8 +582,9 @@ fn log_drain_end(end: &DrainEnd) {
 /// whether a document beat a file is a matter of when the submit landed.
 ///
 /// Only the file arm sets `in_flight`: it is the file dedupe's key, and
-/// neither a document nor a series job is a file. `None` means *every*
-/// queue is empty, which is what makes it the `PlanComplete` condition.
+/// neither a document nor a series job is a file. `None` means every
+/// queue is empty (files held by a release count as empty), which is what
+/// makes it the `PlanComplete` condition.
 fn take_work(q: &mut Queue) -> Option<Work> {
     if let Some(job) = q.documents.pop_front() {
         return Some(Work::Document(job));
@@ -579,7 +595,7 @@ fn take_work(q: &mut Queue) -> Option<Work> {
     if let Some(job) = q.references.pop_front() {
         return Some(Work::Reference(job));
     }
-    if q.items.is_empty() {
+    if q.items.is_empty() || q.hold_files {
         return None;
     }
     let it = q.items.remove(0);
@@ -3012,7 +3028,8 @@ mod tests {
     /// Publishes that wait for their test to open a gate, so the test can
     /// queue work behind a busy writer and stop the runner before anything
     /// queued is popped. One gate per test: a `PublishFn` is a plain `fn`.
-    static STOP_GATES: [(Mutex<bool>, Condvar); 2] = [
+    static STOP_GATES: [(Mutex<bool>, Condvar); 3] = [
+        (Mutex::new(false), Condvar::new()),
         (Mutex::new(false), Condvar::new()),
         (Mutex::new(false), Condvar::new()),
     ];
@@ -3048,6 +3065,14 @@ mod tests {
         req: &DocumentPublishRequest,
     ) -> Result<DocumentOutcome, StoreError> {
         wait_gate(1);
+        publish_document(store, req)
+    }
+
+    fn gated_stop_publish_2(
+        store: &Store,
+        req: &DocumentPublishRequest,
+    ) -> Result<DocumentOutcome, StoreError> {
+        wait_gate(2);
         publish_document(store, req)
     }
 
@@ -3141,6 +3166,53 @@ mod tests {
             ],
             "every queued document, series and snapshot ran, in order"
         );
+        assert!(
+            started.iter().all(|p| !p.ends_with(".csv")),
+            "no file was loaded: {started:?}"
+        );
+    }
+
+    /// A release holds the files before it stops the producers, so a file
+    /// queued then is never taken, even when the documents run out before
+    /// the drain itself begins. The writer is parked on the document while
+    /// the file is queued and held; once the document is published the
+    /// runner either goes idle (held) or announces the file (not held).
+    #[test]
+    fn a_releasing_runner_takes_no_file_before_the_drain_begins() {
+        let (_db, _src, store, risk, mut plan) = harness();
+        plan.items.truncate(1);
+        store.apply_schema(&cvi_dataset()).unwrap();
+        let mut schema = schema_of(risk);
+        schema.datasets.push(cvi_dataset());
+        let (handle, rx) = spawn_channel_with_publish(store, schema, gated_stop_publish_2);
+        handle.submit_document(job("cvi_params", spx()));
+        wait_for_queue(&handle, "the document to be taken", |q| {
+            q.documents.is_empty()
+        });
+        assert_eq!(handle.submit(plan), 1);
+        handle.hold_files();
+        open_gate(2);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut published = false;
+        loop {
+            let left = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .expect("the runner went idle within 10 s");
+            match rx.recv_timeout(left) {
+                Ok(IngestEvent::Published { batch, .. }) if batch == "SPX.Z" => published = true,
+                // The startup announcement precedes the document's publish.
+                Ok(IngestEvent::PlanComplete) if published => break,
+                Ok(IngestEvent::Started { path, .. }) if path.ends_with(".csv") => {
+                    panic!("a held file was taken: {path}")
+                }
+                Ok(IngestEvent::Failed { reason, .. }) => panic!("{reason}"),
+                Ok(_) => {}
+                Err(e) => panic!("no idle announcement: {e}"),
+            }
+        }
+        handle.shutdown_draining(std::time::Instant::now() + Duration::from_secs(2));
+        let (done, started) = outcomes(&rx);
+        assert!(done.is_empty(), "{done:?}");
         assert!(
             started.iter().all(|p| !p.ends_with(".csv")),
             "no file was loaded: {started:?}"
