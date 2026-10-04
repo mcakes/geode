@@ -195,6 +195,10 @@ pub(crate) fn in_text_step(state: &ScopeDialogState) -> bool {
 /// or the Saved screen's filter while it is filtering. Current ignores the
 /// field.
 pub(crate) fn on_query_changed(state: &mut ScopeDialogState, text: &str) {
+    // A question owns the keyboard; the field is not its to edit.
+    if state.pending.is_some() {
+        return;
+    }
     if in_text_step(state) {
         state.text_draft = text.to_string();
         state.error = None;

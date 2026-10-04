@@ -18760,7 +18760,7 @@ run_mutation "scope dialog: a reserved name refuses" \
   geode-shell \
   reserved_and_unusable_names_refuse_inline
 
-# A question claims every key: an unrecognised one neither types nor acts.
+# A question claims every key: an unrecognised chord would open a dialog over it.
 run_mutation "scope dialog: a question claims unrecognised keys" \
   crates/geode-shell/src/shell/scopedialog/prompt.rs \
   '    if let Some(answer) = ConfirmAnswer::from_key(ks) {
@@ -18771,7 +18771,18 @@ run_mutation "scope dialog: a question claims unrecognised keys" \
     };
     answer_pending(shell, answer, window, cx);' \
   geode-shell \
-  n_answers_no_and_keeps_the_draft
+  a_question_keeps_editing_keys_off_the_draft
+
+# A question takes focus off the field: the field's own bindings run before
+# the dialog's key handler and would edit the draft behind the question.
+run_mutation "scope dialog: a question blurs the name field" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '            if state.pending.is_some() {
+                shell.focus_handle.focus(window, cx);' \
+  '            if false {
+                shell.focus_handle.focus(window, cx);' \
+  geode-shell \
+  a_question_keeps_editing_keys_off_the_draft
 
 # A question is routed before the layer beneath it: otherwise `y` types.
 run_mutation "scope dialog: a question owns the keys before its layer" \

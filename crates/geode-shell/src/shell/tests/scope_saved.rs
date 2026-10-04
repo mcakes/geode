@@ -862,3 +862,45 @@ fn scope_save_current_opens_the_prompt_alone_and_escape_closes(cx: &mut gpui::Te
     assert!(!f.has_saved("mine"));
     assert!(!f.queued());
 }
+
+/// Keys the focused field binds (backspace, delete) would edit the draft
+/// behind the question: while it is up the field gives up focus, and `n`
+/// hands it back with the draft as it was.
+#[gpui::test]
+fn a_question_keeps_editing_keys_off_the_draft(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.load("eu");
+    f.open_current();
+    f.keys("s");
+    f.keys("enter");
+    assert!(f.painted("scope-dialog-confirm"));
+    let input_focused = |f: &mut SaveFixture| {
+        let shell = f.shell.clone();
+        f.vcx.update(|window, cx| {
+            shell
+                .read(cx)
+                .dialog_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        })
+    };
+    f.keys("backspace");
+    f.keys("left delete");
+    // An unrecognised chord is claimed too: `alt-p` would push the picker
+    // over the question.
+    f.keys("alt-p");
+    assert_eq!(f.top_kind(), Some(dialog::DialogKind::Scope));
+    assert!(f.painted("scope-dialog-confirm"));
+    assert_eq!(f.draft().as_deref(), Some("eu"));
+    assert_eq!(f.input_text(), "eu");
+    assert!(
+        !input_focused(&mut f),
+        "the question takes focus off the field"
+    );
+    f.keys("n");
+    assert_eq!(f.top(), save_step());
+    assert_eq!(f.draft().as_deref(), Some("eu"));
+    assert_eq!(f.input_text(), "eu");
+    assert!(input_focused(&mut f), "the field has focus back");
+}
