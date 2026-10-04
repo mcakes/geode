@@ -1062,6 +1062,67 @@ fn e_on_an_expression_edits_its_definition_with_a_used_by_note(cx: &mut gpui::Te
     );
 }
 
+/// `asia` and `eu` tick `liq`; `big` ticks nothing.
+fn services_with_users() -> ShellServices {
+    let mut services = test_services();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin(
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+                 [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+            )
+            .unwrap(),
+            LayerDoc::builtin(
+                "scopes",
+                "[eu]\nnamed = [\"liq\"]\n[asia]\nnamed = [\"liq\"]\n",
+            )
+            .unwrap(),
+            LayerDoc::builtin(
+                "expressions",
+                "[liq]\nexpression = \"npv > 0\"\n[big]\nexpression = \"npv > 100\"\n",
+            )
+            .unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    services
+}
+
+/// The definition note names every saved scope that ticks the expression,
+/// in name order, then the lane that ticks it too. The scan reads the raw
+/// scopes doc, the same one the delete question reads.
+#[gpui::test]
+fn the_definition_note_names_each_saved_scope_that_ticks_it(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_users());
+    let shell = shell_of(&window, &mut vcx);
+    frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(liq_scope());
+        f.shared_mut().clear_history();
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    assert_eq!(visible_names(&shell, &vcx), ["asia", "eu", "big", "liq"]);
+    vcx.simulate_keystrokes("j j j e");
+    draw(&mut vcx);
+    let note = shell.read_with(&vcx, |s, _| {
+        s.scope_dialog
+            .as_ref()
+            .and_then(|d| d.definition.as_ref())
+            .and_then(|d| d.note.as_ref().map(|n| n.to_string()))
+    });
+    assert_eq!(
+        note.as_deref(),
+        Some("Used by asia, eu and the current scope.")
+    );
+}
+
 /// The lane still names `liq`, and its effective scope now reads the new
 /// definition: references follow an edit in place.
 #[gpui::test]

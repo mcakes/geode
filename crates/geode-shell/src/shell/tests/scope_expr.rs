@@ -1022,6 +1022,29 @@ fn mod_s_refuses_a_taken_name(cx: &mut gpui::TestAppContext) {
     assert!(!dir.path().join("expressions.toml").exists());
 }
 
+/// A name saved a moment ago is taken at once: the check reads the
+/// configuration the save produced, not the one loaded before it.
+#[gpui::test]
+fn mod_s_refuses_a_name_queued_a_moment_ago(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = saving_shell(cx, &dir);
+    vcx.simulate_input("npv > 1");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input("fresh");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(expr_error(&shell, &vcx), None, "the first save succeeds");
+    vcx.simulate_input("npv > 2");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input("fresh");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        expr_error(&shell, &vcx).as_deref(),
+        Some("'fresh' already exists")
+    );
+}
+
 /// Escape leaves the name entry and restores the text; the dialog stays.
 #[gpui::test]
 fn escape_while_naming_restores_the_text(cx: &mut gpui::TestAppContext) {

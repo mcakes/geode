@@ -2828,7 +2828,11 @@ fn arm_delete(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         Some(row) if row.layer == Some(Layer::User) => {
             arm_confirm(shell, Confirm::Delete);
             let detail = in_domain(shell, Domain::Expressions)
-                .then(|| named_expression_users(shell, &row.name, cx))
+                .then(|| {
+                    crate::shell::scopedialog::saved_view::named_expression_users(
+                        shell, &row.name, cx,
+                    )
+                })
                 .flatten();
             if let Some(state) = shell.object_dialog.as_mut() {
                 state.confirm_detail = detail;
@@ -2869,39 +2873,6 @@ fn in_domain(shell: &ShellView, domain: Domain) -> bool {
         .object_dialog
         .as_ref()
         .is_some_and(|state| state.domain == domain)
-}
-
-/// Who ticks the named expression `name`, as the sentence the delete question
-/// carries: saved scopes in name order, then the frame. `None` when nothing
-/// does. Scopes are read off the raw pending-aware doc, not the reader, so a
-/// scope the reader drops for some other fault still counts as a user.
-/// Deleting never edits these users; the sentence is what says so.
-pub(crate) fn named_expression_users(shell: &ShellView, name: &str, cx: &App) -> Option<String> {
-    let pending = apply::config_with_pending(shell);
-    let config = pending.as_ref().unwrap_or(&shell.services.config);
-    let users: Vec<String> = config
-        .doc(scopes::DOC)
-        .map(|doc| {
-            doc.value
-                .iter()
-                .filter(|(_, scope)| {
-                    scope
-                        .get("named")
-                        .and_then(|v| v.as_array())
-                        .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)))
-                })
-                .map(|(scope, _)| scope.clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    let frame = shell
-        .target_frame()
-        .read(cx)
-        .scope()
-        .named
-        .iter()
-        .any(|n| n == name);
-    super::used_by_sentence(users, frame)
 }
 
 /// Arm reversion when a user definition or presentation overlays an inherited object.

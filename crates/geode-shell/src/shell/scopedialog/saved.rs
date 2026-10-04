@@ -107,6 +107,22 @@ pub(crate) fn summary(scope: &Scope) -> String {
     }
 }
 
+/// The "Used by …" sentence the delete question and the definition note carry for a named expression: `scopes` in
+/// name order, then the frame when `frame` ticks it, joined "A", "A and B" or
+/// "A, B and C". `None` when nothing uses it, so no sentence is painted.
+pub(crate) fn used_by_sentence(mut scopes: Vec<String>, frame: bool) -> Option<String> {
+    scopes.sort();
+    if frame {
+        scopes.push("the current scope".to_string());
+    }
+    let list = match scopes.as_slice() {
+        [] => return None,
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    };
+    Some(format!("Used by {list}."))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +136,33 @@ mod tests {
             &geode_core::scope::complete::ExprVocab::default(),
         )
         .0
+    }
+
+    #[test]
+    fn the_used_by_sentence_lists_scopes_in_order_then_the_frame() {
+        use super::used_by_sentence;
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(used_by_sentence(Vec::new(), false), None);
+        assert_eq!(
+            used_by_sentence(names(&["EQ liquid"]), false).as_deref(),
+            Some("Used by EQ liquid.")
+        );
+        assert_eq!(
+            used_by_sentence(names(&["RATES liquid", "EQ liquid"]), false).as_deref(),
+            Some("Used by EQ liquid and RATES liquid.")
+        );
+        assert_eq!(
+            used_by_sentence(names(&["c", "a", "b"]), false).as_deref(),
+            Some("Used by a, b and c.")
+        );
+        assert_eq!(
+            used_by_sentence(names(&["RATES liquid", "EQ liquid"]), true).as_deref(),
+            Some("Used by EQ liquid, RATES liquid and the current scope.")
+        );
+        assert_eq!(
+            used_by_sentence(Vec::new(), true).as_deref(),
+            Some("Used by the current scope.")
+        );
     }
 
     #[test]

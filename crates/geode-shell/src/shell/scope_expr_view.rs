@@ -632,20 +632,19 @@ fn save_named(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> Result<(), String> {
-    use super::objectdialog::{Domain, apply};
+    use super::objectdialog::apply;
     let typed = shell.dialog_input.read(cx).value().to_string();
     let name = geode_core::config::check_object_name(&typed)
         .map_err(|reason| format!("name: {reason}"))?
         .to_string();
+    if geode_core::scopes::RESERVED_NAMES.contains(&name.as_str()) {
+        return Err(format!("'{name}' is reserved"));
+    }
+    // Pending-aware: a name queued a moment ago is already taken.
+    if apply::definition_owner(shell, geode_core::config::EXPRESSIONS_DOC, &name)
+        != apply::Owner::Absent
     {
-        let pending = apply::config_with_pending(shell);
-        let config = pending.as_ref().unwrap_or(&shell.services.config);
-        if Domain::Expressions.is_reserved(&name) {
-            return Err(format!("'{name}' is reserved"));
-        }
-        if Domain::Expressions.name_taken(config, &name) {
-            return Err(format!("'{name}' already exists"));
-        }
+        return Err(format!("'{name}' already exists"));
     }
     let text = shell
         .scope_expr_dialog

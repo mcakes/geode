@@ -175,33 +175,6 @@ mod tests {
     }
 
     #[test]
-    fn the_used_by_sentence_lists_scopes_in_order_then_the_frame() {
-        use super::super::used_by_sentence;
-        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(used_by_sentence(Vec::new(), false), None);
-        assert_eq!(
-            used_by_sentence(names(&["EQ liquid"]), false).as_deref(),
-            Some("Used by EQ liquid.")
-        );
-        assert_eq!(
-            used_by_sentence(names(&["RATES liquid", "EQ liquid"]), false).as_deref(),
-            Some("Used by EQ liquid and RATES liquid.")
-        );
-        assert_eq!(
-            used_by_sentence(names(&["c", "a", "b"]), false).as_deref(),
-            Some("Used by a, b and c.")
-        );
-        assert_eq!(
-            used_by_sentence(names(&["RATES liquid", "EQ liquid"]), true).as_deref(),
-            Some("Used by EQ liquid, RATES liquid and the current scope.")
-        );
-        assert_eq!(
-            used_by_sentence(Vec::new(), true).as_deref(),
-            Some("Used by the current scope.")
-        );
-    }
-
-    #[test]
     fn to_table_keeps_unmodelled_keys() {
         let config = config("[liq]\nexpression = \"npv > 0\"\nnote = \"desk\"\n");
         let mut draft = Domain::Expressions.draft(&config, "liq");

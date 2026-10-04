@@ -20,6 +20,7 @@ use crate::shell::{ShellView, dialog};
 use dialog::{ConfirmAnswer, ConfirmHandler};
 
 use super::saved::SavedId;
+use super::saved_view::SCOPES_DOC;
 use super::state::{Layer, Step};
 use super::view::{ScopeDialogState, edit_lane};
 
@@ -28,7 +29,6 @@ use super::view::{ScopeDialogState, edit_lane};
 pub(crate) const NOTHING_TO_SAVE: &str = "nothing to save — the scope is empty";
 const SAVE_LABEL: &str = "Save scope as";
 const NAME_EXPRESSION_LABEL: &str = "Name this expression";
-const SCOPES_DOC: &str = "scopes";
 
 /// What a name prompt names.
 #[derive(Debug, Clone, PartialEq)]
@@ -391,9 +391,7 @@ pub(crate) const LIST_CHANGED: &str = "the list changed under the question — n
 pub(super) fn ask_delete(shell: &mut ShellView, id: SavedId, cx: &App) -> Result<(), String> {
     let (doc, name, gone) = doc_of(&id);
     let detail = match &id {
-        SavedId::Expression(name) => {
-            crate::shell::objectdialog::render::named_expression_users(shell, name, cx)
-        }
+        SavedId::Expression(name) => super::saved_view::named_expression_users(shell, name, cx),
         SavedId::Scope(_) => None,
     };
     let question = match apply::definition_owner(shell, doc, name) {

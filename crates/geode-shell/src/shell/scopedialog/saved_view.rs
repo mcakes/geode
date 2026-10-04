@@ -863,3 +863,39 @@ fn hints(state: &ScopeDialogState) -> Vec<Hint> {
         Hint::new(HintRow::Go, &["escape"], leave),
     ]
 }
+
+/// The saved scopes' config doc, as `Config::layered_docs` keys it.
+pub(super) const SCOPES_DOC: &str = "scopes";
+
+/// Who ticks the named expression `name`, as the sentence the delete question
+/// carries: saved scopes in name order, then the frame. `None` when nothing
+/// does. Scopes are read off the raw pending-aware doc, not the reader, so a
+/// scope the reader drops for some other fault still counts as a user.
+/// Deleting never edits these users; the sentence is what says so.
+pub(crate) fn named_expression_users(shell: &ShellView, name: &str, cx: &App) -> Option<String> {
+    let pending = crate::shell::objectdialog::apply::config_with_pending(shell);
+    let config = pending.as_ref().unwrap_or(&shell.services.config);
+    let users: Vec<String> = config
+        .doc(SCOPES_DOC)
+        .map(|doc| {
+            doc.value
+                .iter()
+                .filter(|(_, scope)| {
+                    scope
+                        .get("named")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)))
+                })
+                .map(|(scope, _)| scope.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let frame = shell
+        .target_frame()
+        .read(cx)
+        .scope()
+        .named
+        .iter()
+        .any(|n| n == name);
+    super::saved::used_by_sentence(users, frame)
+}

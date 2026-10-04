@@ -75,7 +75,7 @@ pub(super) fn step_for(
         .get(name)
         .map(|def| def.text().to_string())
         .ok_or(super::saved_view::EXPRESSION_GONE)?;
-    let note = crate::shell::objectdialog::render::named_expression_users(shell, name, cx)
+    let note = super::saved_view::named_expression_users(shell, name, cx)
         .unwrap_or_else(|| NOT_USED.to_string());
     Ok(DefinitionStep {
         name: Some(name.to_string()),

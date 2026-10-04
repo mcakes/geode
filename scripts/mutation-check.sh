@@ -19066,11 +19066,8 @@ run_mutation "scope dialog: revert needs a lower copy" \
 # Deleting an expression says under the question who uses it.
 run_mutation "scope dialog: deleting an expression names its users" \
   crates/geode-shell/src/shell/scopedialog/prompt.rs \
-  '            crate::shell::objectdialog::render::named_expression_users(shell, name, cx)' \
-  '            {
-                let _ = name;
-                None
-            }' \
+  '        SavedId::Expression(name) => super::saved_view::named_expression_users(shell, name, cx),' \
+  '        SavedId::Expression(_) => None,' \
   geode-shell \
   deleting_a_used_expression_leaves_a_broken_reference
 
@@ -26331,10 +26328,21 @@ run_mutation "scope expr: the refresh replaces the frame's named expressions" \
 # Saving under a defined name would overwrite that definition.
 run_mutation "scope expr: saving refuses a taken name" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '        if Domain::Expressions.name_taken(config, &name) {' \
-  '        if false {' \
+  '    if apply::definition_owner(shell, geode_core::config::EXPRESSIONS_DOC, &name)' \
+  '    if false && apply::definition_owner(shell, geode_core::config::EXPRESSIONS_DOC, &name)' \
   geode-shell \
   mod_s_refuses_a_taken_name
+
+# The taken-name check reads the configuration with the pending batch
+# applied: a name saved a moment ago is taken before any reload.
+run_mutation "scope expr: saving refuses a name queued a moment ago" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  'pub(crate) fn definition_owner(shell: &ShellView, doc: &str, name: &str) -> Owner {
+    let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());' \
+  'pub(crate) fn definition_owner(shell: &ShellView, doc: &str, name: &str) -> Owner {
+    let config = shell.services.config.clone();' \
+  geode-shell \
+  mod_s_refuses_a_name_queued_a_moment_ago
 
 # An empty field names nothing; opening the entry for it would ask for a
 # name that can only be refused.
@@ -26382,8 +26390,8 @@ run_mutation "scope expr: naming a term lists an already-listed name twice" \
 # A reserved name belongs to a built-in row; saving under it would shadow it.
 run_mutation "scope expr: saving refuses a reserved name" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '        if Domain::Expressions.is_reserved(&name) {' \
-  '        if false {' \
+  '    if geode_core::scopes::RESERVED_NAMES.contains(&name.as_str()) {' \
+  '    if false {' \
   geode-shell \
   mod_s_refuses_a_reserved_name
 
@@ -26565,13 +26573,14 @@ run_mutation "named expr: space on a named row takes the dimensions door" \
   geode-shell \
   space_on_a_named_expression_never_opens_values
 
-# Deleting a named expression names the saved scopes that tick it.
-run_mutation "named expr: the delete question's used-by scan finds no scope" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
+# The used-by sentence (the definition note, the delete question) names the
+# saved scopes that tick the expression.
+run_mutation "scope dialog: the used-by scan finds no saved scope" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
   '                        .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)))' \
   '                        .is_some_and(|_| false)' \
   geode-shell \
-  deleting_a_named_expression_names_its_users
+  the_definition_note_names_each_saved_scope_that_ticks_it
 
 # `c` on a named expression seeds the copy's field from the copied table.
 run_mutation "named expr: a copy's field is built empty" \

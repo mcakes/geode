@@ -3255,22 +3255,6 @@ pub struct ObjectDialogState {
     pub rows: crate::prepared::Prepared<(u64, u64), String, ObjectRow>,
 }
 
-/// The delete question's "Used by …" sentence for a named expression: `scopes` in
-/// name order, then the frame when `frame` ticks it, joined "A", "A and B" or
-/// "A, B and C". `None` when nothing uses it, so no sentence is painted.
-pub(crate) fn used_by_sentence(mut scopes: Vec<String>, frame: bool) -> Option<String> {
-    scopes.sort();
-    if frame {
-        scopes.push("the current scope".to_string());
-    }
-    let list = match scopes.as_slice() {
-        [] => return None,
-        [one] => one.clone(),
-        [init @ .., last] => format!("{} and {last}", init.join(", ")),
-    };
-    Some(format!("Used by {list}."))
-}
-
 /// Whether an `expression` field — a saved scope's or a named expression's —
 /// is the open text entry, which is the condition for its suggestions to be
 /// shown and to claim keys.
