@@ -2647,15 +2647,20 @@ fn an_import_answer_for_another_classification_is_dropped(cx: &mut gpui::TestApp
     let p = h.import(&mut vcx, "region.csv");
     h.press(&mut vcx, "g c k enter");
     assert_eq!(h.shown_name(&vcx).as_deref(), Some("desk"));
-    h.read_as(&mut vcx, &p, "underlying_ref,region\nNKY,Asia\n");
+    let said = [Notice::status(
+        "import of region.csv was for region \u{2014} not applied",
+    )];
+    // Refused on the answer itself, before any planning starts.
+    h.answer_file(
+        &mut vcx,
+        &p,
+        TextFileResult::Read(Ok("underlying_ref,region\nNKY,Asia\n".into())),
+    );
+    assert_eq!(h.notice_list(&vcx), said);
+    h.land(&mut vcx);
     assert_eq!(h.confirm(&vcx), None);
     assert!(h.edits(&mut vcx).is_empty());
-    assert_eq!(
-        h.notice_list(&vcx),
-        [Notice::status(
-            "import of region.csv was for region \u{2014} not applied"
-        )]
-    );
+    assert_eq!(h.notice_list(&vcx), said);
 }
 
 /// The open dialog is modeless: a classification switched to while it
