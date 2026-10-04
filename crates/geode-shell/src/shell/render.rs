@@ -411,11 +411,11 @@ impl Render for ShellView {
         };
         // The scope bar's save glyph — the mouse form of
         // `scope::save_current`, through the same door `input.rs`'s
-        // dispatch arm uses.
+        // dispatch arm uses: the Scope dialog's save prompt, alone.
         let save_chip_entity = cx.entity();
         let on_save = move |window: &mut Window, cx: &mut App| {
             save_chip_entity.update(cx, |view, cx| {
-                objectdialog::render::open_save_scope(view, window, cx);
+                super::scopedialog::view::open_save(view, window, cx);
             });
         };
         // The scope bar's load glyph opens the Scope dialog's Saved screen,

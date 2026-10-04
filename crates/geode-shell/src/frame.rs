@@ -1303,6 +1303,16 @@ impl<'a> FrameViewMut<'a> {
         }
     }
 
+    /// Record that the lane's scope was just saved as `name`, as
+    /// [`Self::save_scope`] does, for a save written to the configuration by
+    /// another route (the Scope dialog's save prompt). The name need not be
+    /// among the frame's saved scopes yet: the write is pending and the
+    /// caller refreshes the definitions itself. A change advances the
+    /// generation, so the title and the session writer see it.
+    pub fn note_saved_as(&mut self, name: String) {
+        self.set_loaded_from(Some(name));
+    }
+
     /// Session restore's door for the lane's provenance: the record's value
     /// replaces whatever the lane holds, so a pinned lane does not keep the
     /// copy `pin` took from the shared lane. Unlike a load it changes no
@@ -3982,6 +3992,23 @@ mod tests {
         f.view_mut(ws(2)).clear_scope();
         assert_eq!(f.view(ws(2)).loaded_from(), None);
         assert_eq!(f.shared().loaded_from(), Some("eu"));
+    }
+
+    #[test]
+    fn noting_a_save_records_the_name_and_advances_the_generation() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_scope(book_scope("BK001"));
+        let before = f.generation();
+        let scope_version = f.shared().versions().scope;
+        f.shared_mut().note_saved_as("mine".into());
+        assert_eq!(f.shared().loaded_from(), Some("mine"));
+        assert!(f.generation() > before, "a provenance change advances it");
+        assert_eq!(f.shared().scope(), &book_scope("BK001"));
+        assert_eq!(f.shared().versions().scope, scope_version, "no scope edit");
+        // The same name again changes nothing.
+        let again = f.generation();
+        f.shared_mut().note_saved_as("mine".into());
+        assert_eq!(f.generation(), again);
     }
 
     #[test]

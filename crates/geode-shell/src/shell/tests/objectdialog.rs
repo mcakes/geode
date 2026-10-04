@@ -3335,8 +3335,18 @@ fn c_is_not_a_verb_on_views(cx: &mut gpui::TestAppContext) {
     );
 }
 
-// Saving the current scope opens naming from the palette action or scope-bar chip,
-// seeded with the frame's scope.
+// The Scopes object dialog's own save-current naming, seeded with the
+// frame's scope. No production door reaches it any more (the save chip and
+// `scope::save_current` open the Scope dialog's save prompt), so these tests
+// open it directly until the object dialog is removed.
+
+fn open_object_save_scope(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            objectdialog::render::open_save_scope(shell, window, cx);
+        });
+    });
+}
 
 fn set_frame_book_scope(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, book: &str) {
     shell.update(cx, |s, cx| {
@@ -3352,16 +3362,16 @@ fn set_frame_book_scope(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestCont
     });
 }
 
-/// `scope::save_current` opens naming with a `FromFrame` seed. Enter on a new name
+/// The object dialog's save naming opens with a `FromFrame` seed. Enter on a new name
 /// saves the frame's selection and opens the new scope's edit stage.
 #[gpui::test]
-fn scope_save_current_seeds_naming_from_the_frame_and_creates_it(cx: &mut gpui::TestAppContext) {
+fn object_save_scope_seeds_naming_from_the_frame_and_creates_it(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (window, mut cx) = open_shell_with_user_dir(cx, services_with_a_saved_scope(), dir.path());
     let shell = shell_of(&window, &mut cx);
     set_frame_book_scope(&shell, &mut cx, "BK009");
 
-    dispatch_action(&shell, "scope::save_current", &mut cx);
+    open_object_save_scope(&shell, &mut cx);
     cx.run_until_parked();
 
     assert!(
@@ -3393,10 +3403,10 @@ fn scope_save_current_seeds_naming_from_the_frame_and_creates_it(cx: &mut gpui::
     assert!(edit_draft(&shell, &cx, |d| d.is_new));
 }
 
-/// An empty frame scope has nothing to save: `scope::save_current` opens
+/// An empty frame scope has nothing to save: the object dialog's save opens
 /// the dialog in browse, with a notice, and never enters naming at all.
 #[gpui::test]
-fn scope_save_current_with_an_empty_frame_scope_opens_browse_with_a_notice(
+fn object_save_scope_with_an_empty_frame_scope_opens_browse_with_a_notice(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
@@ -3404,7 +3414,7 @@ fn scope_save_current_with_an_empty_frame_scope_opens_browse_with_a_notice(
     let shell = shell_of(&window, &mut cx);
     assert!(shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().scope().is_empty()));
 
-    dispatch_action(&shell, "scope::save_current", &mut cx);
+    open_object_save_scope(&shell, &mut cx);
     cx.run_until_parked();
 
     assert!(shell.read_with(&cx, |s, _| s.modal_open()));
@@ -3421,16 +3431,16 @@ fn scope_save_current_with_an_empty_frame_scope_opens_browse_with_a_notice(
 }
 
 /// `enter` on a name already taken is refused with the same notice
-/// `n`/`c` give — `scope::save_current` reaches `create_from_name`'s one
+/// `n`/`c` give — the object dialog's save reaches `create_from_name`'s one
 /// name check like every other naming path.
 #[gpui::test]
-fn scope_save_current_refuses_a_taken_name(cx: &mut gpui::TestAppContext) {
+fn object_save_scope_refuses_a_taken_name(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (window, mut cx) = open_shell_with_user_dir(cx, services_with_a_saved_scope(), dir.path());
     let shell = shell_of(&window, &mut cx);
     set_frame_book_scope(&shell, &mut cx, "BK009");
 
-    dispatch_action(&shell, "scope::save_current", &mut cx);
+    open_object_save_scope(&shell, &mut cx);
     cx.run_until_parked();
     cx.simulate_input("mine"); // the fixture's own saved scope
     cx.simulate_keystrokes("enter");
@@ -3456,13 +3466,13 @@ fn scope_save_current_refuses_a_taken_name(cx: &mut gpui::TestAppContext) {
 /// the palette action's own id (`Domain::Scopes.reserved_names()`), and
 /// letting a scope claim it would shadow `input.rs`'s dispatch arm.
 #[gpui::test]
-fn scope_save_current_refuses_its_own_name_as_reserved(cx: &mut gpui::TestAppContext) {
+fn object_save_scope_refuses_its_own_name_as_reserved(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (window, mut cx) = open_shell_with_user_dir(cx, services_with_a_saved_scope(), dir.path());
     let shell = shell_of(&window, &mut cx);
     set_frame_book_scope(&shell, &mut cx, "BK009");
 
-    dispatch_action(&shell, "scope::save_current", &mut cx);
+    open_object_save_scope(&shell, &mut cx);
     cx.run_until_parked();
     cx.simulate_input("save_current");
     cx.simulate_keystrokes("enter");
@@ -3486,13 +3496,13 @@ fn scope_save_current_refuses_its_own_name_as_reserved(cx: &mut gpui::TestAppCon
 /// `escape` from a `FromFrame` naming prompt cancels like any other:
 /// back to browse, nothing written.
 #[gpui::test]
-fn escape_from_save_current_naming_writes_nothing(cx: &mut gpui::TestAppContext) {
+fn escape_from_object_save_scope_naming_writes_nothing(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (window, mut cx) = open_shell_with_user_dir(cx, services_with_a_saved_scope(), dir.path());
     let shell = shell_of(&window, &mut cx);
     set_frame_book_scope(&shell, &mut cx, "BK009");
 
-    dispatch_action(&shell, "scope::save_current", &mut cx);
+    open_object_save_scope(&shell, &mut cx);
     cx.run_until_parked();
     cx.simulate_input("today");
     cx.simulate_keystrokes("escape");
@@ -3515,13 +3525,13 @@ fn escape_from_save_current_naming_writes_nothing(cx: &mut gpui::TestAppContext)
 /// Scopes state `open` just installed, never on the parked Views one. With Scopes
 /// already open underneath, the request is refused and touches nothing.
 #[gpui::test]
-fn scope_save_current_stacks_over_views_without_touching_it(cx: &mut gpui::TestAppContext) {
+fn object_save_scope_stacks_over_views_without_touching_it(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) =
         dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
     set_frame_book_scope(&shell, &mut cx, "BK009");
 
-    dispatch_action(&shell, "scope::save_current", &mut cx);
+    open_object_save_scope(&shell, &mut cx);
     cx.run_until_parked();
 
     assert_eq!(
@@ -3554,7 +3564,7 @@ fn scope_save_current_stacks_over_views_without_touching_it(cx: &mut gpui::TestA
 
     // Settings over Scopes over Views: a second save is refused and touches neither.
     dispatch_action(&shell, "settings::open", &mut cx);
-    dispatch_action(&shell, "scope::save_current", &mut cx);
+    open_object_save_scope(&shell, &mut cx);
     cx.run_until_parked();
     assert_eq!(
         shell.read_with(&cx, |s, _| s.notice.clone()).as_deref(),

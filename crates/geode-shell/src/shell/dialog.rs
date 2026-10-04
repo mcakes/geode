@@ -574,15 +574,24 @@ pub(crate) fn sync_dialog_text(
         }
         Some(DialogKind::Scope) => {
             // Current has no field: keys reach the dialog through the shell.
-            // The text step owns the input, its draft the source of truth.
+            // The text step and a name prompt own the input, their draft the
+            // source of truth; the input keeps focus under a prompt's
+            // question, whose keys the dialog claims before the field.
             // The Saved screen's filter is a mode dialog's: the input mirrors
             // its query and has focus only while filtering.
             let Some(state) = shell.scope_dialog.as_ref() else {
                 return;
             };
             let input = shell.dialog_input.clone();
-            if super::scopedialog::view::in_text_step(state) {
-                let draft = state.text_draft.clone();
+            let draft = if super::scopedialog::view::in_text_step(state) {
+                Some(state.text_draft.as_str())
+            } else if super::scopedialog::prompt::in_name_prompt(state) {
+                state.prompt.as_ref().map(|p| p.draft.as_str())
+            } else {
+                None
+            };
+            if let Some(draft) = draft {
+                let draft = draft.to_string();
                 if input.read(cx).text() != draft.as_str() {
                     input.update(cx, |i, cx| i.set_value(draft, window, cx));
                 }
@@ -705,9 +714,13 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
             };
             dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);
         }
-        // The Saved screen's frozen filter row; a no-op on any other layer.
+        // The Saved screen's frozen filter row; a no-op on any other layer
+        // and while a question is up.
         Some(DialogKind::Scope) => {
             if let Some(state) = shell.scope_dialog.as_mut() {
+                if state.pending.is_some() {
+                    return;
+                }
                 state.error = None;
                 super::scopedialog::saved_view::enter_filter(state);
             }

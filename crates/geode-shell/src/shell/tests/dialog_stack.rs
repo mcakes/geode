@@ -326,6 +326,10 @@ fn opens_dialog_matches_what_dispatch_pushes(cx: &mut gpui::TestAppContext) {
         // pushes over a dialog with a tile focused is asserted by
         // `the_chooser_is_refused_over_a_page_and_listed_as_a_dialog_opener`.
         "tile::link_group",
+        // The lane's scope is empty here: nothing to save, a status notice
+        // and no prompt. That it opens over a nonempty scope is asserted by
+        // `scope_save_current_opens_the_prompt_alone_and_escape_closes`.
+        "scope::save_current",
     ];
     let (window, mut vcx) = open_shell(cx, super::picker::services_with_pickable());
     let shell = shell_of(&window, &mut vcx);

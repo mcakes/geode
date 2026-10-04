@@ -2842,7 +2842,7 @@ run_mutation "object stack: save-current names the covered dialog instead of Sco
   '    if !dialog::can_open_object(shell, Domain::Scopes) {' \
   '    if !dialog::can_open(shell, dialog::DialogKind::Object) {' \
   geode-shell \
-  scope_save_current_stacks_over_views_without_touching_it
+  object_save_scope_stacks_over_views_without_touching_it
 
 run_mutation "object stack: a failed write rebuilds every open draft" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
@@ -8419,7 +8419,7 @@ run_mutation "scope dialog: the + holds its pressed fill while open" \
 # the step's open, re-seed the field and push a second step layer.
 run_mutation "scope dialog: rows under the text step ignore presses" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
-  '                    if shell.scope_dialog.as_ref().is_some_and(in_text_step) {
+  '                    if !shell.scope_dialog.as_ref().is_some_and(takes_pointer) {
                         return;
                     }' \
   '' \
@@ -9586,7 +9586,7 @@ run_mutation "scope-save: save_current is matched before the scope:: prefix arm"
   '        } else if action.0 == "scope::save_current" {' \
   '        } else if false {' \
   geode-shell \
-  scope_save_current_seeds_naming_from_the_frame_and_creates_it
+  scope_save_current_opens_the_prompt_alone_and_escape_closes
 
 # `open_save_scope`'s one gate: an empty frame scope has nothing to save,
 # so it must open browse with the notice rather than naming. Dropping
@@ -9597,7 +9597,7 @@ run_mutation "scope-save: an empty frame scope refuses naming" \
   '    if shell.target_frame().read(cx).scope().is_empty() {' \
   '    if false {' \
   geode-shell \
-  scope_save_current_with_an_empty_frame_scope_opens_browse_with_a_notice
+  object_save_scope_with_an_empty_frame_scope_opens_browse_with_a_notice
 
 # `ScopeBarModel::savable` is the scope bar's own gate on the `save`
 # chip: an always-true value would paint the chip over an empty scope,
@@ -9617,7 +9617,7 @@ run_mutation "scope-save: save_current is a reserved scope name" \
   '            Domain::Scopes | Domain::Expressions => &geode_core::scopes::RESERVED_NAMES,' \
   '            Domain::Scopes | Domain::Expressions => &[],' \
   geode-shell \
-  scope_save_current_refuses_its_own_name_as_reserved
+  object_save_scope_refuses_its_own_name_as_reserved
 
 # `Frame::save_scope` rejects the reserved name `save_current` at its own
 # boundary. Otherwise saving through a caller without dialog validation
@@ -9648,7 +9648,7 @@ run_mutation "scope-save: the toolbar only paints the save chip while savable" \
   '    if model.savable {' \
   '    if true {' \
   geode-shell \
-  the_save_chip_only_paints_with_a_savable_scope_and_opens_naming
+  the_save_chip_only_paints_with_a_savable_scope_and_opens_the_save_prompt
 
 # The `×` is inside a chip whose body opens the picker. Its occluding
 # hitbox prevents the same mouse-down from reaching that body; without
@@ -18358,7 +18358,7 @@ run_mutation "scope dialog: o pushes the Saved screen" \
 # s pushes the save prompt.
 run_mutation "scope dialog: s pushes the save prompt" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
-  '            crate::shell::objectdialog::render::open_save_scope(shell, window, cx);' \
+  '            super::prompt::push_save(shell, cx);' \
   '' \
   geode-shell \
   o_pushes_saved_and_s_pushes_the_save_prompt
@@ -18446,7 +18446,7 @@ run_mutation "scope dialog: add controls under the text step ignore presses" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
   '    cx: &mut Context<ShellView>,
 ) {
-    if shell.scope_dialog.as_ref().is_none_or(in_text_step) {
+    if !shell.scope_dialog.as_ref().is_some_and(takes_pointer) {
         return;
     }' \
   '    cx: &mut Context<ShellView>,
@@ -18689,6 +18689,123 @@ run_mutation "scope dialog: Back from Saved returns to Current" \
   '    if true || !back_available(shell) {' \
   geode-shell \
   the_back_button_returns_from_saved_to_current
+
+# ---- Scope dialog: the save prompt ------------------------------------
+
+# A name the user already holds asks before it is overwritten; reading no
+# owner writes at once.
+run_mutation "scope dialog: saving over a user scope asks first" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '    match apply::definition_owner(shell, SCOPES_DOC, &name) {' \
+  '    match Owner::Absent {' \
+  geode-shell \
+  s_seeds_the_source_and_enter_on_a_user_scope_asks_then_overwrites
+
+# A desk or builtin scope forks at once, with its announcement.
+run_mutation "scope dialog: saving over an inherited scope forks without asking" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '        Owner::Absent | Owner::Inherited(_) => save_scope_as(shell, name, window, cx),' \
+  '        Owner::Absent => save_scope_as(shell, name, window, cx),
+        Owner::Inherited(_) => {}' \
+  geode-shell \
+  saving_over_a_desk_scope_forks_without_asking_and_says_so
+
+# A save records the name as the lane's provenance.
+run_mutation "scope dialog: a save records the lane's source" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '    edit_lane(shell, cx, |f| f.note_saved_as(name));' \
+  '    let _ = name;' \
+  geode-shell \
+  saving_under_a_new_name_writes_it_and_records_the_source
+
+# The frame resolves a save before the flush.
+run_mutation "scope dialog: a save refreshes the frame's definitions at once" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '    apply::refresh_definitions_now(shell, cx);' \
+  '' \
+  geode-shell \
+  saving_under_a_new_name_writes_it_and_records_the_source
+
+# Frame: noting a save sets the provenance.
+run_mutation "frame: note_saved_as records the name" \
+  crates/geode-shell/src/frame.rs \
+  '    pub fn note_saved_as(&mut self, name: String) {
+        self.set_loaded_from(Some(name));' \
+  '    pub fn note_saved_as(&mut self, name: String) {
+        let _ = name;' \
+  geode-shell \
+  noting_a_save_records_the_name_and_advances_the_generation
+
+# s on an empty scope refuses in the dialog rather than opening a prompt.
+run_mutation "scope dialog: s on an empty scope refuses" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '    if empty {' \
+  '    if false {' \
+  geode-shell \
+  saving_an_empty_scope_refuses
+
+# The one-shot door on an empty scope refuses on the status bar.
+run_mutation "scope dialog: the one-shot save door refuses an empty scope" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    if empty {' \
+  '    if false {' \
+  geode-shell \
+  saving_an_empty_scope_refuses
+
+# The reserved action name is refused as a scope name.
+run_mutation "scope dialog: a reserved name refuses" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '    if geode_core::scopes::RESERVED_NAMES.contains(&name.as_str()) {' \
+  '    if false {' \
+  geode-shell \
+  reserved_and_unusable_names_refuse_inline
+
+# A question claims every key: an unrecognised one neither types nor acts.
+run_mutation "scope dialog: a question claims unrecognised keys" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '    if let Some(answer) = ConfirmAnswer::from_key(ks) {
+        answer_pending(shell, answer, window, cx);
+    }' \
+  '    let Some(answer) = ConfirmAnswer::from_key(ks) else {
+        return false;
+    };
+    answer_pending(shell, answer, window, cx);' \
+  geode-shell \
+  n_answers_no_and_keeps_the_draft
+
+# A question is routed before the layer beneath it: otherwise `y` types.
+run_mutation "scope dialog: a question owns the keys before its layer" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    if state.pending.is_some() {
+        return super::prompt::pending_key(shell, ks, window, cx);
+    }' \
+  '' \
+  geode-shell \
+  s_seeds_the_source_and_enter_on_a_user_scope_asks_then_overwrites
+
+# The field's Change reaches the prompt's draft.
+run_mutation "scope dialog: typing reaches the name prompt's draft" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        super::prompt::on_draft_changed(state, text);' \
+  '' \
+  geode-shell \
+  saving_under_a_new_name_writes_it_and_records_the_source
+
+# The input mirrors the prompt's draft and takes focus.
+run_mutation "scope dialog: the input mirrors the name prompt" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '            } else if super::scopedialog::prompt::in_name_prompt(state) {' \
+  '            } else if false {' \
+  geode-shell \
+  s_seeds_the_source_and_enter_on_a_user_scope_asks_then_overwrites
+
+# The save chip opens the Scope dialog's save prompt.
+run_mutation "scope dialog: the save chip opens the save prompt" \
+  crates/geode-shell/src/shell/render.rs \
+  '                super::scopedialog::view::open_save(view, window, cx);' \
+  '' \
+  geode-shell \
+  the_save_chip_opens_the_prompt_alone_and_enter_closes
 
 # ---- Scope dialog: lane provenance, rows, saved rows and layers ----
 

@@ -692,9 +692,13 @@ fn begin_copy(shell: &mut ShellView, source: String) {
 /// string so the two sites cannot drift apart.
 const EMPTY_SCOPE_NOTICE: &str = "the frame's scope is empty — nothing to save";
 
-/// Open Scopes naming for the current frame scope from palette or toolbar. An empty
-/// frame scope opens browsing with a notice instead. Creation checks emptiness again
-/// because the frame can change while naming is open.
+/// Open Scopes naming for the current frame scope. An empty frame scope opens
+/// browsing with a notice instead. Creation checks emptiness again because the
+/// frame can change while naming is open.
+// No production door reaches this since the save chip and
+// `scope::save_current` open the Scope dialog's save prompt; the object
+// dialog's own naming tests still open it until the dialog is removed.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::shell) fn open_save_scope(
     shell: &mut ShellView,
     window: &mut Window,

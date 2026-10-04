@@ -231,7 +231,7 @@ pub(crate) fn back_available(shell: &ShellView) -> bool {
     shell
         .scope_dialog
         .as_ref()
-        .is_some_and(|s| in_saved(s) && s.layers.depth() > 1)
+        .is_some_and(|s| in_saved(s) && s.layers.depth() > 1 && s.pending.is_none())
 }
 
 /// The Back button's step: what `escape` does from here, all its rungs at
@@ -417,7 +417,12 @@ fn commit_cursor(shell: &mut ShellView, window: &mut Window, cx: &mut Context<Sh
 
 /// Show whatever the Saved screen left for, or close the dialog when it was
 /// the bottom layer.
-fn finish(shell: &mut ShellView, after: After, window: &mut Window, cx: &mut Context<ShellView>) {
+pub(super) fn finish(
+    shell: &mut ShellView,
+    after: After,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
     match after {
         After::Close => shell.close_modal(window, cx),
         After::Show => {
@@ -441,7 +446,8 @@ fn press_row(
     let Some(state) = shell.scope_dialog.as_mut() else {
         return;
     };
-    if !in_saved(state) {
+    // A question up over the screen owns the pointer too.
+    if !in_saved(state) || state.pending.is_some() {
         return;
     }
     state.saved.cursor = at;
@@ -630,14 +636,19 @@ pub(crate) fn build(
                 .child(error.clone()),
         );
     }
+    let border = cx.theme().border;
+    let footer = match super::prompt::pending_footer(state, entity, cx) {
+        Some(question) => question,
+        None => dialog::hint_rows(&hints(state)),
+    };
     body.child(
         v_flex()
             .w_full()
             .gap_1()
             .pt_2()
             .border_t_1()
-            .border_color(cx.theme().border)
-            .child(dialog::hint_rows(&hints(state))),
+            .border_color(border)
+            .child(footer),
     )
     .into_any_element()
 }

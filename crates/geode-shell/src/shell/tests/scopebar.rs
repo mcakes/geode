@@ -243,10 +243,12 @@ fn a_text_set_elsewhere_shows_in_the_field_and_a_chip_close_drops_the_dimension(
     assert!(vcx.debug_bounds("scope-chip-close-book").is_none());
 }
 
-/// The save chip appears only for a nonempty frame scope. Clicking it opens naming
-/// seeded from the frame, matching `scope::save_current`.
+/// The save chip appears only for a nonempty frame scope. Clicking it opens the
+/// Scope dialog's save prompt, matching `scope::save_current`.
 #[gpui::test]
-fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui::TestAppContext) {
+fn the_save_chip_only_paints_with_a_savable_scope_and_opens_the_save_prompt(
+    cx: &mut gpui::TestAppContext,
+) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
@@ -268,29 +270,35 @@ fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui
     vcx.simulate_click(save.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
 
-    assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s
-            .object_dialog
-            .as_ref()
-            .map(|d| d.stage.clone())),
-        Some(objectdialog::Stage::Naming)
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
     );
     assert_eq!(
         shell.read_with(&vcx, |s, _| s
-            .object_dialog
+            .scope_dialog
             .as_ref()
-            .map(|d| d.naming_seed.clone())),
-        Some(objectdialog::NameSeed::FromFrame)
+            .map(|d| d.layers.top().clone())),
+        Some(crate::shell::scopedialog::state::Layer::Step(
+            crate::shell::scopedialog::state::Step::SaveScope
+        ))
     );
-    // The naming field retains focus through the opening mouse-down because the dialog
+    // The name field retains focus through the opening mouse-down because the dialog
     // helper prevents the default focus transfer.
     vcx.simulate_input("eu");
     vcx.run_until_parked();
     assert_eq!(
         shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string()),
         "eu",
-        "typing after the click reaches the naming field"
+        "typing after the click reaches the name field"
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s
+            .scope_dialog
+            .as_ref()
+            .and_then(|d| d.prompt.as_ref().map(|p| p.draft.clone()))),
+        Some("eu".to_string()),
+        "the field is the prompt's draft"
     );
 }
 

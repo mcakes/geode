@@ -564,7 +564,6 @@ pub(super) fn queue_slot_chain(
 }
 
 /// Who holds `name` in `doc`, pending batch included.
-#[allow(dead_code)] // Read by the Saved screen's delete/revert gates, not routed yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Owner {
     /// No layer defines it.
@@ -579,13 +578,11 @@ pub(crate) enum Owner {
 /// batch applied: a definition queued a moment ago is already the user's, so
 /// a caller gating delete, revert or an overwrite question sees it before the
 /// flush. The last layer defining the name wins, the merge's own rule.
-#[allow(dead_code)] // Read by the Saved screen's delete/revert gates, not routed yet.
 pub(crate) fn definition_owner(shell: &ShellView, doc: &str, name: &str) -> Owner {
     let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
     owner_in(&config, doc, name)
 }
 
-#[allow(dead_code)] // Reached through the two callers above, not routed yet.
 fn owner_in(config: &Config, doc: &str, name: &str) -> Owner {
     let holders: Vec<Layer> = config
         .layered_docs(doc)
@@ -628,6 +625,21 @@ pub(crate) fn queue_definition(
     edits.insert((doc, name.to_string()), Some(value));
     queue_batch(shell, edits, user_dir, Duration::ZERO, None, cx);
     Ok(notice)
+}
+
+/// `scope` as a saved scope's own table in `scopes.toml` (the object's inner
+/// table, not wrapped under its name): the value a definition write takes.
+///
+/// Round-tripped through [`super::object_text`], the spelling a flush
+/// produces, rather than hand-converted: what `saved_scopes_from_doc` reads
+/// back is the text a write really contains.
+pub(crate) fn scope_as_toml(scope: &geode_core::scope::Scope) -> toml::Table {
+    let table = geode_core::scopes::scope_to_table(scope);
+    let text = super::object_text("scope", toml_edit::Item::Table(table));
+    text.parse::<toml::Table>()
+        .ok()
+        .and_then(|parsed| parsed.get("scope").and_then(|v| v.as_table()).cloned())
+        .unwrap_or_default()
 }
 
 /// Remove `name`'s user-layer entry from `doc` and its sidecar keys, zero

@@ -593,10 +593,18 @@ fn o_pushes_saved_and_s_pushes_the_save_prompt(cx: &mut gpui::TestAppContext) {
     vcx.simulate_keystrokes("s");
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.top_kind()),
-        Some(dialog::DialogKind::Object)
+        Some(dialog::DialogKind::Scope)
     );
-    let domain = shell.read_with(&vcx, |s, _| s.object_dialog.as_ref().map(|d| d.domain));
-    assert_eq!(domain, Some(crate::shell::objectdialog::Domain::Scopes));
+    assert_eq!(
+        top(&shell, &vcx),
+        Some(crate::shell::scopedialog::state::Layer::Step(
+            crate::shell::scopedialog::state::Step::SaveScope
+        ))
+    );
+    let depth = shell.read_with(&vcx, |s, _| {
+        s.scope_dialog.as_ref().map(|d| d.layers.depth())
+    });
+    assert_eq!(depth, Some(2), "the prompt is pushed over Current");
 }
 
 /// Cursor on term 1 (`delta < 5`), then the lane's expression swapped

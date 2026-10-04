@@ -444,3 +444,412 @@ fn saved_opened_alone_paints_no_back_button(cx: &mut gpui::TestAppContext) {
     assert!(vcx.debug_bounds("scope-saved").is_some());
     assert!(vcx.debug_bounds("shell-modal-back").is_none());
 }
+
+// ---- The save prompt -------------------------------------------------
+
+/// A user layer defining `eu` (book BK001) and a desk layer defining
+/// `desk_eu` (book BK003), over `services`' `risk` dataset, with a
+/// writable user directory the saves land in.
+struct SaveFixture {
+    _desk: tempfile::TempDir,
+    user: tempfile::TempDir,
+    shell: Entity<ShellView>,
+    vcx: gpui::VisualTestContext,
+}
+
+fn save_fixture(cx: &mut gpui::TestAppContext) -> SaveFixture {
+    let desk = tempfile::tempdir().unwrap();
+    let user = tempfile::tempdir().unwrap();
+    std::fs::write(
+        desk.path().join("scopes.toml"),
+        "config_version = 1\n[desk_eu]\n[desk_eu.dimensions]\nbook = [\"BK003\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        user.path().join("scopes.toml"),
+        "config_version = 1\n[eu]\n[eu.dimensions]\nbook = [\"BK001\"]\n",
+    )
+    .unwrap();
+    let mut services = test_services();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin(
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+                 [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+            )
+            .unwrap(),
+        ],
+        desk: Some(desk.path().to_path_buf()),
+        user: Some(user.path().to_path_buf()),
+    });
+    let (window, mut vcx) = open_shell_with_user_dir(cx, services, user.path());
+    let shell = shell_of(&window, &mut vcx);
+    draw(&mut vcx);
+    SaveFixture {
+        _desk: desk,
+        user,
+        shell,
+        vcx,
+    }
+}
+
+fn book(value: &str) -> Scope {
+    Scope {
+        dimensions: vec![geode_core::scope::DimensionSelection {
+            column: "book".into(),
+            values: vec![value.into()],
+        }],
+        ..Scope::default()
+    }
+}
+
+impl SaveFixture {
+    fn set_lane(&mut self, scope: Scope) {
+        frame_of(&self.shell, &self.vcx).update(&mut self.vcx, |f, cx| {
+            f.shared_mut().set_scope(scope);
+            cx.notify();
+        });
+        self.vcx.run_until_parked();
+        draw(&mut self.vcx);
+    }
+
+    fn load(&mut self, name: &str) {
+        let name = name.to_string();
+        self.shell
+            .update(&mut self.vcx, |s, cx| s.load_saved_scope(&name, cx))
+            .expect("the fixture defines it");
+        self.vcx.run_until_parked();
+        draw(&mut self.vcx);
+    }
+
+    fn keys(&mut self, keys: &str) {
+        self.vcx.simulate_keystrokes(keys);
+        self.vcx.run_until_parked();
+        draw(&mut self.vcx);
+    }
+
+    fn type_text(&mut self, text: &str) {
+        self.vcx.simulate_input(text);
+        self.vcx.run_until_parked();
+        draw(&mut self.vcx);
+    }
+
+    fn open_current(&mut self) {
+        dispatch_action(&self.shell, "frame::scope", &mut self.vcx);
+        draw(&mut self.vcx);
+    }
+
+    fn flush(&mut self) {
+        self.vcx.executor().advance_clock(
+            crate::shell::objectdialog::apply::WRITE_DEBOUNCE
+                + std::time::Duration::from_millis(10),
+        );
+        self.vcx.run_until_parked();
+        draw(&mut self.vcx);
+    }
+
+    fn user_scopes(&self) -> String {
+        std::fs::read_to_string(self.user.path().join("scopes.toml")).unwrap_or_default()
+    }
+
+    fn draft(&self) -> Option<String> {
+        self.shell.read_with(&self.vcx, |s, _| {
+            s.scope_dialog
+                .as_ref()
+                .and_then(|d| d.prompt.as_ref().map(|p| p.draft.clone()))
+        })
+    }
+
+    fn prompt_error(&self) -> Option<String> {
+        self.shell.read_with(&self.vcx, |s, _| {
+            s.scope_dialog
+                .as_ref()
+                .and_then(|d| d.prompt.as_ref().and_then(|p| p.error.clone()))
+        })
+    }
+
+    fn input_text(&self) -> String {
+        self.shell.read_with(&self.vcx, |s, cx| {
+            s.dialog_input.read(cx).value().to_string()
+        })
+    }
+
+    fn top(&self) -> Option<Layer> {
+        top_layer(&self.shell, &self.vcx)
+    }
+
+    fn top_kind(&self) -> Option<dialog::DialogKind> {
+        self.shell.read_with(&self.vcx, |s, _| s.top_kind())
+    }
+
+    fn painted(&mut self, selector: &'static str) -> bool {
+        self.vcx.debug_bounds(selector).is_some()
+    }
+
+    fn loaded_from(&self) -> Option<String> {
+        frame_of(&self.shell, &self.vcx).read_with(&self.vcx, |f, _| {
+            f.shared().loaded_from().map(str::to_string)
+        })
+    }
+
+    fn has_saved(&self, name: &str) -> bool {
+        frame_of(&self.shell, &self.vcx)
+            .read_with(&self.vcx, |f, _| f.saved_scopes().contains_key(name))
+    }
+
+    fn notice(&self) -> Option<String> {
+        self.shell
+            .read_with(&self.vcx, |s, _| s.notice.as_ref().map(|n| n.to_string()))
+    }
+
+    fn queued(&self) -> bool {
+        self.shell
+            .read_with(&self.vcx, |s, _| s.pending_config_write.is_some())
+    }
+
+    fn title(&self) -> Option<String> {
+        self.shell.read_with(&self.vcx, |s, _| {
+            s.scope_dialog
+                .as_ref()
+                .and_then(|d| d.title.as_ref().map(|t| t.to_string()))
+        })
+    }
+}
+
+fn save_step() -> Option<Layer> {
+    Some(Layer::Step(
+        crate::shell::scopedialog::state::Step::SaveScope,
+    ))
+}
+
+/// `s` seeds the field with where the scope came from; `enter` on a name
+/// the user already holds asks first, and `y` overwrites it.
+#[gpui::test]
+fn s_seeds_the_source_and_enter_on_a_user_scope_asks_then_overwrites(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut f = save_fixture(cx);
+    f.load("eu");
+    f.open_current();
+    f.keys("t");
+    f.type_text("spx");
+    f.keys("enter");
+    assert_eq!(f.title().as_deref(), Some("from eu, changed"));
+    f.keys("s");
+    assert_eq!(f.top(), save_step());
+    assert_eq!(f.draft().as_deref(), Some("eu"));
+    assert_eq!(f.input_text(), "eu", "the field mirrors the draft");
+    assert!(f.painted("scope-dialog-name-field"));
+    f.keys("enter");
+    assert!(f.painted("scope-dialog-confirm"), "a user scope asks first");
+    assert!(f.painted("scope-dialog-confirm-yes"));
+    assert!(!f.queued(), "nothing queued before the answer");
+    f.keys("y");
+    assert!(!f.painted("scope-dialog-confirm"));
+    assert_eq!(f.top(), Some(Layer::Current));
+    assert_eq!(f.title().as_deref(), Some("from eu"));
+    f.flush();
+    let written = f.user_scopes();
+    assert!(
+        written.contains("[eu") && written.contains("spx"),
+        "{written}"
+    );
+}
+
+/// A new name writes at once, without a question, and the frame resolves it
+/// and records it as the lane's source before the flush.
+#[gpui::test]
+fn saving_under_a_new_name_writes_it_and_records_the_source(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.load("eu");
+    f.open_current();
+    f.keys("s");
+    f.keys("backspace backspace");
+    assert_eq!(f.draft().as_deref(), Some(""));
+    f.type_text("mine");
+    f.keys("enter");
+    assert!(!f.painted("scope-dialog-confirm"), "a new name never asks");
+    assert!(f.has_saved("mine"), "resolved before the flush");
+    assert_eq!(f.loaded_from().as_deref(), Some("mine"));
+    assert_eq!(f.top(), Some(Layer::Current));
+    assert_eq!(f.title().as_deref(), Some("from mine"));
+    f.flush();
+    let written = f.user_scopes();
+    assert!(
+        written.contains("[mine") && written.contains("BK001"),
+        "{written}"
+    );
+}
+
+/// Saving over a desk scope forks it into the user layer at once and says
+/// so on the status bar.
+#[gpui::test]
+fn saving_over_a_desk_scope_forks_without_asking_and_says_so(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.set_lane(book("BK002"));
+    f.open_current();
+    f.keys("s");
+    f.type_text("desk_eu");
+    f.keys("enter");
+    assert!(!f.painted("scope-dialog-confirm"), "a fork does not ask");
+    assert_eq!(f.top(), Some(Layer::Current));
+    assert_eq!(
+        f.notice().as_deref(),
+        Some("copied 'desk_eu' to your config — r restores the desk copy")
+    );
+    assert_eq!(f.loaded_from().as_deref(), Some("desk_eu"));
+    f.flush();
+    let written = f.user_scopes();
+    assert!(
+        written.contains("[desk_eu") && written.contains("BK002"),
+        "{written}"
+    );
+}
+
+/// A scope saved a moment ago is already the user's: saving over it again
+/// before the flush asks.
+#[gpui::test]
+fn saving_over_a_scope_just_created_asks(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.set_lane(book("BK002"));
+    f.open_current();
+    f.keys("s");
+    f.type_text("mine");
+    f.keys("enter");
+    assert!(!f.painted("scope-dialog-confirm"));
+    f.keys("s");
+    assert_eq!(
+        f.draft().as_deref(),
+        Some("mine"),
+        "seeded with the new source"
+    );
+    f.keys("enter");
+    assert!(f.painted("scope-dialog-confirm"));
+}
+
+/// `n` drops the question and leaves the prompt as it was. While the
+/// question is up it owns every key: `j` neither types nor acts.
+#[gpui::test]
+fn n_answers_no_and_keeps_the_draft(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.load("eu");
+    f.open_current();
+    f.keys("s");
+    f.keys("enter");
+    assert!(f.painted("scope-dialog-confirm"));
+    f.keys("j");
+    assert!(
+        f.painted("scope-dialog-confirm"),
+        "an unrecognised key is dropped"
+    );
+    assert_eq!(f.draft().as_deref(), Some("eu"), "it does not type");
+    assert_eq!(f.input_text(), "eu");
+    f.keys("n");
+    assert!(!f.painted("scope-dialog-confirm"));
+    assert_eq!(f.top(), save_step());
+    assert_eq!(f.draft().as_deref(), Some("eu"));
+    assert_eq!(f.input_text(), "eu");
+    assert!(f.painted("scope-dialog-name-field"));
+    assert!(!f.queued(), "nothing was queued");
+}
+
+/// An empty scope has nothing to save: `s` refuses into the dialog's error
+/// line, and the one-shot door refuses on the status bar and opens nothing.
+#[gpui::test]
+fn saving_an_empty_scope_refuses(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_current();
+    f.keys("s");
+    assert_eq!(f.top(), Some(Layer::Current), "no prompt");
+    assert!(!f.painted("scope-dialog-name-field"));
+    assert!(f.painted("scope-dialog-error"));
+    assert_eq!(
+        error(&f.shell, &f.vcx).as_deref(),
+        Some("nothing to save — the scope is empty")
+    );
+    f.keys("escape");
+    assert_eq!(f.top_kind(), None);
+    dispatch_action(&f.shell, "scope::save_current", &mut f.vcx);
+    draw(&mut f.vcx);
+    assert_eq!(f.top_kind(), None, "the one-shot door opens nothing");
+    assert_eq!(
+        f.notice().as_deref(),
+        Some("nothing to save — the scope is empty")
+    );
+}
+
+/// A reserved name and one the configuration cannot hold refuse under the
+/// field, and the prompt stays.
+#[gpui::test]
+fn reserved_and_unusable_names_refuse_inline(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.set_lane(book("BK002"));
+    f.open_current();
+    f.keys("s");
+    f.type_text("save_current");
+    f.keys("enter");
+    assert_eq!(f.top(), save_step());
+    assert!(f.painted("scope-dialog-error"));
+    assert_eq!(
+        f.prompt_error().as_deref(),
+        Some("'save_current' is reserved")
+    );
+    f.keys("escape");
+    assert_eq!(f.top(), Some(Layer::Current));
+    f.keys("s");
+    f.type_text("a b");
+    f.keys("enter");
+    assert_eq!(f.top(), save_step());
+    assert_eq!(
+        f.prompt_error().as_deref(),
+        Some("'a b' is not a usable name")
+    );
+    f.type_text("c");
+    assert_eq!(f.prompt_error(), None, "typing clears the refusal");
+    assert!(!f.queued(), "nothing was queued");
+}
+
+/// The save chip opens the prompt alone: `enter` saves and closes the
+/// dialog.
+#[gpui::test]
+fn the_save_chip_opens_the_prompt_alone_and_enter_closes(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.set_lane(book("BK002"));
+    let chip = f
+        .vcx
+        .debug_bounds("scope-save-chip")
+        .expect("the save chip paints over a nonempty scope");
+    f.vcx
+        .simulate_click(chip.center(), gpui::Modifiers::default());
+    f.vcx.run_until_parked();
+    draw(&mut f.vcx);
+    assert_eq!(f.top_kind(), Some(dialog::DialogKind::Scope));
+    assert_eq!(f.top(), save_step());
+    assert_eq!(depth(&f.shell, &f.vcx), 1, "the prompt is the bottom layer");
+    assert!(f.painted("scope-dialog-name-field"));
+    f.type_text("mine");
+    f.keys("enter");
+    assert_eq!(f.top_kind(), None);
+    assert!(f.has_saved("mine"));
+    assert_eq!(f.loaded_from().as_deref(), Some("mine"));
+}
+
+/// `scope::save_current` is the chip's keyboard door: the prompt alone,
+/// and `escape` closes it with nothing written.
+#[gpui::test]
+fn scope_save_current_opens_the_prompt_alone_and_escape_closes(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.set_lane(book("BK002"));
+    dispatch_action(&f.shell, "scope::save_current", &mut f.vcx);
+    draw(&mut f.vcx);
+    assert_eq!(f.top(), save_step());
+    assert_eq!(depth(&f.shell, &f.vcx), 1);
+    f.type_text("mine");
+    f.keys("escape");
+    assert_eq!(f.top_kind(), None);
+    assert!(!f.has_saved("mine"));
+    assert!(!f.queued());
+}

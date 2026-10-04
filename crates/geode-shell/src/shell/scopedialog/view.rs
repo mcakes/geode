@@ -124,6 +124,10 @@ pub(crate) struct ScopeDialogState {
     /// The Saved screen's rows, filter and cursor; derived with `rows`
     /// under the same key.
     pub saved: super::saved_view::SavedScreen,
+    /// The name being typed while a name prompt is the top layer.
+    pub prompt: Option<super::prompt::NamePrompt>,
+    /// The question awaiting `y`/`n`; while `Some` it owns every key.
+    pub pending: Option<super::prompt::Pending>,
 }
 
 /// What the rows read: the frame generation (every lane value change) and
@@ -146,6 +150,8 @@ impl ScopeDialogState {
             text_draft: String::new(),
             error: None,
             saved: super::saved_view::SavedScreen::new(),
+            prompt: None,
+            pending: None,
         }
     }
 
@@ -185,12 +191,15 @@ pub(crate) fn in_text_step(state: &ScopeDialogState) -> bool {
     matches!(state.layers.top(), Layer::Step(Step::Text))
 }
 
-/// The Change arm's pure half: the text step's draft, or the Saved
-/// screen's filter while it is filtering. Current ignores the field.
+/// The Change arm's pure half: the text step's draft, a name prompt's draft,
+/// or the Saved screen's filter while it is filtering. Current ignores the
+/// field.
 pub(crate) fn on_query_changed(state: &mut ScopeDialogState, text: &str) {
     if in_text_step(state) {
         state.text_draft = text.to_string();
         state.error = None;
+    } else if super::prompt::in_name_prompt(state) {
+        super::prompt::on_draft_changed(state, text);
     } else if super::saved_view::filtering(state) {
         state.saved.set_query(text);
     }
@@ -223,9 +232,58 @@ pub(crate) fn open_saved(view: &mut ShellView, window: &mut Window, cx: &mut Con
     open_on(view, Layer::Saved, window, cx);
 }
 
-fn open_on(view: &mut ShellView, first: Layer, window: &mut Window, cx: &mut Context<ShellView>) {
-    if !dialog::can_open(view, dialog::DialogKind::Scope) {
+/// The one-shot save door (the scope bar's save chip,
+/// `scope::save_current`): the save prompt alone, so its commit or `escape`
+/// closes the dialog. An empty scope refuses on the status bar and opens
+/// nothing. With the dialog already on top on Current the prompt is pushed
+/// over it instead, as `s` does; on any other layer this is a no-op.
+pub(crate) fn open_save(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    if view.top_kind() == Some(dialog::DialogKind::Scope) {
+        if view
+            .scope_dialog
+            .as_ref()
+            .is_some_and(|s| matches!(s.layers.top(), Layer::Current) && s.pending.is_none())
+        {
+            super::prompt::push_save(view, cx);
+            view.refresh_dialog_rows(cx);
+            dialog::sync_dialog_text(view, window, cx);
+            cx.notify();
+        }
         return;
+    }
+    let (empty, seed) = {
+        let frame = view.target_frame().read(cx);
+        (
+            frame.scope().is_empty(),
+            frame.loaded_from().map(str::to_string),
+        )
+    };
+    if empty {
+        view.notice = Some(super::prompt::NOTHING_TO_SAVE.into());
+        cx.notify();
+        return;
+    }
+    if !open_on(view, Layer::Step(Step::SaveScope), window, cx) {
+        return;
+    }
+    if let Some(state) = view.scope_dialog.as_mut() {
+        state.prompt = Some(super::prompt::save_prompt(seed));
+    }
+    view.refresh_dialog_rows(cx);
+    dialog::sync_dialog_text(view, window, cx);
+    cx.notify();
+}
+
+/// Open the dialog with `first` as its bottom layer. Returns whether it
+/// opened (`dialog::can_open` refuses one lower in the stack).
+fn open_on(
+    view: &mut ShellView,
+    first: Layer,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
+    if !dialog::can_open(view, dialog::DialogKind::Scope) {
+        return false;
     }
     view.scope_dialog = Some(ScopeDialogState::new(first));
     let entity = cx.entity();
@@ -247,6 +305,7 @@ fn open_on(view: &mut ShellView, first: Layer, window: &mut Window, cx: &mut Con
         super::saved_view::back_available,
         super::saved_view::back,
     );
+    true
 }
 
 /// Run one edit on the dialog's lane (`target_frame`, so a pinned workspace
@@ -277,8 +336,15 @@ fn handle_key(
     let Some(state) = shell.scope_dialog.as_mut() else {
         return false;
     };
+    // A question owns every key, whatever layer it was asked over.
+    if state.pending.is_some() {
+        return super::prompt::pending_key(shell, ks, window, cx);
+    }
     if in_text_step(state) {
         return text_step_key(shell, ks, window, cx);
+    }
+    if super::prompt::in_name_prompt(state) {
+        return super::prompt::prompt_key(shell, ks, window, cx);
     }
     if super::saved_view::in_saved(state) {
         return super::saved_view::handle_key(shell, ks, window, cx);
@@ -322,8 +388,8 @@ fn handle_key(
             }
         }
         ("s", true, false) => {
-            crate::shell::objectdialog::render::open_save_scope(shell, window, cx);
-            return true;
+            super::prompt::push_save(shell, cx);
+            dialog::sync_dialog_text(shell, window, cx);
         }
         ("enter" | "e", true, false) => {
             open_cursor_row(shell, window, cx);
@@ -525,17 +591,25 @@ fn enter_text_step(shell: &mut ShellView, window: &mut Window, cx: &mut Context<
     cx.notify();
 }
 
+/// Whether Current's rows and controls take the pointer: only while Current
+/// itself is on top with no question up. Under a step drawn on this body
+/// (the text step, a name prompt) they are its preview.
+fn takes_pointer(state: &ScopeDialogState) -> bool {
+    matches!(state.layers.top(), Layer::Current) && state.pending.is_none()
+}
+
 /// The pointer route to `p`, `x` and `t`: a section header's `add` control
 /// or its empty row opens the step that adds to that section, the same door
-/// its key opens. Ignored under the text step, where these are a preview of
-/// the rows rather than controls: a step opened there would cover the typing.
+/// its key opens. Ignored under a step drawn here, where these are a preview
+/// of the rows rather than controls: a step opened there would cover the
+/// typing.
 fn add_from_pointer(
     shell: &mut ShellView,
     section: Section,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    if shell.scope_dialog.as_ref().is_none_or(in_text_step) {
+    if !shell.scope_dialog.as_ref().is_some_and(takes_pointer) {
         return;
     }
     if let Some(state) = shell.scope_dialog.as_mut() {
@@ -824,11 +898,12 @@ fn build(
             let click = entity.clone();
             el = el.on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 click.update(cx, |shell, cx| {
-                    // The rows painted under the text step are its preview,
-                    // not controls: a press there would move Current's
-                    // cursor under the field, and a double-click would open
-                    // a row's step over the typing.
-                    if shell.scope_dialog.as_ref().is_some_and(in_text_step) {
+                    // The rows painted under a step drawn here (the text
+                    // step, a name prompt) are its preview, not controls: a
+                    // press there would move Current's cursor under the
+                    // field, and a double-click would open a row's step
+                    // over the typing.
+                    if !shell.scope_dialog.as_ref().is_some_and(takes_pointer) {
                         return;
                     }
                     if let Some(state) = shell.scope_dialog.as_mut() {
@@ -862,8 +937,11 @@ fn build(
                 .child(dialog::filter_row(&shell.dialog_input, None, cx)),
         );
     }
+    if let Some(field) = super::prompt::field(shell, state, cx) {
+        body = body.child(field);
+    }
     body = body.child(list);
-    if let Some(error) = state.error.as_ref() {
+    if let Some(error) = super::prompt::error(state).or(state.error.as_ref()) {
         body = body.child(
             div()
                 .px_2()
@@ -873,14 +951,19 @@ fn build(
                 .child(error.clone()),
         );
     }
+    let border = theme.border;
+    let footer = match super::prompt::pending_footer(state, entity, cx) {
+        Some(question) => question,
+        None => dialog::hint_rows(&hints(shell, state)),
+    };
     body.child(
         v_flex()
             .w_full()
             .gap_1()
             .pt_2()
             .border_t_1()
-            .border_color(theme.border)
-            .child(dialog::hint_rows(&hints(shell, state))),
+            .border_color(border)
+            .child(footer),
     )
     .into_any_element()
 }
@@ -892,6 +975,9 @@ fn hints(shell: &ShellView, state: &ScopeDialogState) -> Vec<Hint> {
             Hint::new(HintRow::Go, &["enter"], "set text").selector("scope-dialog-hint-set-text"),
             Hint::new(HintRow::Go, &["escape"], "back"),
         ];
+    }
+    if super::prompt::in_name_prompt(state) {
+        return super::prompt::hints(state);
     }
     let mut hints = vec![
         Hint::new(HintRow::Move, &["j", "k"], "row"),

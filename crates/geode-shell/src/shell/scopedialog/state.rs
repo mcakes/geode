@@ -37,7 +37,12 @@ pub(crate) enum Step {
     NameExpression {
         text: String,
     },
+    /// Naming the lane's scope to save it.
     SaveScope,
+    /// Naming a copy of a saved definition.
+    CopyName {
+        from: super::saved::SavedId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
