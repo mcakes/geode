@@ -7,27 +7,13 @@
 //!
 //! Doors: `mod+o` and `+` open `Current`; the load glyph,
 //! `frame::scope_saved`, `config::scopes` and `config::expressions` open
-//! `Saved`; `mod+p`, `frame::pick_book` and a dimension chip open
-//! `Step(Dimension)`; `mod+x` opens `Step(AddExpression)`; a term chip opens
-//! `Step(Term)`; a `≡` chip opens `Step(Definition)`; the `save` chip and
-//! `scope::save_current` open `Step(SaveScope)`.
+//! `Saved`; a `≡` chip opens `Step(Definition)`; the `save` chip and
+//! `scope::save_current` open `Step(SaveScope)`. The dimension and expression
+//! steps are their own dialogs (the picker and the frame expression dialog),
+//! pushed over the Scope dialog rather than layered inside it.
 
-use geode_core::scope::Expr;
-
-#[allow(dead_code)] // Pushed by the step doors, which the view does not route yet.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Step {
-    /// Columns, or a known column's values.
-    Dimension {
-        column: Option<String>,
-    },
-    AddExpression,
-    /// Editing term `index`; `seed` guards the index against the scope
-    /// moving under the dialog.
-    Term {
-        index: usize,
-        seed: Expr,
-    },
     Text,
     /// A saved expression's definition; `None` is a new one.
     Definition {
@@ -124,14 +110,14 @@ impl Layers {
 mod tests {
     use super::*;
 
-    fn dim() -> Layer {
-        Layer::Step(Step::Dimension { column: None })
+    fn text() -> Layer {
+        Layer::Step(Step::Text)
     }
 
     #[test]
     fn a_step_entered_from_current_returns_there_on_commit_and_on_escape() {
         let mut l = Layers::open(Layer::Current);
-        l.push(dim());
+        l.push(text());
         assert_eq!(l.commit_step(), After::Show);
         assert_eq!(l.top(), &Layer::Current);
         l.push(Layer::Step(Step::Text));
@@ -142,9 +128,9 @@ mod tests {
 
     #[test]
     fn a_one_shot_step_closes_on_commit_and_on_escape() {
-        let mut l = Layers::open(dim());
+        let mut l = Layers::open(text());
         assert_eq!(l.commit_step(), After::Close);
-        let mut l = Layers::open(Layer::Step(Step::AddExpression));
+        let mut l = Layers::open(Layer::Step(Step::SaveScope));
         assert_eq!(l.escape(), After::Close);
     }
 

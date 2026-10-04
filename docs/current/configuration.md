@@ -160,12 +160,12 @@ schema and color-definition diagnostics are reported by other callers.
 
 Scope expressions use a restricted grammar validated against the schema. They
 are never raw SQL. A saved scope is checked by `Scope::validate` wherever it
-is loaded; both the frame's expression dialogs and the Scopes object dialog's
-`expression` field additionally check a typed draft at Enter, so an unknown
+is loaded; both the frame's expression dialog and the Scope dialog's
+definition step additionally check a typed draft at Enter, so an unknown
 column or a disallowed operator on a derived dimension is refused with the
 field still open rather than accepted and left to fail later at query time
 (see [input-and-dialogs.md's Frame expression](input-and-dialogs.md#frame-expression)
-and [configuration-dialogs.md's Scope expression field](configuration-dialogs.md#scope-expression-field)).
+and [Definition step](input-and-dialogs.md#definition-step)).
 Source adapter names, document kinds, module keymap fragments, pricer
 names, and market-data panels depend on what the assembled application has
 registered. The app and data service check provider capabilities and panel

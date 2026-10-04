@@ -1,21 +1,14 @@
 # Configuration dialogs
 
-The object dialogs edit Views, Groupings, Scopes, Sources, Colors, and
-Expressions, and inspect Schema. They share a pure draft model and a GPUI
+The object dialogs edit Views, Groupings, Sources and Colors, and inspect
+Schema. They share a pure draft model and a GPUI
 adapter. See
 [configuration](configuration.md) for layer merging, file writes, and reload
 acceptance; this guide describes what editing adds to those contracts.
 
 Saved scopes and named expressions are managed from the Scope dialog's
-[Saved](input-and-dialogs.md#saved) screen, not from object dialogs:
-`config::scopes`, `config::expressions`, the toolbar's load and save glyphs,
-`scope::save_current` and a `≡` chip all open the Scope dialog. No door
-reaches the Scopes or Expressions object dialogs any longer. What this guide
-says of those two domains (their rows in the table below, their copy, save
-and delete behavior, [saved-scope values](#saved-scope-values), the
-[named expressions field](#named-expressions-field) and the
-[scope expression field](#scope-expression-field)) describes code that is
-still compiled but unreachable.
+[Saved](input-and-dialogs.md#saved) screen (`config::scopes`,
+`config::expressions`), not from an object dialog.
 
 ## Stages and ownership
 
@@ -31,7 +24,7 @@ typed name); render and every browse key and click read it. A covered object
 dialog is re-keyed when it is revealed, so a reload while it was parked shows
 on the first paint. Landing the cursor after a removal still ranks the
 pending-aware configuration, because the painted list catches up only when the
-batch applies. The Edit, Column and Values rows are the draft's and are not
+batch applies. The Edit and Column rows are the draft's and are not
 prepared: they derive at each render and handler call, because one derivation
 and rank of the largest demo draft costs 2 to 13 microseconds, too little to
 repay a cache key and its refresh seams (see
@@ -43,10 +36,9 @@ repay a cache key and its refresh seams (see
 | Naming | New name; Enter validates and creates, Escape returns without creating |
 | Edit | One object's fields; Escape returns to browsing after clearing mode/query |
 | Column | Seven presentation fields projected over the same draft; returns to its object |
-| Values | Distinct values for one scope dimension; returns to its scope |
 
 Normal mode leaves the input blurred so bare keys act as commands. In Browse,
-Edit, Column, and Values, `/` or a click on the frozen filter row enters Filter
+Edit, and Column, `/` or a click on the frozen filter row enters Filter
 mode and records that stage's current query. Each entry takes a fresh snapshot.
 
 While filtering, Escape restores the entry query and bare Enter keeps the
@@ -57,7 +49,7 @@ eligible row as described below. An unchanged query preserves selection.
 After keeping a filter, a second Enter performs the stage's normal action:
 Browse opens the selected object (on Groupings it applies the row; see
 [the Grouping dialog](#the-grouping-dialog)), and eligible Edit rows open
-Column or Values. Other rows retain their ordinary edit instructions.
+their Column stage. Other rows retain their ordinary edit instructions.
 
 In Normal mode, Escape clears a remaining query, then returns to the parent
 stage, then closes. The title row's Back button, painted in every stage but
@@ -84,9 +76,9 @@ drag and does nothing else. Available rows have no grip and open nothing on a
 press, so the whole row stays their drag handle. Any row of the list is a drop
 target.
 
-In Edit, Column, and Values, `Draft::is_cursor_stop` determines which rows can
+In Edit and Column, `Draft::is_cursor_stop` determines which rows can
 hold selection. A row qualifies when it supports a row-specific command or
-opens a Column or Values stage. Display-only text, list headers, multi-choice
+opens a Column stage. Display-only text, list headers, multi-choice
 fields, and one-option choices remain visible for context and diagnostics but
 are skipped when eligible rows exist. Schema's declared-column rows qualify
 because they open presentation editors; derived-dimension rows do not.
@@ -108,7 +100,7 @@ keyboard movement can still traverse the inert rows and the footer reports
 that no row command is available. Pointer clicks on ineligible rows are always
 ignored, including in this fallback state.
 
-Column and Values stages stash the parent fields and fold changes back into
+A Column stage stashes the parent fields and folds changes back into
 the same draft before validation and persistence. This avoids independent
 copies of an object's nested state. Returning from a Schema column refreshes
 its read-only summaries from configuration with pending edits included.
@@ -145,10 +137,8 @@ groups changed fields and renders whole named objects for those destinations.
 | Views: order, hidden state, label, width, format | `view_presentation.toml`; overlays the definition |
 | Schema: declared-column presentation | `dataset_presentation.toml`; applies to columns owned by that dataset |
 | Groupings | `groupings.toml`; numbered slot containing an array of dimensions |
-| Scopes | `scopes.toml`; saved dimension selections, text, expression, and ticked named-expression references |
 | Sources | `sources.toml`; source definition, requiring restart for ingestion changes. The rows follow the source's shape when the edit opens: a directory source shows dataset, paths, readiness, stable polls, priority, poll interval, pending timeout, batch pattern and adapter; another adapter adds read-only document, topics, coalesce and source time (a subscription's `recover_timeout` and `recover_max_age` are not shown; set by hand, they survive a save from the dialog); a snapshot source (another adapter over a reference dataset) shows only dataset, poll interval (default `5m`), an editable table and the adapter; it has no priority, since snapshots are taken ahead of every file, and its browse line names only its table. The shape is not rederived when the dataset choice changes; a mismatch is reported by validation and the rows follow on the next open. |
 | Colors | `colors.toml`; hue/tone or semantic token, with optional sign tinting; also opened at naming by the row menu's `Color…` › `New named color…`, where creating the color sets the value's color |
-| Expressions | `expressions.toml`; one named scope expression, referenced by name from a saved scope or the frame |
 | Row menu: Color… | `value_colors.toml`; one value's entry in the user layer (a name, an inline `{ hue }` table, `none`, or removed) |
 
 Editing an inherited definition copies the entire object to the user layer.
@@ -183,8 +173,7 @@ columns open its presentation editor. Groupings always lists slots 1–9,
 including empty slots, after its two leading rows, and does not create or
 rename slots. Its final selected
 dimension cannot be unticked; deletion or reversion handles removing the user
-entry. Scopes selections have no meaningful order and offer no reorder route,
-and neither does a scope's named-expression list.
+entry.
 
 ## The Grouping dialog
 
@@ -331,41 +320,25 @@ These echoes are therefore not completely inert.
 Creation rejects malformed or reserved names and names already held by any
 definition layer, a fixed roster, or the user's presentation overlay. An
 orphaned view overlay still reserves its name; the notice directs the user to
-remove that entry before creating over it. Scopes and Expressions can also
-copy an existing object under a new name (`c`); Scopes can additionally save
-the current frame scope under a new name. A named expression has no default
-text an empty definition could hold: naming a fresh one opens its `expression`
-field at once, with no validation error yet painted for the still-empty text,
-and the object is written to the user layer only on the first Enter that
-parses and is not empty. Escape before that Enter writes nothing. A copy
-starts from its source's text as usual, since it is never empty.
+remove that entry before creating over it.
 
-The frame's scope expression dialog is a second way to create a named
-expression: `mod+s` in any of its modes names the typed text, applying
-the same name checks as creation here (malformed, reserved, or already held)
-and the dialog's own Enter checks on the text, and writes
-`[name] expression = "<text>"` to the user layer of `expressions.toml`
-through this dialog's write path. In the term editor the name then
+The frame's scope expression dialog creates a named expression outside the
+object dialogs: `mod+s` in any of its modes names the typed text, refusing a
+malformed or reserved name and one any layer of `expressions.toml` already
+holds (including one queued a moment ago), applies the dialog's own Enter
+checks on the text, and queues `[name] expression = "<text>"` for the user
+layer of `expressions.toml` through the shared pending batch. In the term editor the name then
 replaces the term (see
 [input and dialogs](input-and-dialogs.md#frame-expression)). A scope-bar
 named chip's click opens the expression's definition in the Scope dialog's
-[definition step](input-and-dialogs.md#definition-step), not this dialog.
+[definition step](input-and-dialogs.md#definition-step).
 
 Delete removes a user-defined object. Revert requires an inherited object to
 restore and removes the user's definition and associated view presentation
 where present. A presentation-only view override can therefore be reverted
 without ever having copied its definition. These object-wide operations are
-unavailable inside Column and Values stages. Overwriting a user-owned scope
-requires confirmation; overwriting an inherited one makes an announced fork.
-Removals bypass draft validation errors so an invalid object can still be
+unavailable inside a Column stage. Removals bypass draft validation errors so an invalid object can still be
 removed or reverted.
-
-Deleting a named expression names its users under the question: every saved
-scope that ticks it, in name order, then "the current scope" when the frame's
-own scope does, joined "A", "A and B" or "A, B and C" — for example "Used by
-EQ liquid, RATES liquid and the current scope." Nothing is listed when no
-scope or the frame uses it. Confirming deletes only the definition; it never
-rewrites those scopes, which then show the name as missing.
 
 `overrides.toml` records the shadowed layer and canonical inherited object text
 when a definition is forked. Browse drift compares that baseline against the
@@ -381,72 +354,3 @@ check against another editor: read-modify-write preserves other objects in the
 file, but the dialog replaces the same object's value with its draft. Whole
 batch recovery likewise uses a captured configuration snapshot rather than a
 merge of intervening external changes.
-
-## Saved-scope values
-
-Opening Values requests distinct values using the draft's scope with the open
-column's constraint removed, plus the frame's as-of state. Each request has a
-monotonic tag; delivery must match the current Values stage and tag. Loading
-and failure rows remain read-only until a usable result arrives. When that
-scope carries a named-expression reference the current `expressions` document
-cannot resolve, the stage shows the resolution error as its values-unavailable
-text instead of requesting anything.
-
-The list retains selected values absent from the returned data and marks them
-as such. Ticking values updates the parent scope's source; unticking the last
-one removes that dimension constraint. Selection summaries are presentation
-only: persistence dirtiness also compares source values so two different
-selections with identical truncated summaries still produce a write.
-
-## Named expressions field
-
-A saved scope has a **Named expressions** field, an ordered-list field shaped
-like Dimensions: the scope's own references, ticked, above the rest of the
-`expressions.toml` document, unticked and available. `space` and a click tick
-or untick a name exactly as they do a dimension; unlike Dimensions, unticking
-the last one is allowed, since an empty `named` list is an ordinary scope with
-no references at all rather than a state the reader must distinguish. The
-list has no reorder route, the way Dimensions has none.
-
-A ticked name the `expressions` document cannot supply is not dropped or
-hidden: its row carries a `missing` or `invalid` note in danger text (the
-same two reasons [`Scope::resolve`](shell.md#the-shared-frame) reports) and
-can still be unticked. Saving a scope with such a name warns at that row rather than
-blocking the commit — the reference may be legitimate and the definition
-written afterward — and the query reports it once the scope is used.
-
-## Scope expression field
-
-The Scopes domain's `expression` field shares suggestion rows, operators,
-value rules, and insertion keys with the [frame expression editor](input-and-dialogs.md#frame-expression).
-Its distinct-values request uses the draft's dimension selections and text
-filter with the frame's as-of. The expression being replaced is removed before
-parsing that scope, so an unreadable saved expression does not discard the
-remaining narrowing.
-
-The Scopes and Expressions object fields exclude named-expression suggestions.
-Scopes select those references through their separate Named expressions field.
-
-Enter validates and commits the field. Syntax errors, unknown columns, and
-forbidden operators on derived dimensions produce an `expression:` notice
-and keep the field open. Escape cancels the field edit. Tab inserts a suggestion;
-Shift+Tab, Up/Down, and Ctrl+P/Ctrl+N move the suggestion highlight. Insertion
-uses the input's undoable range replacement and then updates the draft, so
-text synchronization preserves the inserted value.
-
-The Expressions domain's own `expression` field — the one field a named
-expression has — carries the same suggestion list and the same Enter/Escape
-contract, with two differences. Its values request has no enclosing scope: a
-named expression is ANDed into whichever scope ticks it, so its suggested
-values are the whole dataset's rather than narrowed by anything. And an empty
-field is refused on Enter with `expression: a named expression cannot be
-empty`, keeping the field open, rather than accepted as clearing an optional
-filter — an empty named expression would be a definition every scope ticking
-it fails on.
-
-A resolution failure — the edited scope's own `named` list carrying a missing
-or invalid reference — is reported wherever this dialog would otherwise
-request values under that scope: the Values stage (above) and this field's
-own suggestion list both show it as their ordinary values-unavailable text,
-and no request is sent. See [the shared frame](shell.md#the-shared-frame) for
-resolution itself and the other surfaces it reaches.

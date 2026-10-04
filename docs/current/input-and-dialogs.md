@@ -86,7 +86,7 @@ the cover pops: the same stage, row, open field, and caret. The same domain
 never nests, because two drafts of one file would race each other's writes:
 requesting it from the top does nothing, and from lower in the stack posts
 "views is already open underneath" (the notice names the domain). A covered
-object dialog still receives its values replies and reload refreshes, and its
+object dialog still receives reload refreshes, and its
 column `color` choices follow named colors created above it, with the current
 selection kept by name and the draft left clean. A failed configuration write
 rebuilds only the drafts that contributed edits to the failed batch; a covered
@@ -128,8 +128,8 @@ runs. While the predicate holds, the shared title row paints a ghost Back
 button left of the title, with a tooltip naming Escape. A click leaves exactly
 one screen: it discards whatever Escape's earlier steps would discard, then
 takes that same transition, and synchronizes the shared input as every
-pointer transition does. The object dialog shows Back in Naming, Edit, Column,
-and Values; the dimension picker in Values; the log-level choice in its level
+pointer transition does. The object dialog shows Back in Naming, Edit and
+Column; the dimension picker in Values; the log-level choice in its level
 step. Browse, Columns, the log-level targets, and one-step dialogs paint none.
 In the object dialog one click cancels an open value field with its typed
 text, reverts filtering, and clears a kept query before leaving; while a y/n
@@ -562,9 +562,7 @@ forks. The copy lands in the user layer, and the cursor on it.
 
 `d` asks `Delete '<name>' from your config?` with a `Delete` button; for an
 expression, the line under the question names its users (for example
-`Used by EQ liquid and the current scope.`, as the object dialog's
-[delete of a named expression](configuration-dialogs.md#creation-removal-and-drift)
-did). A delete never rewrites the scopes that name the expression: they show
+`Used by EQ liquid and the current scope.`). A delete never rewrites the scopes that name the expression: they show
 it as missing. `r` asks `Throw away your changes to '<name>'?` with a
 `Revert` button; yes removes the user's copy and the lower layer's is in
 force again. Each refuses when the user holds nothing to remove: `d` on an
@@ -798,13 +796,14 @@ first, then the text, and refuses inline with the entry still open for:
 
 - a malformed name (`name: <reason>`, from `check_object_name`);
 - a reserved name (`'<name>' is reserved`);
-- a name the Expressions domain already holds (`'<name>' already exists`);
+- a name any layer of `expressions.toml` already holds, including one saved
+  a moment ago (`'<name>' already exists`);
 - text that the dialog's own Enter would refuse (a syntax or schema error);
 - no writable user config directory (`no writable user config directory —
   nothing was changed`).
 
-A save writes `[name] expression = "<text>"` to the user layer of
-`expressions.toml` through the object dialog's write path, rebuilds the
+A save queues `[name] expression = "<text>"` for the user layer of
+`expressions.toml` through the shared pending batch, rebuilds the
 frame's named expressions from the pending configuration at once (so the new
 name resolves before the write reaches disk), empties the field, and stages
 the name. In Add nothing reaches the frame scope until Enter;

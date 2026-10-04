@@ -662,8 +662,8 @@ every named reference through `Scope::resolve` against the frame's own
 [configuration](configuration.md#documents)), folding each into `expression`
 in list order, ANDed together and then with whatever expression the scope
 already carried. Resolution runs before every query a scope reaches — a tile's
-own requery and the shell's distinct-value requests (the dimension picker, the
-Scopes dialog's Values stage, and the frame's expression-suggestion lists) all
+own requery and the shell's distinct-value requests (the dimension picker and
+the expression-suggestion lists) all
 resolve the scope they are about to ask for values or rows under. A missing or
 invalid name is that request's error instead: a blotter tile paints it in
 place of a result, keeping whatever snapshot it had already painted rather

@@ -283,7 +283,7 @@ joined on the unique source value, if the idle figure stays over budget.
   0.67 to 0.78 ms for 507 keybinding actions with 200 user overrides, 0.19 to
   0.40 ms for 500 browse objects. A filter keystroke re-ranks without
   deriving: 113 µs and 235 to 245 µs. A repaint derives and ranks nothing.
-  Settings and the object dialog's Edit, Column and Values stages are not
+  Settings and the object dialog's Edit and Column stages are not
   prepared: they derive their rows at each render, key-handling and
   click-resolution call site, because one derivation and rank costs 2 to
   3.5 µs for settings and 2 to 13 µs for the largest demo edit draft, too
