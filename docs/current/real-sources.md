@@ -70,9 +70,9 @@ registered separately:
 Registration is split by what a headless process needs.
 [`geode_compose::adapters`](../../crates/geode-compose/src/lib.rs) builds the
 `AdapterRegistry`, and `geode_compose::engine_setup` registers
-`geode_documents::builtin_kinds()`; the app and the planned background
-collector share both. [`crates/geode-app/src/main.rs`](../../crates/geode-app/src/main.rs)
-builds the `PricerRegistry` and `VolModelRegistry`, and
+`geode_documents::builtin_kinds()`; the app and the background collector
+(`geode-collector`) share both.
+[`crates/geode-app/src/main.rs`](../../crates/geode-app/src/main.rs) builds the `PricerRegistry` and `VolModelRegistry`, and
 [`bridge.rs`](../../crates/geode-app/src/bridge.rs) resolves the pricer,
 egress targets and position service against these registries.
 
@@ -471,6 +471,8 @@ demo directory) and restart.
 - Only `MockPricer` and `DemoVolModel` exist; `cvi_reanchor` and
   `cvi_recalc_forward` refuse; the pricer's health chip never shows because
   no source feeds a dataset the pricer reads.
-- The headless collector that would keep subscriptions running while the
-  app is closed is not built; recovery is the only gap filler.
+- Subscriptions run while the app is closed only once the background
+  collector is installed (`geode-collector install`); without it recovery
+  on subscribe is the only gap filler, and with it recovery still covers
+  each handoff gap.
 - Nemo URL shapes are provisional.

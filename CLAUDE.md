@@ -49,6 +49,9 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo bench --workspace --no-run
 cargo check -p geode-shell --features test-support --all-targets
+cargo run -p geode-collector -- [--demo ROWS]           # background collector loop
+cargo run -p geode-collector -- install --dry-run       # print the login-job plan only
+cargo run -p geode-collector -- status [--demo ROWS]    # who holds the store
 
 bash scripts/mutation-check.sh "name substring"   # targeted mutation entries
 bash scripts/mutation-check.sh --changed           # entries for changed files
@@ -92,6 +95,15 @@ may still use separately configured `CC`/`CXX` wrappers.
   `geode-data`, `geode-documents` and `geode-demo-data`, never on gpui,
   `geode-shell`, `geode-tile` or a feature module (check:
   `cargo tree -p geode-compose -e normal | grep -c gpui` is 0).
+- `geode-collector`, the headless background collector, depends on
+  `geode-compose`, `geode-data` and `geode-core`, never on gpui or a UI
+  crate, even as a dev-dependency (check:
+  `cargo tree -p geode-collector -e normal | grep -c gpui` is 0, and the
+  same with `-e dev`).
+- `geode-collector install` registers a login agent (launchd or Task
+  Scheduler) and is the only way a collector ever starts. It is the
+  owner's opt-in: an agent never runs it, `launchctl` or `schtasks`; use
+  `install --dry-run` and the pure plan builders.
 - `geode-app` is the only composition root that adds UI: it builds on
   `geode-compose`, registers pricers, vol models, module factories and
   panels, and opens the window. The app and the collector must build equal

@@ -83,7 +83,7 @@ reaches `launchctl`, `schtasks` or the real `~/Library/LaunchAgents`.
 | `run.rs` | `run`/`run_with_levels`, the loop below; `ExeStamp` and `exe_changed`; the poll intervals; `BusyTimer` (a refused stamp read's escalation), `confirmed` (the two-probe app check) and `stop_report` (how a stopped hold is logged); the event sink (`Events`). |
 | `status.rs` | `status(db)`: `collector: running\|not running; app: present\|absent; store: <db>`, from two lock probes. |
 | `main.rs` | Installs logging with the `collector` prefix, dispatches, drops the log guard, exits with the returned status. |
-| `tests/handoff.rs` | Cross-process tests: the built binary in a temp home against a temp store, this process (or a child of it) as the app. Also `measure_handoff`, the handoff measurement in `docs/perf.md` (ignored; `GEODE_MEASURE_HANDOFF=1`, release build). Unix only. |
+| `tests/handoff.rs` | Cross-process tests: the built binary in a temp home against a temp store, this process (or a child of it) as the app. Also `measure_handoff`, the handoff measurement in `docs/perf.md` (ignored; `GEODE_MEASURE_HANDOFF=1`, release build). They run on Windows CI too but have been run only on macOS; the lost-race and momentary-lock tests are Unix only. |
 
 ## The loop
 

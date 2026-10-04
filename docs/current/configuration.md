@@ -14,6 +14,10 @@ Configuration is loaded in three layers, from lowest to highest precedence:
    otherwise `$HOME/.config/geode`. This is environment precedence, not a
    platform check; without either variable no user directory is resolved.
 
+The background collector reads the same desk and user layers over the
+builtin data layer, at each acquire; see [background
+collector](#background-collector).
+
 Tables merge recursively. Scalars, arrays, and values of a different type
 replace the lower-layer value at the same path; unrelated values remain.
 Provenance records the winning layer at a leaf or whole-object root, and
@@ -729,9 +733,37 @@ filesystem naming is stable across configured display zones.
 
 `[log]` controls the `geode::*` target levels, keyed by suffix: `ingest`,
 `query`, `config`, `session`, `shell`, `theme`, `pricing`, `vol`, `memory`,
-and `collector` (the background collector's own lifecycle), plus `default`. Third-party targets remain
-capped at `warn`. Runtime level changes persist through the same ordered user
-configuration write path.
+and `collector` (`geode::collector`, the background collector's own
+lifecycle), plus `default`. Third-party targets remain capped at `warn`.
+Runtime level changes persist through the same ordered user configuration
+write path. The background collector applies the same `[log]` levels to its
+own file (`collector.YYYY-MM-DD.log`) each time it takes the store; a
+change reaches it then, not live.
+
+## Background collector
+
+The background collector (`geode-collector`) reads the same layers as the
+app, from the same directories: the builtin data layer (the app's
+`pricer_sheets` and `pricer` declarations, plus the `--demo` layer), the
+desk layer, and the user layer. It lacks only the app's UI documents, which
+decide nothing about the store, so both processes build the same schema
+and sources; a `geode-app` test holds them to it. It reads the layers
+afresh each time it takes the store and has no hot reload: an edit made
+while it holds the store takes effect at its next acquire (after the app
+next opens and closes), its restart, or login. A changed `data.db_path`
+takes effect only at its restart, because its lease is on the store it
+started with; it warns at each acquire while the configuration names
+another.
+
+`[collector] memory_limit` in `app.toml` is an opt-in DuckDB
+`memory_limit` (such as `"2GB"`) for the collector's writer; the app never
+reads it. Unset, the default, the collector leaves DuckDB's own limit, as
+the app does. A finite 512MB limit made DuckDB abort the collector with an
+internal assertion during large CSV loads, and a service manager
+restarting it into the same load could crash-loop, so no default is set
+until an overnight footprint measurement chooses one. A value that is not
+a number and a unit (`B`, `KB`, `MB`, `GB`, `TB`, `KiB`, `MiB`, `GiB`,
+`TiB`, any case) warns at `app.collector.memory_limit` and is ignored.
 
 ## Pricing
 

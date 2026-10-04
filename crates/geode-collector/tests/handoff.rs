@@ -4,8 +4,9 @@
 //! Every test builds a temp world: `HOME` points into a temp directory,
 //! `APPDATA` and `LOCALAPPDATA` are removed, `GEODE_DESK_CONFIG` names a temp
 //! desk directory and `TMPDIR`, `TMP` and `TEMP` a temp directory (the
-//! `--demo` store lives there; Windows' `temp_dir` reads `TMP`/`TEMP`). The user `app.toml` sets `data.db_path` and `[log] collector =
-//! "debug"`, so the collector's publish lines reach
+//! `--demo` store lives there; Windows' `temp_dir` reads `TMP`/`TEMP`). The
+//! user `app.toml` sets `data.db_path` and `[log] collector = "debug"`, so
+//! the collector's publish lines reach
 //! `<temp home>/.config/geode/logs/collector.*.log`, which the tests read.
 //! `GEODE_SERVICE=1` drops the collector's stderr log layer, so a child's
 //! stderr (`<root>/stderr.txt`) holds only panics and aborts, shown when a

@@ -234,8 +234,9 @@ its `value` or `n` column is that key's error rather than a panic.
 ## Store ownership and the background collector
 
 DuckDB admits one writing process per file. Two processes can want a store:
-the app, and a background collector process (planned) that keeps
-subscriptions and discovery publishing while the app is closed. They hand the
+the app, and the background collector (`geode-collector`), a headless
+process that keeps subscriptions and discovery publishing while the app is
+closed. They hand the
 store between them through two advisory lock files beside the database
 ([`lease.rs`](../../crates/geode-data/src/lease.rs)):
 
@@ -257,11 +258,8 @@ the store; when one appears, the collector releases it with
 `DataHandle::release(HANDOFF_DRAIN)` (2 s) and the app's waiting open takes
 it. `StoreRole::Collector` is that process's open: it checks the
 [store-format stamp](#the-store-format-stamp) before any DDL and sets the
-writer's `memory_limit` when `[collector] memory_limit` names one. By
-default it sets none (DuckDB's default, as the app): a finite 512MB limit
-made DuckDB abort the collector with an internal assertion on large CSV
-loads. A value can be set once the overnight footprint measurement chooses
-one.
+writer's `memory_limit` when `[collector] memory_limit` names one (see
+[the collector](#the-collector)).
 
 ### The app's open
 
@@ -285,13 +283,14 @@ file's path as the error. Taking the lock creates the store's directory first
 (best-effort, as `Store::open_with` does), so a fresh machine's first launch
 does not fail on a missing directory. The probes `lease::app_present` and
 `lease::collector_present` open an existing lock file only: a missing lock
-file or directory reports no holder, and neither probe creates anything. A stop during the wait ends it
-at the next retry and the loop returns without a diagnostic or `ThreadStopped`. The service holds
-the lease as its last field, so it is released only after the writer and
-every reader connection have closed, on shutdown and on an unwind alike: a
-collector that sees the lock free can open the file at once. The app mailbox
-keys both store events on one key, so an open replaces a pending wait.
-The app (`bridge::start`) always opens this way, with
+file or directory reports no holder, and neither probe creates anything. A
+stop during the wait ends it at the next retry and the loop returns without a
+diagnostic or `ThreadStopped`. The service holds the lease as its last
+field, so it is released only after the writer and every reader connection
+have closed, on shutdown and on an unwind alike: a collector that sees the
+lock free can open the file at once. The app mailbox keys both store events
+on one key, so an open replaces a pending wait. The app (`bridge::start`)
+always opens this way, with
 `DEFAULT_STORE_DEADLINE`; tests and tools that own their store use `spawn`.
 While the wait lasts the status bar shows `store: waiting for collector`; see
 [the store-waiting segment](shell.md#the-store-waiting-segment).
@@ -352,6 +351,68 @@ collector's subscriptions start after it takes the store. See
 [`service.rs`](../../crates/geode-data/src/service.rs) (`shutdown_with`) and
 [`runner.rs`](../../crates/geode-data/src/ingest/runner.rs).
 
+### The collector
+
+`geode-collector` is a gpui-free binary built on `geode-compose`, so it
+loads the same configuration layers, store path and adapters as the app
+and builds the same store. Each store has at most one collector, enforced
+by `<db>.collector.lock`. Its loop, in
+[`run.rs`](../../crates/geode-collector/src/run.rs) (step by step in the
+[crate README](../../crates/geode-collector/README.md#the-loop)):
+
+1. Take `<db>.collector.lock`. A second collector for the same store finds
+   it held, logs, and exits 0.
+2. Wait, probing `<db>.app.lock` every second, while an app is present.
+3. Read the stamp read-only. A refused read (usually an app that appeared
+   since the probe) goes back to waiting; refusals that last 15 s with no
+   app present treat the store as unreadable. A different format or an
+   unreadable store logs one error and idles, rechecking every 30 s, so a
+   collector from another build never writes the store.
+4. Load the configuration afresh and spawn the data service as
+   `StoreRole::Collector`, plus the demo bus with `--demo`. Each process
+   runs its own demo bus; only the one holding the store publishes.
+5. Hold the store, probing for an app every 100 ms. An app counts only when
+   a second probe 20 ms later still sees it, because a `status` probe holds
+   the app lock for an instant.
+6. When an app appears, `release(HANDOFF_DRAIN)` (see [release](#release)),
+   then go back to step 2.
+
+**Death rule.** A data thread that stops while the collector holds the
+store is a death only when no app is present: the collector logs it as an
+error and exits 70, and the service manager restarts it. With an app
+present, the stop is the app winning the race for the file (its open took
+the store between the collector's probe and its own open): the collector
+logs `app took the store first` at info and goes back to waiting. The data
+service's own open failure and every thread stop are logged once, by the
+loop, not by its event sink.
+
+**Upgrade.** The collector records its executable's size and modification
+time at start. After a release, if either has changed, it exits 75
+(`EXIT_RESTART`, EX_TEMPFAIL) rather than 0, so launchd's `KeepAlive =
+{ SuccessfulExit = false }` starts the new build after its 10 s throttle.
+A second collector's exit 0 is not restarted. A changed binary therefore
+takes effect at the first handoff after it is replaced, never while the
+collector holds the store.
+
+**Memory limit.** `[collector] memory_limit` is opt-in. Unset (the
+default), the collector leaves DuckDB's own limit, as the app does. A
+finite 512MB limit made DuckDB abort the collector (an internal assertion,
+SIGABRT) during large CSV loads, and a service manager restarting it into
+the same load would crash-loop. A value is to be chosen from an overnight
+footprint measurement. An invalid value warns and is ignored.
+
+**Logging.** The collector logs under `geode::collector` to its own daily
+file, `<user config>/logs/collector.YYYY-MM-DD.log`, kept for 7 days
+beside the app's `geode.*.log`. Under launchd, `GEODE_SERVICE=1` drops the
+stderr layer, so `collector-stderr.log` holds only panics and failures from
+before logging started. `geode-collector status` reports, from the two lock
+probes, whether a collector and an app are present.
+
+**Install** is the only opt-in. `geode-collector install` registers the
+running binary as a macOS LaunchAgent or a Windows logon task and starts it;
+the app never starts a collector. `--dry-run` prints the plan and does
+nothing.
+
 ### The store-format stamp
 
 Two builds can write one store in turn, such as an upgraded app with an
@@ -390,6 +451,13 @@ build is never read. A mutation entry checks that a mismatch refuses.
   never check it; they overwrite it after their DDL. An older app opening a
   store written by a newer build therefore restamps it with its own format
   and writes in its own layout.
+- A handoff during a large file load misses the 500 ms target and the 2 s
+  drain cap: the release lets the running load finish, so the handoff lasts
+  the rest of that load (about 1.9 s at 1,000,000 rows, 4.5 s at
+  2,000,000). A load longer than the app's 15 s deadline fails the app's
+  open. Right after a collector opens, draining its startup burst takes
+  about 0.8 s; idle, a handoff takes about 0.2 s. See
+  [performance](performance.md).
 - A handoff gap loses intermediate versions only. Recovery on subscribe
   restores each key's latest document after every subscribe; a key that
   publishes more than once inside the gap (handoff time plus subscription

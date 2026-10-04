@@ -9,14 +9,14 @@ small contracts rather than reaching into one another's state.
 Dependencies point toward smaller and more stable crates:
 
 ```text
-                         geode-app
-                 composition and process setup
-                  /           |        \          \
-          feature modules     |     geode-compose  |
-            |       \         |   (gpui-free half) |
-            |    geode-tile   |         |          |
-            |       /         |         ▼          ▼
-            └──► geode-shell ◄┘        geode-data ◄┘
+                         geode-app                     geode-collector
+                 composition and process setup       headless, gpui-free
+                  /           |        \          \          |       |
+          feature modules     |     geode-compose ◄┼─────────┘       |
+            |       \         |   (gpui-free half) |                 |
+            |    geode-tile   |         |          |                 |
+            |       /         |         ▼          ▼                 |
+            └──► geode-shell ◄┘        geode-data ◄┴─────────────────┘
                      |                       |
                geode-widgets                 |
                      |                       |
@@ -83,12 +83,19 @@ these alongside the tile factories.
 holds the builtin documents that decide the store (`builtin_data_layer`:
 the app's `pricer_sheets` and `pricer` declarations, which live in
 `geode_core::builtin`, plus the `--demo` layer), `engine_setup`, the store
-and config paths, logging setup (one daily file per process prefix in a shared
-logs directory), the collector's settings, and the demo transports. It never
-depends on gpui. The
-app's builtin layer is its own documents plus the data layer, so a process
-built from the data layer alone and the same desk and user directories has
-the app's schema and sources; `geode-app` tests that contract.
+and config paths, logging setup (one daily file per process prefix in a
+shared logs directory), the collector's settings, and the demo transports.
+It never depends on gpui. The app's builtin layer is its own documents plus
+the data layer, so a process built from the data layer alone and the same
+desk and user directories has the app's schema and sources; `geode-app`
+tests that contract.
+
+`geode-collector` is the second binary: the background collector, a
+headless process that holds the store while no app does. It depends on
+`geode-compose`, `geode-data` and `geode-core`, never on gpui, the shell,
+`geode-tile` or a feature module, even as a dev-dependency, so it links no
+UI and opens no window; `cargo tree -p geode-collector` names no gpui crate
+with `-e normal` or `-e dev`.
 
 Reusable presentation is kept below features. `geode-widgets` holds shared
 stateful controls; `geode-chart` holds chart preparation and painting. It is
@@ -120,14 +127,16 @@ request loop (see [text files](data-path.md#text-files)). Transport threads
 standing in for a vendor client (the channel adapter's dispatcher, the demo
 bus) are not.
 
-One process writes a store at a time, because DuckDB admits one writing
-process per file. The app holds `<db>.app.lock` from before its store opens
-until its data service stops (quit, or a failed open), and a background
-collector process (planned) holds the store only while no app does, so after
-a failed open a collector may hold it; the OS drops both locks when a process
-dies. Taking the store over waits, off the UI thread, for the collector to
-drain and release it. See [store ownership and the background
-collector](data-path.md#store-ownership-and-the-background-collector).
+Two processes can own a store, the app and the background collector
+(`geode-collector`), and one writes it at a time, because DuckDB admits one
+writing process per file. Each runs its own `DataService` with its own
+ingest runner as the writer. The app holds `<db>.app.lock` from before its
+store opens until its data service stops (quit, or a failed open). The
+collector holds `<db>.collector.lock` for its life and the store only while
+no app does, so after a failed open a collector may hold it; the OS drops
+both locks when a process dies. Taking the store over waits, off the UI
+thread, for the collector to drain and release it. See [store ownership and
+the background collector](data-path.md#store-ownership-and-the-background-collector).
 
 Submission reports admission or refusal without waiting for queue space; a
 refusal says whether the queue was busy (a retry can succeed) or the service

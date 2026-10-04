@@ -39,13 +39,13 @@ pub struct Logging {
 /// Daily files live under `<user>/logs/<prefix>.YYYY-MM-DD.log`; their date
 /// and rotation use UTC, independently of the configured display clock.
 /// Startup trims files with this prefix to seven before opening the current
-/// log; another prefix's files in the same directory are left alone. Rotation does
-/// not prune files during the run.
+/// log; another prefix's files in the same directory are left alone.
+/// Rotation does not prune files during the run.
 ///
-/// Retain the returned [`Logging::guard`] for the
-/// process lifetime and drop it before explicit process exits. Dropping it
-/// stops the file writer; subsequent file-bound records are lost. Daily logs can
-/// lag behind the synchronous ring that supplies panic reports.
+/// Retain the returned [`Logging::guard`] for the process lifetime and drop
+/// it before explicit process exits. Dropping it stops the file writer;
+/// subsequent file-bound records are lost. Daily logs can lag behind the
+/// synchronous ring that supplies panic reports.
 pub fn install(prefix: &str, stderr: bool) -> Logging {
     let ring = Arc::new(Ring::new(4096));
     let (filter, reload_handle) = reload::Layer::new(LogLevels::default().to_targets());

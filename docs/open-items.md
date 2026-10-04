@@ -578,10 +578,13 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   documents, so feed archives grow with every publish (documented in
   `docs/current/data-path.md`). A sweep also blocks publishes for its duration;
   decide when a sweeper is wired.
-- Background collector: Part 1 (recovery on subscribe) is merged; Part 2
-  (`geode-compose`) and Part 3 (collector, lease, handoff, stamp) are not planned.
-  Decision: the collector's memory limit (provisional 512 MB, revisit after an
-  overnight measurement).
+- Background collector: Parts 1–3 are built (recovery on subscribe;
+  `geode-compose`; the `geode-collector` binary with lease, handoff, stamp and
+  install). Decision: `[collector] memory_limit` is unset by default (512 MB
+  aborted DuckDB on large CSV loads) until the R4 overnight measurement chooses
+  a value. Owed to the owner: the display check of the `store: waiting for
+  collector` segment, a real macOS `install` check, Windows Task Scheduler
+  registration, and a Windows CI run of the handoff tests.
 - Recovery parked items: `data-path.md`'s conditions-table row for
   `<source>:recovery` still says "no topic answering it" (it also needs an
   uncovered topic); a NOTIFY processed before the receiver notices a reconnect does
