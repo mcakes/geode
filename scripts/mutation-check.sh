@@ -34544,6 +34544,14 @@ run_mutation "link: the chooser refuses a loop and stays open" \
   '            if let Some((from, to)) = None::<(Group, Group)> {' \
   geode-shell the_chooser_refuses_a_loop_and_stays_open
 
+# The shared header paints an emitter's NULL refusal, so every emitting
+# module shows why its group kept its scope.
+run_mutation "link: the header shows a NULL refusal" \
+  crates/geode-tile/src/header.rs \
+  '    let refused = membership.emit.and_then(|g| {' \
+  '    let refused = None::<Group>.and_then(|g| {' \
+  geode-tile an_emitter_header_shows_its_null_refusal
+
 # ---- Vol slice viewer ----
 #
 # geode-volslice: one underlying's smiles per expiry and kind. The pure core

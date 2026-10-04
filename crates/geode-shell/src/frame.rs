@@ -584,6 +584,15 @@ impl Frame {
         changed
     }
 
+    /// Test-only: record or clear `tile`'s NULL refusal, as the shell's pull
+    /// would after a cursor path met a NULL. A test outside this crate has
+    /// no shell to pull through; production code records a refusal only
+    /// from the shell's composition of `TileContent::emission`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_link_refusal_for_test(&mut self, tile: TileId, column: Option<String>) -> bool {
+        self.set_link_refusal(tile, column)
+    }
+
     /// Test-only: put `tile` in these groups, as the shell's doors would.
     /// A test outside this crate has no shell to go through; production
     /// code links a tile through `ShellView::set_follow` and `set_emit`

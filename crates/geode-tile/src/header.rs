@@ -96,6 +96,11 @@ pub struct LinkChip {
 #[derive(Clone, Default)]
 pub struct TileLinks {
     pub chips: [Option<LinkChip>; 2],
+    /// Why the tile's last emission left its group's scope where it was: a
+    /// NULL in its cursor path. Painted as a warning with no dismissal; the
+    /// frame clears it on the next posting, on leaving the group, and on
+    /// close, so a hidden copy could never go stale.
+    pub refused: Option<SharedString>,
     /// `None` exactly when there are no chips to press.
     frame: Option<FrameRef>,
 }
@@ -121,10 +126,29 @@ pub fn link_chips(frame: &FrameRef, cx: &App) -> TileLinks {
         ],
         (None, emit) => [emit.map(|group| chip(group, LinkRole::Emit)), None],
     };
+    // Only an emitter has a group to name; the frame keeps no refusal for
+    // a tile that emits into none.
+    let refused = membership.emit.and_then(|g| {
+        frame
+            .entity()
+            .read(cx)
+            .link_refusal(tile)
+            .map(|column| SharedString::from(refusal_text(g, column)))
+    });
     TileLinks {
         frame: chips[0].is_some().then(|| frame.clone()),
         chips,
+        refused,
     }
+}
+
+/// The warning an emitter shows while a NULL in its cursor path keeps its
+/// group's scope where it was.
+pub fn refusal_text(group: Group, column: &str) -> String {
+    format!(
+        "group {} not updated \u{b7} {column} is NULL",
+        group.letter()
+    )
 }
 
 /// A link chip's tooltip title: its letter and arrows in words.
@@ -399,7 +423,8 @@ pub fn frame(
 /// has none, so no empty gap is laid out) and its fixed tail.
 fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> (Option<Stateful<Div>>, Div) {
     let tile = c.tile.0;
-    let text = (!c.status.is_empty() || !c.notices.is_empty()).then(|| {
+    let refusal = c.links.refused.clone().map(notice::Notice::warning);
+    let text = (!c.status.is_empty() || !c.notices.is_empty() || refusal.is_some()).then(|| {
         h_flex()
             .id(ElementId::NamedInteger(
                 SharedString::new_static("tile-cluster-text"),
@@ -418,6 +443,18 @@ fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> (Option<Stateful<Div>>, Div) 
                     .into_iter()
                     .map(|s| div().min_w_0().truncate().child(s)),
             )
+            // The link refusal clears itself with the next posting, so it
+            // takes no dismissal: a hidden one would hide its successor.
+            .children(refusal.as_ref().map(|n| {
+                notice::truncated(
+                    n,
+                    ElementId::NamedInteger(SharedString::new_static("tile-link-refusal"), tile),
+                    SharedString::new_static(NOTICE_TIP),
+                    None,
+                    theme,
+                )
+                .debug_selector(move || format!("tile-link-refusal-{tile}"))
+            }))
             .children(c.notices.iter().enumerate().map(|(i, n)| {
                 notice::truncated(
                     n,
@@ -441,7 +478,7 @@ fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> (Option<Stateful<Div>>, Div) 
             .debug_selector(move || time_selector(tile, i, stale))
             .child(t.text().clone())
     }));
-    let TileLinks { chips, frame } = c.links;
+    let TileLinks { chips, frame, .. } = c.links;
     if let Some(frame) = frame {
         row = row.children(
             chips
@@ -1187,6 +1224,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_refusal_names_the_group_and_the_null_column() {
+        assert_eq!(
+            refusal_text(Group::A, "book"),
+            "group A not updated \u{b7} book is NULL"
+        );
+    }
+
+    /// Record or clear the strip's tile's NULL refusal on its frame and
+    /// repaint, as the shell's pull does after composing a posting.
+    fn refuse(view: &Entity<Strip>, vcx: &mut VisualTestContext, column: Option<&str>) {
+        let frame = view.read_with(vcx, |s, _| s.frame.entity().clone());
+        frame.update(vcx, |f, cx| {
+            f.set_link_refusal_for_test(TILE, column.map(str::to_owned));
+            cx.notify();
+        });
+        view.update(vcx, |_, cx| cx.notify());
+    }
+
+    /// An emitter whose cursor path met a NULL shows why its group kept
+    /// its scope, read from the frame at paint, as a warning beside the
+    /// tile's own notices; it takes no press and clears with the refusal.
+    #[gpui::test]
+    fn an_emitter_header_shows_its_null_refusal(cx: &mut TestAppContext) {
+        let (view, _, _, vcx) = open_strip(cx);
+        link(&view, vcx, None, Some(Group::A));
+        assert!(!painted(vcx, "tile-link-refusal-3"), "nothing refused yet");
+        refuse(&view, vcx, Some("book"));
+        assert!(painted(vcx, "tile-link-refusal-3"));
+        let refused = vcx.read(|cx| link_chips(&view.read(cx).frame, cx).refused);
+        assert_eq!(
+            refused.as_deref(),
+            Some("group A not updated \u{b7} book is NULL")
+        );
+        assert!(
+            painted(vcx, "tile-notice-3-0"),
+            "the tile's own notice stays"
+        );
+        let at = centre(vcx, "tile-link-refusal-3");
+        click(vcx, at);
+        assert!(painted(vcx, "tile-link-refusal-3"), "not dismissable");
+        refuse(&view, vcx, None);
+        assert!(
+            !painted(vcx, "tile-link-refusal-3"),
+            "cleared with the refusal"
+        );
     }
 
     /// Publish the builtin keymap as the live `Chords`, with `mod` as alt,
