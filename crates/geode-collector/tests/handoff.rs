@@ -27,7 +27,7 @@
 //!
 //! Platforms: the tests run on Windows CI too, but have only been run on
 //! macOS. Two are Unix only: the lost-race test needs a FIFO, and the pulse
-//! test's margin (a 2 ms pulse against the 20 ms confirmation gap) does not
+//! test's margin (a 5 ms pulse against the 20 ms confirmation gap) does not
 //! survive Windows' ~15.6 ms timer granularity.
 
 use std::collections::BTreeMap;
@@ -664,11 +664,13 @@ fn a_mismatched_stamp_idles_the_collector() {
 
 /// A `status` probe, or anything else, holding `<db>.app.lock` for an
 /// instant is not an app: the collector releases only on an app confirmed
-/// by a second probe. Five seconds of 2 ms pulses with 40 ms between must
-/// leave the store with the collector: even an overshot sleep keeps a pulse
-/// well under the 20 ms confirmation gap.
+/// by a second probe. Five seconds of 5 ms pulses with 40 ms between must
+/// leave the store with the collector: an overshot sleep keeps a pulse under
+/// the 20 ms confirmation gap, and the 45 ms period never puts a pulse 20 ms
+/// after another. 5 ms rather than shorter keeps the single-probe mutation
+/// caught: it must see a pulse on some poll within the five seconds.
 ///
-/// Unix only: Windows' timer granularity (about 15.6 ms) turns a 2 ms sleep
+/// Unix only: Windows' timer granularity (about 15.6 ms) turns a 5 ms sleep
 /// into one that eats most of the margin against the 20 ms gap.
 #[cfg(unix)]
 #[test]
@@ -693,7 +695,7 @@ fn a_momentary_app_lock_does_not_release_the_store() {
         // The collector's own probe holds the lock for an instant.
         wait_until("the app lock between probes", WAIT, || lock.try_lock().ok());
         let held = Instant::now();
-        std::thread::sleep(Duration::from_millis(2));
+        std::thread::sleep(Duration::from_millis(5));
         lock.unlock().unwrap();
         longest = longest.max(held.elapsed());
         std::thread::sleep(Duration::from_millis(40));
