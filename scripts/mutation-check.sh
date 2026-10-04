@@ -34519,13 +34519,13 @@ run_mutation "link: a tile's own old edge does not count" \
 
 run_mutation "link: the emit door refuses a loop" \
   crates/geode-shell/src/shell/link.rs \
-  '        if let Some((from, to)) = self.frame.read(cx).closing_cycle(tile, follow, group) {' \
+  '        if let Some((from, to)) = self.link_cycle(tile, LinkChange::Emit(group), cx) {' \
   '        if let Some((from, to)) = None::<(Group, Group)> {' \
   geode-shell a_pick_that_closes_a_loop_is_refused_with_a_notice
 
 run_mutation "link: the follow door refuses a loop" \
   crates/geode-shell/src/shell/link.rs \
-  '        if let Some((from, to)) = self.frame.read(cx).closing_cycle(tile, group, emit) {' \
+  '        if let Some((from, to)) = self.link_cycle(tile, LinkChange::Follow(group), cx) {' \
   '        if let Some((from, to)) = None::<(Group, Group)> {' \
   geode-shell a_follow_that_closes_a_loop_is_refused_with_a_notice
 
@@ -34535,6 +34535,14 @@ run_mutation "link: a restored loop drops the later emit" \
   '                            f.closing_cycle(tile, record.link.follow, record.link.emit)' \
   '                            None::<(geode_core::link::Group, geode_core::link::Group)>' \
   geode-shell a_restored_cycle_drops_the_later_emit
+
+# The chooser refuses a loop before it closes, so the list stays open for
+# another pick; without the pre-check the door refuses after it closed.
+run_mutation "link: the chooser refuses a loop and stays open" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            if let Some((from, to)) = shell.link_cycle(tile, change, cx) {' \
+  '            if let Some((from, to)) = None::<(Group, Group)> {' \
+  geode-shell the_chooser_refuses_a_loop_and_stays_open
 
 # ---- Vol slice viewer ----
 #

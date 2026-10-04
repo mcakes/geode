@@ -3178,3 +3178,40 @@ fn a_restored_cycle_drops_the_later_emit(cx: &mut gpui::TestAppContext) {
         );
     });
 }
+
+/// The production chooser route refuses a row that would close a loop:
+/// the list stays open on the same tile for another pick, the status bar
+/// says which link it refused, and the membership is unchanged.
+#[gpui::test]
+fn the_chooser_refuses_a_loop_and_stays_open(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services_that(true, true));
+    set_follow(&shell, &mut vcx, TileId(1), Some(Group::A));
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::B));
+    set_follow(&shell, &mut vcx, TileId(2), Some(Group::B));
+    let (focused, _) = focused_and_other(&shell, &vcx);
+    assert_eq!(focused, TileId(2), "the chooser opens on tile 2");
+    press_mod_u(&mut vcx);
+    assert_eq!(chooser_tile(&shell, &vcx), Some(TileId(2)));
+
+    vcx.simulate_input("emit a");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    draw(&mut vcx);
+
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(2))),
+        geode_core::link::Membership {
+            follow: Some(Group::B),
+            emit: None,
+        }
+    );
+    assert_eq!(
+        chooser_tile(&shell, &vcx),
+        Some(TileId(2)),
+        "the chooser is still open"
+    );
+    assert_eq!(
+        notice(&shell, &vcx).as_deref(),
+        Some("would link B back into A")
+    );
+}

@@ -12,6 +12,7 @@ use gpui::{App, Context};
 use geode_core::link::Group;
 use geode_core::query::QueryKey;
 
+use super::choicedialog::LinkChange;
 use super::{ShellView, status};
 use crate::module::placeholder::PLACEHOLDER_KIND;
 use crate::tiling::TileId;
@@ -102,8 +103,7 @@ impl ShellView {
             );
         }
         let group = group.filter(|_| follows);
-        let emit = self.frame.read(cx).membership(tile).emit;
-        if let Some((from, to)) = self.frame.read(cx).closing_cycle(tile, group, emit) {
+        if let Some((from, to)) = self.link_cycle(tile, LinkChange::Follow(group), cx) {
             self.notice = Some(cycle_refusal(from, to).into());
             cx.notify();
             return;
@@ -165,8 +165,7 @@ impl ShellView {
             );
         }
         let group = group.filter(|_| can);
-        let follow = self.frame.read(cx).membership(tile).follow;
-        if let Some((from, to)) = self.frame.read(cx).closing_cycle(tile, follow, group) {
+        if let Some((from, to)) = self.link_cycle(tile, LinkChange::Emit(group), cx) {
             self.notice = Some(cycle_refusal(from, to).into());
             cx.notify();
             return;
@@ -183,6 +182,26 @@ impl ShellView {
             self.repaint_tile(tile, cx);
             cx.notify();
         }
+    }
+
+    /// The loop of groups `change` would close for `tile`, taken with the
+    /// tile's other current membership: the follow change keeps its emit,
+    /// the emit change keeps its follow. The doors and the chooser both
+    /// ask this one question, so a row the chooser lets through is never
+    /// one a door then refuses after the list has closed.
+    pub(super) fn link_cycle(
+        &self,
+        tile: TileId,
+        change: LinkChange,
+        cx: &App,
+    ) -> Option<(Group, Group)> {
+        let frame = self.frame.read(cx);
+        let m = frame.membership(tile);
+        let (follow, emit) = match change {
+            LinkChange::Follow(group) => (group, m.emit),
+            LinkChange::Emit(group) => (m.follow, group),
+        };
+        frame.closing_cycle(tile, follow, emit)
     }
 
     /// Hold a subscription exactly while `tile` emits, and pull once when
