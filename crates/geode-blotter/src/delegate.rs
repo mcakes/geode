@@ -3180,6 +3180,37 @@ mod tests {
         );
     }
 
+    /// An inline value color travels as its internal key on the prepared
+    /// cell, and paint resolves that key through `NamedColours::get`.
+    #[test]
+    fn an_inline_value_color_reaches_the_prepared_window() {
+        use geode_core::colour::Tone;
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        d.refill_window(0..3);
+        let label = d
+            .cache
+            .get(1, 0)
+            .expect("row 1 has a label")
+            .text
+            .to_string();
+        let mut values = geode_core::colour::ValueColors::default();
+        values.insert_inline(&grouping()[0], &label, Definition::hue(210.0, Tone::Normal));
+        let colours = Arc::new(NamedColours::default().with_values(values));
+        d.set_colours(colours.clone());
+        let key = d
+            .cache
+            .get(1, 0)
+            .unwrap()
+            .value_color
+            .clone()
+            .expect("the label carries its inline key");
+        assert_eq!(
+            colours.get(&key),
+            Some(&Definition::hue(210.0, Tone::Normal))
+        );
+    }
+
     /// The `/` table's held cells carry color names too: a display
     /// installed under a different mapping re-reads them, the same mapping
     /// keeps them.

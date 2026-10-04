@@ -14,7 +14,8 @@ the frame's config door.
   `set_config` stores it and calls `config_changed` on every live tile. Also
   the tile's `TileContent` door, `ACTIONS` (category `Classifications`) and
   the `DEFAULT_KEYMAP` fragment. New, rename, delete and revert have no
-  default chord: the palette and the `⋯` menu reach them.
+  default chord: the palette and the `⋯` menu reach them; Export CSV,
+  Export CSV with unclassified and Import CSV likewise.
 - `core/session.rs`: the session table (`version`, `name`,
   `sort = [column, "asc" | "desc"]`, `cursor`). An unreadable key is dropped
   with a notice and the rest kept.
@@ -46,7 +47,14 @@ the frame's config door.
   that write fired, or something else changed) keeps it, so a later label
   does not flash off and the next edit builds on it; any other object is
   another surface's write and drops it, as a refusal does. Showing another classification, or
-  a rename, delete or revert, forgets all.
+  a rename, delete or revert, forgets all. `record` takes an object a
+  whole plan made (an import) as one entry, so one undo step reverts it;
+  an empty entry records nothing.
+- `core/files.rs`: `FileOp`, the export or import waiting on its answer
+  (tag, classification, path), and the notices' text: `exported`, the
+  import question, `nothing_to_change`, `rejected_notice` (the first
+  `REJECTED_LISTED` = 20 rows, then `and <k> more`), `imported`, the
+  `not applied` refusals, `ready` (a held plan) and `replaced`.
 - `core/prompt.rs`: `Prompt` (`NewName`, `NewColumn`, `Rename`) and
   `submit`, which validates the trimmed answer (`validate_name`,
   `validate_source`) into the next `Step`: the column question, a create,
@@ -134,7 +142,8 @@ the shown classification goes away.
 
 Registered actions only (the palette and the `⋯` menu), never `:`
 commands. The `⋯` menu lists Set, Clear, Copy and Paste label, then New…,
-Rename…, Delete, Revert… (only over a lower copy) and Refresh values;
+Rename…, Delete, Revert… (only over a lower copy) and Refresh values,
+then Export CSV…, Export CSV with unclassified… and Import CSV…;
 a row that cannot act says why in its lane and in full when picked.
 
 New asks a name, then a source column from a closed choice (the
@@ -167,12 +176,61 @@ A verb that changes nothing (`x` on unclassified rows, `u` with nothing to
 undo, a replay that skips every row) is not a relabel: it keeps a live
 selection and a waiting cursor.
 
+## Export and import
+
+Registered actions only (palette and the `⋯` menu's last group), no
+chord, never `:` commands. The tile does no file I/O: both go through
+`DataHandle::text_file` under the tile's key and a fresh `file_tag`, and
+`on_file` acts only on the answer to the waiting `FileOp` (an overtaken
+one is dropped). A `Refusal` shows as a notice (`… — try again` when busy).
+
+Export opens `prompt_for_new_path` on `<name>.csv` in `file_dir` (the
+folder of the last file exported or imported, else the home directory).
+The answer is awaited in `cx.spawn`; `export_to` re-checks that the same
+classification is shown and, for the unclassified variant, that the values
+are loaded and current (no read on its way, no values notice), then
+writes `classification::export` over `History::current`, so an unsaved
+edit is in the file.
+
+Import opens `prompt_for_paths` (one file) and reads with
+`TextFileOp::Read { max_bytes: MAX_IMPORT_BYTES }`. The read text is
+planned by `plan_import` on the background executor over a copy of the
+current object; `import_planned` drops a plan another file operation
+overtook and refuses one landing after a switch or a source-column change.
+Arming a confirm takes focus, so the question is armed only while
+`keyboard_free` holds: the tile is the focused tile (`set_focused`, kept
+from the shell's render, never notifying) with no `/` search, editor,
+prompt or question open, and window focus is nothing or contains the
+table (the shell root, not a palette or another input). Otherwise the
+plan waits in the one `held` slot (`HeldImport`, a newer plan replacing
+it) with `import of <file> ready — focus this tile to answer`.
+`offer_held_later` defers `offer_held` past the current update (the shell
+calls `set_focused` mid-draw) when the tile gains focus, a search ends, the
+editor or prompt closes, or a question is answered; `offer_held` re-checks
+the tag, classification and source column (refusing with the same notices)
+before arming. A newer export or import overtaking an import at any step
+(read, plan, held) says `import of <file> replaced by a newer file
+operation` (`overtake_import`). A refused file (header, size, parse) shows `import refused:
+…`; rejected rows show one warning; a plan changing nothing says so and
+asks nothing. Otherwise the confirm bar holds `Pending::Import` with the
+plan. `y` (`apply_import`) re-checks the classification and its source
+column, refuses while reverting and when `source_writable` fails, applies
+the plan over `History::current` (counted rows only; a row already equal is
+skipped, so the applied count can differ from the question's), `record`s it
+and queues one `ConfigEdit`. The apply runs on the UI thread.
+
 ## Known limitations
 
 - `distinct` skips computed datasets, so a column only a computed dataset
   carries shows its mapped values alone.
 - Rename and delete do not rewrite references; `references` misses ad hoc
   lane chains, pricer views and view sort keys.
+- The open dialog does not start in `file_dir`.
+- A held import is offered again only on the tile's own transitions; a
+  palette or command line closing over the focused tile does not re-offer
+  it until the tile is refocused or an input of its own closes.
+- Applying an import at `y` runs on the UI thread (about 28 ms at 100,000
+  changed rows).
 
 The behavior as the trader sees it is in
 [features](../../docs/current/features.md#classifications).

@@ -94,14 +94,24 @@ pub enum Stage {
     },
 }
 
-/// Source for a newly named object: the domain's defaults, a named saved scope, or
-/// current frame scope. Copy targets are recorded by name because a reload can reorder
-/// the browse list before creation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Source for a newly named object: the domain's defaults, a named saved scope, the
+/// current frame scope, or (Colors, from the value-color list's `New named color…`) a
+/// definition. Copy targets are recorded by name because a reload can reorder the
+/// browse list before creation.
+#[derive(Debug, Clone, PartialEq)]
 pub enum NameSeed {
     Empty,
     CopyOf(String),
     FromFrame,
+    Definition(geode_core::colour::Definition),
+}
+
+/// The value the value-color list's `New named color…` opened this dialog for: the
+/// color created at its naming stage becomes that value's color.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColorForValue {
+    pub dimension: String,
+    pub value: String,
 }
 
 /// A browse row with its effective layer, user override status, and recorded drift from
@@ -2928,18 +2938,18 @@ impl Domain {
     /// The fields a `c`-copied object opens with, built straight from the table
     /// `create_from_name` just copied rather than from a named object `config` has a
     /// row for yet — the copy has not been written when this runs. Only
-    /// [`Domain::duplicable`] needs the real answer: every other domain falls back to
-    /// `self.fields(config, None)`, its own empty-object shape, since nothing else can
-    /// reach this door.
+    /// [`Domain::duplicable`] and Colors (seeded with a definition by the value-color
+    /// list's `New named color…`) need the real answer: every other domain falls back
+    /// to `self.fields(config, None)`, its own empty-object shape, since nothing else
+    /// can reach this door.
     pub fn fields_from_source(self, config: &Config, table: &toml::Table) -> Vec<Field> {
         match self {
             Domain::Scopes => scopes::fields_from_table(config, Some(table)),
             Domain::Expressions => expressions::fields_from_table(Some(table)),
-            Domain::Views
-            | Domain::Groupings
-            | Domain::Schema
-            | Domain::Sources
-            | Domain::Colors => self.fields(config, None),
+            Domain::Colors => colours::fields_from_table(Some(table)),
+            Domain::Views | Domain::Groupings | Domain::Schema | Domain::Sources => {
+                self.fields(config, None)
+            }
         }
     }
 
@@ -3222,6 +3232,11 @@ pub struct ObjectDialogState {
     /// Source of the object being named: defaults, a saved scope copy, or current frame
     /// scope. Stored separately from the name input.
     pub naming_seed: NameSeed,
+    /// The one-shot hook `New named color…` arms: the color created at this naming
+    /// stage colors this value. Taken by the first create, whatever its outcome;
+    /// `begin_naming` clears it, so the dialog's own `n` never fires it. While it is
+    /// set, escape and Back at naming pop back to the pick list.
+    pub on_created: Option<ColorForValue>,
     /// The tag of the latest distinct request the Values stage submitted
     /// (`render::enter_values_stage`); an outcome with any other tag is stale and
     /// dropped.
@@ -3288,6 +3303,7 @@ impl ObjectDialogState {
             save: None,
             naming_dataset: None,
             naming_seed: NameSeed::Empty,
+            on_created: None,
             values_tag: 0,
             expr: None,
             rows: crate::prepared::Prepared::new(),
@@ -3548,6 +3564,7 @@ impl ObjectDialogState {
         self.mode = DialogMode::Filter;
         self.notice = None;
         self.disarm();
+        self.on_created = None;
     }
 
     /// `escape` from [`Stage::Naming`]: back to browse, nothing written.
@@ -4197,6 +4214,20 @@ mod tests {
         assert!(state.has_previous_stage());
         state.cancel_naming();
         assert_eq!(state.stage, Stage::Browse);
+    }
+
+    #[test]
+    fn begin_naming_drops_the_value_hook() {
+        let mut state = ObjectDialogState::new(Domain::Colors);
+        state.on_created = Some(ColorForValue {
+            dimension: "underlying_ref".into(),
+            value: "SPX".into(),
+        });
+        state.begin_naming();
+        assert_eq!(
+            state.on_created, None,
+            "only the value-color opener arms it, after naming begins"
+        );
     }
 
     #[test]

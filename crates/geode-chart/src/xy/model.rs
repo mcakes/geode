@@ -14,6 +14,7 @@ use gpui::{Hsla, SharedString};
 use crate::core::axis::{Axis, Pane, Side};
 use crate::core::layout::LayoutOptions;
 use crate::core::linear::{LinearX, XFormat};
+use crate::core::scale::axis_domain;
 use crate::core::view::View;
 
 /// How a y axis labels its values.
@@ -258,6 +259,10 @@ pub struct XyModel {
     pub split: f32,
     pub slots: Vec<XySlot>,
     full: (f64, f64),
+    /// A fixed y domain per axis, in `Axis::ALL` order; `None` autoscales
+    /// to what the view shows. Part of the model, so a change is a new
+    /// version and the element's cached chrome cannot outlive it.
+    y_limits: [Option<(f64, f64)>; 4],
 }
 
 impl XyModel {
@@ -301,7 +306,46 @@ impl XyModel {
             split,
             slots,
             full,
+            y_limits: [None; 4],
         })
+    }
+
+    /// The same model with `axis`'s y domain fixed to `limit`, or
+    /// autoscaled again with `None`. A limit that is not a finite,
+    /// ascending pair is no limit. The version is left as it came: a
+    /// caller fixing a limit on a model already painted gives the result a
+    /// new version, as for any other change.
+    pub fn with_y_limit(self: Arc<Self>, axis: Axis, limit: Option<(f64, f64)>) -> Arc<Self> {
+        let limit = limit.filter(|(lo, hi)| lo.is_finite() && hi.is_finite() && lo < hi);
+        if self.y_limits[axis.index()] == limit {
+            return self;
+        }
+        let mut model = Arc::unwrap_or_clone(self);
+        model.y_limits[axis.index()] = limit;
+        Arc::new(model)
+    }
+
+    /// `axis`'s fixed y domain, when one is set.
+    pub fn y_limit(&self, axis: Axis) -> Option<(f64, f64)> {
+        self.y_limits[axis.index()]
+    }
+
+    /// The y domain `axis` paints over at `view`: its fixed limit when one
+    /// is set, else the padded extent of what the view shows of the
+    /// axis's visible slots. `None` when the axis is autoscaled and none
+    /// of them has a finite value in view. The element's own scales come
+    /// from here, so a caller freezing the domain it reads gets the axis
+    /// it sees. O(visible values).
+    pub fn side_domain(&self, axis: Axis, view: View) -> Option<(f64, f64)> {
+        if let Some(limit) = self.y_limit(axis) {
+            return Some(limit);
+        }
+        axis_domain(
+            self.slots
+                .iter()
+                .filter(|s| s.visible && s.axis == axis)
+                .flat_map(|s| s.values_in(s.window(view))),
+        )
     }
 
     /// A model with no slots, at version 0, which no built model takes.

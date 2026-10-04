@@ -28,9 +28,27 @@ replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
-`value_colors` is deliberately absent from that list: it merges per value, so
-a user entry for one value keeps the lower layers' other values, and an entry
-of `"none"` clears a lower layer's color.
+`value_colors` replaces whole at depth 2. A dimension's values merge per value,
+so a user entry for one value keeps the lower layers' other values. One value's
+entry (a name, `"none"`, or an inline table) is replaced whole, so a user
+`{ hue = 30 }` over a desk `{ token = "warning" }` is that hue and never a
+table with both keys. An entry of `"none"` clears a lower layer's color.
+
+```toml
+[underlying_ref]
+SPX  = "blue"                       # a named color from colors.toml
+NDX  = { hue = 210 }                # inline, theme-relative
+RUT  = { hue = 30, tone = "light" }
+DAX  = { token = "warning" }        # inline semantic token
+FTSE = "none"                       # clears a lower layer
+```
+
+An inline table follows the `colors.toml` definition rules exactly: `hue`
+0–360 (360 reads as 0) with an optional `tone` (`normal` | `light`), or
+`token`, never both and never neither. `tint_sign` is refused because a value
+has no sign. Every refusal is an error at the entry's path
+(`value_colors.{dimension}.{value}`, plus `.hue` or `.token` for a field
+error) and drops the entry; an invalid `tone` warns and falls back to normal.
 
 Disk loading reads immediate `*.toml` children in sorted path order. Missing
 or unreadable directories and failed directory entries are silently skipped.
@@ -76,7 +94,7 @@ The main configuration documents have distinct owners:
 | `scopes.toml` | Named scopes |
 | `expressions.toml` | Named scope expressions, referenced by name from a saved scope or the frame |
 | `colors.toml` | Named semantic data colors |
-| `value_colors.toml` | A named color per value of a text dimension |
+| `value_colors.toml` | A color per value of a text dimension: a colors.toml name or an inline { hue } / { token } table |
 | `dataset_presentation.toml` | Desk-level column presentation between schema and view overrides |
 | `view_presentation.toml` | Per-view column order, visibility, widths, and formatting overrides |
 | `keymap.toml` | User bindings layered over builtin and module bindings |

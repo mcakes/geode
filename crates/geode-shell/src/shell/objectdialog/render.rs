@@ -39,9 +39,9 @@ use super::scopes;
 use super::sources;
 use super::views;
 use super::{
-    ColumnContext, ColumnDoor, ColumnLayers, Completions, Confirm, Destination, Domain, Draft,
-    EditRow, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE, RowDrag,
-    RowVocabulary, Stage, Step,
+    ColorForValue, ColumnContext, ColumnDoor, ColumnLayers, Completions, Confirm, Destination,
+    Domain, Draft, EditRow, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow,
+    READ_ONLY_NOTICE, RowDrag, RowVocabulary, Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::footer::{Hint, HintRow};
@@ -165,7 +165,7 @@ pub fn open(
                 .as_ref()
                 .is_some_and(ObjectDialogState::has_previous_stage)
         },
-        |shell, _window, cx| step_back(shell, cx),
+        step_back,
     );
 }
 
@@ -173,13 +173,22 @@ pub fn open(
 /// back rung runs, after discarding what the earlier Escape rungs would (see
 /// [`ObjectDialogState::abandon_for_back`]). Does nothing while a confirmation is
 /// pending. The modal's click handler synchronizes the shared input afterwards.
-fn step_back(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+fn step_back(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let Some(state) = shell.object_dialog.as_mut() else {
         return;
     };
     if !state.abandon_for_back() {
         return;
     }
+    // Naming opened from the value-color list: Back pops to the list, as escape does.
+    let pops = state.stage == Stage::Naming && state.on_created.is_some();
+    if pops {
+        shell.close_modal(window, cx);
+        return;
+    }
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
     match state.stage {
         Stage::Naming => state.cancel_naming(),
         Stage::Values { .. } => leave_values_stage(shell, cx),
@@ -246,7 +255,7 @@ fn handle_key(
         Some(Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }) => {
             handle_edit_key(shell, ks, window, cx)
         }
-        Some(Stage::Naming) => handle_naming_key(shell, ks, cx),
+        Some(Stage::Naming) => handle_naming_key(shell, ks, window, cx),
         _ => handle_browse_key(shell, ks, window, cx),
     }
 }
@@ -484,17 +493,33 @@ fn handle_browse_key(
     false
 }
 
-/// The naming stage's keys: `escape` backs out to browse with nothing written; `enter`
+/// The naming stage's keys: `escape` backs out to browse with nothing written (or, when
+/// the value-color list opened this naming stage, pops back to that list); `enter`
 /// checks the name and creates; everything else is the focused `Input`'s to type. The
 /// name is `state.query` — mirrored from the field by the same subscription a filter
 /// uses.
-fn handle_naming_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
+fn handle_naming_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
     if let Some(state) = shell.object_dialog.as_mut()
         && state.notice.take().is_some()
     {
         cx.notify();
     }
     if ks.key == "escape" {
+        // Opened by the value-color list's `New named color…`: escape pops back to
+        // the list, intact, rather than to a browse list nobody opened.
+        if shell
+            .object_dialog
+            .as_ref()
+            .is_some_and(|s| s.on_created.is_some())
+        {
+            shell.close_modal(window, cx);
+            return true;
+        }
         // `cancel_naming` is the whole transition — `Stage::Browse`,
         // `DialogMode::Normal`, an empty `query` — and `dialog::sync_dialog_text`
         // empties the field and blurs it to match on this handler's return.
@@ -579,7 +604,7 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     // One `match` rather than two `if let`s: `seed` is an owned, non-`Copy` value with
     // exactly one consumer, and a second `if let` reading it after a first one already
     // moved it needed a defensive `.clone()` that a single exhaustive match makes
-    // unnecessary — the compiler enforces there is nothing a fourth `NameSeed` variant
+    // unnecessary — the compiler enforces there is nothing a new `NameSeed` variant
     // could add without a reminder here too.
     match seed {
         NameSeed::Empty => {}
@@ -623,6 +648,15 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
             scopes::overwrite_with(&mut draft, &scope, config);
             draft.diagnostics = domain.validate(&draft, config);
         }
+        NameSeed::Definition(definition) => {
+            // The value-color list's seed: its color as a colors.toml entry, read
+            // through the domain's own fields so the edit stage shows it.
+            let folded = apply::config_with_pending(shell);
+            let config = folded.as_ref().unwrap_or(&shell.services.config);
+            draft.source = definition.to_table();
+            draft.fields = domain.fields_from_source(config, &draft.source);
+            draft.diagnostics = domain.validate(&draft, config);
+        }
     }
     enter_edit_stage(shell, &name, Some(draft), cx);
     if opens_expression {
@@ -632,8 +666,22 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
             draft.diagnostics.clear();
         }
         open_field(shell);
-    } else if let Some(notice) = apply::commit_create(shell, cx) {
-        set_notice(shell, notice);
+    } else {
+        // Taken whatever the outcome: a refused create leaves the dialog on the edit
+        // stage, where a later `n` must not color the value.
+        let hook = shell
+            .object_dialog
+            .as_mut()
+            .and_then(|s| s.on_created.take());
+        match apply::commit_create(shell, cx) {
+            Some(notice) => set_notice(shell, notice),
+            None => {
+                if let Some(hook) = hook {
+                    crate::shell::choicedialog::drop_covered_value_color(shell);
+                    apply::color_value_once_written(shell, hook, name, cx);
+                }
+            }
+        }
     }
     cx.notify();
 }
@@ -728,6 +776,34 @@ pub(in crate::shell) fn open_save_scope(
     // shared `Input` the keys — `sync_dialog_text` is the only thing allowed to move
     // focus onto it, and `open` above already called it once for the browse stage it
     // opened in, so this second call is what actually focuses the name field.
+    shell.refresh_dialog_rows(cx);
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+/// Open Colors at its naming stage for the value-color list's `New named color…`,
+/// over the list. The name field holds `name`, the draft is seeded with `seed`, and
+/// the created color colors `hook`'s value (`on_created`). Escape or Back at naming
+/// pops back to the list. Nothing opens when a Colors dialog is already in the stack
+/// (`can_open_object` says so).
+pub(in crate::shell) fn open_new_color(
+    shell: &mut ShellView,
+    name: String,
+    seed: geode_core::colour::Definition,
+    hook: ColorForValue,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if !dialog::can_open_object(shell, Domain::Colors) {
+        return;
+    }
+    open(shell, Domain::Colors, window, cx);
+    if let Some(state) = shell.object_dialog.as_mut() {
+        state.begin_naming();
+        state.naming_seed = NameSeed::Definition(seed);
+        state.query = name;
+        state.on_created = Some(hook);
+    }
     shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
@@ -3566,6 +3642,7 @@ fn build(
             NameSeed::CopyOf(src) => format!("Copy of {src} · name"),
             NameSeed::Empty => format!("New {} · name", object_word(state.domain)),
             NameSeed::FromFrame => "Save scope · name".to_string(),
+            NameSeed::Definition(_) => format!("New {} · name", object_word(state.domain)),
         };
         dialog::name_row(&shell.dialog_input, &label, cx)
     } else {

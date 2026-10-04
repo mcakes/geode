@@ -3401,6 +3401,101 @@ grain = "underlying"
         assert_eq!(label(&handed, "SMI").as_deref(), Some("Alpine"));
     }
 
+    impl ClassificationsShell {
+        /// Run every file request the tiles asked since the last call
+        /// through the data tier's file operation, on the real disk, and
+        /// post each answer to the bridge's drain as the file worker does.
+        /// The `geode-files` worker's queue and thread are bypassed:
+        /// `geode_data::files::run` is called directly, on this thread.
+        fn run_file_requests(&mut self) -> usize {
+            let asked: Vec<_> = self
+                .requests
+                .try_iter()
+                .filter_map(|r| match r {
+                    geode_data::Request::TextFile(p) => Some(p),
+                    _ => None,
+                })
+                .collect();
+            for p in &asked {
+                let result = geode_data::files::run(p);
+                self.events
+                    .try_send(DataEvent::TextFile(geode_core::textfile::TextFileOutcome {
+                        key: p.key,
+                        tag: p.tag,
+                        path: p.path.clone(),
+                        result,
+                    }))
+                    .unwrap();
+            }
+            self.draw();
+            asked.len()
+        }
+    }
+
+    /// A CSV round trip through the composition root: Export writes the
+    /// shown classification to the file the save dialog names, on disk;
+    /// the file edited there and imported through the open dialog asks
+    /// y/n, and past the debounce the shell's `dimensions` document
+    /// carries the file's labels, the ones it does not name kept.
+    #[gpui::test]
+    fn a_classification_exported_edited_and_imported_reaches_the_dimensions_doc(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut s = ClassificationsShell::open(cx);
+        let tag = s
+            .distinct_requests()
+            .iter()
+            .find(|p| p.key == QueryKey(1))
+            .expect("tile 1 asks for its values")
+            .tag;
+        s.answer(QueryKey(1), tag, &[("SMI", 4), ("DAX", 2), ("SX5E", 1)]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("region.csv");
+
+        s.palette("Classification: Export CSV");
+        assert_eq!(s.dispatched("classifications::export"), 1, "fixture");
+        let target = path.clone();
+        s.vcx.simulate_new_path_selection(|_| Some(target));
+        s.draw();
+        assert_eq!(s.run_file_requests(), 1, "one write");
+        let region = s.shell.read_with(&s.vcx, |sh, _| {
+            DerivedDimensions::from_doc(sh.config().doc(DIMENSIONS_DOC).unwrap()).0
+        });
+        let region = region.get("region").expect("fixture").clone();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written, geode_core::classification::export(&region, None));
+        assert!(written.contains("DAX,Europe"), "{written}");
+
+        // DAX moves, SMI gains a label; SX5E is not named and stays.
+        std::fs::write(&path, "underlying_ref,region\nDAX,DACH\nSMI,Alpine\n").unwrap();
+        s.palette("Classification: Import CSV");
+        assert_eq!(s.dispatched("classifications::import"), 1, "fixture");
+        let chosen = path.clone();
+        s.vcx.simulate_path_prompt_response(|_| Some(vec![chosen]));
+        s.draw();
+        assert_eq!(s.run_file_requests(), 1, "one read");
+        s.vcx.simulate_keystrokes("y");
+        s.draw();
+        s.vcx.executor().advance_clock(Duration::from_millis(300));
+        s.draw();
+
+        let shell_dims = s.shell.read_with(&s.vcx, |sh, _| {
+            DerivedDimensions::from_doc(sh.config().doc(DIMENSIONS_DOC).unwrap()).0
+        });
+        let label = |source: &str| {
+            shell_dims
+                .get("region")
+                .and_then(|d| d.values.get(source).cloned())
+        };
+        assert_eq!(label("DAX").as_deref(), Some("DACH"));
+        assert_eq!(label("SMI").as_deref(), Some("Alpine"));
+        assert_eq!(
+            label("SX5E").as_deref(),
+            Some("Europe"),
+            "merged, not replaced"
+        );
+    }
+
     /// A desk `pricer_templates` layer: a `CONDOR` and a broken `RR`
     /// (`weight = 0`), over the builtin seven.
     fn desk_templates() -> Vec<LayerDoc> {

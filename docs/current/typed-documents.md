@@ -288,10 +288,19 @@ tinting applies contrast adjustment to all three variants, including zero.
 
 [`ValueColors::from_doc`](../../crates/geode-core/src/colour/values.rs) reads
 `value_colors.toml`: one table per dimension, each mapping a value's text to a
-`colors.toml` name. Values match exactly, so `spx` is not `SPX`. Five shapes
-are refused with an error that drops the entry: a dimension that is not a
-table, an entry that is not a string, `sign` (a column color mode, not a
-color), a name starting with `#` (an absolute color), and an empty value. An
+`colors.toml` name or an inline `{ hue }` / `{ token }` table. Values match
+exactly, so `spx` is not `SPX`. An inline table is read by
+`Definition::from_table`, the same reader `colors.toml` uses, so the two
+cannot drift; `tint_sign` is refused there because a value has no sign, and
+each refusal is an error at the entry's path (plus `.hue` or `.token` for a
+field) that drops the entry. An inline entry is stored under the internal key
+`inline {dimension}.{value}`, which `check_object_name` refuses, so no color
+name can ever equal it. `NamedColours::get` resolves inline keys, so every
+paint path does, while `NamedColours::names()` and every listing omit them.
+Five shapes are refused with an error that drops the entry: a dimension that
+is not a table, an entry that is neither a string nor a table, `sign` (a
+column color mode, not a color), a name starting with `#` (an absolute
+color), and an empty value. An
 entry of `none` reads as unmapped without a diagnostic; it is how a higher
 layer clears a lower layer's color. A dimension whose entries are all cleared
 or refused is absent. The reader does not consult the schema or the color
@@ -304,7 +313,13 @@ derived dimension (its values are labels); `text_dimensions` lists exactly
 those names. Three warnings each remove their entry: a dimension no dataset or
 derived dimension declares, a declared dimension that is never text (a numeric
 `strike` is not colored by its printed number), and a value naming a color
-`colors.toml` does not define, which paints without a color. What survives is
+`colors.toml` does not define, which paints without a color. Inline entries
+take the two dimension checks and skip the unknown-name check, since they
+name no `colors.toml` color; a pruned dimension drops its inline definitions
+with it. A value is inline only when its color key is its own
+`inline {dimension}.{value}`: a string entry spelled like another value's
+inline key borrows nothing, takes the unknown-name warning, and is pruned.
+What survives is
 exactly what a tile may look up, so paint performs no second validity check.
 `NamedColours::from_config` returns the color definitions together with the
 checked mapping (`NamedColours::values`), so one `Arc<NamedColours>` never

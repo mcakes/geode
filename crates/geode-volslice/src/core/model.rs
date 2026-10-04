@@ -198,6 +198,10 @@ pub struct State {
     pub split: f32,
     /// A saved zoom in x units; `None` follows the data's extent.
     pub view: Option<(f64, f64)>,
+    /// The differences axis's fixed y domain, in its own units (a vol
+    /// difference: `0.02` is two points); `None` autoscales it to what the
+    /// view shows. The density axes always autoscale.
+    pub diff_ylim: Option<(f64, f64)>,
 }
 
 impl Default for State {
@@ -212,6 +216,7 @@ impl Default for State {
             diffs: Vec::new(),
             split: DEFAULT_SPLIT,
             view: None,
+            diff_ylim: None,
         }
     }
 }

@@ -12359,10 +12359,10 @@ run_mutation "cvi: a second <term> inside one slice wins silently instead of bei
 # A colour with both hue and token is dropped, not merged.
 run_mutation "colour: both hue and token is refused" \
   crates/geode-core/src/colour/mod.rs \
-  '                    refuse_both(&mut diags, &at, name);
-                    continue;' \
-  '                    let _ = &at;
-                    Base::Token(Token::Danger)' \
+  '                refuse_both(&mut diags, path, subject);
+                return (None, diags);' \
+  '                let _ = (path, subject);
+                Base::Token(Token::Danger)' \
   geode-core \
   reads_hue_tone_and_token_and_refuses_both_or_neither
 
@@ -12767,8 +12767,8 @@ run_mutation "tint: a tinted triad is floored" \
 # tint_sign: the key is read beside either base, not only under hue.
 run_mutation "colour: tint_sign is read from the doc" \
   crates/geode-core/src/colour/mod.rs \
-  '            let tint_sign = match table.get("tint_sign") {' \
-  '            let tint_sign = match None::<&toml::Value> {' \
+  '        let tint_sign = match table.get("tint_sign") {' \
+  '        let tint_sign = match None::<&toml::Value> {' \
   geode-core \
   reads_tint_sign_beside_a_hue_or_a_token_and_warns_on_a_non_bool
 
@@ -22015,7 +22015,7 @@ run_mutation "chart xy: a reversed line is fed backwards" \
 # A y axis scales over what the view shows. Scaled over the whole slot,
 # a zoom into the money leaves the smile flat against the wings' range.
 run_mutation "chart xy: the domain reads the view only" \
-  crates/geode-chart/src/xy/element.rs \
+  crates/geode-chart/src/xy/model.rs \
   '                .flat_map(|s| s.values_in(s.window(view))),' \
   '                .flat_map(|s| s.values_in((0, s.len()))),' \
   geode-chart \
@@ -32972,8 +32972,8 @@ run_mutation "link: a moved highlight is kept until the query changes" \
 # change.
 run_mutation "link: other dialogs keep the highlight by text" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '            | Target::ValueColor { .. } => self.list.set_query(query),' \
-  '            | Target::ValueColor { .. } => self.list.set_query_placing(query, None),' \
+  '            | Target::ActionValue { .. } => self.list.set_query(query),' \
+  '            | Target::ActionValue { .. } => self.list.set_query_placing(query, None),' \
   geode-shell other_targets_keep_the_highlight_by_text
 
 run_mutation "link: the title names the current groups" \
@@ -34984,14 +34984,14 @@ run_mutation "volslice: the key context takes no counts" \
 # shared steps would claim the `j` and `k` its field must type.
 run_mutation "volslice: the picker publishes no tilelist" \
   crates/geode-volslice/src/tile/mod.rs \
-  '        if matches!(self.popup, Some(Popup::Diff(_))) {' \
-  '        if self.popup.is_some() {' \
+  '            Some(p @ (Popup::Diff(_) | Popup::Actions(_))) => {' \
+  '            Some(p) => {' \
   geode-volslice the_picker_types_j_and_steps_with_the_arrows
 
 run_mutation "volslice: the diff chooser publishes tilelist" \
   crates/geode-volslice/src/tile/mod.rs \
-  '        if matches!(self.popup, Some(Popup::Diff(_))) {' \
-  '        if false {' \
+  '            Some(p @ (Popup::Diff(_) | Popup::Actions(_))) => {' \
+  '            Some(p @ Popup::Actions(_)) => {' \
   geode-volslice d_chooses_a_pair_and_the_batch_carries_its_diff_jobs
 
 # The tile's `shift+d` beats the workspace's duplicate inside the tile.
@@ -35047,8 +35047,8 @@ run_mutation "volslice: keyboard zoom anchors at the centre" \
 run_mutation "volslice: a split step is a new model version" \
   crates/geode-volslice/src/tile/mod.rs \
   '        self.version += 1;
-        self.model = with_split(&self.model, split, self.version);' \
-  '        self.model = with_split(&self.model, split, self.version);' \
+        self.model = restyled(&self.model, split, self.state.diff_ylim, self.version);' \
+  '        self.model = restyled(&self.model, split, self.state.diff_ylim, self.version);' \
   geode-volslice split_keys_step_the_split_as_a_new_model_version
 
 # Wheel and drag go through the x axis's scale, so a reversed delta axis
@@ -35072,11 +35072,11 @@ run_mutation "volslice: a strip press is gated on focus" \
   '        if !self.focused {
             return;
         }
-        let right' \
+        // A press that acts' \
   '        if false {
             return;
         }
-        let right' \
+        // A press that acts' \
   geode-volslice a_click_on_a_strip_row_solos_and_ctrl_or_shift_click_adds_when_focused
 
 run_mutation "volslice: a kind chip dispatches its own digit's action" \
@@ -35634,6 +35634,147 @@ run_mutation "volslice: close cancels by key" \
   '        self.data.cancel(key);' \
   '        let _ = &self.data;' \
   geode-volslice hide_keeps_the_query_and_close_cancels
+
+# A fixed y domain is what the axis scales over at every view; ignored,
+# the difference pane rescales on every pan.
+run_mutation "volslice ylim: a fixed domain survives a pan" \
+  crates/geode-chart/src/xy/model.rs \
+  '        if let Some(limit) = self.y_limit(axis) {' \
+  '        if let Some(limit) = None::<(f64, f64)> {' \
+  geode-volslice the_menu_fixes_the_diff_axis_at_the_shown_domain_and_a_pan_keeps_it
+
+run_mutation "volslice ylim: the chart model honours a fixed domain" \
+  crates/geode-chart/src/xy/model.rs \
+  '        if let Some(limit) = self.y_limit(axis) {' \
+  '        if let Some(limit) = None::<(f64, f64)> {' \
+  geode-chart a_fixed_domain_survives_a_view_change_and_none_autoscales
+
+# The saved ylim restores, and a built model takes it.
+run_mutation "volslice ylim: the session restores ylim" \
+  crates/geode-volslice/src/core/session.rs \
+  '    state.diff_ylim = read(table, "ylim", &mut notices, read_range);' \
+  '    let _ = read(table, "ylim", &mut notices, read_range);' \
+  geode-volslice a_state_round_trips_through_its_table
+
+run_mutation "volslice ylim: a built model takes the fixed domain" \
+  crates/geode-volslice/src/tile/data.rs \
+  '            .with_y_limit(crate::core::build::DIFF_AXIS, self.state.diff_ylim);' \
+  '            .with_y_limit(crate::core::build::DIFF_AXIS, None);' \
+  geode-volslice a_saved_ylim_restores_into_the_model
+
+# A range whose lower end is not below its upper is refused, not set.
+run_mutation "volslice ylim: :ylim refuses lo >= hi" \
+  crates/geode-volslice/src/commands.rs \
+  '    if lo >= hi {' \
+  '    if false {' \
+  geode-volslice ylim_refuses_a_range_that_is_not_one
+
+# A menu pick dispatches the row's action through the key's path.
+run_mutation "volslice menu: a pick dispatches its action" \
+  crates/geode-volslice/src/tile/menu.rs \
+  '                self.dispatch(&id, None, window, cx);' \
+  '                let _ = id;' \
+  geode-volslice the_menu_fixes_the_diff_axis_at_the_shown_domain_and_a_pan_keeps_it
+
+run_mutation "volslice menu: fix_diff_y reaches the tile" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '            "fix_diff_y" => self.fix_diff_y(window, cx),' \
+  '            "fix_diff_y" => {}' \
+  geode-volslice ylim_sets_the_domain_and_the_header_chip_frees_it
+
+# An outside press closes only the popup it was painted for: the button's
+# capture-phase press has already swapped the action menu in.
+run_mutation "volslice menu: an outside press closes only its own popup" \
+  crates/geode-volslice/src/tile/picker.rs \
+  '        if self.popup.as_ref().map(Popup::kind) == Some(painted) {' \
+  '        if self.popup.is_some() {' \
+  geode-volslice the_menu_opens_from_dot_the_button_and_a_chart_right_press
+
+# The right press that focuses a tile opens nothing.
+run_mutation "volslice menu: a chart right press opens only on a focused tile" \
+  crates/geode-volslice/src/tile/menu.rs \
+  '        if event.button != MouseButton::Right || !self.focused {' \
+  '        if event.button != MouseButton::Right {' \
+  geode-volslice the_menu_opens_from_dot_the_button_and_a_chart_right_press
+
+# `.` and `escape` close the action menu: its own bindings, since the
+# normal layer's keys do not reach a `menu`-mode tile.
+run_mutation "volslice menu: dot closes the action menu" \
+  crates/geode-volslice/src/content.rs \
+  '"." = "volslice::cancel"' \
+  '# dot unbound' \
+  geode-volslice the_menu_opens_from_dot_the_button_and_a_chart_right_press
+
+run_mutation "volslice menu: escape closes the action menu" \
+  crates/geode-volslice/src/content.rs \
+  '"enter" = "volslice::menu_pick"
+"escape" = "volslice::cancel"' \
+  '"enter" = "volslice::menu_pick"' \
+  geode-volslice fixing_with_no_differences_refuses
+
+# `.` in the diff chooser swaps the action menu in.
+run_mutation "volslice menu: dot in the chooser opens the menu" \
+  crates/geode-volslice/src/content.rs \
+  '# `.` swaps the chooser for the action menu, as `⋯` does.
+"." = "volslice::menu"' \
+  '# `.` swaps the chooser for the action menu, as `⋯` does.' \
+  geode-volslice dot_in_the_chooser_opens_the_action_menu
+
+# An open menu's rows follow the tile (a `:ylim` ticks the fix row).
+run_mutation "volslice menu: an open menu's rows stay current" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '        self.refresh_menu(cx);' \
+  '        let _ = &self.popup;' \
+  geode-volslice an_open_menus_rows_follow_the_tile
+
+# The header rebuilds when the fixed domain changes, so the chip appears.
+run_mutation "volslice ylim: the header key carries the fixed domain" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '                || k.diff_ylim != self.state.diff_ylim' \
+  '                || false' \
+  geode-volslice ylim_sets_the_domain_and_the_header_chip_frees_it
+
+# With nothing on the differences axis, the fix refuses and says why.
+run_mutation "volslice ylim: a fix with no differences refuses" \
+  crates/geode-volslice/src/tile/menu.rs \
+  '                    self.refuse(NO_DIFF_DOMAIN.to_string(), cx);' \
+  '                    let _ = NO_DIFF_DOMAIN;' \
+  geode-volslice fixing_with_no_differences_refuses
+
+# A refusal holds one slot that the next verb clears: by key, by `:` line.
+run_mutation "volslice refusal: the next key clears it" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '        self.clear_refusal(cx);
+        if !matches!(' \
+  '        if !matches!(' \
+  geode-volslice following_a_group_with_no_single_underlying_paints_the_notice_and_refuses_u
+
+run_mutation "volslice refusal: the next command clears it" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '        self.clear_refusal(cx);
+        match commands::parse(line)? {' \
+  '        match commands::parse(line)? {' \
+  geode-volslice fixing_with_no_differences_refuses
+
+# A frozen domain is the shown one widened outward to tick values.
+run_mutation "volslice ylim: a fix rounds the shown domain outward" \
+  crates/geode-volslice/src/tile/menu.rs \
+  '                Some(domain) => Some(nice_outward(domain, self.diff_tick_hint(window))),' \
+  '                Some(domain) => Some(domain),' \
+  geode-volslice the_menu_fixes_the_diff_axis_at_the_shown_domain_and_a_pan_keeps_it
+
+run_mutation "chart scale: nice_outward never narrows" \
+  crates/geode-chart/src/core/scale.rs \
+  '        (lo / step).floor() * step + 0.0,' \
+  '        (lo / step).round() * step + 0.0,' \
+  geode-chart nice_outward_widens_to_tick_values_and_never_narrows
+
+# The chip prints the stored ends, never rounded to a coarser step.
+run_mutation "volslice ylim: the chip keeps four significant digits" \
+  crates/geode-volslice/src/header.rs \
+  '        let decimals = (3 - magnitude).max(0) as usize;' \
+  '        let decimals = (1 - magnitude).max(0) as usize;' \
+  geode-volslice the_ylim_chip_reads_in_the_axis_format
 
 # ---- the diagnostics page: keyboard routes through the real keymap
 
@@ -36251,14 +36392,23 @@ run_mutation "close: the vol slice content forwards its handle" \
   '        let _ = (close, cx);' \
   geode-volslice the_header_paints_the_close_button
 
-# value_colors merges per value: listing it as atomic would make a user
-# override of one value drop the desk's others.
-run_mutation "value colors: the document merges per value" \
+# value_colors replaces one value's entry whole (depth 2). At depth 1 a user
+# entry would drop the desk's other values of the dimension.
+run_mutation "value colors: a dimension merges per value" \
   crates/geode-core/src/config/merge.rs \
-  '        "colors" => Some(1),' \
-  '        "colors" | "value_colors" => Some(1),' \
+  '        "value_colors" => Some(2),' \
+  '        "value_colors" => Some(1),' \
   geode-core \
-  value_colors_merge_per_value_not_per_dimension
+  value_colors_replace_an_entry_whole_and_merge_a_dimension_per_value
+
+# With no atomic depth a user hue deep-merges into a desk token and the
+# entry is refused as both.
+run_mutation "value colors: an entry is replaced whole" \
+  crates/geode-core/src/config/merge.rs \
+  '        "value_colors" => Some(2),' \
+  '        "value_colors" => None,' \
+  geode-core \
+  value_colors_replace_an_entry_whole_and_merge_a_dimension_per_value
 
 # `none` clears: it must not be stored as a color named "none".
 run_mutation "value colors: none reads as unmapped" \
@@ -36279,7 +36429,7 @@ run_mutation "value colors: sign is refused" \
 # The check prunes an unknown color: a pruned value must not reach paint.
 run_mutation "value colors: an unknown color is pruned" \
   crates/geode-core/src/colour/values.rs \
-  '            if named.get(color).is_none() {' \
+  '            if inline.is_none() && named.get(color).is_none() {' \
   '            if false {' \
   geode-core \
   the_check_prunes_what_cannot_paint_and_says_why
@@ -36296,7 +36446,7 @@ run_mutation "value colors: a non-text dimension is ignored" \
 # would let the desk's color show again.
 run_mutation "value colors: None over a desk color writes none" \
   crates/geode-core/src/colour/values.rs \
-  '            } else if state.lower.as_deref().is_some_and(|c| c != NO_COLOR) {' \
+  '            } else if state.lower.as_ref().is_some_and(|c| !c.is_cleared()) {' \
   '            } else if false {' \
   geode-core \
   a_pick_becomes_the_smallest_user_layer_write
@@ -36304,7 +36454,7 @@ run_mutation "value colors: None over a desk color writes none" \
 # A user `none` over a desk color is no color, not the desk's.
 run_mutation "value colors: a user none clears the effective color" \
   crates/geode-core/src/colour/values.rs \
-  '        .filter(|c| c != NO_COLOR);' \
+  '        .filter(|c| !c.is_cleared());' \
   '        ;' \
   geode-core \
   the_state_separates_the_user_entry_from_the_layers_below
@@ -36496,8 +36646,8 @@ run_mutation "pricer: a line's context owns its underlying" \
 # A dimension entry that is not a table refuses the write.
 run_mutation "value colors: a non-table dimension refuses the write" \
   crates/geode-shell/src/shell/value_color.rs \
-  '                let entry = doc.entry(dimension).or_insert(toml_edit::table());' \
-  '                doc.remove(dimension); let entry = doc.entry(dimension).or_insert(toml_edit::table());' \
+  '                let colors = doc.entry(dimension).or_insert(toml_edit::table());' \
+  '                doc.remove(dimension); let colors = doc.entry(dimension).or_insert(toml_edit::table());' \
   geode-shell \
   a_write_into_a_non_table_dimension_is_refused_and_leaves_the_file
 
@@ -36512,8 +36662,8 @@ run_mutation "value colors: an emptied dimension table is removed" \
 # A value is one key, never split on a dot into nested tables.
 run_mutation "value colors: a dotted value is one key" \
   crates/geode-shell/src/shell/value_color.rs \
-  '                table.insert(value, toml_edit::value(name.as_str()));' \
-  '                table.insert(value.split(".").next().unwrap_or(value), toml_edit::value(name.as_str()));' \
+  '                table.insert(value, entry_item(entry));' \
+  '                table.insert(value.split(".").next().unwrap_or(value), entry_item(entry));' \
   geode-shell \
   a_dotted_value_is_written_as_one_quoted_key
 
@@ -36528,8 +36678,8 @@ run_mutation "value colors: an unchanged pick writes nothing" \
 # The write is decided against the color as painted: an undefined name is none.
 run_mutation "value colors: an undefined color in force is no color to clear" \
   crates/geode-shell/src/shell/value_color.rs \
-  '        state.effective = state.effective.filter(|name| named.get(name).is_some());' \
-  '        let _ = &named;' \
+  '            ValueEntry::Named(name) => named.get(name).is_some(),' \
+  '            ValueEntry::Named(_) => true,' \
   geode-shell \
   enter_over_an_undefined_desk_color_writes_nothing
 
@@ -36555,13 +36705,13 @@ run_mutation "value colors: the list opens on the current color" \
   '        list.set_ranked_highlighted(opening);' \
   '        let _ = opening;' \
   geode-shell \
-  the_color_list_holds_the_names_then_none_and_opens_on_the_current
+  the_color_list_holds_the_names_first_and_ends_custom_then_none
 
 # A row stands for its pick by position: a color may be named None.
 run_mutation "value colors: a pick goes by position, not by text" \
   crates/geode-shell/src/shell/choicedialog.rs \
   '                pick: picks[declared].clone(),' \
-  '                pick: if self.list.options()[declared] == NO_COLOR_ROW { ValuePick::None } else { picks[declared].clone() },' \
+  '                pick: if self.list.options()[declared] == NO_COLOR_ROW { ColorRow::set(ValuePick::None) } else { picks[declared].clone() },' \
   geode-shell \
   a_color_named_none_is_still_picked_by_position
 
@@ -36573,18 +36723,10 @@ run_mutation "value colors: the color rows paint swatches" \
   geode-shell \
   color_opens_the_pick_list_with_swatches
 
-# With no named colors the list says where to define one.
-run_mutation "value colors: no named colors shows the muted line" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '        .children(no_colors.then(|| {' \
-  '        .children(false.then(|| {' \
-  geode-shell \
-  with_no_named_colors_the_list_holds_none_and_says_where_to_define_one
-
 # A desk entry of none offers no Follow desk row beside None.
 run_mutation "value colors: a desk none is nothing to follow" \
   crates/geode-core/src/colour/values.rs \
-  '            (Some(user), Some(lower)) if user != lower && lower != NO_COLOR => Some(lower),' \
+  '            (Some(user), Some(lower)) if user != lower && !lower.is_cleared() => Some(lower),' \
   '            (Some(user), Some(lower)) if user != lower => Some(lower),' \
   geode-core \
   the_state_separates_the_user_entry_from_the_layers_below
@@ -36632,10 +36774,19 @@ run_mutation "classification: conflicting duplicates are rejected" \
 # read as a rejected "empty source".
 run_mutation "classification: blank rows are skipped" \
   crates/geode-core/src/classification/import.rs \
-  '        if record.fields.iter().all(|f| f.trim().is_empty()) {' \
+  '        if (0..record.fields.len()).all(|i| field(record, i).is_empty()) {' \
   '        if false {' \
   geode-core \
   an_all_blank_row_is_skipped_like_a_blank_line
+
+# Export quotes a padded source; trimming it on import would land the row
+# on another key and leave the padded one as it was.
+run_mutation "classification: a quoted source keeps its spaces" \
+  crates/geode-core/src/classification/import.rs \
+  '    if record.quoted[i] {' \
+  '    if false {' \
+  geode-core \
+  a_quoted_padded_source_round_trips_onto_its_own_key
 
 # DuckDB resolves identifiers case-insensitively, so `Book` beside the column
 # `book` would be ambiguous in the compiled SQL.
@@ -36782,6 +36933,344 @@ run_mutation "events: text-file outcomes key by tile and tag" \
   geode-app \
   two_text_file_outcomes_for_the_same_tile_are_both_delivered
 
+# ---- Value color choices ----
+
+# An inline entry names no colors.toml color: the unknown-name check must
+# not prune it.
+run_mutation "value colors: the check keeps an inline entry" \
+  crates/geode-core/src/colour/values.rs \
+  '            if inline.is_none() && named.get(color).is_none() {' \
+  '            if named.get(color).is_none() {' \
+  geode-core \
+  the_check_keeps_an_inline_entry_and_prunes_its_dimension_by_kind
+
+# A value has no sign: tint_sign in an inline entry is refused.
+run_mutation "value colors: an inline tint_sign is refused" \
+  crates/geode-core/src/colour/values.rs \
+  '    if table.contains_key("tint_sign") {' \
+  '    if false {' \
+  geode-core \
+  inline_entries_parse_and_refuse_at_their_path
+
+# The inline key must contain what check_object_name refuses.
+run_mutation "value colors: the inline key is never a color name" \
+  crates/geode-core/src/colour/values.rs \
+  '    format!("inline {dimension}.{value}")' \
+  '    format!("{dimension}{value}")' \
+  geode-core \
+  the_inline_key_can_never_be_a_color_name
+
+# Inline keys are hidden from every listing of names.
+run_mutation "value colors: inline keys are not names" \
+  crates/geode-core/src/colour/mod.rs \
+  '        self.by_name.keys().map(String::as_str)' \
+  '        self.by_name.keys().chain(self.inline.keys()).map(String::as_str)' \
+  geode-core \
+  inline_keys_resolve_through_get_and_never_list
+
+# Paint resolves an inline key through get.
+run_mutation "value colors: get resolves an inline key" \
+  crates/geode-core/src/colour/mod.rs \
+  '        self.by_name.get(name).or_else(|| self.inline.get(name))' \
+  '        self.by_name.get(name)' \
+  geode-core \
+  inline_keys_resolve_through_get_and_never_list
+
+# tone is written only when light.
+run_mutation "colour: to_table writes tone only when light" \
+  crates/geode-core/src/colour/mod.rs \
+  '                if *tone == Tone::Light {' \
+  '                if true {' \
+  geode-core \
+  to_table_round_trips_through_from_table
+
+# A name spelled like another value's inline key borrows nothing: only a
+# value's own inline key reads as inline.
+run_mutation "value colors: only a value's own inline key is inline" \
+  crates/geode-core/src/colour/values.rs \
+  '                .filter(|_| **color == *inline_key(dimension, value));' \
+  '                .filter(|_| true);' \
+  geode-core \
+  a_name_spelled_like_another_values_inline_key_borrows_nothing
+
+# A table entry in a layer reads as an inline entry of the layer state.
+run_mutation "value colors: the layer state reads an inline entry" \
+  crates/geode-core/src/colour/values.rs \
+  '        toml::Value::Table(table) => read_inline(' \
+  '        toml::Value::Table(table) if false => read_inline(' \
+  geode-core \
+  an_inline_entry_reads_into_the_layer_state
+
+# An inline pick equal to the entry in force writes nothing.
+run_mutation "value colors: an inline entry compares by definition" \
+  crates/geode-core/src/colour/values.rs \
+  '    if state.effective.as_ref() == Some(&entry) {' \
+  '    if false {' \
+  geode-core \
+  an_inline_pick_writes_unless_it_is_the_entry_in_force
+
+# A light hue is not a preset.
+run_mutation "value colors: a preset is tone normal" \
+  crates/geode-core/src/colour/values.rs \
+  '        tone: Tone::Normal,
+    } = &definition.base' \
+  '        tone: _,
+    } = &definition.base' \
+  geode-core \
+  preset_matching_is_hue_and_normal_tone_only
+
+# An inline entry is written as an inline table, read back as inline.
+run_mutation "value colors: an inline entry is written as an inline table" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '            toml_edit::value(inline)' \
+  '            toml_edit::value(inline.to_string())' \
+  geode-shell \
+  an_inline_entry_is_one_quoted_key_and_reads_back
+
+# A preset pick says preset.
+run_mutation "value colors: a preset pick's notice names the preset" \
+  crates/geode-shell/src/shell/value_color.rs \
+  '        (ValuePick::Inline(_), Some(preset)) => format!("{value} colored {preset} preset"),' \
+  '        (ValuePick::Inline(_), Some(_)) => format!("{value} colored"),' \
+  geode-shell \
+  the_notice_says_what_the_pick_did
+
+# Follow desk names an inline desk entry by its label.
+run_mutation "value colors: follow desk labels an inline entry" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            options.push(format!("Follow desk ({})", lower.label()));' \
+  '            options.push(format!("Follow desk ({lower:?})"));' \
+  geode-shell \
+  follow_desk_names_an_inline_desk_entry_by_its_hue
+
+# An inline entry that is no preset opens on Custom…, so an untouched enter
+# cannot clear it.
+run_mutation "value colors: an inline entry opens on Custom" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                .or(Some(custom)),' \
+  '                .or(None),' \
+  geode-shell \
+  an_inline_entry_in_force_opens_on_custom
+
+# Escape from the stage returns to the list and writes nothing.
+run_mutation "value colors: escape from the stage writes nothing" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            let _ = leave_hue_stage(shell, window, cx);' \
+  '            apply_hue_stage(shell, window, cx);' \
+  geode-shell \
+  escape_from_the_hue_stage_writes_nothing_and_returns_to_the_list
+
+# Steps wrap round the wheel.
+run_mutation "value colors: a stage step wraps" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        self.hue = (self.hue as i32 + delta).rem_euclid(360) as u16;' \
+  '        self.hue = (self.hue as i32 + delta).clamp(0, 359) as u16;' \
+  geode-shell \
+  stage_steps_wrap_and_shift_steps_one_degree
+
+# A hue is 0–360; out of range is refused.
+run_mutation "value colors: a typed hue is 0 to 360" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    (n <= 360).then_some(n % 360)' \
+  '    Some(n % 360)' \
+  geode-shell \
+  a_hue_is_a_whole_number_from_0_to_360
+
+# Apply is refused while the field is out of range.
+run_mutation "value colors: an invalid hue field does not apply" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    if !stage.valid() {' \
+  '    if false {' \
+  geode-shell \
+  an_out_of_range_hue_keeps_apply_from_writing
+
+# The preview resolves once per hue, tone and theme.
+run_mutation "value colors: the stage preview is cached per key" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            Some((k, color)) if *k == key => *color,' \
+  '            Some((k, color)) if false && *k == key => *color,' \
+  geode-shell \
+  hue_stage_track_and_preview_resolve_once_per_theme
+
+# A slider move reaches the stage.
+run_mutation "value colors: the slider feeds the stage" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        stage.set_hue(hue);' \
+  '        let _ = hue;' \
+  geode-shell \
+  a_slider_click_and_a_tone_click_set_the_stage
+
+# The palette closing over the hue stage hands its keys back to the stage,
+# not to the list's unpainted field.
+run_mutation "value colors: the stage keeps its keys after the palette" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        DialogKind::Choice if super::choicedialog::on_hue_stage(view) => {' \
+  '        DialogKind::Choice if false => {' \
+  geode-shell \
+  the_stage_keeps_its_keys_after_the_palette_closes
+
+# The typed row picks the typed hue.
+run_mutation "value colors: the typed hue row picks the typed hue" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                        let def = Definition::hue(f32::from(n), Tone::Normal);' \
+  '                        let def = Definition::hue(0.0, Tone::Normal);' \
+  geode-shell \
+  a_typed_hue_pins_its_row_and_picks_it
+
+# The typed row is pinned on top and lit.
+run_mutation "value colors: the typed hue row is pinned" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                    self.list.pin_top(0);' \
+  '                    let _ = 0;' \
+  geode-shell \
+  a_typed_hue_is_lit_over_a_row_kept_by_text
+
+# Enter's re-feed of an unchanged query keeps a moved highlight.
+run_mutation "value colors: an unchanged query does not re-pin" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                if query == self.list.query() {' \
+  '                if false {' \
+  geode-shell \
+  a_moved_highlight_under_a_typed_hue_is_kept_at_enter
+
+# A preset entry in force opens on its preset, so an untouched enter
+# writes nothing.
+run_mutation "value colors: a preset in force opens on its preset" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                .and_then(|preset| picks.iter().position(|p| p.preset() == Some(preset)))' \
+  '                .and_then(|_| None::<usize>)' \
+  geode-shell \
+  an_inline_preset_in_force_opens_on_its_preset_row
+
+# A pinned row is put in even when the query does not match it.
+run_mutation "choice: a pinned row is put in when filtered out" \
+  crates/geode-shell/src/choice.rs \
+  '            None => Ranked {
+                row: declared,
+                indices: Vec::new(),
+            },' \
+  '            None => return,' \
+  geode-shell \
+  a_pinned_row_ranks_first_and_lights_whatever_the_query_ranks
+
+# Apply on the stage's untouched hue over a named color writes nothing: an
+# inline copy would detach the value from the name.
+run_mutation "value colors: an untouched apply over a name writes nothing" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '    if stage.holds_in_force() {' \
+  '    if false {' \
+  geode-shell \
+  an_untouched_apply_over_a_named_color_writes_nothing
+
+# The stage holds the color in force only at its hue and tone.
+run_mutation "value colors: the stage compares hue and tone with the color in force" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '        self.in_force == Some((self.hue, self.tone))' \
+  '        self.in_force.is_some()' \
+  geode-shell \
+  the_stage_knows_when_it_holds_the_color_in_force
+
+# The hook is one-shot: the create takes it. (A later create in the same
+# dialog also passes begin_naming, which clears it; the two guards are
+# redundant, so the_hook_colors_the_value_once_and_a_later_create_leaves_it
+# alone cannot see either one removed.)
+run_mutation "value colors: the new color hook fires once" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            .and_then(|s| s.on_created.take());' \
+  '            .and_then(|s| s.on_created.clone());' \
+  geode-shell \
+  new_named_color_creates_the_color_and_colors_the_value
+
+# The Colors dialog's own n never arms the hook.
+run_mutation "value colors: naming begins without the hook" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        self.on_created = None;' \
+  '        let _ = &self.on_created;' \
+  geode-shell \
+  begin_naming_drops_the_value_hook
+
+# The value is colored once the create is written.
+run_mutation "value colors: a written create colors the value" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '                shell.set_value_color(hook.dimension, hook.value, ValuePick::Color(name), None, cx);' \
+  '                let _ = (hook, name);' \
+  geode-shell \
+  new_named_color_creates_the_color_and_colors_the_value
+
+# The created color removes the covered pick list.
+run_mutation "value colors: a created color drops the covered list" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                    crate::shell::choicedialog::drop_covered_value_color(shell);' \
+  '                    let _ = &shell;' \
+  geode-shell \
+  new_named_color_creates_the_color_and_colors_the_value
+
+# Escape at naming from the list pops back to it.
+run_mutation "value colors: escape at naming returns to the list" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            .is_some_and(|s| s.on_created.is_some())' \
+  '            .is_some_and(|_| false)' \
+  geode-shell \
+  escape_at_naming_pops_only_when_opened_from_the_pick_list
+
+# Back at naming from the list pops back to it, as escape does.
+run_mutation "value colors: back at naming returns to the list" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let pops = state.stage == Stage::Naming && state.on_created.is_some();' \
+  '    let pops = false;' \
+  geode-shell \
+  back_at_naming_returns_to_the_pick_list
+
+# The prefill replaces what a name refuses.
+run_mutation "value colors: the new color name is sanitized" \
+  crates/geode-shell/src/shell/value_color.rs \
+  "            if c.is_whitespace() || c == '.' || c == '\"' {" \
+  '            if false {' \
+  geode-shell \
+  color_names_for_a_value_are_lowercased_and_sanitized
+
+# The seed reaches the Colors draft: its fields read the seeded table.
+run_mutation "value colors: a seeded Colors draft reads its definition" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            Domain::Colors => colours::fields_from_table(Some(table)),' \
+  '            Domain::Colors => self.fields(config, None),' \
+  geode-shell \
+  colors_fields_from_a_source_table_read_its_definition
+
+# The typed hue seeds a new named color over the color in force. The test
+# reaches `New named color…` beneath the typed row, as the trader does.
+run_mutation "value colors: the typed hue seeds the new color" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            Target::ValueColor { typed: Some(n), .. } => {' \
+  '            Target::ValueColor { typed: Some(n), in_force: None, .. } => {' \
+  geode-shell \
+  the_new_color_seed_is_the_typed_hue_then_the_color_in_force
+
+# A query cleared back to blank lights the opening row, so enter writes
+# nothing.
+run_mutation "value colors: a cleared query lights the opening row" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                    self.list.set_ranked_highlighted(at);' \
+  '                    let _ = at;' \
+  geode-shell \
+  a_cleared_query_lights_the_opening_row_again
+
+# The same, through the keys: type a hue, backspace, enter writes nothing.
+run_mutation "value colors: a cleared hue query then enter writes nothing" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                    self.list.set_ranked_highlighted(at);' \
+  '                    let _ = at;' \
+  geode-shell \
+  a_cleared_hue_query_then_enter_writes_nothing
+
+# Dropping the typed row drops its pick, so rows keep their picks.
+run_mutation "value colors: a dropped typed row drops its pick" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                        picks.remove(0);' \
+  '                        // the typed pick kept' \
+  geode-shell \
+  a_dropped_typed_row_keeps_the_picks_aligned
+
 # Classifications: the label history, the editor and the tile's notices.
 
 # Two edits before a reload must compose: the second over the pending
@@ -36849,8 +37338,8 @@ run_mutation "classifications: only a unanimous label prefills" \
 # The config door writes even when the reload then rejects the object.
 run_mutation "classifications: an invalid source is never written" \
   crates/geode-classifications/src/tile/mod.rs \
-  '            validate_source(&config_dim.from, &config.schema, &config.dims)' \
-  '            Ok::<(), String>(())' \
+  '        validate_source(&config_dim.from, &config.schema, &config.dims)' \
+  '        Ok::<(), String>(())' \
   geode-classifications \
   an_invalid_source_classification_is_never_written
 
@@ -36978,6 +37467,27 @@ run_mutation "classifications: a foreign reload drops the pending copy" \
   geode-classifications \
   a_reload_changing_this_classification_otherwise_drops_the_pending_edit
 
+# A plan that changes nothing must not leave an undo step that undoes
+# nothing, nor a pending object no reload will answer.
+run_mutation "classifications: an empty recorded plan records nothing" \
+  crates/geode-classifications/src/core/history.rs \
+  '        if entry.is_empty() {
+            return;
+        }' \
+  '' \
+  geode-classifications \
+  recording_an_empty_entry_records_nothing
+
+# A recorded plan is a new edit: redo left standing would re-apply an entry
+# undone over an object the plan replaced.
+run_mutation "classifications: a recorded plan clears redo" \
+  crates/geode-classifications/src/core/history.rs \
+  '        self.undo.push(entry);
+        self.redo.clear();' \
+  '        self.undo.push(entry);' \
+  geode-classifications \
+  a_recorded_plan_clears_redo_and_is_in_flight
+
 # The editor paints on the cursor's row and writes its targets: a resting
 # cursor keeping its index across a reorder would paint one row and write
 # another.
@@ -36996,6 +37506,263 @@ run_mutation "classifications: a revert on its way refuses label verbs" \
   '                drop(name);' \
   geode-classifications \
   a_verb_while_a_revert_is_on_its_way_does_not_undo_it
+
+# An import's answer read after another classification was shown would be
+# planned against that one, under the first one's file.
+run_mutation "classifications: an import read is bound to its classification" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        let file = files::file_name(path);
+        if self.shown().as_deref() != Some(name.as_str()) {' \
+  '        let file = files::file_name(path);
+        if false {' \
+  geode-classifications \
+  an_import_answer_for_another_classification_is_dropped
+
+# The open dialog is modeless: its answer must not read a file for a
+# classification switched to while it stood.
+run_mutation "classifications: an import dialog is bound to its classification" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '    fn import_from(&mut self, name: String, path: PathBuf, cx: &mut Context<Self>) {
+        if self.shown().as_deref() != Some(name.as_str()) {' \
+  '    fn import_from(&mut self, name: String, path: PathBuf, cx: &mut Context<Self>) {
+        if false {' \
+  geode-classifications \
+  an_import_dialog_answered_after_a_switch_reads_nothing
+
+# A plan that changes nothing has nothing to confirm.
+run_mutation "classifications: a no-op import asks nothing" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if !plan.is_noop() {
+            let held = HeldImport {' \
+  '        if true {
+            let held = HeldImport {' \
+  geode-classifications \
+  nothing_to_change_says_so_without_a_confirm
+
+# A plan made off the UI thread lands later: one a newer file operation
+# overtook must not ask about the older file.
+run_mutation "classifications: a newer import supersedes an older plan" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if tag != self.file_tag {
+            return;
+        }' \
+  '' \
+  geode-classifications \
+  a_newer_import_supersedes_an_older_plan
+
+# A plan landing after a switch would be asked about over the classification
+# shown now, with the first one's file.
+run_mutation "classifications: a landing plan is bound to its classification" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if self.shown().as_deref() != Some(name) {' \
+  '        if false {' \
+  geode-classifications \
+  a_plan_landing_after_a_switch_is_dropped
+
+# Arming over an open field or question takes the keyboard from the
+# trader's work in hand.
+run_mutation "classifications: a landing plan never displaces an open edit" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            || self.editor.is_some()
+            || self.prompt.is_some()' \
+  '            || self.prompt.is_some()' \
+  geode-classifications \
+  a_plan_landing_on_an_open_editor_off_its_field_is_held
+
+# Arming takes focus: a plan landing while another tile is focused would
+# take its keys, and a stray y would apply the import.
+run_mutation "classifications: a landing plan waits for the focused tile" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if !self.focused
+            || self.find_entry.is_some()' \
+  '        if false
+            || self.find_entry.is_some()' \
+  geode-classifications \
+  a_plan_landing_on_an_unfocused_tile_is_held_until_focused
+
+# A / search holds the keyboard though no tile field is open: a y typed
+# into it must not answer the import.
+run_mutation "classifications: a landing plan waits for a search to end" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            || self.find_entry.is_some()
+            || self.editor.is_some()' \
+  '            || self.editor.is_some()' \
+  geode-classifications \
+  a_plan_landing_during_a_search_is_held
+
+# A shell input (palette, command line) holds the keys over the focused
+# tile; the tile sees only that focus is not on the shell root or within it.
+run_mutation "classifications: a landing plan waits for a shell input" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        window.focused(cx).is_none() || self.table.focus_handle(cx).within_focused(window, cx)' \
+  '        true' \
+  geode-classifications \
+  a_plan_landing_while_a_shell_input_holds_the_keyboard_is_held
+
+# A held plan is asked about when the tile gains focus; without the offer
+# it waits forever.
+run_mutation "classifications: focusing the tile asks a held plan" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        self.focused = focused;
+        if focused {
+            self.offer_held_later(cx);
+        }' \
+  '        self.focused = focused;' \
+  geode-classifications \
+  a_plan_landing_on_an_unfocused_tile_is_held_until_focused
+
+# A held plan may outlive its classification: asked on focus without the
+# re-check, it would apply one classification's file to another.
+run_mutation "classifications: a held plan is checked again when asked" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if let Err(notice) = self.import_current(&held.name, &held.from, &held.file) {' \
+  '        if let Err(notice) = Ok::<(), Notice>(()) {' \
+  geode-classifications \
+  a_held_plan_for_a_switched_classification_is_refused_on_focus
+
+# The plan is made off the UI thread: a reload moving the source column
+# before it lands makes its sources another column's values.
+run_mutation "classifications: a landing plan refuses a moved source column" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if self.config_dim().is_none_or(|d| d.from != from) {' \
+  '        if false {' \
+  geode-classifications \
+  a_plan_landing_after_the_source_column_moved_is_refused
+
+# An import overtaken by a newer file operation must say so, not vanish.
+run_mutation "classifications: an overtaken import says so" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        waiting.or(planning).or(held)' \
+  '        planning.or(held)' \
+  geode-classifications \
+  a_newer_file_operation_replacing_a_waiting_import_says_so
+
+# Only the waiting operation's answer is acted on: an overtaken one would
+# be reported as the newer one's.
+run_mutation "classifications: only the latest file answer is acted on" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if self.file_op.as_ref().map(FileOp::tag) != Some(outcome.tag) {
+            return;
+        }' \
+  '' \
+  geode-classifications \
+  only_the_latest_file_operation_is_answered
+
+# The save dialog is modeless: a classification switched to while it
+# stood would be written under the first one's file name.
+run_mutation "classifications: an export is bound to its classification" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '    fn export_to(&mut self, name: String, path: PathBuf, all: bool, cx: &mut Context<Self>) {
+        if self.shown().as_deref() != Some(name.as_str()) {' \
+  '    fn export_to(&mut self, name: String, path: PathBuf, all: bool, cx: &mut Context<Self>) {
+        if false {' \
+  geode-classifications \
+  an_export_answered_after_a_switch_is_refused
+
+# Without the values, an export with unclassified rows leaves every
+# unmapped value out and looks complete.
+run_mutation "classifications: export with unclassified needs the values" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if all && !self.values_loaded {' \
+  '        if false {' \
+  geode-classifications \
+  export_with_unclassified_refuses_before_values_load
+
+# Values from an older answer, while a newer read is on its way or after
+# one failed, may miss what the data holds now.
+run_mutation "classifications: export with unclassified needs current values" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if all && (self.loading || self.values_notice.is_some()) {' \
+  '        if false {' \
+  geode-classifications \
+  export_with_unclassified_waits_for_current_values
+
+# A plan's sources are its source column's values: written into an object
+# a reload moved onto another column, they would label the wrong values.
+run_mutation "classifications: y refuses a changed source column" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if config_dim.from != from {' \
+  '        if false {' \
+  geode-classifications \
+  y_after_the_source_column_changed_is_refused
+
+# The file is authoritative for its rows only: applied over anything but
+# the object shown at y, a label written meanwhile would be lost.
+run_mutation "classifications: an import applies over the current object" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        let (next, entry) = plan.apply(self.history.current(&config_dim));' \
+  '        let (next, entry) = plan.apply(&DerivedDimension { values: Default::default(), ..config_dim.clone() });' \
+  geode-classifications \
+  the_confirm_applies_the_plan_over_the_current_object
+
+# An import is one undo step and is shown before its reload.
+run_mutation "classifications: an import is recorded as one undo step" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        self.history.record(&config_dim, next.clone(), entry);' \
+  '        drop(entry);' \
+  geode-classifications \
+  undo_reverts_the_whole_import
+
+# An import in a revert's debounce window would queue the user copy over
+# the removal, undoing the revert.
+run_mutation "classifications: a revert on its way refuses an import" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            return self.refuse(Notice::status(files::not_applied(&file, &name)), cx);
+        }
+        if self.refuse_while_reverting(cx) {' \
+  '            return self.refuse(Notice::status(files::not_applied(&file, &name)), cx);
+        }
+        if false && self.refuse_while_reverting(cx) {' \
+  geode-classifications \
+  import_is_refused_while_a_revert_is_on_its_way
+
+# The config door writes even when the reload then rejects the object.
+run_mutation "classifications: an import into an invalid source is never written" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        let checked = self.source_writable(&config_dim);
+        if let Err(why) = checked {
+            return self.refuse(' \
+  '        let checked: Result<(), String> = Ok(());
+        if let Err(why) = checked {
+            return self.refuse(' \
+  geode-classifications \
+  an_import_into_an_invalid_source_classification_is_never_written
+
+# A file of bad rows must not build a notice the size of the file.
+run_mutation "classifications: the rejected notice is bounded" \
+  crates/geode-classifications/src/core/files.rs \
+  '        .take(REJECTED_LISTED)' \
+  '        .take(usize::MAX)' \
+  geode-classifications \
+  the_rejected_notice_lists_twenty_then_counts
+
+# A whole-file refusal (a header for another classification) must reach
+# the trader, or the import looks as if it never happened.
+run_mutation "classifications: an import refusal reaches the notice" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            Err(why) => return self.refuse(format!("import refused: {why}"), cx),' \
+  '            Err(_) => return,' \
+  geode-classifications \
+  a_wrong_header_is_refused_naming_both
+
+# Export writes what the tile shows: a label edit not yet reloaded is in
+# the file, not the configuration's older object.
+run_mutation "classifications: export writes the current object" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        let dim = self.history.current(&config_dim);
+        let observed = all.then_some(self.observed.as_slice());' \
+  '        let dim = &config_dim;
+        let observed = all.then_some(self.observed.as_slice());' \
+  geode-classifications \
+  export_writes_an_edit_not_yet_reloaded
+
+# The read limit is what keeps a huge file out of memory and off the plan.
+run_mutation "classifications: an import reads with the size limit" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                max_bytes: MAX_IMPORT_BYTES,' \
+  '                max_bytes: u64::MAX,' \
+  geode-classifications \
+  import_reads_the_chosen_file_with_the_size_limit
 
 # A door tile shows its edit before the write: a failed write must reach it,
 # or its labels look saved.
@@ -37047,6 +37814,37 @@ run_mutation "scope writes: refresh resolves before the flush" \
         let saved_changed = false;' \
   geode-shell \
   queue_definition_creates_a_user_entry_and_refresh_resolves_it_at_once
+
+# A digits query filters `New named color…` out by text; pinned beneath the
+# typed row, it is how the typed hue seeds a new named color.
+run_mutation "value colors: New named color is pinned beneath a typed hue" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                        self.list.pin_top(new);' \
+  '                        let _ = new;' \
+  geode-shell \
+  a_typed_hue_seeds_a_new_named_color
+
+# The stage's handlers resolve the slider track, so a paint only reads it.
+run_mutation "value colors: opening the stage warms the track" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  $'    warm_track(shell, cx);\n    shell.focus_handle.focus(window, cx);' \
+  '    shell.focus_handle.focus(window, cx);' \
+  geode-shell \
+  a_tone_change_warms_the_track_before_the_paint
+
+run_mutation "value colors: the tone key warms the track" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            if key == StageKey::Tone {' \
+  '            if false {' \
+  geode-shell \
+  a_tone_change_warms_the_track_before_the_paint
+
+run_mutation "value colors: the tone click warms the track" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  $'    warm_track(shell, cx);\n    cx.notify();\n}' \
+  $'    cx.notify();\n}' \
+  geode-shell \
+  a_tone_change_warms_the_track_before_the_paint
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

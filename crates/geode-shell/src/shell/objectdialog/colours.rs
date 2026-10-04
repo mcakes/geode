@@ -72,7 +72,13 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let table = object
         .and_then(|name| config.doc(DOC).and_then(|doc| doc.value.get(name)))
         .and_then(|value| value.as_table());
+    fields_from_table(table)
+}
 
+/// [`fields`] read straight off a color's raw table rather than a named object
+/// `config` defines: the value-color list's `New named color…` seeds an unwritten
+/// draft with its definition (`NameSeed::Definition`). `None` is the empty color.
+pub(super) fn fields_from_table(table: Option<&toml::Table>) -> Vec<Field> {
     let hue = table
         .and_then(|t| t.get("hue"))
         .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
@@ -284,6 +290,23 @@ mod tests {
             desk: None,
             user: None,
         })
+    }
+
+    /// `New named color…`'s seed reaches the edit stage through the source
+    /// door: the unwritten definition's hue and tone, not the empty color.
+    #[test]
+    fn colors_fields_from_a_source_table_read_its_definition() {
+        let config = config_with_colours("");
+        let table = Definition::hue(210.0, Tone::Light).to_table();
+        let fields = Domain::Colors.fields_from_source(&config, &table);
+        let by = |k: &str| fields.iter().find(|f| f.key == k).unwrap();
+        assert!(matches!(
+            by("hue").kind,
+            FieldKind::Number { value: 210, .. }
+        ));
+        assert!(
+            matches!(&by("tone").kind, FieldKind::Choice { options, selected } if options[*selected] == "light")
+        );
     }
 
     #[test]

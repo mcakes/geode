@@ -7,6 +7,7 @@ use geode_core::log::LogLevels;
 use geode_core::query::{AsOf, DistinctOutcome, DistinctParams, QueryKey};
 use geode_core::scope::Scope;
 use geode_core::scopes::SavedScopes;
+use geode_core::textfile::{TextFileOp, TextFileOutcome, TextFileParams, TextFileResult};
 use geode_data::DataHandle;
 use geode_data::Request;
 use geode_shell::actions::ActionRegistry;
@@ -174,6 +175,8 @@ struct Harness {
     factory: Rc<ClassificationsFactory>,
     /// What the tile asked of the data tier: the test is the service.
     requests: Receiver<Request>,
+    /// The tile's data handle, to fill its queue mid-test.
+    data: DataHandle,
     /// The frame the tile queues its config writes on and hears back from.
     frame: Entity<Frame>,
     shell_focus: gpui::FocusHandle,
@@ -203,7 +206,7 @@ fn open_over(
     if busy {
         data.fill_for_tests();
     }
-    let factory = Rc::new(ClassificationsFactory::new(data));
+    let factory = Rc::new(ClassificationsFactory::new(data.clone()));
     cx.update(|cx| factory.set_config(config, cx));
     let keymap = Rc::new(app_keymap(&factory));
     let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
@@ -252,6 +255,9 @@ fn open_over(
     vcx.update(|window, cx| {
         let _ = window.draw(cx);
         built.shell_focus.focus(window, cx);
+        // The shell's render tells the focused tile it is, as it does a
+        // fresh occupant on its first frame.
+        built.content.set_focused(true, cx);
     });
     (
         Harness {
@@ -259,6 +265,7 @@ fn open_over(
             content: built.content,
             factory,
             requests,
+            data,
             frame: built.frame,
             shell_focus: built.shell_focus,
         },
@@ -1839,6 +1846,13 @@ fn the_dot_menu_lists_actions_with_disabled_reasons(cx: &mut gpui::TestAppContex
             ),
             ("Delete".into(), Some("defined in desk config".into())),
             s("Refresh values"),
+            s("---"),
+            s("Export CSV\u{2026}"),
+            (
+                "Export CSV with unclassified\u{2026}".into(),
+                Some("values not loaded".into())
+            ),
+            s("Import CSV\u{2026}"),
         ]
     );
     // A disabled row says why in full and keeps the menu open.
@@ -2137,5 +2151,972 @@ fn undo_after_a_refusal_says_the_row_was_not_saved(cx: &mut gpui::TestAppContext
     assert_eq!(
         h.notices(&vcx),
         ["1 row was not saved and is left as it is"]
+    );
+}
+
+// ---- export ----
+
+const EXPORT: &str = "classifications::export";
+const EXPORT_ALL: &str = "classifications::export_all";
+
+impl Harness {
+    /// The file requests asked since the last call, in order.
+    fn file_requests(&self) -> Vec<TextFileParams> {
+        self.requests
+            .try_iter()
+            .filter_map(|r| match r {
+                Request::TextFile(p) => Some(p),
+                _ => None,
+            })
+            .collect()
+    }
+    /// Answer the save dialog with `name` in the directory it opened on,
+    /// or cancel it with `None`, then let the tile's wait run.
+    fn save_as(&self, vcx: &mut gpui::VisualTestContext, name: Option<&str>) {
+        vcx.simulate_new_path_selection(|dir| name.map(|n| dir.join(n)));
+        vcx.run_until_parked();
+        self.draw(vcx);
+    }
+    /// Answer a file request through the shell's door, as the bridge
+    /// routes it.
+    fn answer_file(
+        &self,
+        vcx: &mut gpui::VisualTestContext,
+        p: &TextFileParams,
+        result: TextFileResult,
+    ) {
+        let outcome = TextFileOutcome {
+            key: p.key,
+            tag: p.tag,
+            path: p.path.clone(),
+            result,
+        };
+        vcx.update(|window, cx| {
+            self.content
+                .deliver(Delivery::TextFile(outcome), window, cx)
+        });
+        self.draw(vcx);
+    }
+}
+
+/// `region` as the export fixture maps it: SPX, SX5E and DAX.
+fn edit_region() -> DerivedDimension {
+    region(&[("SPX", "Americas"), ("SX5E", "Europe"), ("DAX", "Europe")])
+}
+
+fn observed(values: &[(&str, u64)]) -> Vec<(String, u64)> {
+    values.iter().map(|(s, n)| (s.to_string(), *n)).collect()
+}
+
+#[gpui::test]
+fn export_asks_for_a_path_then_writes_the_mapped_rows(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.file_requests();
+    h.act(&mut vcx, EXPORT);
+    assert!(vcx.did_prompt_for_new_path(), "a save dialog is up");
+    assert!(
+        h.file_requests().is_empty(),
+        "nothing written before a path"
+    );
+    h.save_as(&mut vcx, Some("region.csv"));
+    let asked = h.file_requests();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let p = &asked[0];
+    assert_eq!(p.key, QueryKey(TILE));
+    assert_eq!(p.path.file_name().unwrap(), "region.csv");
+    assert_eq!(
+        p.op,
+        TextFileOp::Write {
+            text: classification::export(&edit_region(), None)
+        }
+    );
+    assert!(h.notices(&vcx).is_empty(), "nothing said before the answer");
+    h.answer_file(&mut vcx, p, TextFileResult::Written(Ok(())));
+    assert_eq!(h.notices(&vcx), ["exported 3 rows to region.csv"]);
+}
+
+/// The export reads the object as the tile shows it: a label edit still on
+/// its way to the configuration is in the file.
+#[gpui::test]
+fn export_writes_an_edit_not_yet_reloaded(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "x");
+    h.edits(&mut vcx);
+    h.file_requests();
+    h.act(&mut vcx, EXPORT);
+    h.save_as(&mut vcx, Some("region.csv"));
+    let asked = h.file_requests();
+    let cleared = region(&[("SX5E", "Europe"), ("DAX", "Europe")]);
+    assert_eq!(
+        asked[0].op,
+        TextFileOp::Write {
+            text: classification::export(&cleared, None)
+        }
+    );
+}
+
+#[gpui::test]
+fn export_with_unclassified_adds_blank_rows_for_observed_values(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.file_requests();
+    h.act(&mut vcx, EXPORT_ALL);
+    h.save_as(&mut vcx, Some("region.csv"));
+    let asked = h.file_requests();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let all = observed(&EDIT_VALUES);
+    let text = classification::export(&edit_region(), Some(&all));
+    assert!(text.contains("NKY,") && text.contains("HSI,"), "{text}");
+    assert_eq!(asked[0].op, TextFileOp::Write { text });
+    h.answer_file(&mut vcx, &asked[0], TextFileResult::Written(Ok(())));
+    assert_eq!(h.notices(&vcx), ["exported 5 rows to region.csv"]);
+}
+
+#[gpui::test]
+fn export_with_unclassified_refuses_before_values_load(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(EDIT), restored("region"));
+    h.act(&mut vcx, EXPORT_ALL);
+    assert!(!vcx.did_prompt_for_new_path());
+    assert_eq!(
+        h.notices(&vcx),
+        ["values not loaded yet \u{2014} shift+r loads them"]
+    );
+    // The menu says so on the row, and the plain export stays open.
+    h.press(&mut vcx, ".");
+    let menu = h.action_menu(&vcx).expect("the menu");
+    assert!(
+        menu.contains(&(
+            "Export CSV with unclassified\u{2026}".into(),
+            Some("values not loaded".into())
+        )),
+        "{menu:?}"
+    );
+    assert!(
+        menu.contains(&("Export CSV\u{2026}".into(), None)),
+        "{menu:?}"
+    );
+}
+
+/// A failed values read is no answer to export: the observed values are
+/// not known.
+#[gpui::test]
+fn export_with_unclassified_refuses_after_a_failed_read(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(EDIT), restored("region"));
+    let asked = h.distinct_requests();
+    h.deliver(&mut vcx, asked[0].tag, "underlying_ref", Err("no table"));
+    h.act(&mut vcx, EXPORT_ALL);
+    assert!(!vcx.did_prompt_for_new_path());
+}
+
+#[gpui::test]
+fn a_cancelled_save_dialog_does_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.file_requests();
+    h.act(&mut vcx, EXPORT);
+    h.save_as(&mut vcx, None);
+    assert!(h.file_requests().is_empty());
+    assert!(h.notices(&vcx).is_empty());
+}
+
+#[gpui::test]
+fn a_failed_write_shows_the_error(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.file_requests();
+    h.act(&mut vcx, EXPORT);
+    h.save_as(&mut vcx, Some("region.csv"));
+    let asked = h.file_requests();
+    h.answer_file(
+        &mut vcx,
+        &asked[0],
+        TextFileResult::Written(Err("region.csv: Permission denied".into())),
+    );
+    let notices = h.tile.read_with(&vcx, |t, _| t.chrome.notices.clone());
+    assert_eq!(
+        notices,
+        [Notice::danger(
+            "export failed: region.csv: Permission denied"
+        )]
+    );
+}
+
+#[gpui::test]
+fn a_busy_service_refuses_the_export(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.act(&mut vcx, EXPORT);
+    h.data.fill_for_tests();
+    h.save_as(&mut vcx, Some("region.csv"));
+    assert!(h.file_requests().is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["the data service is busy \u{2014} try again"]
+    );
+}
+
+/// Two exports: the first's answer was overtaken and says nothing; the
+/// second dialog opens where the first file went.
+#[gpui::test]
+fn only_the_latest_file_operation_is_answered(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.file_requests();
+    let dir = std::env::temp_dir().join("geode-export-test");
+    h.act(&mut vcx, EXPORT);
+    let first = dir.join("first.csv");
+    vcx.simulate_new_path_selection(|_| Some(first.clone()));
+    vcx.run_until_parked();
+    h.act(&mut vcx, EXPORT);
+    vcx.simulate_new_path_selection(|opened_on| {
+        assert_eq!(opened_on, dir.as_path(), "the last file's directory");
+        Some(dir.join("second.csv"))
+    });
+    vcx.run_until_parked();
+    let asked = h.file_requests();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert!(asked[1].tag > asked[0].tag);
+    h.answer_file(&mut vcx, &asked[0], TextFileResult::Written(Ok(())));
+    assert!(h.notices(&vcx).is_empty(), "overtaken: dropped");
+    h.answer_file(&mut vcx, &asked[1], TextFileResult::Written(Ok(())));
+    assert_eq!(h.notices(&vcx), ["exported 3 rows to second.csv"]);
+    // Answered once: the same answer again says nothing more.
+    h.tile.update(&mut vcx, |t, _| {
+        t.notices.outcome.clear();
+        t.rebuild_chrome();
+    });
+    h.answer_file(&mut vcx, &asked[1], TextFileResult::Written(Ok(())));
+    assert!(h.notices(&vcx).is_empty());
+}
+
+#[gpui::test]
+fn export_with_nothing_shown_is_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), None);
+    h.act(&mut vcx, "classifications::cancel");
+    h.act(&mut vcx, EXPORT);
+    assert!(!vcx.did_prompt_for_new_path());
+    assert_eq!(h.notices(&vcx), ["choose a classification to export"]);
+    h.act(&mut vcx, EXPORT_ALL);
+    assert!(!vcx.did_prompt_for_new_path());
+    assert_eq!(h.notices(&vcx), ["choose a classification to export"]);
+}
+
+/// The save dialog is modeless: a classification switched to while it
+/// stood must not go out under the first one's file name.
+#[gpui::test]
+fn an_export_answered_after_a_switch_is_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    h.file_requests();
+    h.act(&mut vcx, EXPORT);
+    h.press(&mut vcx, "g c k enter");
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("desk"));
+    h.save_as(&mut vcx, Some("region.csv"));
+    assert!(h.file_requests().is_empty(), "nothing written");
+    assert_eq!(
+        h.notices(&vcx),
+        ["region is no longer shown \u{2014} nothing exported"]
+    );
+}
+
+/// Values from an earlier answer are not current while a newer read is on
+/// its way or after one failed: the unclassified rows could be missing.
+#[gpui::test]
+fn export_with_unclassified_waits_for_current_values(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    const STALE: &str = "values not current \u{2014} shift+r reloads them";
+    h.press(&mut vcx, "shift-r");
+    let pending = h.distinct_requests();
+    h.act(&mut vcx, EXPORT_ALL);
+    assert!(!vcx.did_prompt_for_new_path(), "a read is on its way");
+    assert_eq!(h.notices(&vcx), [STALE]);
+    h.deliver(&mut vcx, pending[0].tag, "underlying_ref", Err("no table"));
+    h.act(&mut vcx, EXPORT_ALL);
+    assert!(!vcx.did_prompt_for_new_path(), "the refresh failed");
+    assert!(
+        h.notices(&vcx).contains(&STALE.to_string()),
+        "{:?}",
+        h.notices(&vcx)
+    );
+    h.press(&mut vcx, ".");
+    let menu = h.action_menu(&vcx).expect("the menu");
+    assert!(
+        menu.contains(&(
+            "Export CSV with unclassified\u{2026}".into(),
+            Some("values not current".into())
+        )),
+        "{menu:?}"
+    );
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "shift-r");
+    let retry = h.distinct_requests();
+    h.deliver(
+        &mut vcx,
+        retry[0].tag,
+        "underlying_ref",
+        Ok(REGION_VALUES.to_vec()),
+    );
+    h.act(&mut vcx, EXPORT_ALL);
+    assert!(vcx.did_prompt_for_new_path(), "current again");
+}
+
+// ---- import ----
+
+const IMPORT: &str = "classifications::import";
+
+/// Into `region` as `EDIT` maps it (SPX Americas, SX5E and DAX Europe):
+/// two labels changed, one new, one cleared, and line 6 rejected.
+const IMPORT_TEXT: &str =
+    "underlying_ref,region\nSPX,Europe\nSX5E,Asia\nNKY,Asia\nDAX,\nHSI,Asia,extra\n";
+
+/// `region` once `IMPORT_TEXT` is applied over `EDIT`.
+fn imported_region() -> DerivedDimension {
+    region(&[("SPX", "Europe"), ("SX5E", "Asia"), ("NKY", "Asia")])
+}
+
+impl Harness {
+    /// Answer the open dialog with `file`, let the tile's wait run, and
+    /// take the file requests it asked.
+    fn open_file(&self, vcx: &mut gpui::VisualTestContext, file: &str) -> Vec<TextFileParams> {
+        let path = std::env::temp_dir().join("geode-import-test").join(file);
+        vcx.simulate_path_prompt_response(|_| Some(vec![path]));
+        vcx.run_until_parked();
+        self.draw(vcx);
+        self.file_requests()
+    }
+    /// Import: the action, then the dialog answered with `file`; the one
+    /// read it asked.
+    fn import(&self, vcx: &mut gpui::VisualTestContext, file: &str) -> TextFileParams {
+        self.file_requests();
+        self.act(vcx, IMPORT);
+        let mut asked = self.open_file(vcx, file);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        asked.remove(0)
+    }
+    /// Answer `p` with the file's text.
+    fn read_as(&self, vcx: &mut gpui::VisualTestContext, p: &TextFileParams, text: &str) {
+        self.answer_file(vcx, p, TextFileResult::Read(Ok(text.to_string())));
+        self.land(vcx);
+    }
+    /// Let a plan made off the UI thread land.
+    fn land(&self, vcx: &mut gpui::VisualTestContext) {
+        vcx.run_until_parked();
+        self.draw(vcx);
+    }
+    fn notice_list(&self, vcx: &gpui::VisualTestContext) -> Vec<Notice> {
+        self.tile.read_with(vcx, |t, _| t.chrome.notices.clone())
+    }
+}
+
+#[gpui::test]
+fn import_reads_the_chosen_file_with_the_size_limit(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.file_requests();
+    h.act(&mut vcx, IMPORT);
+    assert!(vcx.did_prompt_for_paths(), "an open dialog is up");
+    assert!(h.file_requests().is_empty(), "nothing read before a path");
+    let mut options = None;
+    let path = std::env::temp_dir().join("region.csv");
+    vcx.simulate_path_prompt_response(|o| {
+        options = Some((o.files, o.directories, o.multiple));
+        Some(vec![path.clone()])
+    });
+    vcx.run_until_parked();
+    assert_eq!(options, Some((true, false, false)));
+    let asked = h.file_requests();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].key, QueryKey(TILE));
+    assert_eq!(asked[0].path, path);
+    assert_eq!(
+        asked[0].op,
+        TextFileOp::Read {
+            max_bytes: classification::import::MAX_IMPORT_BYTES
+        }
+    );
+}
+
+#[gpui::test]
+fn import_confirms_a_summary_then_writes_one_edit(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(
+        h.confirm(&vcx).as_deref(),
+        Some("import region.csv: 2 changed, 1 new, 1 cleared, 1 rejected \u{2014} y applies")
+    );
+    assert_eq!(
+        h.notice_list(&vcx),
+        [Notice::warning(
+            "rejected: line 6: expected 2 fields, found 3"
+        )]
+    );
+    assert!(h.edits(&mut vcx).is_empty(), "nothing before y");
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&imported_region())]);
+    assert_eq!(h.label(&vcx, "SPX").as_deref(), Some("Europe"));
+    assert_eq!(h.label(&vcx, "SX5E").as_deref(), Some("Asia"));
+    assert_eq!(h.label(&vcx, "NKY").as_deref(), Some("Asia"));
+    assert_eq!(h.label(&vcx, "DAX"), None);
+    assert_eq!(h.notices(&vcx), ["imported 4 rows into region"]);
+}
+
+/// No rejected rows: the question leaves the count out.
+#[gpui::test]
+fn a_clean_file_asks_without_a_rejected_count(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, "underlying_ref,region\nNKY,Asia\n");
+    assert_eq!(
+        h.confirm(&vcx).as_deref(),
+        Some("import region.csv: 0 changed, 1 new, 0 cleared \u{2014} y applies")
+    );
+    assert!(h.notices(&vcx).is_empty());
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.notices(&vcx), ["imported 1 row into region"]);
+}
+
+#[gpui::test]
+fn n_leaves_the_classification_unchanged(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert!(h.confirm(&vcx).is_some());
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(h.label(&vcx, "SPX").as_deref(), Some("Americas"));
+    assert_eq!(h.label(&vcx, "NKY"), None);
+    assert_eq!(h.notices(&vcx), ["region.csv not imported"]);
+    // Nothing to undo: the import never happened.
+    h.press(&mut vcx, "u");
+    assert!(h.edits(&mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn a_wrong_header_is_refused_naming_both(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "sector.csv");
+    h.read_as(&mut vcx, &p, "underlying_ref,sector\nSPX,Tech\n");
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notice_list(&vcx),
+        [Notice::danger(
+            "import refused: file is underlying_ref,sector; this classification is underlying_ref,region"
+        )]
+    );
+}
+
+#[gpui::test]
+fn nothing_to_change_says_so_without_a_confirm(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, "underlying_ref,region\nSPX,Americas\n");
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notice_list(&vcx),
+        [Notice::status("import: nothing to change")]
+    );
+    // With rejected rows, the count and the list.
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(
+        &mut vcx,
+        &p,
+        "underlying_ref,region\nSPX,Americas\nA,b,c\n,x\n",
+    );
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notice_list(&vcx),
+        [
+            Notice::status("import: nothing to change (2 rejected)"),
+            Notice::warning("rejected: line 3: expected 2 fields, found 3; line 4: empty source"),
+        ]
+    );
+    assert!(h.edits(&mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn undo_reverts_the_whole_import(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.edits(&mut vcx).len(), 1);
+    h.press(&mut vcx, "u");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&edit_region())]);
+    assert_eq!(h.label(&vcx, "SPX").as_deref(), Some("Americas"));
+    assert_eq!(h.label(&vcx, "DAX").as_deref(), Some("Europe"));
+    assert_eq!(h.label(&vcx, "NKY"), None);
+}
+
+#[gpui::test]
+fn an_import_answer_for_another_classification_is_dropped(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.press(&mut vcx, "g c k enter");
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("desk"));
+    let said = [Notice::status(
+        "import of region.csv was for region \u{2014} not applied",
+    )];
+    // Refused on the answer itself, before any planning starts.
+    h.answer_file(
+        &mut vcx,
+        &p,
+        TextFileResult::Read(Ok("underlying_ref,region\nNKY,Asia\n".into())),
+    );
+    assert_eq!(h.notice_list(&vcx), said);
+    h.land(&mut vcx);
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(h.notice_list(&vcx), said);
+}
+
+/// The open dialog is modeless: a classification switched to while it
+/// stood reads nothing.
+#[gpui::test]
+fn an_import_dialog_answered_after_a_switch_reads_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    h.file_requests();
+    h.act(&mut vcx, IMPORT);
+    h.press(&mut vcx, "g c k enter");
+    let asked = h.open_file(&mut vcx, "region.csv");
+    assert!(asked.is_empty(), "{asked:?}");
+    assert_eq!(
+        h.notices(&vcx),
+        ["import of region.csv was for region \u{2014} not applied"]
+    );
+}
+
+#[gpui::test]
+fn a_read_error_shows_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "x.csv");
+    h.answer_file(
+        &mut vcx,
+        &p,
+        TextFileResult::Read(Err("x.csv is not UTF-8 text".into())),
+    );
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notice_list(&vcx),
+        [Notice::danger("import failed: x.csv is not UTF-8 text")]
+    );
+}
+
+/// The file is authoritative for its own rows only: a label another
+/// surface wrote on an unrelated row while the question stood survives.
+#[gpui::test]
+fn the_confirm_applies_the_plan_over_the_current_object(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert!(h.confirm(&vcx).is_some());
+    const MOVED: &str = r#"
+[region]
+from = "underlying_ref"
+[region.values]
+Americas = ["SPX"]
+Europe = ["SX5E", "DAX"]
+Asia = ["HSI"]
+"#;
+    vcx.update(|_, cx| h.factory.set_config(config(MOVED), cx));
+    assert!(h.confirm(&vcx).is_some(), "the question stands");
+    vcx.simulate_keystrokes("y");
+    let both = region(&[
+        ("SPX", "Europe"),
+        ("SX5E", "Asia"),
+        ("NKY", "Asia"),
+        ("HSI", "Asia"),
+    ]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&both)]);
+}
+
+#[gpui::test]
+fn import_is_refused_while_a_revert_is_on_its_way(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(EDIT, &["region"], &[("region", Layer::Desk)]),
+        restored("region"),
+    );
+    let asked = h.distinct_requests();
+    h.deliver(
+        &mut vcx,
+        asked[0].tag,
+        "underlying_ref",
+        Ok(EDIT_VALUES.to_vec()),
+    );
+    let p = h.import(&mut vcx, "region.csv");
+    h.act(&mut vcx, "classifications::revert");
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.edits(&mut vcx), [removal("region")]);
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert!(h.confirm(&vcx).is_some());
+    vcx.simulate_keystrokes("y");
+    assert!(h.edits(&mut vcx).is_empty(), "nothing replaces the removal");
+    assert_eq!(h.notices(&vcx), ["reverting region\u{2026}"]);
+}
+
+/// A classification whose source column may not be mapped is never
+/// written, by an import as by a label verb.
+#[gpui::test]
+fn an_import_into_an_invalid_source_classification_is_never_written(cx: &mut gpui::TestAppContext) {
+    let bad = "[bad]\nfrom = \"delta\"\n[bad.values]\nX = [\"1\"]\n";
+    let (h, mut vcx) = open_with(cx, config(bad), restored("bad"));
+    let p = h.import(&mut vcx, "bad.csv");
+    h.read_as(&mut vcx, &p, "delta,bad\n2,Y\n");
+    assert!(h.confirm(&vcx).is_some());
+    vcx.simulate_keystrokes("y");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["not saved: 'delta' is not a groupable text column"]
+    );
+}
+
+#[gpui::test]
+fn import_with_nothing_shown_is_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), None);
+    h.act(&mut vcx, "classifications::cancel");
+    h.act(&mut vcx, IMPORT);
+    assert!(!vcx.did_prompt_for_paths());
+    assert_eq!(h.notices(&vcx), ["choose a classification to import into"]);
+}
+
+#[gpui::test]
+fn a_busy_service_refuses_the_import(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.act(&mut vcx, IMPORT);
+    h.data.fill_for_tests();
+    let asked = h.open_file(&mut vcx, "region.csv");
+    assert!(asked.is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["the data service is busy \u{2014} try again"]
+    );
+}
+
+/// The plan is made off the UI thread: one landing after a switch is not
+/// asked about over the classification shown now.
+#[gpui::test]
+fn a_plan_landing_after_a_switch_is_dropped(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.answer_file(
+        &mut vcx,
+        &p,
+        TextFileResult::Read(Ok("underlying_ref,region\nNKY,Asia\n".into())),
+    );
+    // The switch is dispatched before the plan lands.
+    h.press(&mut vcx, "g c k enter");
+    h.land(&mut vcx);
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("desk"));
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["import of region.csv was for region \u{2014} not applied"]
+    );
+}
+
+/// A newer file operation supersedes a plan still being made: only the
+/// latest import is asked about.
+#[gpui::test]
+fn a_newer_import_supersedes_an_older_plan(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let first = h.import(&mut vcx, "a.csv");
+    h.answer_file(
+        &mut vcx,
+        &first,
+        TextFileResult::Read(Ok(IMPORT_TEXT.into())),
+    );
+    // The second dialog's answer, ahead of the first plan landing: the
+    // dialog route would race the plan on the executor.
+    let b = std::env::temp_dir().join("b.csv");
+    h.tile
+        .update(&mut vcx, |t, cx| t.import_from("region".into(), b, cx));
+    let second = h.file_requests();
+    assert_eq!(second.len(), 1, "{second:?}");
+    assert!(second[0].tag > first.tag);
+    assert_eq!(h.notices(&vcx), [REPLACED]);
+    h.land(&mut vcx);
+    assert_eq!(h.confirm(&vcx), None, "the first plan was overtaken");
+    assert_eq!(h.notices(&vcx), [REPLACED]);
+    h.read_as(&mut vcx, &second[0], "underlying_ref,region\nNKY,Asia\n");
+    assert_eq!(
+        h.confirm(&vcx).as_deref(),
+        Some("import b.csv: 0 changed, 1 new, 0 cleared \u{2014} y applies")
+    );
+}
+
+const READY: &str = "import of region.csv ready \u{2014} focus this tile to answer";
+const QUESTION: &str =
+    "import region.csv: 2 changed, 1 new, 1 cleared, 1 rejected \u{2014} y applies";
+
+impl Harness {
+    /// The shell's word on whether this is the focused tile, through the
+    /// door its render calls, then whatever that deferred.
+    fn focus_tile(&self, vcx: &mut gpui::VisualTestContext, focused: bool) {
+        vcx.update(|_, cx| self.content.set_focused(focused, cx));
+        self.land(vcx);
+    }
+}
+
+/// A plan landing on an open label field leaves the field as it is: the
+/// trader's typing is never discarded for a question. Held, it is asked
+/// once the field closes.
+#[gpui::test]
+fn a_plan_landing_on_an_open_editor_is_held(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.goto(&mut vcx, "NKY");
+    h.press(&mut vcx, "enter");
+    vcx.simulate_input("Pac");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), None);
+    let (text, _, _) = h.editor(&vcx).expect("the editor stays open");
+    assert_eq!(text, "Pac");
+    assert!(
+        h.notices(&vcx).contains(&READY.to_string()),
+        "{:?}",
+        h.notices(&vcx)
+    );
+    assert!(h.edits(&mut vcx).is_empty());
+    h.press(&mut vcx, "escape");
+    h.land(&mut vcx);
+    assert_eq!(h.confirm(&vcx).as_deref(), Some(QUESTION));
+    assert!(!h.notices(&vcx).contains(&READY.to_string()));
+}
+
+/// The open editor holds the import even when window focus is back on the
+/// shell root (its field is not the only sign of work in hand): arming
+/// there would close nothing but answer the trader's next key.
+#[gpui::test]
+fn a_plan_landing_on_an_open_editor_off_its_field_is_held(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.goto(&mut vcx, "NKY");
+    h.press(&mut vcx, "enter");
+    assert!(h.editor(&vcx).is_some());
+    vcx.update(|window, cx| h.shell_focus.focus(window, cx));
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.editor(&vcx).is_some(), "the editor stays open");
+    assert!(h.notices(&vcx).contains(&READY.to_string()));
+}
+
+#[gpui::test]
+fn a_plan_landing_on_an_open_prompt_is_held(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.act(&mut vcx, "classifications::new");
+    assert!(h.prompt(&vcx).is_some());
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.prompt(&vcx).is_some(), "the prompt stays open");
+    assert!(h.notices(&vcx).contains(&READY.to_string()));
+}
+
+#[gpui::test]
+fn a_plan_landing_on_another_question_is_held(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(EDIT, &["region"], &[]),
+        restored("region"),
+    );
+    let p = h.import(&mut vcx, "region.csv");
+    h.act(&mut vcx, "classifications::delete");
+    let asked = h.confirm(&vcx).expect("the delete question");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), Some(asked), "the delete question stands");
+    assert!(h.notices(&vcx).contains(&READY.to_string()));
+    // Answered no, the delete question gives way to the held import.
+    h.press(&mut vcx, "n");
+    h.land(&mut vcx);
+    assert_eq!(h.confirm(&vcx).as_deref(), Some(QUESTION));
+}
+
+/// A plan landing while a `/` search is typed: the search keeps the
+/// keyboard, so a `y` typed into it never answers the import.
+#[gpui::test]
+fn a_plan_landing_during_a_search_is_held(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.find(&mut vcx, FindEvent::Changed("s".into()));
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), None, "the search keeps the keyboard");
+    assert!(h.notices(&vcx).contains(&READY.to_string()));
+    h.find(&mut vcx, FindEvent::Changed("sy".into()));
+    assert!(h.edits(&mut vcx).is_empty());
+    h.find(&mut vcx, FindEvent::Committed("sy".into()));
+    h.land(&mut vcx);
+    assert_eq!(h.confirm(&vcx).as_deref(), Some(QUESTION));
+}
+
+/// A plan landing while another tile is focused is held until this one is
+/// focused again; only then does it take the keyboard.
+#[gpui::test]
+fn a_plan_landing_on_an_unfocused_tile_is_held_until_focused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.focus_tile(&mut vcx, false);
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.notices(&vcx).contains(&READY.to_string()));
+    h.focus_tile(&mut vcx, true);
+    assert_eq!(h.confirm(&vcx).as_deref(), Some(QUESTION));
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&imported_region())]);
+}
+
+/// A shell input (the palette, the command line) holds the keyboard over
+/// the focused tile: the plan waits for it.
+#[gpui::test]
+fn a_plan_landing_while_a_shell_input_holds_the_keyboard_is_held(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    // Held for the test: a dropped handle reads as nothing focused.
+    let _input = vcx.update(|window, cx| {
+        let input = cx.focus_handle();
+        input.focus(window, cx);
+        input
+    });
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.notices(&vcx).contains(&READY.to_string()));
+}
+
+/// A held plan is checked again when it is asked: the classification
+/// switched meanwhile is refused, not asked about.
+#[gpui::test]
+fn a_held_plan_for_a_switched_classification_is_refused_on_focus(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.focus_tile(&mut vcx, false);
+    h.read_as(&mut vcx, &p, "underlying_ref,region\nNKY,Asia\n");
+    assert_eq!(h.confirm(&vcx), None);
+    h.press(&mut vcx, "g c k enter");
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("desk"));
+    h.focus_tile(&mut vcx, true);
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notices(&vcx),
+        ["import of region.csv was for region \u{2014} not applied"]
+    );
+}
+
+#[gpui::test]
+fn a_held_plan_for_a_moved_source_column_is_refused_on_focus(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.focus_tile(&mut vcx, false);
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    let moved = EDIT.replace("from = \"underlying_ref\"", "from = \"book\"");
+    vcx.update(|_, cx| h.factory.set_config(config(&moved), cx));
+    h.focus_tile(&mut vcx, true);
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notices(&vcx),
+        ["import of region.csv was for underlying_ref values \u{2014} not applied"]
+    );
+}
+
+/// A reload moving the classification onto another source column while
+/// the plan was made: the plan's sources are the old column's values.
+#[gpui::test]
+fn a_plan_landing_after_the_source_column_moved_is_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.answer_file(&mut vcx, &p, TextFileResult::Read(Ok(IMPORT_TEXT.into())));
+    let moved = EDIT.replace("from = \"underlying_ref\"", "from = \"book\"");
+    vcx.update(|_, cx| h.factory.set_config(config(&moved), cx));
+    h.land(&mut vcx);
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["import of region.csv was for underlying_ref values \u{2014} not applied"]
+    );
+}
+
+const REPLACED: &str = "import of a.csv replaced by a newer file operation";
+
+/// A newer file operation overtaking an import still waiting for its read
+/// says so: the import does not vanish without a word.
+#[gpui::test]
+fn a_newer_file_operation_replacing_a_waiting_import_says_so(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let first = h.import(&mut vcx, "a.csv");
+    h.act(&mut vcx, EXPORT);
+    h.save_as(&mut vcx, Some("out.csv"));
+    assert_eq!(h.notices(&vcx), [REPLACED]);
+    h.answer_file(
+        &mut vcx,
+        &first,
+        TextFileResult::Read(Ok(IMPORT_TEXT.into())),
+    );
+    h.land(&mut vcx);
+    assert_eq!(h.confirm(&vcx), None, "the overtaken read is dropped");
+}
+
+#[gpui::test]
+fn a_newer_file_operation_replacing_a_held_import_says_so(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let first = h.import(&mut vcx, "a.csv");
+    h.focus_tile(&mut vcx, false);
+    h.read_as(&mut vcx, &first, IMPORT_TEXT);
+    let b = std::env::temp_dir().join("b.csv");
+    h.tile
+        .update(&mut vcx, |t, cx| t.import_from("region".into(), b, cx));
+    assert!(
+        h.notices(&vcx).contains(&REPLACED.to_string()),
+        "{:?}",
+        h.notices(&vcx)
+    );
+    h.focus_tile(&mut vcx, true);
+    assert_eq!(h.confirm(&vcx), None, "the held plan went with it");
+}
+
+/// A reload that moved the classification onto another source column while
+/// the question stood: the plan's sources are the old column's values.
+#[gpui::test]
+fn y_after_the_source_column_changed_is_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert!(h.confirm(&vcx).is_some());
+    let moved = EDIT.replace("from = \"underlying_ref\"", "from = \"book\"");
+    vcx.update(|_, cx| h.factory.set_config(config(&moved), cx));
+    assert!(h.confirm(&vcx).is_some(), "the question stands");
+    vcx.simulate_keystrokes("y");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["import of region.csv was for underlying_ref values \u{2014} not applied"]
+    );
+}
+
+/// A reload renaming the shown classification while the question stood
+/// withdraws it: `y` then writes nothing under either name.
+#[gpui::test]
+fn y_after_the_classification_was_renamed_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, "underlying_ref,region\nNKY,Asia\n");
+    assert!(h.confirm(&vcx).is_some());
+    let renamed = EDIT.replace("region", "area");
+    vcx.update(|_, cx| h.factory.set_config(config(&renamed), cx));
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(h.notices(&vcx), ["the classification asked about is gone"]);
+    h.press(&mut vcx, "y");
+    assert!(h.edits(&mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn the_import_row_says_why_with_nothing_shown(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), None);
+    h.act(&mut vcx, "classifications::cancel");
+    h.press(&mut vcx, ".");
+    let menu = h.action_menu(&vcx).expect("the menu");
+    assert!(
+        menu.contains(&(
+            "Import CSV\u{2026}".into(),
+            Some("no classification shown".into())
+        )),
+        "{menu:?}"
     );
 }

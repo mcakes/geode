@@ -646,6 +646,12 @@ pub(crate) fn refocus_top(view: &mut ShellView, window: &mut Window, cx: &mut Co
         super::expr_suggest::revealed(view, cx);
     }
     match kind {
+        // The value-color hue stage paints no field: its keys come through
+        // the shell's modal route, so focusing the unpainted input would
+        // leave no surface listening.
+        DialogKind::Choice if super::choicedialog::on_hue_stage(view) => {
+            view.focus_handle.focus(window, cx);
+        }
         DialogKind::Picker | DialogKind::Choice | DialogKind::ScopeExpr => {
             let handle = view.dialog_input.read(cx).focus_handle(cx);
             handle.focus(window, cx);

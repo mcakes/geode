@@ -316,6 +316,14 @@ joined on the unique source value, if the idle figure stays over budget.
   to narrow only its kept rows, because the greedy word placement does not
   guarantee that a row the longer query keeps was kept by the shorter one.
 
+- A classification CSV import is planned on the background executor (60 to
+  93 ms on the UI thread at the 10 MiB / 100,000-row limits, before it
+  moved), but applying the plan at `y` (`ImportPlan::apply`, `to_toml` and
+  the grid's relabel rebuild) still runs on the UI thread: about 28 ms at
+  100,000 changed rows, over the 8 ms budget. Imports of a few thousand rows
+  stay within it. Moving the apply off the thread would need the history
+  and the pending object to accept a result computed over a copy.
+
 - Object-dialog paint still formats per-row element ids (layer, override,
   drift badges; field and provenance ids) and resolves the Colors browse
   swatches per paint; the rows themselves are prepared. Bounded by the

@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use geode_core::colour::ValuePick;
 use geode_core::config::{CONFIG_VERSION, Config, Layer, LayerDoc, Severity};
 use gpui::Context;
 
@@ -95,6 +96,9 @@ pub(crate) struct PendingConfigWrite {
     /// failed write reverts memory for the whole batch, so exactly these drafts are
     /// rebuilt; any other open dialog's draft had nothing in it and is left alone.
     origins: Vec<Domain>,
+    /// Values to color with a color this batch creates, once the batch is written
+    /// (`New named color…`). Dropped with the batch when its write fails.
+    then_color: Vec<(super::ColorForValue, String)>,
     /// The tiles whose door edits joined this batch, each once. A tile shows
     /// its edit optimistically, so a failed write or a merge the reload
     /// rejected has to reach it as a refusal, or its labels look saved.
@@ -418,6 +422,22 @@ pub(crate) fn commit_create(shell: &mut ShellView, cx: &mut Context<ShellView>) 
     }
     queue_batch(shell, edits, user_dir, Duration::ZERO, Some(domain), cx);
     None
+}
+
+/// Color `hook`'s value with `name` once the pending batch, which creates that color,
+/// is written. The color's creation and the value's write are separate user-layer
+/// writes; ordering them this way means the value never names a color the file lacks,
+/// and a failed create colors nothing.
+pub(crate) fn color_value_once_written(
+    shell: &mut ShellView,
+    hook: super::ColorForValue,
+    name: String,
+    cx: &mut Context<ShellView>,
+) {
+    match shell.pending_config_write.as_mut() {
+        Some(pending) => pending.then_color.push((hook, name)),
+        None => shell.set_value_color(hook.dimension, hook.value, ValuePick::Color(name), None, cx),
+    }
 }
 
 /// Queue one whole object (`[name]` in `doc`'s user layer) with zero delay, for a surface
@@ -778,6 +798,7 @@ fn schedule_flush(
             edits: BTreeMap::new(),
             revert,
             origins: Vec::new(),
+            then_color: Vec::new(),
             tiles: Vec::new(),
         });
     pending.seq = seq;
@@ -859,10 +880,10 @@ pub(crate) fn finish_flush(
     match outcome {
         Err(message) => revert_failed_write(shell, message, cx),
         Ok(()) => {
-            let tiles = shell
+            let (then, tiles) = shell
                 .pending_config_write
                 .take()
-                .map(|pending| pending.tiles)
+                .map(|pending| (pending.then_color, pending.tiles))
                 .unwrap_or_default();
             // The write succeeded; separately report whether memory accepted its merge.
             match rejected {
@@ -882,6 +903,9 @@ pub(crate) fn finish_flush(
                         cx.notify();
                     }
                 }
+            }
+            for (hook, name) in then {
+                shell.set_value_color(hook.dimension, hook.value, ValuePick::Color(name), None, cx);
             }
         }
     }

@@ -614,22 +614,27 @@ LHUs.
 
 ## Text files
 
-A tile that imports or exports a file (classification CSVs) asks the data
-service through `DataHandle::text_file` rather than touching the filesystem:
-modules perform no I/O, and a slow or network path must stall neither the UI
-thread nor the request loop. The request loop hands each request to one
-supervised worker, `geode-files`, which runs them in submission order, each
+A tile that imports or exports a file asks the data service through
+`DataHandle::text_file` rather than touching the filesystem: modules perform
+no I/O, and a slow or network path must stall neither the UI thread nor the
+request loop. The Classifications tile is its consumer today: Export CSV
+writes and Import CSV reads under the tile's key and a fresh tag, and the
+tile acts only on its latest operation's answer (see
+[features](features.md#classifications)). The request loop hands each
+request to one supervised worker, `geode-files`, which runs them in submission order, each
 inside its own panic boundary. Every admitted request is answered exactly
 once with `DataEvent::TextFile`, keyed by the asking tile's key and its tag
 (see [requests and UI delivery](request-delivery.md)).
 
 - **Read** returns the whole file as UTF-8 text. A file whose size exceeds
   the request's `max_bytes` is refused before any of it is read (`<path> is
-  larger than 10 MB`, the limit stated in bytes below a megabyte); the length
+  larger than 10 MB`; the worker's message states the limit in bytes below
+  1 MiB and in binary megabytes above, printed as "MB"); the length
   read is checked again afterwards, so a file that grows between the two is
   refused rather than read past the limit. Text that is not UTF-8 is an error
   (`<path> is not UTF-8 text`). The limit for a classification import is
-  `geode_core::classification::import::MAX_IMPORT_BYTES` (10 MB); the
+  `geode_core::classification::import::MAX_IMPORT_BYTES` (10 MiB, which
+  the worker's refusal prints as "10 MB"); the
   import plan then refuses more than `MAX_IMPORT_ROWS` (100,000) data rows.
 - **Write** replaces the file atomically: the text goes to a sibling
   temporary (`.<name>.geode-tmp`), is synced, closed, and renamed over the

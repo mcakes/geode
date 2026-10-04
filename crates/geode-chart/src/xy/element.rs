@@ -58,9 +58,7 @@ use crate::core::marks::{
     Clip, MARKER_R, SEGMENTS_PER_MARK, Segment, dash_polyline, fill_base, fill_outlines,
     mark_stride, point_marks, strided,
 };
-use crate::core::scale::{
-    LinearScale, axis_domain, fmt_percent, fmt_tick, fmt_value, unsigned_zero,
-};
+use crate::core::scale::{LinearScale, fmt_percent, fmt_tick, fmt_value, unsigned_zero};
 use crate::core::view::View;
 use crate::core::{DASH, GAP, Point, Rect, TICK_GAP, Tick, design_px};
 use crate::paint::{
@@ -272,18 +270,11 @@ impl XyElement {
         Layout::solve(r, self.model.layout_options(self.rem_px))
     }
 
-    /// The padded y domain of a pane side over what the view shows of its
-    /// visible slots; `None` when none has a finite value there.
+    /// A pane side's y domain at this view ([`XyModel::side_domain`]):
+    /// its fixed limit, or the padded extent of what the view shows.
     /// O(visible values): a chrome-miss path only.
     pub(crate) fn side_domain(&self, pane: Pane, side: Side) -> Option<(f64, f64)> {
-        let view = self.view;
-        axis_domain(
-            self.model
-                .slots
-                .iter()
-                .filter(|s| s.visible && s.axis.pane() == pane && s.axis.side() == side)
-                .flat_map(|s| s.values_in(s.window(view))),
-        )
+        self.model.side_domain(Axis::of(pane, side), self.view)
     }
 
     /// The crosshair for a cursor at pixel `cursor_x` of `plot`: the x it
@@ -1212,6 +1203,73 @@ mod tests {
         assert!(
             narrow.side_domain(Pane::Lower, Side::Right).is_none(),
             "no slot on that side"
+        );
+    }
+
+    /// A fixed domain is what the side scales over at every view; `None`
+    /// autoscales again, and a limit that is not a finite ascending pair
+    /// is no limit.
+    #[test]
+    fn a_fixed_domain_survives_a_view_change_and_none_autoscales() {
+        let m = fixture(false);
+        let narrow = View {
+            lo: 0.99,
+            hi: 1.01,
+            min_span: 0.001,
+        };
+        let whole = View::with_min_span(m.full(), 0.01);
+        let auto_whole = m.side_domain(Axis::Left, whole).unwrap();
+        let auto_narrow = m.side_domain(Axis::Left, narrow).unwrap();
+        assert_ne!(auto_whole, auto_narrow, "autoscaled, a pan moves it");
+        let fixed = m.clone().with_y_limit(Axis::Left, Some((0.1, 0.3)));
+        for view in [whole, narrow] {
+            let e = XyElement::new(fixed.clone(), view, 12.0, "f");
+            assert_eq!(
+                e.side_domain(Pane::Upper, Side::Left),
+                Some((0.1, 0.3)),
+                "{view:?}"
+            );
+            assert_eq!(
+                e.side_domain(Pane::Lower, Side::Left),
+                m.side_domain(Axis::BottomLeft, view),
+                "the other axes still autoscale"
+            );
+        }
+        let freed = fixed.with_y_limit(Axis::Left, None);
+        assert_eq!(freed.y_limit(Axis::Left), None);
+        assert_eq!(freed.side_domain(Axis::Left, narrow), Some(auto_narrow));
+        for bad in [
+            (0.02, -0.02),
+            (0.01, 0.01),
+            (f64::NAN, 1.0),
+            (0.0, f64::INFINITY),
+        ] {
+            let m = m.clone().with_y_limit(Axis::Left, Some(bad));
+            assert_eq!(m.y_limit(Axis::Left), None, "{bad:?}");
+        }
+    }
+
+    /// Values past a fixed domain still build a path (the pane's clip
+    /// holds it to the plot) and still read in the tooltip.
+    #[test]
+    fn a_value_past_a_fixed_domain_still_builds_and_reads() {
+        let m = fixture(false).with_y_limit(Axis::BottomLeft, Some((-1e-6, 1e-6)));
+        let view = View::with_min_span(m.full(), 0.01);
+        let e = XyElement::new(m.clone(), view, 12.0, "f");
+        let plot = Rect::new(0.0, 0.0, 400.0, 200.0);
+        let lower = m
+            .slots
+            .iter()
+            .position(|s| s.axis == Axis::BottomLeft)
+            .expect("the fixture has a lower slot");
+        let u = m.slots[lower].xs()[10];
+        let (_, rows) = e.tooltip_rows(u, plot);
+        assert_ne!(rows[lower].2, NONE, "the out-of-domain value reads");
+        let y = LinearScale::new((-1e-6, 1e-6), plot.y, plot.bottom());
+        let mut b = Buffers::default();
+        assert!(
+            e.shape(&m.slots[lower], plot, &y, &mut b).is_some(),
+            "a path is built; the pane's mask clips it"
         );
     }
 

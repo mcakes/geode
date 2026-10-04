@@ -516,6 +516,19 @@ fn following_a_group_with_no_single_underlying_paints_the_notice_and_refuses_u(
         h.notices(&vcx)
     );
     assert!(h.requests().is_empty(), "nothing asked, and no picker");
+    // The refusal leads the footer, beside the standing empty state, until
+    // the next verb clears it; the data-side notice stays.
+    let footer = |vcx: &gpui::VisualTestContext| {
+        h.tile
+            .read_with(vcx, |t, _| t.footer_notice().map(|n| n.to_string()))
+    };
+    assert_eq!(
+        footer(&vcx).as_deref(),
+        Some("following A \u{2014} set the underlying there (+1 more)")
+    );
+    vcx.simulate_keystrokes("x");
+    assert_eq!(h.notices(&vcx), vec!["no underlying in A".to_string()]);
+    assert_eq!(footer(&vcx).as_deref(), Some("no underlying in A"));
 }
 
 /// A group's scope change moves the follower's own scope generation, so

@@ -368,10 +368,11 @@ columns](data-path.md#ungrouped-dimension-columns). A numeric dimension such as
 `strike` sorts by number and paints its exact value, never rounded by the text
 format.
 
-A dimension value that `value_colors` maps paints in that value's named
-color. A tree label is a value of the grouping dimension at its depth, so
-`L1` under `lhu` takes `lhu`'s mapping for `L1`, never another level's; the
-gutter number, indent and chevron keep their own paint. A `dimension`
+A dimension value that `value_colors` maps paints in that value's color (a
+named color, or an inline hue or token). A tree label is a value of the
+grouping dimension at its depth, so `L1` under `lhu` takes `lhu`'s mapping
+for `L1`, never another level's; the gutter number, indent and chevron keep
+their own paint. A `dimension`
 column's unanimous value takes its color too. `mixed`, blanks, the grand
 total, measures, headers and the selection footer are never value-colored.
 Muted states (`mixed`, non-attributable, determined non-additive, the `/`
@@ -414,7 +415,8 @@ inside a `V` row selection keeps the cursor and the selection; anywhere
 else it clears any selection and moves the cursor to the clicked row first.
 A row with nothing to offer shows `no actions for
 this row` instead. The menu's [`Color…`](shell.md#color) row sets the
-color a value paints in: the clicked column's value when that column is a
+color a value paints in (named colors, presets, a custom hue, or a new named
+color): the clicked column's value when that column is a
 text dimension (a `utf8` dimension or key column, or a derived dimension),
 else the row's own value, the grouping column's at the row's depth (`L1`
 on an `lhu` subtotal, `lhu` being a `utf8` dimension). The grand total
@@ -1235,6 +1237,21 @@ pair off (`none` is read as `off`). Pairs paint, and list in the legend and
 tooltip, expiry by expiry in the order they were turned on, each labelled
 `<pair> <expiry>`.
 
+The differences axis autoscales to what the view shows, so a pan or a zoom
+rescales it. Fixed, it keeps one y domain whatever the view: `:ylim <lo>
+<hi>` sets it in the axis's own units (`-0.02 0.02` is ±2 vol points) or
+with a `%` suffix per value (`-2% 2%`), refusing a range whose lower end is
+not below its upper or a value that is not a finite number, and `:ylim off`
+(or `auto`) frees it. The action menu's `Fix difference y-axis` row
+(`volslice::fix_diff_y`, also in the palette) freezes the domain the axis
+shows at that moment, widened outward to the axis's tick step so the frozen
+axis holds everything shown and ends on tick values, or frees a fixed one;
+with no difference shown it refuses `no differences shown`. While fixed,
+the header shows a chip such as `y −2%…2%`, the stored ends to four
+significant digits, whose click frees it. Values past the domain are clipped to
+the pane and still read in the tooltip. `0` resets the x view only. The
+density axes always autoscale.
+
 - Curve minus curve is at equal strike: the minuend is evaluated dense and
   the subtrahend at the minuend's strikes through `Grid::Job`, so the two
   never interpolate; it is a line at the minuend's x.
@@ -1287,7 +1304,9 @@ beside its own underlying's documents. Hiding keeps the reads in flight;
 closing cancels by key, the vol batch included.
 
 **Failures.** The footer shows the first notice and a count of the rest,
-in the danger tone; `no underlying` and `no underlying in A` alone are an
+in the danger tone. A refusal (`u` while following, a fix with no
+difference shown, a disabled menu row) leads, in one slot that the next
+verb acting on the tile clears; `no underlying` and `no underlying in A` alone are an
 empty state, painted muted. A failed job is one notice (`no cvi curve at
 <date>: <why>`) and the rest of the batch paints; one cause behind every
 job is said once, in the outcome's words, and a difference failing only
@@ -1314,9 +1333,26 @@ whose picture is on screen:
   publication that reinstalled the documents) clear; the strip, chips and
   header stay, so the next change still has a batch to ask.
 
+**Action menu.** `.` (in the diff chooser too, which it replaces), the
+header's `⋯` button, or a right press on the chart's plot of a focused tile
+opens the shared tile menu (a right press
+that only focuses the tile does nothing else; the strip's right press keeps
+adding or removing a row). Its rows, each naming the key that reaches its
+action in normal mode: `Underlying…` (disabled while following, naming the
+group), `Coordinate: <current>`, the three kinds as ticked toggles (a kind
+with nothing loaded reads `(not loaded)` and still toggles, as its digit
+does), `Densities`, `Difference…`, `Fix difference y-axis` (ticked while
+fixed) and `Reset view`. While the menu is up those keys are inert: the
+menu holds the keys, and a row's key acts once it is closed. The shared `j`/`k` and arrows step its enabled rows, `enter`
+or a click picks, and `escape` or `.` closes it; a pick closes the menu and
+dispatches the row's action through the path its key takes, and a disabled
+row's pick shows its reason as the refusal notice while the menu stays. The strip's keys stay out while
+it is up.
+
 **Session.** The tile saves its coordinate, hidden kinds, densities, split,
 and while set its underlying, active expiries, shown pairs (`diffs`, in
-order) and view; the cursor is not saved. An unreadable value drops its key
+order), view and fixed differences domain (`ylim = [lo, hi]`); the cursor
+is not saved. An unreadable value drops its key
 with a notice. A session saved with a single `diff` pair restores it as the
 one pair shown.
 
@@ -1335,8 +1371,6 @@ one pair shown.
 - On macOS, `ctrl+space` may be taken by the system's input-source
   shortcut and never reach the tile; `shift+space` is the same verb.
 - Keyboard zoom anchors at the view's centre, the wheel at the pointer.
-- There is no `.` action menu; the header chips and the palette carry the
-  actions.
 - A standing `vol request refused` notice is retried by the next state
   change (a key, a draft edit, a publication), not by a group scope change
   that keeps the underlying.
@@ -1443,6 +1477,75 @@ shown before. A verb's notices last until the next verb or another
 classification is shown; the session restore's until the trader's first key
 or press in the tile.
 
+**Export CSV.** `Classification: Export CSV…` and `Classification: Export
+CSV with unclassified…` are registered actions, in the palette and at the
+foot of the `⋯` menu, with no default chord. Each opens the platform's save
+dialog on `<name>.csv` in the folder of the last file this tile exported or
+imported (the home folder before that); a cancelled dialog does nothing.
+The file is `<from>,<name>` then one row per mapped source, sorted by
+source, written as the tile shows the classification when the dialog is
+answered, so a label edit not yet reloaded is in it. With unclassified, every
+observed value the classification does not map gets a row with a blank
+label: the "fill this in and send it back" file. That variant is refused
+(`values not loaded yet` / `values not current — shift+r reloads them`)
+until the values are loaded and current, since stale or missing values
+would leave rows out of a file that looks complete. The dialog is modeless,
+so the export is bound to the classification it was asked for: another
+classification shown by the time it is answered writes nothing (`<name> is
+no longer shown — nothing exported`). The write goes through the data
+service's file worker ([text files](data-path.md#text-files)), atomically;
+success says `exported <n> rows to <file>`, a failure `export failed: …`,
+and a busy service `… — try again`.
+
+**Import CSV.** `Classification: Import CSV…` (palette and `⋯`, no chord)
+opens the platform's open dialog for one file and reads it through the file
+worker with a 10 MiB limit (`MAX_IMPORT_BYTES`); more than 100,000 data rows
+is refused too. The file must be UTF-8: Excel's plain "CSV" is not, and is
+refused as `import failed: <file> is not UTF-8 text` — save as "CSV UTF-8"
+instead (a leading BOM is fine). The header must be exactly `<from>,<name>`
+after trimming, case-sensitive, else the whole file is refused naming both
+(`import refused: file is underlying_ref,sector; this classification is
+underlying_ref,region`); a quoted header field is taken as written, so a
+quoted padded header is refused. Unquoted fields are trimmed; a quoted
+source keeps its spaces, so a padded source export quoted lands back on its
+own key. The file merges: each row sets its source's label, a blank label
+clears it, and sources the file does not name keep theirs. Bare-comma rows
+are skipped; a row without two fields, with an empty source, or naming a
+source twice with different labels (every such line) is rejected and the
+rest still plan. Planning runs off the UI thread over the object shown when
+the file was read, then the confirm bar asks `import <file>: <a> changed,
+<b> new, <c> cleared, <d> rejected — y applies` (the rejected count only
+when there are any). Rejected rows show beside it as one warning, `rejected:
+line <n>: <reason>; …`, listing the first 20 then `and <k> more`. A file
+that changes nothing says `import: nothing to change` and asks nothing.
+`n` says `<file> not imported`.
+
+`y` applies the plan over the object shown then, as one write through the
+config door and one undo step (`u` reverts the whole import), and says
+`imported <n> rows into <name>`. Only the rows the plan counted are
+applied: a label written meanwhile on a row the file does not name stays,
+a row the plan found already equal is not re-asserted, and a counted row
+that now already says what the file says is skipped, so `<n>` can differ
+from the question's counts. The import passes the label verbs' gates: a
+classification over a column no classification may map is never written
+(`not saved: …`), and one being reverted is refused. Each step is bound to
+the classification the import began on: a dialog, read, plan or `y` that
+arrives after another classification is shown applies nothing (`import of
+<file> was for <name> — not applied`), as does `y` after a reload changed
+the source column (`… was for <from> values — not applied`), since the
+plan's sources are the old column's values. Only the latest file operation
+is answered, so a newer import or export supersedes an older one at any
+step (its read, its plan, or a held plan) and says `import of <file>
+replaced by a newer file operation`. The question takes the keyboard, so a
+plan is asked about only while the tile is the focused tile and nothing
+holds the keys: not while another tile is focused, a `/` search, the label
+editor, a name prompt or another question is open, or a shell input (the
+palette, the command line) has focus. Otherwise it waits, saying `import of
+<file> ready — focus this tile to answer`, and is asked when the tile is
+next focused or its own search, field or question closes, after the same
+classification and source-column checks; a stray `y` typed elsewhere never
+applies it. One plan waits at a time: a newer import replaces it.
+
 **Session.** The table saves the classification's name, the sort and the
 cursor's source value. An unreadable key is dropped with a notice and the
 rest kept; a restored cursor waits for the values that hold its row.
@@ -1456,6 +1559,12 @@ Known limitations:
   keys.
 - A desk or builtin classification cannot be deleted from the tile, and
   classifications do not chain.
+- The import's open dialog starts where the platform puts it; only the save
+  dialog opens in the last-used folder.
+- A plan waiting for the keyboard is not asked about when a palette or
+  command line closes over the focused tile; focusing the tile again asks.
+- Applying an import at `y` runs on the UI thread (see
+  [performance](performance.md#known-gaps)); planning does not.
 
 See the [crate guide](../../crates/geode-classifications/README.md) for the
 module map.
@@ -1699,10 +1808,11 @@ in the theme's bearish color and a positive one bullish, a named color from
 `colors.toml` tints the column and its header; a stale cell stays muted and a
 failed one danger whatever the column's color. Measures default to `sign`;
 a column says `color = "none"` to opt out.
-A dimension value that `value_colors` maps paints in that value's named
-color: a text dimension's cell showing an own value (`underlying_ref` on a
-line or leg, and a package or group row's agreed value), and a group row's
-label when the sheet is grouped by that dimension. Label and cell both match
+A dimension value that `value_colors` maps paints in that value's color (a
+named color, or an inline hue or token): a text dimension's cell showing an
+own value (`underlying_ref` on a line or leg, and a package or group row's
+agreed value), and a group row's label when the sheet is grouped by that
+dimension. Label and cell both match
 the raw value grouping and scope read, not the painted spelling: an `expiry`
 mapping names `2026-12-18`, which paints `Z26`, and a package or group cell
 matches only the value every leg beneath it shares. Stale, failed,
@@ -1917,7 +2027,8 @@ anywhere else it clears any selection, closes an open editor or entry bar,
 and moves the cursor to the clicked row, keeping its column. A
 right-click inside the open editor's own cell is the editor's and opens no
 row menu; blank space below the lines opens nothing. The menu's
-[`Color…`](shell.md#color) row is for `underlying_ref` on line, leg and
+[`Color…`](shell.md#color) row (named colors, presets, a custom hue, or a
+new named color) is for `underlying_ref` on line, leg and
 package rows (a package's when its legs share one); a grouping row's context
 is empty, so it offers none.
 

@@ -10,6 +10,7 @@
 //! render: the header's text, the strip's rows, the footer's notice.
 
 mod data;
+mod menu;
 mod picker;
 mod pointer;
 
@@ -43,7 +44,7 @@ use gpui_component::{ActiveTheme as _, Theme, h_flex, v_flex};
 
 use crate::commands::{self, Command, Diff};
 use crate::content::ACTIONS;
-use crate::core::build::{Plan, with_split};
+use crate::core::build::{Plan, restyled};
 use crate::core::docs::{CHAIN, CVI};
 use crate::core::model::{Kind, Loaded, Pair, State, StripRow, toggle_pair};
 use crate::core::session;
@@ -131,8 +132,13 @@ pub struct VolsliceTile {
     palette: HuePalette,
     /// The theme colors `palette` was derived from.
     palette_key: [Hsla; 7],
-    /// Data-side notices: restore, refusals, missing documents, failures.
+    /// Data-side notices: restore, refused reads, missing documents,
+    /// failures. Cleared by the next install.
     notices: Vec<String>,
+    /// The last verb's refusal (`u` while following, a fix with nothing to
+    /// freeze, a disabled menu row): one slot, cleared by the next verb
+    /// that acts on the tile, so a refusal never outlives the next try.
+    refusal: Option<String>,
     /// The painted model's own notices (failed jobs), or a vol refusal.
     model_notices: Vec<String>,
     /// "Today" for tests, whose fixtures are dated: the strip and the chain
@@ -164,6 +170,7 @@ struct HeaderKey {
     mark: Option<DraftMark>,
     hidden: BTreeSet<Kind>,
     diffs: Vec<Pair>,
+    diff_ylim: Option<(f64, f64)>,
 }
 
 /// What the strip's rows were built from: the rows, the active set and
@@ -171,15 +178,18 @@ struct HeaderKey {
 type StripKey = (Vec<StripRow>, Option<BTreeSet<NaiveDate>>, [Hsla; 7]);
 
 /// Prepared paint input, each part with the inputs it was built from.
-#[derive(Default)]
 struct Chrome {
     header: Option<HeaderModel>,
     header_key: Option<HeaderKey>,
     strip: Vec<StripPaint>,
     strip_key: Option<StripKey>,
     notice: Option<geode_tile::notice::Notice>,
-    notice_key: Option<(Vec<String>, Vec<String>)>,
+    notice_key: Option<(Option<String>, Vec<String>, Vec<String>)>,
     hints: Vec<FooterHint>,
+    /// The action menu's element names and the `\u{22ef}` button's
+    /// selector, formatted once per tile.
+    menu_ids: geode_tile::menu::MenuIds,
+    menu_selector: SharedString,
     /// How many parts were rebuilt, for the test that paint formats nothing.
     #[cfg(test)]
     builds: usize,
@@ -237,6 +247,7 @@ impl VolsliceTile {
         // never per frame.
         cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
             this.chrome.hints = header::footer_hints(cx);
+            this.rehint_menu(cx);
             cx.notify();
         })
         .detach();
@@ -260,8 +271,20 @@ impl VolsliceTile {
         let mut health = HealthWatch::new(diagnostics.clone(), id);
         health.reask(cx, |d| d.health_for_datasets(&[CVI, CHAIN]));
         let chrome = Chrome {
+            header: None,
+            header_key: None,
+            strip: Vec::new(),
+            strip_key: None,
+            notice: None,
+            notice_key: None,
             hints: header::footer_hints(cx),
-            ..Chrome::default()
+            menu_ids: geode_tile::menu::MenuIds::new(
+                format!("volslice-menu-{}", id.0),
+                format!("volslice-menu-row-{}", id.0),
+            ),
+            menu_selector: format!("volslice-menu-button-{}", id.0).into(),
+            #[cfg(test)]
+            builds: 0,
         };
         let mut tile = VolsliceTile {
             id,
@@ -296,6 +319,7 @@ impl VolsliceTile {
             palette: palette_of(&key),
             palette_key: key,
             notices,
+            refusal: None,
             model_notices: Vec::new(),
             focused: false,
             chart_bounds: ChartBounds::default(),
@@ -315,9 +339,14 @@ impl VolsliceTile {
     ///
     /// Runs from the tile's self-observer after every notify, and directly
     /// from each door the shell calls inside its draw (`set_visible`),
-    /// where the notify is dropped and the observer never runs. The inputs
-    /// are compared in place, so a notify that changed nothing (a wheel, a
-    /// drag) allocates nothing.
+    /// where the notify is dropped and the observer never runs. The header,
+    /// strip and notice compare their inputs in place, so a notify that
+    /// changed none of them (a wheel, a drag) allocates nothing there. The
+    /// open action menu is not gated: while it is up, every notify rebuilds
+    /// its rows (a dozen, one small allocation each) and scans the
+    /// differences axis's values in view for whether `Fix difference
+    /// y-axis` has a domain to freeze, O(visible values). With the menu
+    /// closed it costs nothing.
     pub(crate) fn refresh_chrome(&mut self, cx: &App) {
         let underlying = self.painted_underlying(cx);
         let header_stale = self.chrome.header_key.as_ref().is_none_or(|k| {
@@ -331,6 +360,7 @@ impl VolsliceTile {
                 || k.mark != self.loaded.draft.as_ref().map(|(_, m)| *m)
                 || k.hidden != self.state.hidden
                 || k.diffs != self.state.diffs
+                || k.diff_ylim != self.state.diff_ylim
         });
         if header_stale {
             let key = HeaderKey {
@@ -340,6 +370,7 @@ impl VolsliceTile {
                 mark: self.loaded.draft.as_ref().map(|(_, m)| *m),
                 hidden: self.state.hidden.clone(),
                 diffs: self.state.diffs.clone(),
+                diff_ylim: self.state.diff_ylim,
             };
             self.chrome.header = Some(HeaderModel::prepare(
                 key.underlying.as_deref(),
@@ -375,16 +406,27 @@ impl VolsliceTile {
             .chrome
             .notice_key
             .as_ref()
-            .is_none_or(|(data, model)| *data != self.notices || *model != self.model_notices);
+            .is_none_or(|(refusal, data, model)| {
+                *refusal != self.refusal || *data != self.notices || *model != self.model_notices
+            });
         if notice_stale {
-            self.chrome.notice =
-                header::footer_notice(self.notices.iter().chain(&self.model_notices));
-            self.chrome.notice_key = Some((self.notices.clone(), self.model_notices.clone()));
+            self.chrome.notice = header::footer_notice(
+                self.refusal
+                    .iter()
+                    .chain(&self.notices)
+                    .chain(&self.model_notices),
+            );
+            self.chrome.notice_key = Some((
+                self.refusal.clone(),
+                self.notices.clone(),
+                self.model_notices.clone(),
+            ));
             #[cfg(test)]
             {
                 self.chrome.builds += 1;
             }
         }
+        self.refresh_menu(cx);
     }
 
     /// The underlying the header names: the one whose documents are on
@@ -418,26 +460,29 @@ impl VolsliceTile {
     }
 
     /// The key context's `mode`: `insert` while the picker's field holds
-    /// the keys, `menu` while the fieldless diff chooser is up, `normal`
-    /// otherwise.
+    /// the keys, `menu` while a fieldless list (the diff chooser or the
+    /// action menu) is up, `normal` otherwise.
     fn mode(&self) -> &'static str {
         match self.popup {
             Some(Popup::Picker(_)) => "insert",
-            Some(Popup::Diff(_)) => "menu",
+            Some(Popup::Diff(_) | Popup::Actions(_)) => "menu",
             None => "normal",
         }
     }
 
     /// No `.counts()`: the bare digits are kind toggles, and a counting
     /// context would make the matcher swallow them as a pending count.
-    /// `tilelist` only under the diff chooser: the picker's field must type
+    /// `tilelist` only under a fieldless list: the picker's field must type
     /// `j` and `k`, which the shared list steps would otherwise claim.
+    /// `popup` names the list, so the chooser's keys and the action menu's
+    /// bind apart.
     pub fn key_context(&self) -> KeyContext {
         let ctx = KeyContext::new(crate::KIND).pair("mode", self.mode());
-        if matches!(self.popup, Some(Popup::Diff(_))) {
-            ctx.tilelist()
-        } else {
-            ctx
+        match &self.popup {
+            Some(p @ (Popup::Diff(_) | Popup::Actions(_))) => {
+                ctx.pair("popup", p.kind()).tilelist()
+            }
+            _ => ctx,
         }
     }
 
@@ -461,9 +506,17 @@ impl VolsliceTile {
         };
         #[cfg(test)]
         self.dispatch_log.push(action.clone());
+        self.clear_refusal(cx);
         if !matches!(
             verb,
-            "commit" | "cancel" | "list_down" | "list_up" | "tick" | "clear_ticks"
+            "commit"
+                | "cancel"
+                | "list_down"
+                | "list_up"
+                | "tick"
+                | "clear_ticks"
+                | "menu"
+                | "menu_pick"
         ) {
             self.close_popup(window, cx);
         }
@@ -497,8 +550,7 @@ impl VolsliceTile {
                 // A follower reads its underlying from the group: picking one
                 // here would be overwritten by the next group change.
                 Some(g) => {
-                    self.notice(following_refusal(g));
-                    cx.notify();
+                    self.refuse(following_refusal(g), cx);
                 }
                 None => self.open_picker(window, cx),
             },
@@ -507,6 +559,9 @@ impl VolsliceTile {
             }
             "split_shrink" => self.step_split(-SPLIT_STEP, cx),
             "split_grow" => self.step_split(SPLIT_STEP, cx),
+            "menu" => self.toggle_menu(window, cx),
+            "menu_pick" => self.pick_highlighted(window, cx),
+            "fix_diff_y" => self.fix_diff_y(window, cx),
             "commit" => self.commit_popup(window, cx),
             "tick" => self.tick_popup(cx),
             "clear_ticks" => self.clear_popup_ticks(cx),
@@ -540,6 +595,7 @@ impl VolsliceTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        self.clear_refusal(cx);
         match commands::parse(line)? {
             Command::Underlying(u) => {
                 if let Some(g) = self.frame.read(cx).following() {
@@ -578,6 +634,7 @@ impl VolsliceTile {
                 toggle_pair(&mut self.state.diffs, p);
                 self.resubmit(cx);
             }
+            Command::Ylim(ylim) => self.set_diff_ylim(ylim, cx),
         }
         Ok(())
     }
@@ -660,7 +717,7 @@ impl VolsliceTile {
         }
         self.state.split = split;
         self.version += 1;
-        self.model = with_split(&self.model, split, self.version);
+        self.model = restyled(&self.model, split, self.state.diff_ylim, self.version);
         cx.notify();
     }
 
@@ -697,12 +754,29 @@ impl VolsliceTile {
         }
     }
 
-    /// Every notice in footer order: the data side's, then the model's.
+    /// A verb refused: its reason takes the refusal slot, ahead of every
+    /// other notice in the footer, until the next verb.
+    pub(super) fn refuse(&mut self, text: String, cx: &mut Context<Self>) {
+        self.refusal = Some(text);
+        cx.notify();
+    }
+
+    /// A verb acting on the tile clears the last refusal: whatever it was
+    /// refused for has been tried again or left behind.
+    pub(super) fn clear_refusal(&mut self, cx: &mut Context<Self>) {
+        if self.refusal.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Every notice in footer order: the refusal, the data side's, then
+    /// the model's.
     // Read by the header and footer paint; tests read them now.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn notices(&self) -> Vec<String> {
-        self.notices
+        self.refusal
             .iter()
+            .chain(&self.notices)
             .chain(&self.model_notices)
             .cloned()
             .collect()
@@ -780,9 +854,7 @@ impl VolsliceTile {
         let bounds_cell = self.chart_bounds.clone();
         let divider = self.divider_rect(rem_px);
         let drag = self.drag;
-        let view = self
-            .view
-            .unwrap_or_else(|| View::with_min_span(self.model.full(), 0.0));
+        let view = self.painted_view();
         div()
             .id(ElementId::NamedInteger(
                 SharedString::new_static("volslice-chart-surface"),
@@ -818,6 +890,12 @@ impl VolsliceTile {
                 let tile = tile.clone();
                 move |event: &MouseDownEvent, window, cx| {
                     tile.update(cx, |t, cx| t.chart_pressed(event, window, cx));
+                }
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let tile = tile.clone();
+                move |event: &MouseDownEvent, window, cx| {
+                    tile.update(cx, |t, cx| t.chart_right_pressed(event, window, cx));
                 }
             })
             .when_some(divider, |el, band| {
@@ -885,6 +963,10 @@ impl Render for VolsliceTile {
                 self.health.chip(),
                 Mode::from_key_mode(self.mode()),
                 link_chips(&self.frame, cx),
+                header::MenuButton {
+                    selector: self.chrome.menu_selector.clone(),
+                    open: matches!(self.popup, Some(Popup::Actions(_))),
+                },
             )
         });
         let reads_one = self

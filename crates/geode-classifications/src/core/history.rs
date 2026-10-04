@@ -64,10 +64,27 @@ impl History {
         if entry.is_empty() {
             return None;
         }
+        self.push(config, &next, entry);
+        Some(next)
+    }
+
+    /// Record `next`, made over the current object by a whole plan (an
+    /// import), as one entry: one undo step however many rows it changed.
+    /// Bookkeeping as [`History::apply`]; an empty entry records nothing.
+    pub fn record(&mut self, config: &DerivedDimension, next: DerivedDimension, entry: UndoEntry) {
+        if entry.is_empty() {
+            return;
+        }
+        self.push(config, &next, entry);
+    }
+
+    /// A new edit: its entry goes on the undo stack, redo is cleared (it
+    /// was undone over an object this edit replaces), and `next` is held
+    /// pending behind any edit already in flight.
+    fn push(&mut self, config: &DerivedDimension, next: &DerivedDimension, entry: UndoEntry) {
         self.undo.push(entry);
         self.redo.clear();
-        self.hold(config, &next);
-        Some(next)
+        self.hold(config, next);
     }
 
     /// Revert the last entry over the current object: the next object and
@@ -162,6 +179,7 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geode_core::classification::Change;
     use std::collections::BTreeMap;
 
     fn dim(pairs: &[(&str, &str)]) -> DerivedDimension {
@@ -307,6 +325,61 @@ mod tests {
         assert_eq!(h.unsaved(&["C".to_string()]), 0);
         h.forget();
         assert_eq!(h.unsaved(&skipped), 0);
+    }
+
+    fn change(source: &str, before: Option<&str>, after: Option<&str>) -> Change {
+        Change {
+            source: source.into(),
+            before: before.map(str::to_string),
+            after: after.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_recorded_plan_is_one_undo_step() {
+        let cfg = dim(&[("A", "X")]);
+        let mut h = History::default();
+        let next = dim(&[("A", "Y"), ("B", "Z")]);
+        let entry = UndoEntry {
+            changes: vec![
+                change("A", Some("X"), Some("Y")),
+                change("B", None, Some("Z")),
+            ],
+        };
+        h.record(&cfg, next.clone(), entry);
+        assert_eq!(h.current(&cfg), &next);
+        let (back, skipped) = h.undo(&cfg).unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn recording_an_empty_entry_records_nothing() {
+        let cfg = dim(&[("A", "X")]);
+        let mut h = History::default();
+        h.record(&cfg, cfg.clone(), UndoEntry::default());
+        assert!(h.undo(&cfg).is_none());
+        assert!(h.pending.is_none(), "no pending object either");
+    }
+
+    /// A recorded plan is an edit like any other: it clears redo, and it is
+    /// in flight behind an earlier edit, so the earlier write's reload keeps
+    /// it on screen.
+    #[test]
+    fn a_recorded_plan_clears_redo_and_is_in_flight() {
+        let cfg = dim(&[]);
+        let mut h = History::default();
+        let e1 = h.apply(&cfg, &["A".into()], Some("X")).unwrap();
+        let next = dim(&[("A", "X"), ("B", "Y")]);
+        let entry = || UndoEntry {
+            changes: vec![change("B", None, Some("Y"))],
+        };
+        h.record(&cfg, next.clone(), entry());
+        h.reloaded(&e1);
+        assert_eq!(h.current(&e1), &next, "the plan does not flash off");
+        assert!(h.undo(&e1).is_some());
+        h.record(&e1, next.clone(), entry());
+        assert!(h.redo(&e1).is_none(), "a recorded plan clears redo");
     }
 
     #[test]

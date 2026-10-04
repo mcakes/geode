@@ -60,6 +60,12 @@ pub fn to_table(state: &State) -> Table {
             Value::Array(vec![Value::Float(lo), Value::Float(hi)]),
         );
     }
+    if let Some((lo, hi)) = state.diff_ylim {
+        t.insert(
+            "ylim".into(),
+            Value::Array(vec![Value::Float(lo), Value::Float(hi)]),
+        );
+    }
     t
 }
 
@@ -138,7 +144,9 @@ fn read_split(v: &Value) -> Result<f64, String> {
         .ok_or_else(|| "not a finite number".into())
 }
 
-fn read_view(v: &Value) -> Result<(f64, f64), String> {
+/// A finite, ascending pair of numbers: the saved view, and the
+/// differences axis's fixed `ylim`.
+fn read_range(v: &Value) -> Result<(f64, f64), String> {
     let pair: Option<Vec<f64>> = v.as_array().and_then(|a| a.iter().map(number).collect());
     match pair.as_deref() {
         Some(&[lo, hi]) if lo.is_finite() && hi.is_finite() && lo < hi => Ok((lo, hi)),
@@ -195,7 +203,8 @@ pub fn from_table(table: &Table) -> (State, Vec<String>) {
         }
         state.split = clamped;
     }
-    state.view = read(table, "view", &mut notices, read_view);
+    state.view = read(table, "view", &mut notices, read_range);
+    state.diff_ylim = read(table, "ylim", &mut notices, read_range);
     (state, notices)
 }
 
@@ -223,6 +232,7 @@ mod tests {
             ],
             split: 0.55,
             view: Some((0.85, 1.15)),
+            diff_ylim: Some((-0.02, 0.015)),
         };
         let t = to_table(&st);
         assert_eq!(t.get("version").and_then(|v| v.as_integer()), Some(1));
@@ -247,7 +257,7 @@ mod tests {
     #[test]
     fn unset_values_are_absent_and_restore_unset() {
         let t = to_table(&State::default());
-        for key in ["underlying", "expiries", "diffs", "view"] {
+        for key in ["underlying", "expiries", "diffs", "view", "ylim"] {
             assert!(!t.contains_key(key), "{key} is absent while unset");
         }
         assert_eq!(from_table(&t), (State::default(), Vec::new()));
@@ -284,6 +294,11 @@ mod tests {
             ("view", "view = [nan, 1.1]"),
             ("view", "view = [0.9, inf]"),
             ("view", "view = [1.1, 0.9]"),
+            ("ylim", "ylim = [0.02, -0.02]"),
+            ("ylim", "ylim = [0.01, 0.01]"),
+            ("ylim", "ylim = [nan, 0.02]"),
+            ("ylim", "ylim = [-0.02]"),
+            ("ylim", r#"ylim = "off""#),
             ("density", r#"density = "yes""#),
             ("underlying", "underlying = 7"),
             ("split", "split = nan"),
