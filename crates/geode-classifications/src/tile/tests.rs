@@ -1407,6 +1407,26 @@ fn the_nothing_to_switch_to_refusal_clears_once_there_is(cx: &mut gpui::TestAppC
     assert_eq!(h.switcher(&vcx), None, "nothing shown went away");
 }
 
+/// `g c`'s refusal is set by a key, so it is transient: a click or
+/// `escape` clears it and `g c` again says it again.
+#[gpui::test]
+fn the_switch_refusal_clears_on_a_click_or_escape_and_returns_on_g_c(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_with(cx, config(""), None);
+    h.press(&mut vcx, "g c");
+    assert_eq!(h.notices(&vcx), ["no classifications to switch to"]);
+    click_notice(&h, &mut vcx);
+    assert!(h.notices(&vcx).is_empty(), "a click clears it");
+    h.press(&mut vcx, "g c");
+    assert_eq!(h.notices(&vcx), ["no classifications to switch to"]);
+    h.press(&mut vcx, "escape");
+    assert!(h.notices(&vcx).is_empty(), "escape clears it");
+    h.press(&mut vcx, "g c");
+    assert_eq!(h.notices(&vcx), ["no classifications to switch to"]);
+    assert!(painted(&h, &mut vcx, NOTICE), "said again: shows");
+}
+
 /// The switcher opens on construction and when the shown classification
 /// goes away, not on a reload that finds the tile still showing nothing
 /// after the trader closed it.

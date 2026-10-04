@@ -523,7 +523,8 @@ impl BlotterTile {
             delivered_at: None,
             visible: false,
             error: restored_view_computed.clone().map(Notice::danger),
-            error_transient: false,
+            // The restore's refusal is one-shot, like the `apply` re-raise.
+            error_transient: restored_view_computed.is_some(),
             dismissed: Dismissals::default(),
             restored_view_refusal: restored_view_computed,
             find: None,
@@ -1453,6 +1454,11 @@ impl BlotterTile {
             return false;
         }
         if self.error_transient && self.error.as_ref() == Some(n) {
+            // A restore refusal still pending its re-raise in `apply` is
+            // the same notice: cleared here, it is not raised again.
+            if self.restored_view_refusal.as_deref() == Some(n.text().as_ref()) {
+                self.restored_view_refusal = None;
+            }
             self.set_error(None);
             return true;
         }
@@ -3042,6 +3048,34 @@ mod tests {
             None,
             "a delivery after the trader acted clears it"
         );
+    }
+
+    /// The restore's refusal is one-shot: a click on it before the first
+    /// delivery clears it, and that delivery does not raise it again.
+    #[gpui::test]
+    fn a_cleared_restore_refusal_stays_cleared_through_the_first_delivery(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let restored: toml::Table = "view = \"vanilla\"".parse().unwrap();
+        let (h, mut vcx) = open_with_views(cx, Some(&restored), tree_and_vanilla());
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        assert!(notice_painted(&mut vcx), "fixture: the refusal paints");
+        let at = centre(&mut vcx, "tile-notice-7-0");
+        click_at(&mut vcx, at, 1);
+        vcx.run_until_parked();
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.error_text()),
+            None,
+            "cleared"
+        );
+        let p = next_query(&h.requests);
+        deliver(&h, &mut vcx, p.tag, Ok(snapshot()));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.error_text()),
+            None,
+            "the first delivery does not raise it again"
+        );
+        assert!(!notice_painted(&mut vcx));
     }
 
     /// Two tiles sharing one frame, one `DataHandle`/`Receiver<Request>`

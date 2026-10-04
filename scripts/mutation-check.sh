@@ -38410,6 +38410,27 @@ run_mutation "notice dismissal: a notice element is keyed by itself, not its pos
   geode-tile \
   a_notice_key_is_its_own_not_its_position
 
+run_mutation "notice dismissal: the restore refusal opens as a one-shot" \
+  crates/geode-blotter/src/tile.rs \
+  '            error_transient: restored_view_computed.is_some(),' \
+  '            error_transient: false,' \
+  geode-blotter \
+  a_cleared_restore_refusal_stays_cleared_through_the_first_delivery
+
+run_mutation "notice dismissal: a cleared restore refusal is not raised again" \
+  crates/geode-blotter/src/tile.rs \
+  $'            if self.restored_view_refusal.as_deref() == Some(n.text().as_ref()) {\n                self.restored_view_refusal = None;\n            }' \
+  $'            if self.restored_view_refusal.as_deref() == Some(n.text().as_ref()) {}' \
+  geode-blotter \
+  a_cleared_restore_refusal_stays_cleared_through_the_first_delivery
+
+run_mutation "notice dismissal: g c's refusal is transient" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if self.notices.nothing_to_switch && *n == Notice::danger(NOTHING_TO_SWITCH) {' \
+  '        if false && self.notices.nothing_to_switch && *n == Notice::danger(NOTHING_TO_SWITCH) {' \
+  geode-classifications \
+  the_switch_refusal_clears_on_a_click_or_escape_and_returns_on_g_c
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

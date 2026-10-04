@@ -126,13 +126,27 @@ line, and the blotter the notice line. Diagnostics has none of them.
   warning and danger notice the tile shows. A count typed before `escape`
   changes nothing: each press peels one layer. A click and `escape` do the
   same thing to the same notice, and what that is depends on the notice:
-  - A transient one-shot notice — a refusal or advisory a key set (the
-    pricer's and market-data's transient notice, the timeseries notice
-    line, the vol slice's refusal, a classifications verb's outcome or
-    the restore's dropped keys, the blotter's dropped sort or selection)
-    — is cleared. Whatever it masked shows (the pricer's view fallback or
-    scope refusal, the notices a vol slice refusal led), and repeating the
-    refused key says it again.
+  - A transient notice — what a module's transient slot holds, which the
+    next verb or delivery replaces — is cleared, as escape always cleared
+    it. Whatever it masked shows (the pricer's view fallback or scope
+    refusal, the notices a vol slice refusal led), and repeating the key
+    that set it says it again. Anything a key sets is transient. Each
+    module's transient set:
+    - the pricer's `notice`: a key's refusal or advisory (a dropped sort,
+      deleted rows, a refused selection) and a load's advisory (`sheet
+      'x' was not found; opened empty`, a sheet not removed);
+    - market-data's `notice`: a verb's refusal or advisory, a document
+      query failure, an unbuildable document, and the delivery-policy
+      notices (a republish that moved the edits onto it, an upload
+      cancelled by a new document);
+    - the timeseries notice line: a verb's refusal or advisory, a series
+      request refusal and a series query failure;
+    - the vol slice's refusal, which leads the footer;
+    - classifications: a verb's outcome, `g c`'s `no classifications to
+      switch to`, and the keys the session restore dropped;
+    - the blotter: a dropped sort or selection and the restored view's
+      refusal (cleared before the fallback view's first delivery, it is
+      not raised again).
   - A standing notice — one the tile would report again: an error, a
     standing refusal, a derived or model notice, the upload error, the save
     notice — is hidden, not cleared: the tile keeps reporting it and nothing

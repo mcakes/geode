@@ -229,8 +229,12 @@ returns the keyboard to the tile.
 Normal-mode `escape` (`marketdata::escape`) peels one layer per press: a
 popup a palette dispatch left open, then a live selection, then a find, and
 only when none of those answered it the header's notices, each as a click
-on it would (`dismiss_notice`): the transient notice (a verb's refusal or
-advisory) is cleared, so the verb repeated says it again; the upload error
+on it would (`dismiss_notice`): the transient `notice` is cleared, so the
+key repeated says it again. That slot holds a verb's refusal or advisory,
+a document query failure, an unbuildable document and the delivery-policy
+notices (a republish that moved the edits, an upload cancelled by a new
+document), all of which escape has
+always cleared and the next verb or delivery replaces. The upload error
 is standing and is hidden, not cleared: it stays hidden while the header
 keeps reporting it and shows again once it stops and returns
 (`geode_tile::notice::Dismissals`, pruned in `rebuild_chrome`). The upload

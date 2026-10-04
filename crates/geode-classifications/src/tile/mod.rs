@@ -792,16 +792,22 @@ impl ClassificationsTile {
 
     /// One header notice dismissed, as a click on it does and `escape`
     /// does to each notice showing. A transient one-shot notice — a verb's
-    /// outcome (a refusal, a fork, a skipped row) or what the session
-    /// restore dropped — is cleared, so the verb repeated says it again.
-    /// A standing one (nothing to switch to, the values notice) is hidden
-    /// through `dismissed` until it changes. Whether anything did.
+    /// outcome (a refusal, a fork, a skipped row), `g c`'s nothing to
+    /// switch to, or what the session restore dropped — is cleared, so the
+    /// key repeated says it again. The standing one (the values notice) is
+    /// hidden through `dismissed` until it changes. Whether anything did.
     pub(crate) fn dismiss_notice(&mut self, n: &Notice) -> bool {
         if !n.dismissable() {
             return false;
         }
         if let Some(i) = self.notices.outcome.iter().position(|o| o == n) {
             self.notices.outcome.remove(i);
+            self.rebuild_chrome();
+            return true;
+        }
+        // `g c`'s refusal: a key set it, so it is transient too.
+        if self.notices.nothing_to_switch && *n == Notice::danger(NOTHING_TO_SWITCH) {
+            self.notices.nothing_to_switch = false;
             self.rebuild_chrome();
             return true;
         }
