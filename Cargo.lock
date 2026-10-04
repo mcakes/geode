@@ -2505,6 +2505,7 @@ dependencies = [
  "async-channel",
  "chrono",
  "geode-blotter",
+ "geode-classifications",
  "geode-core",
  "geode-data",
  "geode-demo-data",
@@ -2562,6 +2563,20 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "proptest",
+]
+
+[[package]]
+name = "geode-classifications"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "geode-core",
+ "geode-data",
+ "geode-shell",
+ "geode-tile",
+ "gpui-component",
+ "gpui-pre",
+ "toml 1.1.4+spec-1.1.0",
 ]
 
 [[package]]

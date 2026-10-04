@@ -37,6 +37,7 @@ use gpui::Context;
 use super::{Destination, Domain, Stage};
 use crate::config_write;
 use crate::shell::ShellView;
+use crate::tiling::TileId;
 
 /// Quiet period after the latest field edit before merging, applying, and writing the
 /// pending batch. The draft itself already shows each change. Restarting this timer
@@ -94,7 +95,16 @@ pub(crate) struct PendingConfigWrite {
     /// failed write reverts memory for the whole batch, so exactly these drafts are
     /// rebuilt; any other open dialog's draft had nothing in it and is left alone.
     origins: Vec<Domain>,
+    /// The tiles whose door edits joined this batch, each once. A tile shows
+    /// its edit optimistically, so a failed write or a merge the reload
+    /// rejected has to reach it as a refusal, or its labels look saved.
+    tiles: Vec<TileId>,
 }
+
+/// The refusal a door tile hears when its batch reached disk but the merge kept
+/// the last good configuration: its optimistic edit is not what is in force.
+pub(crate) const DOOR_REJECTED_NOTICE: &str =
+    "saved to disk · rejected by the merge — showing the configuration in force";
 
 /// Render and parse the exact object text used for persistence, so memory and disk
 /// receive the same value.
@@ -433,23 +443,103 @@ pub(crate) fn queue_object(
 /// one reload. Refuses, with nothing queued, when there is no writable user
 /// directory. Later edits to the same object overwrite earlier ones: each
 /// carries the whole object.
+///
+/// Setting an object a lower layer defines forks it as a dialog edit does:
+/// the inherited value is recorded in the overrides sidecar in the same
+/// batch, so drift and revert see it. Returns each fork's announcement with
+/// the tile that asked; a fork from an edit with no origin is recorded but
+/// announced to no one.
 pub(crate) fn queue_edits(
     shell: &mut ShellView,
     edits: Vec<crate::frame::ConfigEdit>,
     cx: &mut Context<ShellView>,
-) -> Result<(), String> {
+) -> Result<Vec<(TileId, String)>, String> {
     if edits.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let Some(user_dir) = shell.user_dir.clone() else {
         return Err("no writable user config directory — nothing was changed".to_string());
     };
-    let edits = edits
-        .into_iter()
-        .map(|e| ((e.doc, e.object), e.value))
-        .collect::<BTreeMap<_, _>>();
-    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, None, cx);
-    Ok(())
+    // Pending-aware: an object forked a moment ago is already the user's,
+    // and forking it again would overwrite its recorded baseline.
+    let mut config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+    let mut batch: BTreeMap<(&'static str, String), ObjectEdit> = BTreeMap::new();
+    let mut notices = Vec::new();
+    let origins: Vec<TileId> = edits.iter().filter_map(|e| e.origin).collect();
+    for e in edits {
+        if let Some(value) = &e.value
+            && let Some(layer) = fork_record(&config, e.doc, &e.object, &mut batch)
+        {
+            if let Some(tile) = e.origin {
+                notices.push((tile, door_fork_notice(&e.object, layer)));
+            }
+            // A later edit to the same object in this drain must find it
+            // the user's, or it would fork and announce a second time.
+            config = Config::from_docs(docs_with_object(
+                config.all_docs(),
+                &user_dir,
+                e.doc,
+                &e.object,
+                Some(value.clone()),
+            ));
+        }
+        batch.insert((e.doc, e.object), e.value);
+    }
+    queue_batch(shell, batch, user_dir, WRITE_DEBOUNCE, None, cx);
+    if let Some(pending) = shell.pending_config_write.as_mut() {
+        for tile in origins {
+            if !pending.tiles.contains(&tile) {
+                pending.tiles.push(tile);
+            }
+        }
+    }
+    Ok(notices)
+}
+
+/// Record a user-layer write of `name` in `doc` as a fork when `config`'s
+/// winning copy comes from a lower layer: prune stale sidecar keys into
+/// `edits`, insert the shadowed copy's sidecar entry, and return the
+/// shadowed copy's layer. `None`, touching nothing, when the user layer already wins
+/// or no layer defines the object — there is nothing to shadow.
+///
+/// The fresh entry is inserted after the prune so it wins over a stale twin
+/// of its own key: a fork's key can look stale before its definition reaches
+/// the user layer.
+fn fork_record(
+    config: &Config,
+    doc: &'static str,
+    name: &str,
+    edits: &mut BTreeMap<(&'static str, String), ObjectEdit>,
+) -> Option<Layer> {
+    // The last layer defining the object wins, the merge's own rule.
+    let winner = config
+        .layered_docs(doc)
+        .iter()
+        .filter(|d| d.table.contains_key(name))
+        .map(|d| d.layer)
+        .next_back()?;
+    if winner == Layer::User {
+        return None;
+    }
+    let (layer, value) = super::shadow_of(config, doc, name)?;
+    for stale in super::stale_override_keys(config) {
+        edits.insert((super::OVERRIDES_DOC, stale), None);
+    }
+    edits.insert(
+        (super::OVERRIDES_DOC, super::override_key(doc, name)),
+        Some(super::override_entry(layer, name, &value)),
+    );
+    Some(layer)
+}
+
+/// A config-door fork's announcement to the tile that asked. The dialogs'
+/// wording names `r`, which only a dialog binds; a tile restores the lower
+/// copy with its own Revert… verb, so the door names that instead.
+fn door_fork_notice(name: &str, layer: Layer) -> String {
+    format!(
+        "copied '{name}' to your config — Revert… restores the {} copy",
+        layer.name()
+    )
 }
 
 /// Queue `chain` as slot `slot`'s user-layer definition, with zero delay,
@@ -472,25 +562,9 @@ pub(super) fn queue_slot_chain(
     // Pending-aware: a slot forked a moment ago is already the user's, and
     // forking it again would overwrite its recorded baseline.
     let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
-    let inherited = Domain::Groupings
-        .objects(&config)
-        .into_iter()
-        .find(|row| row.name == name)
-        .is_some_and(|row| row.layer.is_some_and(|layer| layer != Layer::User));
     let mut edits: BTreeMap<(&'static str, String), ObjectEdit> = BTreeMap::new();
-    let mut notice = None;
-    if inherited && let Some((layer, value)) = super::shadow_of(&config, doc, &name) {
-        // Stale sidecar keys are pruned before the fresh entry is inserted,
-        // so the fresh entry wins over a stale twin of the same key.
-        for stale in super::stale_override_keys(&config) {
-            edits.insert((super::OVERRIDES_DOC, stale), None);
-        }
-        edits.insert(
-            (super::OVERRIDES_DOC, super::override_key(doc, &name)),
-            Some(super::override_entry(layer, &name, &value)),
-        );
-        notice = Some(fork_notice_of(&config, doc, &name));
-    }
+    let notice =
+        fork_record(&config, doc, &name, &mut edits).map(|_| fork_notice_of(&config, doc, &name));
     edits.insert(
         (doc, name),
         Some(toml::Value::Array(
@@ -584,6 +658,7 @@ fn schedule_flush(
             edits: BTreeMap::new(),
             revert,
             origins: Vec::new(),
+            tiles: Vec::new(),
         });
     pending.seq = seq;
     pending.edits.extend(edits);
@@ -664,12 +739,20 @@ pub(crate) fn finish_flush(
     match outcome {
         Err(message) => revert_failed_write(shell, message, cx),
         Ok(()) => {
-            shell.pending_config_write = None;
+            let tiles = shell
+                .pending_config_write
+                .take()
+                .map(|pending| pending.tiles)
+                .unwrap_or_default();
             // The write succeeded; separately report whether memory accepted its merge.
             match rejected {
                 Some(n) => {
                     shell.config_write_error =
                         Some(format!("{REJECTED_STATUS}: {n} error(s) — keeping last good").into());
+                    // The reload kept the last good config, so no tile hears a
+                    // reload carrying its edit; without this its optimistic
+                    // labels would stay painted as if they were in force.
+                    refuse_door_tiles(shell, tiles, DOOR_REJECTED_NOTICE.to_string(), cx);
                     cx.notify();
                 }
                 None => {
@@ -738,7 +821,11 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
     let restored = Config::from_docs(pending.revert);
     shell.apply_reload(restored, cx);
     // Keep the failure visible even when the dialog that queued the write is closed.
-    shell.config_write_error = Some(format!("config not saved — reverted: {message}").into());
+    let failure = format!("config not saved — reverted: {message}");
+    shell.config_write_error = Some(failure.clone().into());
+    // A door tile shows its edit before the write; the revert has to reach it
+    // too, or it keeps painting the value the file refused.
+    refuse_door_tiles(shell, pending.tiles.clone(), failure, cx);
     // Only the drafts that contributed to the batch show it reverted. A covered
     // dialog of another domain keeps its unsaved draft: nothing of it was in the
     // batch, and rebuilding it would throw away the trader's place.
@@ -752,6 +839,31 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
         rebuild_after_revert(state, config, &message);
     }
     cx.notify();
+}
+
+/// Post `TileNotice::Refused(message)` to each door tile of a finished batch.
+///
+/// Deferred, as the drain posts: a completion can run inside a frame
+/// notification, and the tile reads its notices on the frame notification sent
+/// after posting. Posting moves no frame version, so it opens no flip.
+fn refuse_door_tiles(
+    shell: &ShellView,
+    tiles: Vec<TileId>,
+    message: String,
+    cx: &mut Context<ShellView>,
+) {
+    if tiles.is_empty() {
+        return;
+    }
+    let frame = shell.frame().clone();
+    cx.defer(move |cx| {
+        frame.update(cx, |f, cx| {
+            for tile in tiles {
+                f.post_tile_notice(tile, crate::frame::TileNotice::Refused(message.clone()));
+            }
+            cx.notify();
+        })
+    });
 }
 
 /// Rebuild one dialog's draft from the reverted config and say why. The draft is the

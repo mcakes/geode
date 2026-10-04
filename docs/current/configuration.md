@@ -557,15 +557,17 @@ separate outcomes. See [configuration dialogs](configuration-dialogs.md) for
 inherited objects, presentation routing, reload interaction, and write failures.
 
 Modules write configuration only through the shell's config door
-(`Frame::queue_config_edits`, see [the config door](shell.md#the-config-door)),
-which joins the object dialogs' pending batch. `dimensions` has a runtime
-writer this way: a classification edited in a tile is written as its whole
-`dimensions.toml` object, never as one changed key, because the document
-replaces whole named objects across layers. Editing a desk or builtin
-classification therefore forks it: the user layer receives the complete
-object, which shadows the lower layer's from then on, including later desk
-changes to it. Removing the object removes only the user layer's copy, which
-reveals the lower layer's again; it cannot delete a desk classification.
+(`FrameRef::queue_config_edits`, see [the config
+door](shell.md#the-config-door)), which joins the object dialogs' pending
+batch. `dimensions` has a runtime writer this way, the Classifications tile
+(see [features](features.md#classifications)): a classification edited in a
+tile is written as its whole `dimensions.toml` object, never as one changed
+key, because the document replaces whole named objects across layers. Editing
+a desk or builtin classification therefore forks it: the user layer receives
+the complete object, which shadows the lower layer's from then on, including
+later desk changes to it. Removing the object removes only the user layer's
+copy, which reveals the lower layer's again; it cannot delete a desk
+classification.
 
 An inherited object can be edited by creating a user override. Deleting that
 override reveals the lower-layer value again. `overrides.toml` records accepted

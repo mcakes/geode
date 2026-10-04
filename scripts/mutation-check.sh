@@ -5774,7 +5774,7 @@ run_mutation "objectdialog: an edit carries the previous config's diagnostics fo
 # dialog-only notice cannot reach the user on that path.
 run_mutation "objectdialog: a failed write reports only through the dialog notice" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    shell.config_write_error = Some(format!("config not saved — reverted: {message}").into());' \
+  '    shell.config_write_error = Some(failure.clone().into());' \
   '' \
   geode-shell \
   a_write_that_fails_after_the_dialog_closed_still_reports_itself
@@ -18118,8 +18118,8 @@ run_mutation "grouping dialog: saving an equal chain writes nothing" \
 # A fork records the inherited value, so drift and revert see it.
 run_mutation "grouping dialog: a save that forks records its baseline" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    if inherited && let Some((layer, value)) = super::shadow_of(&config, doc, &name) {' \
-  '    if false && let Some((layer, value)) = super::shadow_of(&config, doc, &name) {' \
+  '        fork_record(&config, doc, &name, &mut edits).map(|_| fork_notice_of(&config, doc, &name));' \
+  '        None::<Layer>.map(|_| fork_notice_of(&config, doc, &name));' \
   geode-shell \
   saving_over_an_inherited_slot_forks_it_without_asking
 
@@ -36156,10 +36156,55 @@ run_mutation "distinct: shell keys stay with the shell" \
 # A module edit must reach the batch.
 run_mutation "config door: drained edits are queued" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, None, cx);' \
-  '    let _ = (edits, user_dir);' \
+  '    queue_batch(shell, batch, user_dir, WRITE_DEBOUNCE, None, cx);' \
+  '    let _ = (batch, user_dir);' \
   geode-shell \
   queued_config_edits_reach_the_user_layer_through_the_batch
+
+# A tile's edit to an inherited object is a fork: without its sidecar
+# record drift and revert cannot see the shadowed copy.
+run_mutation "config door: an inherited object is fork-recorded" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '            && let Some(layer) = fork_record(&config, e.doc, &e.object, &mut batch)' \
+  '            && let Some(layer) = None::<Layer>' \
+  geode-shell \
+  a_door_edit_to_a_desk_object_forks_records_and_tells_its_tile
+
+# A tile has no `r`: the door names the tile's Revert… verb and the
+# layer the copy shadows, not the dialogs' wording.
+run_mutation "config door: a fork names the tile's revert verb" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '                notices.push((tile, door_fork_notice(&e.object, layer)));' \
+  '                notices.push((tile, fork_notice_of(&config, e.doc, &e.object)));' \
+  geode-shell \
+  a_door_edit_to_a_desk_object_forks_records_and_tells_its_tile
+
+# A shell-keyed answer delivered as a tile's reaches no tile and leaves
+# the picker waiting.
+run_mutation "distinct: the bridge hands shell keys to the shell" \
+  crates/geode-app/src/bridge.rs \
+  '                        if is_shell_key(outcome.key) {' \
+  '                        if false {' \
+  geode-app \
+  a_tile_keyed_distinct_reaches_a_classifications_tile_and_a_picker_one_does_not
+
+# A refused drain must tell the tile, or its optimistic edit stays shown.
+run_mutation "config door: the origin tile hears the refusal" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                            .map(|t| (t, crate::frame::TileNotice::Refused(e.clone())))' \
+  '                            .filter(|_| false)
+                            .map(|t| (t, crate::frame::TileNotice::Refused(e.clone())))' \
+  geode-shell \
+  a_refused_door_edit_tells_its_tile
+
+# A closed tile never takes its notices; kept, they pile up and reach a
+# later occupant under the same id.
+run_mutation "config door: a closed tile's notices are dropped" \
+  crates/geode-shell/src/frame.rs \
+  '        self.tile_notices.retain(|(t, _)| *t != tile);' \
+  '        let _ = &self.tile_notices;' \
+  geode-shell \
+  closing_an_unlinked_tile_drops_its_pending_notices
 
 # The read limit is checked before reading.
 run_mutation "files: oversized reads are refused" \
@@ -36193,6 +36238,237 @@ run_mutation "events: text-file outcomes key by tile and tag" \
   '        DataEvent::TextFile(o) => Key::TextFile(o.key, 0),' \
   geode-app \
   two_text_file_outcomes_for_the_same_tile_are_both_delivered
+
+# Classifications: the label history, the editor and the tile's notices.
+
+# Two edits before a reload must compose: the second over the pending
+# object, or it reverts the first.
+run_mutation "classifications: a verb works over the pending object" \
+  crates/geode-classifications/src/core/history.rs \
+  '        self.pending.as_ref().unwrap_or(config)' \
+  '        config' \
+  geode-classifications \
+  two_quick_edits_compose_and_undo_reverts_only_the_second
+
+# The label loop: the cursor keeps its shown index after a verb.
+run_mutation "classifications: a relabel keeps the cursor index (grid)" \
+  crates/geode-classifications/src/core/grid.rs \
+  '            self.place(at.min(self.visible.len() - 1));' \
+  '            let _ = at;' \
+  geode-classifications \
+  a_relabel_rebuild_keeps_the_cursor_index_even_when_put
+
+run_mutation "classifications: a relabel keeps the cursor index (tile)" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if relabelled {' \
+  '        if false {' \
+  geode-classifications \
+  labelling_the_top_unclassified_row_leaves_the_cursor_on_the_next
+
+# A selection whose cursor row vanished would re-span to rows nobody chose.
+run_mutation "classifications: losing the cursor row ends a selection" \
+  crates/geode-classifications/src/core/grid.rs \
+  '            && (lost(self.anchor.as_deref()) || lost(self.cursor_source.as_deref()))' \
+  '            && lost(self.anchor.as_deref())' \
+  geode-classifications \
+  a_rebuild_removing_the_cursor_row_ends_a_selection
+
+run_mutation "classifications: the session saves a filter-hidden cursor row" \
+  crates/geode-classifications/src/core/grid.rs \
+  '            .or(self.hidden.as_deref())' \
+  '            .or(None)' \
+  geode-classifications \
+  the_saved_cursor_prefers_seed_then_hidden_then_cursor
+
+# `tech` typed over `Tech` must not make a second label.
+run_mutation "classifications: a case variant takes the existing label" \
+  crates/geode-classifications/src/tile/editor.rs \
+  '            .is_some_and(|h| h.to_lowercase() == typed.to_lowercase());' \
+  '            .is_some_and(|h| h == typed);' \
+  geode-classifications \
+  typing_a_case_variant_of_an_existing_label
+
+run_mutation "classifications: a moved highlight is what enter takes" \
+  crates/geode-classifications/src/tile/editor.rs \
+  '    let take = moved' \
+  '    let take = false' \
+  geode-classifications \
+  a_moved_highlight_or_a_row_press_picks_the_label
+
+# A mixed selection prefilled with one label would write it across all.
+run_mutation "classifications: only a unanimous label prefills" \
+  crates/geode-classifications/src/tile/editor.rs \
+  '    labels.all(|l| l == Some(first)).then_some(first)' \
+  '    Some(first)' \
+  geode-classifications \
+  editing_a_selection_prefills_only_a_unanimous_label
+
+# The config door writes even when the reload then rejects the object.
+run_mutation "classifications: an invalid source is never written" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            validate_source(&config_dim.from, &config.schema, &config.dims)' \
+  '            Ok::<(), String>(())' \
+  geode-classifications \
+  an_invalid_source_classification_is_never_written
+
+run_mutation "classifications: the tile takes its shell notices" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            .update(cx, |f, _| f.take_tile_notices(id));' \
+  '            .update(cx, |_, _| Vec::<TileNotice>::new());' \
+  geode-classifications \
+  a_fork_notice_from_the_shell_shows_once
+
+run_mutation "classifications: a refusal drops the optimistic edit" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            self.history.refused();' \
+  '            let _ = &self.history;' \
+  geode-classifications \
+  a_refusal_notice_drops_the_optimistic_edit
+
+run_mutation "classifications: the switcher opens only on first or gone" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            _ if !shown && (first || gone) => {' \
+  '            _ if !shown => {' \
+  geode-classifications \
+  a_closed_switcher_stays_closed_across_an_unrelated_reload
+
+run_mutation "classifications: the switcher refusal clears when it no longer holds" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if self.notices.nothing_to_switch && !self.switch_rows().is_empty() {' \
+  '        if false {' \
+  geode-classifications \
+  the_nothing_to_switch_to_refusal_clears_once_there_is
+
+run_mutation "classifications: a restore notice clears on the first action" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            self.notices.restore.clear();' \
+  '            let _ = &self.notices.restore;' \
+  geode-classifications \
+  a_restore_notice_clears_on_the_first_action
+
+# The grid: a put cursor follows its row; a blank label is unclassified.
+run_mutation "classifications: the cursor follows its source across a rebuild" \
+  crates/geode-classifications/src/core/grid.rs \
+  '            Some(at) => self.cursor = Some(at),' \
+  '            Some(_) => self.set_cursor(self.cursor.map_or(0, |c| c.min(len - 1))),' \
+  geode-classifications \
+  the_cursor_follows_its_source_across_a_row_rebuild
+
+run_mutation "classifications: a blank label counts as unclassified" \
+  crates/geode-classifications/src/core/grid.rs \
+  '        self.unclassified = rows.iter().filter(|r| label_text(r).is_none()).count();' \
+  '        self.unclassified = rows.iter().filter(|r| r.label.is_none()).count();' \
+  geode-classifications \
+  counts_ignore_the_filter_and_treat_a_blank_label_as_unclassified
+
+# Undo pops the last entry; taking the oldest reverts the wrong edit.
+run_mutation "classifications: undo reverts only the last edit" \
+  crates/geode-classifications/src/core/history.rs \
+  '        let entry = self.undo.pop()?;' \
+  '        let entry = self.undo.drain(..).next()?;' \
+  geode-classifications \
+  two_quick_edits_compose_and_undo_reverts_only_the_second
+
+# A reload carrying an earlier own write is a step behind: treated as
+# foreign, it drops the later edits and the next edit overwrites them.
+run_mutation "classifications: a reload of an earlier own write keeps later edits" \
+  crates/geode-classifications/src/core/history.rs \
+  '        } else if let Some(at) = self.in_flight.iter().position(|o| o == config) {' \
+  '        } else if let Some(at) = None::<usize> {' \
+  geode-classifications \
+  a_reload_of_the_first_write_keeps_a_later_edit_in_flight
+
+run_mutation "classifications: a stale distinct tag is ignored" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if outcome.tag != self.tag || !current {' \
+  '        if !current {' \
+  geode-classifications \
+  a_stale_tag_is_ignored
+
+# Only a change is a relabel; a no-op verb must not end the selection.
+run_mutation "classifications: a no-op verb keeps the selection" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if changed {
+            self.rebuild_rows(true, cx);' \
+  '        if true {
+            self.rebuild_rows(true, cx);' \
+  geode-classifications \
+  a_verb_that_changes_nothing_keeps_the_selection
+
+# A desk object cannot be removed from the user layer: a delete would
+# queue a removal that removes nothing and wait for it forever.
+run_mutation "classifications: delete refuses a desk object" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            Some(Layer::Desk) => return Err(lower(Layer::Desk, "defined in desk config")),' \
+  '            Some(Layer::Desk) => {}' \
+  geode-classifications \
+  delete_refuses_a_desk_object
+
+# The new object and the old one's removal travel together: one batch,
+# one reload, never a moment with both or neither.
+run_mutation "classifications: rename writes the new object and the old one's removal together" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            vec![set_edit(&renamed), remove_edit(&from)],' \
+  '            vec![set_edit(&renamed)],' \
+  geode-classifications \
+  rename_confirms_with_the_reference_count_and_writes_one_batch
+
+run_mutation "classifications: a refused rename shows the old name" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                Some(name) => self.show(&name, cx),' \
+  '                Some(name) => drop(name),' \
+  geode-classifications \
+  a_refused_rename_shows_the_old_name_again
+
+# A reload carrying neither the pending object, the base nor an in-flight
+# one is another surface's write: keeping the copy would paint labels that
+# overwrite it on the next edit.
+run_mutation "classifications: a foreign reload drops the pending copy" \
+  crates/geode-classifications/src/core/history.rs \
+  '            self.base = Some(config.clone());
+        } else {
+            self.drop_pending();
+        }' \
+  '            self.base = Some(config.clone());
+        } else {
+        }' \
+  geode-classifications \
+  a_reload_changing_this_classification_otherwise_drops_the_pending_edit
+
+# The editor paints on the cursor's row and writes its targets: a resting
+# cursor keeping its index across a reorder would paint one row and write
+# another.
+run_mutation "classifications: the open editor pins its row" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        self.grid.put_cursor();' \
+  '        let _ = &self.grid;' \
+  geode-classifications \
+  a_reload_reordering_rows_keeps_the_open_editor_on_its_row
+
+# A verb in a revert's debounce window would queue the user copy over the
+# removal in the shell's batch, undoing the revert.
+run_mutation "classifications: a revert on its way refuses label verbs" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                self.reverting = Some(name);' \
+  '                drop(name);' \
+  geode-classifications \
+  a_verb_while_a_revert_is_on_its_way_does_not_undo_it
+
+# A door tile shows its edit before the write: a failed write must reach it,
+# or its labels look saved.
+run_mutation "config door: a failed write refuses its origin tiles" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    refuse_door_tiles(shell, pending.tiles.clone(), failure, cx);' \
+  '    drop(failure);' \
+  geode-shell \
+  a_failed_door_write_tells_its_tile_once
+
+run_mutation "config door: a rejected merge refuses its origin tiles" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '                    refuse_door_tiles(shell, tiles, DOOR_REJECTED_NOTICE.to_string(), cx);' \
+  '                    drop(tiles);' \
+  geode-shell \
+  a_rejected_door_merge_tells_its_tile
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

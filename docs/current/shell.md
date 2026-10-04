@@ -1373,22 +1373,51 @@ rename exposes either the old or new complete file to the reload poll.
 
 ### The config door
 
-A module never writes configuration: it queues whole-object edits on the
-frame with `Frame::queue_config_edits` and notifies. Each `ConfigEdit` names a
-document, an object, and the whole new value, or `None` to remove the user
-layer's object. On its frame observation the shell drains the queue into the
-object dialogs' pending batch, with the same 250 ms debounce, user-layer
-promotion and revert on failure, so a burst of edits from a tile becomes one
-write and one reload, and a later edit to the same object replaces an earlier
-one. The write reaches tiles through the reload it causes; queuing moves no
-frame version. With no writable user directory nothing is queued and the
-refusal shows as the status bar's configuration write error.
+A module never writes configuration: it queues whole-object edits through its
+tile's handle with `FrameRef::queue_config_edits`, which stamps the tile as
+each edit's `origin` and notifies the frame, so no caller forgets the notify.
+Each `ConfigEdit` names a document, an object, and the whole new value, or
+`None` to remove the user layer's object. On its frame observation the shell
+drains the queue into the object dialogs' pending batch, with the same 250 ms
+debounce, user-layer promotion and revert on failure, so a burst of edits from
+a tile becomes one write and one reload, and a later edit to the same object
+replaces an earlier one. The write reaches tiles through the reload it causes;
+queuing moves no frame version.
+
+Setting an object whose winning copy comes from the desk or builtin layer
+forks it as an object-dialog edit does: the shadowed copy is recorded in the
+user `overrides.toml` sidecar in the same batch, so drift and the `r` revert
+see it. Whether an object is inherited is read with the pending batch folded
+in, and with earlier edits of the same drain applied, so an object forked a
+moment ago is already the user's and a second edit neither forks again nor
+overwrites the recorded baseline.
+
+The tile that asked hears the outcome through the frame: a fork posts
+`TileNotice::Forked` (`copied '<name>' to your config — Revert… restores the
+<layer> copy`, naming the layer the copy shadows; not the dialogs' wording,
+whose `r` no tile binds), and a refusal posts
+`TileNotice::Refused` once per tile per drain. The shell posts from a deferred
+update and then notifies the frame once; the tile drains its own notices with
+`Frame::take_tile_notices` on that notification. Notices live on the frame,
+not a lane, so a pin or unpin keeps them; closing the tile drops the ones it
+never took, so they neither accumulate nor reach a later occupant under the
+same id. An edit with no origin forks the
+same way but tells no one. With no writable user directory nothing is queued
+and the refusal also shows as the status bar's configuration write error.
 
 The door does not validate. A caller validates the object before queuing it
 (a classification through `geode_core::classification::validate`). An edit
 whose in-memory reload is rejected, keeping the last good configuration, is
 still written to the user file; the status bar then reports
 `saved to disk · rejected by the merge` with the error count.
+
+A tile shows its edit before the write, so the batch remembers each origin
+tile once and tells it when its edit is not what is in force: a failed write,
+which reverts memory to the batch's start, posts `TileNotice::Refused` with
+the status bar's `config not saved — reverted: …`, and a written batch whose
+merge was rejected posts `saved to disk · rejected by the merge — showing the
+configuration in force`. Either goes to every tile whose edits joined the
+batch, deferred and followed by one frame notification, as the drain posts.
 
 Hot reload keeps the last valid configuration when a changed document is
 rejected by the file, modifier, clock, or keymap checks. Later typed readers

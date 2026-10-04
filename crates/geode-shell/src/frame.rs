@@ -271,6 +271,18 @@ pub struct ConfigEdit {
     pub doc: &'static str,
     pub object: String,
     pub value: Option<toml::Value>,
+    /// The tile that asked, told of a fork or refusal; `None` for a surface
+    /// with no tile.
+    pub origin: Option<TileId>,
+}
+
+/// What the shell tells the tile that queued a config edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TileNotice {
+    /// The edit copied an inherited object into the user layer.
+    Forked(String),
+    /// Nothing was written; the text says why.
+    Refused(String),
 }
 
 #[derive(Debug)]
@@ -315,6 +327,10 @@ pub struct Frame {
     /// awaiting the shell's frame observer. A module cannot reach the
     /// shell's config batch, so it queues here instead of writing.
     pending_config_edits: Vec<ConfigEdit>,
+    /// What the shell's drain told each tile about its config edits, in
+    /// arrival order, until that tile takes them. Frame-wide rather than per
+    /// lane: a tile keeps its notices across a pin or unpin.
+    tile_notices: Vec<(TileId, TileNotice)>,
     /// Lazy model cache keyed by versions excluding flip, clock, and local date.
     /// `Rc` makes a hit cheap; interior mutability permits caching through `&self`.
     /// Lane generations are unique across lanes, so one cache serves them all.
@@ -342,6 +358,7 @@ impl Frame {
             pending_persist: None,
             pending_link_chooser: None,
             pending_config_edits: Vec::new(),
+            tile_notices: Vec::new(),
             bar_cache: RefCell::new(None),
             barrier: None,
         }
@@ -494,9 +511,11 @@ impl Frame {
         links.post(tile, emission, generation)
     }
 
-    /// Drop a closed tile's membership and what it posted. `true`, and the
-    /// generation advances, when it was in a group.
+    /// Drop a closed tile's membership, what it posted, and the notices it
+    /// will never take. `true`, and the generation advances, when it was in
+    /// a group; the notices alone change nothing an observer reads.
     pub(crate) fn forget_tile(&mut self, tile: TileId) -> bool {
+        self.tile_notices.retain(|(t, _)| *t != tile);
         let changed = self.links.forget(tile);
         if changed {
             fresh(&mut self.generation);
@@ -738,6 +757,29 @@ impl Frame {
     /// Drain queued config edits for the shell's frame observer.
     pub fn take_pending_config_edits(&mut self) -> Vec<ConfigEdit> {
         std::mem::take(&mut self.pending_config_edits)
+    }
+
+    /// Record a notice for `tile`. Does not notify: the shell posts from a
+    /// deferred update and notifies the frame once after posting.
+    pub(crate) fn post_tile_notice(&mut self, tile: TileId, notice: TileNotice) {
+        self.tile_notices.push((tile, notice));
+    }
+
+    /// The test door for module crates, which cannot reach the shell's drain
+    /// to post a notice for the tile under test.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn post_tile_notice_for_test(&mut self, tile: TileId, notice: TileNotice) {
+        self.post_tile_notice(tile, notice);
+    }
+
+    /// Remove and return `tile`'s notices in the order they were posted.
+    /// A tile reads these when the frame notifies it.
+    pub fn take_tile_notices(&mut self, tile: TileId) -> Vec<TileNotice> {
+        let (mine, rest) = std::mem::take(&mut self.tile_notices)
+            .into_iter()
+            .partition(|(t, _)| *t == tile);
+        self.tile_notices = rest;
+        mine.into_iter().map(|(_, n)| n).collect()
     }
 
     /// Drain the latest pending slot write for the shell's background writer.
@@ -3590,6 +3632,23 @@ mod tests {
         assert_eq!(f.generation(), settled, "nothing dropped, nothing to save");
         assert!(f.forget_tile(emitter));
         assert!(f.generation() > settled);
+    }
+
+    /// A closed tile never takes its notices, so forgetting it drops them:
+    /// otherwise they accumulate, and a later occupant under the same id
+    /// would hear about an edit it never asked for.
+    #[test]
+    fn forgetting_a_tile_drops_its_pending_notices() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let (closed, open) = (TileId(1), TileId(2));
+        f.post_tile_notice(closed, TileNotice::Refused("no".into()));
+        f.post_tile_notice(open, TileNotice::Forked("desk".into()));
+        f.forget_tile(closed);
+        assert!(f.take_tile_notices(closed).is_empty());
+        assert_eq!(
+            f.take_tile_notices(open),
+            [TileNotice::Forked("desk".into())]
+        );
     }
 
     /// The shell pulls an emitter again on every notify. A repeat of its

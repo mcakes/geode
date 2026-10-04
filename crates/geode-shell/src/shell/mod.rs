@@ -1811,12 +1811,48 @@ impl ShellView {
             .detach();
         }
         // Whole-object config edits queued by a module tile join the object
-        // dialogs' pending batch: one debounce, one write, one reload. With
-        // no user directory the refusal shows on the status bar.
+        // dialogs' pending batch: one debounce, one write, one reload. The
+        // tile that asked hears of a fork or a refusal through the frame;
+        // with no user directory the refusal also shows on the status bar.
         let edits = frame.update(cx, |f, _| f.take_pending_config_edits());
-        if let Err(e) = objectdialog::apply::queue_edits(self, edits, cx) {
-            self.config_write_error = Some(e.into());
-            cx.notify();
+        if !edits.is_empty() {
+            let mut origins: Vec<TileId> = edits.iter().filter_map(|e| e.origin).collect();
+            let posted: Vec<(TileId, crate::frame::TileNotice)> =
+                match objectdialog::apply::queue_edits(self, edits, cx) {
+                    Ok(notices) => notices
+                        .into_iter()
+                        .map(|(t, n)| (t, crate::frame::TileNotice::Forked(n)))
+                        .collect(),
+                    Err(e) => {
+                        self.config_write_error = Some(e.clone().into());
+                        cx.notify();
+                        // One refusal per tile, however many of its edits
+                        // the drain refused together.
+                        origins.sort_unstable();
+                        origins.dedup();
+                        origins
+                            .into_iter()
+                            .map(|t| (t, crate::frame::TileNotice::Refused(e.clone())))
+                            .collect()
+                    }
+                };
+            if !posted.is_empty() {
+                // Deferred: this runs inside the frame's own observer, and a
+                // tile reads its notices on the frame notification below.
+                // That notification re-enters this observer; it is harmless
+                // because the edit queue was drained above, and posting moves
+                // no frame version, so it opens no flip and starts no
+                // requery.
+                let frame = frame.clone();
+                cx.defer(move |cx| {
+                    frame.update(cx, |f, cx| {
+                        for (tile, notice) in posted {
+                            f.post_tile_notice(tile, notice);
+                        }
+                        cx.notify();
+                    })
+                });
+            }
         }
         // A pressed header link chip opens the chooser on its own tile.
         if let Some(tile) = frame.update(cx, |f, _| f.take_pending_link_chooser()) {
