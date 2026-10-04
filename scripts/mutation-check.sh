@@ -5883,7 +5883,6 @@ run_mutation "objectdialog: a removal bypasses the batch again" \
   '    let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
-    let origin = shell.object_dialog.as_ref().map(|s| s.domain);
     queue_batch(shell, edits, user_dir, Duration::ZERO, origin, cx);
     None
 }' \
@@ -8965,12 +8964,10 @@ run_mutation "objectdialog: a removal waits on the write debounce" \
   '    let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
-    let origin = shell.object_dialog.as_ref().map(|s| s.domain);
     queue_batch(shell, edits, user_dir, Duration::ZERO, origin, cx);' \
   '    let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
-    let origin = shell.object_dialog.as_ref().map(|s| s.domain);
     queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, origin, cx);' \
   geode-shell deleting_a_user_layer_object_leaves_the_browse_list_before_the_watcher_could_fire
 
@@ -18721,8 +18718,9 @@ run_mutation "scope dialog: a save records the lane's source" \
 # The frame resolves a save before the flush.
 run_mutation "scope dialog: a save refreshes the frame's definitions at once" \
   crates/geode-shell/src/shell/scopedialog/prompt.rs \
-  '    apply::refresh_definitions_now(shell, cx);' \
-  '' \
+  '    apply::refresh_definitions_now(shell, cx);
+    edit_lane(shell, cx, |f| f.note_saved_as(name));' \
+  '    edit_lane(shell, cx, |f| f.note_saved_as(name));' \
   geode-shell \
   saving_under_a_new_name_writes_it_and_records_the_source
 
@@ -18869,8 +18867,10 @@ run_mutation "scope dialog: an empty definition refuses" \
 # silently redefine someone else's.
 run_mutation "scope dialog: a new expression refuses a taken name" \
   crates/geode-shell/src/shell/scopedialog/prompt.rs \
-  '    if apply::definition_owner(shell, doc, &name) != Owner::Absent {' \
-  '    if false {' \
+  '    let doc = geode_core::config::EXPRESSIONS_DOC;
+    if apply::definition_owner(shell, doc, &name) != Owner::Absent {' \
+  '    let doc = geode_core::config::EXPRESSIONS_DOC;
+    if false {' \
   geode-shell \
   naming_a_new_expression_refuses_a_taken_name
 
@@ -19004,6 +19004,147 @@ run_mutation "scope dialog: only the save prompt previews the scope" \
   '        true' \
   geode-shell \
   naming_a_new_expression_previews_its_text_not_the_scope
+
+# ---- Scope dialog: copy, delete and revert in Saved ----
+
+# Delete asks only over the user's own definition: an inherited one has
+# nothing of the user's to remove, and refuses naming its layer.
+run_mutation "scope dialog: delete asks only over the user's own definition" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '        Owner::User { .. } => format!("Delete '"'"'{name}'"'"' from your config?"),' \
+  '        Owner::User { .. } | Owner::Inherited(_) => format!("Delete '"'"'{name}'"'"' from your config?"),' \
+  geode-shell \
+  d_on_a_desk_scope_refuses_with_its_layer
+
+# Revert asks only when the user's copy shadows a lower one.
+run_mutation "scope dialog: revert needs a lower copy" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '    let Owner::User { over: Some(_) } = apply::definition_owner(shell, doc, name) else {' \
+  '    let Owner::User { .. } = apply::definition_owner(shell, doc, name) else {' \
+  geode-shell \
+  r_without_changes_refuses
+
+# Deleting an expression says under the question who uses it.
+run_mutation "scope dialog: deleting an expression names its users" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '            crate::shell::objectdialog::render::named_expression_users(shell, name, cx)' \
+  '            {
+                let _ = name;
+                None
+            }' \
+  geode-shell \
+  deleting_a_used_expression_leaves_a_broken_reference
+
+# The answer re-checks the definition: one gone or no longer the user's
+# removes nothing.
+run_mutation "scope dialog: a stale question removes nothing" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '        Owner::Absent | Owner::Inherited(_) => false,' \
+  '        Owner::Absent | Owner::Inherited(_) => true,' \
+  geode-shell \
+  a_question_answered_after_the_row_vanished_removes_nothing
+
+# A revert answered after the lower copy went would delete the user's only
+# copy: the answer re-checks `over`.
+run_mutation "scope dialog: a stale revert re-checks its lower copy" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '        Owner::User { over } => !revert || over.is_some(),' \
+  '        Owner::User { over } => {
+            let _ = (revert, over);
+            true
+        }' \
+  geode-shell \
+  a_question_answered_after_the_row_vanished_removes_nothing
+
+# Yes to a delete removes the user's definition.
+run_mutation "scope dialog: yes to a delete removes it" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '        let removed = apply::remove_definition(shell, doc, name, cx);' \
+  '        let removed: Result<(), String> = Ok(());' \
+  geode-shell \
+  d_deletes_a_user_scope_after_yes
+
+# A copy takes a name no layer holds: it never forks.
+run_mutation "scope dialog: a copy refuses a taken name" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '    if apply::definition_owner(shell, doc, &name) != Owner::Absent {
+        return set_prompt_error(shell, format!("'"'"'{name}'"'"' already exists"));
+    }
+    // Re-read' \
+  '    // Re-read' \
+  geode-shell \
+  c_copies_a_scope_under_a_new_name
+
+# A copy resolves in the frame at once.
+run_mutation "scope dialog: a copy refreshes the frame at once" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '    apply::refresh_definitions_now(shell, cx);
+    let copy = match from {' \
+  '    let copy = match from {' \
+  geode-shell \
+  c_copies_a_scope_under_a_new_name
+
+# A delete or revert resolves in the frame at once.
+run_mutation "scope dialog: a removal refreshes the frame at once" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '        apply::refresh_definitions_now(shell, cx);
+        removed.err()' \
+  '        removed.err()' \
+  geode-shell \
+  d_deletes_a_user_scope_after_yes
+
+# Saved shows again with the cursor on the copy.
+run_mutation "scope dialog: the cursor lands on the copy" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '    state.saved.cursor_id = Some(super::saved_view::StopId::Row(copy));' \
+  '    let _ = copy;' \
+  geode-shell \
+  c_copies_a_scope_under_a_new_name
+
+# The copy prompt names its source.
+run_mutation "scope dialog: the copy prompt names its source" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '            label: format!("Copy '"'"'{}'"'"' as", row.name).into(),' \
+  '            label: "Copy as".into(),' \
+  geode-shell \
+  c_copies_a_scope_under_a_new_name
+
+# The copy prompt previews a scope's summary, not its name.
+run_mutation "scope dialog: the copy prompt previews the source's summary" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '        super::saved::SavedKind::Scope { summary } => summary.clone(),' \
+  '        super::saved::SavedKind::Scope { .. } => row.name.clone(),' \
+  geode-shell \
+  c_copies_a_scope_under_a_new_name
+
+# A question over Saved owns the pointer: a row double-click would load.
+run_mutation "scope dialog: rows under a question ignore presses" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '    if !in_saved(state) || state.pending.is_some() {' \
+  '    if !in_saved(state) {' \
+  geode-shell \
+  a_question_over_saved_ignores_the_pointer
+
+# A question over Saved owns the pointer: Back would leave under it.
+run_mutation "scope dialog: Back is unavailable under a question" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        .is_some_and(|s| in_saved(s) && s.layers.depth() > 1 && s.pending.is_none())' \
+  '        .is_some_and(|s| in_saved(s) && s.layers.depth() > 1)' \
+  geode-shell \
+  a_question_over_saved_ignores_the_pointer
+
+# A question over Saved owns the pointer: the filter row would enter filter mode.
+run_mutation "scope dialog: the filter row ignores presses under a question" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '                if state.pending.is_some() {
+                    return;
+                }
+                state.error = None;
+                super::scopedialog::saved_view::enter_filter(state);' \
+  '                state.error = None;
+                super::scopedialog::saved_view::enter_filter(state);' \
+  geode-shell \
+  a_question_over_saved_ignores_the_pointer
 
 # ---- Scope dialog: lane provenance, rows, saved rows and layers ----
 

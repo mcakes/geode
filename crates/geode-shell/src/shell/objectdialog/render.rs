@@ -3054,7 +3054,8 @@ fn run_confirmed(
                     } else {
                         "reverted"
                     };
-                    let outcome = apply::commit_removal(shell, keys, cx);
+                    let origin = shell.object_dialog.as_ref().map(|s| s.domain);
+                    let outcome = apply::commit_removal(shell, keys, origin, cx);
                     after_removal(shell, &name, cx);
                     match outcome {
                         // The removal joined the batch; the flush (no

@@ -459,8 +459,17 @@ struct SaveFixture {
 }
 
 fn save_fixture(cx: &mut gpui::TestAppContext) -> SaveFixture {
+    save_fixture_with(cx, "")
+}
+
+/// [`save_fixture`] with `user_expressions` as the user layer's
+/// `expressions.toml` when it is not empty.
+fn save_fixture_with(cx: &mut gpui::TestAppContext, user_expressions: &str) -> SaveFixture {
     let desk = tempfile::tempdir().unwrap();
     let user = tempfile::tempdir().unwrap();
+    if !user_expressions.is_empty() {
+        std::fs::write(user.path().join("expressions.toml"), user_expressions).unwrap();
+    }
     std::fs::write(
         desk.path().join("scopes.toml"),
         "config_version = 1\n[desk_eu]\n[desk_eu.dimensions]\nbook = [\"BK003\"]\n",
@@ -1352,4 +1361,368 @@ fn e_on_a_vanished_expression_says_so(cx: &mut gpui::TestAppContext) {
         Some("that expression no longer exists")
     );
     assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
+}
+
+// ---- Copy, delete and revert ------------------------------------------
+
+use crate::shell::scopedialog::saved::SavedId;
+
+impl SaveFixture {
+    fn copy_label_and_preview(&self) -> Option<(String, Option<String>)> {
+        self.shell.read_with(&self.vcx, |s, _| {
+            let prompt = s.scope_dialog.as_ref()?.prompt.as_ref()?;
+            Some((
+                prompt.purpose.label().to_string(),
+                prompt.purpose.preview().map(|p| p.to_string()),
+            ))
+        })
+    }
+
+    /// The question up: its text, its detail line and its yes label.
+    fn question(&self) -> Option<(String, Option<String>, &'static str)> {
+        self.shell.read_with(&self.vcx, |s, _| {
+            let pending = s.scope_dialog.as_ref()?.pending.as_ref()?;
+            Some((
+                pending.question.clone(),
+                pending.detail.clone(),
+                pending.yes_label,
+            ))
+        })
+    }
+
+    fn saved_cursor(&self) -> Option<SavedId> {
+        self.shell.read_with(&self.vcx, |s, _| {
+            s.scope_dialog
+                .as_ref()?
+                .saved
+                .cursor_row()
+                .map(|r| r.id.clone())
+        })
+    }
+
+    fn saved_summary(&self, name: &str) -> Option<String> {
+        frame_of(&self.shell, &self.vcx).read_with(&self.vcx, |f, _| {
+            f.saved_scopes()
+                .get(name)
+                .map(crate::shell::scopedialog::saved::summary)
+        })
+    }
+
+    fn saved_error(&self) -> Option<String> {
+        error(&self.shell, &self.vcx)
+    }
+
+    /// Fork `desk_eu` into the user layer with book BK002 (the desk copy
+    /// holds BK003), flush it, and open Saved over Current on `desk_eu`.
+    fn fork_desk_eu_and_open_saved(&mut self) {
+        self.set_lane(book("BK002"));
+        self.open_current();
+        self.keys("s");
+        self.type_text("desk_eu");
+        self.keys("enter");
+        self.flush();
+        assert!(self.user_scopes().contains("[desk_eu"));
+        self.keys("o");
+        assert_eq!(top_layer(&self.shell, &self.vcx), Some(Layer::Saved));
+        assert_eq!(self.saved_cursor(), Some(SavedId::Scope("desk_eu".into())));
+    }
+
+    /// Reload the configuration as it is, less `name` in `layer`'s `doc`:
+    /// a change made elsewhere while the dialog is up.
+    fn reload_without(&mut self, layer: geode_core::config::Layer, doc: &str, name: &str) {
+        let (doc, name) = (doc.to_string(), name.to_string());
+        self.shell.update(&mut self.vcx, |s, cx| {
+            let docs = s
+                .services
+                .config
+                .all_docs()
+                .into_iter()
+                .map(|mut d| {
+                    if d.layer == layer && d.name == doc {
+                        d.table.remove(&name);
+                    }
+                    d
+                })
+                .collect();
+            s.apply_reload(geode_core::config::Config::from_docs(docs), cx);
+        });
+        self.vcx.run_until_parked();
+        draw(&mut self.vcx);
+    }
+}
+
+fn copy_step(from: SavedId) -> Option<Layer> {
+    Some(Layer::Step(Step::CopyName { from }))
+}
+
+/// `c` names a copy of the scope under the cursor: the prompt says what it
+/// copies and previews its summary; a taken name refuses; `enter` writes
+/// the source's definition under the new name and Saved shows again with
+/// the cursor on the copy.
+#[gpui::test]
+fn c_copies_a_scope_under_a_new_name(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("j c"); // eu
+    assert_eq!(f.top(), copy_step(SavedId::Scope("eu".into())));
+    assert!(f.painted("scope-dialog-name-field"));
+    assert!(f.painted("scope-dialog-name-preview"));
+    assert!(!f.painted("scope-dialog"), "Current's rows do not paint");
+    assert_eq!(
+        f.copy_label_and_preview(),
+        Some(("Copy 'eu' as".into(), Some("book BK001".into())))
+    );
+    assert_eq!(f.input_text(), "", "the name starts empty");
+    f.type_text("desk_eu");
+    f.keys("enter");
+    assert_eq!(
+        f.prompt_error().as_deref(),
+        Some("'desk_eu' already exists")
+    );
+    assert!(!f.queued(), "a taken name writes nothing");
+    f.keys("backspace backspace backspace backspace backspace backspace backspace");
+    f.type_text("eu2");
+    f.keys("enter");
+    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(f.has_saved("eu2"), "resolved at once");
+    assert_eq!(f.saved_summary("eu2").as_deref(), Some("book BK001"));
+    assert_eq!(f.saved_cursor(), Some(SavedId::Scope("eu2".into())));
+    assert_eq!(f.notice(), None, "a new name forks nothing");
+    assert_eq!(lane_scope(&f.shell, &f.vcx), liq_scope(), "nothing loaded");
+    f.flush();
+    let written = f.user_scopes();
+    assert!(
+        written.contains("[eu2") && written.contains("[eu]"),
+        "{written}"
+    );
+}
+
+/// `c` on an expression copies its text, previewed in the prompt.
+#[gpui::test]
+fn c_copies_an_expression_with_its_text(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("j j j c"); // liq
+    assert_eq!(f.top(), copy_step(SavedId::Expression("liq".into())));
+    assert_eq!(
+        f.copy_label_and_preview(),
+        Some(("Copy 'liq' as".into(), Some("npv > 0".into())))
+    );
+    f.type_text("liq2");
+    f.keys("enter");
+    assert_eq!(f.top(), Some(Layer::Saved));
+    assert_eq!(f.named_text("liq2").as_deref(), Some("npv > 0"));
+    assert_eq!(f.saved_cursor(), Some(SavedId::Expression("liq2".into())));
+    assert_eq!(lane_scope(&f.shell, &f.vcx), liq_scope(), "not applied");
+    f.flush();
+    let written = f.user_expressions();
+    assert!(
+        written.contains("[liq2") && written.contains("npv > 0"),
+        "{written}"
+    );
+}
+
+/// `d` on a user scope asks; `y` removes it from the user layer and the
+/// cursor lands on the next row.
+#[gpui::test]
+fn d_deletes_a_user_scope_after_yes(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("j d"); // eu
+    assert!(f.painted("scope-dialog-confirm"));
+    assert_eq!(
+        f.question(),
+        Some(("Delete 'eu' from your config?".into(), None, "Delete"))
+    );
+    assert!(!f.queued(), "nothing queued before the answer");
+    f.keys("y");
+    assert!(!f.painted("scope-dialog-confirm"));
+    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(!f.has_saved("eu"));
+    assert_eq!(visible_names(&f.shell, &f.vcx), ["desk_eu", "big", "liq"]);
+    assert_eq!(f.saved_cursor(), Some(SavedId::Expression("big".into())));
+    f.flush();
+    assert!(!f.user_scopes().contains("[eu"), "{}", f.user_scopes());
+}
+
+/// Deleting an expression the lane names says so under the question; after
+/// `y` the lane's reference is left broken, not silently dropped.
+#[gpui::test]
+fn deleting_a_used_expression_leaves_a_broken_reference(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture_with(cx, "config_version = 1\n[mine]\nexpression = \"npv > 5\"\n");
+    f.set_lane(Scope {
+        named: vec!["mine".into()],
+        ..Scope::default()
+    });
+    f.open_current();
+    f.keys("o");
+    assert_eq!(
+        visible_names(&f.shell, &f.vcx),
+        ["desk_eu", "eu", "big", "liq", "mine"]
+    );
+    f.keys("j j j j d");
+    assert!(f.painted("scope-dialog-confirm-detail"));
+    assert_eq!(
+        f.question(),
+        Some((
+            "Delete 'mine' from your config?".into(),
+            Some("Used by the current scope.".into()),
+            "Delete"
+        ))
+    );
+    f.keys("y");
+    assert_eq!(f.named_text("mine"), None);
+    f.keys("escape");
+    assert_eq!(f.top(), Some(Layer::Current));
+    assert_eq!(
+        lane_scope(&f.shell, &f.vcx).named,
+        ["mine"],
+        "the reference stays"
+    );
+    let broken = f.shell.read_with(&f.vcx, |s, _| {
+        s.scope_dialog
+            .as_ref()
+            .and_then(|d| d.display.first().map(|r| (r.label.to_string(), r.broken)))
+    });
+    assert_eq!(broken, Some(("mine".into(), true)));
+    f.flush();
+    assert!(!f.user_expressions().contains("[mine"));
+}
+
+/// A desk or builtin definition has nothing of the user's to delete: `d`
+/// refuses, naming the layer, and asks nothing.
+#[gpui::test]
+fn d_on_a_desk_scope_refuses_with_its_layer(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("d"); // desk_eu
+    assert!(!f.painted("scope-dialog-confirm"));
+    assert_eq!(
+        f.saved_error().as_deref(),
+        Some("'desk_eu' comes from the desk layer — there is nothing of yours to delete")
+    );
+    assert!(f.painted("scope-dialog-error"));
+    f.keys("j j d"); // big
+    assert_eq!(
+        f.saved_error().as_deref(),
+        Some("'big' comes from the builtin layer — there is nothing of yours to delete")
+    );
+    assert!(!f.queued());
+}
+
+/// `r` on a forked scope asks; `y` removes the user copy and the desk copy
+/// shows again, the cursor still on it.
+#[gpui::test]
+fn r_reverts_a_forked_scope_to_the_desk_copy(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.fork_desk_eu_and_open_saved();
+    assert_eq!(f.saved_summary("desk_eu").as_deref(), Some("book BK002"));
+    f.keys("r");
+    assert_eq!(
+        f.question(),
+        Some((
+            "Throw away your changes to 'desk_eu'?".into(),
+            None,
+            "Revert"
+        ))
+    );
+    f.keys("y");
+    assert!(!f.painted("scope-dialog-confirm"));
+    assert_eq!(f.saved_summary("desk_eu").as_deref(), Some("book BK003"));
+    assert_eq!(f.saved_cursor(), Some(SavedId::Scope("desk_eu".into())));
+    f.flush();
+    assert!(!f.user_scopes().contains("[desk_eu"), "{}", f.user_scopes());
+}
+
+/// A definition the user holds with nothing beneath it, or does not hold
+/// at all, has no changes to revert.
+#[gpui::test]
+fn r_without_changes_refuses(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("j r"); // eu: the user's own, nothing beneath
+    assert!(!f.painted("scope-dialog-confirm"));
+    assert_eq!(
+        f.saved_error().as_deref(),
+        Some("'eu' has no changes of yours to revert")
+    );
+    f.keys("k r"); // desk_eu: not the user's
+    assert_eq!(
+        f.saved_error().as_deref(),
+        Some("'desk_eu' has no changes of yours to revert")
+    );
+    assert!(!f.queued());
+}
+
+/// The answer applies to the definition the question was asked about, as
+/// it was: a revert whose lower copy vanished would now delete the user's
+/// only copy, and a delete whose definition vanished has nothing to do.
+/// Both refuse and remove nothing.
+#[gpui::test]
+fn a_question_answered_after_the_row_vanished_removes_nothing(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.fork_desk_eu_and_open_saved();
+    f.keys("r");
+    assert!(f.question().is_some());
+    f.reload_without(geode_core::config::Layer::Desk, "scopes", "desk_eu");
+    f.keys("y");
+    assert_eq!(
+        f.saved_error().as_deref(),
+        Some("the list changed under the question — nothing was removed")
+    );
+    assert!(!f.queued(), "nothing queued");
+    assert!(f.has_saved("desk_eu"), "the user's copy stays");
+    assert!(f.user_scopes().contains("[desk_eu"));
+
+    f.keys("j d"); // eu
+    assert!(f.question().is_some());
+    f.reload_without(geode_core::config::Layer::User, "scopes", "eu");
+    f.keys("y");
+    assert_eq!(
+        f.saved_error().as_deref(),
+        Some("the list changed under the question — nothing was removed")
+    );
+    assert!(!f.queued());
+}
+
+/// A question over Saved owns the pointer as well as the keys: a row's
+/// double-click, the Back button and the filter row do nothing.
+#[gpui::test]
+fn a_question_over_saved_ignores_the_pointer(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    let row = f.vcx.debug_bounds("scope-saved-row-1").expect("eu paints");
+    let back = f
+        .vcx
+        .debug_bounds("shell-modal-back")
+        .expect("Saved over Current paints Back");
+    let filter = f
+        .vcx
+        .debug_bounds("scope-saved-filter")
+        .expect("the filter row paints");
+    f.keys("j d");
+    assert!(f.painted("scope-dialog-confirm"));
+    super::double_click(&mut f.vcx, row.center(), gpui::Modifiers::default());
+    f.vcx.run_until_parked();
+    draw(&mut f.vcx);
+    f.vcx
+        .simulate_click(back.center(), gpui::Modifiers::default());
+    f.vcx.run_until_parked();
+    draw(&mut f.vcx);
+    f.vcx
+        .simulate_click(filter.center(), gpui::Modifiers::default());
+    f.vcx.run_until_parked();
+    draw(&mut f.vcx);
+    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(
+        f.painted("scope-dialog-confirm"),
+        "the question is still up"
+    );
+    assert_eq!(lane_scope(&f.shell, &f.vcx), liq_scope(), "nothing loaded");
+    assert!(f.has_saved("eu"), "nothing removed");
+    assert!(!f.queued());
+    let mode = f
+        .shell
+        .read_with(&f.vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.saved.mode));
+    assert_eq!(mode, Some(crate::dialogmode::DialogMode::Normal));
 }

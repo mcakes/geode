@@ -37,17 +37,22 @@ pub(crate) enum Purpose {
     SaveScope,
     /// A new expression whose text was just accepted.
     NameExpression { text: String },
-    /// A copy of a saved definition.
-    #[allow(dead_code)] // Raised by the Saved screen's copy verb, not routed yet.
-    Copy { from: SavedId },
+    /// A copy of a saved definition. The label (`Copy '<name>' as`) and the
+    /// preview (the source's summary or text) are prepared when the prompt
+    /// opens, so painting it formats nothing.
+    Copy {
+        from: SavedId,
+        label: SharedString,
+        preview: SharedString,
+    },
 }
 
 impl Purpose {
-    fn label(&self) -> &'static str {
+    pub(crate) fn label(&self) -> &str {
         match self {
             Purpose::SaveScope => SAVE_LABEL,
             Purpose::NameExpression { .. } => NAME_EXPRESSION_LABEL,
-            Purpose::Copy { .. } => "Copy as",
+            Purpose::Copy { label, .. } => label,
         }
     }
 
@@ -69,16 +74,11 @@ impl Purpose {
     }
 
     /// The preview line of a prompt painted alone.
-    fn preview(&self) -> Option<SharedString> {
+    pub(crate) fn preview(&self) -> Option<SharedString> {
         match self {
             Purpose::SaveScope => None,
             Purpose::NameExpression { text } => Some(text.clone().into()),
-            Purpose::Copy { from } => Some(
-                match from {
-                    SavedId::Scope(name) | SavedId::Expression(name) => name.clone(),
-                }
-                .into(),
-            ),
+            Purpose::Copy { preview, .. } => Some(preview.clone()),
         }
     }
 }
@@ -158,7 +158,6 @@ pub(crate) struct NamePrompt {
 }
 
 /// What a `yes` carries out.
-#[allow(dead_code)] // Delete and Revert are raised by Saved-screen verbs not routed yet.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PendingAction {
     OverwriteScope { name: String },
@@ -306,7 +305,159 @@ fn submit(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView
     match prompt.purpose {
         Purpose::SaveScope => submit_save(shell, name, window, cx),
         Purpose::NameExpression { text } => name_expression(shell, name, &text, window, cx),
-        Purpose::Copy { .. } => {}
+        Purpose::Copy { from, .. } => copy_definition(shell, name, &from, window, cx),
+    }
+}
+
+/// The document a saved definition lives in, its name, and the refusal
+/// when it is gone.
+pub(super) fn doc_of(id: &SavedId) -> (&'static str, &str, &'static str) {
+    match id {
+        SavedId::Scope(name) => (SCOPES_DOC, name, super::saved_view::SCOPE_GONE),
+        SavedId::Expression(name) => (
+            geode_core::config::EXPRESSIONS_DOC,
+            name,
+            super::saved_view::EXPRESSION_GONE,
+        ),
+    }
+}
+
+/// The Copy prompt for the Saved row `row`: empty, labelled with what it
+/// copies, previewing the source's summary or text.
+pub(super) fn copy_prompt(row: &super::saved::SavedRow) -> NamePrompt {
+    let preview = match &row.kind {
+        super::saved::SavedKind::Scope { summary } => summary.clone(),
+        super::saved::SavedKind::Expression { text, .. } => text.clone(),
+    };
+    NamePrompt {
+        purpose: Purpose::Copy {
+            from: row.id.clone(),
+            label: format!("Copy '{}' as", row.name).into(),
+            preview: preview.into(),
+        },
+        draft: String::new(),
+        error: None,
+    }
+}
+
+/// Write `from`'s definition, as the configuration holds it now, under the
+/// new `name`. A copy never forks: the name must be one no layer holds. The
+/// step leaves for Saved with the cursor on the copy.
+fn copy_definition(
+    shell: &mut ShellView,
+    name: String,
+    from: &SavedId,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let (doc, source, gone) = doc_of(from);
+    if apply::definition_owner(shell, doc, &name) != Owner::Absent {
+        return set_prompt_error(shell, format!("'{name}' already exists"));
+    }
+    // Re-read, pending batch included: the row was prepared earlier and the
+    // source may have changed or gone since.
+    let value = {
+        let pending = apply::config_with_pending(shell);
+        let config = pending.as_ref().unwrap_or(&shell.services.config);
+        config.doc(doc).and_then(|d| d.value.get(source)).cloned()
+    };
+    let Some(value) = value else {
+        return set_prompt_error(shell, gone.into());
+    };
+    if let Err(refusal) = apply::queue_definition(shell, doc, &name, value, cx) {
+        return set_prompt_error(shell, refusal);
+    }
+    apply::refresh_definitions_now(shell, cx);
+    let copy = match from {
+        SavedId::Scope(_) => SavedId::Scope(name),
+        SavedId::Expression(_) => SavedId::Expression(name),
+    };
+    let Some(state) = shell.scope_dialog.as_mut() else {
+        return;
+    };
+    state.prompt = None;
+    state.saved.cursor_id = Some(super::saved_view::StopId::Row(copy));
+    let after = state.layers.commit_step();
+    super::saved_view::finish(shell, after, window, cx);
+}
+
+/// Refusal when the definition a question was asked about is gone, or no
+/// longer what the question asked about, when the answer arrives.
+pub(crate) const LIST_CHANGED: &str = "the list changed under the question — nothing was removed";
+
+/// `d` on a Saved row: ask before deleting the user's own definition; an
+/// inherited one has nothing of the user's to delete. The delete of an
+/// expression says under the question who uses it.
+pub(super) fn ask_delete(shell: &mut ShellView, id: SavedId, cx: &App) -> Result<(), String> {
+    let (doc, name, gone) = doc_of(&id);
+    let detail = match &id {
+        SavedId::Expression(name) => {
+            crate::shell::objectdialog::render::named_expression_users(shell, name, cx)
+        }
+        SavedId::Scope(_) => None,
+    };
+    let question = match apply::definition_owner(shell, doc, name) {
+        Owner::User { .. } => format!("Delete '{name}' from your config?"),
+        Owner::Inherited(layer) => {
+            return Err(format!(
+                "'{name}' comes from the {} layer — there is nothing of yours to delete",
+                layer.name()
+            ));
+        }
+        Owner::Absent => return Err(gone.into()),
+    };
+    if let Some(state) = shell.scope_dialog.as_mut() {
+        state.pending = Some(Pending {
+            question,
+            detail,
+            yes_label: "Delete",
+            action: PendingAction::Delete { id },
+        });
+    }
+    Ok(())
+}
+
+/// `r` on a Saved row: ask before throwing away the user's copy of a
+/// definition a lower layer also holds; anything else has nothing to
+/// revert.
+pub(super) fn ask_revert(shell: &mut ShellView, id: SavedId) -> Result<(), String> {
+    let (doc, name, _) = doc_of(&id);
+    let Owner::User { over: Some(_) } = apply::definition_owner(shell, doc, name) else {
+        return Err(format!("'{name}' has no changes of yours to revert"));
+    };
+    let question = format!("Throw away your changes to '{name}'?");
+    if let Some(state) = shell.scope_dialog.as_mut() {
+        state.pending = Some(Pending {
+            question,
+            detail: None,
+            yes_label: "Revert",
+            action: PendingAction::Revert { id },
+        });
+    }
+    Ok(())
+}
+
+/// Carry out a delete or revert the user said yes to, against the
+/// definition as it is now: still the user's, and for a revert still over a
+/// lower copy. Otherwise the question no longer describes what a removal
+/// would do (a revert whose lower copy went would delete the user's only
+/// copy), and it refuses. The Saved rows re-derive on the way out, so the
+/// cursor stays on a reverted row or moves to the next after a delete.
+fn remove_saved(shell: &mut ShellView, id: &SavedId, revert: bool, cx: &mut Context<ShellView>) {
+    let (doc, name, _) = doc_of(id);
+    let still = match apply::definition_owner(shell, doc, name) {
+        Owner::User { over } => !revert || over.is_some(),
+        Owner::Absent | Owner::Inherited(_) => false,
+    };
+    let refusal = if !still {
+        Some(LIST_CHANGED.to_string())
+    } else {
+        let removed = apply::remove_definition(shell, doc, name, cx);
+        apply::refresh_definitions_now(shell, cx);
+        removed.err()
+    };
+    if let Some(state) = shell.scope_dialog.as_mut() {
+        state.error = refusal;
     }
 }
 
@@ -375,8 +526,8 @@ fn answer_pending(
     }
     match pending.action {
         PendingAction::OverwriteScope { name } => save_scope_as(shell, name, window, cx),
-        // Nothing raises these yet.
-        PendingAction::Delete { .. } | PendingAction::Revert { .. } => {}
+        PendingAction::Delete { id } => remove_saved(shell, &id, false, cx),
+        PendingAction::Revert { id } => remove_saved(shell, &id, true, cx),
     }
 }
 

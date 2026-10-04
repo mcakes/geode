@@ -4,6 +4,11 @@
 //! the screen — back to Current when Saved was entered from there, else the
 //! dialog closes (`Layers::commit_saved_row`).
 //!
+//! `c` names a copy of the row's definition; `d` and `r` ask before
+//! deleting the user's own copy or reverting it to the lower layer's, and
+//! refuse when the user holds nothing to remove (`prompt::ask_delete`,
+//! `prompt::ask_revert`).
+//!
 //! The rows derive with Current's under one key (`view::rows_key`): saved
 //! scopes and named expressions both bump the frame's config version, and
 //! the `applied` tags read the lane's scope. `/` filters them by name and
@@ -22,7 +27,7 @@ use crate::footer::{Hint, HintRow};
 use crate::keymap::{Keystroke, Modifiers};
 
 use super::saved::{self, SavedId, SavedKind, SavedRow};
-use super::state::{After, Layer};
+use super::state::{After, Layer, Step};
 use super::view::{ScopeDialogState, edit_lane};
 use crate::shell::control::{self, PointerStates as _};
 use crate::shell::{ShellView, dialog, scale};
@@ -428,6 +433,14 @@ fn normal_key(
             super::definition::push(shell, None, window, cx);
             return Normal::Done;
         }
+        // Copy, delete and revert act on a definition: an empty row has none.
+        "c" | "d" | "r" => {
+            let Some(row) = state.saved.cursor_row().cloned() else {
+                return Normal::Declined;
+            };
+            row_verb(shell, ks.key.as_str(), row, window, cx);
+            return Normal::Done;
+        }
         // An empty row has nothing to load or toggle: `enter` there is the
         // section's way to make a first one.
         "enter" if stop == Some(Stop::Empty(Section::Scopes)) => {
@@ -449,6 +462,38 @@ fn normal_key(
         _ => return Normal::Declined,
     }
     Normal::Claimed
+}
+
+/// `c` pushes the copy prompt for `row`; `d` and `r` ask before deleting or
+/// reverting it, or refuse into the error line when there is nothing of the
+/// user's to remove. The input is synced either way: a question takes its
+/// focus, the prompt gives it back.
+fn row_verb(
+    shell: &mut ShellView,
+    key: &str,
+    row: SavedRow,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let refused = match key {
+        "c" => {
+            if let Some(state) = shell.scope_dialog.as_mut() {
+                state.prompt = Some(super::prompt::copy_prompt(&row));
+                state
+                    .layers
+                    .push(Layer::Step(Step::CopyName { from: row.id }));
+            }
+            Ok(())
+        }
+        "d" => super::prompt::ask_delete(shell, row.id, cx),
+        _ => super::prompt::ask_revert(shell, row.id),
+    };
+    if let (Err(refusal), Some(state)) = (refused, shell.scope_dialog.as_mut()) {
+        state.error = Some(refusal);
+    }
+    shell.refresh_dialog_rows(cx);
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
 }
 
 /// Load the cursor's scope or toggle the cursor's expression, then leave
@@ -804,6 +849,9 @@ fn hints(state: &ScopeDialogState) -> Vec<Hint> {
         enter,
         Hint::new(HintRow::Edit, &["e"], "edit expression"),
         Hint::new(HintRow::Edit, &["n"], "new expression"),
+        Hint::new(HintRow::Edit, &["c"], "copy"),
+        Hint::new(HintRow::Edit, &["d"], "delete"),
+        Hint::new(HintRow::Edit, &["r"], "revert"),
         Hint::new(HintRow::Go, &["/"], "filter"),
         Hint::new(HintRow::Go, &["escape"], leave),
     ]

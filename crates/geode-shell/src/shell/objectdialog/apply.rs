@@ -365,10 +365,13 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
 ///
 /// Removals bypass draft errors because deleting or reverting the invalid object may
 /// resolve those errors. They still use the shared asynchronous flush so a pending edit
-/// on another object is included rather than raced.
+/// on another object is included rather than raced. `origin` is the object dialog the
+/// removal came from; a removal made without one passes `None`, so an object dialog
+/// that happens to be open is not taken for its origin.
 pub(super) fn commit_removal(
     shell: &mut ShellView,
     keys: impl IntoIterator<Item = (&'static str, String)>,
+    origin: Option<Domain>,
     cx: &mut Context<ShellView>,
 ) -> Option<String> {
     let edits: BTreeMap<(&'static str, String), ObjectEdit> =
@@ -379,7 +382,6 @@ pub(super) fn commit_removal(
     let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
-    let origin = shell.object_dialog.as_ref().map(|s| s.domain);
     queue_batch(shell, edits, user_dir, Duration::ZERO, origin, cx);
     None
 }
@@ -648,7 +650,6 @@ pub(crate) fn scope_as_toml(scope: &geode_core::scope::Scope) -> toml::Table {
 /// applies. Only keys that exist are queued, so a missing sidecar is never
 /// created just to remove nothing from it; with nothing to remove, nothing is
 /// queued and the call succeeds.
-#[allow(dead_code)] // Called by the Saved screen's delete/revert, not routed yet.
 pub(crate) fn remove_definition(
     shell: &mut ShellView,
     doc: &'static str,
@@ -665,7 +666,7 @@ pub(crate) fn remove_definition(
             .into_iter()
             .map(|k| (super::OVERRIDES_DOC, k)),
     );
-    match commit_removal(shell, keys, cx) {
+    match commit_removal(shell, keys, None, cx) {
         Some(refusal) => Err(refusal),
         None => Ok(()),
     }
