@@ -185,6 +185,18 @@ impl GridModel {
         self.cursor
     }
 
+    /// Put a resting cursor on the row it rests on, so it follows that row
+    /// across a rebuild instead of keeping its index. Something now acts on
+    /// that row (the label editor paints there), and a reorder under a
+    /// resting cursor would move it off the row it acts on.
+    pub fn put_cursor(&mut self) {
+        if !self.put
+            && let Some(at) = self.cursor
+        {
+            self.place(at);
+        }
+    }
+
     pub fn cursor_source(&self) -> Option<&str> {
         self.cursor_source.as_deref()
     }
@@ -427,6 +439,17 @@ mod tests {
     /// A cursor nobody put anywhere keeps its index across a rebuild: the
     /// top row stays under it when the values arrive ahead of the map's
     /// rows.
+    #[test]
+    fn a_put_resting_cursor_follows_its_row() {
+        let mut g = GridModel::new();
+        g.set_rows(vec![row("A", None, None), row("B", None, None)]);
+        assert_eq!(g.cursor_source(), Some("A"));
+        g.put_cursor();
+        g.set_rows(vec![row("B", None, None), row("A", None, None)]);
+        assert_eq!(g.cursor_source(), Some("A"));
+        assert_eq!(g.cursor(), Some(1));
+    }
+
     #[test]
     fn a_resting_cursor_keeps_its_index() {
         let mut g = GridModel::new();

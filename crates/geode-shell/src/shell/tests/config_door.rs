@@ -339,3 +339,74 @@ fn a_refused_door_edit_tells_its_tile(cx: &mut gpui::TestAppContext) {
         )]
     );
 }
+
+/// A door edit whose file write fails is reverted in memory, and its tile
+/// hears so once however many of its edits joined the batch: it painted the
+/// edit before the write, and must not keep painting a value no file holds.
+#[gpui::test]
+fn a_failed_door_write_tells_its_tile_once(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services_with_book(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    // Unparseable on disk: the in-memory merge accepts the edit, the writer refuses.
+    std::fs::write(dir.path().join("dimensions.toml"), "[sector\nfrom =").unwrap();
+    let edit = |label: &str| ConfigEdit {
+        doc: geode_core::config::DIMENSIONS_DOC,
+        object: "sector".into(),
+        value: Some(sector(label)),
+        origin: None,
+    };
+    queue_from(&shell, Some(TILE), vec![edit("Tech")], &mut cx);
+    cx.run_until_parked();
+    queue_from(&shell, Some(TILE), vec![edit("Index")], &mut cx);
+    flush(&mut cx);
+
+    let notices = take_notices(&shell, &mut cx);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(
+        matches!(&notices[0], TileNotice::Refused(m) if m.starts_with("config not saved — reverted: ")),
+        "{notices:?}"
+    );
+}
+
+/// A door edit the merge rejects still reaches disk, but memory keeps the
+/// last good configuration: the tile hears that its edit is not in force.
+#[gpui::test]
+fn a_rejected_door_merge_tells_its_tile(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, services_with_book(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    // An invalid `ctrl` modifier alias is an error the reload refuses whole.
+    let mut keymap = toml::Table::new();
+    keymap.insert("mod".into(), "ctrl".into());
+    queue_from(
+        &shell,
+        Some(TILE),
+        vec![ConfigEdit {
+            doc: "app",
+            object: "keymap".into(),
+            value: Some(toml::Value::Table(keymap)),
+            origin: None,
+        }],
+        &mut cx,
+    );
+    flush(&mut cx);
+
+    assert!(
+        dir.path().join("app.toml").exists(),
+        "the rejected merge still writes"
+    );
+    let status = shell.read_with(&cx, |s, _| s.config_write_error.clone());
+    assert!(
+        status
+            .as_deref()
+            .is_some_and(|m| m.starts_with(crate::shell::objectdialog::apply::REJECTED_STATUS)),
+        "{status:?}"
+    );
+    assert_eq!(
+        take_notices(&shell, &mut cx),
+        vec![TileNotice::Refused(
+            crate::shell::objectdialog::apply::DOOR_REJECTED_NOTICE.to_string()
+        )]
+    );
+}

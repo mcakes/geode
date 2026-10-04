@@ -41,7 +41,13 @@ pub(crate) struct HeaderModel {
     pub unclassified: Option<SharedString>,
     /// The layer its winning definition comes from.
     pub layer: Option<&'static str>,
+    /// A values read is on its way: the counts are the map's alone until
+    /// it answers.
+    pub loading: bool,
 }
+
+/// What the header says while the values read is on its way.
+pub(crate) const LOADING: &str = "loading values\u{2026}";
 
 impl HeaderModel {
     /// `counts` is the grid's `(values, unclassified)`.
@@ -67,7 +73,14 @@ impl HeaderModel {
             ),
             unclassified: (k > 0).then(|| format!("{k} unclassified").into()),
             layer: layer.map(Layer::name),
+            loading: false,
         }
+    }
+
+    /// Mark the values read as on its way (or not).
+    pub(crate) fn loading(mut self, loading: bool) -> Self {
+        self.loading = loading;
+        self
     }
 
     /// The left side's words in paint order, for tests that read the header
@@ -80,6 +93,7 @@ impl HeaderModel {
         }];
         parts.extend(self.from.iter().map(|f| format!("from {f}")));
         parts.extend(self.values.iter().map(|v| v.to_string()));
+        parts.extend(self.loading.then(|| LOADING.to_string()));
         parts.extend(self.unclassified.iter().map(|v| v.to_string()));
         parts.extend(self.layer.map(str::to_string));
         parts.join(" \u{00b7} ")
@@ -220,6 +234,17 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> Div
         .when_some(h.values.clone(), |el, values| {
             el.child(div().flex_none().text_color(muted).child(values))
         })
+        // Muted and in words, beside the count it qualifies: the grid shows
+        // the map alone meanwhile, and a mark that moved would read as news.
+        .when(h.loading, |el| {
+            el.child(
+                div()
+                    .flex_none()
+                    .text_color(muted)
+                    .debug_selector(move || format!("classifications-loading-{tile_id}"))
+                    .child(LOADING),
+            )
+        })
         .when_some(h.unclassified.clone(), |el, k| {
             el.child(
                 div()
@@ -284,5 +309,11 @@ mod tests {
             "Classification: desk \u{00b7} from book \u{00b7} 3 values \u{00b7} 1 unclassified"
         );
         assert_eq!(HeaderModel::prepare(None, None, (0, 0)).text(), NONE_SHOWN);
+        assert_eq!(
+            HeaderModel::prepare(Some(&dim), None, (2, 0))
+                .loading(true)
+                .text(),
+            "Classification: desk \u{00b7} from book \u{00b7} 2 values \u{00b7} loading values\u{2026}"
+        );
     }
 }

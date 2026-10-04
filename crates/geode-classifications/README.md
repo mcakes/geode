@@ -109,11 +109,22 @@ over a column no classification may map is never written, with a
 `not saved:` notice, since the config door writes even when the reload is
 then rejected. Otherwise the whole object goes through
 `FrameRef::queue_config_edits` and shows at once. Undo that skips rows
-changed elsewhere says how many.
+changed elsewhere says how many; rows a refused write of the tile's own
+touched (`History::unsaved`) are counted apart, as `not saved`. Opening the
+editor puts the cursor on its row (`GridModel::put_cursor`), so a rebuild
+reordering the rows keeps the field on the row it writes.
+
+A right press on a row (`table::RowContext`, with the pointer's window
+position) moves the cursor there, keeping a live selection the row is in,
+and opens the `⋯` menu hung from the pointer. While a values read is on its
+way the header shows `loading values…` (`HeaderModel::loading`), cleared by
+its answer, a failure, or a refusal.
 
 Notices: the shell's `TileNotice`s are taken on every frame notification;
 `Forked` shows as status, `Refused` as danger and drops the optimistic
-edit. A verb's notices last until the next verb or another classification
+edit. The shell refuses to every tile whose edits joined a batch whose write
+failed or whose merge was rejected (kept last good), so a label shown ahead
+of the reload never outlives a write that did not land. A verb's notices last until the next verb or another classification
 is shown; session-restore notices until the trader's first key or press in
 the tile; the switcher's `no classifications to switch to` while that
 holds. The switcher opens by itself only on the first snapshot and when
@@ -131,9 +142,10 @@ highlighted column answers; enter with nothing typed takes the first), and
 writes an empty classification. Rename asks the new name (seeded and
 selected). Each answer is validated before anything is written; a refusal
 shows under the field and keeps it open. Rename, Delete and Revert then ask
-y/n on the confirm bar (`geode_tile::confirm`), naming how many groupings,
-views, saved scopes and named expressions still name the classification
-(`references`): these are not rewritten. A rename writes the new object and
+y/n on the confirm bar (`geode_tile::confirm`). Rename and Delete name how
+many groupings, views, saved scopes and named expressions still name the
+classification (`references`): these are not rewritten. Revert names the
+lower copy's layer instead; the name stays defined. A rename writes the new object and
 removes the old in one `queue_config_edits` batch; delete and revert remove
 the user definition. Rename and delete act only on a classification the
 user layer owns outright: a desk or builtin one cannot be removed from the
@@ -143,7 +155,11 @@ names the lower copy's layer). A classification with no recorded layer is
 refused too (`can't tell where <name> is defined`). After a
 create or rename the tile shows the new name (`Saving <name>…` until the
 reload carries it); after a delete the switcher opens without it. A
-`Refused` notice puts back what was shown before. While the prompt or a
+`Refused` notice puts back what was shown before. A confirmed revert is
+awaited too (`reverting`): until the reload no longer shows a user copy over
+the lower one, a label verb or the editor on that classification is refused
+with `reverting <name>…`, since an edit built on the user copy would replace
+the removal in the shell's batch. A `Refused` notice ends the wait. While the prompt or a
 question is up the tile is in `insert` mode; any other verb closes the
 prompt or answers the question no.
 
@@ -157,8 +173,6 @@ selection and a waiting cursor.
   carries shows its mapped values alone.
 - Rename and delete do not rewrite references; `references` misses ad hoc
   lane chains, pricer views and view sort keys.
-- A reload the shell rejects (kept last good) sends the tile nothing: its
-  pending labels stay until the next verb or switch.
 
 The behavior as the trader sees it is in
 [features](../../docs/current/features.md#classifications).

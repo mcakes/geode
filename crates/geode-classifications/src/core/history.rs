@@ -17,6 +17,13 @@
 //! flash the later labels off, and the next edit, built over the reload,
 //! would overwrite them. Any other object is someone else's write, and is
 //! the truth now.
+//!
+//! A refused write leaves its rows as the configuration has them, so undo
+//! later skips them like rows changed elsewhere; [`History::unsaved`] tells
+//! the two apart, so the notice does not blame another surface for the
+//! tile's own write that never landed.
+
+use std::collections::BTreeSet;
 
 use geode_core::classification::{self, UndoEntry};
 use geode_core::dimensions::DerivedDimension;
@@ -31,6 +38,10 @@ pub struct History {
     /// Every object an edit produced since `base`, oldest first; the last
     /// is `pending`.
     in_flight: Vec<DerivedDimension>,
+    /// Rows a refused write would have changed, until another
+    /// classification is shown: an undo that skips one skips the tile's own
+    /// unsaved edit, not another surface's.
+    unsaved: BTreeSet<String>,
 }
 
 impl History {
@@ -111,9 +122,25 @@ impl History {
         }
     }
 
-    /// The write was refused and the configuration's object stands.
+    /// The write was refused and the configuration's object stands. The
+    /// rows the in-flight edits changed are remembered as never saved.
     pub fn refused(&mut self) {
+        if let (Some(pending), Some(base)) = (&self.pending, &self.base) {
+            let changed = pending
+                .values
+                .keys()
+                .chain(base.values.keys())
+                .filter(|s| pending.values.get(*s) != base.values.get(*s));
+            self.unsaved.extend(changed.cloned());
+        }
         self.drop_pending();
+    }
+
+    /// How many of `skipped` are rows a refused write of this tile changed:
+    /// left as they are because the edit was never saved, not because
+    /// another surface changed them.
+    pub fn unsaved(&self, skipped: &[String]) -> usize {
+        skipped.iter().filter(|s| self.unsaved.contains(*s)).count()
     }
 
     fn drop_pending(&mut self) {
@@ -127,6 +154,7 @@ impl History {
     pub fn forget(&mut self) {
         self.undo.clear();
         self.redo.clear();
+        self.unsaved.clear();
         self.drop_pending();
     }
 }
@@ -262,6 +290,23 @@ mod tests {
         let (after, skipped) = h.undo(&cfg).unwrap();
         assert_eq!(skipped, ["A"]);
         assert_eq!(after.values.get("A").map(String::as_str), Some("Z"));
+    }
+
+    /// Undo after a refusal skips the refused rows, and says they were
+    /// the tile's own unsaved edit rather than another surface's change.
+    #[test]
+    fn undo_after_a_refusal_counts_the_refused_rows_as_unsaved() {
+        let cfg = dim(&[("A", "X")]);
+        let mut h = History::default();
+        h.apply(&cfg, &["A".into(), "B".into()], Some("Y"));
+        h.refused();
+        let (_, skipped) = h.undo(&cfg).unwrap();
+        assert_eq!(skipped, ["A", "B"]);
+        assert_eq!(h.unsaved(&skipped), 2);
+        // A row another surface changed is not the tile's unsaved edit.
+        assert_eq!(h.unsaved(&["C".to_string()]), 0);
+        h.forget();
+        assert_eq!(h.unsaved(&skipped), 0);
     }
 
     #[test]

@@ -933,7 +933,7 @@ fn a_blank_label_counts_and_paints_as_unclassified(cx: &mut gpui::TestAppContext
     let (h, vcx) = open_with(cx, config(blank), restored("region"));
     let header = h.header(&vcx);
     assert!(
-        header.contains("1 value \u{00b7} 1 unclassified"),
+        header.contains("1 value") && header.contains("1 unclassified"),
         "{header}"
     );
     let label = h.tile.read_with(&vcx, |t, cx| {
@@ -1953,5 +1953,189 @@ fn a_reload_of_the_first_write_keeps_a_later_edit_in_flight(cx: &mut gpui::TestA
         h.edits(&mut vcx),
         [edit_of(&region(&[]))],
         "the third edit carries all three"
+    );
+}
+
+// ---- final review fixes ----
+
+/// The shell refuses a batch carrying two edits (a failed write, or a
+/// merge kept last good): both optimistic labels go, not just the last.
+#[gpui::test]
+fn a_refusal_after_two_edits_drops_both(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "x");
+    h.goto(&mut vcx, "DAX");
+    h.press(&mut vcx, "x");
+    assert_eq!((h.label(&vcx, "SPX"), h.label(&vcx, "DAX")), (None, None));
+    h.edits(&mut vcx);
+    let why =
+        "saved to disk \u{00b7} rejected by the merge \u{2014} showing the configuration in force";
+    h.shell_says(&mut vcx, TileNotice::Refused(why.into()));
+    assert_eq!(h.notices(&vcx), [why]);
+    assert_eq!(h.label(&vcx, "SPX").as_deref(), Some("Americas"));
+    assert_eq!(h.label(&vcx, "DAX").as_deref(), Some("Europe"));
+}
+
+/// The editor opened on a cursor nobody moved: a reload reordering the
+/// rows under it keeps the editor on its row, and the commit writes that
+/// row over the reloaded object.
+#[gpui::test]
+fn a_reload_reordering_rows_keeps_the_open_editor_on_its_row(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    h.press(&mut vcx, "enter");
+    assert!(h.editor(&vcx).is_some());
+    // Another surface labels NKY: it leaves the unclassified rows at the top.
+    let moved = "[region]\nfrom = \"underlying_ref\"\n[region.values]\nAmericas = [\"SPX\"]\nAsia = [\"NKY\"]\nEurope = [\"SX5E\", \"DAX\"]\n";
+    vcx.update(|_, cx| h.factory.set_config(config(moved), cx));
+    assert_eq!(h.shown(&vcx)[0], "HSI", "the rows moved");
+    assert!(h.editor(&vcx).is_some(), "a reload keeps the editor");
+    assert_eq!(
+        h.cursor(&vcx).as_deref(),
+        Some("NKY"),
+        "the editor paints on the row it writes"
+    );
+    vcx.simulate_input("Pacific");
+    h.press(&mut vcx, "enter");
+    assert_eq!(
+        h.edits(&mut vcx),
+        [edit_of(&region(&[
+            ("SPX", "Americas"),
+            ("NKY", "Pacific"),
+            ("SX5E", "Europe"),
+            ("DAX", "Europe"),
+        ]))]
+    );
+}
+
+/// A revert in the debounce window: a label verb on the reverting
+/// classification is refused, so no edit built on the user copy replaces
+/// the revert's removal in the shell's batch; the reload brings the verbs
+/// back.
+#[gpui::test]
+fn a_verb_while_a_revert_is_on_its_way_does_not_undo_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(EDIT, &["region"], &[("region", Layer::Desk)]),
+        restored("region"),
+    );
+    let asked = h.distinct_requests();
+    h.deliver(
+        &mut vcx,
+        asked[0].tag,
+        "underlying_ref",
+        Ok(EDIT_VALUES.to_vec()),
+    );
+    h.act(&mut vcx, "classifications::revert");
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.edits(&mut vcx), [removal("region")]);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "x");
+    h.press(&mut vcx, "enter");
+    assert!(h.edits(&mut vcx).is_empty(), "nothing replaces the removal");
+    assert_eq!(h.editor(&vcx), None);
+    assert_eq!(h.notices(&vcx), ["reverting region\u{2026}"]);
+    // The reload carrying the revert: the desk copy, no user copy over it.
+    let mut desk = config(TWO);
+    desk.layers.insert("region".into(), Layer::Desk);
+    vcx.update(|_, cx| h.factory.set_config(desk, cx));
+    h.goto(&mut vcx, "DAX");
+    h.press(&mut vcx, "x");
+    assert_eq!(h.edits(&mut vcx).len(), 1, "the verbs are back");
+}
+
+/// A right press on a row moves the cursor there and opens the `⋯` menu
+/// hung from the pointer.
+#[gpui::test]
+fn a_right_click_on_a_row_opens_the_action_menu_there(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.draw(&mut vcx);
+    let row = vcx
+        .debug_bounds("classifications-row-SPX")
+        .expect("the row is painted");
+    let at = row.center();
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+    h.draw(&mut vcx);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SPX"));
+    let rows = h.action_menu(&vcx).expect("the menu opened");
+    assert_eq!(rows[0].0, "Set label");
+    let menu = vcx
+        .debug_bounds("classifications-menu")
+        .expect("the menu is painted");
+    assert!(
+        (menu.origin.x - at.x).abs() < gpui::px(2.) && (menu.origin.y - at.y).abs() < gpui::px(2.),
+        "hung from the pointer: {menu:?} vs {at:?}"
+    );
+    // Its rows act on the row pressed.
+    h.press(&mut vcx, "j enter");
+    assert_eq!(h.label(&vcx, "SPX"), None, "Clear label cleared SPX");
+    release_the_table_menu(&mut vcx, at);
+}
+
+/// gpui-component's table builds its (empty) context menu on every right
+/// press, and that menu's dismiss subscription holds it in a cycle only
+/// the table's next right press breaks, so a test ending after a right
+/// press leaks it (the pricer's tests have the same helper). One more
+/// right press, whose deferred rebuild never runs because the window
+/// closes in the same update, breaks it.
+fn release_the_table_menu(vcx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+    vcx.update(|window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Right,
+                position: at,
+                modifiers: gpui::Modifiers::default(),
+                click_count: 1,
+                first_mouse: false,
+            }),
+            cx,
+        );
+        window.remove_window();
+    });
+    vcx.run_until_parked();
+}
+
+/// The header says the values are loading while the read is on its way,
+/// and stops on its answer, a failure, or a refused read.
+#[gpui::test]
+fn the_header_marks_a_pending_values_read(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), restored("region"));
+    assert!(
+        h.header(&vcx).contains("loading values\u{2026}"),
+        "{}",
+        h.header(&vcx)
+    );
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Err("no such column"));
+    assert!(!h.header(&vcx).contains("loading"), "{}", h.header(&vcx));
+    vcx.simulate_keystrokes("shift-r");
+    assert!(h.header(&vcx).contains("loading values\u{2026}"));
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Ok(REGION_VALUES.to_vec()));
+    assert!(!h.header(&vcx).contains("loading"), "{}", h.header(&vcx));
+}
+
+/// A refused read was never sent: nothing is loading.
+#[gpui::test]
+fn a_refused_values_read_shows_no_loading_mark(cx: &mut gpui::TestAppContext) {
+    let (h, vcx) = open_over(cx, config(TWO), restored("region"), true);
+    assert!(!h.header(&vcx).contains("loading"), "{}", h.header(&vcx));
+}
+
+/// Undo after a refusal skips the refused row, and says it was not saved
+/// rather than blame another surface.
+#[gpui::test]
+fn undo_after_a_refusal_says_the_row_was_not_saved(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "x");
+    h.edits(&mut vcx);
+    h.shell_says(&mut vcx, TileNotice::Refused("not saved".into()));
+    h.press(&mut vcx, "u");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["1 row was not saved and is left as it is"]
     );
 }

@@ -283,6 +283,16 @@ dispatch targets. A registered saved-scope action and a live saved-scope row are
 items with distinct usage keys. Live rows allow a newly reloaded scope to be
 selected even if no corresponding action was registered at startup.
 
+A module registers its tile's actions under its own category, and a title
+names the tile it acts on, since the palette lists every kind's actions
+together. The Classifications tile's field verbs read `Classification:
+Confirm field` and `Classification: Cancel field` (`enter`/`escape` in its
+label editor, prompt and menus), not a bare `Commit`. Its configuration
+verbs, `Classification: New…`, `Rename…`, `Delete` and `Revert…`, have no
+default chord: the palette and the tile's `⋯` menu reach them, and the menu
+also opens on a right press over a grid row, at the pointer, with the cursor
+moved to that row.
+
 Binding badges are indicative: the palette takes the first compiled binding
 for an action without resolving current contexts or later shadows. They are
 not a guarantee that pressing the displayed key currently dispatches that row.

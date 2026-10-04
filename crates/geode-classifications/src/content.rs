@@ -47,8 +47,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("classifications::menu", "Classification: Actions"),
     // The popup and field verbs: registered beside the rest so the
     // fragment binds them and the palette lists them.
-    ("classifications::commit", "Commit"),
-    ("classifications::cancel", "Cancel"),
+    ("classifications::commit", "Classification: Confirm field"),
+    ("classifications::cancel", "Classification: Cancel field"),
     ("classifications::choice_up", "Label: previous"),
     ("classifications::choice_down", "Label: next"),
     (
@@ -379,5 +379,19 @@ mod tests {
             assert!(!title.is_empty(), "{id}");
             assert_eq!(action_title(id), *title);
         }
+    }
+
+    /// The palette lists every action across every tile kind: a bare
+    /// "Commit" or "Cancel" there would not say whose field it acts on.
+    #[test]
+    fn the_field_verbs_name_their_tile_in_the_palette() {
+        assert_eq!(
+            action_title("classifications::commit"),
+            "Classification: Confirm field"
+        );
+        assert_eq!(
+            action_title("classifications::cancel"),
+            "Classification: Cancel field"
+        );
     }
 }

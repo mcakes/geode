@@ -2569,6 +2569,7 @@ dependencies = [
 name = "geode-classifications"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "geode-core",
  "geode-data",
  "geode-shell",

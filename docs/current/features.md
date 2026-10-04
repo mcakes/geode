@@ -1319,7 +1319,9 @@ and the row count. The values come from one `DataHandle::distinct` read
 keyed by the tile, sent when a classification is shown, when a reload
 changes its source column, and on `shift+r`; an answer another read has
 overtaken is dropped. A refused or failed read keeps the map's own rows on
-screen with a header notice (`values not loaded: … — shift+r retries`). The
+screen with a header notice (`values not loaded: … — shift+r retries`);
+while a read is on its way the header says `loading values…` beside the
+count. The
 default order is unclassified rows first, then by label. A label blank
 after trimming is unclassified everywhere: in the counts, the sort and the
 paint, including a hand-written `''`. `:sort <source|label|rows>
@@ -1333,7 +1335,9 @@ keeps it on its row; `v`/`shift+v` start a row selection, `escape` ends it.
 A label verb is the exception: after one the cursor keeps its visible
 index, so labelling the top unclassified row leaves the cursor on the next
 one. A rebuild that removes the cursor's row ends a live selection rather
-than let its span re-resolve to rows nobody chose.
+than let its span re-resolve to rows nobody chose. A right press on a row
+moves the cursor there (a row inside a live selection keeps the selection)
+and opens the `⋯` menu at the pointer, as `.` opens it from the header.
 
 **Labels.** The verbs act on the selection, else the cursor's row.
 `enter`/`c` (or a double-click) open the label editor in the label cell,
@@ -1351,7 +1355,11 @@ every verb builds on it, so two edits before the reload compose; a reload
 carrying an earlier write of the tile's own keeps the later ones, and any
 other change to the object is the truth and drops them. Undo and redo
 replay row by row over what is current: a row another surface changed
-since is left as it is, and the notice says how many. A verb that changes
+since is left as it is, and the notice says how many; a row the tile's own
+refused write touched is reported as not saved rather than changed
+elsewhere. Opening the editor puts the cursor on its row, so a reload or a
+values answer that reorders the rows keeps the field on the row it writes.
+A verb that changes
 nothing (`x` on unclassified rows, `u` with nothing to undo, a replay that
 skips every row) keeps the selection and a waiting cursor.
 
@@ -1362,9 +1370,12 @@ empty classification; rename asks the new name. Each answer is validated
 before anything is written, and a refusal stays under the field. Rename,
 delete and revert then ask y/n on the confirm bar, naming how many
 groupings, views, saved scopes and named expressions still name the
-classification. A rename writes the new object and removes the old in one
-batch; delete and revert remove the user definition, and revert's question
-names the lower layer it restores. Rename and delete act only on a
+classification; revert's question names the lower layer it restores
+instead, since the name stays defined. A rename writes the new object and
+removes the old in one batch; delete and revert remove the user definition.
+Until the revert's reload lands, the label verbs on that classification
+are refused with `reverting <name>…`: an edit built on the user copy would
+replace the removal in the shell's batch and undo the revert. Rename and delete act only on a
 classification the user layer owns outright: a desk or builtin one is
 refused (`<name> is defined in desk config; Geode cannot …`), as is a user
 copy over a lower one (Revert… removes that) and one whose layer is
@@ -1375,7 +1386,9 @@ when picked, and lists Revert… only over a shadowed user copy.
 notification. A fork (`copied '<name>' to your config — Revert… restores
 the <layer> copy`, naming the layer it shadows) shows as status: editing a
 desk or builtin classification copies it whole into the user layer. A refusal shows as danger and drops the
-pending edit; a create, rename or delete that was refused shows what was
+pending edit, whether the door refused it, the write failed (`config not
+saved — reverted: …`) or the merge rejected it (`saved to disk · rejected
+by the merge — showing the configuration in force`); a create, rename or delete that was refused shows what was
 shown before. A verb's notices last until the next verb or another
 classification is shown; the session restore's until the trader's first key
 or press in the tile.
@@ -1393,9 +1406,6 @@ Known limitations:
   keys.
 - A desk or builtin classification cannot be deleted from the tile, and
   classifications do not chain.
-- A reload the shell rejects (it keeps the last good configuration) gives
-  the tile no signal: its unsaved labels stay on screen until the next verb
-  or switch, while the status bar says the configuration was kept.
 
 See the [crate guide](../../crates/geode-classifications/README.md) for the
 module map.

@@ -95,7 +95,16 @@ pub(crate) struct PendingConfigWrite {
     /// failed write reverts memory for the whole batch, so exactly these drafts are
     /// rebuilt; any other open dialog's draft had nothing in it and is left alone.
     origins: Vec<Domain>,
+    /// The tiles whose door edits joined this batch, each once. A tile shows
+    /// its edit optimistically, so a failed write or a merge the reload
+    /// rejected has to reach it as a refusal, or its labels look saved.
+    tiles: Vec<TileId>,
 }
+
+/// The refusal a door tile hears when its batch reached disk but the merge kept
+/// the last good configuration: its optimistic edit is not what is in force.
+pub(crate) const DOOR_REJECTED_NOTICE: &str =
+    "saved to disk · rejected by the merge — showing the configuration in force";
 
 /// Render and parse the exact object text used for persistence, so memory and disk
 /// receive the same value.
@@ -456,6 +465,7 @@ pub(crate) fn queue_edits(
     let mut config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
     let mut batch: BTreeMap<(&'static str, String), ObjectEdit> = BTreeMap::new();
     let mut notices = Vec::new();
+    let origins: Vec<TileId> = edits.iter().filter_map(|e| e.origin).collect();
     for e in edits {
         if let Some(value) = &e.value
             && let Some(layer) = fork_record(&config, e.doc, &e.object, &mut batch)
@@ -476,6 +486,13 @@ pub(crate) fn queue_edits(
         batch.insert((e.doc, e.object), e.value);
     }
     queue_batch(shell, batch, user_dir, WRITE_DEBOUNCE, None, cx);
+    if let Some(pending) = shell.pending_config_write.as_mut() {
+        for tile in origins {
+            if !pending.tiles.contains(&tile) {
+                pending.tiles.push(tile);
+            }
+        }
+    }
     Ok(notices)
 }
 
@@ -641,6 +658,7 @@ fn schedule_flush(
             edits: BTreeMap::new(),
             revert,
             origins: Vec::new(),
+            tiles: Vec::new(),
         });
     pending.seq = seq;
     pending.edits.extend(edits);
@@ -721,12 +739,20 @@ pub(crate) fn finish_flush(
     match outcome {
         Err(message) => revert_failed_write(shell, message, cx),
         Ok(()) => {
-            shell.pending_config_write = None;
+            let tiles = shell
+                .pending_config_write
+                .take()
+                .map(|pending| pending.tiles)
+                .unwrap_or_default();
             // The write succeeded; separately report whether memory accepted its merge.
             match rejected {
                 Some(n) => {
                     shell.config_write_error =
                         Some(format!("{REJECTED_STATUS}: {n} error(s) — keeping last good").into());
+                    // The reload kept the last good config, so no tile hears a
+                    // reload carrying its edit; without this its optimistic
+                    // labels would stay painted as if they were in force.
+                    refuse_door_tiles(shell, tiles, DOOR_REJECTED_NOTICE.to_string(), cx);
                     cx.notify();
                 }
                 None => {
@@ -795,7 +821,11 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
     let restored = Config::from_docs(pending.revert);
     shell.apply_reload(restored, cx);
     // Keep the failure visible even when the dialog that queued the write is closed.
-    shell.config_write_error = Some(format!("config not saved — reverted: {message}").into());
+    let failure = format!("config not saved — reverted: {message}");
+    shell.config_write_error = Some(failure.clone().into());
+    // A door tile shows its edit before the write; the revert has to reach it
+    // too, or it keeps painting the value the file refused.
+    refuse_door_tiles(shell, pending.tiles.clone(), failure, cx);
     // Only the drafts that contributed to the batch show it reverted. A covered
     // dialog of another domain keeps its unsaved draft: nothing of it was in the
     // batch, and rebuilding it would throw away the trader's place.
@@ -809,6 +839,31 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
         rebuild_after_revert(state, config, &message);
     }
     cx.notify();
+}
+
+/// Post `TileNotice::Refused(message)` to each door tile of a finished batch.
+///
+/// Deferred, as the drain posts: a completion can run inside a frame
+/// notification, and the tile reads its notices on the frame notification sent
+/// after posting. Posting moves no frame version, so it opens no flip.
+fn refuse_door_tiles(
+    shell: &ShellView,
+    tiles: Vec<TileId>,
+    message: String,
+    cx: &mut Context<ShellView>,
+) {
+    if tiles.is_empty() {
+        return;
+    }
+    let frame = shell.frame().clone();
+    cx.defer(move |cx| {
+        frame.update(cx, |f, cx| {
+            for tile in tiles {
+                f.post_tile_notice(tile, crate::frame::TileNotice::Refused(message.clone()));
+            }
+            cx.notify();
+        })
+    });
 }
 
 /// Rebuild one dialog's draft from the reverted config and say why. The draft is the

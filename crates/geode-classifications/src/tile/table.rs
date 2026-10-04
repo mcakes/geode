@@ -10,8 +10,8 @@ use geode_shell::shell::{listrow, scale};
 use geode_shell::{fonts, palette};
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Div, ElementId, Entity, MouseButton, MouseDownEvent, SharedString, Stateful,
-    TextAlign, Window, div, px,
+    App, Context, Div, ElementId, Entity, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
+    Stateful, TextAlign, Window, div, px,
 };
 use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, h_flex, v_flex};
@@ -93,12 +93,21 @@ pub(crate) struct RowPressed {
     pub clicks: usize,
 }
 
+/// A right press on shown row `row`, at `position` in window coordinates:
+/// the `⋯` menu opens there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RowContext {
+    pub row: usize,
+    pub position: Point<Pixels>,
+}
+
 /// A header's sort control was pressed on this column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SortClicked(pub SortCol);
 
 impl gpui::EventEmitter<RowPressed> for TableState<GridDelegate> {}
 impl gpui::EventEmitter<SortClicked> for TableState<GridDelegate> {}
+impl gpui::EventEmitter<RowContext> for TableState<GridDelegate> {}
 
 /// The table inside a wrapper that keeps window focus where the shell put
 /// it. `DataTable`'s root tracks its own focus handle, so a row press
@@ -308,7 +317,8 @@ impl TableDelegate for GridDelegate {
     /// Each row is identified by its source value, and reports a press
     /// (with shift and the click count) to the tile's one pointer door. A
     /// press with a command, control or alt modifier is the shell's gesture
-    /// and is left alone.
+    /// and is left alone. A right press reports [`RowContext`] at the
+    /// pointer, for the `⋯` menu.
     fn render_tr(
         &mut self,
         row_ix: usize,
@@ -333,6 +343,15 @@ impl TableDelegate for GridDelegate {
                         row: row_ix,
                         shift: m.shift,
                         clicks: e.click_count,
+                    });
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |_, e: &MouseDownEvent, _, cx| {
+                    cx.emit(RowContext {
+                        row: row_ix,
+                        position: e.position,
                     });
                 }),
             )

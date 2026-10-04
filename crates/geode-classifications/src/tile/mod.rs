@@ -14,9 +14,9 @@
 //! New, Rename, Delete and Revert are registered actions (the palette and
 //! the `⋯` menu). New and Rename ask in a prompt bar under the header
 //! (`editor::PromptField`), validated before anything is written; Rename,
-//! Delete and Revert then ask y/n on the confirm bar, saying how many
-//! groupings, views, scopes and expressions still name the classification
-//! (they are not rewritten). Each writes through the config door as one
+//! Delete and Revert then ask y/n on the confirm bar, Rename and Delete
+//! saying how many groupings, views, scopes and expressions still name the
+//! classification (they are not rewritten). Each writes through the config door as one
 //! batch; the tile shows where it will land at once and goes back if the
 //! shell refuses the write.
 //!
@@ -52,7 +52,10 @@ use geode_tile::header::{HEADER_HEIGHT, Mode, link_chips};
 use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, MenuPick, Row};
 use geode_tile::notice::Notice;
 use gpui::prelude::*;
-use gpui::{AnyWindowHandle, App, Context, Entity, Focusable as _, SharedString, Window, div};
+use gpui::{
+    AnchoredPositionMode, AnyWindowHandle, App, Context, Entity, Focusable as _, Pixels, Point,
+    SharedString, Window, anchored, div,
+};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, v_flex};
@@ -64,7 +67,7 @@ use crate::core::prompt::{self, Prompt, Step};
 use crate::core::session::{self, SortCol, State};
 use editor::{ChoiceKind, EditorPaint, LabelEditor, PromptField};
 use header::HeaderModel;
-use table::{GridDelegate, Prepared, RowPressed, SortClicked};
+use table::{GridDelegate, Prepared, RowContext, RowPressed, SortClicked};
 
 /// Which menu is up: the switcher, hung under the header's name, or the
 /// `⋯` action menu, hung from the header's right edge. Both share menu
@@ -198,6 +201,10 @@ pub struct ClassificationsTile {
     /// The rem the table's column widths were last scaled to.
     last_rem: f32,
     menu: Option<(MenuKind, Menu<Pick>)>,
+    /// Where a right-click opened the `⋯` menu, in window coordinates; it
+    /// hangs from that point instead of the header's `⋯` control. `None`
+    /// for a menu the key, the palette or the control opened.
+    menu_at: Option<Point<Pixels>>,
     /// The live keymap the menus' hints are resolved against.
     chords: Arc<Vec<Binding>>,
     stack: Option<StackHandle>,
@@ -214,6 +221,14 @@ pub struct ClassificationsTile {
     confirm: Option<Confirm<Pending>>,
     /// A create, rename or delete written and not yet reloaded.
     awaiting: Option<Awaiting>,
+    /// A classification whose revert is queued and not yet reloaded. Its
+    /// label verbs are refused meanwhile: the tile cannot see the lower
+    /// copy the revert will show, and an edit built on the user copy would
+    /// replace the revert's removal in the shell's batch, undoing it.
+    reverting: Option<String>,
+    /// Whether a values read is on its way: the header says so until it
+    /// answers or is refused.
+    loading: bool,
     /// The window the editor or the prompt opened in, to blur its field
     /// where no window is at hand (a reload removing the classification, a
     /// close).
@@ -267,6 +282,10 @@ impl ClassificationsTile {
             this.row_pressed(*e, window, cx)
         })
         .detach();
+        cx.subscribe_in(&table, window, |this, _, e: &RowContext, window, cx| {
+            this.row_context(*e, window, cx)
+        })
+        .detach();
         cx.subscribe(&table, |this, _, e: &SortClicked, cx| {
             this.sort_clicked(e.0, cx)
         })
@@ -310,6 +329,7 @@ impl ClassificationsTile {
             find_entry: None,
             last_rem: 0.0,
             menu: None,
+            menu_at: None,
             chords: menu::live_bindings(cx),
             stack: None,
             close: None,
@@ -322,6 +342,8 @@ impl ClassificationsTile {
             prompt: None,
             confirm: None,
             awaiting: None,
+            reverting: None,
+            loading: false,
             field_window: None,
             register: None,
             settled: false,
@@ -377,6 +399,13 @@ impl ClassificationsTile {
         }
         if self.awaiting.as_ref().is_some_and(|a| self.landed(a)) {
             self.awaiting = None;
+        }
+        if self
+            .reverting
+            .as_ref()
+            .is_some_and(|n| self.revert_landed(n))
+        {
+            self.reverting = None;
         }
         self.settle_menu(shown);
         if self.notices.nothing_to_switch && !self.switch_rows().is_empty() {
@@ -448,11 +477,39 @@ impl ClassificationsTile {
         }
         if refused {
             self.history.refused();
+            self.reverting = None;
             self.rebuild_rows(false, cx);
         } else {
             self.rebuild_chrome();
         }
         cx.notify();
+    }
+
+    /// Whether the configuration no longer has the user copy of `name` over
+    /// a lower one: the revert's reload has landed (or the classification
+    /// went away).
+    fn revert_landed(&self, name: &str) -> bool {
+        let config = self.shared.config.borrow();
+        config
+            .as_ref()
+            .is_none_or(|c| !c.shadowed.contains_key(name))
+    }
+
+    /// Whether `name`'s revert is still on its way.
+    fn reverting(&self) -> Option<&str> {
+        self.reverting
+            .as_deref()
+            .filter(|n| self.state.name.as_deref() == Some(*n))
+    }
+
+    /// Refuse a label verb while the shown classification's revert is on
+    /// its way (see `reverting`); `true` when refused.
+    fn refuse_while_reverting(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(name) = self.reverting().map(str::to_string) else {
+            return false;
+        };
+        self.refuse(Notice::status(format!("reverting {name}\u{2026}")), cx);
+        true
     }
 
     /// Whether the configuration now carries what `a` wrote.
@@ -495,6 +552,7 @@ impl ClassificationsTile {
         }
         self.asked = now.clone();
         self.values_notice = None;
+        self.loading = false;
         let Some(asked) = now else {
             return;
         };
@@ -506,11 +564,16 @@ impl ClassificationsTile {
             scope: Scope::default(),
             as_of: AsOf::Live,
         };
-        if let Err(refusal) = self.data.distinct(params) {
-            self.values_notice = Some(match refusal {
-                Refusal::Busy => format!("values not loaded: {refusal} \u{2014} shift+r retries"),
-                Refusal::Stopped => format!("values not loaded: {refusal}"),
-            });
+        match self.data.distinct(params) {
+            Ok(()) => self.loading = true,
+            Err(refusal) => {
+                self.values_notice = Some(match refusal {
+                    Refusal::Busy => {
+                        format!("values not loaded: {refusal} \u{2014} shift+r retries")
+                    }
+                    Refusal::Stopped => format!("values not loaded: {refusal}"),
+                });
+            }
         }
     }
 
@@ -524,6 +587,7 @@ impl ClassificationsTile {
         if outcome.tag != self.tag || !current {
             return;
         }
+        self.loading = false;
         let answered = match outcome.values {
             Ok(values) => {
                 self.observed = values;
@@ -657,7 +721,8 @@ impl ClassificationsTile {
             .as_deref()
             .and_then(|n| config.as_ref()?.dims.get(n));
         let layer = dim.and_then(|d| config.as_ref()?.layers.get(&d.name).copied());
-        self.chrome.header = HeaderModel::prepare(dim, layer, self.grid.counts());
+        self.chrome.header = HeaderModel::prepare(dim, layer, self.grid.counts())
+            .loading(dim.is_some() && self.loading);
         let none_defined = config
             .as_ref()
             .is_none_or(|c| c.dims.all().next().is_none());
@@ -845,6 +910,7 @@ impl ClassificationsTile {
     /// kind's open menu is replaced, not stacked. A switcher with nothing to
     /// list refuses into the header rather than paint an empty list.
     fn toggle_menu(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
+        self.menu_at = None;
         if self.menu.as_ref().is_some_and(|(k, _)| *k == kind) {
             self.menu = None;
         } else {
@@ -868,6 +934,7 @@ impl ClassificationsTile {
     }
 
     fn close_menu(&mut self, cx: &mut Context<Self>) {
+        self.menu_at = None;
         if self.menu.take().is_some() {
             cx.notify();
         }
@@ -914,6 +981,9 @@ impl ClassificationsTile {
     /// definition) is never written: the door would write it even when the
     /// reload then rejected it.
     fn write(&mut self, write: Write, cx: &mut Context<Self>) {
+        if self.refuse_while_reverting(cx) {
+            return;
+        }
         self.notices.outcome.clear();
         let Some(config_dim) = self.config_dim() else {
             return;
@@ -947,7 +1017,19 @@ impl ClassificationsTile {
             }),
         };
         if let Some((next, skipped)) = done {
-            match skipped.len() {
+            // The tile's own refused write left its rows as they were; only
+            // the rest were changed by another surface.
+            let unsaved = self.history.unsaved(&skipped);
+            match unsaved {
+                0 => {}
+                1 => self
+                    .notices
+                    .outcome(Notice::warning("1 row was not saved and is left as it is")),
+                n => self.notices.outcome(Notice::warning(format!(
+                    "{n} rows were not saved and are left as they are"
+                ))),
+            }
+            match skipped.len() - unsaved {
                 0 => {}
                 1 => self
                     .notices
@@ -984,10 +1066,18 @@ impl ClassificationsTile {
     /// prefilled with their label when they all share one, the text
     /// selected so typing replaces it.
     fn open_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_while_reverting(cx) {
+            return;
+        }
         let targets = self.grid.targets();
         if targets.is_empty() {
             return;
         }
+        // The editor paints on the cursor's row and writes `targets`: a
+        // resting cursor keeps its index across a rebuild, so a reload or a
+        // values answer reordering the rows would leave the field painted
+        // on a row it does not write. Put on its row, the cursor follows it.
+        self.grid.put_cursor();
         let Some(config_dim) = self.config_dim() else {
             return;
         };
@@ -1349,10 +1439,11 @@ impl ClassificationsTile {
         cx.notify();
     }
 
-    /// Say why a verb cannot act, in the header.
-    fn refuse(&mut self, why: impl Into<SharedString>, cx: &mut Context<Self>) {
+    /// Say why a verb cannot act, in the header: a danger notice unless
+    /// `why` is already one.
+    fn refuse(&mut self, why: impl Into<Why>, cx: &mut Context<Self>) {
         self.notices.outcome.clear();
-        self.notices.outcome(Notice::danger(why.into()));
+        self.notices.outcome(why.into().0);
         self.rebuild_chrome();
         cx.notify();
     }
@@ -1430,6 +1521,32 @@ impl ClassificationsTile {
             let edit = ActionId("classifications::edit".to_string());
             self.dispatch(&edit, None, window, cx);
         }
+        cx.notify();
+    }
+
+    /// A right press on shown row `row`: the cursor moves there (a row of a
+    /// live selection keeps the selection, which the menu then acts on),
+    /// and the `⋯` menu opens hung from the pointer, as `.` opens it from
+    /// the header.
+    fn row_context(&mut self, e: RowContext, window: &mut Window, cx: &mut Context<Self>) {
+        self.user_acted(cx);
+        confirm::cancel(self, window, cx);
+        self.close_editor(window, cx);
+        self.close_prompt(window, cx);
+        let in_selection = self.grid.selected().is_some_and(|s| s.contains(&e.row));
+        if !in_selection {
+            self.grid.click(e.row, false);
+        }
+        // The table's own right-press row outline: the tile paints the
+        // cursor and the selection itself.
+        self.table
+            .update(cx, |t, cx| t.set_right_clicked_row(None, cx));
+        self.sync_table(false, cx);
+        self.menu = Some((
+            MenuKind::Actions,
+            Menu::new(self.action_rows(), &self.chords).open_at(None),
+        ));
+        self.menu_at = Some(e.position);
         cx.notify();
     }
 
@@ -1938,15 +2055,27 @@ impl Render for ClassificationsTile {
             .as_ref()
             .filter(|(k, _)| *k == MenuKind::Actions)
             .map(|(_, m)| {
-                menu::render_menu(
-                    m,
-                    &ids,
-                    gpui::Anchor::TopRight,
-                    &tile,
-                    close(MenuKind::Actions),
-                    cx,
-                )
+                // From the header's `⋯` its top-right corner hangs under the
+                // control; from a right press its top-left at the pointer.
+                let corner = if self.menu_at.is_some() {
+                    gpui::Anchor::TopLeft
+                } else {
+                    gpui::Anchor::TopRight
+                };
+                menu::render_menu(m, &ids, corner, &tile, close(MenuKind::Actions), cx)
             });
+        let (actions, row_actions) = match self.menu_at {
+            Some(at) => (
+                None,
+                actions.map(|m| {
+                    anchored()
+                        .position_mode(AnchoredPositionMode::Window)
+                        .position(at)
+                        .child(m)
+                }),
+            ),
+            None => (actions, None),
+        };
         let theme = cx.theme();
         let header = header::render(
             &self.chrome.header,
@@ -1958,7 +2087,7 @@ impl Render for ClassificationsTile {
                 mode: Mode::from_key_mode(self.mode()),
                 links: link_chips(&self.frame, cx),
                 notices: self.chrome.notices.clone(),
-                actions_open: actions.is_some(),
+                actions_open: actions.is_some() || row_actions.is_some(),
                 switcher,
                 menu_selector: self.menu_selector.clone(),
                 menu_tip: self.menu_tip.clone(),
@@ -2019,7 +2148,8 @@ impl Render for ClassificationsTile {
             )
             .children(question)
             .children(prompt)
-            .child(body);
+            .child(body)
+            .children(row_actions);
         // A pointer press anywhere on the tile answers an armed question no.
         confirm::cancel_on_press(root, self.confirm.is_some(), &tile)
     }
@@ -2050,6 +2180,7 @@ impl ConfirmHost for ClassificationsTile {
             Pending::Revert { name } => {
                 self.notices.outcome.clear();
                 self.frame.queue_config_edits(vec![remove_edit(&name)], cx);
+                self.reverting = Some(name);
                 self.history.forget();
                 self.rebuild_rows(false, cx);
                 cx.notify();
@@ -2090,6 +2221,22 @@ impl Blocked {
             short: text,
             long: text.to_string(),
         }
+    }
+}
+
+/// What [`ClassificationsTile::refuse`] shows: a sentence is a danger
+/// notice; a waiting state passes its own status notice.
+struct Why(Notice);
+
+impl From<Notice> for Why {
+    fn from(notice: Notice) -> Self {
+        Why(notice)
+    }
+}
+
+impl From<String> for Why {
+    fn from(why: String) -> Self {
+        Why(Notice::danger(why))
     }
 }
 

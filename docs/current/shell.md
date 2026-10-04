@@ -1413,6 +1413,14 @@ whose in-memory reload is rejected, keeping the last good configuration, is
 still written to the user file; the status bar then reports
 `saved to disk · rejected by the merge` with the error count.
 
+A tile shows its edit before the write, so the batch remembers each origin
+tile once and tells it when its edit is not what is in force: a failed write,
+which reverts memory to the batch's start, posts `TileNotice::Refused` with
+the status bar's `config not saved — reverted: …`, and a written batch whose
+merge was rejected posts `saved to disk · rejected by the merge — showing the
+configuration in force`. Either goes to every tile whose edits joined the
+batch, deferred and followed by one frame notification, as the drain posts.
+
 Hot reload keeps the last valid configuration when a changed document is
 rejected by the file, modifier, clock, or keymap checks. Later typed readers
 do not roll back the whole reload. Every accepted reload advances the frame's

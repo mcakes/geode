@@ -25,3 +25,8 @@ geode-core = { workspace = true, features = ["test-support"] }
 geode-shell = { workspace = true, features = ["test-support"] }
 geode-data = { path = "../geode-data", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+criterion = "0.8.2"
+
+[[bench]]
+name = "grid"
+harness = false

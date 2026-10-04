@@ -557,7 +557,7 @@ separate outcomes. See [configuration dialogs](configuration-dialogs.md) for
 inherited objects, presentation routing, reload interaction, and write failures.
 
 Modules write configuration only through the shell's config door
-(`Frame::queue_config_edits`, see [the config
+(`FrameRef::queue_config_edits`, see [the config
 door](shell.md#the-config-door)), which joins the object dialogs' pending
 batch. `dimensions` has a runtime writer this way, the Classifications tile
 (see [features](features.md#classifications)): a classification edited in a
