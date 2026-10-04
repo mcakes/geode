@@ -337,7 +337,11 @@ blotter's do; `g p`, `g u` and `g m` among
 them, beside the shell's `g g`: a first `g` waits for the second key), its
 `mode == insert` field keys and its `mode == menu` pick and close keys.
 The timeseries fragment binds its popups' `enter`, `escape` and `.`; their
-row steps are the shared ones under `tilelist`.
+row steps are the shared ones under `tilelist`. Under `mode == normal` it
+binds `escape` to `timeseries::cancel`, which clears the notice line
+(see [Shared tile interaction](features.md#shared-tile-interaction)); the
+popup layers come later in the fragment, so their `escape` still wins
+while one is up.
 The vol slice fragment binds its verbs under `mode == normal`, among them
 the bare digits `1`..`9` (its key context does not opt into counts, so a
 digit reaches its kind toggle rather than starting a count) and `shift+d`,
@@ -345,10 +349,13 @@ which beats the workspace's duplicate inside the tile. Under `mode ==
 insert` (the underlying picker's field) it binds `enter`, `escape` and
 `up`/`down` (`volslice::list_down`/`list_up`); under `mode == menu` (the
 difference chooser) `enter` and `escape`, its steps being the shared ones.
+Its normal-mode `escape` is `volslice::cancel`, which dismisses the footer
+notice when there is nothing else to cancel.
 The classifications fragment binds its label verbs under `mode == normal`
 (`enter`/`c` edit, `x` clear, `y y` copy, `p` paste, `u` undo, `ctrl+r`
 redo, `shift+r` refresh, `.` the `⋯` menu, `g c` the switcher, `v`/`shift+v`
-a row selection); under `mode == visual` the verbs that act on a selection
+a row selection, `escape` dismissing the header's warning and danger
+notices); under `mode == visual` the verbs that act on a selection
 and `escape`; under `mode == insert` (the label editor and the New/Rename
 field) `enter`, `escape` and `up`/`down` over the typeahead; under `mode ==
 menu` `enter`, `escape` and `.`. `y` and `g` alone are unbound, so `y y` and

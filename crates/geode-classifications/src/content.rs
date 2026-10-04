@@ -118,6 +118,9 @@ context = "classifications && mode == normal"
 "g c" = "classifications::switch"
 "shift+v" = "classifications::visual_rows"
 "v" = "classifications::visual_rows"
+# Nothing to cancel in normal mode but the header's notices: `escape`
+# dismisses the warning and danger ones, and does nothing otherwise.
+"escape" = "classifications::cancel"
 
 [[bindings]]
 context = "classifications && mode == insert"
@@ -374,7 +377,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 24);
+        assert_eq!(count, 25);
         // The config-level verbs are reached from the palette and the menu.
         for unbound in [
             "new",

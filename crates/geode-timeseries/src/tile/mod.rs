@@ -150,6 +150,9 @@ pub struct TimeseriesTile {
     /// asks for a different span, so an unanswered fetch over the old
     /// one must not suppress it.
     in_flight_range: Option<Range>,
+    /// The notice line: a transient slot (every handled verb replaces or
+    /// clears it), so a click on it and `escape` clear it rather than hide
+    /// it, and the same refusal said again shows again.
     notice: Option<SharedString>,
     /// Prepared text: the range/frequency readout and one chip per slot.
     header: HeaderModel,
@@ -530,6 +533,7 @@ impl TimeseriesTile {
                 None => return false,
             },
         };
+        let had_popup = self.popup.is_some();
         // Handled verbs replace the standing notice. Restore it on unhandled
         // paths so an inert action does not silently erase the last refusal.
         let previous = self.notice.take();
@@ -620,6 +624,13 @@ impl TimeseriesTile {
                 // nothing and gives the standing notice back.
                 if !handled && self.notice.is_none() {
                     self.notice = previous;
+                }
+                // Last in line: an `escape` no popup answered clears the
+                // notice line, as a click on it does; handled only when
+                // there was one.
+                if !handled && verb == "cancel" && !had_popup && self.dismiss_notice() {
+                    cx.notify();
+                    return true;
                 }
                 return handled;
             }
@@ -949,6 +960,17 @@ impl TimeseriesTile {
         self.pick_context.as_ref()
     }
 
+    /// The notice line as it paints: always danger.
+    pub(crate) fn reported_notice(&self) -> Option<geode_tile::notice::Notice> {
+        self.notice.clone().map(geode_tile::notice::Notice::danger)
+    }
+
+    /// The notice line dismissed, by a click on it or by `escape`: the
+    /// transient slot is cleared. Whether there was one.
+    pub(crate) fn dismiss_notice(&mut self) -> bool {
+        self.notice.take().is_some()
+    }
+
     #[cfg(test)]
     pub(crate) fn notice(&self) -> Option<&SharedString> {
         self.notice.as_ref()
@@ -1229,8 +1251,15 @@ impl Render for TimeseriesTile {
             .size_full()
             .bg(theme.background)
             .child(header)
-            .when_some(self.notice.clone(), |el, n| {
-                el.child(header::render_notice(&n, theme))
+            .when_some(self.reported_notice(), |el, n| {
+                el.child(header::render_notice(
+                    &n,
+                    &geode_tile::notice::on_dismiss_with(&tile, |t: &mut TimeseriesTile, _, _| {
+                        t.dismiss_notice()
+                    }),
+                    tile_id,
+                    theme,
+                ))
             })
             .when_some(expr_field, |el, f| el.child(f))
             .child(body)

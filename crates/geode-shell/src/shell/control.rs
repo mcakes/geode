@@ -265,6 +265,27 @@ mod tests {
                 "market-data ⋯ and the tile ×",
             ),
             (
+                ControlInputs::new(
+                    theme,
+                    Rest::Bare,
+                    theme.background,
+                    crate::shell::chip::chip_paint(theme, crate::shell::chip::Tone::WarningText)
+                        .text,
+                ),
+                // `geode_tile::notice::dismissable`, a warning notice.
+                "dismissable warning notice",
+            ),
+            (
+                ControlInputs::new(
+                    theme,
+                    Rest::Bare,
+                    theme.background,
+                    crate::shell::chip::chip_paint(theme, crate::shell::chip::Tone::DangerText)
+                        .text,
+                ),
+                "dismissable danger notice",
+            ),
+            (
                 ControlInputs::new(theme, muted, theme.popover, theme.secondary_foreground),
                 "secondary_foreground on popover",
             ),

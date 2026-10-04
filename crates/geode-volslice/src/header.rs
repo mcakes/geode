@@ -22,7 +22,7 @@ use geode_shell::shell::{kbd, scale};
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
 use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks};
-use geode_tile::notice::{Notice, Tone as NoticeTone};
+use geode_tile::notice::{Notice, OnDismiss, Tone as NoticeTone};
 use gpui::prelude::*;
 use gpui::{App, Div, ElementId, Entity, MouseButton, MouseDownEvent, SharedString, div};
 use gpui_component::{Theme, h_flex, v_flex};
@@ -453,9 +453,13 @@ pub(crate) fn render_header(
     .debug_selector(move || format!("volslice-header-{tile_id}"))
 }
 
-/// The footer: the notice line when there is one, then the hint row.
+/// The footer: the notice line when there is one, then the hint row. The
+/// tile hands in only a notice that shows (its dismissals filtered it);
+/// a danger notice takes the notice door's dismissal (`on_dismiss`), an
+/// empty state (status) stays inert.
 pub(crate) fn render_footer(
     notice: Option<&Notice>,
+    on_dismiss: &OnDismiss,
     hints: &[FooterHint],
     theme: &Theme,
     tile_id: u64,
@@ -490,7 +494,22 @@ pub(crate) fn render_footer(
                     .px_2()
                     .text_xs()
                     .debug_selector(move || format!("volslice-notice-{tile_id}"))
-                    .child(geode_tile::notice::render(n, theme).truncate()),
+                    .child(
+                        geode_tile::notice::dismissable(
+                            geode_tile::notice::render(n, theme)
+                                .id(ElementId::NamedInteger(
+                                    SharedString::new_static("volslice-notice"),
+                                    tile_id,
+                                ))
+                                .min_w_0()
+                                .truncate(),
+                            n,
+                            Some(on_dismiss),
+                            SharedString::new_static("tip-volslice-notice"),
+                            theme,
+                        )
+                        .debug_selector(move || format!("volslice-notice-text-{tile_id}")),
+                    ),
             )
         })
         .child(hint_row)

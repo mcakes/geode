@@ -18,7 +18,7 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks, TimeRun};
-use geode_tile::notice::{self, Notice};
+use geode_tile::notice::{self, Dismissals, Notice};
 use gpui::prelude::*;
 use gpui::{AnyElement, ElementId, Entity, FocusHandle, Hsla, SharedString, div, rems};
 use gpui_component::input::Input;
@@ -266,6 +266,13 @@ impl HeaderModel {
         }
     }
 
+    /// The notices the header reports, in paint order: the upload error,
+    /// then the notice. The one list the tile prunes its dismissals
+    /// against, escape dismisses from and render filters.
+    pub(crate) fn notices(&self) -> impl Iterator<Item = &Notice> {
+        self.upload_error.iter().chain(&self.notice)
+    }
+
     /// Every painted string, in order — the test door: a test asserts on
     /// what a trader reads, not on the fields behind it. Test-only: no
     /// production code reads a formatted-string form of the header, only
@@ -306,9 +313,10 @@ impl HeaderModel {
 }
 
 /// Render the header through the shared frame: kind badge, underlying and
-/// attributes on the left; state, incomplete rows, echo and upload error
-/// as cluster status; then the notice, the time, the health chip, `⋯` and ×
-/// from the shared cluster. The attribute cursor and editor are passed
+/// attributes on the left; state, incomplete rows and echo as cluster
+/// status; then the upload error and the notice (less those `dismissed`,
+/// each dismissable by a click), the time, the health chip, `⋯` and × from
+/// the shared cluster. The attribute cursor and editor are passed
 /// separately from prepared values; `menu_open` keeps the action button's
 /// selected fill; `mode` (the key context's own) paints the cluster's mode
 /// icon. A pending upload asks on the confirm door's bar under the header,
@@ -331,6 +339,7 @@ pub(crate) fn render(
     health: Option<&HealthChip>,
     mode: Mode,
     links: TileLinks,
+    dismissed: &Dismissals,
 ) -> impl IntoElement {
     let muted = theme.muted_foreground;
     let mut left = h_flex().items_center().gap_3();
@@ -471,31 +480,18 @@ pub(crate) fn render(
                 .into_any_element(),
         );
     }
-    if let Some(e) = &h.upload_error {
-        status.push(
-            // Cut to one line in the cluster; the tooltip keeps the whole
-            // error readable.
-            notice::truncated(
-                e,
-                ElementId::NamedInteger(
-                    SharedString::new_static("marketdata-upload-error"),
-                    tile_id,
-                ),
-                SharedString::new_static("tip-marketdata-upload-error"),
-                theme,
-            )
-            .debug_selector(move || format!("marketdata-upload-error-{tile_id}"))
-            .into_any_element(),
-        );
-    }
-    // The shared cluster: status, the notice, the time (its stale label
+    // The shared cluster: status, the upload error and the notice, the time (its stale label
     // prepared), the health chip, `⋯`, ×. The trigger toggles in the capture
     // phase and lets the press bubble on so the shell still focuses the tile.
     let mut cluster = Cluster::new(TileId(tile_id));
     cluster.close = close.cloned();
     cluster.mode = mode;
     cluster.status = status;
-    cluster.notices.extend(h.notice.clone());
+    cluster.notices = dismissed.visible(h.notices().cloned());
+    cluster.on_dismiss = Some(notice::on_dismiss_with(
+        tile,
+        |t: &mut MarketDataTile, n, _| t.dismiss_notice(n),
+    ));
     cluster.times.extend(h.time.clone().map(|label| TimeRun {
         label,
         stale_label: h.time_stale.clone(),

@@ -31,7 +31,7 @@ Current behavior and rationale:
 | `core::cursor`, `core::menu` | Grid navigation over `geode_tile::motion` (the shared rules; `step_clamped` for a live selection), with the attribute strip outside the wrap cycle, and the action list's rows (`geode_tile::menu` rows over action ids, hints as live chords). Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
 | `core::bulk` | Selection-wide edit rules: whether a typed value lands in a cell of each kind, one arrow step's delta per column, and the `set`/`stepped` notices that count skips by reason. |
 | `commands` | The `:` line: `:rebase`, `:revert`, `:auto`, `:bump`, `:upload`, `:autosize [reset]` and the rest, parsed to data. |
-| `header` | Prepared identity, attributes, draft/upload feedback, source time (and its prepared stale label), and shared date-field rendering. Paints through `geode_tile::header::frame`: kind badge, underlying and attributes on the left; state, incomplete rows, echo and upload error as cluster status; the notice, the time, the health chip (the panel's dataset), `⋯` and the shell's × from the shared cluster. The `:upload` question asks on the confirm door's bar under the header (`tile`'s render), not here. |
+| `header` | Prepared identity, attributes, draft/upload feedback, source time (and its prepared stale label), and shared date-field rendering. Paints through `geode_tile::header::frame`: kind badge, underlying and attributes on the left; state, incomplete rows and echo as cluster status; the upload error then the notice as cluster notices (`HeaderModel::notices`, less the tile's dismissed ones; a click on either dismisses it), the time, the health chip (the panel's dataset), `⋯` and the shell's × from the shared cluster. The `:upload` question asks on the confirm door's bar under the header (`tile`'s render), not here. |
 | `tile` | `MarketDataTile`: requests one document by key through `DataHandle`, runs its document request through `geode_tile::following` (following `as_of` and its watched document's data; hiding keeps the request in flight, `closed` cancels it and answers the barrier; arrivals from `closed` and `set_visible`, which the shell calls inside its draw, go through `geode_tile::following::DeferredDoor` so the release is heard), owns the cursor, the editor, the draft and the parked drafts per underlying. |
 | `tile::select` | The `V`/`v` grid selection: its state doors, label-anchored resolution, and every verb that takes it as operand (`y`, `d`, `:bump`, the bulk commit, the live step and its undo). |
 | `delegate` | `MatrixDelegate`, the `TableDelegate` over gpui-component's table, and the window (`geode_tile::grid::WindowCache<MdCell>`) `render_td` reads. It fills the window for the range the table reports (`visible_rows_changed`) and refills the recorded range on every install; before any report it prepares the first `FIRST_WINDOW` rows. Holds `:autosize`'s fitted widths by column label (`__row_axis` for the row labels), which `column()` prefers over the fixed defaults. |
@@ -225,6 +225,20 @@ draft withdraws it unanswered (neither submit nor cancel runs) and says so in
 the notice, `upload cancelled: a new document arrived`. The upload confirm is
 `geode_tile::confirm`'s; after an answer the shell's focus restoration path
 returns the keyboard to the tile.
+
+Normal-mode `escape` (`marketdata::escape`) peels one layer per press: a
+popup a palette dispatch left open, then a live selection, then a find, and
+only when none of those answered it the header's notices, each as a click
+on it would (`dismiss_notice`): the transient `notice` is cleared, so the
+key repeated says it again. That slot holds a verb's refusal or advisory,
+a document query failure, an unbuildable document and the delivery-policy
+notices (a republish that moved the edits, an upload cancelled by a new
+document), all of which escape has
+always cleared and the next verb or delivery replaces. The upload error
+is standing and is hidden, not cleared: it stays hidden while the header
+keeps reporting it and shows again once it stops and returns
+(`geode_tile::notice::Dismissals`, pruned in `rebuild_chrome`). The upload
+error therefore still clears on the next edit or upload as before.
 
 Action-menu stepping, hover, picking and painting are `geode_tile::menu`'s:
 the menu opens on its first enabled action; its steps are the shared

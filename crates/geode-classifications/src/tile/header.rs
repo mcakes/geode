@@ -17,7 +17,7 @@ use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_tile::header::{Cluster, MenuTrigger, Mode, OnPress, TileLinks};
-use geode_tile::notice::Notice;
+use geode_tile::notice::{Notice, OnDismiss};
 use gpui::prelude::*;
 use gpui::{AnyElement, Div, ElementId, Entity, SharedString, div};
 use gpui_component::{Theme, h_flex};
@@ -108,7 +108,10 @@ pub(crate) struct HeaderChrome<'a> {
     pub close: Option<&'a CloseHandle>,
     pub mode: Mode,
     pub links: TileLinks,
+    /// The notices to paint: the reported ones less those dismissed.
     pub notices: Vec<Notice>,
+    /// A press on a warning or danger notice dismisses it.
+    pub on_dismiss: OnDismiss,
     /// The `⋯` menu is up: its control keeps the selected fill.
     pub actions_open: bool,
     /// The open switcher, rendered by the tile, hung from the name.
@@ -262,6 +265,7 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> Div
     cluster.mode = c.mode;
     cluster.links = c.links;
     cluster.notices = c.notices;
+    cluster.on_dismiss = Some(c.on_dismiss);
     cluster.menu = Some(MenuTrigger {
         id: ElementId::NamedInteger(
             SharedString::new_static("classifications-menu-button"),

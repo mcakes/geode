@@ -4191,9 +4191,9 @@ run_mutation "tile: the depth bound is requested, not everything" \
 run_mutation "tile: a query error keeps the last snapshot" \
   crates/geode-blotter/src/tile.rs \
   '                self.fail_fuzzy_find(e.clone(), cx);
-                self.error = Some(Notice::danger(e));' \
+                self.set_error(Some(Notice::danger(e)));' \
   '                self.fail_fuzzy_find(e.clone(), cx);
-                self.error = Some(Notice::danger(e));
+                self.set_error(Some(Notice::danger(e)));
                 self.table
                     .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());' \
   geode-blotter \
@@ -27068,8 +27068,8 @@ run_mutation "bridge: refused submissions are not read" \
 
 run_mutation "blotter: a stopped query refusal reads as something else" \
   crates/geode-blotter/src/tile.rs \
-  '            self.error = Some(Notice::danger(format!("query refused: {refusal}")));' \
-  '            self.error = Some(Notice::danger({ let _ = refusal; "query refused".to_string() }));' \
+  '            self.set_error(Some(Notice::danger(format!("query refused: {refusal}"))));' \
+  '            self.set_error(Some(Notice::danger({ let _ = refusal; "query refused".to_string() })));' \
   geode-blotter a_refused_query_says_busy_or_stopped
 
 run_mutation "mdtile: a document refusal loses its kind" \
@@ -31026,8 +31026,8 @@ run_mutation "tile header: a long notice leaves the left side its share" \
 # wrap, a long error runs out of the 22 px strip.
 run_mutation "tile header: a long notice stays one line" \
   crates/geode-tile/src/notice.rs \
-  '        .truncate()' \
-  '        .overflow_hidden()' \
+  '    let el = render(notice, theme).id(id).min_w_0().truncate();' \
+  '    let el = render(notice, theme).id(id).min_w_0().overflow_hidden();' \
   geode-tile an_overlong_notice_cuts_and_leaves_the_tail_and_left_side
 
 # A pending-too-long source has no reason of its own; without the detail
@@ -37756,6 +37756,273 @@ run_mutation "value colors: the tone click warms the track" \
   $'    cx.notify();\n}' \
   geode-shell \
   a_tone_change_warms_the_track_before_the_paint
+
+# A dismissed warning or danger notice is filtered from the paint; a status
+# notice never is; the prune forgets what is no longer reported, so a notice
+# that stops and returns shows again.
+run_mutation "notice dismissal: a dismissed notice is filtered" \
+  crates/geode-tile/src/notice.rs \
+  '        !self.hidden.contains(notice)' \
+  '        true' \
+  geode-tile \
+  a_dismissed_notice_is_filtered_and_a_status_never_is
+
+run_mutation "notice dismissal: a status notice is never hidden" \
+  crates/geode-tile/src/notice.rs \
+  '        if !notice.dismissable() || self.hidden.contains(notice) {' \
+  '        if self.hidden.contains(notice) {' \
+  geode-tile \
+  a_dismissed_notice_is_filtered_and_a_status_never_is
+
+run_mutation "notice dismissal: the prune forgets a notice no longer reported" \
+  crates/geode-tile/src/notice.rs \
+  '        self.hidden.retain(|h| reported.contains(&h));' \
+  '        let _ = reported;' \
+  geode-tile \
+  a_notice_that_stops_and_returns_shows_again
+
+run_mutation "notice dismissal: the header prune lets a returning notice show" \
+  crates/geode-tile/src/notice.rs \
+  '        self.hidden.retain(|h| reported.contains(&h));' \
+  '        let _ = reported;' \
+  geode-tile \
+  a_dismissed_notice_shows_again_after_it_stops_and_returns
+
+run_mutation "notice dismissal: a click on a notice dismisses it" \
+  crates/geode-tile/src/notice.rs \
+  '            on_dismiss(&pressed, window, cx);' \
+  '            let _ = (&pressed, &on_dismiss);' \
+  geode-tile \
+  clicking_a_warning_or_danger_notice_dismisses_it
+
+run_mutation "notice dismissal: the click stops at the notice" \
+  crates/geode-tile/src/notice.rs \
+  $'            cx.stop_propagation();\n            window.prevent_default();\n            on_dismiss(&pressed, window, cx);' \
+  $'            window.prevent_default();\n            on_dismiss(&pressed, window, cx);' \
+  geode-tile \
+  clicking_a_warning_or_danger_notice_dismisses_it
+
+run_mutation "notice dismissal: a status notice takes no press" \
+  crates/geode-tile/src/notice.rs \
+  '    on_dismiss.filter(|_| notice.dismissable())' \
+  '    on_dismiss' \
+  geode-tile \
+  a_status_notice_or_one_without_a_dismiss_takes_no_press
+
+# Each module filters its notices through its dismissals at paint, prunes
+# them at its notice seam, and dismisses on escape only after every other
+# escape layer had nothing to do.
+run_mutation "notice dismissal: the blotter filters a dismissed error" \
+  crates/geode-blotter/src/tile.rs \
+  '        cluster.notices = self.dismissed.visible(self.reported_notices().cloned());' \
+  '        cluster.notices = self.reported_notices().cloned().collect();' \
+  geode-blotter \
+  clicking_the_error_notice_hides_it_until_it_changes
+
+run_mutation "notice dismissal: the blotter prunes at set_error" \
+  crates/geode-blotter/src/tile.rs \
+  '        self.dismissed.prune(self.error.iter());' \
+  '        let _ = &self.dismissed;' \
+  geode-blotter \
+  clicking_the_error_notice_hides_it_until_it_changes
+
+run_mutation "notice dismissal: the pricer header filters dismissed notices" \
+  crates/geode-pricer/src/header.rs \
+  '    cluster.notices = c.dismissed.visible(h.notices().cloned());' \
+  '    cluster.notices = h.notices().cloned().collect();' \
+  geode-pricer \
+  clicking_a_header_notice_hides_it_until_it_changes
+
+run_mutation "notice dismissal: the pricer prunes in rebuild_chrome" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.dismissed.prune(self.header.notices());' \
+  '        let _ = &self.dismissed;' \
+  geode-pricer \
+  clicking_a_header_notice_hides_it_until_it_changes
+
+run_mutation "notice dismissal: a palette escape closes the pricer menu before the notices" \
+  crates/geode-pricer/src/tile.rs \
+  '            "escape" if layer => {}' \
+  '            "escape" if false => {}' \
+  geode-pricer \
+  a_palette_escape_over_an_open_menu_closes_only_the_menu
+
+run_mutation "notice dismissal: pricer escape ends a find before the notices" \
+  crates/geode-pricer/src/tile.rs \
+  '            "escape" if self.find.is_some() => self.find = None,' \
+  $'            "escape" if self.find.is_some() => {\n                self.find = None;\n                self.dismissed.dismiss_all(self.header.notices());\n            }' \
+  geode-pricer \
+  escape_dismisses_the_notices_only_after_every_other_layer
+
+run_mutation "notice dismissal: the market-data header filters dismissed notices" \
+  crates/geode-marketdata/src/header.rs \
+  '    cluster.notices = dismissed.visible(h.notices().cloned());' \
+  '    cluster.notices = h.notices().cloned().collect();' \
+  geode-marketdata \
+  clicking_the_upload_error_hides_it_until_it_returns
+
+run_mutation "notice dismissal: market-data prunes in rebuild_chrome" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.dismissed.prune(self.header.notices());' \
+  '        let _ = &self.dismissed;' \
+  geode-marketdata \
+  clicking_the_upload_error_hides_it_until_it_returns
+
+run_mutation "notice dismissal: market-data escape ends a find before the notices" \
+  crates/geode-marketdata/src/tile.rs \
+  $'                } else if self.find.is_some() {\n                    self.find = None;\n                    false' \
+  $'                } else if self.find.is_some() {\n                    self.find = None;\n                    self.notice = None;\n                    self.dismissed.dismiss_all(self.header.notices());\n                    false' \
+  geode-marketdata \
+  escape_ends_a_find_before_it_touches_a_notice
+
+run_mutation "notice dismissal: classifications filters dismissed notices" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                notices: self.dismissed.visible(self.chrome.notices.iter().cloned()),' \
+  '                notices: self.chrome.notices.clone(),' \
+  geode-classifications \
+  clicking_a_values_notice_hides_it_until_it_returns
+
+run_mutation "notice dismissal: classifications prunes in rebuild_chrome" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        self.dismissed.prune(&self.chrome.notices);' \
+  '        let _ = &self.dismissed;' \
+  geode-classifications \
+  clicking_a_values_notice_hides_it_until_it_returns
+
+run_mutation "notice dismissal: classifications escape ends a selection first" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            "classifications::cancel" if self.grid.selecting() => {' \
+  '            "classifications::cancel" if self.grid.selecting() && !self.dismissed.dismiss_all(&self.chrome.notices) => {' \
+  geode-classifications \
+  escape_ends_a_selection_before_it_dismisses_a_notice
+
+run_mutation "notice dismissal: the vol slice footer filters" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '                    .filter(|n| self.dismissed.shows(n)),' \
+  '                    .filter(|_| true),' \
+  geode-volslice \
+  a_click_dismisses_the_footer_notice_until_it_stops_and_returns
+
+run_mutation "notice dismissal: the vol slice prunes in refresh_chrome" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '        self.dismissed.prune(self.chrome.notice.iter());' \
+  '        let _ = &self.dismissed;' \
+  geode-volslice \
+  a_click_dismisses_the_footer_notice_until_it_stops_and_returns
+
+# A click and escape do the same to the same notice: a transient one-shot
+# notice is cleared (revealing what it masked), a standing one hidden.
+run_mutation "notice dismissal: blotter escape dismisses only after the narrowing" \
+  crates/geode-blotter/src/tile.rs \
+  $'                    self.find = None;\n                    self.table.update(cx, |t, cx| t.refresh(cx));\n                } else if let Some(n) = self.error.clone().filter(|n| self.dismissed.shows(n))' \
+  $'                    self.find = None;\n                    self.dismissed.dismiss_all(self.error.iter());\n                    self.table.update(cx, |t, cx| t.refresh(cx));\n                } else if let Some(n) = self.error.clone().filter(|n| self.dismissed.shows(n))' \
+  geode-blotter \
+  escape_dismisses_the_notice_only_after_every_other_layer
+
+run_mutation "notice dismissal: a blotter click clears a one-shot notice" \
+  crates/geode-blotter/src/tile.rs \
+  '        if self.error_transient && self.error.as_ref() == Some(n) {' \
+  '        if false {' \
+  geode-blotter \
+  a_click_clears_a_one_shot_notice_as_escape_does
+
+run_mutation "notice dismissal: a pricer click clears the transient notice" \
+  crates/geode-pricer/src/tile.rs \
+  $'        let transient =\n            !self.stopped && self.refusals == 0 && self.notice.as_ref() == Some(n.text());' \
+  '        let transient = false;' \
+  geode-pricer \
+  a_click_on_the_transient_notice_clears_it_and_reveals_the_standing_one
+
+run_mutation "notice dismissal: market-data escape dismisses the upload error" \
+  crates/geode-marketdata/src/tile.rs \
+  '                        any |= self.dismiss_notice(n);' \
+  '                        let _ = n;' \
+  geode-marketdata \
+  escape_clears_the_notice_and_dismisses_the_upload_error
+
+run_mutation "notice dismissal: a market-data click clears the transient notice" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.notice.as_ref() == Some(n.text()) {' \
+  '        if false {' \
+  geode-marketdata \
+  a_click_clears_the_transient_notice_as_escape_does
+
+run_mutation "notice dismissal: classifications escape dismisses" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                    any |= self.dismiss_notice(n);' \
+  '                    let _ = n;' \
+  geode-classifications \
+  escape_dismisses_a_warning_notice
+
+run_mutation "notice dismissal: a classifications click clears a refusal" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if let Some(i) = self.notices.outcome.iter().position(|o| o == n) {' \
+  '        if let Some(i) = None::<usize> {' \
+  geode-classifications \
+  a_click_or_escape_clears_a_refusal_and_the_verb_says_it_again
+
+run_mutation "notice dismissal: a palette cancel under a question only answers it" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if answered && action.0 == "classifications::cancel" {' \
+  '        if false && answered {' \
+  geode-classifications \
+  a_palette_cancel_under_a_question_answers_it_and_leaves_the_notices
+
+run_mutation "notice dismissal: a timeseries click clears the notice line" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        self.notice.take().is_some()' \
+  '        self.notice.is_some()' \
+  geode-timeseries \
+  a_click_clears_the_notice_line_and_the_key_says_it_again
+
+run_mutation "notice dismissal: timeseries escape clears the notice line" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  "                if !handled && verb == \"cancel\" && !had_popup && self.dismiss_notice() {" \
+  "                if !handled && verb == \"cancel\" && !had_popup && false {" \
+  geode-timeseries \
+  escape_clears_the_notice_line
+
+run_mutation "notice dismissal: a vol slice click clears a refusal" \
+  crates/geode-volslice/src/tile/mod.rs \
+  $'        if self.refusal.is_some() {\n            self.clear_refusal(cx);\n            return true;' \
+  $'        if false {\n            self.clear_refusal(cx);\n            return true;' \
+  geode-volslice \
+  a_click_on_a_refusal_clears_it_and_reveals_what_it_led
+
+run_mutation "notice dismissal: vol slice escape dismisses the footer notice" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '                if !self.dismissed.dismiss_all(self.chrome.notice.iter()) {' \
+  '                if true {' \
+  geode-volslice \
+  escape_dismisses_the_footer_notice_after_every_other_layer
+
+run_mutation "notice dismissal: a notice element is keyed by itself, not its position" \
+  crates/geode-tile/src/notice.rs \
+  '    let repeat = notices[..i].iter().filter(|n| *n == notice).count();' \
+  '    let repeat = i;' \
+  geode-tile \
+  a_notice_key_is_its_own_not_its_position
+
+run_mutation "notice dismissal: the restore refusal opens as a one-shot" \
+  crates/geode-blotter/src/tile.rs \
+  '            error_transient: restored_view_computed.is_some(),' \
+  '            error_transient: false,' \
+  geode-blotter \
+  a_cleared_restore_refusal_stays_cleared_through_the_first_delivery
+
+run_mutation "notice dismissal: a cleared restore refusal is not raised again" \
+  crates/geode-blotter/src/tile.rs \
+  $'            if self.restored_view_refusal.as_deref() == Some(n.text().as_ref()) {\n                self.restored_view_refusal = None;\n            }' \
+  $'            if self.restored_view_refusal.as_deref() == Some(n.text().as_ref()) {}' \
+  geode-blotter \
+  a_cleared_restore_refusal_stays_cleared_through_the_first_delivery
+
+run_mutation "notice dismissal: g c's refusal is transient" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if self.notices.nothing_to_switch && *n == Notice::danger(NOTHING_TO_SWITCH) {' \
+  '        if false && self.notices.nothing_to_switch && *n == Notice::danger(NOTHING_TO_SWITCH) {' \
+  geode-classifications \
+  the_switch_refusal_clears_on_a_click_or_escape_and_returns_on_g_c
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

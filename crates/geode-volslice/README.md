@@ -135,6 +135,7 @@ data returns.
 | `0` | Reset the view to the data's extent |
 | `[` / `]` | Shrink or grow the upper pane by a twentieth, within 0.2..0.8 |
 | `.` | Action menu (open or close) |
+| `escape` | Clear a refusal, else dismiss the footer's danger notice (`volslice::cancel`) |
 
 The action menu (`.`, the header's `⋯`, a right press on the chart's plot
 of a focused tile, or `.` in the diff chooser, which it replaces) lists
@@ -206,6 +207,18 @@ the model's. An empty state alone (the first item below) is painted in the
 muted status tone the sibling modules use for an empty state; every other
 notice is a failure or a refusal, painted in the danger tone, and so is an
 empty state with another notice behind it:
+
+A danger footer notice can be dismissed: a click on it, or `escape` in
+normal mode once no popup is left to close; both do the same
+(`dismiss_notice`). A refusal leads the footer whenever there is one and is
+transient, so it is cleared and the notices it led show; the same key
+refused again shows again. Otherwise the footer notice is standing (data
+and model notices) and is hidden through `geode_tile::notice::Dismissals`,
+not cleared: the footer notice as painted (its text, count and tone) stays
+hidden while the tile keeps reporting it, and shows again once it stopped
+and came back or its text changed (another notice joined it).
+`refresh_chrome` prunes the dismissals after rebuilding the notice, never
+render. An empty state alone (status) is never dismissed.
 
 - `no underlying`, or `no underlying in A` while following a group whose
   scope names none or several.

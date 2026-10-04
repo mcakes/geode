@@ -23,7 +23,7 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks, TimeRun};
-use geode_tile::notice::Notice;
+use geode_tile::notice::{self, Dismissals, Notice};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, ElementId, Entity, FontWeight, Hsla, IntoElement, SharedString, div, relative,
@@ -178,6 +178,13 @@ pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
 }
 
 impl HeaderModel {
+    /// The notices the header reports, in paint order (save, then the
+    /// notice), before the dismissal filter: what the cluster paints, what
+    /// `escape` dismisses and what the dismissals are pruned against.
+    pub(crate) fn notices(&self) -> impl Iterator<Item = &Notice> {
+        self.save.iter().chain(&self.notice)
+    }
+
     /// Prepared text used by header tests, including the fresh time label.
     /// Stale-time selection and the action trigger are rendered separately.
     #[cfg(test)]
@@ -299,6 +306,8 @@ pub(crate) struct HeaderChrome<'a> {
     pub close: Option<&'a CloseHandle>,
     pub tile_id: TileId,
     pub tile: &'a Entity<PricerTile>,
+    /// The notices the trader dismissed: the cluster paints the rest.
+    pub dismissed: &'a Dismissals,
     pub menu_open: bool,
     /// The `⋯` tooltip's selector, built once with the tile.
     pub menu_tip: SharedString,
@@ -534,8 +543,11 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
     cluster
         .status
         .push(pair(PRICER_LABEL, h.pricer.clone(), muted, theme.foreground).into_any_element());
-    cluster.notices.extend(h.save.clone());
-    cluster.notices.extend(h.notice.clone());
+    cluster.notices = c.dismissed.visible(h.notices().cloned());
+    cluster.on_dismiss = Some(notice::on_dismiss_with(
+        c.tile,
+        |t: &mut PricerTile, n, _| t.dismiss_notice(n),
+    ));
     cluster.times.extend(h.time.clone().map(|label| TimeRun {
         label,
         stale_label: h.time_stale.clone(),

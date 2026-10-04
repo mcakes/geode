@@ -141,6 +141,9 @@ pub struct VolsliceTile {
     refusal: Option<String>,
     /// The painted model's own notices (failed jobs), or a vol refusal.
     model_notices: Vec<String>,
+    /// The footer notices the trader dismissed, each hidden while the
+    /// tile keeps reporting it; pruned in `refresh_chrome`.
+    dismissed: geode_tile::notice::Dismissals,
     /// "Today" for tests, whose fixtures are dated: the strip and the chain
     /// drop expiries before today.
     #[cfg(test)]
@@ -321,6 +324,7 @@ impl VolsliceTile {
             notices,
             refusal: None,
             model_notices: Vec::new(),
+            dismissed: Default::default(),
             focused: false,
             chart_bounds: ChartBounds::default(),
             drag: None,
@@ -426,6 +430,10 @@ impl VolsliceTile {
                 self.chrome.builds += 1;
             }
         }
+        // The footer notice's dismissal lasts while it is reported: one
+        // the tile stopped reporting shows again when it returns. Here,
+        // never in render; cheap with nothing hidden.
+        self.dismissed.prune(self.chrome.notice.iter());
         self.refresh_menu(cx);
     }
 
@@ -565,7 +573,19 @@ impl VolsliceTile {
             "commit" => self.commit_popup(window, cx),
             "tick" => self.tick_popup(cx),
             "clear_ticks" => self.clear_popup_ticks(cx),
-            "cancel" => self.close_popup(window, cx),
+            // Last in line: with no popup to close, `escape` dismisses the
+            // footer's notice, and is handled only when it did. A refusal
+            // (transient) went with this verb above, as a click on it
+            // clears it; the combined text it led, hidden here, leaves the
+            // footer when the chrome refreshes, which then shows what
+            // remains — what a click shows.
+            "cancel" if self.popup.is_some() => self.close_popup(window, cx),
+            "cancel" => {
+                if !self.dismissed.dismiss_all(self.chrome.notice.iter()) {
+                    return false;
+                }
+                cx.notify();
+            }
             "list_down" => {
                 self.step_popup(1, cx);
             }
@@ -763,6 +783,27 @@ impl VolsliceTile {
 
     /// A verb acting on the tile clears the last refusal: whatever it was
     /// refused for has been tried again or left behind.
+    /// The footer notice dismissed by a press on it, as `escape` does: a
+    /// refusal leads the footer whenever there is one, and it is transient
+    /// (the next verb clears it), so it is cleared and the notices it led
+    /// show; with none, the footer notice is standing (data and model
+    /// notices the tile reports again) and is hidden through `dismissed`
+    /// until it changes. Whether anything did.
+    pub(crate) fn dismiss_notice(
+        &mut self,
+        n: &geode_tile::notice::Notice,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !n.dismissable() {
+            return false;
+        }
+        if self.refusal.is_some() {
+            self.clear_refusal(cx);
+            return true;
+        }
+        self.dismissed.dismiss(n)
+    }
+
     pub(super) fn clear_refusal(&mut self, cx: &mut Context<Self>) {
         if self.refusal.take().is_some() {
             cx.notify();
@@ -1023,7 +1064,14 @@ impl Render for VolsliceTile {
             )
             .child(body)
             .child(header::render_footer(
-                self.chrome.notice.as_ref(),
+                self.chrome
+                    .notice
+                    .as_ref()
+                    .filter(|n| self.dismissed.shows(n)),
+                &geode_tile::notice::on_dismiss_with(
+                    &cx.entity(),
+                    |t: &mut VolsliceTile, n, cx| t.dismiss_notice(n, cx),
+                ),
                 &self.chrome.hints,
                 theme,
                 id,

@@ -66,7 +66,7 @@ use geode_tile::edit::EditCaret;
 use geode_tile::following::{self, FrameDoor};
 use geode_tile::header::HealthWatch;
 use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, Row};
-use geode_tile::notice::Notice;
+use geode_tile::notice::{Dismissals, Notice};
 use geode_widgets::datefield::{DateTimeField, FieldKey, Precision, Segment, route};
 use gpui::prelude::*;
 use gpui::{
@@ -610,9 +610,13 @@ pub struct PricerTile {
     /// The view fallback's standing notice (`resolve_plan`).
     view_notice: Option<SharedString>,
     /// Save status in a separate header slot: admission refusal, failed save, or
-    /// blocked load. Pricing notices and `escape` leave it intact. A successful
+    /// blocked load. Pricing notices and `escape` leave it intact (`escape`
+    /// and a click only hide it, through `dismissed`). A successful
     /// save outcome clears it unless a newer attempt was refused admission.
     save_notice: Option<SharedString>,
+    /// The header notices the trader dismissed (click or `escape`), hidden
+    /// while the header keeps reporting them; pruned in `rebuild_chrome`.
+    pub(crate) dismissed: Dismissals,
     /// A failed or refused load leaves a fallback that must not overwrite the stored
     /// document. Block saves until another sheet is opened or a load is retried.
     /// A genuinely absent document (`Missing`, `Ok(None)`) opens empty under its
@@ -1129,6 +1133,7 @@ impl PricerTile {
             view_notice: None,
             save_blocked: blocked.is_some(),
             save_notice: blocked,
+            dismissed: Dismissals::default(),
             dirty: false,
             save_failed: false,
             save_refused: false,
@@ -3392,9 +3397,20 @@ impl PricerTile {
             return true;
         }
         self.footer = None;
+        // Whether `escape` finds a layer of its own to close below: then it
+        // closes that alone and leaves the find and the notices.
+        let open = [
+            self.entry.is_some(),
+            self.editor.is_some(),
+            self.sheet_picker.is_some(),
+            self.rename_field.is_some(),
+            self.menu.is_some(),
+        ];
+        let layer = verb == "escape" && open.contains(&true);
         // A verb arriving under an armed `:rm` (a palette dispatch; a key
         // never gets here, the prompt consumes it) answers "no" first.
-        confirm::cancel(self, window, cx);
+        let answered = confirm::cancel(self, window, cx);
+        let layer = layer || (verb == "escape" && answered);
         // Any verb but the fields' own closes an open field first (a
         // palette dispatch can arrive while one is open). `add_below` and
         // `add_above` keep an open bar: they are the bar's own openers.
@@ -3491,13 +3507,24 @@ impl PricerTile {
             }
             "find_next" => self.repeat_find(FindDirection::Forward, n, cx),
             "find_prev" => self.repeat_find(FindDirection::Backward, n, cx),
-            // A live selection takes the first `escape` alone, so leaving
-            // visual mode never also drops the find or a notice.
+            // One layer per `escape`: a live selection, then whatever the
+            // closers above shut (field, menu, question), then the find, and
+            // only when none of those had anything to undo, the notices.
             "escape" if self.selection.is_some() => self.clear_selection(),
+            "escape" if layer => {}
+            "escape" if self.find.is_some() => self.find = None,
             "escape" => {
-                self.find = None;
-                // "loading…" is the only sign a load is pending; `loaded`
-                // clears it when the rows (or the refusal) arrive.
+                // Every warning and danger notice showing at the press goes
+                // as a click on it would: the transient one is cleared,
+                // revealing a standing one it masked; a standing one is
+                // hidden. "loading…" is a status, the only sign a load is
+                // pending; `loaded` clears it when the rows (or the
+                // refusal) arrive. A transient notice masked by `stopped`
+                // or a refusal clears too, as it always has.
+                let shown = self.dismissed.visible(self.header.notices().cloned());
+                for n in &shown {
+                    self.dismiss_notice(n);
+                }
                 if !self.loading {
                     self.notice = None;
                 }
@@ -5485,6 +5512,27 @@ impl PricerTile {
         true
     }
 
+    /// One header notice dismissed, as a click on it does and `escape`
+    /// does to each notice showing: the transient notice (a refusal or
+    /// advisory a key set in `notice`, while it is what the slot shows) is
+    /// cleared, so a standing notice it masked shows and the same key says
+    /// it again; every other warning or danger notice is standing and is
+    /// hidden through `dismissed` until it changes. Whether anything did.
+    pub(crate) fn dismiss_notice(&mut self, n: &Notice) -> bool {
+        if !n.dismissable() {
+            return false;
+        }
+        let transient =
+            !self.stopped && self.refusals == 0 && self.notice.as_ref() == Some(n.text());
+        if transient {
+            self.notice = None;
+            self.rebuild_chrome();
+            true
+        } else {
+            self.dismissed.dismiss(n)
+        }
+    }
+
     pub(crate) fn rebuild_chrome(&mut self) {
         let settings: PricerSettings = self.shared.settings.borrow().clone();
         let notice = if self.stopped {
@@ -5515,6 +5563,9 @@ impl PricerTile {
             settings: &settings,
             clock: self.clock,
         });
+        // The notice seam: forget a dismissal the header no longer
+        // reports, so a notice that stops and returns shows again.
+        self.dismissed.prune(self.header.notices());
         self.title = format!("Pricer · {}", self.sheet.name).into();
         self.footer_text = self.footer.clone().or_else(|| {
             let row = self.cursor_row().and_then(|r| self.model.sheet_row(r))?;
@@ -6264,6 +6315,7 @@ impl gpui::Render for PricerTile {
                 close: self.close.as_ref(),
                 tile_id: self.id,
                 tile: &tile,
+                dismissed: &self.dismissed,
                 menu_open: self.menu.is_some() && self.menu_kind == MenuKind::Actions,
                 view_menu,
                 view_tip: self.view_tip.clone(),
@@ -12570,6 +12622,240 @@ pub(crate) mod tests {
     }
 
     // ---- notices ----
+
+    /// Set the save slot and the transient notice as the tile's own paths
+    /// do, through the chrome seam.
+    fn report(h: &Harness, vcx: &mut VisualTestContext, save: Option<&str>, notice: Option<&str>) {
+        h.tile.update(vcx, |t, cx| {
+            t.save_notice = save.map(|s| s.to_string().into());
+            t.notice = notice.map(|s| s.to_string().into());
+            t.rebuild_chrome();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+
+    /// The header notices painted, by text, in order: the unhidden ones,
+    /// checked against how many the header actually painted.
+    fn painted_notices(h: &Harness, vcx: &mut VisualTestContext) -> Vec<String> {
+        h.draw(vcx);
+        let shown = (0..4)
+            .filter(|i| {
+                let sel: &'static str =
+                    Box::leak(format!("tile-notice-{TILE}-{i}").into_boxed_str());
+                vcx.debug_bounds(sel).is_some()
+            })
+            .count();
+        let visible: Vec<String> = h.tile.read_with(vcx, |t, _| {
+            t.dismissed
+                .visible(t.header.notices().cloned())
+                .iter()
+                .map(|n| n.text().to_string())
+                .collect()
+        });
+        if shown == visible.len() {
+            visible
+        } else {
+            vec![format!("{shown} painted, {visible:?} unhidden")]
+        }
+    }
+
+    fn click_notice(vcx: &mut VisualTestContext, i: usize) {
+        let sel: &'static str = Box::leak(format!("tile-notice-{TILE}-{i}").into_boxed_str());
+        let at = centre_of(vcx, sel);
+        click_at(vcx, at, 1);
+        vcx.run_until_parked();
+    }
+
+    /// `escape` as the shell resolves it: the real fragment under the
+    /// tile's live key context, dispatched through the `TileContent` door.
+    fn press_escape(h: &Harness, vcx: &mut VisualTestContext) -> String {
+        use geode_shell::keymap::{MatchResult, Matcher, build_keymap, parse_keystroke};
+        let mut registry = geode_shell::actions::ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
+        h.factory.register_actions(&mut registry);
+        let doc =
+            geode_shell::keymap::fragments::fragment_doc("pricer", crate::content::DEFAULT_KEYMAP)
+                .unwrap();
+        let (keymap, diags) = build_keymap(&[doc], geode_shell::defaults::default_mod(), &registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        let stack = [h.tile.read_with(vcx, |t, _| t.key_context())];
+        let ks = parse_keystroke("escape", geode_shell::defaults::default_mod()).unwrap();
+        let MatchResult::Matched { action, count } = Matcher::default().press(&keymap, ks, &stack)
+        else {
+            panic!("escape binds nothing over the pricer");
+        };
+        vcx.update(|window, cx| h.content.dispatch(&action, count, window, cx));
+        vcx.run_until_parked();
+        action.0
+    }
+
+    const VIEW_FALLBACK: &str = "view 'x' not configured";
+
+    /// The transient notice masking the view fallback, through the seam.
+    fn transient_over_standing(h: &Harness, vcx: &mut VisualTestContext) {
+        h.tile.update(vcx, |t, cx| {
+            t.view_notice = Some(VIEW_FALLBACK.into());
+            t.notice = Some("sort dropped".into());
+            t.rebuild_chrome();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+
+    /// A click on the transient notice clears it, as `escape` does: the
+    /// standing notice it masked shows, and the same advisory set again
+    /// shows again.
+    #[gpui::test]
+    fn a_click_on_the_transient_notice_clears_it_and_reveals_the_standing_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        transient_over_standing(&h, &mut vcx);
+        assert_eq!(painted_notices(&h, &mut vcx), ["sort dropped"]);
+        click_notice(&mut vcx, 0);
+        assert_eq!(painted_notices(&h, &mut vcx), [VIEW_FALLBACK], "revealed");
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.notice.is_none()),
+            "cleared, not hidden"
+        );
+        report(&h, &mut vcx, None, Some("sort dropped"));
+        assert_eq!(
+            painted_notices(&h, &mut vcx),
+            ["sort dropped"],
+            "said again: shows"
+        );
+    }
+
+    /// `escape` does the same to the same notice: the standing one shows.
+    #[gpui::test]
+    fn escape_clears_the_transient_notice_and_reveals_the_standing_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        transient_over_standing(&h, &mut vcx);
+        press_escape(&h, &mut vcx);
+        assert_eq!(painted_notices(&h, &mut vcx), [VIEW_FALLBACK], "revealed");
+        press_escape(&h, &mut vcx);
+        assert!(painted_notices(&h, &mut vcx).is_empty(), "then hidden");
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.view_notice.is_some()),
+            "standing: still reported"
+        );
+    }
+
+    /// A click on a warning notice hides that one; the tile still reports
+    /// it. Reported again unchanged it stays hidden; once it stops being
+    /// reported, its return shows.
+    #[gpui::test]
+    fn clicking_a_header_notice_hides_it_until_it_changes(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        report(&h, &mut vcx, Some(NOT_SAVED), Some("sort dropped"));
+        assert_eq!(painted_notices(&h, &mut vcx), [NOT_SAVED, "sort dropped"]);
+        click_notice(&mut vcx, 0);
+        assert_eq!(painted_notices(&h, &mut vcx), ["sort dropped"]);
+        assert_eq!(
+            h.save_notice(&vcx).as_deref(),
+            Some(NOT_SAVED),
+            "still reported"
+        );
+        report(&h, &mut vcx, Some(NOT_SAVED), Some("sort dropped"));
+        assert_eq!(
+            painted_notices(&h, &mut vcx),
+            ["sort dropped"],
+            "unchanged: hidden"
+        );
+        report(&h, &mut vcx, None, Some("sort dropped"));
+        report(&h, &mut vcx, Some(NOT_SAVED), Some("sort dropped"));
+        assert_eq!(
+            painted_notices(&h, &mut vcx),
+            [NOT_SAVED, "sort dropped"],
+            "stopped and returned: shows again"
+        );
+        assert_eq!(h.host_presses.get(), 0, "the press stopped at the notice");
+    }
+
+    /// `loading…` is a status: a click on it and `escape` both leave it.
+    #[gpui::test]
+    fn the_loading_status_is_never_dismissed(cx: &mut gpui::TestAppContext) {
+        let (store, record) = seeded(&["SPX Z26 5000 C"]);
+        store.set_pending(true);
+        let (h, mut vcx) = open_full(cx, Some(record), store, test_settings());
+        assert_eq!(painted_notices(&h, &mut vcx), [LOADING]);
+        click_notice(&mut vcx, 0);
+        assert_eq!(painted_notices(&h, &mut vcx), [LOADING]);
+        press_escape(&h, &mut vcx);
+        assert_eq!(painted_notices(&h, &mut vcx), [LOADING]);
+    }
+
+    /// `escape` is last in line: a selection, then the find, each take a
+    /// press of their own and leave the notices; the next press hides the
+    /// save notice (its slot intact) and clears the transient one.
+    #[gpui::test]
+    fn escape_dismisses_the_notices_only_after_every_other_layer(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        vcx.update(|window, cx| {
+            h.content
+                .find(FindEvent::Committed("spx".into()), window, cx)
+        });
+        report(&h, &mut vcx, Some(NOT_SAVED), Some("sort dropped"));
+        h.dispatch(&mut vcx, "visual_rows", None);
+        assert_eq!(press_escape(&h, &mut vcx), "pricer::escape");
+        assert!(h.tile.read_with(&vcx, |t, _| t.selection.is_none()));
+        assert_eq!(
+            painted_notices(&h, &mut vcx),
+            [NOT_SAVED, "sort dropped"],
+            "selection first"
+        );
+        press_escape(&h, &mut vcx);
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.find.is_none()),
+            "then the find"
+        );
+        assert_eq!(painted_notices(&h, &mut vcx), [NOT_SAVED, "sort dropped"]);
+        press_escape(&h, &mut vcx);
+        assert!(painted_notices(&h, &mut vcx).is_empty(), "then the notices");
+        assert_eq!(
+            h.save_notice(&vcx).as_deref(),
+            Some(NOT_SAVED),
+            "hidden, not cleared"
+        );
+        assert_eq!(
+            h.notice(&vcx),
+            None,
+            "the transient notice clears as before"
+        );
+    }
+
+    /// An open menu takes `escape` alone (its own close), and the notices
+    /// stay for the next press.
+    #[gpui::test]
+    fn escape_closes_an_open_menu_before_the_notices(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        report(&h, &mut vcx, Some(NOT_SAVED), None);
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(press_escape(&h, &mut vcx), "pricer::menu_close");
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(painted_notices(&h, &mut vcx), [NOT_SAVED]);
+        assert_eq!(press_escape(&h, &mut vcx), "pricer::escape");
+        assert!(painted_notices(&h, &mut vcx).is_empty());
+    }
+
+    /// From the palette, `pricer::escape` arrives with the menu still up
+    /// (the key route sends `menu_close` instead): it closes the menu
+    /// alone, and the notices stay for the next press.
+    #[gpui::test]
+    fn a_palette_escape_over_an_open_menu_closes_only_the_menu(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        report(&h, &mut vcx, Some(NOT_SAVED), None);
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(h.mode(&mut vcx), "menu", "fixture: the menu is up");
+        h.dispatch(&mut vcx, "escape", None);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(painted_notices(&h, &mut vcx), [NOT_SAVED]);
+        h.dispatch(&mut vcx, "escape", None);
+        assert!(painted_notices(&h, &mut vcx).is_empty());
+    }
 
     /// "loading…" is the only sign a load is in progress: `escape` may
     /// clear find, never it.
