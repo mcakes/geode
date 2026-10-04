@@ -4,6 +4,7 @@
 //! types; `view` paints Current and routes its keys; steps that exist as
 //! their own modals are pushed over it.
 
+pub(crate) mod definition;
 pub(crate) mod prompt;
 pub(crate) mod rows;
 pub(crate) mod saved;

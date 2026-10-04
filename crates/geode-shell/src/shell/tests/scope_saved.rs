@@ -448,8 +448,9 @@ fn saved_opened_alone_paints_no_back_button(cx: &mut gpui::TestAppContext) {
 // ---- The save prompt -------------------------------------------------
 
 /// A user layer defining `eu` (book BK001) and a desk layer defining
-/// `desk_eu` (book BK003), over `services`' `risk` dataset, with a
-/// writable user directory the saves land in.
+/// `desk_eu` (book BK003), over `services`' `risk` dataset and builtin
+/// expressions `liq` (`npv > 0`) and `big` (`npv > 100`), with a writable
+/// user directory the saves land in.
 struct SaveFixture {
     _desk: tempfile::TempDir,
     user: tempfile::TempDir,
@@ -479,6 +480,11 @@ fn save_fixture(cx: &mut gpui::TestAppContext) -> SaveFixture {
                 "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
                  [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
                  [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+            )
+            .unwrap(),
+            LayerDoc::builtin(
+                "expressions",
+                "[liq]\nexpression = \"npv > 0\"\n[big]\nexpression = \"npv > 100\"\n",
             )
             .unwrap(),
         ],
@@ -903,4 +909,369 @@ fn a_question_keeps_editing_keys_off_the_draft(cx: &mut gpui::TestAppContext) {
     assert_eq!(f.draft().as_deref(), Some("eu"));
     assert_eq!(f.input_text(), "eu");
     assert!(input_focused(&mut f), "the field has focus back");
+}
+
+// ---- The definition step ----------------------------------------------
+
+use crate::shell::scopedialog::state::Step;
+
+fn definition_step(name: Option<&str>) -> Option<Layer> {
+    Some(Layer::Step(Step::Definition {
+        name: name.map(str::to_string),
+    }))
+}
+
+impl SaveFixture {
+    /// The Scope dialog on Current over a lane naming `liq`, then `o`.
+    fn open_saved_over_liq(&mut self) {
+        self.set_lane(liq_scope());
+        self.open_current();
+        self.keys("o");
+        assert_eq!(
+            visible_names(&self.shell, &self.vcx),
+            ["desk_eu", "eu", "big", "liq"]
+        );
+    }
+
+    fn definition_draft(&self) -> Option<String> {
+        self.shell.read_with(&self.vcx, |s, _| {
+            s.scope_dialog
+                .as_ref()
+                .and_then(|d| d.definition.as_ref().map(|d| d.draft.clone()))
+        })
+    }
+
+    fn definition_note(&self) -> Option<String> {
+        self.shell.read_with(&self.vcx, |s, _| {
+            s.scope_dialog
+                .as_ref()
+                .and_then(|d| d.definition.as_ref())
+                .and_then(|d| d.note.as_ref().map(|n| n.to_string()))
+        })
+    }
+
+    fn definition_error(&self) -> Option<String> {
+        self.shell.read_with(&self.vcx, |s, _| {
+            s.scope_dialog
+                .as_ref()
+                .and_then(|d| d.definition.as_ref())
+                .and_then(|d| d.error.clone())
+        })
+    }
+
+    fn named_text(&self, name: &str) -> Option<String> {
+        frame_of(&self.shell, &self.vcx).read_with(&self.vcx, |f, _| {
+            f.named_expressions()
+                .get(name)
+                .map(|d| d.text().to_string())
+        })
+    }
+
+    fn user_expressions(&self) -> String {
+        std::fs::read_to_string(self.user.path().join("expressions.toml")).unwrap_or_default()
+    }
+
+    /// `enter` dispatched and the frame read in one update: no task runs
+    /// between them, so only the step's own refresh can have resolved it.
+    fn enter_and_read_named(&mut self, name: &str) -> Option<String> {
+        let frame = frame_of(&self.shell, &self.vcx);
+        let text = self.vcx.update(|window, cx| {
+            window.dispatch_keystroke(gpui::Keystroke::parse("enter").unwrap(), cx);
+            frame
+                .read(cx)
+                .named_expressions()
+                .get(name)
+                .map(|d| d.text().to_string())
+        });
+        self.vcx.run_until_parked();
+        draw(&mut self.vcx);
+        text
+    }
+
+    /// Open `liq`'s definition from Saved and change it to `npv > 5`.
+    fn edit_liq_to_npv_gt_5(&mut self) -> Option<String> {
+        self.open_saved_over_liq();
+        self.keys("j j j e");
+        assert_eq!(self.top(), definition_step(Some("liq")));
+        self.keys("backspace");
+        self.type_text("5");
+        assert_eq!(self.definition_draft().as_deref(), Some("npv > 5"));
+        self.enter_and_read_named("liq")
+    }
+}
+
+/// `e` on an expression row opens its definition, seeded with its text and
+/// a note saying who uses it; `enter` writes it, resolved in the frame at
+/// once, and Saved shows again.
+#[gpui::test]
+fn e_on_an_expression_edits_its_definition_with_a_used_by_note(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("j j j e");
+    assert_eq!(f.top(), definition_step(Some("liq")));
+    assert_eq!(f.top_kind(), Some(dialog::DialogKind::Scope));
+    assert!(f.painted("scope-dialog-definition-field"));
+    assert!(f.painted("scope-dialog-definition-note"));
+    assert_eq!(
+        f.definition_note().as_deref(),
+        Some("Used by the current scope.")
+    );
+    assert_eq!(f.definition_draft().as_deref(), Some("npv > 0"));
+    assert_eq!(f.input_text(), "npv > 0", "the field mirrors the draft");
+    f.keys("backspace");
+    f.type_text("5");
+    assert_eq!(
+        f.enter_and_read_named("liq").as_deref(),
+        Some("npv > 5"),
+        "resolved before the flush"
+    );
+    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(
+        f.notice()
+            .is_some_and(|n| n.starts_with("copied 'liq' to your config")),
+        "{:?}",
+        f.notice()
+    );
+    f.flush();
+    let written = f.user_expressions();
+    assert!(
+        written.contains("[liq") && written.contains("npv > 5"),
+        "{written}"
+    );
+}
+
+/// The lane still names `liq`, and its effective scope now reads the new
+/// definition: references follow an edit in place.
+#[gpui::test]
+fn editing_a_definition_reaches_the_current_scope_at_once(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    let frame = frame_of(&f.shell, &f.vcx);
+    let before = frame.read_with(&f.vcx, |fr, _| fr.shared().versions().config);
+    assert_eq!(f.edit_liq_to_npv_gt_5().as_deref(), Some("npv > 5"));
+    assert_eq!(lane_scope(&f.shell, &f.vcx), liq_scope());
+    let (resolved, after) = frame.read_with(&f.vcx, |fr, _| {
+        (
+            fr.shared().effective_scope(&Scope::default()),
+            fr.shared().versions().config,
+        )
+    });
+    let resolved = resolved.expect("liq resolves");
+    assert_eq!(
+        resolved.expression.map(|e| e.to_string()).as_deref(),
+        Some("npv > 5")
+    );
+    assert!(after > before, "the config version advanced");
+}
+
+/// The definition field suggests columns but never named rows: one
+/// definition does not refer to another. An unused expression's note says
+/// so.
+#[gpui::test]
+fn the_definition_field_offers_columns_but_no_named_rows(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("j j e"); // big
+    assert_eq!(f.top(), definition_step(Some("big")));
+    assert_eq!(f.definition_note().as_deref(), Some("not used"));
+    f.keys("escape");
+    assert_eq!(f.top(), Some(Layer::Saved));
+    f.keys("n");
+    assert_eq!(f.top(), definition_step(None));
+    assert_eq!(f.input_text(), "");
+    assert!(
+        !f.painted("scope-dialog-definition-note"),
+        "a new one has no note"
+    );
+    f.type_text("n");
+    assert!(f.painted("scope-expr-row-npv"), "a column is offered");
+    assert!(!f.painted("scope-expr-named-row-liq"));
+    assert!(!f.painted("scope-expr-named-row-big"));
+    // `b` would match both `book` and the name `big`, were names offered.
+    f.keys("backspace");
+    f.type_text("b");
+    assert!(f.painted("scope-expr-row-book"));
+    assert!(!f.painted("scope-expr-named-row-big"), "no named rows");
+}
+
+/// `tab` accepts the highlighted column into the field, and the draft holds
+/// what the field now reads: the input is not put back to the typed prefix.
+#[gpui::test]
+fn tab_accepts_a_column_into_the_definition_draft(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("j j n"); // on big
+    f.type_text("np");
+    assert!(f.painted("scope-expr-row-npv"));
+    f.keys("tab");
+    let draft = f.definition_draft().unwrap_or_default();
+    assert!(draft.starts_with("npv"), "{draft:?}");
+    assert_eq!(f.input_text(), draft, "the field and the draft agree");
+}
+
+/// An empty, unparseable or unknown-column definition refuses under the
+/// field, which stays open; nothing is written.
+#[gpui::test]
+fn an_empty_or_broken_definition_refuses_inline(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("j j j e");
+    f.keys("backspace backspace backspace backspace backspace backspace backspace");
+    assert_eq!(f.definition_draft().as_deref(), Some(""));
+    f.keys("enter");
+    assert_eq!(
+        f.definition_error().as_deref(),
+        Some("an empty named expression would match everything")
+    );
+    assert!(f.painted("scope-dialog-error"));
+    assert_eq!(f.top(), definition_step(Some("liq")));
+    f.type_text("npv >");
+    assert_eq!(f.definition_error(), None, "typing clears the refusal");
+    f.keys("enter");
+    assert!(f.definition_error().is_some(), "a parse error refuses");
+    assert_eq!(f.top(), definition_step(Some("liq")));
+    f.keys("backspace backspace backspace backspace backspace");
+    f.type_text("nvp > 1");
+    f.keys("enter");
+    assert!(
+        f.definition_error()
+            .is_some_and(|e| e.contains("unknown column 'nvp'")),
+        "{:?}",
+        f.definition_error()
+    );
+    assert_eq!(f.top(), definition_step(Some("liq")));
+    assert_eq!(f.named_text("liq").as_deref(), Some("npv > 0"));
+    assert!(!f.queued(), "nothing queued");
+}
+
+/// `n` opens an empty definition; `enter` turns it into a name prompt in
+/// place; naming it writes it without touching the lane's scope, and Saved
+/// shows again.
+#[gpui::test]
+fn n_names_a_new_expression_without_applying_it(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("j j n");
+    assert_eq!(f.top(), definition_step(None));
+    f.type_text("npv < 1");
+    f.keys("enter");
+    assert_eq!(
+        f.top(),
+        Some(Layer::Step(Step::NameExpression {
+            text: "npv < 1".into()
+        }))
+    );
+    assert_eq!(depth(&f.shell, &f.vcx), 3, "replaces the step in place");
+    assert!(f.painted("scope-dialog-name-field"));
+    assert_eq!(f.input_text(), "", "the field is the name now");
+    f.type_text("small");
+    assert_eq!(f.enter_and_read_named("small").as_deref(), Some("npv < 1"));
+    assert_eq!(f.top(), Some(Layer::Saved));
+    assert_eq!(lane_scope(&f.shell, &f.vcx), liq_scope(), "not applied");
+    assert_eq!(f.notice(), None, "a new name forks nothing");
+    f.flush();
+    let written = f.user_expressions();
+    assert!(
+        written.contains("[small") && written.contains("npv < 1"),
+        "{written}"
+    );
+}
+
+/// A name already defined at any layer, or reserved, refuses under the
+/// field with nothing written.
+#[gpui::test]
+fn naming_a_new_expression_refuses_a_taken_name(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("j j n"); // on big
+    f.type_text("npv < 1");
+    f.keys("enter");
+    f.type_text("big");
+    f.keys("enter");
+    assert_eq!(f.prompt_error().as_deref(), Some("'big' already exists"));
+    assert!(f.painted("scope-dialog-error"));
+    assert!(matches!(
+        f.top(),
+        Some(Layer::Step(Step::NameExpression { .. }))
+    ));
+    f.keys("backspace backspace backspace");
+    f.type_text("save_current");
+    f.keys("enter");
+    assert_eq!(
+        f.prompt_error().as_deref(),
+        Some("'save_current' is reserved")
+    );
+    assert!(!f.queued(), "nothing queued");
+    assert_eq!(f.named_text("big").as_deref(), Some("npv > 100"));
+}
+
+/// The `≡` chip's body opens the definition alone: its commit closes the
+/// dialog.
+#[gpui::test]
+fn the_named_chip_opens_its_definition_alone(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.set_lane(liq_scope());
+    let chip = f
+        .vcx
+        .debug_bounds("scope-named-chip-liq")
+        .expect("the chip paints");
+    f.vcx
+        .simulate_click(chip.center(), gpui::Modifiers::default());
+    f.vcx.run_until_parked();
+    draw(&mut f.vcx);
+    assert_eq!(f.top_kind(), Some(dialog::DialogKind::Scope));
+    assert_eq!(f.top(), definition_step(Some("liq")));
+    assert_eq!(depth(&f.shell, &f.vcx), 1, "the step is the bottom layer");
+    assert_eq!(f.input_text(), "npv > 0");
+    f.keys("backspace");
+    f.type_text("5");
+    f.keys("enter");
+    assert_eq!(f.top_kind(), None, "the commit closes the dialog");
+    assert_eq!(f.named_text("liq").as_deref(), Some("npv > 5"));
+}
+
+/// With no saved definitions at all, `n` opens a new expression, and the
+/// Expressions section's empty row is its pointer route.
+#[gpui::test]
+fn n_and_the_empty_expressions_row_open_a_new_definition(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = shell_on_liq(cx);
+    frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
+        f.replace_saved_scopes(SavedScopes::new());
+        f.replace_named_expressions(geode_core::named::NamedExpressions::default());
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("n");
+    draw(&mut vcx);
+    assert_eq!(top_layer(&shell, &vcx), definition_step(None));
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
+    let empty = vcx
+        .debug_bounds("scope-saved-empty-expressions")
+        .expect("the empty row paints");
+    vcx.simulate_click(empty.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(top_layer(&shell, &vcx), definition_step(None));
+}
+
+/// `e` on an expression removed since the rows derived refuses and opens
+/// nothing.
+#[gpui::test]
+fn e_on_a_vanished_expression_says_so(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_saved_from_current(cx);
+    vcx.simulate_keystrokes("j j"); // big
+    frame_of(&shell, &vcx).update(&mut vcx, |f, _| {
+        let named = geode_core::named::NamedExpressions::default();
+        assert!(f.replace_named_expressions(named));
+    });
+    vcx.simulate_keystrokes("e");
+    draw(&mut vcx);
+    assert_eq!(
+        error(&shell, &vcx).as_deref(),
+        Some("that expression no longer exists")
+    );
+    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
 }

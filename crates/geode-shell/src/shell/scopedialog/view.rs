@@ -1,9 +1,10 @@
 //! The Scope dialog's Current screen: the lane's scope as rows by
 //! ingredient, refreshed when the frame changes under it. Steps that exist
-//! as their own modals (the dimension picker, the expression dialog, the
-//! save prompt) are pushed over this one; their commits pop back here. The
-//! text step is drawn here; the Saved screen (`saved_view`) is a layer of
-//! this dialog, and keys and paint route to it while it is on top.
+//! as their own modals (the dimension picker, the expression dialog) are
+//! pushed over this one; their commits pop back here. The text step and a
+//! name prompt are drawn here; the Saved screen (`saved_view`) and the
+//! definition step (`definition`) are layers of this dialog, and keys and
+//! paint route to them while they are on top.
 
 use std::rc::Rc;
 
@@ -128,6 +129,8 @@ pub(crate) struct ScopeDialogState {
     pub prompt: Option<super::prompt::NamePrompt>,
     /// The question awaiting `y`/`n`; while `Some` it owns every key.
     pub pending: Option<super::prompt::Pending>,
+    /// The definition being edited while the definition step is on top.
+    pub definition: Option<super::definition::DefinitionStep>,
 }
 
 /// What the rows read: the frame generation (every lane value change) and
@@ -152,6 +155,7 @@ impl ScopeDialogState {
             saved: super::saved_view::SavedScreen::new(),
             prompt: None,
             pending: None,
+            definition: None,
         }
     }
 
@@ -191,9 +195,9 @@ pub(crate) fn in_text_step(state: &ScopeDialogState) -> bool {
     matches!(state.layers.top(), Layer::Step(Step::Text))
 }
 
-/// The Change arm's pure half: the text step's draft, a name prompt's draft,
-/// or the Saved screen's filter while it is filtering. Current ignores the
-/// field.
+/// The Change arm's pure half: the text step's draft, the definition
+/// step's draft, a name prompt's draft, or the Saved screen's filter while
+/// it is filtering. Current ignores the field.
 pub(crate) fn on_query_changed(state: &mut ScopeDialogState, text: &str) {
     // A question owns the keyboard; the field is not its to edit.
     if state.pending.is_some() {
@@ -202,6 +206,8 @@ pub(crate) fn on_query_changed(state: &mut ScopeDialogState, text: &str) {
     if in_text_step(state) {
         state.text_draft = text.to_string();
         state.error = None;
+    } else if super::definition::in_definition(state) {
+        super::definition::on_draft_changed(state, text);
     } else if super::prompt::in_name_prompt(state) {
         super::prompt::on_draft_changed(state, text);
     } else if super::saved_view::filtering(state) {
@@ -278,6 +284,48 @@ pub(crate) fn open_save(view: &mut ShellView, window: &mut Window, cx: &mut Cont
     cx.notify();
 }
 
+/// The one-shot definition door (a `≡` chip's body): the expression's
+/// definition alone, so its commit or `escape` closes the dialog. A name
+/// nothing defines refuses on the status bar and opens nothing. With the
+/// dialog already on top on Current or Saved the step is pushed over that
+/// screen instead; on any other layer this is a no-op.
+pub(crate) fn open_definition(
+    view: &mut ShellView,
+    name: String,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if view.top_kind() == Some(dialog::DialogKind::Scope) {
+        if view.scope_dialog.as_ref().is_some_and(|s| {
+            matches!(s.layers.top(), Layer::Current | Layer::Saved) && s.pending.is_none()
+        }) {
+            super::definition::push(view, Some(name), window, cx);
+        }
+        return;
+    }
+    let step = match super::definition::step_for(view, Some(&name), cx) {
+        Ok(step) => step,
+        Err(refusal) => {
+            view.notice = Some(refusal.into());
+            cx.notify();
+            return;
+        }
+    };
+    if !open_on(
+        view,
+        Layer::Step(Step::Definition { name: Some(name) }),
+        window,
+        cx,
+    ) {
+        return;
+    }
+    if let Some(state) = view.scope_dialog.as_mut() {
+        state.definition = Some(step);
+    }
+    view.refresh_dialog_rows(cx);
+    super::definition::begin(view, window, cx);
+}
+
 /// Open the dialog with `first` as its bottom layer. Returns whether it
 /// opened (`dialog::can_open` refuses one lower in the stack).
 fn open_on(
@@ -346,6 +394,9 @@ fn handle_key(
     }
     if in_text_step(state) {
         return text_step_key(shell, ks, window, cx);
+    }
+    if super::definition::in_definition(state) {
+        return super::definition::handle_key(shell, ks, window, cx);
     }
     if super::prompt::in_name_prompt(state) {
         return super::prompt::prompt_key(shell, ks, window, cx);
@@ -512,7 +563,7 @@ fn remove_cursor_row(shell: &mut ShellView, cx: &mut Context<ShellView>) {
 
 /// Open the step that edits the cursor's row, pushed over this dialog: a
 /// dimension's values in the picker, a term in the expression dialog, a
-/// reference's definition in the Expressions object dialog, the text in
+/// reference's definition in this dialog's definition step, the text in
 /// the text step.
 fn open_cursor_row(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let Some(row) = shell
@@ -529,13 +580,7 @@ fn open_cursor_row(shell: &mut ShellView, window: &mut Window, cx: &mut Context<
         RowKind::Term { index, term, .. } => {
             open_term_row(shell, index, &term, window, cx);
         }
-        RowKind::Named { name, .. } => crate::shell::objectdialog::render::open_object(
-            shell,
-            crate::shell::objectdialog::Domain::Expressions,
-            &name,
-            window,
-            cx,
-        ),
+        RowKind::Named { name, .. } => super::definition::push(shell, Some(name), window, cx),
         RowKind::Text { .. } => enter_text_step(shell, window, cx),
     }
 }
@@ -748,6 +793,9 @@ fn build(
     };
     if super::saved_view::in_saved(state) {
         return super::saved_view::build(shell, state, entity, cx);
+    }
+    if super::definition::in_definition(state) {
+        return super::definition::build(shell, state, entity, cx);
     }
     let theme = cx.theme();
     let paint = crate::shell::listrow::row_paint(theme);

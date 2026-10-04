@@ -24,6 +24,7 @@ use crate::keymap::{Keystroke, Modifiers};
 use super::saved::{self, SavedId, SavedKind, SavedRow};
 use super::state::{After, Layer};
 use super::view::{ScopeDialogState, edit_lane};
+use crate::shell::control::{self, PointerStates as _};
 use crate::shell::{ShellView, dialog, scale};
 
 const ROW_HEIGHT: f32 = 28.0;
@@ -344,10 +345,8 @@ fn normal_key(
     if ks.mods.is_chord() || ks.mods.shift {
         return Normal::Declined;
     }
-    let on_scope = matches!(
-        state.saved.cursor_row().map(|r| &r.id),
-        Some(SavedId::Scope(_))
-    );
+    let cursor = state.saved.cursor_row().map(|r| r.id.clone());
+    let on_scope = matches!(cursor, Some(SavedId::Scope(_)));
     match ks.key.as_str() {
         "j" | "down" => state.saved.move_cursor(crate::vimnav::NavCommand::Move(1)),
         "k" | "up" => state.saved.move_cursor(crate::vimnav::NavCommand::Move(-1)),
@@ -355,9 +354,21 @@ fn normal_key(
             let saved = &mut state.saved;
             dialogmode::enter_filter(&mut saved.mode, &mut saved.entry_query, &saved.query);
         }
-        // `e` and `n` on an expression row belong to the definition step.
         "e" if on_scope => state.error = Some(EDIT_SCOPE.into()),
         "n" if on_scope => state.error = Some(NEW_SCOPE.into()),
+        // On an expression row `e` edits its definition; `n` anywhere off a
+        // scope row (an expression, or no row at all) starts a new one.
+        "e" => {
+            let Some(SavedId::Expression(name)) = cursor else {
+                return Normal::Declined;
+            };
+            super::definition::push(shell, Some(name), window, cx);
+            return Normal::Done;
+        }
+        "n" => {
+            super::definition::push(shell, None, window, cx);
+            return Normal::Done;
+        }
         "enter" => {
             commit_cursor(shell, window, cx);
             return Normal::Done;
@@ -461,6 +472,19 @@ fn press_row(
     cx.notify();
 }
 
+/// The empty Expressions row's press: a new expression, as `n` opens.
+/// Ignored unless Saved is on top with no question up.
+fn press_new_expression(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    if !shell
+        .scope_dialog
+        .as_ref()
+        .is_some_and(|s| in_saved(s) && s.pending.is_none())
+    {
+        return;
+    }
+    super::definition::push(shell, None, window, cx);
+}
+
 struct SectionNames {
     title: &'static str,
     note: &'static str,
@@ -500,6 +524,9 @@ pub(crate) fn build(
     let tag_radius = theme.radius_tokens().sm;
     let border = theme.border;
     let mono = crate::fonts::MONO;
+    // The clickable empty row is a muted label on the modal panel, as
+    // Current's are.
+    let empty_states = control::paint(theme, control::Rest::Bare, theme.popover, muted);
 
     let mut list = v_flex()
         .id("scope-saved-rows")
@@ -528,17 +555,31 @@ pub(crate) fn build(
                 ),
         );
         if screen.section_is_empty(section) {
-            list = list.child(
-                div()
-                    .px_2()
-                    .h(scale::design(ROW_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .text_sm()
-                    .text_color(muted)
-                    .debug_selector(move || format!("scope-saved-empty-{slug}"))
-                    .child(names.empty),
-            );
+            let empty = div()
+                .px_2()
+                .h(scale::design(ROW_HEIGHT))
+                .flex()
+                .items_center()
+                .text_sm()
+                .rounded(radius)
+                .text_color(muted)
+                .debug_selector(move || format!("scope-saved-empty-{slug}"))
+                .child(names.empty);
+            // No cursor rests on an empty row, so a press is the pointer
+            // route of `n` into a new expression.
+            list = if section == Section::Expressions {
+                let click = entity.clone();
+                list.child(
+                    empty
+                        .id("scope-saved-empty-expressions")
+                        .pointer_states(empty_states)
+                        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                            click.update(cx, |shell, cx| press_new_expression(shell, window, cx));
+                        }),
+                )
+            } else {
+                list.child(empty)
+            };
             continue;
         }
         for (i, &row_ix) in screen.visible.iter().enumerate() {
@@ -668,6 +709,8 @@ fn hints(state: &ScopeDialogState) -> Vec<Hint> {
     vec![
         Hint::new(HintRow::Move, &["j", "k"], "row"),
         Hint::new(HintRow::Go, &["enter"], "load / add-remove"),
+        Hint::new(HintRow::Edit, &["e"], "edit expression"),
+        Hint::new(HintRow::Edit, &["n"], "new expression"),
         Hint::new(HintRow::Go, &["/"], "filter"),
         Hint::new(HintRow::Go, &["escape"], leave),
     ]

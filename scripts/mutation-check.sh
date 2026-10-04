@@ -2784,10 +2784,10 @@ run_mutation "dialog stack: a pop does not restore the covered input" \
 
 run_mutation "dialog stack: a covered expression field refreshes from the top dialog's text" \
   crates/geode-shell/src/shell/expr_suggest.rs \
-  '            Some(state.expr.get_or_insert_with(ExprCompletion::default))
+  '            state.definition.as_mut().map(|d| &mut d.completion)
         }
         _ => None,' \
-  '            Some(state.expr.get_or_insert_with(ExprCompletion::default))
+  '            state.definition.as_mut().map(|d| &mut d.completion)
         }
         _ => view.scope_expr_dialog.as_mut().map(|s| &mut s.completion),' \
   geode-shell \
@@ -18818,6 +18818,136 @@ run_mutation "scope dialog: the save chip opens the save prompt" \
   geode-shell \
   the_save_chip_opens_the_prompt_alone_and_enter_closes
 
+# ---- Scope dialog: the definition step ---------------------------------
+
+# A definition write resolves in the frame at once: until the flush every
+# scope naming it would read the old text.
+run_mutation "scope dialog: a definition write refreshes the frame at once" \
+  crates/geode-shell/src/shell/scopedialog/definition.rs \
+  '    apply::refresh_definitions_now(shell, cx);
+    Ok(fork)' \
+  '    Ok(fork)' \
+  geode-shell \
+  e_on_an_expression_edits_its_definition_with_a_used_by_note
+
+# One definition never refers to another: the step offers no named rows.
+run_mutation "scope dialog: the definition step offers no named rows" \
+  crates/geode-shell/src/shell/scopedialog/definition.rs \
+  '            note: None,
+            completion: ExprCompletion::default(),' \
+  '            note: None,
+            completion: {
+                let mut c = ExprCompletion::default();
+                let offers = shell
+                    .target_frame()
+                    .read(cx)
+                    .named_expressions()
+                    .names()
+                    .map(|n| crate::exprcomplete::NamedOffer {
+                        name: n.to_string(),
+                        preview: String::new(),
+                        broken: false,
+                    })
+                    .collect();
+                c.set_named_offers(offers, &shell.expr_vocab);
+                c
+            },' \
+  geode-shell \
+  the_definition_field_offers_columns_but_no_named_rows
+
+# An empty definition would match everything wherever it is named.
+run_mutation "scope dialog: an empty definition refuses" \
+  crates/geode-shell/src/shell/scopedialog/definition.rs \
+  '    if text.is_empty() {
+        return set_error(shell, EMPTY.into());
+    }' \
+  '' \
+  geode-shell \
+  an_empty_or_broken_definition_refuses_inline
+
+# A new expression's name must be free at every layer, or naming it would
+# silently redefine someone else's.
+run_mutation "scope dialog: a new expression refuses a taken name" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '    if apply::definition_owner(shell, doc, &name) != Owner::Absent {' \
+  '    if false {' \
+  geode-shell \
+  naming_a_new_expression_refuses_a_taken_name
+
+# A new expression's text step becomes its name prompt in place, so the
+# commit returns to the screen it was opened from.
+run_mutation "scope dialog: naming replaces the definition step" \
+  crates/geode-shell/src/shell/scopedialog/definition.rs \
+  '                .replace_top(Layer::Step(Step::NameExpression { text }));' \
+  '                .push(Layer::Step(Step::NameExpression { text }));' \
+  geode-shell \
+  n_names_a_new_expression_without_applying_it
+
+# An accepted suggestion lands in the definition draft, or the sync after
+# the key writes the typed prefix back.
+run_mutation "scope dialog: an accepted suggestion reaches the definition draft" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '        step.draft = text;' \
+  '        let _ = text;' \
+  geode-shell \
+  tab_accepts_a_column_into_the_definition_draft
+
+# The field's Change reaches the definition draft.
+run_mutation "scope dialog: typing reaches the definition draft" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        super::definition::on_draft_changed(state, text);' \
+  '' \
+  geode-shell \
+  e_on_an_expression_edits_its_definition_with_a_used_by_note
+
+# The input mirrors the definition draft.
+run_mutation "scope dialog: the input mirrors the definition draft" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '                state.definition.as_ref().map(|d| d.draft.as_str())' \
+  '                None' \
+  geode-shell \
+  e_on_an_expression_edits_its_definition_with_a_used_by_note
+
+# enter on a reference row opens its definition in this dialog.
+run_mutation "scope dialog: enter on a reference opens its definition" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        RowKind::Named { name, .. } => super::definition::push(shell, Some(name), window, cx),' \
+  '        RowKind::Named { .. } => {}' \
+  geode-shell \
+  enter_on_a_reference_row_opens_its_definition
+
+# e on a Saved expression row opens its definition.
+run_mutation "scope dialog: e on a Saved expression opens its definition" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '            super::definition::push(shell, Some(name), window, cx);' \
+  '            let _ = name;' \
+  geode-shell \
+  e_on_an_expression_edits_its_definition_with_a_used_by_note
+
+# A vanished name refuses where the door was used.
+run_mutation "scope dialog: a vanished definition says so" \
+  crates/geode-shell/src/shell/scopedialog/definition.rs \
+  '            state.error = Some(refusal.into());' \
+  '            let _ = refusal;' \
+  geode-shell \
+  e_on_a_vanished_expression_says_so
+
+# The empty Expressions row is the pointer route of n.
+run_mutation "scope dialog: the empty Expressions row opens a new definition" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '                            click.update(cx, |shell, cx| press_new_expression(shell, window, cx));' \
+  '                            let _ = (&click, &window, &cx);' \
+  geode-shell \
+  n_and_the_empty_expressions_row_open_a_new_definition
+
+# A fork of an inherited definition is announced.
+run_mutation "scope dialog: a definition fork is announced" \
+  crates/geode-shell/src/shell/scopedialog/definition.rs \
+  '        shell.notice = Some(fork.into());' \
+  '        let _ = fork;' \
+  geode-shell \
+  e_on_an_expression_edits_its_definition_with_a_used_by_note
+
 # ---- Scope dialog: lane provenance, rows, saved rows and layers ----
 
 # A load of the scope already in force must still name its source, or the
@@ -25981,21 +26111,29 @@ run_mutation "expr suggest: no suggestions while naming" \
   naming_offers_no_suggestions
 
 # A named chip's body is the mouse door to its definition.
-run_mutation "named chip: the body opens its expression" \
+run_mutation "named chip: the body opens its definition" \
   crates/geode-shell/src/shell/toolbar.rs \
   '                on_open(&open_name, window, cx)' \
   '                { let _ = (&on_open, &open_name, &window, &cx); }' \
   geode-shell \
-  a_named_chips_body_opens_its_expression
+  a_named_chips_body_opens_its_definition
 
-# An undefined name must not enter an edit stage: its draft is empty, and
-# an edit there would write an object nobody asked to create.
-run_mutation "named chip: a missing name stays in browse" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if defined {' \
-  '    if true {' \
+# The chip's handler is the one-shot definition door.
+run_mutation "named chip: the body opens the Scope dialog's definition step" \
+  crates/geode-shell/src/shell/render.rs \
+  '                super::scopedialog::view::open_definition(view, name.to_string(), window, cx);' \
+  '                let _ = (&view, &name, &window, &cx);' \
   geode-shell \
-  a_missing_named_chips_body_opens_browse_with_a_notice
+  the_named_chip_opens_its_definition_alone
+
+# An undefined name must not open an empty definition: an edit there would
+# write an expression nobody asked to create.
+run_mutation "named chip: a missing name refuses and opens nothing" \
+  crates/geode-shell/src/shell/scopedialog/definition.rs \
+  '        .ok_or(super::saved_view::EXPRESSION_GONE)?;' \
+  '        .unwrap_or_default();' \
+  geode-shell \
+  a_missing_named_chips_body_refuses_with_a_notice
 
 # The old expression is blanked before the draft's scope is read, or an
 # unreadable one drops the selections from the values narrowing.

@@ -698,11 +698,11 @@ the name is defined again or removed. The `×` inside a named chip removes that
 name (`FrameViewMut::drop_named`, undoable through `set_scope`) and does nothing
 else. Named chips are keyed by name, so their element ids survive a
 neighbour's removal. The chip body has the chips' hover and pressed fills,
-and a click on it opens the Expressions dialog on that name
-(`objectdialog::render::open_object`): a defined name opens in its edit
-stage, an invalid one included, since editing it is how it gets fixed; a
-missing name opens the Browse list with the notice `'<name>' is not
-defined`. The keyboard route to one name's removal, and to every other
+and a click on it opens that name's definition in the Scope dialog, alone
+(`scopedialog::view::open_definition`): a defined name opens seeded with its
+text, an invalid one included, since editing it is how it gets fixed; a
+missing name opens nothing and says `that expression no longer exists` on
+the status bar. The keyboard route to one name's removal, and to every other
 chip's, is the [Scope dialog](input-and-dialogs.md#scope-dialog): `d` on
 that name's `≡` row. A scope whose only content is a name is not empty: the
 chips row and the save glyph paint for it.

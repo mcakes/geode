@@ -5,6 +5,7 @@ use super::*;
 use geode_core::scope::{DimensionSelection, Scope, parse_expr};
 
 use crate::shell::scopedialog::rows::RowId;
+use crate::shell::scopedialog::state::Layer;
 
 /// `book` and `desk` are dimensions; `npv` and `delta` measures; one
 /// saved scope `eu` (book BK001) and one named expression `liq`.
@@ -447,36 +448,73 @@ fn e_on_a_dimension_opens_the_picker_on_its_column(cx: &mut gpui::TestAppContext
     );
 }
 
+fn definition_of(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Option<Layer> {
+    shell.read_with(vcx, |s, _| {
+        s.scope_dialog.as_ref().map(|d| d.layers.top().clone())
+    })
+}
+
+fn liq_definition() -> Option<Layer> {
+    Some(Layer::Step(
+        crate::shell::scopedialog::state::Step::Definition {
+            name: Some("liq".into()),
+        },
+    ))
+}
+
+/// `enter`, `e` and a double-click on a reference open its definition
+/// inside this dialog, pushed over Current; `escape` returns there.
 #[gpui::test]
-fn enter_on_a_reference_opens_its_expressions_entry(cx: &mut gpui::TestAppContext) {
+fn enter_on_a_reference_row_opens_its_definition(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_on(cx, rich_scope());
     vcx.simulate_keystrokes("j j j enter"); // the reference `liq`
-    assert_eq!(
-        shell.read_with(&vcx, |s, _| s.top_kind()),
-        Some(dialog::DialogKind::Object)
-    );
-    let opened = shell.read_with(&vcx, |s, _| {
-        s.object_dialog
-            .as_ref()
-            .map(|d| (d.domain, d.stage.clone()))
-    });
-    assert_eq!(
-        opened,
-        Some((
-            crate::shell::objectdialog::Domain::Expressions,
-            crate::shell::objectdialog::Stage::Edit {
-                object: "liq".into()
-            }
-        ))
-    );
-    // Escape steps the object dialog back to its list, then closes it.
-    vcx.simulate_keystrokes("escape escape");
+    draw(&mut vcx);
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.top_kind()),
         Some(dialog::DialogKind::Scope)
     );
+    assert_eq!(definition_of(&shell, &vcx), liq_definition());
+    assert!(vcx.debug_bounds("scope-dialog-definition-field").is_some());
+    assert_eq!(
+        shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string()),
+        "npv > 0"
+    );
+    vcx.simulate_keystrokes("escape");
     draw(&mut vcx);
+    assert_eq!(definition_of(&shell, &vcx), Some(Layer::Current));
     assert!(vcx.debug_bounds("scope-dialog").is_some());
+    vcx.simulate_keystrokes("e");
+    assert_eq!(definition_of(&shell, &vcx), liq_definition());
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    let row = vcx
+        .debug_bounds("scope-dialog-row-3")
+        .expect("the reference row paints");
+    super::double_click(&mut vcx, row.center(), gpui::Modifiers::default());
+    assert_eq!(definition_of(&shell, &vcx), liq_definition());
+}
+
+/// A reference to a name nothing defines has no definition to open: the
+/// row refuses and Current stays.
+#[gpui::test]
+fn enter_on_a_missing_reference_refuses(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(
+        cx,
+        Scope {
+            named: vec!["gone".into()],
+            ..Scope::default()
+        },
+    );
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(definition_of(&shell, &vcx), Some(Layer::Current));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s
+            .scope_dialog
+            .as_ref()
+            .and_then(|d| d.error.clone())),
+        Some("that expression no longer exists".to_string())
+    );
 }
 
 #[gpui::test]

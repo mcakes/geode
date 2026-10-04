@@ -27,10 +27,10 @@ use super::view::{ScopeDialogState, edit_lane};
 /// if the scope was cleared under the prompt.
 pub(crate) const NOTHING_TO_SAVE: &str = "nothing to save — the scope is empty";
 const SAVE_LABEL: &str = "Save scope as";
+const NAME_EXPRESSION_LABEL: &str = "Name this expression";
 const SCOPES_DOC: &str = "scopes";
 
 /// What a name prompt names.
-#[allow(dead_code)] // NameExpression and Copy are raised by steps the view does not route yet.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Purpose {
     /// The lane's scope, saved under the name.
@@ -38,6 +38,7 @@ pub(crate) enum Purpose {
     /// A new expression whose text was just accepted.
     NameExpression { text: String },
     /// A copy of a saved definition.
+    #[allow(dead_code)] // Raised by the Saved screen's copy verb, not routed yet.
     Copy { from: SavedId },
 }
 
@@ -45,8 +46,17 @@ impl Purpose {
     fn label(&self) -> &'static str {
         match self {
             Purpose::SaveScope => SAVE_LABEL,
-            Purpose::NameExpression { .. } => "Name expression",
+            Purpose::NameExpression { .. } => NAME_EXPRESSION_LABEL,
             Purpose::Copy { .. } => "Copy as",
+        }
+    }
+
+    /// What `enter` does, as the footer says it.
+    fn enter_hint(&self) -> &'static str {
+        match self {
+            Purpose::SaveScope => "save",
+            Purpose::NameExpression { .. } => "create",
+            Purpose::Copy { .. } => "copy",
         }
     }
 }
@@ -81,7 +91,11 @@ pub(crate) struct Pending {
 
 /// Whether a name prompt is the top layer: its field owns the input.
 pub(crate) fn in_name_prompt(state: &ScopeDialogState) -> bool {
-    state.prompt.is_some() && matches!(state.layers.top(), Layer::Step(_))
+    state.prompt.is_some()
+        && matches!(
+            state.layers.top(),
+            Layer::Step(Step::SaveScope | Step::NameExpression { .. } | Step::CopyName { .. })
+        )
 }
 
 /// The save prompt's starting state: seeded with where the scope came from,
@@ -161,7 +175,7 @@ pub(super) fn prompt_key(
 
 /// Re-derive and resync while the dialog is still the top one; a commit
 /// that closed it handed focus to whatever is beneath.
-fn after_key(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+pub(super) fn after_key(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     if shell.top_kind() == Some(dialog::DialogKind::Scope) {
         shell.refresh_dialog_rows(cx);
         dialog::sync_dialog_text(shell, window, cx);
@@ -184,22 +198,64 @@ fn set_prompt_error(shell: &mut ShellView, error: String) {
     }
 }
 
-/// Check the draft as a name, then save: at once over a new or inherited
-/// name (a fork, announced), after a question over the user's own.
+/// The draft as a usable, unreserved name, or the refusal.
+fn checked_name(draft: &str) -> Result<String, String> {
+    let name = geode_core::config::check_object_name(draft)?.to_string();
+    if geode_core::scopes::RESERVED_NAMES.contains(&name.as_str()) {
+        return Err(format!("'{name}' is reserved"));
+    }
+    Ok(name)
+}
+
+/// Check the draft as a name, then carry out the prompt's purpose.
 fn submit(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let Some(prompt) = shell.scope_dialog.as_ref().and_then(|s| s.prompt.clone()) else {
         return;
     };
-    if prompt.purpose != Purpose::SaveScope {
-        return;
-    }
-    let name = match geode_core::config::check_object_name(&prompt.draft) {
-        Ok(name) => name.to_string(),
+    let name = match checked_name(&prompt.draft) {
+        Ok(name) => name,
         Err(refusal) => return set_prompt_error(shell, refusal),
     };
-    if geode_core::scopes::RESERVED_NAMES.contains(&name.as_str()) {
-        return set_prompt_error(shell, format!("'{name}' is reserved"));
+    match prompt.purpose {
+        Purpose::SaveScope => submit_save(shell, name, window, cx),
+        Purpose::NameExpression { text } => name_expression(shell, name, &text, window, cx),
+        Purpose::Copy { .. } => {}
     }
+}
+
+/// A new expression takes a name no layer holds: naming it is not editing
+/// someone else's. Written and resolved at once, and not applied to the
+/// lane's scope; the step leaves for the screen it was opened from.
+fn name_expression(
+    shell: &mut ShellView,
+    name: String,
+    text: &str,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let doc = geode_core::config::EXPRESSIONS_DOC;
+    if apply::definition_owner(shell, doc, &name) != Owner::Absent {
+        return set_prompt_error(shell, format!("'{name}' already exists"));
+    }
+    if let Err(refusal) = super::definition::write(shell, &name, text, cx) {
+        return set_prompt_error(shell, refusal);
+    }
+    let Some(state) = shell.scope_dialog.as_mut() else {
+        return;
+    };
+    state.prompt = None;
+    let after = state.layers.commit_step();
+    super::saved_view::finish(shell, after, window, cx);
+}
+
+/// Save the lane's scope as `name`: at once over a new or inherited name
+/// (a fork, announced), after a question over the user's own.
+fn submit_save(
+    shell: &mut ShellView,
+    name: String,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
     // Pending-aware: a scope saved a moment ago is already the user's.
     match apply::definition_owner(shell, SCOPES_DOC, &name) {
         Owner::User { .. } => {
@@ -338,13 +394,17 @@ pub(super) fn pending_footer(
 
 /// The prompt's own keys: everything else types.
 pub(super) fn hints(state: &ScopeDialogState) -> Vec<Hint> {
+    let enter = state
+        .prompt
+        .as_ref()
+        .map_or("save", |p| p.purpose.enter_hint());
     let leave = if state.layers.depth() > 1 {
         "back"
     } else {
         "close"
     };
     vec![
-        Hint::new(HintRow::Go, &["enter"], "save").selector("scope-dialog-hint-save"),
+        Hint::new(HintRow::Go, &["enter"], enter).selector("scope-dialog-hint-save"),
         Hint::new(HintRow::Go, &["escape"], leave),
     ]
 }

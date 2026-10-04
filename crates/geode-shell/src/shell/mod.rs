@@ -1048,7 +1048,8 @@ impl ShellView {
                 }
                 Some(dialog::DialogKind::Scope) => {
                     if let Some(state) = view.scope_dialog.as_mut() {
-                        // The text step and a name prompt type their draft;
+                        // The text step, the definition step and a name
+                        // prompt type their draft;
                         // the Saved screen filters while in filter mode;
                         // Current ignores it.
                         scopedialog::view::on_query_changed(state, &query);

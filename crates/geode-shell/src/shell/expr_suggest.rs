@@ -1,6 +1,6 @@
 //! Suggestions for the scope expression fields: the frame's expression
-//! dialog and the Scopes dialog's open `expression` field. Both edit the
-//! shared `dialog_input`. The pure state is `crate::exprcomplete`; this
+//! dialog, the Scopes dialog's open `expression` field and the Scope
+//! dialog's definition step. All edit the shared `dialog_input`. The pure state is `crate::exprcomplete`; this
 //! module feeds it the live text and caret, claims its keys, requests
 //! categorical values under [`super::EXPR_KEY`] and paints it.
 //!
@@ -43,6 +43,15 @@ pub(crate) fn completion_mut(view: &mut ShellView) -> Option<&mut ExprCompletion
             }
             Some(state.expr.get_or_insert_with(ExprCompletion::default))
         }
+        // The Scope dialog's definition step, only while it is the top
+        // layer: its other layers' fields are names, filters and text.
+        DialogKind::Scope => {
+            let state = view.scope_dialog.as_mut()?;
+            if !super::scopedialog::definition::in_definition(state) {
+                return None;
+            }
+            state.definition.as_mut().map(|d| &mut d.completion)
+        }
         _ => None,
     }
 }
@@ -78,6 +87,13 @@ fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
                 _ => None,
             }
         }
+        // A named expression is ANDed into whichever scope names it, so
+        // its values are the whole dataset's.
+        Some(DialogKind::Scope) => view
+            .scope_dialog
+            .as_ref()
+            .filter(|state| super::scopedialog::definition::in_definition(state))
+            .map(|_| Scope::default()),
         _ => None,
     }
 }
@@ -176,6 +192,16 @@ pub(crate) fn deliver(view: &mut ShellView, outcome: DistinctOutcome, cx: &mut C
             .filter_map(|state| state.expr.as_mut())
             .any(|c| c.deliver(&outcome.column, outcome.tag, outcome.values.clone(), &vocab));
     }
+    if !landed
+        && let Some(step) = view
+            .scope_dialog
+            .as_mut()
+            .and_then(|state| state.definition.as_mut())
+    {
+        landed = step
+            .completion
+            .deliver(&outcome.column, outcome.tag, outcome.values, &vocab);
+    }
     if landed {
         cx.notify();
     }
@@ -258,6 +284,15 @@ pub(crate) fn accept(
         && let Some(draft) = state.draft.as_mut()
     {
         draft.set_query(text);
+        super::dialog::sync_dialog_text(view, window, cx);
+    } else if view.top_kind() == Some(DialogKind::Scope)
+        && let Some(state) = view.scope_dialog.as_mut()
+        && super::scopedialog::definition::in_definition(state)
+        && let Some(step) = state.definition.as_mut()
+    {
+        // The Scope dialog's definition draft, for the same reason.
+        step.draft = text;
+        step.error = None;
         super::dialog::sync_dialog_text(view, window, cx);
     }
     if let Some(name) = staged {

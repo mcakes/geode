@@ -463,19 +463,13 @@ impl Render for ShellView {
                 });
             });
         };
-        // A named-expression chip's body opens the Expressions dialog on
-        // that name; its `×` drops that name alone, an undoable edit like
-        // the other chips' `×`.
+        // A named-expression chip's body opens that name's definition in
+        // the Scope dialog, alone; its `×` drops that name alone, an
+        // undoable edit like the other chips' `×`.
         let named_open_entity = cx.entity();
         let on_named_open = move |name: &str, window: &mut Window, cx: &mut App| {
             named_open_entity.update(cx, |view, cx| {
-                objectdialog::render::open_object(
-                    view,
-                    objectdialog::Domain::Expressions,
-                    name,
-                    window,
-                    cx,
-                );
+                super::scopedialog::view::open_definition(view, name.to_string(), window, cx);
             });
         };
         let named_close_entity = cx.entity();

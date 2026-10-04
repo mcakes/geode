@@ -86,7 +86,6 @@ impl Layers {
     /// Swap the top layer without changing where its commit leads: a new
     /// expression's text step becomes its naming step and still returns to
     /// the screen beneath.
-    #[allow(dead_code)] // Called by the new-expression naming step, which the view lacks yet.
     pub(crate) fn replace_top(&mut self, layer: Layer) {
         if let Some(top) = self.layers.last_mut() {
             *top = layer;

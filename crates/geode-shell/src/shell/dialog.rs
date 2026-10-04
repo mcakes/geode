@@ -574,7 +574,8 @@ pub(crate) fn sync_dialog_text(
         }
         Some(DialogKind::Scope) => {
             // Current has no field: keys reach the dialog through the shell.
-            // The text step and a name prompt own the input, their draft the
+            // The text step, the definition step and a name prompt own the
+            // input, their draft the
             // source of truth. A question gives the shell root focus: the
             // field's own bindings (backspace, delete, paste) run before the
             // dialog's key handler could claim them, and would edit the draft
@@ -591,6 +592,8 @@ pub(crate) fn sync_dialog_text(
             let input = shell.dialog_input.clone();
             let draft = if super::scopedialog::view::in_text_step(state) {
                 Some(state.text_draft.as_str())
+            } else if super::scopedialog::definition::in_definition(state) {
+                state.definition.as_ref().map(|d| d.draft.as_str())
             } else if super::scopedialog::prompt::in_name_prompt(state) {
                 state.prompt.as_ref().map(|p| p.draft.as_str())
             } else {
