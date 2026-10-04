@@ -36553,7 +36553,8 @@ run_mutation "value colors: a seeded Colors draft reads its definition" \
   geode-shell \
   colors_fields_from_a_source_table_read_its_definition
 
-# The typed hue seeds a new named color over the color in force.
+# The typed hue seeds a new named color over the color in force. The test
+# reaches `New named color…` beneath the typed row, as the trader does.
 run_mutation "value colors: the typed hue seeds the new color" \
   crates/geode-shell/src/shell/choicedialog.rs \
   '            Target::ValueColor { typed: Some(n), .. } => {' \
@@ -37094,6 +37095,37 @@ run_mutation "config door: a rejected merge refuses its origin tiles" \
   '                    drop(tiles);' \
   geode-shell \
   a_rejected_door_merge_tells_its_tile
+
+# A digits query filters `New named color…` out by text; pinned beneath the
+# typed row, it is how the typed hue seeds a new named color.
+run_mutation "value colors: New named color is pinned beneath a typed hue" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                        self.list.pin_top(new);' \
+  '                        let _ = new;' \
+  geode-shell \
+  a_typed_hue_seeds_a_new_named_color
+
+# The stage's handlers resolve the slider track, so a paint only reads it.
+run_mutation "value colors: opening the stage warms the track" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  $'    warm_track(shell, cx);\n    shell.focus_handle.focus(window, cx);' \
+  '    shell.focus_handle.focus(window, cx);' \
+  geode-shell \
+  a_tone_change_warms_the_track_before_the_paint
+
+run_mutation "value colors: the tone key warms the track" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            if key == StageKey::Tone {' \
+  '            if false {' \
+  geode-shell \
+  a_tone_change_warms_the_track_before_the_paint
+
+run_mutation "value colors: the tone click warms the track" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  $'    warm_track(shell, cx);\n    cx.notify();\n}' \
+  $'    cx.notify();\n}' \
+  geode-shell \
+  a_tone_change_warms_the_track_before_the_paint
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

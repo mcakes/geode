@@ -262,9 +262,12 @@ still that color. With no named color the list begins with the presets.
 
 While the query is a whole number 0–360 (360 reads as 0; `07` is 7, while
 `-5`, `1e2` or `21a` are no hue), a pinned top row `Hue {n}` with its
-swatch appears, lit, and the other rows still filter beneath it. Enter on
-it writes `{ hue = n }`. Moving the highlight off it keeps the move: enter
-does not re-pin an unchanged query.
+swatch appears, lit, with `New named color…` pinned beneath it (the
+digits would filter it out by text), and the other rows still filter
+beneath them. Enter on `Hue {n}` writes `{ hue = n }`; moving down one
+reaches `New named color…`, which seeds the new color from the typed hue.
+Moving the highlight off the typed row keeps the move: enter does not
+re-pin an unchanged query.
 
 `New named color…` pushes the Colors dialog over the list at its naming
 stage, the name field prefilled with the value lowercased, whitespace, `.`
@@ -278,8 +281,13 @@ where hue and tone edits repaint the value through the named color.
 `escape` or `‹` at naming returns to the list intact, writing nothing. A
 refused name (taken, reserved or invalid) stays on naming with the
 dialog's notice. A failed color write colors nothing; the value is written
-only after the color is, so it never names a color the file lacks. A
-failed value write shows its error, and the color remains.
+only after the color is, so it never names a color the file lacks. If the
+color is written but the reload rejects the batch, the value is still
+written and paints once the configuration is valid. If an edit made while
+the create's write was in flight extends the batch and that later write
+fails, the color is written but the value stays uncolored: the batch, with
+its pending value write, is dropped. A failed value write shows its error,
+and the color remains.
 
 `Custom…` opens the hue stage: a second stage of the same modal, under the
 same title, with the title row's `‹` back button. The preview shows the
@@ -297,8 +305,11 @@ Apply on the hue and tone of the color in force writes nothing, whether
 that color is inline or a named hue color: an inline copy of a name's hue
 would detach the value from the name. `escape`, `Cancel` or `‹`
 returns to the list as it was, writing nothing. The track and the preview
-are resolved once per theme signature (the preview also per hue and tone),
-a step or slider move resolving only the preview, in its handler.
+are resolved once per theme signature (the track also per tone, the
+preview per hue and tone), in the handler that changes the key: opening
+the stage resolves both, a step or slider move only the preview, a tone
+change both. A paint only reads them, except after a theme change while
+the stage is open, which resolves once at the next paint.
 
 A pick writes only the user layer's `value_colors.toml`, through
 `config_write`, off the UI thread, keeping the rest of the file:
@@ -318,10 +329,10 @@ cleared this way).
 After a write the status bar reads `SPX colored blue`, `SPX colored hue 210`,
 `SPX colored hue 30 light`, `SPX colored warning`, `SPX colored blue preset`,
 `SPX color cleared` or `SPX follows the desk`. A preset row says `SPX
-colored blue preset`; a typed hue or the stage says `SPX colored hue 240`,
-even when the hue equals a preset. The ordinary reload repaints. A failed write (a
-dimension entry that is not a table, an unreadable file) shows the writer's
-error as the notice and leaves the file untouched. With no user
+colored blue preset`; a typed hue or the stage says `SPX colored hue
+240`, even when the hue equals a preset. The ordinary reload repaints. A
+failed write (a dimension entry that is not a table, an unreadable file)
+shows the writer's error as the notice and leaves the file untouched. With no user
 configuration directory the notice reads `no user configuration directory:
 the color was not saved`.
 

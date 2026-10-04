@@ -40,7 +40,8 @@
 //! (`preset · {name}`), then `Custom…` (the hue stage), then
 //! `New named color…`, then `None`, then `Follow desk ({name})` when the
 //! user layer overrides a different, colored lower entry. While the query is
-//! a whole number 0–360 a typed `Hue {n}` row is pinned on top, lit. It
+//! a whole number 0–360 a typed `Hue {n}` row is pinned on top, lit, with
+//! `New named color…` pinned beneath it so the typed hue can seed one. It
 //! opens on the color in force (an inline preset on its row, any other
 //! inline entry on `Custom…`, `None` without one), and a query cleared back
 //! to blank lights that row again, so enter on an untouched list changes
@@ -584,8 +585,9 @@ impl ChoiceDialogState {
     /// target keeps the lit row by text.
     ///
     /// The value-color list pins a `Hue {n}` row on top while the query is
-    /// a whole number 0–360 ([`parse_hue`]), lit, with the other rows
-    /// filtering beneath it; an unchanged query moves nothing, so enter's
+    /// a whole number 0–360 ([`parse_hue`]), lit, and `New named color…`
+    /// pinned second (the digits filter it out by text), with the other
+    /// rows filtering beneath them; an unchanged query moves nothing, so enter's
     /// re-feed keeps a moved highlight. A query cleared back to blank lights
     /// the row the list opened on, so enter on it still changes nothing.
     pub fn set_query(&mut self, query: &str) -> bool {
@@ -631,6 +633,13 @@ impl ChoiceDialogState {
                 }
                 self.list.set_query(query);
                 if typed.is_some() {
+                    // `New named color…` second: a digits query filters it
+                    // out by text, and it is how the typed hue seeds a new
+                    // named color. Pinned by declared index, so its pick
+                    // stays its own; the next rerank drops both pins.
+                    if let Some(new) = picks.iter().position(|p| *p == ColorRow::NewNamed) {
+                        self.list.pin_top(new);
+                    }
                     self.list.pin_top(0);
                 } else if query.trim().is_empty()
                     && let Some(at) = self.list.ranked().iter().position(|r| r.row == *opening)
@@ -929,6 +938,10 @@ type PreviewMemo = (([gpui::Hsla; 28], u16, Tone), gpui::Hsla);
 pub struct StageCache {
     track: std::cell::RefCell<Option<Box<TrackMemo>>>,
     preview: std::cell::RefCell<Option<Box<PreviewMemo>>>,
+    /// Tracks a paint had to resolve itself ([`Self::painted_track`]): a
+    /// handler that changed the key without warming it.
+    #[cfg(test)]
+    paint_misses: std::cell::Cell<usize>,
 }
 
 impl PartialEq for StageCache {
@@ -954,6 +967,38 @@ impl StageCache {
                 stops
             }
         }
+    }
+
+    /// Whether the track for `theme` and `tone` is cached, so a paint
+    /// resolves nothing.
+    #[cfg(test)]
+    pub fn holds_track(&self, theme: [gpui::Hsla; 28], tone: Tone) -> bool {
+        self.track
+            .borrow()
+            .as_deref()
+            .is_some_and(|(k, _)| *k == (theme, tone))
+    }
+
+    /// [`Self::track`] as a paint reads it. The handlers that change the
+    /// tone warm the track first, so this only resolves after a theme
+    /// change while the stage is open, as the swatches do.
+    pub fn painted_track(
+        &self,
+        theme: [gpui::Hsla; 28],
+        tone: Tone,
+        resolve: impl FnOnce() -> Rc<[gpui::Hsla]>,
+    ) -> Rc<[gpui::Hsla]> {
+        #[cfg(test)]
+        if !self.holds_track(theme, tone) {
+            self.paint_misses.set(self.paint_misses.get() + 1);
+        }
+        self.track(theme, tone, resolve)
+    }
+
+    /// How many tracks a paint resolved itself.
+    #[cfg(test)]
+    pub fn paint_misses(&self) -> usize {
+        self.paint_misses.get()
     }
 
     pub fn preview(
@@ -1029,7 +1074,7 @@ pub struct HueSlider {
 impl ChoiceDialogState {
     /// One row per named color (alphabetical), then twelve presets
     /// (`preset · {name}`, [`PRESETS`]), then [`CUSTOM_ROW`], then
-    /// [`NO_COLOR_ROW`], then `Follow desk ({label})` when the user layer
+    /// [`NEW_NAMED_ROW`], then [`NO_COLOR_ROW`], then `Follow desk ({label})` when the user layer
     /// overrides a different lower entry. Opens on the color in force: a
     /// named color on its row, an inline entry equal to a preset on that
     /// preset, any other inline entry on `Custom…`, none (or a name no
@@ -1684,6 +1729,7 @@ fn enter_hue_stage(shell: &mut ShellView, window: &mut Window, cx: &mut Context<
         _change: change,
     });
     warm_preview(shell, cx);
+    warm_track(shell, cx);
     shell.focus_handle.focus(window, cx);
     cx.notify();
 }
@@ -1778,6 +1824,9 @@ fn hue_stage_key(
                 slider.update(cx, |s, cx| s.set_value(f32::from(hue), window, cx));
             }
             warm_preview(shell, cx);
+            if key == StageKey::Tone {
+                warm_track(shell, cx);
+            }
         }
     }
     cx.notify();
@@ -1801,6 +1850,7 @@ fn set_stage_tone(shell: &mut ShellView, tone: Tone, cx: &mut Context<ShellView>
         stage.tone = tone;
     }
     warm_preview(shell, cx);
+    warm_track(shell, cx);
     cx.notify();
 }
 
@@ -1848,6 +1898,21 @@ fn warm_preview(shell: &ShellView, cx: &App) {
     }
 }
 
+/// Resolve the stage's slider track in a handler, so the next paint finds
+/// it cached: the stage opening and a tone change each cost one resolve
+/// outside render. A theme change while the stage is open resolves once at
+/// the next paint, as the swatches do.
+fn warm_track(shell: &ShellView, cx: &App) {
+    if let Some(stage) = hue_stage(shell) {
+        let theme = cx.theme();
+        stage
+            .cache
+            .track(super::colours::theme_signature(theme), stage.tone, || {
+                track_stops(stage.tone, theme)
+            });
+    }
+}
+
 /// The hue field's refusal, painted while its text is not a hue.
 const HUE_REFUSAL: &str = "a hue is 0\u{2013}360";
 
@@ -1883,7 +1948,7 @@ fn hue_stage_body(
     });
     let track = stage
         .cache
-        .track(signature, stage.tone, || track_stops(stage.tone, theme));
+        .painted_track(signature, stage.tone, || track_stops(stage.tone, theme));
     let valid = stage.valid();
     let sample = |color: gpui::Hsla, selector: &'static str| {
         div()
@@ -3382,6 +3447,10 @@ mod tests {
         let mut inline = value_list(&["blue"], &state);
         assert_eq!(inline.new_color_seed(), Definition::hue(210.0, Tone::Light));
         inline.set_query("90");
+        // A digits query filters `New named color…` out by text; it is pinned
+        // beneath the typed row so the typed hue can seed it.
+        inline.list.nav(crate::vimnav::NavCommand::Move(1));
+        assert_eq!(lit(&inline), Some(ColorRow::NewNamed), "reachable");
         assert_eq!(
             inline.new_color_seed(),
             Definition::hue(90.0, Tone::Normal),
@@ -3426,7 +3495,22 @@ mod tests {
     fn a_dropped_typed_row_keeps_the_picks_aligned() {
         let mut state = value_list(&["blue"], &value_state(None, None));
         assert!(state.set_query("210"));
+        let second = state.list.ranked()[1].row;
+        assert_eq!(
+            state.list.options()[second],
+            NEW_NAMED_ROW,
+            "pinned beneath the typed row"
+        );
+        assert_eq!(value_pick(&state, 1), Some(ColorRow::NewNamed));
         assert!(state.set_query("blue"));
+        assert!(
+            !state
+                .list
+                .ranked()
+                .iter()
+                .any(|r| state.list.options()[r.row] == NEW_NAMED_ROW),
+            "the second pin goes with the typed row"
+        );
         let Target::ValueColor {
             picks, swatches, ..
         } = &state.target
@@ -3604,6 +3688,15 @@ mod tests {
             Rc::<[gpui::Hsla]>::from(vec![red; TRACK_STOPS])
         });
         assert_eq!(tracks.get(), 2, "a tone change resolves the track");
+        assert!(cache.holds_track(light, Tone::Light), "a hit");
+        assert!(
+            !cache.holds_track(light, Tone::Normal),
+            "the other tone misses"
+        );
+        assert!(
+            !cache.holds_track(dark, Tone::Light),
+            "another theme misses"
+        );
         assert_eq!(
             StageCache::default(),
             cache,

@@ -369,9 +369,10 @@ columns](data-path.md#ungrouped-dimension-columns). A numeric dimension such as
 format.
 
 A dimension value that `value_colors` maps paints in that value's color (a
-named color, or an inline hue or token). A tree label is a value of the grouping dimension at its depth, so
-`L1` under `lhu` takes `lhu`'s mapping for `L1`, never another level's; the
-gutter number, indent and chevron keep their own paint. A `dimension`
+named color, or an inline hue or token). A tree label is a value of the
+grouping dimension at its depth, so `L1` under `lhu` takes `lhu`'s mapping
+for `L1`, never another level's; the gutter number, indent and chevron keep
+their own paint. A `dimension`
 column's unanimous value takes its color too. `mixed`, blanks, the grand
 total, measures, headers and the selection footer are never value-colored.
 Muted states (`mixed`, non-attributable, determined non-additive, the `/`
@@ -1808,9 +1809,10 @@ in the theme's bearish color and a positive one bullish, a named color from
 failed one danger whatever the column's color. Measures default to `sign`;
 a column says `color = "none"` to opt out.
 A dimension value that `value_colors` maps paints in that value's color (a
-named color, or an inline hue or token): a text dimension's cell showing an own value (`underlying_ref` on a
-line or leg, and a package or group row's agreed value), and a group row's
-label when the sheet is grouped by that dimension. Label and cell both match
+named color, or an inline hue or token): a text dimension's cell showing an
+own value (`underlying_ref` on a line or leg, and a package or group row's
+agreed value), and a group row's label when the sheet is grouped by that
+dimension. Label and cell both match
 the raw value grouping and scope read, not the painted spelling: an `expiry`
 mapping names `2026-12-18`, which paints `Z26`, and a package or group cell
 matches only the value every leg beneath it shares. Stale, failed,

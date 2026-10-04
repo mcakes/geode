@@ -1533,6 +1533,52 @@ fn new_named_color_creates_the_color_and_colors_the_value(cx: &mut gpui::TestApp
     );
 }
 
+/// A typed hue keeps `New named color…` reachable beneath its row, and
+/// the color it creates starts from the typed hue.
+#[gpui::test]
+fn a_typed_hue_seeds_a_new_named_color(cx: &mut gpui::TestAppContext) {
+    use crate::shell::dialog::DialogKind;
+    use crate::shell::objectdialog::{Domain, NameSeed, Stage};
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, Some(dir.path().to_path_buf()));
+    vcx.simulate_input("210");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("down");
+    draw(&mut vcx);
+    let lit = shell.read_with(&vcx, |s, _| {
+        s.choice_dialog
+            .as_ref()
+            .and_then(|d| d.list.highlighted_text().map(str::to_string))
+    });
+    assert_eq!(lit.as_deref(), Some("New named color\u{2026}"));
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(
+        modal_kinds(&shell, &vcx),
+        [DialogKind::Choice, DialogKind::Object]
+    );
+    let (domain, stage, seed) = shell.read_with(&vcx, |s, _| {
+        let d = s.object_dialog.as_ref().unwrap();
+        (d.domain, d.stage.clone(), d.naming_seed.clone())
+    });
+    assert_eq!((domain, stage), (Domain::Colors, Stage::Naming));
+    assert_eq!(
+        seed,
+        NameSeed::Definition(geode_core::colour::Definition::hue(210.0, Tone::Normal))
+    );
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    super::objectdialog::flush_config_write(&mut vcx);
+    vcx.run_until_parked();
+    let colors = colors_file(dir.path()).expect("the color was written");
+    assert!(
+        colors.contains("[spx]") && colors.contains("hue = 210"),
+        "{colors}"
+    );
+    let values = value_colors_file(dir.path()).expect("the value was written");
+    assert!(values.contains("SPX = \"spx\""), "{values}");
+}
+
 #[gpui::test]
 fn the_hook_colors_the_value_once_and_a_later_create_leaves_it(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -1790,6 +1836,35 @@ fn a_slider_click_and_a_tone_click_set_the_stage(cx: &mut gpui::TestAppContext) 
     );
     draw(&mut vcx);
     assert_eq!(hue_stage(&shell, &vcx).unwrap().tone, Tone::Light);
+}
+
+/// The stage opening and a tone change resolve the slider track in their
+/// handlers, so a paint only reads the cache: by key and by click.
+#[gpui::test]
+fn a_tone_change_warms_the_track_before_the_paint(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_color_list(cx, TWO_COLORS, None);
+    open_stage(&shell, &mut vcx);
+    let signature = vcx.update(|_, cx| {
+        use gpui_component::ActiveTheme as _;
+        crate::shell::colours::theme_signature(cx.theme())
+    });
+    let misses =
+        |vcx: &gpui::VisualTestContext| hue_stage(&shell, vcx).map(|s| s.cache.paint_misses());
+    assert_eq!(misses(&vcx), Some(0), "the stage opened warm");
+    vcx.simulate_keystrokes("t");
+    draw(&mut vcx);
+    let stage = hue_stage(&shell, &vcx).unwrap();
+    assert_eq!(stage.tone, Tone::Light);
+    assert!(stage.cache.holds_track(signature, Tone::Light));
+    assert_eq!(misses(&vcx), Some(0), "the tone key warmed the track");
+    let tone = vcx.debug_bounds("valuecolor-stage-tone").unwrap();
+    vcx.simulate_click(
+        gpui::point(tone.left() + gpui::px(4.), tone.center().y),
+        gpui::Modifiers::none(),
+    );
+    draw(&mut vcx);
+    assert_eq!(hue_stage(&shell, &vcx).unwrap().tone, Tone::Normal);
+    assert_eq!(misses(&vcx), Some(0), "the tone click warmed the track");
 }
 
 #[gpui::test]
