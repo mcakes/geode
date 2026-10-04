@@ -207,6 +207,7 @@ fn fixing_with_no_differences_refuses(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.footer(&vcx).as_deref(), Some(NO_DIFF_DOMAIN));
     // Shown a difference, the same action succeeds and the refusal is gone.
     h.command(&mut vcx, "diff cvi - chain").unwrap();
+    assert_eq!(h.footer(&vcx), None, "a `:` line is a verb: the refusal clears");
     vcx.simulate_keystrokes("j space");
     h.answer_last(&mut vcx).expect("the pair resubmits");
     h.draw(&mut vcx);
