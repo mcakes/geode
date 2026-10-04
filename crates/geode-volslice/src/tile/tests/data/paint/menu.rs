@@ -5,6 +5,7 @@
 use super::*;
 use crate::core::build::{DIFF_AXIS, restyled};
 use crate::core::menu::{FIX_DIFF_Y, NO_DIFF_DOMAIN};
+use geode_chart::core::scale::nice_outward;
 use geode_shell::actions::ActionId;
 
 /// A loaded tile showing `cvi − chain` in the lower pane at 2026-11-20,
@@ -45,6 +46,14 @@ impl Harness {
             restyled(t.model(), t.state().split, None, 0).side_domain(DIFF_AXIS, t.painted_view())
         })
     }
+    fn footer(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+        self.tile
+            .read_with(vcx, |t, _| t.footer_notice().map(|n| n.to_string()))
+    }
+    /// The open menu's tick on `id`'s row: `None` with no menu.
+    fn menu_tick(&self, vcx: &gpui::VisualTestContext, id: &str) -> Option<Option<bool>> {
+        self.tile.read_with(vcx, |t, _| t.menu_tick(id))
+    }
     fn highlighted_id(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
         let (ids, at) = self.menu(vcx)?;
         // `menu_open` lists action rows only; map the row index back.
@@ -82,14 +91,21 @@ fn the_menu_fixes_the_diff_axis_at_the_shown_domain_and_a_pan_keeps_it(
         Some("volslice::underlying")
     );
     let cursor = h.state(&vcx).cursor;
-    // underlying → coordinate → cvi → chain (the draft is not loaded, so
-    // its row is skipped) → densities → difference → fix.
-    vcx.simulate_keystrokes("j j j j j j");
+    // underlying → coordinate → cvi → cvi draft → chain → densities →
+    // difference → fix.
+    vcx.simulate_keystrokes("j j j j j j j");
     assert_eq!(h.highlighted_id(&vcx).as_deref(), Some(FIX_DIFF_Y));
     assert_eq!(h.state(&vcx).cursor, cursor, "the strip's j stays out");
+    let hint = vcx.update(|window, cx| h.tile.read(cx).diff_tick_hint(window));
+    let frozen = nice_outward(shown, hint);
+    assert!(
+        frozen.0 <= shown.0 && frozen.1 >= shown.1 && frozen != shown,
+        "widened outward to tick values: {frozen:?} over {shown:?}"
+    );
     vcx.simulate_keystrokes("enter");
     assert_eq!(h.menu(&vcx), None, "a pick closes the menu");
-    assert_eq!(h.ylim(&vcx), Some(shown));
+    assert_eq!(h.ylim(&vcx), Some(frozen));
+    let shown = frozen;
     let log = h.dispatched(&vcx);
     assert!(
         log.ends_with(&["volslice::menu_pick".into(), FIX_DIFF_Y.into()]),
@@ -188,7 +204,81 @@ fn fixing_with_no_differences_refuses(cx: &mut gpui::TestAppContext) {
             .dispatch(&ActionId(FIX_DIFF_Y.into()), None, window, cx)
     });
     assert_eq!(h.ylim(&vcx), None);
-    assert!(h.notices(&vcx).contains(&NO_DIFF_DOMAIN.to_string()));
+    assert_eq!(h.footer(&vcx).as_deref(), Some(NO_DIFF_DOMAIN));
+    // Shown a difference, the same action succeeds and the refusal is gone.
+    h.command(&mut vcx, "diff cvi - chain").unwrap();
+    vcx.simulate_keystrokes("j space");
+    h.answer_last(&mut vcx).expect("the pair resubmits");
+    h.draw(&mut vcx);
+    vcx.update(|window, cx| {
+        h.content
+            .dispatch(&ActionId(FIX_DIFF_Y.into()), None, window, cx)
+    });
+    assert!(h.ylim(&vcx).is_some());
+    assert!(!h.notices(&vcx).contains(&NO_DIFF_DOMAIN.to_string()));
+    assert_ne!(h.footer(&vcx).as_deref(), Some(NO_DIFF_DOMAIN));
+}
+
+/// A disabled row picked by key (the pointer lit it; `enter` picks the
+/// lit row) or by a click gives its reason as the refusal and the menu
+/// stays up.
+#[gpui::test]
+fn a_disabled_row_picked_by_key_or_click_says_why(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = loaded(cx);
+    h.focus(&mut vcx);
+    vcx.simulate_keystrokes(".");
+    h.draw(&mut vcx);
+    let rows = h.tile.read_with(&vcx, |t, cx| t.menu_rows(cx));
+    let fix = rows
+        .iter()
+        .position(|r| r.action().is_some_and(|a| a.pick().0 == FIX_DIFF_Y))
+        .unwrap();
+    let row = format!("volslice-menu-row-{TILE}-{fix}");
+    let at = bounds(&mut vcx, &row).center();
+    vcx.simulate_event(gpui::MouseMoveEvent {
+        position: at,
+        pressed_button: None,
+        modifiers: Modifiers::default(),
+    });
+    assert_eq!(
+        h.menu(&vcx).and_then(|m| m.1),
+        Some(fix),
+        "the pointer lit it"
+    );
+    vcx.simulate_keystrokes("enter");
+    assert!(h.menu(&vcx).is_some(), "the menu stays");
+    assert_eq!(h.footer(&vcx).as_deref(), Some(NO_DIFF_DOMAIN));
+    assert_eq!(h.ylim(&vcx), None);
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(h.footer(&vcx), None, "escape is a verb: the refusal clears");
+    vcx.simulate_keystrokes(".");
+    h.draw(&mut vcx);
+    click(&mut vcx, &row, Modifiers::default());
+    assert!(h.menu(&vcx).is_some());
+    assert_eq!(h.footer(&vcx).as_deref(), Some(NO_DIFF_DOMAIN));
+}
+
+/// Rows follow the tile under an open menu: a `:ylim` ticks the fix row.
+#[gpui::test]
+fn an_open_menus_rows_follow_the_tile(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = with_diff(cx);
+    vcx.simulate_keystrokes(".");
+    assert_eq!(h.menu_tick(&vcx, FIX_DIFF_Y), Some(Some(false)));
+    h.command(&mut vcx, "ylim -2% 2%").unwrap();
+    assert!(h.menu(&vcx).is_some(), "a :ylim leaves the menu up");
+    assert_eq!(h.menu_tick(&vcx, FIX_DIFF_Y), Some(Some(true)));
+}
+
+/// `.` in the diff chooser swaps the action menu in, as `\u{22ef}` does.
+#[gpui::test]
+fn dot_in_the_chooser_opens_the_action_menu(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = loaded(cx);
+    h.focus(&mut vcx);
+    vcx.simulate_keystrokes("d");
+    assert!(h.chooser(&vcx).is_some());
+    vcx.simulate_keystrokes(".");
+    assert!(h.chooser(&vcx).is_none());
+    assert!(h.menu(&vcx).is_some());
 }
 
 /// `.` toggles; the `\u{22ef}` button toggles; a right press on the chart's

@@ -132,8 +132,13 @@ pub struct VolsliceTile {
     palette: HuePalette,
     /// The theme colors `palette` was derived from.
     palette_key: [Hsla; 7],
-    /// Data-side notices: restore, refusals, missing documents, failures.
+    /// Data-side notices: restore, refused reads, missing documents,
+    /// failures. Cleared by the next install.
     notices: Vec<String>,
+    /// The last verb's refusal (`u` while following, a fix with nothing to
+    /// freeze, a disabled menu row): one slot, cleared by the next verb
+    /// that acts on the tile, so a refusal never outlives the next try.
+    refusal: Option<String>,
     /// The painted model's own notices (failed jobs), or a vol refusal.
     model_notices: Vec<String>,
     /// "Today" for tests, whose fixtures are dated: the strip and the chain
@@ -179,7 +184,7 @@ struct Chrome {
     strip: Vec<StripPaint>,
     strip_key: Option<StripKey>,
     notice: Option<geode_tile::notice::Notice>,
-    notice_key: Option<(Vec<String>, Vec<String>)>,
+    notice_key: Option<(Option<String>, Vec<String>, Vec<String>)>,
     hints: Vec<FooterHint>,
     /// The action menu's element names and the `\u{22ef}` button's
     /// selector, formatted once per tile.
@@ -314,6 +319,7 @@ impl VolsliceTile {
             palette: palette_of(&key),
             palette_key: key,
             notices,
+            refusal: None,
             model_notices: Vec::new(),
             focused: false,
             chart_bounds: ChartBounds::default(),
@@ -333,9 +339,14 @@ impl VolsliceTile {
     ///
     /// Runs from the tile's self-observer after every notify, and directly
     /// from each door the shell calls inside its draw (`set_visible`),
-    /// where the notify is dropped and the observer never runs. The inputs
-    /// are compared in place, so a notify that changed nothing (a wheel, a
-    /// drag) allocates nothing.
+    /// where the notify is dropped and the observer never runs. The header,
+    /// strip and notice compare their inputs in place, so a notify that
+    /// changed none of them (a wheel, a drag) allocates nothing there. The
+    /// open action menu is not gated: while it is up, every notify rebuilds
+    /// its rows (a dozen, one small allocation each) and scans the
+    /// differences axis's values in view for whether `Fix difference
+    /// y-axis` has a domain to freeze, O(visible values). With the menu
+    /// closed it costs nothing.
     pub(crate) fn refresh_chrome(&mut self, cx: &App) {
         let underlying = self.painted_underlying(cx);
         let header_stale = self.chrome.header_key.as_ref().is_none_or(|k| {
@@ -395,11 +406,21 @@ impl VolsliceTile {
             .chrome
             .notice_key
             .as_ref()
-            .is_none_or(|(data, model)| *data != self.notices || *model != self.model_notices);
+            .is_none_or(|(refusal, data, model)| {
+                *refusal != self.refusal || *data != self.notices || *model != self.model_notices
+            });
         if notice_stale {
-            self.chrome.notice =
-                header::footer_notice(self.notices.iter().chain(&self.model_notices));
-            self.chrome.notice_key = Some((self.notices.clone(), self.model_notices.clone()));
+            self.chrome.notice = header::footer_notice(
+                self.refusal
+                    .iter()
+                    .chain(&self.notices)
+                    .chain(&self.model_notices),
+            );
+            self.chrome.notice_key = Some((
+                self.refusal.clone(),
+                self.notices.clone(),
+                self.model_notices.clone(),
+            ));
             #[cfg(test)]
             {
                 self.chrome.builds += 1;
@@ -485,6 +506,7 @@ impl VolsliceTile {
         };
         #[cfg(test)]
         self.dispatch_log.push(action.clone());
+        self.clear_refusal(cx);
         if !matches!(
             verb,
             "commit"
@@ -528,8 +550,7 @@ impl VolsliceTile {
                 // A follower reads its underlying from the group: picking one
                 // here would be overwritten by the next group change.
                 Some(g) => {
-                    self.notice(following_refusal(g));
-                    cx.notify();
+                    self.refuse(following_refusal(g), cx);
                 }
                 None => self.open_picker(window, cx),
             },
@@ -540,7 +561,7 @@ impl VolsliceTile {
             "split_grow" => self.step_split(SPLIT_STEP, cx),
             "menu" => self.toggle_menu(window, cx),
             "menu_pick" => self.pick_highlighted(window, cx),
-            "fix_diff_y" => self.fix_diff_y(cx),
+            "fix_diff_y" => self.fix_diff_y(window, cx),
             "commit" => self.commit_popup(window, cx),
             "tick" => self.tick_popup(cx),
             "clear_ticks" => self.clear_popup_ticks(cx),
@@ -574,6 +595,7 @@ impl VolsliceTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        self.clear_refusal(cx);
         match commands::parse(line)? {
             Command::Underlying(u) => {
                 if let Some(g) = self.frame.read(cx).following() {
@@ -732,12 +754,29 @@ impl VolsliceTile {
         }
     }
 
-    /// Every notice in footer order: the data side's, then the model's.
+    /// A verb refused: its reason takes the refusal slot, ahead of every
+    /// other notice in the footer, until the next verb.
+    pub(super) fn refuse(&mut self, text: String, cx: &mut Context<Self>) {
+        self.refusal = Some(text);
+        cx.notify();
+    }
+
+    /// A verb acting on the tile clears the last refusal: whatever it was
+    /// refused for has been tried again or left behind.
+    pub(super) fn clear_refusal(&mut self, cx: &mut Context<Self>) {
+        if self.refusal.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Every notice in footer order: the refusal, the data side's, then
+    /// the model's.
     // Read by the header and footer paint; tests read them now.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn notices(&self) -> Vec<String> {
-        self.notices
+        self.refusal
             .iter()
+            .chain(&self.notices)
             .chain(&self.model_notices)
             .cloned()
             .collect()

@@ -88,7 +88,8 @@ Difference pairs (`d`) paint in a lower pane under the vol pane, several at
 once, expiry by expiry in the order they were turned on. A pair and its
 reverse are never both on. The pane's axis (`build::DIFF_AXIS`, the lower
 left) autoscales to what the view shows unless a fixed domain is set
-(`State::diff_ylim`, `:ylim`, the menu's `Fix diff y-axis`); values past a
+(`State::diff_ylim`, `:ylim`, the menu's `Fix difference y-axis`); values
+past a
 fixed domain clip to the pane and still read in the tooltip.
 
 - Curve minus curve is at equal strike: the minuend is evaluated dense and
@@ -135,15 +136,20 @@ data returns.
 | `[` / `]` | Shrink or grow the upper pane by a twentieth, within 0.2..0.8 |
 | `.` | Action menu (open or close) |
 
-The action menu (`.`, the header's `⋯`, or a right press on the chart's
-plot of a focused tile) lists `Underlying…`, `Coordinate: <current>`, the
-three kinds and `Densities` as ticked toggles, `Difference…`, `Fix diff
-y-axis` (`volslice::fix_diff_y`, no default key: its lane names `:ylim`)
-and `Reset view`, each with its live key. The shared `j`/`k` or arrows step
-its enabled rows, `enter` or a click picks, `escape` or `.` closes it. A
-pick closes the menu and dispatches the row's action; a disabled row
-(`Underlying…` while following, an unloaded kind, `Fix diff y-axis` with no
-difference shown) gives its reason as a notice.
+The action menu (`.`, the header's `⋯`, a right press on the chart's plot
+of a focused tile, or `.` in the diff chooser, which it replaces) lists
+`Underlying…`, `Coordinate: <current>`, the three kinds and `Densities` as
+ticked toggles (a kind with nothing loaded reads `(not loaded)` and still
+toggles, as its digit does), `Difference…`, `Fix difference y-axis`
+(`volslice::fix_diff_y`, no default key: its lane names `:ylim`) and
+`Reset view`. Each row names the key that reaches its action in normal
+mode; while the menu is up those keys are inert (the menu holds the keys
+in `menu` mode), so a row is picked from the menu or its key is pressed
+once the menu is closed. The shared `j`/`k` or arrows step its enabled
+rows, `enter` or a click picks, `escape` or `.` closes it. A pick closes
+the menu and dispatches the row's action; a disabled row (`Underlying…`
+while following, `Fix difference y-axis` with no difference shown) gives
+its reason as the refusal notice and the menu stays.
 
 In the picker, `enter` commits, `escape` cancels, `up`/`down` step and every
 other bare key types; `tab` completes. In the chooser the shared `j`/`k` or
@@ -181,8 +187,9 @@ keeps the fixed domain.
 The session table holds `version = 1`, `coordinate`, `hidden`, `density`
 and `split` always, and `underlying`, `expiries`, `diffs` (a list of
 `[minuend, subtrahend]` pairs in turn-on order), `view` and `ylim` (the
-fixed differences domain, `[lo, hi]`) while set; the cursor is not saved. A session holding the single-pair `diff` key of an
-older build restores it as one pair; `diffs` wins beside it. A value that
+fixed differences domain, `[lo, hi]`) while set; the cursor is not saved.
+A session holding the single-pair `diff` key of an older build restores
+it as one pair; `diffs` wins beside it. A value that
 cannot be read drops its key with `session: dropped <key>: <why>`, and so
 does a `diffs` list naming a pair twice or a pair and its reverse; a split
 outside the chart's bounds is clamped with a notice. The launch table
@@ -190,11 +197,15 @@ outside the chart's bounds is clamped with a notice. The launch table
 
 ## Failure states
 
-The footer shows the first notice and how many more stand behind it. An
-empty state alone (the first item below) is painted in the muted status
-tone the sibling modules use for an empty state; every other notice is a
-failure or a refusal, painted in the danger tone, and so is an empty state
-with another notice behind it:
+The footer shows the first notice and how many more stand behind it. A
+refusal of the last verb comes first: it holds one slot, replaced by the
+next refusal and cleared by the next verb that acts on the tile (a key, a
+`:` line, a menu pick, a strip press), so it never outlives the next try.
+The data-side notices follow, cleared when documents next install, then
+the model's. An empty state alone (the first item below) is painted in the
+muted status tone the sibling modules use for an empty state; every other
+notice is a failure or a refusal, painted in the danger tone, and so is an
+empty state with another notice behind it:
 
 - `no underlying`, or `no underlying in A` while following a group whose
   scope names none or several.
@@ -224,9 +235,10 @@ with another notice behind it:
   Curves built from anything else (another underlying's documents, a
   draft that since left or changed mark, a superseded publication) clear
   under the new strip and chips.
-- `following A — set the underlying there` for `u` while following.
-- `no differences shown` for `volslice::fix_diff_y` while the differences
-  axis shows nothing to freeze.
+- Refusals (the refusal slot): `following A — set the underlying there`
+  for `u` while following; `no differences shown` for
+  `volslice::fix_diff_y` while the differences axis shows nothing to
+  freeze; a disabled menu row's reason when it is picked.
 
 ## Known limitations
 
@@ -299,7 +311,11 @@ with another notice behind it:
   (`XyModel::with_y_limit`), so it is applied under a new model version
   (`build::restyled`, and every built model) and the element's chrome cache
   cannot keep the old scale. `fix_diff_y` freezes `XyModel::side_domain` at
-  the painted view, the very domain the element scales over.
+  the painted view, the very domain the element scales over, widened
+  outward to the axis's tick step (`scale::nice_outward` at the lower
+  pane's painted tick count): the frozen axis holds all it showed and its
+  ends are tick values. The header chip prints the stored ends as they are,
+  to four significant digits, never rounded to a coarser step.
 - `ctrl+space` and `shift+space` refuse to deactivate the last active
   expiry; `space` or `enter` on another row moves off it.
 - `space` belongs to the strip in `normal` mode and to the chooser's tick

@@ -46,7 +46,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("volslice::reset_view", "Reset view"),
     ("volslice::split_shrink", "Shrink the upper pane"),
     ("volslice::split_grow", "Grow the upper pane"),
-    ("volslice::fix_diff_y", "Fix/free the difference y-axis"),
+    ("volslice::fix_diff_y", "Fix difference y-axis"),
     ("volslice::menu", "Actions\u{2026}"),
     // The popup verbs: registered beside the rest so the fragment binds
     // them and the palette lists them.
@@ -139,6 +139,8 @@ context = "volslice && mode == menu && popup == diff"
 "ctrl+x" = "volslice::clear_ticks"
 "enter" = "volslice::commit"
 "escape" = "volslice::cancel"
+# `.` swaps the chooser for the action menu, as `⋯` does.
+"." = "volslice::menu"
 
 [[bindings]]
 context = "volslice && mode == menu && popup == actions"
@@ -350,7 +352,7 @@ mod tests {
                 bound += 1;
             }
         }
-        assert_eq!(bound, 40);
+        assert_eq!(bound, 41);
         // And the registry the app builds accepts every binding.
         let (data, _rx) = DataHandle::for_tests();
         let mut registry = ActionRegistry::default();

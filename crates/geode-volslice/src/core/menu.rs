@@ -18,9 +18,6 @@ pub const FIX_DIFF_Y: &str = "volslice::fix_diff_y";
 /// A fix asked while the differences axis shows nothing: nothing to freeze.
 pub const NO_DIFF_DOMAIN: &str = "no differences shown";
 
-/// Why a kind's row cannot be picked: nothing of it is loaded.
-const NOT_LOADED: &str = "not loaded";
-
 const KIND_ACTIONS: [&str; 3] = ["volslice::kind_1", "volslice::kind_2", "volslice::kind_3"];
 
 /// What the rows are built from, read from the tile when the menu opens
@@ -62,15 +59,16 @@ pub fn rows(i: &MenuInputs) -> Vec<Row<ActionId>> {
         ),
         Row::Separator,
     ];
+    // Always enabled, as the digit is: a kind with nothing loaded keeps
+    // its choice, so one hidden before it arrives arrives hidden.
     for (kind, id) in Kind::ALL.into_iter().zip(KIND_ACTIONS) {
+        let title: SharedString = if i.loaded.contains(&kind) {
+            SharedString::new_static(kind.label())
+        } else {
+            format!("{} (not loaded)", kind.label()).into()
+        };
         out.push(Row::Action(
-            row(id, kind.label())
-                .checked(!st.hidden.contains(&kind))
-                .enabled(if i.loaded.contains(&kind) {
-                    Ok(())
-                } else {
-                    Err(SharedString::new_static(NOT_LOADED))
-                }),
+            row(id, title).checked(!st.hidden.contains(&kind)),
         ));
     }
     out.push(Row::Action(
@@ -82,7 +80,7 @@ pub fn rows(i: &MenuInputs) -> Vec<Row<ActionId>> {
     out.push(Row::Action(
         // No default key: unbound, the lane names the `:` verb that sets
         // the domain by value.
-        row(FIX_DIFF_Y, "Fix diff y-axis")
+        row(FIX_DIFF_Y, "Fix difference y-axis")
             .hint(Hint::chord_or_verb(FIX_DIFF_Y, ":ylim"))
             .checked(fixed)
             .enabled(if fixed || i.diff_domain {
@@ -151,10 +149,10 @@ mod tests {
             "hidden"
         );
         let draft = find(&rows, "volslice::kind_2");
-        assert_eq!(
-            draft.reason().map(|r| r.as_ref()),
-            Some("not loaded"),
-            "only loaded kinds are enabled"
+        assert_eq!(draft.title().as_ref(), "cvi draft (not loaded)");
+        assert!(
+            draft.is_enabled(),
+            "the digit acts on a kind not loaded, so the row does"
         );
         assert_eq!(find(&rows, "volslice::density").tick(), Some(true));
         let fix = find(&rows, FIX_DIFF_Y);

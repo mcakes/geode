@@ -5,7 +5,9 @@
 //! opens from `.`, the header's `\u{22ef}` and a right press on the chart's
 //! plot of a focused tile.
 
+use geode_chart::core::scale::nice_outward;
 use geode_chart::core::view::View;
+use geode_chart::paint::y_tick_hint;
 use geode_chart::{Hit, hit_test};
 use geode_shell::actions::ActionId;
 use geode_tile::menu::{Menu, MenuHost, Row, live_bindings};
@@ -120,21 +122,31 @@ impl VolsliceTile {
     }
 
     /// `volslice::fix_diff_y`: freeze the differences axis at the domain
-    /// it shows now, or, when fixed, autoscale it again. With nothing on
-    /// that axis there is nothing to freeze, and the action refuses.
-    pub(super) fn fix_diff_y(&mut self, cx: &mut Context<Self>) {
+    /// it shows now, widened outward to the axis's tick step so the frozen
+    /// axis holds everything that was shown and its ends are tick values;
+    /// or, when fixed, autoscale it again. With nothing on that axis there
+    /// is nothing to freeze, and the action refuses.
+    pub(super) fn fix_diff_y(&mut self, window: &Window, cx: &mut Context<Self>) {
         let next = match self.state.diff_ylim {
             Some(_) => None,
             None => match self.diff_domain() {
-                Some(domain) => Some(domain),
+                Some(domain) => Some(nice_outward(domain, self.diff_tick_hint(window))),
                 None => {
-                    self.notice(NO_DIFF_DOMAIN.to_string());
-                    cx.notify();
+                    self.refuse(NO_DIFF_DOMAIN.to_string(), cx);
                     return;
                 }
             },
         };
         self.set_diff_ylim(next, cx);
+    }
+
+    /// The tick count the differences axis asks for at its last painted
+    /// height; five before the chart is painted.
+    pub(super) fn diff_tick_hint(&self, window: &Window) -> usize {
+        let rem_px = window.rem_size().as_f32();
+        self.geometry(rem_px)
+            .and_then(|(_, layout, _)| layout.lower)
+            .map_or(5, |lower| y_tick_hint(lower.plot.h, rem_px))
     }
 
     /// Set the differences axis's fixed domain (`None`: autoscaled). The
@@ -148,6 +160,22 @@ impl VolsliceTile {
         self.version += 1;
         self.model = restyled(&self.model, self.state.split, ylim, self.version);
         cx.notify();
+    }
+
+    /// The open menu's tick on `id`'s row, `None` with no menu up.
+    #[cfg(test)]
+    pub(crate) fn menu_tick(&self, id: &str) -> Option<Option<bool>> {
+        match &self.popup {
+            Some(Popup::Actions(a)) => Some(
+                a.menu
+                    .rows()
+                    .iter()
+                    .filter_map(Row::action)
+                    .find(|r| r.pick().0 == id)
+                    .and_then(|r| r.tick()),
+            ),
+            _ => None,
+        }
     }
 
     #[cfg(test)]
@@ -190,10 +218,7 @@ impl MenuHost for VolsliceTile {
                 self.close_popup(window, cx);
                 self.dispatch(&id, None, window, cx);
             }
-            Some(Err(reason)) => {
-                self.notice(reason.to_string());
-                cx.notify();
-            }
+            Some(Err(reason)) => self.refuse(reason.to_string(), cx),
             None => {}
         }
     }

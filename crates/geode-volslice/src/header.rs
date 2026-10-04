@@ -10,7 +10,7 @@
 //! same action its key does, so the pointer and the keyboard cannot
 //! disagree.
 
-use geode_chart::core::scale::{LinearScale, fmt_percent, fmt_tick, unsigned_zero};
+use geode_chart::core::scale::unsigned_zero;
 use geode_chart::xy::YFormat;
 use geode_core::link::{DraftMark, Group};
 use geode_shell::actions::ActionId;
@@ -90,33 +90,55 @@ pub(crate) struct MenuButton {
     pub open: bool,
 }
 
-/// The fixed differences domain as the chip names it, in the axis's tick
-/// format: each end with the fewest decimals that print it exactly (a
-/// typed `-2% 2%` reads `\u{2212}2%\u{2026}2%`), and no finer than the
-/// step a ten-tick axis over the range would take (a frozen autoscaled
-/// domain reads to that step). Never a signed zero; the labels' minus.
-pub(crate) fn ylim_text((lo, hi): (f64, f64)) -> String {
-    let format = Y_FORMAT[DIFF_AXIS.index()];
-    // In the units the label prints: a percent axis reads a hundredth.
-    let unit = match format {
-        YFormat::Percent => 100.0,
-        YFormat::Plain => 1.0,
-    };
-    let finest = LinearScale::nice_step((hi - lo) * unit, 10);
-    let end = |v: f64| {
-        let shown = v * unit;
-        let step = (0..6)
-            .map(|d| 10f64.powi(-d))
-            .find(|step| {
-                let at = (shown / step).round() * step;
-                (shown - at).abs() <= 1e-9 * shown.abs().max(1.0)
-            })
-            .map_or(finest, |step| step.max(finest));
-        let text = match format {
-            YFormat::Percent => fmt_percent(v, step / unit),
-            YFormat::Plain => fmt_tick(v, step),
+/// A number to at most four significant digits, trailing zeros dropped,
+/// in scientific form past the range a plain one reads in. Never a signed
+/// zero.
+fn significant(v: f64) -> String {
+    if v == 0.0 || !v.is_finite() {
+        return if v.is_finite() {
+            "0".into()
+        } else {
+            v.to_string()
         };
-        unsigned_zero(text).replacen('-', "\u{2212}", 1)
+    }
+    let magnitude = v.abs().log10().floor() as i32;
+    let text = if (-4..6).contains(&magnitude) {
+        let decimals = (3 - magnitude).max(0) as usize;
+        let t = format!("{v:.decimals$}");
+        if t.contains('.') {
+            t.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            t
+        }
+    } else {
+        let t = format!("{v:.3e}");
+        let (mantissa, exp) = t.split_once('e').unwrap_or((&t, "0"));
+        let mantissa = if mantissa.contains('.') {
+            mantissa.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            mantissa
+        };
+        format!("{mantissa}e{exp}")
+    };
+    unsigned_zero(text)
+}
+
+/// The fixed differences domain as the chip names it: the stored ends as
+/// they are, in the axis's unit (a percent axis reads a hundredth), to at
+/// most four significant digits, never rounded to a coarser step, with the
+/// labels' minus. Fixed from the menu, the ends are tick values already.
+pub(crate) fn ylim_text((lo, hi): (f64, f64)) -> String {
+    let (unit, suffix) = match Y_FORMAT[DIFF_AXIS.index()] {
+        YFormat::Percent => (100.0, "%"),
+        YFormat::Plain => (1.0, ""),
+    };
+    // Only a leading sign takes the labels' minus; an exponent's stays.
+    let end = |v: f64| {
+        let text = significant(v * unit);
+        match text.strip_prefix('-') {
+            Some(rest) => format!("\u{2212}{rest}{suffix}"),
+            None => format!("{text}{suffix}"),
+        }
     };
     format!("y {}\u{2026}{}", end(lo), end(hi))
 }
@@ -528,10 +550,26 @@ mod tests {
     /// and no signed zero.
     #[test]
     fn the_ylim_chip_reads_in_the_axis_format() {
-        assert_eq!(ylim_text((-0.02, 0.02)), "y \u{2212}2%\u{2026}2%");
-        assert_eq!(ylim_text((-0.0123, 0.0234)), "y \u{2212}1.2%\u{2026}2.3%");
-        assert_eq!(ylim_text((-0.00001, 0.05)), "y 0%\u{2026}5%");
-        assert_eq!(ylim_text((-0.015, 0.03)), "y \u{2212}1.5%\u{2026}3%");
+        let m = "\u{2212}";
+        assert_eq!(ylim_text((-0.02, 0.02)), format!("y {m}2%\u{2026}2%"));
+        assert_eq!(
+            ylim_text((-0.0275, 0.0275)),
+            format!("y {m}2.75%\u{2026}2.75%"),
+            "never rounded to a coarser step"
+        );
+        assert_eq!(
+            ylim_text((-0.0123, 0.02)),
+            format!("y {m}1.23%\u{2026}2%"),
+            "each end as typed"
+        );
+        assert_eq!(ylim_text((0.0, 1e-40)), "y 0%\u{2026}1e-38%");
+        assert_eq!(
+            ylim_text((-0.0123456, 0.0234567)),
+            format!("y {m}1.235%\u{2026}2.346%"),
+            "four significant digits at most"
+        );
+        assert_eq!(ylim_text((-0.015, 0.03)), format!("y {m}1.5%\u{2026}3%"));
+        assert_eq!(ylim_text((-0.0, 0.5)), "y 0%\u{2026}50%");
     }
 
     #[test]

@@ -235,6 +235,8 @@ impl VolsliceTile {
         if !self.focused {
             return;
         }
+        // A press that acts is a verb: the last refusal is behind it.
+        self.clear_refusal(cx);
         let right = button == MouseButton::Right;
         if !right && (modifiers.alt || modifiers.platform) {
             return;
