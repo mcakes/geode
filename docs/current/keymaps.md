@@ -114,6 +114,19 @@ whole text selected, so typing replaces it and one backspace clears it. `i`
 and Enter retain the `edit` action and end placement.
 Date fields and choice pickers open as usual through either action.
 
+`ctrl+c` and `ctrl+v` are copy and paste beside the vim keys: every module
+block that binds a copy (`y` or `y y`) binds `ctrl+c` to the same action, and
+every block that binds a paste (`p`) binds `ctrl+v` to it, in the same modes.
+That is the blotter, market-data panels and pricer (normal and visual), the
+classifications tile, the guide and the diagnostics page. In the pricer's and
+classifications' normal mode `ctrl+c` is the row copy `y y`, and in the
+pricer it is `ctrl+v` that puts below, as `p` does. The chords stay
+literal Control on every platform, so they never collide with the primary
+modifier, and each is declared before its vim key in its block, so a hint,
+which names an action's last live binding, still shows `y` or `p`. A
+focused text field is not in these contexts, so its own clipboard keys are
+unchanged.
+
 The primary modifier is configured separately in **`app.toml`**:
 
 ```toml
@@ -205,7 +218,8 @@ menu is open closes it first, then moves. The pricer's
 `pricer && mode == visual` block binds `y` (`pricer::yank`), `d`
 (`pricer::delete`), `shift+j`/`shift+k`, `g p`, `g u`, `i` and `enter`
 (`pricer::edit`), `I` (`pricer::edit_select`), `v`, `V` and `escape` as the selection's verbs.
-Normal-mode keys it does not list — the doubled `y y`, `y c` and `d d`, `p`,
+Normal-mode keys it does not list — the doubled `y y`, `y c` and `d d`, `p`
+and `ctrl+v`,
 `shift+p`, `u`, `ctrl+r`, `o`, `shift+o`, `n`, `shift+n`, `space`, the `z`
 folds, `g m` and `.` — are unbound while a selection is live; the palette still reaches
 them. A palette verb closes an open editor first, as a cancel, so the
@@ -352,7 +366,7 @@ difference chooser) `enter` and `escape`, its steps being the shared ones.
 Its normal-mode `escape` is `volslice::cancel`, which dismisses the footer
 notice when there is nothing else to cancel.
 The classifications fragment binds its label verbs under `mode == normal`
-(`enter`/`c` edit, `x` clear, `y y` copy, `p` paste, `u` undo, `ctrl+r`
+(`enter`/`c` edit, `x` clear, `y y`/`ctrl+c` copy, `p`/`ctrl+v` paste, `u` undo, `ctrl+r`
 redo, `shift+r` refresh, `.` the `⋯` menu, `g c` the switcher, `v`/`shift+v`
 a row selection, `escape` dismissing the header's warning and danger
 notices); under `mode == visual` the verbs that act on a selection

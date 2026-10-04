@@ -347,6 +347,20 @@ run_mutation "guide: frame changes acknowledge the offline reader" \
   geode-guide \
   a_frame_change_never_waits_for_the_offline_reader
 
+run_mutation "ctrl copy/paste: ctrl+v puts below as p does" \
+  crates/geode-pricer/src/content.rs \
+  '"ctrl+v" = "pricer::put_below"' \
+  '"ctrl+v" = "pricer::put_above"' \
+  geode-app \
+  the_production_keymap_binds_ctrl_c_and_ctrl_v_beside_y_and_p
+
+run_mutation "ctrl copy/paste: the guide binds ctrl+c to copy" \
+  crates/geode-guide/src/lib.rs \
+  '"ctrl+c" = "guide::copy"' \
+  '"ctrl+c" = "guide::next_match"' \
+  geode-app \
+  the_production_keymap_binds_ctrl_c_and_ctrl_v_beside_y_and_p
+
 run_mutation "guide: startup registers the guide tile" \
   crates/geode-app/src/main.rs \
   '    roster.add(Box::new(geode_guide::GuideFactory));' \

@@ -110,8 +110,8 @@ The verbs act on the row selection, else the cursor's row. `enter`/`c`
 (and a row double-click) open the editor, prefilled and selected; in it
 the tile is in `insert` mode, `up`/`down` move the highlight, `enter`
 writes, `escape` or a press elsewhere closes it unwritten. `x` clears,
-`y y` copies the cursor row's label (unclassified copies as a clear), `p`
-pastes it, `u` undoes and `ctrl+r` redoes. Each write first checks the
+`y y` (or `ctrl+c`) copies the cursor row's label (unclassified copies as a clear), `p`
+(or `ctrl+v`) pastes it, `u` undoes and `ctrl+r` redoes. Each write first checks the
 classification's source column (`validate_source`): a hand-written one
 over a column no classification may map is never written, with a
 `not saved:` notice, since the config door writes even when the reload is

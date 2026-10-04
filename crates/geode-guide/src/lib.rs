@@ -60,6 +60,7 @@ context = "guide && mode == normal"
 "end" = "guide::bottom"
 "n" = "guide::next_match"
 "shift+n" = "guide::previous_match"
+"ctrl+c" = "guide::copy"
 "y" = "guide::copy"
 
 [[bindings]]

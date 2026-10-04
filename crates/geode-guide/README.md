@@ -16,7 +16,7 @@ after existing module kinds so the launcher's order stays stable.
 Open **Guide: Split** from the palette, or **guide** from the tile picker.
 `c` opens chapter contents, `[`/`]` move through sections, `j`/`k` scroll,
 Page Up/Down move a viewport page, and `g g`/`G` reach the section's ends.
-`/` searches sections and `n`/`N` cycle matches. `y` copies section Markdown.
+`/` searches sections and `n`/`N` cycle matches. `y` (or `ctrl+c`) copies section Markdown.
 `:section <heading-anchor>` opens a heading directly with completion. The
 header's **⋯** and `.` open the shared tile actions menu. Controls, tooltips,
 the footer, and menu rows show live keymap hints, refreshed on rebinding.

@@ -100,6 +100,7 @@ context = "classifications && mode == visual"
 "enter" = "classifications::edit"
 "c" = "classifications::edit"
 "x" = "classifications::clear"
+"ctrl+v" = "classifications::paste"
 "p" = "classifications::paste"
 "escape" = "classifications::cancel"
 
@@ -109,7 +110,9 @@ context = "classifications && mode == normal"
 "enter" = "classifications::edit"
 "c" = "classifications::edit"
 "x" = "classifications::clear"
+"ctrl+c" = "classifications::yank"
 "y y" = "classifications::yank"
+"ctrl+v" = "classifications::paste"
 "p" = "classifications::paste"
 "u" = "classifications::undo"
 "ctrl+r" = "classifications::redo"
@@ -377,7 +380,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 25);
+        assert_eq!(count, 28);
         // The config-level verbs are reached from the palette and the menu.
         for unbound in [
             "new",
