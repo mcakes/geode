@@ -210,7 +210,7 @@ pub fn truncated(
     theme: &Theme,
 ) -> Stateful<Div> {
     let el = render(notice, theme).id(id).min_w_0().truncate();
-    if on_dismiss.is_some() && notice.dismissable() {
+    if armed(notice, on_dismiss).is_some() {
         dismissable(el, notice, on_dismiss, tip_selector, theme)
     } else {
         el.tooltip(tips::tip_with(
@@ -220,6 +220,12 @@ pub fn truncated(
             None,
         ))
     }
+}
+
+/// The one gate for a press: the dismiss, when there is one and the
+/// notice is a warning or danger. A status notice is never armed.
+fn armed<'a>(notice: &Notice, on_dismiss: Option<&'a OnDismiss>) -> Option<&'a OnDismiss> {
+    on_dismiss.filter(|_| notice.dismissable())
 }
 
 /// `el`, a painted notice, made dismissable when `on_dismiss` is given and
@@ -235,7 +241,7 @@ pub fn dismissable(
     tip_selector: SharedString,
     theme: &Theme,
 ) -> Stateful<Div> {
-    let Some(on_dismiss) = on_dismiss.filter(|_| notice.dismissable()).cloned() else {
+    let Some(on_dismiss) = armed(notice, on_dismiss).cloned() else {
         return el;
     };
     let pressed = notice.clone();

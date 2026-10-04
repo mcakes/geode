@@ -522,7 +522,8 @@ continuously, and whether it selects rows or a block is decided by where the
 press that started it landed — the gutter starts rows, a cell starts a
 block — so a drag that did not begin with a press on a cell or the gutter
 selects nothing. The first `escape` clears the selection alone; a second
-escape follows the tile's normal narrowing and find-clearing behavior.
+clears the `/` narrowing and the find; only with none of those does escape
+dismiss the header's error notice.
 
 Limitations: a selection is always one contiguous row range or rectangle —
 there is no multi-range selection — and there is no paste; `y` is yank-only.
@@ -661,9 +662,12 @@ reason becomes the notice.
 
 The header is the [shared frame](#shared-tile-interaction): kind badge,
 underlying and attributes on the left; then the state, incomplete rows, echo,
-upload error and the upload prompt, the notice, the source time (`HH:MM:SS
+the upload error and the notice (both header notices,
+dismissable), the source time (`HH:MM:SS
 stale` in the warning text tone once stale), the health chip, `⋯` and ×. The
-header's health chip covers the panel's dataset.
+header's health chip covers the panel's dataset. Escape ends a selection,
+then a find, and only then clears the notice and dismisses the upload
+error.
 
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
 with no underlying opens the underlying picker at once; a restored panel does
@@ -2669,7 +2673,11 @@ same key again clears. With no row under the cursor (an empty sheet) both
 refuse with `select from a line or package row`. While a selection is live
 the tile reports `mode == visual` with a `select == rows|block` pair (see
 [context predicates](keymaps.md#context-predicates)); motions extend it and
-the first `escape` clears it alone.
+the first `escape` clears it alone. Escape then closes, in turn, whatever
+the pricer has open (the entry bar, a cell editor, the sheet picker or
+rename field, a menu, an armed question), then the find, and only then
+clears the transient notice (never `loading…`) and dismisses the save and
+standing notices.
 
 The anchor is the row's line id and the column's name, so a repricing, an
 edit elsewhere, a move or a view reload keeps the same cells selected. An

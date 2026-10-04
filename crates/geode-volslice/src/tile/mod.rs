@@ -514,9 +514,6 @@ impl VolsliceTile {
         };
         #[cfg(test)]
         self.dispatch_log.push(action.clone());
-        // A refusal the verb clears is that verb's visible change: `escape`
-        // clearing one goes no further.
-        let refused = self.refusal.is_some();
         self.clear_refusal(cx);
         if !matches!(
             verb,
@@ -576,11 +573,12 @@ impl VolsliceTile {
             "commit" => self.commit_popup(window, cx),
             "tick" => self.tick_popup(cx),
             "clear_ticks" => self.clear_popup_ticks(cx),
-            // Last in line: with no popup to close and no refusal cleared,
-            // `escape` dismisses the footer's notice, and is handled only
-            // when it did.
+            // Last in line: with no popup to close, `escape` dismisses the
+            // footer's notice, and is handled only when it did. A refusal
+            // the verb cleared above leaves the footer when the chrome
+            // refreshes, so the combined text it led, dismissed here, is
+            // never painted again: the footer then shows what remains.
             "cancel" if self.popup.is_some() => self.close_popup(window, cx),
-            "cancel" if refused => {}
             "cancel" => {
                 if !self.dismissed.dismiss_all(self.chrome.notice.iter()) {
                     return false;

@@ -38211,8 +38211,8 @@ run_mutation "notice dismissal: the click stops at the notice" \
 
 run_mutation "notice dismissal: a status notice takes no press" \
   crates/geode-tile/src/notice.rs \
-  '    let Some(on_dismiss) = on_dismiss.filter(|_| notice.dismissable()).cloned() else {' \
-  '    let Some(on_dismiss) = on_dismiss.cloned() else {' \
+  '    on_dismiss.filter(|_| notice.dismissable())' \
+  '    on_dismiss' \
   geode-tile \
   a_status_notice_or_one_without_a_dismiss_takes_no_press
 
@@ -38254,12 +38254,12 @@ run_mutation "notice dismissal: the pricer prunes in rebuild_chrome" \
   geode-pricer \
   clicking_a_header_notice_hides_it_until_it_changes
 
-run_mutation "notice dismissal: pricer escape closes a menu before the notices" \
+run_mutation "notice dismissal: a palette escape closes the pricer menu before the notices" \
   crates/geode-pricer/src/tile.rs \
   '            "escape" if layer => {}' \
   '            "escape" if false => {}' \
   geode-pricer \
-  escape_closes_an_open_menu_before_the_notices
+  a_palette_escape_over_an_open_menu_closes_only_the_menu
 
 run_mutation "notice dismissal: pricer escape ends a find before the notices" \
   crates/geode-pricer/src/tile.rs \
@@ -38358,13 +38358,6 @@ run_mutation "notice dismissal: the vol slice prunes in refresh_chrome" \
   '        let _ = &self.dismissed;' \
   geode-volslice \
   a_click_dismisses_the_footer_notice_until_it_stops_and_returns
-
-run_mutation "notice dismissal: vol slice escape clears a refusal before the notice" \
-  crates/geode-volslice/src/tile/mod.rs \
-  '            "cancel" if refused => {}' \
-  '            "cancel" if false => {}' \
-  geode-volslice \
-  escape_dismisses_the_footer_notice_after_every_other_layer
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

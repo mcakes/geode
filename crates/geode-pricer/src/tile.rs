@@ -12759,6 +12759,22 @@ pub(crate) mod tests {
         assert!(painted_notices(&h, &mut vcx).is_empty());
     }
 
+    /// From the palette, `pricer::escape` arrives with the menu still up
+    /// (the key route sends `menu_close` instead): it closes the menu
+    /// alone, and the notices stay for the next press.
+    #[gpui::test]
+    fn a_palette_escape_over_an_open_menu_closes_only_the_menu(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        report(&h, &mut vcx, Some(NOT_SAVED), None);
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(h.mode(&mut vcx), "menu", "fixture: the menu is up");
+        h.dispatch(&mut vcx, "escape", None);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(painted_notices(&h, &mut vcx), [NOT_SAVED]);
+        h.dispatch(&mut vcx, "escape", None);
+        assert!(painted_notices(&h, &mut vcx).is_empty());
+    }
+
     /// "loading…" is the only sign a load is in progress: `escape` may
     /// clear find, never it.
     #[gpui::test]
