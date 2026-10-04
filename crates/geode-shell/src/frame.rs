@@ -540,10 +540,15 @@ impl Frame {
     }
 
     /// Record or clear the NULL column that stopped `tile`'s last posting.
-    /// `true` when it changed. The header reads it at paint.
+    /// `true` when it changed. The header reads it at paint. A tile that
+    /// emits into no group records nothing: a pull deferred from before it
+    /// left would otherwise leave a refusal naming no group, which nothing
+    /// clears until it joins one again.
     pub(crate) fn set_link_refusal(&mut self, tile: TileId, column: Option<String>) -> bool {
+        let emitting = self.links.membership(tile).emit.is_some();
         match column {
-            Some(c) => self.link_refusals.insert(tile, c.clone()) != Some(c),
+            Some(c) if emitting => self.link_refusals.insert(tile, c.clone()) != Some(c),
+            Some(_) => false,
             None => self.link_refusals.remove(&tile).is_some(),
         }
     }
@@ -3477,6 +3482,10 @@ mod tests {
         f.forget_tile(tile);
         assert_eq!(f.link_refusal(tile), None, "closing clears");
         assert!(!f.set_link_refusal(tile, None), "nothing left to clear");
+
+        // A late pull for a tile that no longer emits records nothing.
+        assert!(!f.set_link_refusal(tile, Some("book".into())));
+        assert_eq!(f.link_refusal(tile), None, "not emitting: not recorded");
     }
 
     #[test]

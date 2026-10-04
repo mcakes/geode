@@ -34440,6 +34440,14 @@ run_mutation "link: changing the emit group clears the refusal" \
   '            fresh(&mut self.generation);' \
   geode-shell a_link_refusal_ends_with_the_emit_membership_it_names
 
+# A late pull for a tile that left its group must not record a refusal
+# that names no group and that nothing would clear.
+run_mutation "link: a tile emitting nowhere records no refusal" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(c) if emitting => self.link_refusals.insert(tile, c.clone()) != Some(c),' \
+  '            Some(c) if emitting || true => self.link_refusals.insert(tile, c.clone()) != Some(c),' \
+  geode-shell a_link_refusal_ends_with_the_emit_membership_it_names
+
 # Composition: base, then layer, then the cursor path, which is last.
 run_mutation "link: compose puts the path last" \
   crates/geode-core/src/link.rs \
