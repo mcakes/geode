@@ -1,6 +1,6 @@
 """Static checks behind `mutation-check.sh --anchors-only`.
 
-Reads the NUL-separated six-field records the zsh script collects (name,
+Reads the NUL-separated six-field records the mutation-check script collects (name,
 file, anchor, replacement, package, filter) and checks every anchor for
 exactly one match in its file and every test filter against the
 test-attributed function names under the package's src directory. It runs no

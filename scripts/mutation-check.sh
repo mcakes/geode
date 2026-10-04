@@ -1,10 +1,10 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 #
 # Mutation checks: replace one source anchor and run the tests expected to
 # detect the broken behavior. A surviving mutation identifies a behavior the
 # selected package's tests did not distinguish from the original code.
 #
-# Usage: zsh scripts/mutation-check.sh [--anchors-only | --build-check] [--changed[=REF]] [substring]
+# Usage: bash scripts/mutation-check.sh [--anchors-only | --build-check] [--changed[=REF]] [substring]
 #
 # --anchors-only runs no Cargo commands and changes no source files. It checks
 # every selected anchor for exactly one match, reports ANCHOR or AMBIG, and
@@ -70,11 +70,22 @@ if ! mkdir "$lock" 2>/dev/null; then
   exit 1
 fi
 
-bak="$(mktemp -t mutate-bak)"
-log="$(mktemp -t mutate-log)"
+# Runs under zsh or bash (bash 3.2 on macOS, Git Bash on Windows). Temp
+# files use an explicit XXXXXX template: BSD mktemp accepts `-t prefix`, GNU
+# mktemp (Git Bash) rejects it.
+tmp="${TMPDIR:-/tmp}"
+bak="$(mktemp "$tmp/mutate-bak.XXXXXX")"
+log="$(mktemp "$tmp/mutate-log.XXXXXX")"
 # --anchors-only collects (name, file, anchor, replacement, package, filter)
 # NUL-separated here and checks them all in one pass at the end.
-anchors="$(mktemp -t mutate-anchors)"
+anchors="$(mktemp "$tmp/mutate-anchors.XXXXXX")"
+# Windows installs Python as `python`; PYTHON overrides the choice when
+# `python3` resolves to the Microsoft Store stub.
+py="${PYTHON:-$(command -v python3 || command -v python)}"
+if [[ -z "$py" ]]; then
+  echo "mutation-check needs Python 3 (python3, python, or PYTHON=...)" >&2
+  exit 1
+fi
 in_flight=""
 
 # Restore whatever is mutated right now, however we leave.
@@ -142,7 +153,7 @@ elif [[ "${1:-}" == --changed=* ]]; then
   changed_ref="${1#--changed=}"
   shift
 fi
-usage="usage: zsh scripts/mutation-check.sh [--anchors-only | --build-check] [--changed[=REF]] [substring]"
+usage="usage: bash scripts/mutation-check.sh [--anchors-only | --build-check] [--changed[=REF]] [substring]"
 only="${1:-}"
 if [[ "$only" == --* ]]; then
   # Flags are positional: mode, --changed, then substring. Reject a flag
@@ -240,7 +251,7 @@ run_mutation() {
   # on separate lines on purpose: `local hits=$(…)` would mask python's
   # exit status, and a failure would then read as "0 hits".
   local hits
-  hits=$(python3 - "$file" "$from" <<'PY'
+  hits=$("$py" - "$file" "$from" <<'PY'
 import sys, pathlib
 print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").count(sys.argv[2]))
 PY
@@ -263,10 +274,13 @@ PY
   fi
   cp "$file" "$bak"
   in_flight="$file"
-  python3 - "$file" "$from" "$to" <<'PY'
+  # Explicit UTF-8 on write: the platform default is cp1252 on Windows,
+  # which fails or corrupts any non-ASCII source character.
+  "$py" - "$file" "$from" "$to" <<'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text(encoding="utf-8")
-p.write_text(s.replace(sys.argv[2], sys.argv[3], 1))
+with p.open("w", encoding="utf-8", newline="") as f:
+    f.write(s.replace(sys.argv[2], sys.argv[3], 1))
 PY
   if (( build_only )); then
     # The same target a mutation run tests ($target_flag) under the test
@@ -38061,5 +38075,5 @@ if (( anchors_only )); then
     exit 1
   fi
   # Static checks over every selected entry; see scripts/mutation_anchors.py.
-  python3 scripts/mutation_anchors.py "$anchors" || exit 1
+  "$py" scripts/mutation_anchors.py "$anchors" || exit 1
 fi
