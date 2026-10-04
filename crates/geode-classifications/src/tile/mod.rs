@@ -790,6 +790,31 @@ impl ClassificationsTile {
         });
     }
 
+    /// One header notice dismissed, as a click on it does and `escape`
+    /// does to each notice showing. A transient one-shot notice — a verb's
+    /// outcome (a refusal, a fork, a skipped row) or what the session
+    /// restore dropped — is cleared, so the verb repeated says it again.
+    /// A standing one (nothing to switch to, the values notice) is hidden
+    /// through `dismissed` until it changes. Whether anything did.
+    pub(crate) fn dismiss_notice(&mut self, n: &Notice) -> bool {
+        if !n.dismissable() {
+            return false;
+        }
+        if let Some(i) = self.notices.outcome.iter().position(|o| o == n) {
+            self.notices.outcome.remove(i);
+            self.rebuild_chrome();
+            return true;
+        }
+        if n.tone() == notice::Tone::Danger
+            && self.notices.restore.iter().any(|r| r == n.text().as_ref())
+        {
+            self.notices.restore.retain(|r| r != n.text().as_ref());
+            self.rebuild_chrome();
+            return true;
+        }
+        self.dismissed.dismiss(n)
+    }
+
     fn rebuild_chrome(&mut self) {
         let config = self.shared.config.borrow();
         let dim = self
@@ -2246,8 +2271,12 @@ impl ClassificationsTile {
     ) -> bool {
         self.user_acted(cx);
         // A verb arriving under an armed question (the palette; a key never
-        // gets here, the question takes every key) answers no first.
-        confirm::cancel(self, window, cx);
+        // gets here, the question takes every key) answers no first. For
+        // `cancel` that answer is the whole of it: the notices wait.
+        let answered = confirm::cancel(self, window, cx);
+        if answered && action.0 == "classifications::cancel" {
+            return true;
+        }
         // The prompt's own keys; any other verb closes it unwritten first.
         if self.prompt.is_some() {
             match action.0.as_str() {
@@ -2331,11 +2360,15 @@ impl ClassificationsTile {
                 cx.notify();
             }
             // Last in line: nothing above had anything to cancel, so
-            // `escape` dismisses the header's warning and danger notices,
-            // hidden until they change. Nothing to dismiss: unhandled, as
-            // a normal-mode escape always was.
+            // `escape` dismisses every warning and danger notice showing,
+            // each as a click on it would. Nothing to dismiss: unhandled.
             "classifications::cancel" => {
-                if !self.dismissed.dismiss_all(&self.chrome.notices) {
+                let shown = self.dismissed.visible(self.chrome.notices.iter().cloned());
+                let mut any = false;
+                for n in &shown {
+                    any |= self.dismiss_notice(n);
+                }
+                if !any {
                     return false;
                 }
                 cx.notify();
@@ -2674,8 +2707,8 @@ impl Render for ClassificationsTile {
                 mode: Mode::from_key_mode(self.mode()),
                 links: link_chips(&self.frame, cx),
                 notices: self.dismissed.visible(self.chrome.notices.iter().cloned()),
-                on_dismiss: notice::on_dismiss(&tile, |t: &mut ClassificationsTile| {
-                    &mut t.dismissed
+                on_dismiss: notice::on_dismiss_with(&tile, |t: &mut ClassificationsTile, n, _| {
+                    t.dismiss_notice(n)
                 }),
                 actions_open: actions.is_some() || row_actions.is_some(),
                 switcher,

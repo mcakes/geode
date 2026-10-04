@@ -209,13 +209,16 @@ notice is a failure or a refusal, painted in the danger tone, and so is an
 empty state with another notice behind it:
 
 A danger footer notice can be dismissed: a click on it, or `escape` in
-normal mode once nothing else answers it (no popup to close, no refusal
-to clear), hides it through `geode_tile::notice::Dismissals`. The tile's
-notices are not cleared: the footer notice as painted (its text, count
-and tone) stays hidden while the tile keeps reporting it, and shows again
-once it stopped and came back or its text changed (another notice joined
-it). `refresh_chrome` prunes the dismissals after rebuilding the notice,
-never render. An empty state alone (status) is never dismissed.
+normal mode once no popup is left to close; both do the same
+(`dismiss_notice`). A refusal leads the footer whenever there is one and is
+transient, so it is cleared and the notices it led show; the same key
+refused again shows again. Otherwise the footer notice is standing (data
+and model notices) and is hidden through `geode_tile::notice::Dismissals`,
+not cleared: the footer notice as painted (its text, count and tone) stays
+hidden while the tile keeps reporting it, and shows again once it stopped
+and came back or its text changed (another notice joined it).
+`refresh_chrome` prunes the dismissals after rebuilding the notice, never
+render. An empty state alone (status) is never dismissed.
 
 - `no underlying`, or `no underlying in A` while following a group whose
   scope names none or several.

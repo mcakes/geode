@@ -338,7 +338,7 @@ them, beside the shell's `g g`: a first `g` waits for the second key), its
 `mode == insert` field keys and its `mode == menu` pick and close keys.
 The timeseries fragment binds its popups' `enter`, `escape` and `.`; their
 row steps are the shared ones under `tilelist`. Under `mode == normal` it
-binds `escape` to `timeseries::cancel`, which dismisses the notice line
+binds `escape` to `timeseries::cancel`, which clears the notice line
 (see [Shared tile interaction](features.md#shared-tile-interaction)); the
 popup layers come later in the fragment, so their `escape` still wins
 while one is up.

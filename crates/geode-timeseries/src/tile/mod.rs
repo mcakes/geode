@@ -150,11 +150,10 @@ pub struct TimeseriesTile {
     /// asks for a different span, so an unanswered fetch over the old
     /// one must not suppress it.
     in_flight_range: Option<Range>,
+    /// The notice line: a transient slot (every handled verb replaces or
+    /// clears it), so a click on it and `escape` clear it rather than hide
+    /// it, and the same refusal said again shows again.
     notice: Option<SharedString>,
-    /// The notice line's dismissals: a notice the trader dismissed stays
-    /// hidden while `notice` keeps reporting it. Pruned by the self-observer
-    /// (every notify) and by `set_visible` (whose notify the draw drops).
-    dismissed: geode_tile::notice::Dismissals,
     /// Prepared text: the range/frequency readout and one chip per slot.
     header: HeaderModel,
     title: SharedString,
@@ -237,10 +236,6 @@ impl TimeseriesTile {
             cx.notify();
         })
         .detach();
-        // The notice is assigned at many sites; every one notifies, so
-        // the self-observer is the one seam that sees each change and
-        // forgets a dismissal the line stopped reporting.
-        cx.observe_self(|this, _| this.prune_dismissals()).detach();
         cx.observe(frame.entity(), |this, _, cx| {
             // Process flip releases before the visibility guard so hidden tiles can
             // promote staged data. Promotion still checks the followed as-of version.
@@ -383,7 +378,6 @@ impl TimeseriesTile {
             in_flight: HashSet::new(),
             in_flight_range: None,
             notice: (!notices.is_empty()).then(|| notices.join("; ").into()),
-            dismissed: Default::default(),
             header,
             title,
             stack: None,
@@ -495,9 +489,6 @@ impl TimeseriesTile {
             self.in_flight.clear();
         }
         self.rebuild_chrome(cx);
-        // Called inside the shell's draw, where this notify is dropped and
-        // the self-observer never runs: prune here.
-        self.prune_dismissals();
         cx.notify();
     }
 
@@ -634,14 +625,12 @@ impl TimeseriesTile {
                 if !handled && self.notice.is_none() {
                     self.notice = previous;
                 }
-                // Last in line: an `escape` no popup answered dismisses
-                // the notice line, handled only when it did.
-                if !handled && verb == "cancel" && !had_popup {
-                    let shown = self.reported_notice();
-                    if self.dismissed.dismiss_all(shown.iter()) {
-                        cx.notify();
-                        return true;
-                    }
+                // Last in line: an `escape` no popup answered clears the
+                // notice line, as a click on it does; handled only when
+                // there was one.
+                if !handled && verb == "cancel" && !had_popup && self.dismiss_notice() {
+                    cx.notify();
+                    return true;
                 }
                 return handled;
             }
@@ -971,16 +960,15 @@ impl TimeseriesTile {
         self.pick_context.as_ref()
     }
 
-    /// The notice line as it paints when not dismissed: always danger.
+    /// The notice line as it paints: always danger.
     pub(crate) fn reported_notice(&self) -> Option<geode_tile::notice::Notice> {
         self.notice.clone().map(geode_tile::notice::Notice::danger)
     }
 
-    /// Forget dismissals the notice line no longer reports, so a notice
-    /// that stopped and came back shows again. Never from render.
-    pub(crate) fn prune_dismissals(&mut self) {
-        let shown = self.reported_notice();
-        self.dismissed.prune(shown.iter());
+    /// The notice line dismissed, by a click on it or by `escape`: the
+    /// transient slot is cleared. Whether there was one.
+    pub(crate) fn dismiss_notice(&mut self) -> bool {
+        self.notice.take().is_some()
     }
 
     #[cfg(test)]
@@ -1263,19 +1251,16 @@ impl Render for TimeseriesTile {
             .size_full()
             .bg(theme.background)
             .child(header)
-            .when_some(
-                self.reported_notice().filter(|n| self.dismissed.shows(n)),
-                |el, n| {
-                    el.child(header::render_notice(
-                        &n,
-                        &geode_tile::notice::on_dismiss(&tile, |t: &mut TimeseriesTile| {
-                            &mut t.dismissed
-                        }),
-                        tile_id,
-                        theme,
-                    ))
-                },
-            )
+            .when_some(self.reported_notice(), |el, n| {
+                el.child(header::render_notice(
+                    &n,
+                    &geode_tile::notice::on_dismiss_with(&tile, |t: &mut TimeseriesTile, _, _| {
+                        t.dismiss_notice()
+                    }),
+                    tile_id,
+                    theme,
+                ))
+            })
             .when_some(expr_field, |el, f| el.child(f))
             .child(body)
             .child(header::render_footer(&self.footer, theme))

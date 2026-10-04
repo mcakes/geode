@@ -38233,13 +38233,6 @@ run_mutation "notice dismissal: the blotter prunes at set_error" \
   geode-blotter \
   clicking_the_error_notice_hides_it_until_it_changes
 
-run_mutation "notice dismissal: blotter escape dismisses only after the narrowing" \
-  crates/geode-blotter/src/tile.rs \
-  $'                    self.find = None;\n                    self.table.update(cx, |t, cx| t.refresh(cx));\n                } else if self.dismissed.dismiss_all(self.error.iter()) {' \
-  $'                    self.find = None;\n                    self.dismissed.dismiss_all(self.error.iter());\n                    self.table.update(cx, |t, cx| t.refresh(cx));\n                } else if self.dismissed.dismiss_all(self.error.iter()) {' \
-  geode-blotter \
-  escape_dismisses_the_notice_only_after_every_other_layer
-
 run_mutation "notice dismissal: the pricer header filters dismissed notices" \
   crates/geode-pricer/src/header.rs \
   '    cluster.notices = c.dismissed.visible(h.notices().cloned());' \
@@ -38289,13 +38282,6 @@ run_mutation "notice dismissal: market-data escape ends a find before the notice
   geode-marketdata \
   escape_ends_a_find_before_it_touches_a_notice
 
-run_mutation "notice dismissal: market-data escape dismisses the upload error" \
-  crates/geode-marketdata/src/tile.rs \
-  '                    let hid = self.dismissed.dismiss_all(self.header.notices());' \
-  '                    let hid = false;' \
-  geode-marketdata \
-  escape_clears_the_notice_and_dismisses_the_upload_error
-
 run_mutation "notice dismissal: classifications filters dismissed notices" \
   crates/geode-classifications/src/tile/mod.rs \
   '                notices: self.dismissed.visible(self.chrome.notices.iter().cloned()),' \
@@ -38310,40 +38296,12 @@ run_mutation "notice dismissal: classifications prunes in rebuild_chrome" \
   geode-classifications \
   clicking_a_values_notice_hides_it_until_it_returns
 
-run_mutation "notice dismissal: classifications escape dismisses" \
-  crates/geode-classifications/src/tile/mod.rs \
-  '                if !self.dismissed.dismiss_all(&self.chrome.notices) {' \
-  '                if true {' \
-  geode-classifications \
-  escape_dismisses_a_warning_notice
-
 run_mutation "notice dismissal: classifications escape ends a selection first" \
   crates/geode-classifications/src/tile/mod.rs \
   '            "classifications::cancel" if self.grid.selecting() => {' \
   '            "classifications::cancel" if self.grid.selecting() && !self.dismissed.dismiss_all(&self.chrome.notices) => {' \
   geode-classifications \
   escape_ends_a_selection_before_it_dismisses_a_notice
-
-run_mutation "notice dismissal: the timeseries notice line filters" \
-  crates/geode-timeseries/src/tile/mod.rs \
-  '                self.reported_notice().filter(|n| self.dismissed.shows(n)),' \
-  '                self.reported_notice(),' \
-  geode-timeseries \
-  a_click_dismisses_the_notice_line_until_it_stops_and_returns
-
-run_mutation "notice dismissal: the timeseries self-observer prunes" \
-  crates/geode-timeseries/src/tile/mod.rs \
-  '        self.dismissed.prune(shown.iter());' \
-  '        let _ = &shown;' \
-  geode-timeseries \
-  a_click_dismisses_the_notice_line_until_it_stops_and_returns
-
-run_mutation "notice dismissal: timeseries escape dismisses" \
-  crates/geode-timeseries/src/tile/mod.rs \
-  '                    if self.dismissed.dismiss_all(shown.iter()) {' \
-  '                    if false && shown.is_some() {' \
-  geode-timeseries \
-  escape_dismisses_the_notice_line
 
 run_mutation "notice dismissal: the vol slice footer filters" \
   crates/geode-volslice/src/tile/mod.rs \
@@ -38358,6 +38316,99 @@ run_mutation "notice dismissal: the vol slice prunes in refresh_chrome" \
   '        let _ = &self.dismissed;' \
   geode-volslice \
   a_click_dismisses_the_footer_notice_until_it_stops_and_returns
+
+# A click and escape do the same to the same notice: a transient one-shot
+# notice is cleared (revealing what it masked), a standing one hidden.
+run_mutation "notice dismissal: blotter escape dismisses only after the narrowing" \
+  crates/geode-blotter/src/tile.rs \
+  $'                    self.find = None;\n                    self.table.update(cx, |t, cx| t.refresh(cx));\n                } else if let Some(n) = self.error.clone().filter(|n| self.dismissed.shows(n))' \
+  $'                    self.find = None;\n                    self.dismissed.dismiss_all(self.error.iter());\n                    self.table.update(cx, |t, cx| t.refresh(cx));\n                } else if let Some(n) = self.error.clone().filter(|n| self.dismissed.shows(n))' \
+  geode-blotter \
+  escape_dismisses_the_notice_only_after_every_other_layer
+
+run_mutation "notice dismissal: a blotter click clears a one-shot notice" \
+  crates/geode-blotter/src/tile.rs \
+  '        if self.error_transient && self.error.as_ref() == Some(n) {' \
+  '        if false {' \
+  geode-blotter \
+  a_click_clears_a_one_shot_notice_as_escape_does
+
+run_mutation "notice dismissal: a pricer click clears the transient notice" \
+  crates/geode-pricer/src/tile.rs \
+  $'        let transient =\n            !self.stopped && self.refusals == 0 && self.notice.as_ref() == Some(n.text());' \
+  '        let transient = false;' \
+  geode-pricer \
+  a_click_on_the_transient_notice_clears_it_and_reveals_the_standing_one
+
+run_mutation "notice dismissal: market-data escape dismisses the upload error" \
+  crates/geode-marketdata/src/tile.rs \
+  '                        any |= self.dismiss_notice(n);' \
+  '                        let _ = n;' \
+  geode-marketdata \
+  escape_clears_the_notice_and_dismisses_the_upload_error
+
+run_mutation "notice dismissal: a market-data click clears the transient notice" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.notice.as_ref() == Some(n.text()) {' \
+  '        if false {' \
+  geode-marketdata \
+  a_click_clears_the_transient_notice_as_escape_does
+
+run_mutation "notice dismissal: classifications escape dismisses" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                    any |= self.dismiss_notice(n);' \
+  '                    let _ = n;' \
+  geode-classifications \
+  escape_dismisses_a_warning_notice
+
+run_mutation "notice dismissal: a classifications click clears a refusal" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if let Some(i) = self.notices.outcome.iter().position(|o| o == n) {' \
+  '        if let Some(i) = None::<usize> {' \
+  geode-classifications \
+  a_click_or_escape_clears_a_refusal_and_the_verb_says_it_again
+
+run_mutation "notice dismissal: a palette cancel under a question only answers it" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if answered && action.0 == "classifications::cancel" {' \
+  '        if false && answered {' \
+  geode-classifications \
+  a_palette_cancel_under_a_question_answers_it_and_leaves_the_notices
+
+run_mutation "notice dismissal: a timeseries click clears the notice line" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        self.notice.take().is_some()' \
+  '        self.notice.is_some()' \
+  geode-timeseries \
+  a_click_clears_the_notice_line_and_the_key_says_it_again
+
+run_mutation "notice dismissal: timeseries escape clears the notice line" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  "                if !handled && verb == \"cancel\" && !had_popup && self.dismiss_notice() {" \
+  "                if !handled && verb == \"cancel\" && !had_popup && false {" \
+  geode-timeseries \
+  escape_clears_the_notice_line
+
+run_mutation "notice dismissal: a vol slice click clears a refusal" \
+  crates/geode-volslice/src/tile/mod.rs \
+  $'        if self.refusal.is_some() {\n            self.clear_refusal(cx);\n            return true;' \
+  $'        if false {\n            self.clear_refusal(cx);\n            return true;' \
+  geode-volslice \
+  a_click_on_a_refusal_clears_it_and_reveals_what_it_led
+
+run_mutation "notice dismissal: vol slice escape dismisses the footer notice" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '                if !self.dismissed.dismiss_all(self.chrome.notice.iter()) {' \
+  '                if true {' \
+  geode-volslice \
+  escape_dismisses_the_footer_notice_after_every_other_layer
+
+run_mutation "notice dismissal: a notice element is keyed by itself, not its position" \
+  crates/geode-tile/src/notice.rs \
+  '    let repeat = notices[..i].iter().filter(|n| *n == notice).count();' \
+  '    let repeat = i;' \
+  geode-tile \
+  a_notice_key_is_its_own_not_its_position
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

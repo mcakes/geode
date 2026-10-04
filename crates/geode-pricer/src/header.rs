@@ -544,9 +544,10 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> imp
         .status
         .push(pair(PRICER_LABEL, h.pricer.clone(), muted, theme.foreground).into_any_element());
     cluster.notices = c.dismissed.visible(h.notices().cloned());
-    cluster.on_dismiss = Some(notice::on_dismiss(c.tile, |t: &mut PricerTile| {
-        &mut t.dismissed
-    }));
+    cluster.on_dismiss = Some(notice::on_dismiss_with(
+        c.tile,
+        |t: &mut PricerTile, n, _| t.dismiss_notice(n),
+    ));
     cluster.times.extend(h.time.clone().map(|label| TimeRun {
         label,
         stale_label: h.time_stale.clone(),

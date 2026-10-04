@@ -2251,6 +2251,23 @@ impl MarketDataTile {
         cx.notify();
     }
 
+    /// One header notice dismissed, as a click on it does and `escape`
+    /// does to each notice showing: the transient `notice` (a refusal or
+    /// advisory a verb set) is cleared, so the same verb says it again; the
+    /// upload error is standing and is hidden through `dismissed` until it
+    /// changes. Whether anything did.
+    pub(crate) fn dismiss_notice(&mut self, n: &geode_tile::notice::Notice) -> bool {
+        if !n.dismissable() {
+            return false;
+        }
+        if self.notice.as_ref() == Some(n.text()) {
+            self.notice = None;
+            self.rebuild_chrome();
+            return true;
+        }
+        self.dismissed.dismiss(n)
+    }
+
     /// Prepare header identity, attributes, draft/upload state, notices, and
     /// source-time text from current tile state.
     fn rebuild_chrome(&mut self) {
@@ -2516,14 +2533,17 @@ impl MarketDataTile {
                     self.find = None;
                     false
                 } else {
-                    // Nothing else answered: the transient notice clears
-                    // and every other warning or danger notice (the upload
-                    // error) is dismissed, hidden until it changes. Only
-                    // when there WAS one: `escape` on a clean header
-                    // changes nothing the chips show.
-                    let took = self.notice.take().is_some();
-                    let hid = self.dismissed.dismiss_all(self.header.notices());
-                    took || hid
+                    // Nothing else answered: every notice showing goes as a
+                    // click on it would — the transient notice clears, the
+                    // upload error is hidden until it changes. Only when
+                    // there WAS one: `escape` on a clean header changes
+                    // nothing the chips show.
+                    let shown = self.dismissed.visible(self.header.notices().cloned());
+                    let mut any = false;
+                    for n in &shown {
+                        any |= self.dismiss_notice(n);
+                    }
+                    any
                 }
             }
             "menu" => {
@@ -15542,6 +15562,25 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
             h.header_texts(&vcx).contains(&UPLOAD_FAILED.to_string()),
             "the error is hidden, not cleared"
         );
+    }
+
+    /// A click on the transient notice clears it, exactly as `escape`
+    /// does: the slot is empty, and the same verb says it again.
+    #[gpui::test]
+    fn a_click_clears_the_transient_notice_as_escape_does(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.motion(&mut vcx, "up", None);
+        h.dispatch(&mut vcx, "yank_col", None);
+        assert!(notice_painted(&mut vcx, NOTICE_0), "fixture: the notice");
+        click_at_notice(&mut vcx, NOTICE_0);
+        assert!(!notice_painted(&mut vcx, NOTICE_0));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.notice().is_none()),
+            "cleared, not hidden"
+        );
+        h.dispatch(&mut vcx, "yank_col", None);
+        assert!(notice_painted(&mut vcx, NOTICE_0), "said again: shows");
     }
 
     /// `escape` is last in line: a live find takes the first press and

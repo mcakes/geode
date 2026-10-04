@@ -3514,12 +3514,17 @@ impl PricerTile {
             "escape" if layer => {}
             "escape" if self.find.is_some() => self.find = None,
             "escape" => {
-                // Every warning and danger notice showing at the press is
-                // hidden; a standing one the transient notice masked is
-                // revealed, not hidden unseen. "loading…" is a status, the
-                // only sign a load is pending; `loaded` clears it when the
-                // rows (or the refusal) arrive.
-                self.dismissed.dismiss_all(self.header.notices());
+                // Every warning and danger notice showing at the press goes
+                // as a click on it would: the transient one is cleared,
+                // revealing a standing one it masked; a standing one is
+                // hidden. "loading…" is a status, the only sign a load is
+                // pending; `loaded` clears it when the rows (or the
+                // refusal) arrive. A transient notice masked by `stopped`
+                // or a refusal clears too, as it always has.
+                let shown = self.dismissed.visible(self.header.notices().cloned());
+                for n in &shown {
+                    self.dismiss_notice(n);
+                }
                 if !self.loading {
                     self.notice = None;
                 }
@@ -5505,6 +5510,27 @@ impl PricerTile {
             });
         }
         true
+    }
+
+    /// One header notice dismissed, as a click on it does and `escape`
+    /// does to each notice showing: the transient notice (a refusal or
+    /// advisory a key set in `notice`, while it is what the slot shows) is
+    /// cleared, so a standing notice it masked shows and the same key says
+    /// it again; every other warning or danger notice is standing and is
+    /// hidden through `dismissed` until it changes. Whether anything did.
+    pub(crate) fn dismiss_notice(&mut self, n: &Notice) -> bool {
+        if !n.dismissable() {
+            return false;
+        }
+        let transient =
+            !self.stopped && self.refusals == 0 && self.notice.as_ref() == Some(n.text());
+        if transient {
+            self.notice = None;
+            self.rebuild_chrome();
+            true
+        } else {
+            self.dismissed.dismiss(n)
+        }
     }
 
     pub(crate) fn rebuild_chrome(&mut self) {
@@ -12662,6 +12688,60 @@ pub(crate) mod tests {
         vcx.update(|window, cx| h.content.dispatch(&action, count, window, cx));
         vcx.run_until_parked();
         action.0
+    }
+
+    const VIEW_FALLBACK: &str = "view 'x' not configured";
+
+    /// The transient notice masking the view fallback, through the seam.
+    fn transient_over_standing(h: &Harness, vcx: &mut VisualTestContext) {
+        h.tile.update(vcx, |t, cx| {
+            t.view_notice = Some(VIEW_FALLBACK.into());
+            t.notice = Some("sort dropped".into());
+            t.rebuild_chrome();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+
+    /// A click on the transient notice clears it, as `escape` does: the
+    /// standing notice it masked shows, and the same advisory set again
+    /// shows again.
+    #[gpui::test]
+    fn a_click_on_the_transient_notice_clears_it_and_reveals_the_standing_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        transient_over_standing(&h, &mut vcx);
+        assert_eq!(painted_notices(&h, &mut vcx), ["sort dropped"]);
+        click_notice(&mut vcx, 0);
+        assert_eq!(painted_notices(&h, &mut vcx), [VIEW_FALLBACK], "revealed");
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.notice.is_none()),
+            "cleared, not hidden"
+        );
+        report(&h, &mut vcx, None, Some("sort dropped"));
+        assert_eq!(
+            painted_notices(&h, &mut vcx),
+            ["sort dropped"],
+            "said again: shows"
+        );
+    }
+
+    /// `escape` does the same to the same notice: the standing one shows.
+    #[gpui::test]
+    fn escape_clears_the_transient_notice_and_reveals_the_standing_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        transient_over_standing(&h, &mut vcx);
+        press_escape(&h, &mut vcx);
+        assert_eq!(painted_notices(&h, &mut vcx), [VIEW_FALLBACK], "revealed");
+        press_escape(&h, &mut vcx);
+        assert!(painted_notices(&h, &mut vcx).is_empty(), "then hidden");
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.view_notice.is_some()),
+            "standing: still reported"
+        );
     }
 
     /// A click on a warning notice hides that one; the tile still reports

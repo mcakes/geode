@@ -499,9 +499,8 @@ pub(crate) fn render_header(
 
 /// The notice line under the header: the last refusal or advisory, in
 /// the notice door's danger tone as TEXT (no fill — it is a sentence, not
-/// a state). The tile hands in only a notice that shows (its dismissals
-/// filtered it); a press on the text dismisses it through the notice
-/// door, as `escape` does once nothing else answers it.
+/// a state). A press on the text clears it through the notice door, as
+/// `escape` does once nothing else answers it.
 pub(crate) fn render_notice(
     notice: &geode_tile::notice::Notice,
     on_dismiss: &geode_tile::notice::OnDismiss,

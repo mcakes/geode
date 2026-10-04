@@ -421,7 +421,10 @@ fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> (Option<Stateful<Div>>, Div) 
             .children(c.notices.iter().enumerate().map(|(i, n)| {
                 notice::truncated(
                     n,
-                    i,
+                    ElementId::NamedInteger(
+                        SharedString::new_static("tile-notice"),
+                        notice::element_key(&c.notices, i),
+                    ),
                     SharedString::new_static(NOTICE_TIP),
                     c.on_dismiss.as_ref(),
                     theme,

@@ -4,16 +4,22 @@
 //! shows; this door paints the winner, so a tone is one color in every tile.
 //!
 //! A warning or danger notice can be dismissed: a click on it, or `escape`
-//! once nothing else in the tile answers it, hides it while the tile keeps
-//! reporting it. [`Dismissals`] is that state, one per tile, owned by the
-//! module. Identity is the notice's text and tone: the tile's own notice
-//! fields are never cleared, the render filters through
-//! [`Dismissals::visible`], and the module prunes at the seam where it
-//! prepares its notices ([`Dismissals::prune`]), so a notice the tile
-//! stopped reporting shows again when it comes back. Without the prune a
-//! derived notice (recomputed on every rebuild) would stay hidden forever;
-//! without the dismissal living outside the module's fields it would
-//! reappear on the next rebuild. `Status` (`loading…`) is never hidden.
+//! once nothing else in the tile answers it, and both do the same thing to
+//! the same notice. A transient one-shot notice (a refusal or advisory a
+//! key set in the module's transient slot) is cleared from its slot, so
+//! whatever that slot masked shows and repeating the key says it again. A
+//! standing notice (an error, a standing refusal, a derived or save notice
+//! the module would report again) is hidden while the tile keeps reporting
+//! it: [`Dismissals`] is that state, one per tile, owned by the module.
+//! Identity is the notice's text and tone: the module's standing fields are
+//! never cleared, the render filters through [`Dismissals::visible`], and
+//! the module prunes at the seam where it prepares its notices
+//! ([`Dismissals::prune`]), so a notice that stops and returns shows again.
+//! Without the prune a derived notice (recomputed on every rebuild) would
+//! stay hidden forever; without the dismissal living outside the module's
+//! fields it would reappear on the next rebuild. Which slot a notice came
+//! from is the module's knowledge, so the door takes the module's handler
+//! ([`on_dismiss_with`]). `Status` (`loading…`) is never dismissed.
 
 use std::rc::Rc;
 
@@ -21,7 +27,9 @@ use geode_shell::shell::chip::{self, chip_paint};
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::tips;
 use gpui::prelude::*;
-use gpui::{App, Div, ElementId, Entity, Hsla, MouseButton, SharedString, Stateful, Window, div};
+use gpui::{
+    App, Context, Div, ElementId, Entity, Hsla, MouseButton, SharedString, Stateful, Window, div,
+};
 use gpui_component::Theme;
 
 /// What a notice means to the trader.
@@ -152,9 +160,9 @@ impl Dismissals {
 /// state, so the module hands this in ([`on_dismiss`]).
 pub type OnDismiss = Rc<dyn Fn(&Notice, &mut Window, &mut App)>;
 
-/// The press for a tile `entity` whose dismissals `field` reaches: dismiss
-/// the pressed notice and repaint the tile when that changed anything.
-/// Holds the tile weakly, so a painted notice never keeps a closed tile.
+/// The press for a tile `entity` whose notices are all standing, whose
+/// dismissals `field` reaches: hide the pressed notice and repaint the tile
+/// when that changed anything.
 pub fn on_dismiss<T: 'static>(
     entity: &Entity<T>,
     field: fn(&mut T) -> &mut Dismissals,
@@ -167,6 +175,44 @@ pub fn on_dismiss<T: 'static>(
             }
         });
     })
+}
+
+/// The press for a tile `entity` with a transient slot: `handler` is the
+/// module's own dismissal, the one its `escape` runs per notice — it clears
+/// a transient one-shot notice from its slot (what `escape` does to it,
+/// revealing whatever that slot masked) and hides a standing one through
+/// its [`Dismissals`]. It returns whether anything changed; the tile then
+/// repaints. Both hold the tile weakly, so a painted notice never keeps a
+/// closed tile.
+pub fn on_dismiss_with<T: 'static>(
+    entity: &Entity<T>,
+    handler: fn(&mut T, &Notice, &mut Context<T>) -> bool,
+) -> OnDismiss {
+    let tile = entity.downgrade();
+    Rc::new(move |notice, _, cx| {
+        let _ = tile.update(cx, |t, cx| {
+            if handler(t, notice, cx) {
+                cx.notify();
+            }
+        });
+    })
+}
+
+/// A stable element key for `notices[i]` among its siblings, derived from
+/// the notice itself (its text and tone) and, for a repeat, how many equal
+/// notices precede it — never its position. Keyed by position, dismissing
+/// notice 0 would hand notice 1's id, and with it gpui's per-id tooltip and
+/// pressed state, to the notice that moved into its place.
+pub fn element_key(notices: &[Notice], i: usize) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let notice = &notices[i];
+    let repeat = notices[..i].iter().filter(|n| *n == notice).count();
+    // SipHash with fixed keys: the same notice keys the same on every paint.
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    notice.text.as_ref().hash(&mut h);
+    (notice.tone as u8).hash(&mut h);
+    repeat.hash(&mut h);
+    h.finish()
 }
 
 /// The dismissable notice's tooltip detail: both routes, the key spelled
@@ -277,6 +323,26 @@ mod tests {
             Notice::warning("not saved"),
             Notice::danger("query failed"),
         ]
+    }
+
+    /// A notice keeps its key when one before it is dismissed; equal
+    /// notices get distinct keys, the same on every paint.
+    #[test]
+    fn a_notice_key_is_its_own_not_its_position() {
+        let a = Notice::warning("not saved");
+        let b = Notice::danger("query failed");
+        let both = [a.clone(), b.clone()];
+        let alone = [b.clone()];
+        assert_eq!(element_key(&both, 1), element_key(&alone, 0));
+        assert_ne!(element_key(&both, 0), element_key(&both, 1));
+        let twice = [a.clone(), a.clone()];
+        assert_ne!(element_key(&twice, 0), element_key(&twice, 1));
+        assert_eq!(element_key(&twice, 1), element_key(&[a.clone(), a], 1));
+        assert_ne!(
+            element_key(&[Notice::warning("x")], 0),
+            element_key(&[Notice::danger("x")], 0),
+            "tone is part of identity"
+        );
     }
 
     #[test]

@@ -121,22 +121,43 @@ line, and the blotter the notice line. Diagnostics has none of them.
 - A warning or danger notice can be dismissed: a click on it (the press
   stops there — no tile focus, no drag), or `escape` in normal mode once
   every other thing escape does in that tile (ending a selection, clearing
-  a find or a `/` result, closing a popup, menu or field) had nothing to do,
-  which dismisses every warning and danger notice the tile shows. Escape
-  with nothing to dismiss does what it did before. A dismissed notice is
-  hidden, not cleared: the tile keeps reporting it and nothing it reports
-  changes. Identity is the notice's text and tone; when the tile stops
-  reporting it (or its text changes) and it later comes back, it shows
-  again. So a derived notice that every rebuild recomputes (the vol slice's
-  `no CVI document for X`, a blotter query error repeated by each requery)
-  stays hidden while it stands and returns only as news. A status notice
-  (`loading…`) is never dismissed and takes no press. The dismissal is the
-  tile's own (`geode_tile::notice::Dismissals`): render only filters, and
-  each module forgets a dismissal at the seam where it prepares its
-  notices. A dismissable notice takes the control door's hover and pressed
-  states, and its tooltip shows the whole text and "click or ⎋ dismisses".
-  The header's notices, the timeseries notice line under its header and
-  the vol slice's footer notice line all go through this door.
+  a find or a `/` result, closing a popup, menu or field, answering an armed
+  question from the palette) had nothing to do, which dismisses every
+  warning and danger notice the tile shows. A count typed before `escape`
+  changes nothing: each press peels one layer. A click and `escape` do the
+  same thing to the same notice, and what that is depends on the notice:
+  - A transient one-shot notice — a refusal or advisory a key set (the
+    pricer's and market-data's transient notice, the timeseries notice
+    line, the vol slice's refusal, a classifications verb's outcome or
+    the restore's dropped keys, the blotter's dropped sort or selection)
+    — is cleared. Whatever it masked shows (the pricer's view fallback or
+    scope refusal, the notices a vol slice refusal led), and repeating the
+    refused key says it again.
+  - A standing notice — one the tile would report again: an error, a
+    standing refusal, a derived or model notice, the upload error, the save
+    notice — is hidden, not cleared: the tile keeps reporting it and nothing
+    it reports changes. Identity is the notice's text and tone; when the
+    tile stops reporting it (or its text changes) and it later comes back,
+    it shows again. So a derived notice that every rebuild recomputes (the
+    vol slice's `no CVI document for X`, a blotter query error repeated by
+    each requery) stays hidden while it stands and returns only as news.
+    The hiding is the tile's own (`geode_tile::notice::Dismissals`): render
+    only filters, and each module forgets a dismissal at the seam where it
+    prepares its notices.
+
+  A status notice (`loading…`) is never dismissed and takes no press. With
+  nothing to dismiss, escape in the blotter, pricer and market-data does
+  what it did before. Classifications, timeseries and the vol slice had no
+  normal-mode `escape` before; it now runs their `cancel`, which with
+  nothing to dismiss does nothing, except that in classifications any
+  dispatched verb, this one included, counts as the trader's first action
+  and clears the session-restore notices. A dismissable notice takes the
+  control door's hover and pressed states, and its tooltip shows the whole
+  text and "click or ⎋ dismisses". The header's notices, the timeseries
+  notice line under its header and the vol slice's footer notice line all go
+  through this door; header notices are keyed by their own text and tone,
+  never their position, so dismissing one hands no hover or pressed state
+  to its neighbour.
 - Every tile header is `geode_tile::header::frame`: 22 px at the design rem,
   the stack marker first, the module's own left side, then a right cluster in
   a fixed order — the mode icon, status items, notices, source times, the

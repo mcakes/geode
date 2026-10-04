@@ -195,6 +195,11 @@ pub struct BlotterTile {
     /// Header notice. Dropped sorts and selections are warnings; query and
     /// configuration failures are danger.
     pub error: Option<Notice>,
+    /// `error` holds a one-shot notice (a dropped sort or selection, the
+    /// restored view's refusal), which a click or `escape` clears; a query
+    /// or configuration failure the next requery reports again is standing
+    /// and is hidden through `dismissed` instead.
+    error_transient: bool,
     /// The header notices the trader dismissed (click or `escape`), hidden
     /// while `error` keeps reporting them; pruned in `set_error`.
     dismissed: Dismissals,
@@ -518,6 +523,7 @@ impl BlotterTile {
             delivered_at: None,
             visible: false,
             error: restored_view_computed.clone().map(Notice::danger),
+            error_transient: false,
             dismissed: Dismissals::default(),
             restored_view_refusal: restored_view_computed,
             find: None,
@@ -775,7 +781,7 @@ impl BlotterTile {
         // Raised before the notices below so a fresher one about this very
         // snapshot (a dropped sort or selection) still wins the one slot.
         if let Some(refusal) = self.restored_view_refusal.take() {
-            self.set_error(Some(Notice::danger(refusal)));
+            self.set_one_shot(Notice::danger(refusal));
         }
         if let Some(view) = self.view() {
             // The plan is (re)built from `view` here, so the definitions
@@ -800,9 +806,9 @@ impl BlotterTile {
                 t.delegate_mut().dropped_sort.take()
             });
             if let Some(name) = dropped_sort {
-                self.set_error(Some(Notice::warning(format!(
+                self.set_one_shot(Notice::warning(format!(
                     "sort on '{name}' dropped: the column is no longer in this view"
-                ))));
+                )));
             }
             self.take_selection_notice(cx);
             self.prepare_header(cx);
@@ -1336,7 +1342,9 @@ impl BlotterTile {
                     });
                     self.find = None;
                     self.table.update(cx, |t, cx| t.refresh(cx));
-                } else if self.dismissed.dismiss_all(self.error.iter()) {
+                } else if let Some(n) = self.error.clone().filter(|n| self.dismissed.shows(n))
+                    && self.dismiss_notice(&n)
+                {
                     cx.notify();
                 }
             }
@@ -1422,17 +1430,33 @@ impl BlotterTile {
         true
     }
 
-    /// The tile's one-shot notice for `refresh_selection` clearing a
-    /// selection whose anchor row, or block anchor column, is no longer
-    /// shown — `selection_lost` is taken, not read, so the same loss is
-    /// never reported twice. The anchor is whichever end the selection
-    /// started from, not necessarily the range's first row.
     /// The header's notice seam: every change to `error` comes through
     /// here, and the dismissals forget whatever it no longer reports, so a
     /// dismissed notice that stops and later returns shows again.
     fn set_error(&mut self, error: Option<Notice>) {
         self.error = error;
+        self.error_transient = false;
         self.dismissed.prune(self.error.iter());
+    }
+
+    /// A one-shot notice into the slot: a click or `escape` clears it.
+    fn set_one_shot(&mut self, notice: Notice) {
+        self.set_error(Some(notice));
+        self.error_transient = true;
+    }
+
+    /// The header notice dismissed, as a click on it does and `escape`
+    /// does once nothing else answers it: a one-shot notice is cleared, a
+    /// standing one hidden until it changes. Whether anything did.
+    fn dismiss_notice(&mut self, n: &Notice) -> bool {
+        if !n.dismissable() {
+            return false;
+        }
+        if self.error_transient && self.error.as_ref() == Some(n) {
+            self.set_error(None);
+            return true;
+        }
+        self.dismissed.dismiss(n)
     }
 
     /// The notices the header reports, before the dismissal filter.
@@ -1440,13 +1464,18 @@ impl BlotterTile {
         self.error.iter()
     }
 
+    /// The tile's one-shot notice for `refresh_selection` clearing a
+    /// selection whose anchor row, or block anchor column, is no longer
+    /// shown — `selection_lost` is taken, not read, so the same loss is
+    /// never reported twice. The anchor is whichever end the selection
+    /// started from, not necessarily the range's first row.
     fn take_selection_notice(&mut self, cx: &mut Context<Self>) {
         if let Some(lost) = self.with_delegate(cx, |d| d.selection_lost.take()) {
             let text = match lost {
                 Lost::Row => "selection cleared: anchor row no longer shown",
                 Lost::Column => "selection cleared: anchor column no longer shown",
             };
-            self.set_error(Some(Notice::warning(text)));
+            self.set_one_shot(Notice::warning(text));
         }
     }
 
@@ -2274,9 +2303,10 @@ impl gpui::Render for BlotterTile {
         cluster.close = self.close.clone();
         cluster.mode = geode_tile::header::Mode::from_key_mode(self.mode(cx));
         cluster.notices = self.dismissed.visible(self.reported_notices().cloned());
-        cluster.on_dismiss = Some(notice::on_dismiss(&cx.entity(), |t: &mut Self| {
-            &mut t.dismissed
-        }));
+        cluster.on_dismiss = Some(notice::on_dismiss_with(
+            &cx.entity(),
+            |t: &mut Self, n, _| t.dismiss_notice(n),
+        ));
         cluster.times = self
             .header
             .times
@@ -4701,6 +4731,30 @@ mod tests {
         );
         failed(&h, &mut cx, "another error");
         assert!(notice_painted(&mut cx), "stopped and returned: shows again");
+    }
+
+    /// A one-shot notice (the selection-loss warning) is transient: a click
+    /// on it clears it, exactly as `escape` does, rather than hiding it.
+    #[gpui::test]
+    fn a_click_clears_a_one_shot_notice_as_escape_does(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "motion::bottom");
+        act(&h, &mut cx, "blotter::visual_rows");
+        h.tile.update(&mut cx, |t, cx| {
+            t.table()
+                .update(cx, |t, _| t.delegate_mut().set_narrowed(Some(vec![0, 1])));
+            t.dispatch(&ActionId("motion::up".into()), None, cx);
+        });
+        assert!(notice_painted(&mut cx), "fixture: the warning paints");
+        let at = centre(&mut cx, "tile-notice-7-0");
+        click_at(&mut cx, at, 1);
+        cx.run_until_parked();
+        assert!(!notice_painted(&mut cx));
+        assert_eq!(
+            h.tile.read_with(&cx, |t, _| t.error.clone()),
+            None,
+            "cleared, not hidden"
+        );
     }
 
     /// `escape` is last in line: a live selection (then the narrowing)

@@ -176,3 +176,28 @@ fn a_status_footer_notice_is_not_dismissed(cx: &mut gpui::TestAppContext) {
     vcx.simulate_keystrokes("escape");
     assert!(h.footer_painted(&mut vcx), "escape leaves it");
 }
+
+/// A refusal leads the footer as a transient one-shot notice: a press on
+/// it clears the refusal, exactly as `escape` does, and the standing
+/// notice it led shows; the same key refused again shows again.
+#[gpui::test]
+fn a_click_on_a_refusal_clears_it_and_reveals_what_it_led(cx: &mut gpui::TestAppContext) {
+    const REFUSED: &str = "following A \u{2014} set the underlying there (+1 more)";
+    let (h, mut vcx) = failed(cx);
+    vcx.simulate_keystrokes("u");
+    assert_eq!(h.footer_notice_text(&vcx).as_deref(), Some(REFUSED));
+    click(
+        &mut vcx,
+        &format!("volslice-notice-text-{TILE}"),
+        Modifiers::none(),
+    );
+    assert_eq!(
+        h.footer_notice_text(&vcx).as_deref(),
+        Some(FAILED),
+        "the refusal cleared"
+    );
+    assert!(h.footer_painted(&mut vcx), "what it led shows");
+    vcx.simulate_keystrokes("u");
+    assert_eq!(h.footer_notice_text(&vcx).as_deref(), Some(REFUSED));
+    assert!(h.footer_painted(&mut vcx), "refused again: shows");
+}

@@ -121,7 +121,7 @@ context = "timeseries && mode == normal"
 "g" = "timeseries::jump_start"
 "shift+g" = "timeseries::jump_end"
 "." = "timeseries::menu"
-# Last in line: with no popup up, `escape` dismisses the notice line.
+# Last in line: with no popup up, `escape` clears the notice line.
 # The popups' own `escape` (below) wins while one is open.
 "escape" = "timeseries::cancel"
 
@@ -426,7 +426,7 @@ mod tests {
     }
 
     /// With no popup up, `escape` is the tile's `cancel`: last in line, it
-    /// dismisses the notice line.
+    /// clears the notice line.
     #[test]
     fn escape_with_no_popup_is_cancel() {
         use geode_shell::keymap::{KeyContext, MatchResult, Matcher, parse_keystroke};

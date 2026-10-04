@@ -401,16 +401,19 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   outcome updates the production store's known names through
   `note_saved`/`note_forgotten`. The save state has its own header slot,
   which pricing notices and `escape` never clear; `escape` and a click only
-  hide it (below).
+  hide it (below): it is standing.
 - `escape` takes one layer per press: a grip drag, then a live selection,
   then whatever the verb's closers shut (the entry bar, the cell editor, the
   sheet picker or rename field, a menu, an armed question), then the find.
-  Only when none of those had anything to undo does it hide every warning
-  and danger notice showing at the press (`Dismissals::dismiss_all`) and
-  clear the transient notice (never `loading…`). A standing notice the
-  transient one masked is revealed, not hidden unseen. `rebuild_chrome` is
-  the prune seam: a hidden notice the header no longer reports is forgotten,
-  so its return shows.
+  Only when none of those had anything to undo does it dismiss every
+  warning and danger notice showing at the press, each as a click on it
+  does (`dismiss_notice`): the transient notice (a key's refusal or
+  advisory in `notice`, never `loading…`) is cleared, so a standing notice
+  it masked (scope refusal, view fallback, missing pricer) shows and the
+  same key says it again; a standing notice (that one, the save notice,
+  `stopped`, a pricing refusal) is hidden through `Dismissals`.
+  `rebuild_chrome` is the prune seam: a hidden notice the header no longer
+  reports is forgotten, so its return shows.
 - Loads carry the tile's own `load_tag` (separate from the pricing `tag`);
   `Delivery::Query` under any other tag is dropped, and the answer is decoded
   by `rows_from_snapshot` into `loaded`. A hide cancels a pending load, so

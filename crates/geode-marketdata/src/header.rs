@@ -488,9 +488,10 @@ pub(crate) fn render(
     cluster.mode = mode;
     cluster.status = status;
     cluster.notices = dismissed.visible(h.notices().cloned());
-    cluster.on_dismiss = Some(notice::on_dismiss(tile, |t: &mut MarketDataTile| {
-        &mut t.dismissed
-    }));
+    cluster.on_dismiss = Some(notice::on_dismiss_with(
+        tile,
+        |t: &mut MarketDataTile, n, _| t.dismiss_notice(n),
+    ));
     cluster.times.extend(h.time.clone().map(|label| TimeRun {
         label,
         stale_label: h.time_stale.clone(),

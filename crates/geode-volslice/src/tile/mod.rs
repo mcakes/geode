@@ -575,9 +575,10 @@ impl VolsliceTile {
             "clear_ticks" => self.clear_popup_ticks(cx),
             // Last in line: with no popup to close, `escape` dismisses the
             // footer's notice, and is handled only when it did. A refusal
-            // the verb cleared above leaves the footer when the chrome
-            // refreshes, so the combined text it led, dismissed here, is
-            // never painted again: the footer then shows what remains.
+            // (transient) went with this verb above, as a click on it
+            // clears it; the combined text it led, hidden here, leaves the
+            // footer when the chrome refreshes, which then shows what
+            // remains — what a click shows.
             "cancel" if self.popup.is_some() => self.close_popup(window, cx),
             "cancel" => {
                 if !self.dismissed.dismiss_all(self.chrome.notice.iter()) {
@@ -782,6 +783,27 @@ impl VolsliceTile {
 
     /// A verb acting on the tile clears the last refusal: whatever it was
     /// refused for has been tried again or left behind.
+    /// The footer notice dismissed by a press on it, as `escape` does: a
+    /// refusal leads the footer whenever there is one, and it is transient
+    /// (the next verb clears it), so it is cleared and the notices it led
+    /// show; with none, the footer notice is standing (data and model
+    /// notices the tile reports again) and is hidden through `dismissed`
+    /// until it changes. Whether anything did.
+    pub(crate) fn dismiss_notice(
+        &mut self,
+        n: &geode_tile::notice::Notice,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !n.dismissable() {
+            return false;
+        }
+        if self.refusal.is_some() {
+            self.clear_refusal(cx);
+            return true;
+        }
+        self.dismissed.dismiss(n)
+    }
+
     pub(super) fn clear_refusal(&mut self, cx: &mut Context<Self>) {
         if self.refusal.take().is_some() {
             cx.notify();
@@ -1046,9 +1068,10 @@ impl Render for VolsliceTile {
                     .notice
                     .as_ref()
                     .filter(|n| self.dismissed.shows(n)),
-                &geode_tile::notice::on_dismiss(&cx.entity(), |t: &mut VolsliceTile| {
-                    &mut t.dismissed
-                }),
+                &geode_tile::notice::on_dismiss_with(
+                    &cx.entity(),
+                    |t: &mut VolsliceTile, n, cx| t.dismiss_notice(n, cx),
+                ),
                 &self.chrome.hints,
                 theme,
                 id,

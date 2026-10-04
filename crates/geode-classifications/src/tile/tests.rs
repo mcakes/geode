@@ -3184,6 +3184,59 @@ fn clicking_a_values_notice_hides_it_until_it_returns(cx: &mut gpui::TestAppCont
     assert!(painted(&h, &mut vcx, NOTICE), "back: shows again");
 }
 
+/// A verb's refusal is a transient outcome: a click on it clears it,
+/// exactly as `escape` does, and the verb refused again says it again.
+#[gpui::test]
+fn a_click_or_escape_clears_a_refusal_and_the_verb_says_it_again(cx: &mut gpui::TestAppContext) {
+    const WHY: &str = "can't tell where region is defined";
+    let mut c = config(TWO);
+    c.layers.remove("region");
+    let (h, mut vcx) = open_with(cx, c, restored("region"));
+    h.act(&mut vcx, "classifications::delete");
+    assert_eq!(h.notices(&vcx), [WHY], "fixture");
+    click_notice(&h, &mut vcx);
+    assert!(!painted(&h, &mut vcx, NOTICE));
+    assert!(h.notices(&vcx).is_empty(), "cleared, not hidden");
+    h.act(&mut vcx, "classifications::delete");
+    assert!(painted(&h, &mut vcx, NOTICE), "refused again: shows");
+    h.press(&mut vcx, "escape");
+    assert!(h.notices(&vcx).is_empty(), "escape clears it too");
+    h.act(&mut vcx, "classifications::delete");
+    assert!(painted(&h, &mut vcx, NOTICE), "and again: shows");
+}
+
+/// A palette `cancel` under an armed question answers it "no", and that
+/// is the whole of it: the notices wait for the next one.
+#[gpui::test]
+fn a_palette_cancel_under_a_question_answers_it_and_leaves_the_notices(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(TWO, &["region"], &[]),
+        restored("region"),
+    );
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Err("no such column"));
+    assert_eq!(h.notices(&vcx), [NO_SUCH_COLUMN], "fixture");
+    h.act(&mut vcx, "classifications::delete");
+    assert!(h.confirm(&vcx).is_some(), "fixture: the question is armed");
+    let shows = |h: &Harness, vcx: &gpui::VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| {
+            t.dismissed
+                .visible(t.chrome.notices.iter().cloned())
+                .iter()
+                .any(|n| n.text().as_ref() == NO_SUCH_COLUMN)
+        })
+    };
+    assert!(shows(&h, &vcx), "fixture: the values notice");
+    h.act(&mut vcx, "classifications::cancel");
+    assert_eq!(h.confirm(&vcx), None, "answered no");
+    assert!(shows(&h, &vcx), "the values notice waits");
+    h.act(&mut vcx, "classifications::cancel");
+    assert!(!shows(&h, &vcx), "the next cancel dismisses it");
+}
+
 /// A status notice is never dismissed: neither a click nor `escape`
 /// hides `nothing copied`.
 #[gpui::test]
