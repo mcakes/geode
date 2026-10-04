@@ -3695,17 +3695,39 @@ mod tests {
             .expect("the bus dispatched the newer document");
         watcher.unsubscribe();
 
-        // Reopened on the same store: no NOTIFY is published, so SPX can
-        // only go live with 0.7 by the recovery asking the recorded topic.
+        // Reopened on the same store: no NOTIFY is published for SPX, so it
+        // can only go live with 0.7 by the recovery asking the recorded
+        // topic. A NOTIFY for another key, published after the open, is
+        // the proof the start-time ask has been made (the receiver asks
+        // before it takes its first message), so a wrong ask fails here at
+        // once rather than after a publish timeout.
         let (svc, rx) =
             DataService::open_channel(recovery_config(path, adapters, &["md/*/NOTIFY"])).unwrap();
-        assert_eq!(next_published(&rx).1, "SPX");
-        assert_eq!(live_spx_param(&svc, &rx), 0.7);
+        assert!(feed.publish(
+            "md/NDX/NOTIFY",
+            FakeKind::message("NDX", [0.2, 2., 3., 4., 5., 6.])
+        ));
+        let mut spx_recovered = false;
+        until(&rx, |e| match e {
+            DataEvent::Published { batch, .. } if batch == "NDX" => Some(()),
+            DataEvent::Published { batch, .. } => {
+                spx_recovered |= batch == "SPX";
+                None
+            }
+            _ => None,
+        });
         assert_eq!(
             *asked.lock().unwrap(),
             vec![vec!["md/SPX/NOTIFY".to_string()]],
             "the concrete topic, never the pattern"
         );
+        if !spx_recovered {
+            until(&rx, |e| match e {
+                DataEvent::Published { batch, .. } if batch == "SPX" => Some(()),
+                _ => None,
+            });
+        }
+        assert_eq!(live_spx_param(&svc, &rx), 0.7);
         svc.shutdown();
     }
 
