@@ -32335,13 +32335,17 @@ run_mutation "link: a restored emit on a non-emitter is dropped" \
   geode-shell a_restored_emit_on_a_tile_that_cannot_emit_is_dropped
 
 # The doors link only a tile a module occupies: a membership written for
-# an id with no occupant, or a placeholder, has nothing to end it.
+# an id with no occupant, or a placeholder, has nothing to end it. As with
+# the emit door below, the `follows()` filter behind the guard already keeps
+# the frame untouched, so the guard's return is observable only in the log:
+# without it the door goes on to log a second refusal (the module does not
+# follow).
 run_mutation "link: the follow door refuses a tile with no occupant" \
   crates/geode-shell/src/shell/link.rs \
   '"follow refused for tile {}: {why}", tile.0);
             return;' \
   '"follow refused for tile {}: {why}", tile.0);' \
-  geode-shell the_doors_refuse_a_tile_with_no_occupant
+  geode-shell a_refused_door_logs_the_tile_and_the_reason
 
 # A refused door changes nothing a trader sees; the log line is where it
 # says so. The emit door's own guard is observable only there: the
