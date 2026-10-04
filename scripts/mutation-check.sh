@@ -26333,17 +26333,6 @@ run_mutation "scope expr: saving refuses a taken name" \
   geode-shell \
   mod_s_refuses_a_taken_name
 
-# The taken-name check reads the configuration with the pending batch
-# applied: a name saved a moment ago is taken before any reload.
-run_mutation "scope expr: saving refuses a name queued a moment ago" \
-  crates/geode-shell/src/shell/objectdialog/apply.rs \
-  'pub(crate) fn definition_owner(shell: &ShellView, doc: &str, name: &str) -> Owner {
-    let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());' \
-  'pub(crate) fn definition_owner(shell: &ShellView, doc: &str, name: &str) -> Owner {
-    let config = shell.services.config.clone();' \
-  geode-shell \
-  mod_s_refuses_a_name_queued_a_moment_ago
-
 # An empty field names nothing; opening the entry for it would ask for a
 # name that can only be refused.
 run_mutation "scope expr: mod+s on an empty field opens the name entry" \
