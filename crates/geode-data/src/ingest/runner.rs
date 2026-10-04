@@ -171,9 +171,12 @@ pub struct DocumentJob {
     /// `Unchanged`, so a reconnect does not republish every topic it asked
     /// for.
     pub recovered: bool,
-    /// Set on a topic's first document per run, so the publish records it
-    /// in the same transaction. `None` on every other document keeps the
-    /// hot path free of the extra write.
+    /// The topic to record with this document. A NOTIFY document carries
+    /// it on the topic's first document per run (and again once
+    /// `RERECORD_AFTER` old); `None` on every other one keeps the hot path
+    /// free of the extra write. A recovered document always carries it: a
+    /// reply proves the topic alive, so the store records it whether the
+    /// reply publishes or is `Unchanged`.
     pub topic: Option<String>,
 }
 

@@ -1,6 +1,12 @@
-//! The concrete topics each subscribed source has published from. Written
-//! in the publish transaction of a topic's first document per run, pruned
+//! The concrete topics each subscribed source has published from, pruned
 //! and read at service open, before the ingest runner owns the writer.
+//! Written in the publish transaction of a topic's first NOTIFY document
+//! per run, and again once the receiver's record of it is 24 hours old, so
+//! a long run keeps a live topic's receive time current. A recovery reply
+//! also writes it: in the transaction when the reply publishes, and as one
+//! upsert when it is unchanged, because an answered GET proves the topic
+//! alive. A topic that neither publishes nor answers for the source's
+//! `recover_max_age` is pruned.
 
 use crate::store::StoreError;
 use chrono::{DateTime, Utc};

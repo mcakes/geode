@@ -37,9 +37,10 @@ pub struct DocumentPublishRequest<'a> {
     /// repeats what a previous run most likely stored; an ordinary NOTIFY
     /// document is a fresh update and skips the comparison's cost.
     pub compare_live: bool,
-    /// The concrete topic the document arrived on, recorded in the publish
-    /// transaction so a later run can ask for it again. `None` records
-    /// nothing.
+    /// The concrete topic the document arrived on, recorded so a later run
+    /// can ask for it again: in the publish transaction when it publishes,
+    /// and by itself when a compared document is `Unchanged` (a recovery
+    /// reply proves the topic alive). `None` records nothing.
     pub topic: Option<&'a str>,
 }
 
@@ -157,6 +158,13 @@ pub fn publish_document(
         if live.is_some()
             && staged_equals_live(conn, STAGING_TABLE, &tables.live, &columns, &batch)?
         {
+            // A reply proves its topic alive even when it changes nothing:
+            // refresh the record so a key slower than `recover_max_age` is
+            // not pruned. One upsert, outside any transaction; no
+            // identifier, generation or catalog row.
+            if let Some(answered) = req.topic {
+                crate::store::topics::record(conn, req.source, answered, req.received_at)?;
+            }
             return Ok(DocumentOutcome::Unchanged { batch });
         }
         let file_id = catalog.reserve_file_id()?;
@@ -1278,6 +1286,51 @@ role = "attribute"
         );
     }
 
+    /// A recovery reply proves its topic alive even when it changes nothing,
+    /// so the unchanged outcome still refreshes the topic's receive time —
+    /// with no identifier spent. Without it a slow-moving key whose runs
+    /// each start with an equal reply ages out of `subscription_topics`.
+    #[test]
+    fn an_unchanged_recovered_document_refreshes_its_topic_and_spends_nothing() {
+        let (_d, store, ds) = fixture();
+        let rows = cvi_doc("SPX.Z", [1., 2., 3., 4., 5., 6.]);
+        publish_document(
+            &store,
+            &DocumentPublishRequest {
+                topic: Some("marketdata/cvi/SPX/NOTIFY"),
+                ..req(&ds, &rows, "2026-09-12T14:00:00Z")
+            },
+        )
+        .unwrap();
+        let sequences_before = sequence_positions(&store);
+        let out = publish_document(
+            &store,
+            &DocumentPublishRequest {
+                compare_live: true,
+                topic: Some("marketdata/cvi/SPX/NOTIFY"),
+                ..req(&ds, &rows, "2026-09-12T14:05:00Z")
+            },
+        )
+        .unwrap();
+        assert!(matches!(out, DocumentOutcome::Unchanged { .. }));
+        assert_eq!(sequence_positions(&store), sequences_before);
+        let (first, last): (i64, i64) = store
+            .writer()
+            .query_row(
+                "select first_seen_us, last_received_us from subscription_topics \
+                 where source = 'cvi' and topic = 'marketdata/cvi/SPX/NOTIFY'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(first, ts("2026-09-12T14:00:00Z").timestamp_micros());
+        assert_eq!(
+            last,
+            ts("2026-09-12T14:05:00Z").timestamp_micros(),
+            "the equal reply refreshed the topic's receive time"
+        );
+    }
+
     #[test]
     fn a_rolled_back_publish_records_no_topic() {
         let (_d, store, ds) = fixture();
@@ -1286,8 +1339,8 @@ role = "attribute"
             &req(&ds, &cvi_doc("SPX.Z", [1.; 6]), "2026-09-12T14:00:00Z"),
         )
         .unwrap();
-        // The second catalog insert fails after rows, dictionaries and the
-        // topic were written inside the transaction.
+        // The second catalog insert fails after rows and dictionaries were
+        // written inside the transaction, before the topic is recorded.
         store
             .writer()
             .execute_batch("create unique index one_file_for_test on file_generations(dataset)")
