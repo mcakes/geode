@@ -3280,3 +3280,44 @@ fn a_reload_that_turns_the_filter_off_repulls_without_the_layer(cx: &mut gpui::T
     assert!(!shell.read_with(&vcx, |s, _| s.link_include_tile_filter));
     assert_eq!(group_region(&frame, &vcx), None);
 }
+
+/// The setter persists `[links] include_tile_filter` to the user
+/// `app.toml` off the UI thread, so the choice survives a restart.
+#[gpui::test]
+fn setting_the_filter_off_persists_it_to_the_user_layer(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    shell.update(&mut vcx, |s, cx| s.set_link_filter(false, cx));
+    vcx.run_until_parked();
+    let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
+    assert!(
+        text.contains("[links]") && text.contains("include_tile_filter = false"),
+        "{text}"
+    );
+}
+
+/// A configured `[links] include_tile_filter = false` holds from the
+/// first posting: the emitter's own layer never reaches its group.
+#[gpui::test]
+fn a_configured_filter_setting_off_holds_from_startup(cx: &mut gpui::TestAppContext) {
+    let (mut services, _emitter) = emitting_services(Emission {
+        cursor: CursorScope::Path(underlying("SPX.Z")),
+        layer: Scope::one("region", "EU"),
+        ..Emission::default()
+    });
+    services.config = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("app", "[links]\ninclude_tile_filter = false\n").unwrap()],
+        desk: None,
+        user: None,
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    assert!(!shell.read_with(&vcx, |s, _| s.link_include_tile_filter));
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("SPX.Z"),
+        "sanity: the emitter posted"
+    );
+    assert_eq!(group_region(&frame, &vcx), None);
+}

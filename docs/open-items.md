@@ -132,6 +132,8 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 
 ### Display checks
 
+- Settings dialog: the Links row's title "Linked scope includes tile filter" fits
+  the title column beside its category and On/Off value, unclipped.
 - Object dialog against the "Geode Config Dialogs" mockup: crumb and pill in the
   title row, badges, grip/tick, section headers, outlined buttons.
 - Object dialog rows: diagnostic glyph + label block, dimmed dataset prefix on

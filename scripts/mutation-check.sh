@@ -34582,6 +34582,18 @@ run_mutation "link: changing the filter setting re-pulls" \
   '        cx.notify();' \
   geode-shell turning_the_filter_setting_off_repulls_without_the_layer
 
+run_mutation "link: the filter setting persists to the user layer" \
+  crates/geode-shell/src/shell/input.rs \
+  '                if let Err(e) = crate::linkfilter::persist_to_user_config(&dir, on) {' \
+  '                if let Err(e) = Ok::<(), String>(()) {' \
+  geode-shell setting_the_filter_off_persists_it_to_the_user_layer
+
+run_mutation "link: the filter setting is seeded from config" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        let link_include_tile_filter = crate::linkfilter::from_config(&services.config);' \
+  '        let link_include_tile_filter = true;' \
+  geode-shell a_configured_filter_setting_off_holds_from_startup
+
 run_mutation "link: a reload that changes the filter setting re-pulls" \
   crates/geode-shell/src/shell/hot_reload.rs \
   '                self.force_repull_emitters(cx);' \

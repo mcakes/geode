@@ -15,8 +15,9 @@
 //! so bare letters act as commands.
 //!
 //! Visible settings are Theme, Font size, Line numbers, Find style, Add tile direction,
-//! timeseries default source, and whether a linked scope includes the tile filter. With no configured sources, its only option is
-//! `(none)`. Theme names include appearance, so there is no separate mode row.
+//! timeseries default source, and whether a linked scope includes the tile filter.
+//! With no configured sources, the source row's only option is `(none)`. Theme names
+//! include appearance, so there is no separate mode row.
 
 use std::rc::Rc;
 
@@ -74,9 +75,9 @@ pub struct SettingRow {
 }
 
 /// Build rows from plain inputs in fixed order: Theme, Font size, Find style, Line
-/// numbers, Add tile direction, Default series source, and the linked-scope filter. The source row always
-/// includes `(none)`, even with no configured sources. `rows_for` supplies the live
-/// shell values.
+/// numbers, Add tile direction, Default series source, and the linked-scope filter.
+/// The source row always includes `(none)`, even with no configured sources.
+/// `rows_for` supplies the live shell values.
 ///
 /// An unknown active theme falls back to index zero. An unavailable default source
 /// selects `(none)`.
