@@ -670,9 +670,18 @@ fn saving_under_a_new_name_writes_it_and_records_the_source(cx: &mut gpui::TestA
     f.keys("backspace backspace");
     assert_eq!(f.draft().as_deref(), Some(""));
     f.type_text("mine");
-    f.keys("enter");
+    // Dispatched and read in one update: no task runs between them, so the
+    // batch has not flushed and only the save's own refresh can resolve it.
+    let frame = frame_of(&f.shell, &f.vcx);
+    let resolved = f.vcx.update(|window, cx| {
+        window.dispatch_keystroke(gpui::Keystroke::parse("enter").unwrap(), cx);
+        frame.read(cx).saved_scopes().contains_key("mine")
+    });
+    assert!(resolved, "resolved before the flush");
+    f.vcx.run_until_parked();
+    draw(&mut f.vcx);
     assert!(!f.painted("scope-dialog-confirm"), "a new name never asks");
-    assert!(f.has_saved("mine"), "resolved before the flush");
+    assert!(f.has_saved("mine"));
     assert_eq!(f.loaded_from().as_deref(), Some("mine"));
     assert_eq!(f.top(), Some(Layer::Current));
     assert_eq!(f.title().as_deref(), Some("from mine"));
