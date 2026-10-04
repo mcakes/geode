@@ -627,6 +627,9 @@ See [`recover.rs`](../../crates/geode-data/src/ingest/recover.rs),
 [`topics.rs`](../../crates/geode-data/src/store/topics.rs) and
 [`compare.rs`](../../crates/geode-data/src/store/compare.rs).
 
+See [real sources](real-sources.md) for the seam each vendor client
+implements and the shapes still to verify against real feeds.
+
 ## Egress and uploads
 
 An upload encodes a whole document and sends it through a configured

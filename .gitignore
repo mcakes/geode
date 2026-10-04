@@ -16,3 +16,6 @@ proptest-regressions/
 
 # Local documentation plans and design archive.
 /docs/superpowers/
+
+# macOS Finder metadata.
+.DS_Store

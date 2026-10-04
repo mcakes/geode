@@ -34,6 +34,23 @@ cargo run -p geode-chart --example xy
 
 ## Contracts
 
+### Rendering path
+
+Charts paint with gpui's own primitives. gpui's primitive set is closed (no
+cross-platform texture or shader hook), so an embedded GPU renderer would
+need readback or a fork of gpui; none is used.
+
+- Vector geometry (lines, bands, whiskers, smiles) goes through
+  `paint_path`, bounded by min-max decimation (`core`; see the decimation
+  contract below); path tessellation's sub-pixel collapse is not
+  decimation. Measured at the
+  pinned gpui, a million-point polyline painted this way holds frame rate.
+- A dense field (a heatmap or surface), when one is added, is drawn as
+  CPU-prepared pixels through `paint_image`, not one `paint_quad` per cell:
+  per-cell quads grow superlinearly past a few thousand cells.
+- Continuous redraw is requested with `window.request_animation_frame()`
+  from `render`. A hand-chained `on_next_frame` plus `notify` stalls.
+
 ### The kit and its elements
 
 - There is one element per chart type, never one per module. An element
