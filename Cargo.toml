@@ -20,6 +20,7 @@ members = [
     "crates/geode-demo-data",
     "crates/geode-nemo",
     "crates/geode-positions",
+    "crates/geode-compose",
     "crates/geode-app",
 ]
 
@@ -43,6 +44,7 @@ geode-timeseries = { path = "crates/geode-timeseries" }
 geode-volslice = { path = "crates/geode-volslice" }
 geode-classifications = { path = "crates/geode-classifications" }
 geode-pricer = { path = "crates/geode-pricer" }
+geode-compose = { path = "crates/geode-compose" }
 
 # Logging versions match gpui's resolved `tracing` family, avoiding a second
 # copy. `tracing-appender` supplies the daily rolling file layer in

@@ -132,7 +132,7 @@ fn main() {
 
             let (mut services, desk, user, bridge, diagnostics_factory) = build_shell_services(
                 demo_root.as_deref(),
-                config_dirs(),
+                geode_compose::config_dirs(),
                 log_ring,
                 log_control,
                 adapters,
@@ -301,7 +301,7 @@ fn install_logging() -> (
     let ring = Arc::new(Ring::new(4096));
     let (filter, reload_handle) = reload::Layer::new(LogLevels::default().to_targets());
 
-    let (_, user) = config_dirs();
+    let (_, user) = geode_compose::config_dirs();
     let mut log_guard = None;
     let file_layer = user.as_ref().and_then(|dir| {
         let logs = dir.join("logs");
@@ -530,7 +530,7 @@ fn build_shell_services(
     // Data-backed factories require a successful data setup. If setup is absent,
     // those kinds have no add-tile actions and restored tiles remain placeholders.
     // The builtin pricer dataset and views normally supply the required documents.
-    let db = bridge::db_path(
+    let db = geode_compose::db_path(
         &config,
         demo_root,
         std::env::var("LOCALAPPDATA").ok(),
@@ -680,26 +680,6 @@ fn print_diagnostic(diag: &Diagnostic) {
     }
 }
 
-/// Resolve the desk directory from `GEODE_DESK_CONFIG` and the user directory
-/// from `APPDATA`, falling back to `HOME/.config`. Missing or non-Unicode
-/// environment values are treated as absent. No filesystem checks are made.
-fn config_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
-    let desk = std::env::var("GEODE_DESK_CONFIG").ok().map(PathBuf::from);
-    let user = user_config_dir(std::env::var("APPDATA").ok(), std::env::var("HOME").ok());
-    (desk, user)
-}
-
-/// Pure core of the user-config-directory resolution in [`config_dirs`]:
-/// `%APPDATA%/geode` when set, else `$HOME/.config/geode`, else `None`.
-/// Kept as a pure function of its inputs so it's unit-testable without
-/// touching the real environment.
-fn user_config_dir(appdata: Option<String>, home: Option<String>) -> Option<PathBuf> {
-    if let Some(appdata) = appdata {
-        return Some(PathBuf::from(appdata).join("geode"));
-    }
-    home.map(|home| PathBuf::from(home).join(".config").join("geode"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,29 +732,6 @@ label = "atm"
 column = "skew"
 label = "skew"
 "#;
-
-    #[test]
-    fn appdata_wins_when_set() {
-        let dir = user_config_dir(
-            Some("C:\\Users\\me\\AppData\\Roaming".to_string()),
-            Some("/home/me".to_string()),
-        );
-        assert_eq!(
-            dir,
-            Some(PathBuf::from("C:\\Users\\me\\AppData\\Roaming").join("geode"))
-        );
-    }
-
-    #[test]
-    fn home_config_used_without_appdata() {
-        let dir = user_config_dir(None, Some("/home/me".to_string()));
-        assert_eq!(dir, Some(PathBuf::from("/home/me/.config/geode")));
-    }
-
-    #[test]
-    fn none_when_neither_env_var_set() {
-        assert_eq!(user_config_dir(None, None), None);
-    }
 
     #[test]
     fn no_arguments_means_no_demo() {

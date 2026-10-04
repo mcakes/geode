@@ -26,6 +26,8 @@ gpui-base.workspace = true
 gpui-component-macros.workspace = true
 geode-shell = { path = "../geode-shell" }
 geode-core.workspace = true
+# Store and config path resolution, shared with the background collector.
+geode-compose.workspace = true
 # The app bridge connects shell state to data services without a dependency
 # between those crates.
 geode-data = { path = "../geode-data" }

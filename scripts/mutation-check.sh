@@ -4304,10 +4304,10 @@ run_mutation 'bridge: dropped_events counted on a refused try_send' \
   geode-app a_closed_receiver_is_counted_as_dropped_rather_than_lost_silently
 
 run_mutation "bridge: db_path precedence — config wins over demo and the platform dir" \
-  crates/geode-app/src/bridge.rs \
+  crates/geode-compose/src/paths.rs \
   '    if let Some(p) = config.get("app", "data.db_path").and_then(|v| v.as_str()) {' \
   '    if false && let Some(p) = config.get("app", "data.db_path").and_then(|v| v.as_str()) {' \
-  geode-app \
+  geode-compose \
   the_database_path_prefers_config_then_demo_then_the_platform_dir
 
 run_mutation "demo: the sources doc's paths glob is rewritten onto the emitted directory" \

@@ -1,0 +1,24 @@
+[package]
+name = "geode-compose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+# The gpui-free half of the composition root, shared by the app and the
+# background collector: the builtin data layer, the engine's configuration,
+# store and config paths, the demo transports and their registry. Never
+# depends on gpui, geode-shell, geode-tile or a feature module, so a headless
+# binary can link it.
+[dependencies]
+geode-core.workspace = true
+geode-data = { path = "../geode-data" }
+
+# Match the support features used by workspace tests to share dependency builds.
+[dev-dependencies]
+geode-core = { workspace = true, features = ["test-support"] }
+geode-data = { path = "../geode-data", features = ["test-support"] }
+tempfile = "3.27.0"

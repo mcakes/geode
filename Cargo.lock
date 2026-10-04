@@ -2506,6 +2506,7 @@ dependencies = [
  "chrono",
  "geode-blotter",
  "geode-classifications",
+ "geode-compose",
  "geode-core",
  "geode-data",
  "geode-demo-data",
@@ -2577,6 +2578,15 @@ dependencies = [
  "gpui-component",
  "gpui-pre",
  "toml 1.1.4+spec-1.1.0",
+]
+
+[[package]]
+name = "geode-compose"
+version = "0.1.0"
+dependencies = [
+ "geode-core",
+ "geode-data",
+ "tempfile",
 ]
 
 [[package]]

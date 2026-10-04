@@ -41,7 +41,7 @@ use gpui::{App, AsyncApp, Entity, WindowHandle};
 use gpui_component::Root;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -407,31 +407,6 @@ fn pin_app_dataset(
         ),
         path: Some(format!("datasets.{name}")),
     })
-}
-
-/// Choose data.db_path from app.toml, then the demo directory, then the
-/// supplied platform data directory/home fallback.
-pub fn db_path(
-    config: &Config,
-    demo: Option<&Path>,
-    local_app_data: Option<String>,
-    home: Option<String>,
-) -> PathBuf {
-    if let Some(p) = config.get("app", "data.db_path").and_then(|v| v.as_str()) {
-        return PathBuf::from(p);
-    }
-    if let Some(dir) = demo {
-        return dir.join("geode.duckdb");
-    }
-    if let Some(lad) = local_app_data {
-        return PathBuf::from(lad).join("Geode").join("geode.duckdb");
-    }
-    let home = home.unwrap_or_else(|| ".".into());
-    if cfg!(target_os = "macos") {
-        PathBuf::from(home).join("Library/Application Support/Geode/geode.duckdb")
-    } else {
-        PathBuf::from(home).join(".local/share/geode/geode.duckdb")
-    }
 }
 
 /// Read blotter.stale_after from app.toml using the shared duration parser.
@@ -1874,6 +1849,7 @@ mod tests {
     use geode_shell::{theme, vimfind::FindStyle};
     use gpui::AppContext as _;
     use std::cell::RefCell;
+    use std::path::Path;
 
     /// Verify source descriptions retain the startup schema's pipeline pairing.
     /// Classification rules themselves are tested in source_config.
@@ -7988,52 +7964,6 @@ grain = "underlying"
         assert!(
             diagnostics.read_with(&vcx, |d, _| !d.sources.contains_key("cvi:queue")),
             "no source is named after the condition key"
-        );
-    }
-
-    #[test]
-    fn the_database_path_prefers_config_then_demo_then_the_platform_dir() {
-        let empty = Config::load(&ConfigSources::default());
-        assert_eq!(
-            db_path(
-                &empty,
-                None,
-                Some("C:\\Users\\me\\AppData\\Local".into()),
-                Some("/home/me".into())
-            ),
-            PathBuf::from("C:\\Users\\me\\AppData\\Local")
-                .join("Geode")
-                .join("geode.duckdb")
-        );
-        let unix = db_path(&empty, None, None, Some("/home/me".into()));
-        assert!(
-            unix.ends_with("Geode/geode.duckdb") || unix.ends_with("geode/geode.duckdb"),
-            "{unix:?}"
-        );
-        assert_eq!(
-            db_path(
-                &empty,
-                Some(std::path::Path::new("/tmp/geode-demo/100000-42")),
-                None,
-                None
-            ),
-            PathBuf::from("/tmp/geode-demo/100000-42/geode.duckdb")
-        );
-        let configured = Config::load(&ConfigSources {
-            builtin: vec![
-                LayerDoc::builtin("app", "[data]\ndb_path = \"/var/geode/x.duckdb\"\n").unwrap(),
-            ],
-            ..ConfigSources::default()
-        });
-        assert_eq!(
-            db_path(
-                &configured,
-                Some(std::path::Path::new("/tmp/d")),
-                None,
-                None
-            ),
-            PathBuf::from("/var/geode/x.duckdb"),
-            "config wins even over demo"
         );
     }
 
