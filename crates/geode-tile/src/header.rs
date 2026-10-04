@@ -45,7 +45,7 @@ use gpui::{
 use gpui_component::{Icon, Sizable as _, Theme, h_flex};
 use gpui_kit_assets::IconName;
 
-use crate::notice::{self, Notice};
+use crate::notice::{self, Notice, OnDismiss};
 
 /// Every tile header's height, in pixels at the design rem
 /// (`shell::scale`), so headers line up across a split. Popups anchor
@@ -318,8 +318,14 @@ pub struct Cluster<'a> {
     /// What only one module has (the pricer's prompt and counts, market-data's
     /// state), built each paint from prepared strings.
     pub status: Vec<AnyElement>,
-    /// Painted in order through the notice door.
+    /// Painted in order through the notice door. The module passes them
+    /// through its [`Dismissals::visible`](crate::notice::Dismissals::visible)
+    /// filter, so a dismissed notice never reaches the frame.
     pub notices: Vec<Notice>,
+    /// What a press on a warning or danger notice runs: the module's own
+    /// dismissal ([`notice::on_dismiss`]). `None` paints every notice
+    /// inert, as a status notice always is.
+    pub on_dismiss: Option<OnDismiss>,
     pub times: Vec<TimeRun>,
     /// The tile's link groups, from [`link_chips`]; painted in the fixed
     /// tail after the times.
@@ -339,6 +345,7 @@ impl Cluster<'_> {
             mode: Mode::Normal,
             status: Vec::new(),
             notices: Vec::new(),
+            on_dismiss: None,
             times: Vec::new(),
             links: TileLinks::default(),
             health: None,
@@ -412,8 +419,14 @@ fn paint_cluster(c: Cluster<'_>, theme: &Theme) -> (Option<Stateful<Div>>, Div) 
                     .map(|s| div().min_w_0().truncate().child(s)),
             )
             .children(c.notices.iter().enumerate().map(|(i, n)| {
-                notice::truncated(n, i, SharedString::new_static(NOTICE_TIP), theme)
-                    .debug_selector(move || format!("tile-notice-{tile}-{i}"))
+                notice::truncated(
+                    n,
+                    i,
+                    SharedString::new_static(NOTICE_TIP),
+                    c.on_dismiss.as_ref(),
+                    theme,
+                )
+                .debug_selector(move || format!("tile-notice-{tile}-{i}"))
             }))
     });
     let mut row = h_flex().items_center().gap_3();
@@ -829,6 +842,10 @@ mod tests {
         /// overflow a narrow header.
         left_runs: usize,
         notice: Notice,
+        /// The strip's own dismissals, as a module keeps them.
+        dismissed: crate::notice::Dismissals,
+        /// Whether the strip hands the cluster a dismiss.
+        dismiss: bool,
         mode: Mode,
         /// The tile's own handle on a frame: what its link chips are read
         /// from, each paint, as a module reads them.
@@ -857,7 +874,12 @@ mod tests {
                     .child("2 pricing…")
                     .into_any_element(),
             );
-            cluster.notices.push(self.notice.clone());
+            cluster.notices = self.dismissed.visible([self.notice.clone()]);
+            if self.dismiss {
+                cluster.on_dismiss = Some(notice::on_dismiss(&cx.entity(), |s: &mut Strip| {
+                    &mut s.dismissed
+                }));
+            }
             cluster.times = self.times.clone();
             cluster.health = self.watch.chip();
             cluster.links = link_chips(&self.frame, cx);
@@ -911,6 +933,8 @@ mod tests {
                 times: vec![plain_time()],
                 left_runs: 0,
                 notice: Notice::warning("not saved"),
+                dismissed: Default::default(),
+                dismiss: true,
                 mode: Mode::Normal,
                 frame: FrameRef::for_tile(frame, WorkspaceIx::FIRST, TILE),
                 close: None,
@@ -1365,6 +1389,94 @@ mod tests {
             0,
             "the chip's press stops at the chip: no tile focus, no shell root"
         );
+    }
+
+    fn set_notice(view: &Entity<Strip>, vcx: &mut VisualTestContext, notice: Notice) {
+        view.update(vcx, |s, cx| {
+            s.notice = notice;
+            // The strip's preparation seam, as a module's would run.
+            let reported = [s.notice.clone()];
+            s.dismissed.prune(&reported);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+
+    fn painted(vcx: &mut VisualTestContext, selector: &'static str) -> bool {
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.debug_bounds(selector).is_some()
+    }
+
+    /// A click on a warning or danger notice hides it, and the press stops
+    /// at the notice: the tile's own listeners (focus, drag) never see it.
+    #[gpui::test]
+    fn clicking_a_warning_or_danger_notice_dismisses_it(cx: &mut TestAppContext) {
+        let (view, _, presses, vcx) = open_strip(cx);
+        for notice in [Notice::warning("not saved"), Notice::danger("query failed")] {
+            set_notice(&view, vcx, notice.clone());
+            let at = centre(vcx, "tile-notice-3-0");
+            click(vcx, at);
+            assert!(!painted(vcx, "tile-notice-3-0"), "{notice:?} dismissed");
+            assert!(
+                view.read_with(vcx, |s, _| s.notice == notice),
+                "the tile's own notice is untouched"
+            );
+        }
+        assert_eq!(parent_presses(&view, vcx), 0, "the press stops there");
+        assert_eq!(presses.get(), 0);
+    }
+
+    /// A status notice, and any notice in a cluster with no dismiss, takes
+    /// no press: it stays, and the press reaches the tile as before.
+    #[gpui::test]
+    fn a_status_notice_or_one_without_a_dismiss_takes_no_press(cx: &mut TestAppContext) {
+        let (view, _, _, vcx) = open_strip(cx);
+        set_notice(&view, vcx, Notice::status("loading\u{2026}"));
+        let at = centre(vcx, "tile-notice-3-0");
+        click(vcx, at);
+        assert!(painted(vcx, "tile-notice-3-0"), "a status stays");
+        assert_eq!(parent_presses(&view, vcx), 1, "the press reached the tile");
+        view.update(vcx, |s, cx| {
+            s.dismiss = false;
+            cx.notify();
+        });
+        set_notice(&view, vcx, Notice::danger("query failed"));
+        let at = centre(vcx, "tile-notice-3-0");
+        click(vcx, at);
+        assert!(painted(vcx, "tile-notice-3-0"), "no dismiss: it stays");
+        assert_eq!(parent_presses(&view, vcx), 2);
+    }
+
+    /// Hidden until it changes: the same notice re-reported stays hidden;
+    /// another notice shows; the first, back after its absence, shows.
+    #[gpui::test]
+    fn a_dismissed_notice_shows_again_after_it_stops_and_returns(cx: &mut TestAppContext) {
+        let (view, _, _, vcx) = open_strip(cx);
+        let failed = Notice::danger("query failed");
+        set_notice(&view, vcx, failed.clone());
+        let at = centre(vcx, "tile-notice-3-0");
+        click(vcx, at);
+        set_notice(&view, vcx, failed.clone());
+        assert!(!painted(vcx, "tile-notice-3-0"), "still reported: hidden");
+        set_notice(&view, vcx, Notice::warning("not saved"));
+        assert!(painted(vcx, "tile-notice-3-0"), "another notice shows");
+        set_notice(&view, vcx, failed);
+        assert!(painted(vcx, "tile-notice-3-0"), "returned: shows again");
+    }
+
+    /// Hovering a dismissable notice shows its whole text and both routes.
+    #[gpui::test]
+    fn hovering_a_dismissable_notice_names_the_dismissal(cx: &mut TestAppContext) {
+        let (_view, _, _, vcx) = open_strip(cx);
+        let at = centre(vcx, "tile-notice-3-0");
+        vcx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(600));
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("tip-tile-notice-title").is_some());
+        assert!(vcx.debug_bounds("tip-tile-notice-detail").is_some());
     }
 
     #[gpui::test]
