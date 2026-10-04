@@ -290,10 +290,10 @@ field, so it is released only after the writer and every reader connection
 have closed, on shutdown and on an unwind alike: a collector that sees the
 lock free can open the file at once. The app mailbox keys both store events
 on one key, so an open replaces a pending wait. The app (`bridge::start`)
-always opens this way, with
-`DEFAULT_STORE_DEADLINE`; tests and tools that own their store use `spawn`.
-While the wait lasts the status bar shows `store: waiting for collector`; see
-[the store-waiting segment](shell.md#the-store-waiting-segment).
+always opens this way, with `DEFAULT_STORE_DEADLINE`; tests and tools that
+own their store use `spawn`. While the wait lasts the status bar shows
+`store: waiting for collector`; see [the store-waiting
+segment](shell.md#the-store-waiting-segment).
 
 The app lock is retried for 1 s before the open counts as a second window,
 because a collector's probe holds it for an instant. The deadline counts from
@@ -402,16 +402,17 @@ the same load would crash-loop. A value is to be chosen from an overnight
 footprint measurement. An invalid value warns and is ignored.
 
 **Logging.** The collector logs under `geode::collector` to its own daily
-file, `<user config>/logs/collector.YYYY-MM-DD.log`, kept for 7 days
-beside the app's `geode.*.log`. Under launchd, `GEODE_SERVICE=1` drops the
+file, `<user config>/logs/collector.YYYY-MM-DD.log`, beside the app's
+`geode.*.log`. At startup the collector trims its own files to the newest
+seven; rotation never prunes, so a collector that runs for weeks keeps every
+daily file until it restarts. Under launchd, `GEODE_SERVICE=1` drops the
 stderr layer, so `collector-stderr.log` holds only panics and failures from
 before logging started. `geode-collector status` reports, from the two lock
 probes, whether a collector and an app are present.
 
 **Install** is the only opt-in. `geode-collector install` registers the
 running binary as a macOS LaunchAgent or a Windows logon task and starts it;
-the app never starts a collector. `--dry-run` prints the plan and does
-nothing.
+the app never starts a collector. `--dry-run` prints the plan and does nothing.
 
 ### The store-format stamp
 
@@ -454,7 +455,7 @@ build is never read. A mutation entry checks that a mismatch refuses.
 - A handoff during a large file load misses the 500 ms target and the 2 s
   drain cap: the release lets the running load finish, so the handoff lasts
   the rest of that load (about 1.9 s at 1,000,000 rows, 4.5 s at
-  2,000,000). A load longer than the app's 15 s deadline fails the app's
+  2,000,000, measured with a `memory_limit` of 512MB and 1GB). A load longer than the app's 15 s deadline fails the app's
   open. Right after a collector opens, draining its startup burst takes
   about 0.8 s; idle, a handoff takes about 0.2 s. See
   [performance](performance.md).
@@ -491,6 +492,9 @@ build is never read. A mutation entry checks that a mismatch refuses.
   that asked during the up to 15 s wait has no outcome for that request and
   learns of the failure only through the open-failure diagnostic and
   `ThreadStopped`.
+- The collector's daily log files are trimmed to seven only when it
+  starts. A collector that runs for weeks without a restart keeps every
+  daily file in the logs directory until its next start.
 - The collector reads configuration when it takes the store, with no live
   reload: a hand edit to `sources.toml` made while the app is closed takes
   effect at its next acquire, its restart, or login.

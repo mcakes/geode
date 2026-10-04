@@ -585,11 +585,9 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   a value. Owed to the owner: the display check of the `store: waiting for
   collector` segment, a real macOS `install` check, Windows Task Scheduler
   registration, and a Windows CI run of the handoff tests.
-- Recovery parked items: `data-path.md`'s conditions-table row for
-  `<source>:recovery` still says "no topic answering it" (it also needs an
-  uncovered topic); a NOTIFY processed before the receiver notices a reconnect does
-  not count toward report coverage; demo chain recovery restores one expiry per
-  underlying. Demo run check pending.
+- Recovery parked items: a NOTIFY processed before the receiver notices a
+  reconnect does not count toward report coverage; demo chain recovery restores
+  one expiry per underlying. Demo run check pending.
 - Expiry calendars (open decision from the 2026-09-25 review): a `geode-dates` leaf
   crate should own month-code and tenor resolution, with a per-underlying trading
   calendar (e.g. `NYS`, `LnS`) held in reference data, replacing the hardcoded third

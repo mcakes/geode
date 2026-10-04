@@ -10,7 +10,8 @@
 //!     load configuration; DataService::spawn_as(Collector); demo bus
 //!     while no app and no stopped thread: sleep HOLD_POLL
 //!     stopped: an app present is a lost race (wait again); else exit 70
-//!     release(HANDOFF_DRAIN); a changed executable exits 0
+//!     release(HANDOFF_DRAIN); a changed executable exits 75 (EXIT_RESTART)
+//!     so the service manager restarts the new build
 //! ```
 //!
 //! The collector spawns no child process: a fork would share the lease's

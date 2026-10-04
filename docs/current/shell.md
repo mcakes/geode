@@ -1274,8 +1274,8 @@ bar's left side shows `store: waiting for collector`, after the stopped segment
 and before the count prefix. It is muted, like ingestion activity, and the
 same indeterminate strip along the bar's top edge runs while it shows (one
 strip, whether a load, the wait, or both are under way): the open is
-progressing, not failing. Its tooltip reads `the background collector (PID n) is handing
-the store over`, without the PID when DuckDB named none. It has no click
+progressing, not failing. Its tooltip reads `the background collector
+(PID n) is handing the store over`, without the PID when DuckDB named none. It has no click
 action and nothing to act on, so it needs no keyboard route.
 
 `Diagnostics::note_store_waiting` (from `DataEvent::StoreWaiting`) records the
@@ -1286,8 +1286,9 @@ that ends in `StoreOpened` shows nothing. `StoreOpened` is sent when
 DuckDB's open succeeds, before the DDL and workers run. A wait that fails,
 like a failure after `StoreOpened`, ends in the request loop's
 `ThreadStopped`: `note_thread_stopped` for `geode-data` clears the wait,
-and the danger stopped segment's tooltip carries the lease error as `data service failed to open: …`, followed by `another Geode window
-has this store open` or `the background collector did not release the store
+and the danger stopped segment's tooltip carries the lease error as `data
+service failed to open: …`, followed by `another Geode window has this
+store open` or `the background collector did not release the store
 within 15 s (PID n)` (15 s is `DEFAULT_STORE_DEADLINE`).
 
 `Diagnostics::refused` holds the data handle's cumulative count of `Busy`
