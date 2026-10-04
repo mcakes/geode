@@ -549,20 +549,32 @@ impl BlotterTile {
         self.table.read(cx).delegate().dimension_context()
     }
 
-    /// The one underlying the cursor row names, for a link group's scope:
-    /// the `underlying_ref` among the row's single-valued columns. `None`
-    /// before the first snapshot, and on a row that names none (a group
-    /// above the underlying level, or one mixed across several). Reads the
-    /// one row and skips the selection walk `dimension_context` does: the
-    /// shell asks on every cursor move while the tile emits, and a
-    /// selection never changes which underlying the cursor is on.
-    pub fn cursor_underlying(&self, cx: &App) -> Option<String> {
+    /// What this tile answers when the shell pulls it for a link group: the
+    /// cursor row's path (see `core::context::cursor_scope`), its `:filter`
+    /// layer and its `:unscoped` flag, which the shell composes over the
+    /// tile's base so a follower shows what this tile shows at the cursor.
+    /// `CursorScope::Nothing` before the first snapshot. Reads the one
+    /// shown row and skips the selection walk `dimension_context` does: the
+    /// shell asks on every cursor move, and a selection never changes the
+    /// cursor's path.
+    pub fn emission(&self, cx: &App) -> geode_core::link::Emission {
         let d = self.table.read(cx).delegate();
-        let (snapshot, plan) = (d.snapshot.as_ref()?, d.plan.as_ref()?);
-        let row = *d.shown.get(d.cursor.row)? as usize;
-        crate::core::context::values_at(snapshot, plan, row)
-            .into_iter()
-            .find_map(|(column, value)| (column == geode_core::link::UNDERLYING).then_some(value))
+        let cursor = match (
+            d.snapshot.as_ref(),
+            d.plan.as_ref(),
+            d.shown.get(d.cursor.row),
+        ) {
+            (Some(snapshot), Some(plan), Some(&row)) => {
+                crate::core::context::cursor_scope(snapshot, plan, row as usize)
+            }
+            _ => geode_core::link::CursorScope::Nothing,
+        };
+        geode_core::link::Emission {
+            cursor,
+            layer: self.tile_scope.clone(),
+            unscoped: self.unscoped,
+            board: Vec::new(),
+        }
     }
 
     /// The row a right press just landed on, for the shell's row menu:
@@ -9117,42 +9129,134 @@ mod tests {
         cx.update(|_, cx| content.emission(cx))
     }
 
-    /// The scope a blotter posts is the cursor row's one underlying, under
-    /// the column every follower reads; a row above the underlying level
-    /// names none, which leaves the group's scope alone. It posts no board.
-    #[gpui::test]
-    fn the_emission_is_the_cursor_rows_underlying(cx: &mut gpui::TestAppContext) {
-        let (h, mut cx) = delivered_with_a_dimension(cx);
-        assert!(content_of(&h).emits());
-        let on = |u: &str| geode_core::link::CursorScope::Path(Scope::one("underlying_ref", u));
+    /// The path a [`delivered_with_a_dimension`] leaf posts: its `lhu` and
+    /// the `underlying_ref` it carries.
+    fn leaf_path(lhu: &str, underlying: &str) -> geode_core::link::CursorScope {
+        geode_core::link::CursorScope::Path(geode_core::link::path_scope(&[
+            ("lhu".to_string(), lhu.to_string()),
+            ("underlying_ref".to_string(), underlying.to_string()),
+        ]))
+    }
 
-        // The cursor opens on the grand total, above every underlying.
+    /// A blotter answers the shell's pull with the cursor row's grouping
+    /// path (a group row: its levels only; a leaf: its own single values
+    /// too), its `:filter` layer and its `:unscoped` flag, each through the
+    /// `TileContent` door the shell uses; the commands tell the shell. It
+    /// posts no board.
+    #[gpui::test]
+    fn the_blotter_emits_the_cursor_path_its_filter_and_unscoped(cx: &mut gpui::TestAppContext) {
+        use geode_core::link::CursorScope;
+        let (h, mut cx) = delivered(cx);
+        let content = content_of(&h);
+        assert!(content.emits());
+        let path = |pairs: &[(&str, &str)]| {
+            CursorScope::Path(geode_core::link::path_scope(
+                &pairs
+                    .iter()
+                    .map(|(c, v)| (c.to_string(), v.to_string()))
+                    .collect::<Vec<_>>(),
+            ))
+        };
+
+        // The cursor opens on the grand total: an empty path.
         let total = emission_of(&h, &mut cx);
-        assert_eq!(
-            total.cursor,
-            geode_core::link::CursorScope::Nothing,
-            "the root names no underlying"
-        );
+        assert_eq!(total.cursor, path(&[]), "the root posts the base alone");
+        assert!(total.layer.is_empty() && !total.unscoped);
         assert!(total.board.is_empty());
 
+        // A group row: its own level, nothing below it.
         assert!(content_act(&h, &mut cx, "motion::down"));
-        let spx = emission_of(&h, &mut cx);
-        assert_eq!(spx.cursor, on("SPX"));
-        assert!(spx.board.is_empty());
+        assert_eq!(emission_of(&h, &mut cx).cursor, path(&[("lhu", "L1")]));
 
+        // Open it and step onto its leaf: the leaf's own level joins.
+        assert!(content_act(&h, &mut cx, "blotter::expand"));
         assert!(content_act(&h, &mut cx, "motion::down"));
-        let ndx = emission_of(&h, &mut cx);
-        assert_eq!(ndx.cursor, on("NDX"), "the emission follows the cursor");
-        assert!(ndx.board.is_empty());
+        let leaf = emission_of(&h, &mut cx);
+        assert_eq!(
+            leaf.cursor,
+            path(&[("lhu", "L1"), ("underlying_ref", "SPX")])
+        );
+        assert!(leaf.board.is_empty());
+
+        // `:filter` and `:unscoped` reach the emission, and tell the shell.
+        let calls = Rc::new(Cell::new(0u32));
+        let _subscription = cx
+            .update(|_, cx| {
+                let calls = calls.clone();
+                content.watch_emission(Rc::new(move |_| calls.set(calls.get() + 1)), cx)
+            })
+            .expect("an emitter hands the shell a subscription");
+        cx.run_until_parked();
+        let before = calls.get();
+        cx.update(|window, cx| content.command("filter model_code = 'EURP'", window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(calls.get() > before, "`:filter` announces the change");
+        let filtered = emission_of(&h, &mut cx);
+        assert_eq!(
+            filtered.layer.expression.as_ref().map(ToString::to_string),
+            Some("model_code = 'EURP'".to_string())
+        );
+        assert!(!filtered.unscoped);
+        assert_eq!(
+            filtered.cursor,
+            path(&[("lhu", "L1"), ("underlying_ref", "SPX")]),
+            "a filter leaves the cursor's path alone"
+        );
+
+        let before = calls.get();
+        cx.update(|window, cx| content.command("unscoped", window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(calls.get() > before, "`:unscoped` announces the change");
+        assert!(emission_of(&h, &mut cx).unscoped);
+    }
+
+    /// A row whose grouping value is NULL refuses and names the column, so
+    /// the shell posts nothing rather than widening every follower to all
+    /// of `lhu`. Its neighbour under a real value still posts.
+    #[gpui::test]
+    fn a_cursor_on_a_null_group_refuses(cx: &mut gpui::TestAppContext) {
+        use geode_core::link::CursorScope;
+        let (h, mut cx) = delivered_with_a_dimension(cx);
+        let meta = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: n == "delta01",
+            mixed_flag: None,
+        };
+        // Root; a NULL `lhu` row on SPX; L2 on NDX.
+        let null_lhu = Arc::new(Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu"),
+                    TestColumn::Dict(vec![None, None, Some("L2".into())]),
+                ),
+                (
+                    meta("underlying_ref"),
+                    TestColumn::Dict(vec![None, Some("SPX".into()), Some("NDX".into())]),
+                ),
+                (meta("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (meta("delta01"), TestColumn::F64(vec![Some(1.0); 3])),
+            ],
+            1,
+        ));
+        h.tile.update(&mut cx, |t, cx| t.requery(cx));
+        let tag = next_query(&h.requests).tag;
+        deliver(&h, &mut cx, tag, Ok(null_lhu));
 
         assert!(content_act(&h, &mut cx, "motion::top"));
-        let back = emission_of(&h, &mut cx);
+        assert!(content_act(&h, &mut cx, "motion::down"));
         assert_eq!(
-            back.cursor,
-            geode_core::link::CursorScope::Nothing,
-            "back on the group row: none again"
+            emission_of(&h, &mut cx).cursor,
+            CursorScope::NullIn("lhu".into())
         );
-        assert!(back.board.is_empty());
+        assert!(content_act(&h, &mut cx, "motion::down"));
+        assert!(matches!(
+            emission_of(&h, &mut cx).cursor,
+            CursorScope::Path(p) if p.sole("lhu") == Some("L2")
+        ));
     }
 
     /// The shell pulls only when told: a cursor move must reach the
@@ -9321,9 +9425,9 @@ mod tests {
     /// display order and the snapshot's part ways: reading the snapshot row
     /// at the cursor's display index would post the wrong underlying.
     #[gpui::test]
-    fn the_emission_is_the_shown_rows_underlying_under_a_sort(cx: &mut gpui::TestAppContext) {
+    fn the_emission_is_the_shown_rows_path_under_a_sort(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered_with_a_dimension(cx);
-        let on = |u: &str| geode_core::link::CursorScope::Path(Scope::one("underlying_ref", u));
+        let on = |l: &str, u: &str| leaf_path(l, u);
         // Ascending on `underlying_ref`: NDX (snapshot row 2) above SPX
         // (snapshot row 1).
         assert!(content_act(&h, &mut cx, "motion::right"));
@@ -9337,11 +9441,11 @@ mod tests {
         assert!(content_act(&h, &mut cx, "motion::down"));
         assert_eq!(
             emission_of(&h, &mut cx).cursor,
-            on("NDX"),
+            on("L2", "NDX"),
             "display row 1 is NDX's"
         );
         assert!(content_act(&h, &mut cx, "motion::down"));
-        assert_eq!(emission_of(&h, &mut cx).cursor, on("SPX"));
+        assert_eq!(emission_of(&h, &mut cx).cursor, on("L1", "SPX"));
     }
 
     /// [`delivered_flat`]'s document alone: a root and one `lhu` row per
@@ -9390,9 +9494,9 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut cx) = delivered_with_a_dimension(cx);
-        let on = |u: &str| geode_core::link::CursorScope::Path(Scope::one("underlying_ref", u));
+        let on = |l: &str, u: &str| leaf_path(l, u);
         assert!(content_act(&h, &mut cx, "motion::down"));
-        assert_eq!(emission_of(&h, &mut cx).cursor, on("SPX"));
+        assert_eq!(emission_of(&h, &mut cx).cursor, on("L1", "SPX"));
         let content = content_of(&h);
         let calls = Rc::new(Cell::new(0u32));
         let _subscription = cx
@@ -9423,7 +9527,7 @@ mod tests {
         );
         assert_eq!(
             emission_of(&h, &mut cx).cursor,
-            on("SPX"),
+            on("L1", "SPX"),
             "held, so the painted row still names the old underlying"
         );
         let before = calls.get();
@@ -9437,7 +9541,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             emission_of(&h, &mut cx).cursor,
-            on("DAX"),
+            on("L1", "DAX"),
             "the promoted snapshot's cursor row"
         );
         assert!(

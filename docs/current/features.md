@@ -334,7 +334,7 @@ pulls:
 
 | Module | Follows | Scope it posts | Board it posts | Posts nothing when |
 |---|---|---|---|---|
-| Blotter | Yes | The cursor row's one `underlying_ref`, as a one-value scope | None | No snapshot has arrived, or the cursor row names no single underlying |
+| Blotter | Yes | Its base and `:filter` layer, then the cursor row's grouping path (plus a leaf row's own single values) | None | No snapshot has arrived, or the path passes through a NULL grouping value (the tile header says so) |
 | Pricer | Yes | The cursor row's one underlying, as a one-value `underlying_ref` scope | None | The sheet has no cursor row, or the row is a package across underlyings or a grouping row |
 | Market data | No | The panel's underlying, as a one-value `underlying_ref` scope | Its draft document, while the draft is not clean | The panel has no underlying |
 | Timeseries | No | Does not emit | | |
@@ -444,16 +444,19 @@ column's grouping level, a mixed value, or a NULL value leaves it absent, and
 a row holding no registered context column (an `lhu` subtotal, say) opens the
 plain tile picker.
 
-Emitting into a [link group](#link-groups), the blotter posts that same
-value as the group's scope: the cursor row's `underlying_ref`, where the row
-has exactly one. A row above the column's grouping level, a mixed or NULL
-value, and a tile with no snapshot yet post no scope, which leaves the
-group's scope as it was. Only the cursor row is read, never the selection: a
-selection does not change which underlying the cursor is on. Every cursor
-move, tree change and delivery tells the shell to pull, and so does the
-promotion of a snapshot held behind a flip barrier, which no delivery
-paints; a pull that finds the same underlying writes nothing. The blotter
-posts no documents.
+Emitting into a [link group](#link-groups), the blotter reports the cursor
+row's path, its `:filter` layer and its `:unscoped` flag, and the shell
+composes them over the tile's base. The path is one value per grouping level
+down to the cursor row; a leaf row (the deepest grouping level) adds its own
+single-valued columns after it, omitting a NULL or mixed one, while a group
+row adds nothing beyond its levels. The total row's path is empty, so it
+posts the base and layer alone. A NULL or empty grouping value on the path
+refuses: the group keeps its scope and the tile header names the column. A
+tile with no snapshot yet posts no scope. Only the cursor row is read, never
+the selection. Every cursor move, tree change, delivery, `:filter` and
+`:unscoped` tells the shell to pull, and so does the promotion of a snapshot
+held behind a flip barrier, which no delivery paints; a pull that finds the
+same scope writes nothing. The blotter posts no documents.
 Following a group, it queries under the group's scope in place of the
 workspace's, composed with its own `:filter` layer.
 

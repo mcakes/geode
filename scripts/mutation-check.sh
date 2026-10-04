@@ -32830,22 +32830,76 @@ run_mutation "link: the timeseries header shows the chip" \
   '                Default::default(),' \
   geode-timeseries the_header_shows_the_link_group_the_tile_follows
 
-# A blotter posts its cursor row's one underlying as its cursor path, can emit before it has
-# rows (the shell drops a restored membership for a tile that answers
-# false right after create), and tells the shell on every cursor move.
-run_mutation "link: the blotter emits the cursor's underlying" \
+# A blotter answers the shell's pull with its cursor row's path, its
+# `:filter` layer and its `:unscoped` flag; it can emit before it has rows
+# (the shell drops a restored membership for a tile that answers false
+# right after create), and tells the shell on every cursor move.
+run_mutation "link: the blotter emits its cursor path" \
   crates/geode-blotter/src/content.rs \
-  '                    CursorScope::Path(underlying_scope(&u))' \
-  '                    { let _ = &u; CursorScope::Nothing }' \
-  geode-blotter the_emission_is_the_cursor_rows_underlying
+  '        self.tile.read(cx).emission(cx)' \
+  '        geode_core::link::Emission::default()' \
+  geode-blotter the_blotter_emits_the_cursor_path_its_filter_and_unscoped
 
 run_mutation "link: the blotter emission follows the cursor row" \
   crates/geode-blotter/src/tile.rs \
-  '        let row = *d.shown.get(d.cursor.row)? as usize;
-        crate::core::context::values_at(snapshot, plan, row)' \
-  '        let row = *d.shown.first()? as usize;
-        crate::core::context::values_at(snapshot, plan, row)' \
-  geode-blotter the_emission_is_the_cursor_rows_underlying
+  '            d.shown.get(d.cursor.row),
+        ) {' \
+  '            d.shown.first(),
+        ) {' \
+  geode-blotter the_blotter_emits_the_cursor_path_its_filter_and_unscoped
+
+run_mutation "link: the blotter reports its filter layer" \
+  crates/geode-blotter/src/tile.rs \
+  '            layer: self.tile_scope.clone(),' \
+  '            layer: Scope::default(),' \
+  geode-blotter the_blotter_emits_the_cursor_path_its_filter_and_unscoped
+
+run_mutation "link: the blotter reports its unscoped flag" \
+  crates/geode-blotter/src/tile.rs \
+  '            unscoped: self.unscoped,
+            board: Vec::new(),' \
+  '            unscoped: false,
+            board: Vec::new(),' \
+  geode-blotter the_blotter_emits_the_cursor_path_its_filter_and_unscoped
+
+# The blotter's cursor path: a NULL grouping value refuses (a scope cannot
+# select NULL, and dropping the level widens every follower); a group row
+# posts its levels only; a leaf adds its own single values.
+run_mutation "link: a NULL on the blotter path refuses" \
+  crates/geode-blotter/src/core/context.rs \
+  '            None => return CursorScope::NullIn(name.clone()),' \
+  '            None => continue,' \
+  geode-blotter a_null_on_the_path_refuses_and_names_the_column
+
+run_mutation "link: a NULL blotter row refuses through the tile" \
+  crates/geode-blotter/src/core/context.rs \
+  '            None => return CursorScope::NullIn(name.clone()),' \
+  '            None => continue,' \
+  geode-blotter a_cursor_on_a_null_group_refuses
+
+run_mutation "link: a NULL blotter row refuses in production" \
+  crates/geode-blotter/src/core/context.rs \
+  '            None => return CursorScope::NullIn(name.clone()),' \
+  '            None => continue,' \
+  geode-app the_production_blotter_emits_its_cursor_path_into_a_group_a_pricer_follows
+
+run_mutation "link: only a blotter leaf adds its own values" \
+  crates/geode-blotter/src/core/context.rs \
+  '    if !path.is_empty() && path.len() == plan.grouping.len() {' \
+  '    if true {' \
+  geode-blotter a_group_row_emits_its_path_and_nothing_unanimous
+
+run_mutation "link: a blotter leaf adds its own values" \
+  crates/geode-blotter/src/core/context.rs \
+  '    if !path.is_empty() && path.len() == plan.grouping.len() {' \
+  '    if false {' \
+  geode-blotter a_leaf_row_adds_its_own_single_values
+
+run_mutation "link: a blotter group row posts its levels only" \
+  crates/geode-blotter/src/core/context.rs \
+  '    if !path.is_empty() && path.len() == plan.grouping.len() {' \
+  '    if !path.is_empty() {' \
+  geode-blotter the_blotter_emits_the_cursor_path_its_filter_and_unscoped
 
 run_mutation "link: the blotter can emit before it has rows" \
   crates/geode-blotter/src/content.rs \
@@ -33009,19 +33063,19 @@ run_mutation "link: the production roster emits" \
   '    fn emits(&self) -> bool {
         false
     }' \
-  geode-app the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows
+  geode-app the_production_blotter_emits_its_cursor_path_into_a_group_a_pricer_follows
 
 run_mutation "link: the production pricer emits its cursor line" \
   crates/geode-pricer/src/content.rs \
   '                    CursorScope::Path(underlying_scope(&u))' \
   '                    { let _ = &u; CursorScope::Nothing }' \
-  geode-app the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows
+  geode-app the_production_blotter_emits_its_cursor_path_into_a_group_a_pricer_follows
 
 run_mutation "link: the production follower reads its group through its own handle" \
   crates/geode-shell/src/shell/occupants.rs \
   '            let frame = FrameRef::for_tile(self.frame.clone(), ws, *id);' \
   '            let frame = FrameRef::new(self.frame.clone(), ws);' \
-  geode-app the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows
+  geode-app the_production_blotter_emits_its_cursor_path_into_a_group_a_pricer_follows
 
 # A tile whose queries ignore the frame's scope cannot follow: it is offered
 # no follow row, the follow door refuses it, and a follow restored for it is
@@ -33194,7 +33248,7 @@ run_mutation "link: the production follower queries under its group's scope" \
   crates/geode-shell/src/frame.rs \
   '        self.scope().and_then(tile).resolve(&self.frame.named)' \
   '        self.lane.scope.and_then(tile).resolve(&self.frame.named)' \
-  geode-app the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows
+  geode-app the_production_blotter_emits_its_cursor_path_into_a_group_a_pricer_follows
 
 # A follower in a pinned workspace keeps that workspace's grouping and as-of:
 # the group replaces the scope alone.
@@ -33316,11 +33370,11 @@ run_mutation "link: the panel's popup close notifies the tile" \
 # order and the snapshot's part ways.
 run_mutation "link: the blotter emission maps the cursor through the shown rows" \
   crates/geode-blotter/src/tile.rs \
-  '        let row = *d.shown.get(d.cursor.row)? as usize;
-        crate::core::context::values_at(snapshot, plan, row)' \
-  '        let row = d.cursor.row;
-        crate::core::context::values_at(snapshot, plan, row)' \
-  geode-blotter the_emission_is_the_shown_rows_underlying_under_a_sort
+  '            (Some(snapshot), Some(plan), Some(&row)) => {
+                crate::core::context::cursor_scope(snapshot, plan, row as usize)' \
+  '            (Some(snapshot), Some(plan), Some(&_row)) => {
+                crate::core::context::cursor_scope(snapshot, plan, d.cursor.row)' \
+  geode-blotter the_emission_is_the_shown_rows_path_under_a_sort
 
 # A draft the builder refuses is remembered like a result, so it is walked
 # once and not once per pull; a draft held `Behind` posts its own retained
