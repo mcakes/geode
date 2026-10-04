@@ -240,6 +240,13 @@ fn open_on(view: &mut ShellView, first: Layer, window: &mut Window, cx: &mut Con
         false,
     );
     dialog::set_title_extra(view, title_extra);
+    // Reads the layers, so one registration serves both doors: Back shows
+    // only while Saved sits over Current.
+    dialog::set_back(
+        view,
+        super::saved_view::back_available,
+        super::saved_view::back,
+    );
 }
 
 /// Run one edit on the dialog's lane (`target_frame`, so a pinned workspace

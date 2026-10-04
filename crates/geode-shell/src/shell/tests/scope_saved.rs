@@ -400,3 +400,47 @@ fn e_and_n_on_a_scope_row_refuse_with_the_way_to_do_it(cx: &mut gpui::TestAppCon
     assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
     assert_eq!(lane_scope(&shell, &vcx), liq_scope());
 }
+
+/// The pointer route of `escape` from Saved over Current: the title row's
+/// Back button returns to Current, leaving a filter on the way, in one click.
+#[gpui::test]
+fn the_back_button_returns_from_saved_to_current(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_saved_from_current(cx);
+    vcx.simulate_keystrokes("/");
+    vcx.simulate_input("eu");
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    let back = vcx
+        .debug_bounds("shell-modal-back")
+        .expect("Saved over Current paints Back");
+    vcx.simulate_click(back.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Current));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+    assert!(vcx.debug_bounds("scope-saved").is_none());
+    assert!(vcx.debug_bounds("scope-dialog").is_some());
+    assert!(
+        vcx.debug_bounds("shell-modal-back").is_none(),
+        "Current is the first screen"
+    );
+    assert_eq!(lane_scope(&shell, &vcx), liq_scope(), "nothing loaded");
+}
+
+/// Saved opened alone has no screen behind it: no Back button.
+#[gpui::test]
+fn saved_opened_alone_paints_no_back_button(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = shell_on_liq(cx);
+    let glyph = vcx
+        .debug_bounds("scope-load-chip")
+        .expect("the load glyph paints");
+    vcx.simulate_click(glyph.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
+    assert!(vcx.debug_bounds("scope-saved").is_some());
+    assert!(vcx.debug_bounds("shell-modal-back").is_none());
+}

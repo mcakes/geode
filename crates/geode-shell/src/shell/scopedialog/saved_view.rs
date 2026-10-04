@@ -224,6 +224,42 @@ pub(crate) fn push(state: &mut ScopeDialogState) {
     state.layers.push(Layer::Saved);
 }
 
+/// Whether the title row's Back button leads anywhere: only while Saved is
+/// on top with Current beneath it. Saved opened alone has no screen to go
+/// back to; its close button is the way out.
+pub(crate) fn back_available(shell: &ShellView) -> bool {
+    shell
+        .scope_dialog
+        .as_ref()
+        .is_some_and(|s| in_saved(s) && s.layers.depth() > 1)
+}
+
+/// The Back button's step: what `escape` does from here, all its rungs at
+/// once — a filter is left (reverted) and the screen leaves for Current.
+/// Does nothing when the button is no longer available, since a click can
+/// land after the state changed under it.
+pub(crate) fn back(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    if !back_available(shell) {
+        return;
+    }
+    let Some(state) = shell.scope_dialog.as_mut() else {
+        return;
+    };
+    state.error = None;
+    let saved = &mut state.saved;
+    if saved.mode == DialogMode::Filter {
+        dialogmode::exit_filter(
+            &mut saved.mode,
+            &saved.entry_query,
+            &mut saved.query,
+            dialogmode::FilterExit::Revert,
+        );
+        saved.refilter();
+    }
+    let after = state.layers.escape();
+    finish(shell, after, window, cx);
+}
+
 /// The pointer's route into filter mode: the frozen filter row's press.
 pub(crate) fn enter_filter(state: &mut ScopeDialogState) {
     if !in_saved(state) || state.saved.mode == DialogMode::Filter {

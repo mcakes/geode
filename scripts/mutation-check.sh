@@ -18681,6 +18681,15 @@ run_mutation "scope dialog: a Saved row double-click commits" \
   geode-shell \
   a_row_double_click_commits_it
 
+# The title row's Back button is the pointer route of escape from Saved
+# over Current.
+run_mutation "scope dialog: Back from Saved returns to Current" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '    if !back_available(shell) {' \
+  '    if true || !back_available(shell) {' \
+  geode-shell \
+  the_back_button_returns_from_saved_to_current
+
 # ---- Scope dialog: lane provenance, rows, saved rows and layers ----
 
 # A load of the scope already in force must still name its source, or the
