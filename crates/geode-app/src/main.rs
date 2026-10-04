@@ -851,7 +851,6 @@ label = "skew"
     #[test]
     fn the_app_and_the_collector_build_the_same_schema_and_sources() {
         let desk = tempfile::tempdir().unwrap();
-        let user = tempfile::tempdir().unwrap();
         std::fs::write(
             desk.path().join("datasets.toml"),
             "config_version = 1\n\n[desk_marks.columns.underlying]\ntype = \"utf8\"\n\
@@ -864,102 +863,129 @@ label = "skew"
              paths = [\"/nonexistent/*.csv\"]\n",
         )
         .unwrap();
-        // Two user redeclarations of the app's datasets, one per pin branch:
-        // a valid but different `pricer_sheets` (qty retyped) is replaced in
-        // its slot, and an invalid `pricer` (an unknown family) is dropped by
-        // the schema reader and pushed back at the end. Both sides must pin
-        // each the same way.
-        let sheets = geode_core::builtin::PRICER_SHEETS_DECLARATION.replace(
+        // The user layer redeclares the app's datasets, once per pin branch.
+        // "replace": both redeclared validly but differently, so each is
+        // replaced in its slot and the data layer's dataset order survives
+        // the pin. "append": `pricer_sheets` redeclared invalidly (an unknown
+        // family), so the schema reader drops it and the pin pushes it back
+        // at the end. Dropping a dataset erases its slot, so only "replace"
+        // sees the order of the app's two datasets.
+        let builtin_sheets = geode_core::builtin::PRICER_SHEETS_DECLARATION;
+        let builtin_pricer = geode_core::builtin::PRICER_DATASET_DECLARATION;
+        let retyped_sheets = builtin_sheets.replace(
             "[pricer_sheets.columns.qty]\ntype = \"i64\"",
             "[pricer_sheets.columns.qty]\ntype = \"f64\"",
         );
-        let pricer = geode_core::builtin::PRICER_DATASET_DECLARATION
-            .replace("[pricer]\n", "[pricer]\nfamily = \"no_such_family\"\n");
-        let user_datasets = format!("config_version = 1\n\n{sheets}\n{pricer}");
-        std::fs::write(user.path().join("datasets.toml"), &user_datasets).unwrap();
-        // The fixture exercises the branches it names: the user doc alone
-        // declares a different `pricer_sheets` and no valid `pricer`.
-        let (alone, _) = geode_core::schema::SchemaSpec::from_doc(&geode_core::config::merge_docs(
-            "datasets",
-            &[LayerDoc::builtin("datasets", &user_datasets).unwrap()],
-        ));
-        let (builtin_sheets, _) =
+        let untextual_pricer = builtin_pricer.replace(
+            "[pricer.columns.template]\ntype = \"utf8\"\nrole = \"dimension\"\ntextual = true",
+            "[pricer.columns.template]\ntype = \"utf8\"\nrole = \"dimension\"\ntextual = false",
+        );
+        let unknown_family_sheets = builtin_sheets.replace(
+            "[pricer_sheets]\nfamily = \"document\"",
+            "[pricer_sheets]\nfamily = \"no_such_family\"",
+        );
+        let schema_of = |text: &str| {
             geode_core::schema::SchemaSpec::from_doc(&geode_core::config::merge_docs(
                 "datasets",
-                &[
-                    LayerDoc::builtin("datasets", geode_core::builtin::PRICER_SHEETS_DECLARATION)
-                        .unwrap(),
-                ],
-            ));
-        let user_sheets = alone
-            .dataset("pricer_sheets")
-            .expect("the user's pricer_sheets is valid");
-        assert_ne!(Some(user_sheets), builtin_sheets.dataset("pricer_sheets"));
+                &[LayerDoc::builtin("datasets", text).unwrap()],
+            ))
+            .0
+        };
+        let builtin = schema_of(&format!("{builtin_sheets}\n{builtin_pricer}"));
+        // Each fixture reaches the branch it names.
+        let replace = schema_of(&format!("{retyped_sheets}\n{untextual_pricer}"));
+        for name in ["pricer_sheets", "pricer"] {
+            let redeclared = replace.dataset(name);
+            assert!(redeclared.is_some(), "replace: the user's {name} is valid");
+            assert_ne!(redeclared, builtin.dataset(name), "replace: {name} differs");
+        }
         assert!(
-            alone.dataset("pricer").is_none(),
-            "the user's pricer is invalid"
+            schema_of(&unknown_family_sheets)
+                .dataset("pricer_sheets")
+                .is_none(),
+            "append: the user's pricer_sheets is invalid"
         );
+        let fixtures = [
+            (
+                "replace",
+                format!("{retyped_sheets}\n{untextual_pricer}"),
+                2,
+            ),
+            ("append", unknown_family_sheets, 1),
+        ];
         // The demo layer only rewrites paths onto this directory; nothing
         // here reads it, so it needs no emitted files.
         let demo = tempfile::tempdir().unwrap();
-        for demo_root in [None, Some(demo.path())] {
-            let sources = |builtin| ConfigSources {
-                builtin,
-                desk: Some(desk.path().to_path_buf()),
-                user: Some(user.path().to_path_buf()),
-            };
-            let app_config = Config::load(&sources(builtin_layer(demo_root)));
-            let collector_config =
-                Config::load(&sources(geode_compose::builtin_data_layer(demo_root)));
-            let db = demo.path().join("unused.duckdb");
-            let app = bridge::data_setup(
-                &app_config,
-                db.clone(),
-                geode_compose::adapters(demo_root).0,
-                Default::default(),
-                Default::default(),
+        for (fixture, user_datasets, pinned) in fixtures {
+            let user = tempfile::tempdir().unwrap();
+            std::fs::write(
+                user.path().join("datasets.toml"),
+                format!("config_version = 1\n\n{user_datasets}"),
             )
-            .expect("the app's builtin layer supplies datasets and views");
-            let collector = geode_compose::engine_setup(
-                &collector_config,
-                db,
-                geode_compose::adapters(demo_root).0,
-            );
-            let case = if demo_root.is_some() {
-                "demo"
-            } else {
-                "non-demo"
-            };
-            // Asserted on the app side only: schema equality covers the collector.
-            assert!(
-                app.config.schema.dataset("desk_marks").is_some(),
-                "{case}: the desk dataset loaded"
-            );
-            assert_eq!(app.config.schema, collector.config.schema, "{case}: schema");
-            assert_eq!(
-                app.config.sources, collector.config.sources,
-                "{case}: sources"
-            );
-            assert!(!app.config.sources.is_empty(), "{case}: sources loaded");
-            // Both sides refuse the user redeclarations with the same errors.
-            let pin = |diagnostics: &[Diagnostic]| -> Vec<Diagnostic> {
-                diagnostics
-                    .iter()
-                    .filter(|d| {
-                        matches!(
-                            d.path.as_deref(),
-                            Some("datasets.pricer_sheets" | "datasets.pricer")
-                        )
-                    })
-                    .cloned()
-                    .collect()
-            };
-            let app_pin = pin(&app.diagnostics);
-            assert!(
-                app_pin.len() == 2 && app_pin.iter().all(|d| d.severity == Severity::Error),
-                "{case}: the app pins pricer_sheets and pricer: {app_pin:?}"
-            );
-            assert_eq!(app_pin, pin(&collector.diagnostics), "{case}: pin error");
+            .unwrap();
+            for demo_root in [None, Some(demo.path())] {
+                let sources = |builtin| ConfigSources {
+                    builtin,
+                    desk: Some(desk.path().to_path_buf()),
+                    user: Some(user.path().to_path_buf()),
+                };
+                let app_config = Config::load(&sources(builtin_layer(demo_root)));
+                let collector_config =
+                    Config::load(&sources(geode_compose::builtin_data_layer(demo_root)));
+                let db = demo.path().join("unused.duckdb");
+                let app = bridge::data_setup(
+                    &app_config,
+                    db.clone(),
+                    geode_compose::adapters(demo_root).0,
+                    Default::default(),
+                    Default::default(),
+                )
+                .expect("the app's builtin layer supplies datasets and views");
+                let collector = geode_compose::engine_setup(
+                    &collector_config,
+                    db,
+                    geode_compose::adapters(demo_root).0,
+                );
+                let case = format!(
+                    "{fixture}, {}",
+                    if demo_root.is_some() {
+                        "demo"
+                    } else {
+                        "non-demo"
+                    }
+                );
+                // Asserted on the app side only: schema equality covers the collector.
+                assert!(
+                    app.config.schema.dataset("desk_marks").is_some(),
+                    "{case}: the desk dataset loaded"
+                );
+                assert_eq!(app.config.schema, collector.config.schema, "{case}: schema");
+                assert_eq!(
+                    app.config.sources, collector.config.sources,
+                    "{case}: sources"
+                );
+                assert!(!app.config.sources.is_empty(), "{case}: sources loaded");
+                // Both sides refuse the user redeclarations with the same errors.
+                let pin = |diagnostics: &[Diagnostic]| -> Vec<Diagnostic> {
+                    diagnostics
+                        .iter()
+                        .filter(|d| {
+                            matches!(
+                                d.path.as_deref(),
+                                Some("datasets.pricer_sheets" | "datasets.pricer")
+                            )
+                        })
+                        .cloned()
+                        .collect()
+                };
+                let app_pin = pin(&app.diagnostics);
+                assert!(
+                    app_pin.len() == pinned
+                        && app_pin.iter().all(|d| d.severity == Severity::Error),
+                    "{case}: the app pins each redeclaration: {app_pin:?}"
+                );
+                assert_eq!(app_pin, pin(&collector.diagnostics), "{case}: pin errors");
+            }
         }
     }
 
