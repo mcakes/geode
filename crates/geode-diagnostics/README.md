@@ -52,7 +52,7 @@ the header's back control through the shell-actions handle. The retired
 `g s`, `g d`, `g r`, `g c`, `g l`, and `g p` jump directly to a section.
 `tab` / `shift+tab` (and `ctrl+tab` / `ctrl+shift+tab`) step the section's
 views, wrapping; only Config (Current issues, History, Effective values)
-and Reference (its declared datasets) have views, and elsewhere the keys are consumed and do nothing. `y` copies the
+and Reference (its declared datasets) have views, and elsewhere the keys are consumed and do nothing. `y` (or `ctrl+c`) copies the
 active row's full details in any table; `r` refreshes the catalog;
 `z shift+r` / `z shift+m` expand or collapse all datasets; `o` in Config
 opens the config directory. In Log, `-` / `=` step the minimum shown level

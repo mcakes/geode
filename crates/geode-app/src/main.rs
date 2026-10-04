@@ -1174,6 +1174,9 @@ label = "skew"
             cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
         let mut roster = ModuleRoster::new();
         add_bridge_modules(&mut roster, &bridge);
+        // `run` adds the bundled guide after the bridge's modules.
+        let guide = geode_guide::GuideFactory;
+        roster.add(Box::new(guide));
         let mut pages = PageRoster::new();
         pages.add(Box::new(Rc::new(DiagnosticsPageFactory::new(
             Arc::new(Ring::new(16)),
@@ -1243,6 +1246,67 @@ label = "skew"
                 }
                 other => panic!("{kind}: g . resolved to {other:?}"),
             }
+        }
+    }
+
+    /// `ctrl+c` and `ctrl+v` are universal copy and paste beside the vim
+    /// keys: in every shipped surface that copies or pastes, the chord
+    /// resolves through the production keymap to the same action as its
+    /// `y`/`y y`/`p` key, in the same mode.
+    #[gpui::test]
+    fn the_production_keymap_binds_ctrl_c_and_ctrl_v_beside_y_and_p(cx: &mut gpui::TestAppContext) {
+        use geode_shell::keymap::{KeyContext, MatchResult, Matcher, parse_keystroke};
+        let (keymap, keymap_diags, _registry, mod_alias, _dir) = production_keymap(cx);
+        assert!(keymap_diags.is_empty(), "{keymap_diags:?}");
+        let resolve = |stack: &[KeyContext], keys: &str| -> Option<String> {
+            let mut m = Matcher::default();
+            let mut last = None;
+            for key in keys.split(' ') {
+                last = Some(m.press(&keymap, parse_keystroke(key, mod_alias).unwrap(), stack));
+            }
+            match last {
+                Some(MatchResult::Matched { action, .. }) => Some(action.0),
+                _ => None,
+            }
+        };
+        let tile = |kind: &str, mode: &str| {
+            vec![
+                KeyContext::new("workspace"),
+                KeyContext::new("tile"),
+                KeyContext::new(kind).grid().pair("mode", mode).counts(),
+            ]
+        };
+        let page = |kind: &str| {
+            vec![
+                KeyContext::new("page"),
+                KeyContext::new(kind).grid().pair("mode", "normal"),
+            ]
+        };
+        let cases = [
+            (tile("blotter", "normal"), "ctrl+c", "y"),
+            (tile("blotter", "visual"), "ctrl+c", "y"),
+            (tile("marketdata", "normal"), "ctrl+c", "y"),
+            (tile("marketdata", "visual"), "ctrl+c", "y"),
+            (tile("pricer", "normal"), "ctrl+c", "y y"),
+            (tile("pricer", "visual"), "ctrl+c", "y"),
+            (tile("pricer", "normal"), "ctrl+v", "p"),
+            (tile("classifications", "normal"), "ctrl+c", "y y"),
+            (tile("classifications", "normal"), "ctrl+v", "p"),
+            (tile("classifications", "visual"), "ctrl+v", "p"),
+            (tile("guide", "normal"), "ctrl+c", "y"),
+            (page("diagnostics"), "ctrl+c", "y"),
+        ];
+        for (stack, chord, vim) in &cases {
+            let expected = resolve(stack, vim);
+            assert!(
+                expected.is_some(),
+                "{chord} vs {vim} in {stack:?}: {vim} binds nothing"
+            );
+            assert_eq!(
+                resolve(stack, chord),
+                expected,
+                "{chord} vs {vim} in {stack:?}"
+            );
         }
     }
 
