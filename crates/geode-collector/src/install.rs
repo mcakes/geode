@@ -503,7 +503,8 @@ pub fn uninstall_plan(platform: Platform, job: &Job, host: &Host) -> Plan {
     }
 }
 
-/// `launchctl bootout`'s answers for a job that is not loaded.
+/// `schtasks /Delete`'s answer for a task that is not registered, so a
+/// second uninstall succeeds as it does on macOS.
 fn no_task(exit: &Exit) -> bool {
     [&exit.stderr, &exit.stdout]
         .iter()
@@ -525,6 +526,7 @@ pub fn target_warning(exe: &Path) -> Option<String> {
     })
 }
 
+/// `launchctl bootout`'s answers for a job that is not loaded.
 fn not_loaded(exit: &Exit) -> bool {
     matches!(exit.code, Some(3) | Some(113))
         || ["No such process", "Could not find specified service"]
