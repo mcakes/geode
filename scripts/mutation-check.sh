@@ -354,6 +354,8 @@ run_mutation "guide: startup registers the guide tile" \
   geode-app \
   the_bundled_guide_launches_navigates_and_saves_through_the_shell
 
+# Caught by the "replace, demo" iteration: without a demo root the mutated
+# line is identical to production.
 run_mutation "compose: the app composes the same data layer as the collector (demo)" \
   crates/geode-app/src/main.rs \
   '    builtin.extend(geode_compose::builtin_data_layer(demo_root));' \
@@ -361,6 +363,9 @@ run_mutation "compose: the app composes the same data layer as the collector (de
   geode-app \
   the_app_and_the_collector_build_the_same_schema_and_sources
 
+# Caught first by the "replace, non-demo" iteration (pricer and pricer_sheets
+# swap; both are replaced in their slots, so the swap survives the pin), and
+# independently by "replace, demo".
 run_mutation "compose: the data layer's dataset order is the collector's" \
   crates/geode-app/src/main.rs \
   '    builtin.extend(geode_compose::builtin_data_layer(demo_root));' \
