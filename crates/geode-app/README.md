@@ -114,7 +114,7 @@ cargo check -p geode-app --features profiling
   `data_setup` and `ConfigReloaded` arms.
 - Every local-write outcome for `pricer_sheets` reaches the pricer factory
   (`save_answered`/`forget_answered`), in the writer's order: a pricer tile
-  can wait on one exact outcome with no timeout. `pin_app_datasets` keeps
+  can wait on one exact outcome with no timeout. `geode_compose::pin_app_datasets` keeps
   the builtin declaration of `pricer_sheets` and of the computed `pricer`
   against a differing layer redeclaration, at startup and on reload, with
   an error diagnostic.

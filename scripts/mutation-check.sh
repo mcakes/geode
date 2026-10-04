@@ -22940,14 +22940,8 @@ run_mutation "bridge: a DataEvent::Upload reaches the shell" \
 # removes every configured target from the running service.
 run_mutation "bridge: data_setup wires the resolved egress list into DataServiceConfig" \
   crates/geode-app/src/bridge.rs \
-  '            vol,
-            egress,
-            positions,
-        },' \
-  '            vol,
-            egress: Vec::new(),
-            positions,
-        },' \
+  '    service.egress = egress;' \
+  '    service.egress = Vec::new();' \
   geode-app \
   the_demo_layer_produces_a_servable_data_setup
 
@@ -22955,12 +22949,8 @@ run_mutation "bridge: data_setup wires the resolved egress list into DataService
 # every Move LHU refused "no position service configured".
 run_mutation "bridge: data_setup wires the resolved position service into DataServiceConfig" \
   crates/geode-app/src/bridge.rs \
-  '            egress,
-            positions,
-        },' \
-  '            egress,
-            positions: None,
-        },' \
+  '    service.positions = positions;' \
+  '    service.positions = None;' \
   geode-app \
   the_demo_layer_produces_a_servable_data_setup
 
@@ -24642,9 +24632,9 @@ run_mutation "bridge: start builds the pricer over the in-memory store" \
   '        Rc::new(geode_pricer::store::MemorySheetStore::default()),' \
   geode-app a_typed_sheet_is_stored_in_duckdb_and_loads_back_in_a_new_tile_and_after_a_restart
 
-run_mutation "main: the builtin layer omits pricer_sheets" \
-  crates/geode-app/src/main.rs \
-  '        LayerDoc::builtin("datasets", geode_pricer::core::PRICER_SHEETS_DECLARATION)
+run_mutation "compose: the builtin data layer omits pricer_sheets" \
+  crates/geode-compose/src/lib.rs \
+  '        LayerDoc::builtin("datasets", PRICER_SHEETS_DECLARATION)
             .expect("PRICER_SHEETS_DECLARATION is well-formed TOML"),' \
   '' \
   geode-app the_builtin_layer_declares_pricer_sheets_as_a_local_dataset
@@ -24694,23 +24684,31 @@ run_mutation "pricer: a save refused at submission is counted as queued" \
 
 # `pricer_sheets` keeps the app's declaration: its tables are written
 # positionally, so a layer's redeclaration would misplace values.
-run_mutation "data_setup: a redeclared pricer_sheets is kept" \
-  crates/geode-app/src/bridge.rs \
+run_mutation "engine_setup: a redeclared pricer_sheets is kept" \
+  crates/geode-compose/src/lib.rs \
   '    diagnostics.extend(pin_app_datasets(&mut schema, config));' \
   '' \
   geode-app a_layer_redeclaring_pricer_sheets_differently_is_ignored_with_an_error
 
 run_mutation "reload: a redeclared pricer_sheets is kept" \
   crates/geode-app/src/bridge.rs \
-  '                    pin_diags.extend(pin_app_datasets(&mut schema, config));' \
+  '                    pin_diags.extend(geode_compose::pin_app_datasets(&mut schema, config));' \
   '                    let _ = &mut schema;' \
   geode-app a_reload_ignores_and_reports_a_redeclared_pricer_sheets
 
 run_mutation "pin: an identical redeclaration of pricer_sheets is reported" \
-  crates/geode-app/src/bridge.rs \
+  crates/geode-compose/src/lib.rs \
   '    if slot.is_some_and(|i| schema.datasets[i] == declared) {' \
   '    if false {' \
   geode-app a_layer_redeclaring_pricer_sheets_identically_is_silent
+
+# The demo position service rewrites the CSVs under `<demo_root>/src`, where
+# the demo source polls; registered at the root it finds no position.
+run_mutation "compose: demo positions registered at the demo root" \
+  crates/geode-compose/src/lib.rs \
+  '    adapters.register(Arc::new(demo::DemoPositions::new(root.join("src"))));' \
+  '    adapters.register(Arc::new(demo::DemoPositions::new(root.to_path_buf())));' \
+  geode-compose the_demo_position_service_moves_positions_under_the_demo_source_directory
 
 # A local dataset is neither a view's nor a source's to name.
 run_mutation "views dialog: a local dataset is offered" \
@@ -28799,7 +28797,7 @@ run_mutation "app: pricer_views is an error" \
 # redeclaring it differently is replaced with an error, since a differing
 # declaration changes what a view, scope or grouping over it means.
 run_mutation "app: the pricer pin replaces a differing redeclaration" \
-  crates/geode-app/src/bridge.rs \
+  crates/geode-compose/src/lib.rs \
   '        pin_app_dataset(
             schema,
             config,

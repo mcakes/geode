@@ -2,9 +2,9 @@
 //! Each line or package occupies a row; document attributes hold sheet-wide settings.
 //! Results are omitted, so reopened sheets reprice.
 //!
-//! Document values are non-NULL: optional values use flags or kind tags. `geode-app`
-//! installs the dataset declaration, and `DuckSheetStore` performs I/O through
-//! `DataHandle`.
+//! Document values are non-NULL: optional values use flags or kind tags.
+//! `geode_compose::builtin_data_layer` installs the dataset declaration, and
+//! `DuckSheetStore` performs I/O through `DataHandle`.
 
 use crate::core::sheet::{LineId, LineState, OwnShifts, Refresh, RowKind, RowRecord, Sheet};
 use crate::core::template::Template;

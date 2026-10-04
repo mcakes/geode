@@ -388,9 +388,9 @@ fn add_dimension_actions(
 
 /// Every builtin config doc: the shell's keymap, the pricer's two bundled
 /// views and seven package templates (a desk or user layer overrides a
-/// view or a template by name), the pricer's two datasets (`pricer_sheets`,
-/// its local documents, and `pricer`, its computed vocabulary), the builtin
-/// market-data panels, and the `--demo` layer.
+/// view or a template by name), the builtin market-data panels, and
+/// `geode_compose::builtin_data_layer` (the pricer's two datasets and the
+/// `--demo` layer), which the collector builds alone.
 fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
     let mut builtin = vec![
         LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed"),
@@ -404,11 +404,6 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
             geode_pricer::core::BUILTIN_TEMPLATES,
         )
         .expect("BUILTIN_TEMPLATES is well-formed TOML"),
-        // The pricer's sheets, a local document dataset every build
-        // declares. `datasets` merges per dataset name, so a demo, desk or
-        // user `datasets` doc adds its own datasets beside these two.
-        LayerDoc::builtin("datasets", geode_pricer::core::PRICER_SHEETS_DECLARATION)
-            .expect("PRICER_SHEETS_DECLARATION is well-formed TOML"),
         // The builtin market-data panels. `panels` replaces per panel name,
         // so a desk or user panels doc adds panels beside these or replaces
         // one whole.
@@ -417,14 +412,8 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
             geode_marketdata::core::BUILTIN_PANELS,
         )
         .expect("BUILTIN_PANELS is well-formed TOML"),
-        // The pricer's vocabulary as a computed dataset: views, scopes and
-        // groupings see its columns; nothing stores or queries it.
-        LayerDoc::builtin("datasets", geode_pricer::core::PRICER_DATASET_DECLARATION)
-            .expect("PRICER_DATASET_DECLARATION is well-formed TOML"),
     ];
-    if let Some(root) = demo_root {
-        builtin.extend(geode_compose::demo::layer(&root.join("src")));
-    }
+    builtin.extend(geode_compose::builtin_data_layer(demo_root));
     builtin
 }
 
