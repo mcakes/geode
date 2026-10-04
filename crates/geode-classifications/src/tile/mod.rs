@@ -939,6 +939,14 @@ impl ClassificationsTile {
                 long: "values not loaded yet \u{2014} shift+r loads them".into(),
             });
         }
+        // Values from an earlier answer while a newer read is on its way,
+        // or after one refused or failed, may miss what the data now holds.
+        if all && (self.loading || self.values_notice.is_some()) {
+            return Err(Blocked {
+                short: "values not current",
+                long: "values not current \u{2014} shift+r reloads them".into(),
+            });
+        }
         Ok(name)
     }
 
@@ -958,21 +966,28 @@ impl ClassificationsTile {
         let answer = cx.prompt_for_new_path(&dir, Some(&format!("{name}.csv")));
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(path))) = answer.await {
-                this.update(cx, |t, cx| t.export_to(path, all, cx)).ok();
+                this.update(cx, |t, cx| t.export_to(name, path, all, cx))
+                    .ok();
             }
         })
         .detach();
     }
 
-    /// Queue the write of the shown classification, as the tile shows it
-    /// (a label edit not yet reloaded included), to `path`. Checked again:
-    /// the classification or its values may have gone while the dialog
-    /// stood.
-    fn export_to(&mut self, path: PathBuf, all: bool, cx: &mut Context<Self>) {
-        let name = match self.exportable(all) {
-            Ok(name) => name,
-            Err(b) => return self.refuse(b.long, cx),
-        };
+    /// Queue the write of classification `name`, as the tile shows it (a
+    /// label edit not yet reloaded included), to `path`. Checked again: the
+    /// save dialog is modeless, so another classification may be shown by
+    /// now (its rows would go out under `name`'s file), or the values may
+    /// have gone stale.
+    fn export_to(&mut self, name: String, path: PathBuf, all: bool, cx: &mut Context<Self>) {
+        if self.shown().as_deref() != Some(name.as_str()) {
+            return self.refuse(
+                format!("{name} is no longer shown \u{2014} nothing exported"),
+                cx,
+            );
+        }
+        if let Err(b) = self.exportable(all) {
+            return self.refuse(b.long, cx);
+        }
         let Some(config_dim) = self.config_dim() else {
             return;
         };

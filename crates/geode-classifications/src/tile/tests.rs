@@ -2392,3 +2392,61 @@ fn export_with_nothing_shown_is_refused(cx: &mut gpui::TestAppContext) {
     assert!(!vcx.did_prompt_for_new_path());
     assert_eq!(h.notices(&vcx), ["choose a classification to export"]);
 }
+
+/// The save dialog is modeless: a classification switched to while it
+/// stood must not go out under the first one's file name.
+#[gpui::test]
+fn an_export_answered_after_a_switch_is_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    h.file_requests();
+    h.act(&mut vcx, EXPORT);
+    h.press(&mut vcx, "g c k enter");
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("desk"));
+    h.save_as(&mut vcx, Some("region.csv"));
+    assert!(h.file_requests().is_empty(), "nothing written");
+    assert_eq!(
+        h.notices(&vcx),
+        ["region is no longer shown \u{2014} nothing exported"]
+    );
+}
+
+/// Values from an earlier answer are not current while a newer read is on
+/// its way or after one failed: the unclassified rows could be missing.
+#[gpui::test]
+fn export_with_unclassified_waits_for_current_values(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    const STALE: &str = "values not current \u{2014} shift+r reloads them";
+    h.press(&mut vcx, "shift-r");
+    let pending = h.distinct_requests();
+    h.act(&mut vcx, EXPORT_ALL);
+    assert!(!vcx.did_prompt_for_new_path(), "a read is on its way");
+    assert_eq!(h.notices(&vcx), [STALE]);
+    h.deliver(&mut vcx, pending[0].tag, "underlying_ref", Err("no table"));
+    h.act(&mut vcx, EXPORT_ALL);
+    assert!(!vcx.did_prompt_for_new_path(), "the refresh failed");
+    assert!(
+        h.notices(&vcx).contains(&STALE.to_string()),
+        "{:?}",
+        h.notices(&vcx)
+    );
+    h.press(&mut vcx, ".");
+    let menu = h.action_menu(&vcx).expect("the menu");
+    assert!(
+        menu.contains(&(
+            "Export CSV with unclassified\u{2026}".into(),
+            Some("values not current".into())
+        )),
+        "{menu:?}"
+    );
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "shift-r");
+    let retry = h.distinct_requests();
+    h.deliver(
+        &mut vcx,
+        retry[0].tag,
+        "underlying_ref",
+        Ok(REGION_VALUES.to_vec()),
+    );
+    h.act(&mut vcx, EXPORT_ALL);
+    assert!(vcx.did_prompt_for_new_path(), "current again");
+}
