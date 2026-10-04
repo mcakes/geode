@@ -18256,15 +18256,6 @@ run_mutation "choice: a row click resolves through the ranked order" \
   geode-shell \
   a_click_resolves_through_the_ranked_order
 
-# The picker opens on the saved scope EQUAL to the frame's current one, so
-# a bare `enter` changes nothing.
-run_mutation "scope-picker: the highlight opens on the current scope" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '        list.place(active);' \
-  '        list.place(None);' \
-  geode-shell \
-  the_scope_equal_to_the_current_one_is_lit
-
 # A Saved scope loads through `load_saved_scope` (one undoable `set_scope`
 # step that records its source); applying the saved scope and dropping the
 # history is not undoable.
@@ -32027,8 +32018,8 @@ run_mutation "action choose: an empty reply leaves a covered choice loading" \
 
 run_mutation "action choose: the loading footer offers enter" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  $'    } else if loading {\n        ("action-loading-hints", ACTION_LOADING_HINTS)' \
-  $'    } else if false {\n        ("action-loading-hints", ACTION_LOADING_HINTS)' \
+  $'    let (hints_selector, hints) = if loading {\n        ("action-loading-hints", ACTION_LOADING_HINTS)' \
+  $'    let (hints_selector, hints) = if false {\n        ("action-loading-hints", ACTION_LOADING_HINTS)' \
   geode-shell enter_while_loading_does_nothing
 
 run_mutation "action confirm: a refused confirm is silent" \

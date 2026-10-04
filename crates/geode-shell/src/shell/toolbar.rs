@@ -10,7 +10,7 @@
 //! The as-of chip alone uses warning colors. Grouping opens the Grouping
 //! dialog and stays visibly pressed while it is open. Filled selection chips contain
 //! a separate, occluding close target; add/load/save actions are bare
-//! glyphs. The load glyph opens the saved-scope chooser and, like the grouping
+//! glyphs. The load glyph opens the Scope dialog's Saved screen and, like the grouping
 //! readout, stays pressed while it is open.
 //!
 //! Scope chips show dimensions, named expressions, top-level expression
