@@ -124,3 +124,8 @@ Line Pricer -> Launch CVI, Dividend, Repo for the underlying in line
 Line Pricer -> Launch Slice Viewer, Term Structure Viewer for underlying in tree, if applicable
 Line Pricer -> Generate output for Scenario Panels
 Vol Watchlist -> Launch Timeseries Viewer for underlying and column
+
+
+## Classifications module
+
+
