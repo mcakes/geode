@@ -555,6 +555,15 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - Link groups: a group's scope is saved in the session (reversible ruling);
   duplicating a tile does not copy its membership; a mistyped `follow` (e.g. `fow`
   + Enter) unfollows.
+- Decision: a blotter or pricer that follows and emits into one group re-posts
+  when its cursor row vanishes after a requery, so with a co-emitter in the
+  group (a linked pair) a delivery-driven cursor move overwrites the other
+  emitter's selection. Fixing it needs a rule telling a trader's cursor move
+  from one a delivery forced.
+- Decision: while an emitter's NULL refusal stands, its group keeps the base the
+  emitter had when it last posted; a lane scope edit or a pin/unpin since then
+  is not reflected. Only the emitter's header warns. Consider a follower-side
+  stale cue.
 - Decision: rulings not yet confirmed by the owner: density fill opacity 0.3, the
   demo's switch to a Hart double-precision normal CDF, the floor kink in the wide
   call wing. Expiry hues 21 positions apart sit about 8° apart.
@@ -704,6 +713,11 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - As-of: presets are fixed (configurable presets are a follow-up); `Clock::zone()`
   is unused; the `[time] sod`/`eod` bad-time arm is unpinned.
 - A theme-contrast floor test could become permanent if a floor is agreed.
+- `linkfilter::persist_to_user_config` panics on an inline `links = {…}` table in
+  the user `app.toml` (`is_table_like` passes, `as_table_mut` is `None`), on the
+  background write path. The same pattern is in `linenumbers`, `fontsize`,
+  `tileadd`, `series`, `theme`, `vimfind` and `log_persist` (`ui = {…}`,
+  `log = {…}`).
 
 ## Performance
 
