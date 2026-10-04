@@ -864,14 +864,41 @@ label = "skew"
              paths = [\"/nonexistent/*.csv\"]\n",
         )
         .unwrap();
-        // A user redeclaration of the app's sheets dataset: both sides must
-        // pin it back the same way.
-        std::fs::write(
-            user.path().join("datasets.toml"),
-            "config_version = 1\n\n[pricer_sheets]\nfamily = \"document\"\nlocal = true\n\
-             key = [\"sheet\"]\n\n[pricer_sheets.columns.sheet]\ntype = \"utf8\"\nrole = \"dimension\"\n",
-        )
-        .unwrap();
+        // Two user redeclarations of the app's datasets, one per pin branch:
+        // a valid but different `pricer_sheets` (qty retyped) is replaced in
+        // its slot, and an invalid `pricer` (an unknown family) is dropped by
+        // the schema reader and pushed back at the end. Both sides must pin
+        // each the same way.
+        let sheets = geode_core::builtin::PRICER_SHEETS_DECLARATION.replace(
+            "[pricer_sheets.columns.qty]\ntype = \"i64\"",
+            "[pricer_sheets.columns.qty]\ntype = \"f64\"",
+        );
+        let pricer = geode_core::builtin::PRICER_DATASET_DECLARATION
+            .replace("[pricer]\n", "[pricer]\nfamily = \"no_such_family\"\n");
+        let user_datasets = format!("config_version = 1\n\n{sheets}\n{pricer}");
+        std::fs::write(user.path().join("datasets.toml"), &user_datasets).unwrap();
+        // The fixture exercises the branches it names: the user doc alone
+        // declares a different `pricer_sheets` and no valid `pricer`.
+        let (alone, _) = geode_core::schema::SchemaSpec::from_doc(&geode_core::config::merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", &user_datasets).unwrap()],
+        ));
+        let (builtin_sheets, _) =
+            geode_core::schema::SchemaSpec::from_doc(&geode_core::config::merge_docs(
+                "datasets",
+                &[
+                    LayerDoc::builtin("datasets", geode_core::builtin::PRICER_SHEETS_DECLARATION)
+                        .unwrap(),
+                ],
+            ));
+        let user_sheets = alone
+            .dataset("pricer_sheets")
+            .expect("the user's pricer_sheets is valid");
+        assert_ne!(Some(user_sheets), builtin_sheets.dataset("pricer_sheets"));
+        assert!(
+            alone.dataset("pricer").is_none(),
+            "the user's pricer is invalid"
+        );
         // The demo layer only rewrites paths onto this directory; nothing
         // here reads it, so it needs no emitted files.
         let demo = tempfile::tempdir().unwrap();
@@ -903,6 +930,7 @@ label = "skew"
             } else {
                 "non-demo"
             };
+            // Asserted on the app side only: schema equality covers the collector.
             assert!(
                 app.config.schema.dataset("desk_marks").is_some(),
                 "{case}: the desk dataset loaded"
@@ -913,18 +941,23 @@ label = "skew"
                 "{case}: sources"
             );
             assert!(!app.config.sources.is_empty(), "{case}: sources loaded");
-            // Both sides refuse the user redeclaration with the same error.
+            // Both sides refuse the user redeclarations with the same errors.
             let pin = |diagnostics: &[Diagnostic]| -> Vec<Diagnostic> {
                 diagnostics
                     .iter()
-                    .filter(|d| d.path.as_deref() == Some("datasets.pricer_sheets"))
+                    .filter(|d| {
+                        matches!(
+                            d.path.as_deref(),
+                            Some("datasets.pricer_sheets" | "datasets.pricer")
+                        )
+                    })
                     .cloned()
                     .collect()
             };
             let app_pin = pin(&app.diagnostics);
             assert!(
-                app_pin.len() == 1 && app_pin[0].severity == Severity::Error,
-                "{case}: the app pins pricer_sheets: {app_pin:?}"
+                app_pin.len() == 2 && app_pin.iter().all(|d| d.severity == Severity::Error),
+                "{case}: the app pins pricer_sheets and pricer: {app_pin:?}"
             );
             assert_eq!(app_pin, pin(&collector.diagnostics), "{case}: pin error");
         }
