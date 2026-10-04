@@ -288,6 +288,14 @@ fn the_filter_keeps_sections_and_escape_restores(cx: &mut gpui::TestAppContext) 
         "escape only left the filter"
     );
 
+    // `b` ranks `big` (a prefix) above both scopes; the rows stay in row
+    // order all the same, scopes first.
+    vcx.simulate_keystrokes("/");
+    vcx.simulate_input("b");
+    vcx.run_until_parked();
+    assert_eq!(visible_names(&shell, &vcx), ["asia", "eu", "big"]);
+    vcx.simulate_keystrokes("escape");
+
     vcx.simulate_keystrokes("/");
     vcx.simulate_input("x");
     vcx.simulate_keystrokes("enter");
