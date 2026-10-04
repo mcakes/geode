@@ -11,7 +11,8 @@
 # exits nonzero for either finding or an empty selection. Run the unfiltered
 # anchor check before merging and after editing an anchored source block.
 # Test filters are checked against test-attributed function names under
-# the selected package's src directory. FILTER means no match; FILTERx means
+# the selected package's src directory (for a `package:test` entry, its
+# `tests/<test>.rs` and `tests/<test>/`). FILTER means no match; FILTERx means
 # several matches without an exact function name and is also an error. FILTER?
 # means an exact name plus other substring matches and is a warning. This is a
 # source scan, not Cargo test discovery: it does not evaluate cfg attributes,
@@ -46,7 +47,7 @@
 # anchor unmatched) in a mutation run or build check. --build-check applies each selected mutation and
 # compiles it with `cargo check --profile test` on the target a mutation run
 # tests (the lib, or geode-app's bins, with their unit tests; not integration
-# tests) without running tests. It audits for replacements left stale by
+# tests, unless the entry names one as `package:test`) without running tests. It audits for replacements left stale by
 # signature changes, which --anchors-only cannot see because it never
 # compiles anything. A mutation run or build check that selects no entry
 # prints "ran 0 entries (nothing selected)" and exits 1, so a mistyped
@@ -115,6 +116,12 @@ trap 'cleanup; exit 143' TERM
 # report "caught" on the strength of unrelated tests, or "SURVIVED" while a
 # perfectly good test sits one crate away. Name the crate that holds the
 # test, not the crate that holds the code.
+#
+# `package:test` (for example `geode-collector:handoff`) runs that
+# package's integration test target `tests/<test>.rs` (`--test <test>`)
+# instead of its lib: the home of a test that drives the package's binary
+# across processes. Cargo rebuilds the binary from the mutated source
+# before that test runs.
 #
 # `test_filter`, if given, is a `cargo test` name filter for the test(s)
 # expected to catch this mutation, tried before the full crate suite:
@@ -215,6 +222,9 @@ report_failure() {
 
 run_mutation() {
   local name="$1" file="$2" from="$3" to="$4" pkg="${5:-geode-data}" filter="${6:-}"
+  # The package as the entry spells it, kept for the anchor record: a
+  # `package:test` spelling names an integration test (below).
+  local pkg_spec="$pkg"
   if [[ -n "$only" && "$name" != *"$only"* ]]; then
     return 0
   fi
@@ -227,15 +237,21 @@ run_mutation() {
   # `--lib` fails outright with "no library targets found"; `--bins`
   # is the equivalent for it. Every other package here is lib-only, so
   # `--lib` stays the default.
+  # A `package:test` spelling targets that package's integration test
+  # `tests/<test>.rs` (`--test <test>`) instead: a test that drives a
+  # binary across processes lives there, not in the lib.
   local target_flag="--lib"
-  if [[ "$pkg" == "geode-app" ]]; then
+  if [[ "$pkg" == *:* ]]; then
+    target_flag="--test ${pkg#*:}"
+    pkg="${pkg%%:*}"
+  elif [[ "$pkg" == "geode-app" ]]; then
     target_flag="--bins"
   fi
   if (( anchors_only )); then
     # Retain the replacement, package and test filter alongside the source
     # anchor so the final scan can validate locations and intended tests, and
     # can recognise entries that repeat another's anchor and replacement.
-    printf '%s\0%s\0%s\0%s\0%s\0%s\0' "$name" "$file" "$from" "$to" "$pkg" "$filter" >> "$anchors"
+    printf '%s\0%s\0%s\0%s\0%s\0%s\0' "$name" "$file" "$from" "$to" "$pkg_spec" "$filter" >> "$anchors"
     return 0
   fi
   # A moved or deleted file is a stale entry, reported by name, not a
@@ -287,7 +303,8 @@ PY
     # profile, i.e. with cfg(test) and its unit tests, and nothing more.
     # Integration tests are excluded because a mutation run never builds
     # them: a replacement that broke only one would read BUILD here but
-    # compile and be tested in a real run.
+    # compile and be tested in a real run. A `package:test` entry's run
+    # builds that integration test, so its check does too.
     built=$((built + 1))
     if ! cargo check -p "$pkg" $target_flag --profile test >"$log" 2>&1; then
       echo "BUILD     $name  <-- mutation does not compile; no test ran"
@@ -1452,6 +1469,25 @@ run_mutation "collector: an app is confirmed by a second probe" \
   $'    std::thread::sleep(gap);\n    true' \
   geode-collector \
   an_app_is_confirmed_by_a_second_probe
+
+# Across processes (geode-collector's tests/handoff.rs, against the real
+# binary). The hold loop releases only on a confirmed app: a momentary
+# `<db>.app.lock` (a status probe) must not hand the store to nobody. A
+# data thread stopping while an app is present is the app winning the race
+# for the store: a yield, never exit 70.
+run_mutation "collector: a release needs a confirmed app" \
+  crates/geode-collector/src/run.rs \
+  '    while !events.stopped() && !confirmed(&mut probe, CONFIRM_GAP) {' \
+  '    while !events.stopped() && !probe() {' \
+  geode-collector:handoff \
+  a_momentary_app_lock_does_not_release_the_store
+
+run_mutation "collector: a stop with an app present is a yield" \
+  crates/geode-collector/src/run.rs \
+  '        let app = confirmed(&mut || app_present(db).unwrap_or(false), CONFIRM_GAP);' \
+  '        let app = false;' \
+  geode-collector:handoff \
+  a_lost_race_is_a_yield_not_an_exit
 
 # The login job (geode-collector install.rs). launchd restarts only a
 # failed exit: a second collector exits 0 and must stay down, while a

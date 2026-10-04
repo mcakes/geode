@@ -32,3 +32,9 @@ chrono = "0.4.42"
 geode-core = { workspace = true, features = ["test-support"] }
 geode-data = { path = "../geode-data", features = ["test-support"] }
 tempfile = "3.27.0"
+# The demo underlyings, for the cross-process handoff test's demo store.
+geode-demo-data = { path = "../geode-demo-data" }
+
+[[test]]
+name = "handoff"
+bench = false

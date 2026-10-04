@@ -3,7 +3,8 @@
 Reads the NUL-separated six-field records the mutation-check script collects (name,
 file, anchor, replacement, package, filter) and checks every anchor for
 exactly one match in its file and every test filter against the
-test-attributed function names under the package's src directory. It runs no
+test-attributed function names under the package's src directory (for a
+`package:test` entry, its integration test `tests/<test>.rs`). It runs no
 Cargo command and edits no file.
 
 Missing or ambiguous anchors, invalid filters, an entry with no filter, a
@@ -36,6 +37,22 @@ def read_entries(raw):
     ]
 
 
+def test_sources(root, pkg):
+    """The files whose tests an entry's run reaches.
+
+    `package` runs the lib (or geode-app's bins): everything under `src`.
+    `package:test` runs only the integration test target `tests/<test>.rs`,
+    with any modules it keeps under `tests/<test>/`.
+    """
+    name, _, target = pkg.partition(":")
+    crate = root / "crates" / name
+    if not target:
+        return sorted((crate / "src").rglob("*.rs"))
+    single = crate / "tests" / f"{target}.rs"
+    files = [single] if single.is_file() else []
+    return files + sorted((crate / "tests" / target).rglob("*.rs"))
+
+
 def test_fns(root, pkg):
     """Names of test-attributed functions in a package.
 
@@ -44,7 +61,7 @@ def test_fns(root, pkg):
     plain helper pass, so only functions carrying a `test` attribute count.
     """
     names = set()
-    for path in sorted((root / "crates" / pkg / "src").rglob("*.rs")):
+    for path in test_sources(root, pkg):
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeDecodeError):

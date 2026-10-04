@@ -147,6 +147,31 @@ class Check(unittest.TestCase):
         lines, _ = self.run_check({LIB: SRC}, [entry(name="a"), entry(name="b"), entry(name="c", filt="")])
         self.assertIn("checked 3 anchors: 0 stale, 0 ambiguous, 0 bad filters, 2 bad entries", lines)
 
+    def test_a_package_test_entry_finds_tests_in_that_integration_test_only(self):
+        files = {
+            LIB: SRC,
+            "crates/p/tests/handoff.rs": "#[test]\nfn across_processes() {}\n",
+            "crates/p/tests/handoff/support.rs": "#[test]\nfn in_a_module() {}\n",
+            "crates/p/tests/other.rs": "#[test]\nfn elsewhere() {}\n",
+        }
+        for filt in ("across_processes", "in_a_module"):
+            lines, code = self.run_check(files, [entry(pkg="p:handoff", filt=filt)])
+            self.assertEqual(code, 0, (filt, lines))
+        # The lib's tests and another target's are not in that run.
+        for filt in ("t_one", "elsewhere"):
+            lines, code = self.run_check(files, [entry(pkg="p:handoff", filt=filt)])
+            self.assertEqual(code, 1, (filt, lines))
+            self.assertIn(f"FILTER    e  <-- '{filt}' matches no test in p:handoff", lines)
+        # And the lib entry does not see the integration test.
+        lines, code = self.run_check(files, [entry(filt="across_processes")])
+        self.assertEqual(code, 1, lines)
+
+    def test_a_package_test_entry_and_a_lib_entry_are_different_tests(self):
+        files = {LIB: SRC, "crates/p/tests/handoff.rs": "#[test]\nfn t_one() {}\n"}
+        lines, code = self.run_check(files, [entry(name="a"), entry(name="b", pkg="p:handoff")])
+        self.assertEqual(code, 0, lines)
+        self.assertIn("ALSO      b  <-- same mutation as a, detected by 't_one'", lines)
+
     def test_an_anchored_file_that_is_not_utf8_is_stale(self):
         tmp, root = tree({LIB: SRC})
         self.addCleanup(tmp.cleanup)
