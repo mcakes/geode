@@ -36174,8 +36174,8 @@ run_mutation "classifications: only a unanimous label prefills" \
 # The config door writes even when the reload then rejects the object.
 run_mutation "classifications: an invalid source is never written" \
   crates/geode-classifications/src/tile/mod.rs \
-  '            validate_source(&config_dim.from, &config.schema, &config.dims)' \
-  '            Ok::<(), String>(())' \
+  '        validate_source(&config_dim.from, &config.schema, &config.dims)' \
+  '        Ok::<(), String>(())' \
   geode-classifications \
   an_invalid_source_classification_is_never_written
 
@@ -36342,6 +36342,88 @@ run_mutation "classifications: a revert on its way refuses label verbs" \
   '                drop(name);' \
   geode-classifications \
   a_verb_while_a_revert_is_on_its_way_does_not_undo_it
+
+# An import's answer read after another classification was shown would be
+# planned against that one, under the first one's file.
+run_mutation "classifications: an import read is bound to its classification" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        let file = files::file_name(path);
+        if self.shown().as_deref() != Some(name.as_str()) {' \
+  '        let file = files::file_name(path);
+        if false {' \
+  geode-classifications \
+  an_import_answer_for_another_classification_is_dropped
+
+# The open dialog is modeless: its answer must not read a file for a
+# classification switched to while it stood.
+run_mutation "classifications: an import dialog is bound to its classification" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '    fn import_from(&mut self, name: String, path: PathBuf, cx: &mut Context<Self>) {
+        if self.shown().as_deref() != Some(name.as_str()) {' \
+  '    fn import_from(&mut self, name: String, path: PathBuf, cx: &mut Context<Self>) {
+        if false {' \
+  geode-classifications \
+  an_import_dialog_answered_after_a_switch_reads_nothing
+
+# A plan that changes nothing has nothing to confirm.
+run_mutation "classifications: a no-op import asks nothing" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if !plan.is_noop() {
+            // The question takes the keyboard' \
+  '        if true {
+            // The question takes the keyboard' \
+  geode-classifications \
+  nothing_to_change_says_so_without_a_confirm
+
+# The file is authoritative for its rows only: applied over anything but
+# the object shown at y, a label written meanwhile would be lost.
+run_mutation "classifications: an import applies over the current object" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        let (next, entry) = plan.apply(self.history.current(&config_dim));' \
+  '        let (next, entry) = plan.apply(&DerivedDimension { values: Default::default(), ..config_dim.clone() });' \
+  geode-classifications \
+  the_confirm_applies_the_plan_over_the_current_object
+
+# An import is one undo step and is shown before its reload.
+run_mutation "classifications: an import is recorded as one undo step" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        self.history.record(&config_dim, next.clone(), entry);' \
+  '        drop(entry);' \
+  geode-classifications \
+  undo_reverts_the_whole_import
+
+# An import in a revert's debounce window would queue the user copy over
+# the removal, undoing the revert.
+run_mutation "classifications: a revert on its way refuses an import" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            return self.refuse(Notice::status(files::not_applied(&file, &name)), cx);
+        }
+        if self.refuse_while_reverting(cx) {' \
+  '            return self.refuse(Notice::status(files::not_applied(&file, &name)), cx);
+        }
+        if false && self.refuse_while_reverting(cx) {' \
+  geode-classifications \
+  import_is_refused_while_a_revert_is_on_its_way
+
+# The config door writes even when the reload then rejects the object.
+run_mutation "classifications: an import into an invalid source is never written" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        let checked = self.source_writable(&config_dim);
+        if let Err(why) = checked {
+            return self.refuse(' \
+  '        let checked: Result<(), String> = Ok(());
+        if let Err(why) = checked {
+            return self.refuse(' \
+  geode-classifications \
+  an_import_into_an_invalid_source_classification_is_never_written
+
+# A file of bad rows must not build a notice the size of the file.
+run_mutation "classifications: the rejected notice is bounded" \
+  crates/geode-classifications/src/core/files.rs \
+  '        .take(REJECTED_LISTED)' \
+  '        .take(usize::MAX)' \
+  geode-classifications \
+  the_rejected_notice_lists_twenty_then_counts
 
 # A door tile shows its edit before the write: a failed write must reach it,
 # or its labels look saved.

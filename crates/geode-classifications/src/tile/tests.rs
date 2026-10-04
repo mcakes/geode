@@ -1849,6 +1849,7 @@ fn the_dot_menu_lists_actions_with_disabled_reasons(cx: &mut gpui::TestAppContex
                 "Export CSV with unclassified\u{2026}".into(),
                 Some("values not loaded".into())
             ),
+            s("Import CSV\u{2026}"),
         ]
     );
     // A disabled row says why in full and keeps the menu open.
@@ -2449,4 +2450,328 @@ fn export_with_unclassified_waits_for_current_values(cx: &mut gpui::TestAppConte
     );
     h.act(&mut vcx, EXPORT_ALL);
     assert!(vcx.did_prompt_for_new_path(), "current again");
+}
+
+// ---- import ----
+
+const IMPORT: &str = "classifications::import";
+
+/// Into `region` as `EDIT` maps it (SPX Americas, SX5E and DAX Europe):
+/// two labels changed, one new, one cleared, and line 6 rejected.
+const IMPORT_TEXT: &str =
+    "underlying_ref,region\nSPX,Europe\nSX5E,Asia\nNKY,Asia\nDAX,\nHSI,Asia,extra\n";
+
+/// `region` once `IMPORT_TEXT` is applied over `EDIT`.
+fn imported_region() -> DerivedDimension {
+    region(&[("SPX", "Europe"), ("SX5E", "Asia"), ("NKY", "Asia")])
+}
+
+impl Harness {
+    /// Answer the open dialog with `file`, let the tile's wait run, and
+    /// take the file requests it asked.
+    fn open_file(&self, vcx: &mut gpui::VisualTestContext, file: &str) -> Vec<TextFileParams> {
+        let path = std::env::temp_dir().join("geode-import-test").join(file);
+        vcx.simulate_path_prompt_response(|_| Some(vec![path]));
+        vcx.run_until_parked();
+        self.draw(vcx);
+        self.file_requests()
+    }
+    /// Import: the action, then the dialog answered with `file`; the one
+    /// read it asked.
+    fn import(&self, vcx: &mut gpui::VisualTestContext, file: &str) -> TextFileParams {
+        self.file_requests();
+        self.act(vcx, IMPORT);
+        let mut asked = self.open_file(vcx, file);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        asked.remove(0)
+    }
+    /// Answer `p` with the file's text.
+    fn read_as(&self, vcx: &mut gpui::VisualTestContext, p: &TextFileParams, text: &str) {
+        self.answer_file(vcx, p, TextFileResult::Read(Ok(text.to_string())));
+    }
+    fn notice_list(&self, vcx: &gpui::VisualTestContext) -> Vec<Notice> {
+        self.tile.read_with(vcx, |t, _| t.chrome.notices.clone())
+    }
+}
+
+#[gpui::test]
+fn import_reads_the_chosen_file_with_the_size_limit(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.file_requests();
+    h.act(&mut vcx, IMPORT);
+    assert!(vcx.did_prompt_for_paths(), "an open dialog is up");
+    assert!(h.file_requests().is_empty(), "nothing read before a path");
+    let mut options = None;
+    let path = std::env::temp_dir().join("region.csv");
+    vcx.simulate_path_prompt_response(|o| {
+        options = Some((o.files, o.directories, o.multiple));
+        Some(vec![path.clone()])
+    });
+    vcx.run_until_parked();
+    assert_eq!(options, Some((true, false, false)));
+    let asked = h.file_requests();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].key, QueryKey(TILE));
+    assert_eq!(asked[0].path, path);
+    assert_eq!(
+        asked[0].op,
+        TextFileOp::Read {
+            max_bytes: classification::import::MAX_IMPORT_BYTES
+        }
+    );
+}
+
+#[gpui::test]
+fn import_confirms_a_summary_then_writes_one_edit(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(
+        h.confirm(&vcx).as_deref(),
+        Some("import region.csv: 2 changed, 1 new, 1 cleared, 1 rejected \u{2014} y applies")
+    );
+    assert_eq!(
+        h.notice_list(&vcx),
+        [Notice::warning(
+            "rejected: line 6: expected 2 fields, found 3"
+        )]
+    );
+    assert!(h.edits(&mut vcx).is_empty(), "nothing before y");
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&imported_region())]);
+    assert_eq!(h.label(&vcx, "SPX").as_deref(), Some("Europe"));
+    assert_eq!(h.label(&vcx, "SX5E").as_deref(), Some("Asia"));
+    assert_eq!(h.label(&vcx, "NKY").as_deref(), Some("Asia"));
+    assert_eq!(h.label(&vcx, "DAX"), None);
+    assert_eq!(h.notices(&vcx), ["imported 4 rows into region"]);
+}
+
+/// No rejected rows: the question leaves the count out.
+#[gpui::test]
+fn a_clean_file_asks_without_a_rejected_count(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, "underlying_ref,region\nNKY,Asia\n");
+    assert_eq!(
+        h.confirm(&vcx).as_deref(),
+        Some("import region.csv: 0 changed, 1 new, 0 cleared \u{2014} y applies")
+    );
+    assert!(h.notices(&vcx).is_empty());
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.notices(&vcx), ["imported 1 row into region"]);
+}
+
+#[gpui::test]
+fn n_leaves_the_classification_unchanged(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert!(h.confirm(&vcx).is_some());
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(h.label(&vcx, "SPX").as_deref(), Some("Americas"));
+    assert_eq!(h.label(&vcx, "NKY"), None);
+    assert_eq!(h.notices(&vcx), ["region.csv not imported"]);
+    // Nothing to undo: the import never happened.
+    h.press(&mut vcx, "u");
+    assert!(h.edits(&mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn a_wrong_header_is_refused_naming_both(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "sector.csv");
+    h.read_as(&mut vcx, &p, "underlying_ref,sector\nSPX,Tech\n");
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notice_list(&vcx),
+        [Notice::danger(
+            "import refused: file is underlying_ref,sector; this classification is underlying_ref,region"
+        )]
+    );
+}
+
+#[gpui::test]
+fn nothing_to_change_says_so_without_a_confirm(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, "underlying_ref,region\nSPX,Americas\n");
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notice_list(&vcx),
+        [Notice::status("import: nothing to change")]
+    );
+    // With rejected rows, the count and the list.
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(
+        &mut vcx,
+        &p,
+        "underlying_ref,region\nSPX,Americas\nA,b,c\n,x\n",
+    );
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notice_list(&vcx),
+        [
+            Notice::status("import: nothing to change (2 rejected)"),
+            Notice::warning("rejected: line 3: expected 2 fields, found 3; line 4: empty source"),
+        ]
+    );
+    assert!(h.edits(&mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn undo_reverts_the_whole_import(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.edits(&mut vcx).len(), 1);
+    h.press(&mut vcx, "u");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&edit_region())]);
+    assert_eq!(h.label(&vcx, "SPX").as_deref(), Some("Americas"));
+    assert_eq!(h.label(&vcx, "DAX").as_deref(), Some("Europe"));
+    assert_eq!(h.label(&vcx, "NKY"), None);
+}
+
+#[gpui::test]
+fn an_import_answer_for_another_classification_is_dropped(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.press(&mut vcx, "g c k enter");
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("desk"));
+    h.read_as(&mut vcx, &p, "underlying_ref,region\nNKY,Asia\n");
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(
+        h.notice_list(&vcx),
+        [Notice::status(
+            "import of region.csv was for region \u{2014} not applied"
+        )]
+    );
+}
+
+/// The open dialog is modeless: a classification switched to while it
+/// stood reads nothing.
+#[gpui::test]
+fn an_import_dialog_answered_after_a_switch_reads_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    h.file_requests();
+    h.act(&mut vcx, IMPORT);
+    h.press(&mut vcx, "g c k enter");
+    let asked = h.open_file(&mut vcx, "region.csv");
+    assert!(asked.is_empty(), "{asked:?}");
+    assert_eq!(
+        h.notices(&vcx),
+        ["import of region.csv was for region \u{2014} not applied"]
+    );
+}
+
+#[gpui::test]
+fn a_read_error_shows_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "x.csv");
+    h.answer_file(
+        &mut vcx,
+        &p,
+        TextFileResult::Read(Err("x.csv is not UTF-8 text".into())),
+    );
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notice_list(&vcx),
+        [Notice::danger("import failed: x.csv is not UTF-8 text")]
+    );
+}
+
+/// The file is authoritative for its own rows only: a label another
+/// surface wrote on an unrelated row while the question stood survives.
+#[gpui::test]
+fn the_confirm_applies_the_plan_over_the_current_object(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert!(h.confirm(&vcx).is_some());
+    const MOVED: &str = r#"
+[region]
+from = "underlying_ref"
+[region.values]
+Americas = ["SPX"]
+Europe = ["SX5E", "DAX"]
+Asia = ["HSI"]
+"#;
+    vcx.update(|_, cx| h.factory.set_config(config(MOVED), cx));
+    assert!(h.confirm(&vcx).is_some(), "the question stands");
+    vcx.simulate_keystrokes("y");
+    let both = region(&[
+        ("SPX", "Europe"),
+        ("SX5E", "Asia"),
+        ("NKY", "Asia"),
+        ("HSI", "Asia"),
+    ]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&both)]);
+}
+
+#[gpui::test]
+fn import_is_refused_while_a_revert_is_on_its_way(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(EDIT, &["region"], &[("region", Layer::Desk)]),
+        restored("region"),
+    );
+    let asked = h.distinct_requests();
+    h.deliver(
+        &mut vcx,
+        asked[0].tag,
+        "underlying_ref",
+        Ok(EDIT_VALUES.to_vec()),
+    );
+    let p = h.import(&mut vcx, "region.csv");
+    h.act(&mut vcx, "classifications::revert");
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.edits(&mut vcx), [removal("region")]);
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert!(h.confirm(&vcx).is_some());
+    vcx.simulate_keystrokes("y");
+    assert!(h.edits(&mut vcx).is_empty(), "nothing replaces the removal");
+    assert_eq!(h.notices(&vcx), ["reverting region\u{2026}"]);
+}
+
+/// A classification whose source column may not be mapped is never
+/// written, by an import as by a label verb.
+#[gpui::test]
+fn an_import_into_an_invalid_source_classification_is_never_written(cx: &mut gpui::TestAppContext) {
+    let bad = "[bad]\nfrom = \"delta\"\n[bad.values]\nX = [\"1\"]\n";
+    let (h, mut vcx) = open_with(cx, config(bad), restored("bad"));
+    let p = h.import(&mut vcx, "bad.csv");
+    h.read_as(&mut vcx, &p, "delta,bad\n2,Y\n");
+    assert!(h.confirm(&vcx).is_some());
+    vcx.simulate_keystrokes("y");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["not saved: 'delta' is not a groupable text column"]
+    );
+}
+
+#[gpui::test]
+fn import_with_nothing_shown_is_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, config(TWO), None);
+    h.act(&mut vcx, "classifications::cancel");
+    h.act(&mut vcx, IMPORT);
+    assert!(!vcx.did_prompt_for_paths());
+    assert_eq!(h.notices(&vcx), ["choose a classification to import into"]);
+}
+
+#[gpui::test]
+fn a_busy_service_refuses_the_import(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.act(&mut vcx, IMPORT);
+    h.data.fill_for_tests();
+    let asked = h.open_file(&mut vcx, "region.csv");
+    assert!(asked.is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["the data service is busy \u{2014} try again"]
+    );
 }

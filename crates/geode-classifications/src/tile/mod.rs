@@ -23,6 +23,10 @@
 //! Export CSV asks for a path in the platform's save dialog, awaited off
 //! the update, then asks the data tier to write the classification as the
 //! tile shows it; only the latest file operation's answer is acted on.
+//! Import CSV asks for a file in the open dialog, reads it through the data
+//! tier, plans it over the shown object and asks y/n with the counts; `y`
+//! applies the plan over the object shown then as one write and one undo
+//! step. Each step is bound to the classification the import began on.
 //!
 //! What paint reads is prepared in `Chrome` and the table's `Prepared`
 //! whenever the configuration, the values, the filter or the sort change,
@@ -37,6 +41,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use geode_core::classification;
+use geode_core::classification::import::{ImportPlan, MAX_IMPORT_BYTES, plan_import};
 use geode_core::classification::validate::{references, source_columns, validate_source};
 use geode_core::config::{DIMENSIONS_DOC, Layer};
 use geode_core::dimensions::DerivedDimension;
@@ -59,8 +64,8 @@ use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, MenuPick,
 use geode_tile::notice::Notice;
 use gpui::prelude::*;
 use gpui::{
-    AnchoredPositionMode, AnyWindowHandle, App, Context, Entity, Focusable as _, Pixels, Point,
-    SharedString, Window, anchored, div,
+    AnchoredPositionMode, AnyWindowHandle, App, Context, Entity, Focusable as _, PathPromptOptions,
+    Pixels, Point, SharedString, Window, anchored, div,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{TableEvent, TableState};
@@ -110,13 +115,27 @@ const REVERT_ACTION: &str = "classifications::revert";
 const REFRESH_ACTION: &str = "classifications::refresh";
 const EXPORT_ACTION: &str = "classifications::export";
 const EXPORT_ALL_ACTION: &str = "classifications::export_all";
+const IMPORT_ACTION: &str = "classifications::import";
 
 /// What an armed confirm does on `y`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pending {
-    Rename { from: String, to: String },
-    Delete { name: String },
-    Revert { name: String },
+    Rename {
+        from: String,
+        to: String,
+    },
+    Delete {
+        name: String,
+    },
+    Revert {
+        name: String,
+    },
+    /// Apply `plan`, read from `file`, to classification `name`.
+    Import {
+        name: String,
+        file: String,
+        plan: ImportPlan,
+    },
 }
 
 /// A create, rename or delete the tile has written and is showing ahead
@@ -863,6 +882,7 @@ impl ClassificationsTile {
         rows.push(Row::Separator);
         rows.push(row(EXPORT_ACTION, self.exportable(false).map(|_| ())));
         rows.push(row(EXPORT_ALL_ACTION, self.exportable(true).map(|_| ())));
+        rows.push(row(IMPORT_ACTION, self.importable().map(|_| ())));
         rows
     }
 
@@ -1018,7 +1038,12 @@ impl ClassificationsTile {
 
     /// A file operation's answer. One carrying any tag but the waiting
     /// operation's was overtaken (or already answered) and is dropped.
-    pub fn on_file(&mut self, outcome: TextFileOutcome, cx: &mut Context<Self>) {
+    pub fn on_file(
+        &mut self,
+        outcome: TextFileOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.file_op.as_ref().map(FileOp::tag) != Some(outcome.tag) {
             return;
         }
@@ -1032,15 +1057,189 @@ impl ClassificationsTile {
             (FileOp::Export { .. }, TextFileResult::Written(Err(why))) => {
                 Notice::danger(format!("export failed: {why}"))
             }
-            // A write answered as a read, or an import's answer: neither
-            // is an export's, and no import is asked for here.
-            (FileOp::Export { .. }, TextFileResult::Read(_)) | (FileOp::Import { .. }, _) => {
+            (FileOp::Import { name, path, .. }, TextFileResult::Read(read)) => {
+                return self.import_read(name, &path, read, window, cx);
+            }
+            // A write answered as a read or a read as a write: not the
+            // answer to what was asked.
+            (FileOp::Export { .. }, TextFileResult::Read(_))
+            | (FileOp::Import { .. }, TextFileResult::Written(_)) => {
                 return;
             }
         };
         self.notices.outcome.clear();
         self.notices.outcome(notice);
         self.rebuild_chrome();
+        cx.notify();
+    }
+
+    /// The shown classification when a file can be imported into it; else
+    /// why not.
+    fn importable(&self) -> Result<String, Blocked> {
+        self.shown().ok_or_else(|| Blocked {
+            short: NOTHING_SHOWN,
+            long: "choose a classification to import into".into(),
+        })
+    }
+
+    /// Import: ask which file to read. The dialog is awaited off the
+    /// update, and its answer is bound to the classification shown now. A
+    /// cancelled dialog does nothing.
+    fn ask_import_path(&mut self, cx: &mut Context<Self>) {
+        let name = match self.importable() {
+            Ok(name) => name,
+            Err(b) => return self.refuse(b.long, cx),
+        };
+        self.notices.outcome.clear();
+        self.rebuild_chrome();
+        cx.notify();
+        let answer = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = answer.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                this.update(cx, |t, cx| t.import_from(name, path, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Ask the data tier to read `path` for classification `name`. The
+    /// open dialog is modeless: another classification may be shown by
+    /// now, and the file is not read into it.
+    fn import_from(&mut self, name: String, path: PathBuf, cx: &mut Context<Self>) {
+        if self.shown().as_deref() != Some(name.as_str()) {
+            let file = files::file_name(&path);
+            return self.refuse(Notice::status(files::not_applied(&file, &name)), cx);
+        }
+        self.file_tag += 1;
+        let params = TextFileParams {
+            key: QueryKey(self.id.0),
+            tag: self.file_tag,
+            path: path.clone(),
+            op: TextFileOp::Read {
+                max_bytes: MAX_IMPORT_BYTES,
+            },
+        };
+        match self.data.text_file(params) {
+            Ok(()) => {
+                self.file_dir = path.parent().map(Path::to_path_buf);
+                self.file_op = Some(FileOp::Import {
+                    tag: self.file_tag,
+                    name,
+                    path,
+                });
+            }
+            Err(refusal) => self.refuse(busy_text(refusal), cx),
+        }
+    }
+
+    /// The file read for classification `name`: planned over the object
+    /// the tile shows, then asked about. Nothing is written until `y`;
+    /// a file that changes nothing or is refused whole asks nothing.
+    /// Rejected rows are listed whatever the plan.
+    fn import_read(
+        &mut self,
+        name: String,
+        path: &Path,
+        read: Result<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let file = files::file_name(path);
+        if self.shown().as_deref() != Some(name.as_str()) {
+            return self.refuse(Notice::status(files::not_applied(&file, &name)), cx);
+        }
+        let text = match read {
+            Ok(text) => text,
+            Err(why) => return self.refuse(format!("import failed: {why}"), cx),
+        };
+        let Some(config_dim) = self.config_dim() else {
+            return;
+        };
+        let plan = match plan_import(self.history.current(&config_dim), &text) {
+            Ok(plan) => plan,
+            Err(why) => return self.refuse(format!("import refused: {why}"), cx),
+        };
+        self.notices.outcome.clear();
+        if plan.is_noop() {
+            self.notices
+                .outcome(Notice::status(files::nothing_to_change(
+                    plan.rejected.len(),
+                )));
+        }
+        if !plan.rejected.is_empty() {
+            self.notices
+                .outcome(Notice::warning(files::rejected_notice(&plan.rejected)));
+        }
+        if !plan.is_noop() {
+            // The question takes the keyboard: a label field or a name
+            // prompt left open under it would no longer hold it.
+            self.release_editor(cx);
+            self.release_prompt(cx);
+            self.close_menu(cx);
+            self.sync_editor(cx);
+            let question = files::import_question(&file, &plan);
+            confirm::arm(
+                self,
+                Pending::Import { name, file, plan },
+                question,
+                window,
+                cx,
+            );
+        }
+        self.rebuild_chrome();
+        cx.notify();
+    }
+
+    /// `y` on an import: the plan applied over the object shown now (a
+    /// label written meanwhile on a row the file does not name stays), as
+    /// one write and one undo step, through the label verbs' gates.
+    fn apply_import(
+        &mut self,
+        name: String,
+        file: String,
+        plan: ImportPlan,
+        cx: &mut Context<Self>,
+    ) {
+        if self.shown().as_deref() != Some(name.as_str()) {
+            return self.refuse(Notice::status(files::not_applied(&file, &name)), cx);
+        }
+        if self.refuse_while_reverting(cx) {
+            return;
+        }
+        self.notices.outcome.clear();
+        let Some(config_dim) = self.config_dim() else {
+            return;
+        };
+        let checked = self.source_writable(&config_dim);
+        if let Err(why) = checked {
+            return self.refuse(format!("not saved: {why}"), cx);
+        }
+        let (next, entry) = plan.apply(self.history.current(&config_dim));
+        let rows = entry.changes.len();
+        if rows == 0 {
+            // Every row the file names already says what it says.
+            return self.refuse(Notice::status(files::nothing_to_change(0)), cx);
+        }
+        self.history.record(&config_dim, next.clone(), entry);
+        self.frame.queue_config_edits(
+            vec![ConfigEdit {
+                doc: DIMENSIONS_DOC,
+                object: config_dim.name.clone(),
+                value: Some(classification::to_toml(&next)),
+                origin: None,
+            }],
+            cx,
+        );
+        self.notices
+            .outcome(Notice::status(files::imported(rows, &name)));
+        self.rebuild_rows(true, cx);
         cx.notify();
     }
 
@@ -1125,6 +1324,16 @@ impl ClassificationsTile {
         Some(label_text(row).map(str::to_string))
     }
 
+    /// Whether the shown classification's source column is one a
+    /// classification may map. A hand-written definition over another
+    /// column is never written: the door would write it even when the
+    /// reload then rejected it.
+    fn source_writable(&self, config_dim: &DerivedDimension) -> Result<(), String> {
+        let config = self.shared.config.borrow();
+        let config = config.as_ref().expect("config_dim found it");
+        validate_source(&config_dim.from, &config.schema, &config.dims)
+    }
+
     /// Write one label change through the config door: validated, recorded
     /// in the history, queued whole-object, and shown at once (the pending
     /// edit) ahead of the reload that carries it. A classification whose
@@ -1139,11 +1348,7 @@ impl ClassificationsTile {
         let Some(config_dim) = self.config_dim() else {
             return;
         };
-        let checked = {
-            let config = self.shared.config.borrow();
-            let config = config.as_ref().expect("config_dim found it");
-            validate_source(&config_dim.from, &config.schema, &config.dims)
-        };
+        let checked = self.source_writable(&config_dim);
         if let Err(why) = checked {
             self.notices
                 .outcome(Notice::danger(format!("not saved: {why}")));
@@ -1942,6 +2147,10 @@ impl ClassificationsTile {
                 self.close_menu(cx);
                 self.ask_export_path(action.0 == EXPORT_ALL_ACTION, cx);
             }
+            IMPORT_ACTION => {
+                self.close_menu(cx);
+                self.ask_import_path(cx);
+            }
             // The classification's own verbs, from the palette or the menu.
             NEW_ACTION => {
                 self.close_menu(cx);
@@ -2332,6 +2541,7 @@ impl ConfirmHost for ClassificationsTile {
                     cx,
                 );
             }
+            Pending::Import { name, file, plan } => self.apply_import(name, file, plan, cx),
             Pending::Revert { name } => {
                 self.notices.outcome.clear();
                 self.frame.queue_config_edits(vec![remove_edit(&name)], cx);
@@ -2348,6 +2558,7 @@ impl ConfirmHost for ClassificationsTile {
             Pending::Rename { from, .. } => format!("{from} not renamed"),
             Pending::Delete { name } => format!("{name} not deleted"),
             Pending::Revert { name } => format!("{name} not reverted"),
+            Pending::Import { file, .. } => format!("{file} not imported"),
         };
         self.notices.outcome.clear();
         self.notices.outcome(Notice::status(said));
