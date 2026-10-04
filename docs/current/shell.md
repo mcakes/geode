@@ -1266,6 +1266,26 @@ already open, closes). The page keeps whatever section it was showing.
 threads; the segment's tooltip is where the reason is read, and the
 segment stays on the status bar whatever the page shows.
 
+### The store-waiting segment
+
+While the app's store open waits for the background collector to hand the
+store over ([the app's open](data-path.md)), the status bar's left side
+shows `store: waiting for collector`, after the stopped segment and before the
+count prefix. It is muted, like ingestion activity: the open is progressing,
+not failing. Its tooltip reads `the background collector (PID n) is handing
+the store over`, without the PID when DuckDB named none. It has no click
+action and nothing to act on, so it needs no keyboard route.
+
+`Diagnostics::note_store_waiting` (from `DataEvent::StoreWaiting`) records the
+wait and prepares the `StoreWaitingSegment` text and tooltip;
+`note_store_opened` (from `StoreOpened`) clears both and advances the version
+only when a wait was recorded. Both events share one mailbox key, so a burst
+that ends in `StoreOpened` shows nothing. A wait that fails ends in the
+request loop's `ThreadStopped` instead: `note_thread_stopped` for `geode-data`
+clears the wait, and the danger stopped segment carries the lease error
+(`another Geode window has this store open`, or `the background collector did
+not release the store within 15 s (PID n)`) in its tooltip.
+
 `Diagnostics::refused` holds the data handle's cumulative count of `Busy`
 refusals since launch (submissions turned away by a full request queue);
 `Stopped` refusals are not counted: they describe a service that is gone,

@@ -17,8 +17,8 @@ use geode_core::view::ViewSpec;
 use geode_data::adapter::AdapterRegistry;
 use geode_data::source::SourceSpec;
 use geode_data::{
-    DataEvent, DataHandle, DataService, DataServiceConfig, EventSink, PricerConfig, PricerRegistry,
-    Refusal, VolConfig, VolModelRegistry,
+    DEFAULT_STORE_DEADLINE, DataEvent, DataHandle, DataService, DataServiceConfig, EventSink,
+    PricerConfig, PricerRegistry, Refusal, StoreRole, VolConfig, VolModelRegistry,
 };
 use geode_marketdata::MarketDataFactory;
 use geode_pricer::content::{PayoutSource, PricerFactory, PricerSettings, UnderlyingList};
@@ -684,7 +684,17 @@ pub fn start(
             .collect(),
     );
     let positions_configured = setup.config.positions.is_some();
-    let handle = DataService::spawn(setup.config, sink);
+    // Through the lease: while the background collector holds the store the
+    // open waits up to `DEFAULT_STORE_DEADLINE` for its handoff (the
+    // `store-waiting` status segment), and a second window on the same store
+    // is refused instead of sharing the writer.
+    let handle = DataService::spawn_as(
+        setup.config,
+        sink,
+        StoreRole::App {
+            deadline: DEFAULT_STORE_DEADLINE,
+        },
+    );
     // Both factories receive the same startup colors and later reload updates.
     let timeseries = Rc::new(geode_timeseries::content::TimeseriesFactory::new(
         handle.clone(),
@@ -8972,6 +8982,92 @@ grain = "underlying"
         assert_eq!(
             diagnostics.read_with(&vcx, |d, _| d.stopped_segment().map(|s| s.text.to_string())),
             Some("ingest stopped".to_string())
+        );
+    }
+
+    /// The store-waiting segment through the production drain: shown by
+    /// `StoreWaiting`, cleared by `StoreOpened`.
+    #[gpui::test]
+    fn store_events_show_then_clear_the_waiting_segment(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        let segment = |vcx: &gpui::VisualTestContext| {
+            diagnostics.read_with(vcx, |d, _| {
+                d.store_waiting_segment().map(|s| s.text.to_string())
+            })
+        };
+        f.events
+            .try_send(DataEvent::StoreWaiting { holder: Some(812) })
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            segment(&vcx),
+            Some("store: waiting for collector".to_string())
+        );
+        f.events.try_send(DataEvent::StoreOpened).unwrap();
+        vcx.run_until_parked();
+        assert_eq!(segment(&vcx), None, "the open clears the segment");
+    }
+
+    /// Both store events in one burst share `Key::Store`: the late
+    /// `StoreOpened` replaces the pending `StoreWaiting`, so no segment
+    /// is ever shown.
+    #[gpui::test]
+    fn a_store_burst_that_ends_opened_shows_no_segment(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        f.events
+            .try_send(DataEvent::StoreWaiting { holder: Some(812) })
+            .unwrap();
+        f.events.try_send(DataEvent::StoreOpened).unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.store_waiting_segment().cloned()),
+            None
+        );
+    }
+
+    /// A failed wait ends with the request loop's `ThreadStopped`: the
+    /// waiting segment gives way to the stopped segment carrying the lease
+    /// error.
+    #[gpui::test]
+    fn a_failed_store_wait_hands_the_bar_to_the_stopped_segment(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        f.events
+            .try_send(DataEvent::StoreWaiting { holder: Some(812) })
+            .unwrap();
+        vcx.run_until_parked();
+        assert!(diagnostics.read_with(&vcx, |d, _| d.store_waiting_segment().is_some()));
+        let reason = "the background collector did not release the store within 15 s (PID 812)";
+        f.events
+            .try_send(DataEvent::ThreadStopped {
+                thread: "geode-data".into(),
+                reason: reason.into(),
+            })
+            .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.store_waiting_segment().cloned()),
+            None
+        );
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d
+                .stopped_segment()
+                .map(|s| s.detail.to_string())),
+            Some(reason.to_string())
         );
     }
 

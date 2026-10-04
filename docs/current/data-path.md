@@ -157,6 +157,10 @@ the lease as its last field, so it is released only after the writer and
 every reader connection have closed, on shutdown and on an unwind alike: a
 collector that sees the lock free can open the file at once. The app mailbox
 keys both store events on one key, so an open replaces a pending wait.
+The app (`bridge::start`) always opens this way, with
+`DEFAULT_STORE_DEADLINE`; tests and tools that own their store use `spawn`.
+While the wait lasts the status bar shows `store: waiting for collector`; see
+[the store-waiting segment](shell.md#the-store-waiting-segment).
 
 ### The request loop
 

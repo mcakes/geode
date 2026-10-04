@@ -1335,6 +1335,31 @@ run_mutation "open-with-wait: a stop ends the wait" \
   geode-data \
   stopping_while_waiting_returns_promptly
 
+# The store-waiting status segment (geode-shell diagnostics.rs, status.rs),
+# reached through the app's event drain: the open clears it, a failed wait
+# (the request loop's ThreadStopped) hands the bar to the stopped segment,
+# and the bar paints it only while the open waits.
+run_mutation "store segment: opened clears it" \
+  crates/geode-shell/src/diagnostics.rs \
+  $'        if self.store_waiting.take().is_some() {\n            self.store_waiting_segment = None;\n            self.version += 1;\n        }' \
+  '' \
+  geode-app \
+  store_events_show_then_clear_the_waiting_segment
+
+run_mutation "store segment: a stopped request loop ends the wait" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if thread == REQUEST_LOOP {' \
+  '        if false {' \
+  geode-app \
+  a_failed_store_wait_hands_the_bar_to_the_stopped_segment
+
+run_mutation "store segment: the status bar paints it" \
+  crates/geode-shell/src/shell/status.rs \
+  '    if let Some(segment) = store_waiting {' \
+  '    if let Some(segment) = store_waiting.filter(|_| false) {' \
+  geode-shell \
+  the_store_waiting_segment_paints_only_while_the_open_waits
+
 # The store lease (lease.rs). The app and the collector hand the store over
 # through lock files; a probe must not read as a second app, a stop must end
 # the wait, and only DuckDB's own lock conflict is waited out.

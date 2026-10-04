@@ -20,7 +20,7 @@ use gpui_component::{
 use super::chip;
 use super::control::{self, PointerStates as _};
 use super::scale;
-use crate::diagnostics::{IngestActivity, StoppedSegment};
+use crate::diagnostics::{IngestActivity, StoppedSegment, StoreWaitingSegment};
 use crate::fonts;
 use crate::keymap::Keystroke;
 
@@ -79,7 +79,8 @@ pub fn following_label(group: Group, underlying: Option<&str>) -> SharedString {
     }
 }
 
-/// Render optional status segments in order: stopped data threads, count, nonempty
+/// Render optional status segments in order: stopped data threads, the store
+/// open waiting for the background collector, count, nonempty
 /// pending keys, reload failure, write failure, restart requirement, shell notice,
 /// diagnostics summary, ingestion activity, and historical time on the left;
 /// following, fullscreen, then the theme name, on the right. The following segment
@@ -89,7 +90,7 @@ pub fn following_label(group: Group, underlying: Option<&str>) -> SharedString {
 /// a main-tree tile is maximised, carrying the number of tiles it hides; clicking it
 /// restores the layout through the supplied callback. Stopped threads and
 /// configuration errors use danger, restart and diagnostics use warning, and ordinary
-/// notices are muted. Clicks on the stopped segment and the diagnostics summary both
+/// notices, ingestion activity and the store wait are muted. Clicks on the stopped segment and the diagnostics summary both
 /// invoke the supplied diagnostics callback. The historical badge requires both the shortened and
 /// full timestamps; its tooltip shows the full timestamp. Inputs remain separate
 /// because callers already hold these values independently.
@@ -106,6 +107,10 @@ pub fn status_bar(
     // Stopped data threads, prepared by `Diagnostics::note_thread_stopped`;
     // None while every data thread lives.
     stopped: Option<&StoppedSegment>,
+    // The store open waiting for the background collector, prepared by
+    // `Diagnostics::note_store_waiting`; None once the store opened or the
+    // open failed.
+    store_waiting: Option<&StoreWaitingSegment>,
     diagnostics_summary: Option<&SharedString>,
     on_diagnostics_click: impl Fn(&mut Window, &mut App) + Clone + 'static,
     // Current ingestion activity, shown as a loading label and a two-pixel strip along
@@ -165,6 +170,25 @@ pub fn status_bar(
                 .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                     stopped_click(window, cx);
                 }),
+        );
+    }
+    if let Some(segment) = store_waiting {
+        // Muted, like ingest loading: the open is progressing, not failing.
+        // A failed wait arrives as the stopped segment above instead. No
+        // click: there is nothing to act on, and a pointer action would need
+        // a keyboard route. The tooltip names who holds the store.
+        bar = bar.left(
+            div()
+                .id("store-waiting")
+                .text_color(theme.muted_foreground)
+                .debug_selector(|| "store-waiting".to_string())
+                .child(segment.text.clone())
+                .tooltip(crate::tips::tip_with(
+                    SharedString::new_static("tip-store-waiting"),
+                    segment.detail.clone(),
+                    None,
+                    None,
+                )),
         );
     }
     if let Some(count) = count {
