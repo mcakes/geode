@@ -2,6 +2,7 @@
 name = "geode-shell"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [lib]

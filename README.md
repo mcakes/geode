@@ -167,3 +167,10 @@ targets and automatically saved pricer sheets. There are no production vendor
 adapters; demo sources exercise each supported source
 shape. Some recent UI paths still need real-window display checks. The current
 subsystem guides record their specific limitations.
+
+## License
+
+Geode is licensed under the [MIT License](LICENSE).
+Bundled [fonts](assets/fonts/README.md) and adapted
+[themes](assets/themes/README.md) retain their respective upstream licenses
+and notices.
