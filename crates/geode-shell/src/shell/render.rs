@@ -23,8 +23,8 @@ use super::drag::{
     DividerDrag, DividerDragTarget, StripSpec, TILE_DRAG_GHOST_OFFSET, TILE_DRAG_GHOST_SIZE,
 };
 use super::{
-    ShellView, asof_view, choicedialog, commandline_view, dialog, objectdialog, perf_overlay,
-    picker, scope_expr_view, sidebar, stacklist, status, toolbar, whichkey,
+    ShellView, asof_view, commandline_view, dialog, objectdialog, perf_overlay, picker,
+    scope_expr_view, sidebar, stacklist, status, toolbar, whichkey,
 };
 
 /// Shared hover-group name for divider strips. GPUI resolves each line
@@ -418,12 +418,12 @@ impl Render for ShellView {
                 objectdialog::render::open_save_scope(view, window, cx);
             });
         };
-        // The scope bar's load glyph opens the saved-scope chooser;
-        // `frame::scope`/`mod+o` opens the Scope dialog instead.
+        // The scope bar's load glyph opens the Scope dialog's Saved screen,
+        // the mouse form of `frame::scope_saved`.
         let load_chip_entity = cx.entity();
         let on_load = move |window: &mut Window, cx: &mut App| {
             load_chip_entity.update(cx, |view, cx| {
-                choicedialog::open_scopes(view, window, cx);
+                super::scopedialog::view::open_saved(view, window, cx);
             });
         };
         // The grouping readout's click — the mouse form of
@@ -501,11 +501,12 @@ impl Render for ShellView {
                         parked.state.domain == objectdialog::Domain::Groupings
                     })
                 });
-        // The load glyph holds its pressed fill while the saved-scope chooser is up.
-        let scope_open = matches!(
-            self.choice_dialog.as_ref().map(|d| &d.target),
-            Some(choicedialog::Target::Scope { .. })
-        );
+        // The load glyph holds its pressed fill while the Saved screen is
+        // the Scope dialog's top layer.
+        let scope_open = self
+            .scope_dialog
+            .as_ref()
+            .is_some_and(super::scopedialog::saved_view::in_saved);
         // The pin glyph names the active workspace, whose tiles are the
         // ones on screen, not a dialog's target.
         let ws = self.active_ix();

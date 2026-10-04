@@ -1,8 +1,9 @@
 //! The Scope dialog's Current screen: the lane's scope as rows by
 //! ingredient, refreshed when the frame changes under it. Steps that exist
 //! as their own modals (the dimension picker, the expression dialog, the
-//! saved-scope chooser, the save prompt) are pushed over this one; their
-//! commits pop back here. The text step is drawn here.
+//! save prompt) are pushed over this one; their commits pop back here. The
+//! text step is drawn here; the Saved screen (`saved_view`) is a layer of
+//! this dialog, and keys and paint route to it while it is on top.
 
 use std::rc::Rc;
 
@@ -26,7 +27,7 @@ use crate::frame::FrameViewMut;
 use crate::shell::control::{self, PointerStates as _};
 use crate::shell::{ShellView, dialog, scale};
 
-const WIDTH: f32 = 560.0;
+pub(super) const WIDTH: f32 = 560.0;
 const ROW_HEIGHT: f32 = 28.0;
 /// The glyph column: wide enough for one glyph, so labels line up by kind.
 const GLYPH_WIDTH: f32 = 16.0;
@@ -120,6 +121,9 @@ pub(crate) struct ScopeDialogState {
     pub text_draft: String,
     /// The last refusal (an inline that could not resolve, a term that moved).
     pub error: Option<String>,
+    /// The Saved screen's rows, filter and cursor; derived with `rows`
+    /// under the same key.
+    pub saved: super::saved_view::SavedScreen,
 }
 
 /// What the rows read: the frame generation (every lane value change) and
@@ -129,9 +133,9 @@ pub(crate) fn rows_key(frame: &Frame) -> (u64, u64) {
 }
 
 impl ScopeDialogState {
-    fn new() -> Self {
+    fn new(first: Layer) -> Self {
         ScopeDialogState {
-            layers: Layers::open(Layer::Current),
+            layers: Layers::open(first),
             rows: CurrentRows::default(),
             display: Vec::new(),
             title: None,
@@ -141,6 +145,7 @@ impl ScopeDialogState {
             cursor_id: None,
             text_draft: String::new(),
             error: None,
+            saved: super::saved_view::SavedScreen::new(),
         }
     }
 
@@ -149,7 +154,7 @@ impl ScopeDialogState {
     }
 
     pub(crate) fn is_current(&self, key: (u64, u64)) -> bool {
-        self.key == key
+        self.key == key && self.saved.key == key
     }
 
     pub(crate) fn refresh(
@@ -172,6 +177,7 @@ impl ScopeDialogState {
         self.cursor = at;
         self.cursor_id = self.rows.rows.get(at).map(|r| r.id.clone());
         self.key = key;
+        self.saved.refresh(saved, named, scope, key);
     }
 }
 
@@ -179,11 +185,14 @@ pub(crate) fn in_text_step(state: &ScopeDialogState) -> bool {
     matches!(state.layers.top(), Layer::Step(Step::Text))
 }
 
-/// The Change arm's pure half: only the text step types.
+/// The Change arm's pure half: the text step's draft, or the Saved
+/// screen's filter while it is filtering. Current ignores the field.
 pub(crate) fn on_query_changed(state: &mut ScopeDialogState, text: &str) {
     if in_text_step(state) {
         state.text_draft = text.to_string();
         state.error = None;
+    } else if super::saved_view::filtering(state) {
+        state.saved.set_query(text);
     }
 }
 
@@ -191,10 +200,34 @@ pub(crate) fn on_query_changed(state: &mut ScopeDialogState, text: &str) {
 /// when the dialog is already on top; refused with a notice when it is lower
 /// in the stack (`dialog::can_open`).
 pub(crate) fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    open_on(view, Layer::Current, window, cx);
+}
+
+/// Open on the Saved screen (`frame::scope_saved`, the load glyph,
+/// `config::scopes`, `config::expressions`). Saved is the bottom layer, so
+/// a commit or `escape` closes the dialog. With the dialog already on top
+/// on Current, Saved is pushed over it instead, as `o` does; on any other
+/// layer this is a no-op.
+pub(crate) fn open_saved(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    if view.top_kind() == Some(dialog::DialogKind::Scope) {
+        if let Some(state) = view.scope_dialog.as_mut()
+            && matches!(state.layers.top(), Layer::Current)
+        {
+            super::saved_view::push(state);
+            view.refresh_dialog_rows(cx);
+            dialog::sync_dialog_text(view, window, cx);
+            cx.notify();
+        }
+        return;
+    }
+    open_on(view, Layer::Saved, window, cx);
+}
+
+fn open_on(view: &mut ShellView, first: Layer, window: &mut Window, cx: &mut Context<ShellView>) {
     if !dialog::can_open(view, dialog::DialogKind::Scope) {
         return;
     }
-    view.scope_dialog = Some(ScopeDialogState::new());
+    view.scope_dialog = Some(ScopeDialogState::new(first));
     let entity = cx.entity();
     dialog::open_shell_dialog_with_key(
         view,
@@ -213,7 +246,7 @@ pub(crate) fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<S
 /// is edited, not the shared lane) and notify when the frame generation
 /// moved: a provenance-only change (a clear of an empty scope) moves it too,
 /// and a notify keyed on the method's boolean would leave observers stale.
-fn edit_lane<R>(
+pub(super) fn edit_lane<R>(
     shell: &mut ShellView,
     cx: &mut Context<ShellView>,
     edit: impl FnOnce(&mut FrameViewMut) -> R,
@@ -239,6 +272,9 @@ fn handle_key(
     };
     if in_text_step(state) {
         return text_step_key(shell, ks, window, cx);
+    }
+    if super::saved_view::in_saved(state) {
+        return super::saved_view::handle_key(shell, ks, window, cx);
     }
     // The error describes the last action only: every claimed key drops it,
     // and the refusing action sets it again. An unclaimed key puts it back.
@@ -274,8 +310,9 @@ fn handle_key(
             return true;
         }
         ("o", true, false) => {
-            crate::shell::choicedialog::open_scopes(shell, window, cx);
-            return true;
+            if let Some(state) = shell.scope_dialog.as_mut() {
+                super::saved_view::push(state);
+            }
         }
         ("s", true, false) => {
             crate::shell::objectdialog::render::open_save_scope(shell, window, cx);
@@ -624,6 +661,9 @@ fn build(
     let Some(state) = shell.scope_dialog.as_ref() else {
         return div().into_any_element();
     };
+    if super::saved_view::in_saved(state) {
+        return super::saved_view::build(shell, state, entity, cx);
+    }
     let theme = cx.theme();
     let paint = crate::shell::listrow::row_paint(theme);
     let muted = theme.muted_foreground;
@@ -871,7 +911,7 @@ fn hints(shell: &ShellView, state: &ScopeDialogState) -> Vec<Hint> {
     }
     hints.extend([
         Hint::new(HintRow::Go, &["enter"], "edit row").selector("scope-dialog-hint-edit-row"),
-        Hint::new(HintRow::Go, &["o"], "saved scopes…"),
+        Hint::new(HintRow::Go, &["o"], "saved…"),
         Hint::new(HintRow::Go, &["s"], "save as…"),
         Hint::new(HintRow::Go, &["escape"], "close"),
     ]);

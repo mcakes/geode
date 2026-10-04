@@ -6,5 +6,6 @@
 
 pub(crate) mod rows;
 pub(crate) mod saved;
+pub(crate) mod saved_view;
 pub(crate) mod state;
 pub(crate) mod view;

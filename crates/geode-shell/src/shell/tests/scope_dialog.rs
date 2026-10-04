@@ -566,17 +566,27 @@ fn mod_s_on_a_term_opens_its_name_entry(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn o_and_s_push_the_saved_chooser_and_the_save_prompt(cx: &mut gpui::TestAppContext) {
+fn o_pushes_saved_and_s_pushes_the_save_prompt(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_on(cx, rich_scope());
     vcx.simulate_keystrokes("o");
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.top_kind()),
-        Some(dialog::DialogKind::Choice)
+        Some(dialog::DialogKind::Scope)
     );
+    let top = |shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext| {
+        shell.read_with(vcx, |s, _| {
+            s.scope_dialog.as_ref().map(|d| d.layers.top().clone())
+        })
+    };
+    assert_eq!(
+        top(&shell, &vcx),
+        Some(crate::shell::scopedialog::state::Layer::Saved)
+    );
+    draw(&mut vcx);
     vcx.simulate_keystrokes("enter"); // loads `eu`
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.top_kind()),
-        Some(dialog::DialogKind::Scope)
+        top(&shell, &vcx),
+        Some(crate::shell::scopedialog::state::Layer::Current)
     );
     assert_eq!(lane_scope(&shell, &vcx).sole("book"), Some("BK001"));
     draw(&mut vcx);

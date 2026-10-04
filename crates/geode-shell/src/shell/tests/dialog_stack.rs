@@ -245,7 +245,7 @@ fn accept_in_a_pushed_dialog_does_not_touch_a_covered_object_draft(cx: &mut gpui
         cx,
         super::objectdialog::services_with_a_saved_scope(),
         dir.path(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     super::objectdialog::open_expression_field(&shell, &mut vcx);
     vcx.simulate_input("boo");
@@ -391,7 +391,7 @@ fn a_dialog_chord_pushes_over_the_object_edit_stage(cx: &mut gpui::TestAppContex
     let (shell, mut vcx) = dialog_test_shell_with(
         cx,
         super::objectdialog::services_with_a_saved_scope(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     vcx.simulate_keystrokes("enter"); // open `mine`'s edit stage
     assert_eq!(
@@ -646,7 +646,7 @@ fn a_click_on_a_dialog_row_under_the_palette_does_not_open_it(cx: &mut gpui::Tes
     let (shell, mut vcx) = dialog_test_shell_with(
         cx,
         super::objectdialog::services_with_a_saved_scope(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     let row = vcx
         .debug_bounds("objectdialog-row-mine")

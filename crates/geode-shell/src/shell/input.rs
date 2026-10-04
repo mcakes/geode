@@ -362,16 +362,16 @@ impl ShellView {
             objectdialog::render::open(self, objectdialog::Domain::Views, window, cx);
         } else if action.0 == "config::groupings" {
             objectdialog::render::open(self, objectdialog::Domain::Groupings, window, cx);
-        } else if action.0 == "config::scopes" {
-            objectdialog::render::open(self, objectdialog::Domain::Scopes, window, cx);
+        } else if action.0 == "config::scopes" || action.0 == "config::expressions" {
+            // Saved scopes and expressions are managed on the Scope dialog's
+            // Saved screen; the palette titles stay where traders look.
+            super::scopedialog::view::open_saved(self, window, cx);
         } else if action.0 == "config::schema" {
             objectdialog::render::open(self, objectdialog::Domain::Schema, window, cx);
         } else if action.0 == "config::sources" {
             objectdialog::render::open(self, objectdialog::Domain::Sources, window, cx);
         } else if action.0 == "config::colors" {
             objectdialog::render::open(self, objectdialog::Domain::Colors, window, cx);
-        } else if action.0 == "config::expressions" {
-            objectdialog::render::open(self, objectdialog::Domain::Expressions, window, cx);
         } else if action.0 == "config::view_column" {
             // Pull the focused tile's columns now; the list keeps this copy.
             choicedialog::open_columns(self, objectdialog::Domain::Views, window, cx);
@@ -504,6 +504,10 @@ impl ShellView {
         } else if action.0 == "frame::scope" {
             // The Scope dialog on Current: the lane's scope by ingredient.
             super::scopedialog::view::open(self, window, cx);
+        } else if action.0 == "frame::scope_saved" {
+            // The Scope dialog on its Saved screen, one-shot: a load, a
+            // toggle or `escape` closes it.
+            super::scopedialog::view::open_saved(self, window, cx);
         } else if action.0 == "frame::as_of" {
             // Open the as-of selector.
             asof_view::open(self, window, cx);

@@ -18231,50 +18231,33 @@ run_mutation "scope-picker: the highlight opens on the current scope" \
   geode-shell \
   the_scope_equal_to_the_current_one_is_lit
 
-run_mutation "scope-picker: enter on an untouched picker keeps the current scope" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '        list.place(active);' \
-  '        list.place(None);' \
-  geode-shell \
-  the_picker_opens_on_the_current_scope_and_enter_keeps_it
-
-# A pick loads through `load_saved_scope` (one undoable `set_scope` step);
-# applying the saved scope and dropping the history is not undoable.
-run_mutation "scope-picker: a pick loads through the undoable load_saved_scope" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '            if shell.load_saved_scope(&name, cx).is_err() {' \
-  '            if shell
-                .target_frame()
-                .update(cx, |f, _| {
-                    let s = f.saved_scopes().get(&name).cloned();
-                    s.map(|s| {
-                        f.set_scope(s);
-                        f.clear_history();
-                    })
+# A Saved scope loads through `load_saved_scope` (one undoable `set_scope`
+# step that records its source); applying the saved scope and dropping the
+# history is not undoable.
+run_mutation "scope dialog: a Saved scope loads through the undoable load_saved_scope" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        SavedId::Scope(name) => shell.load_saved_scope(name, cx).err().map(|_| SCOPE_GONE),' \
+  '        SavedId::Scope(name) => shell
+            .target_frame()
+            .update(cx, |f, _| {
+                let s = f.saved_scopes().get(name.as_str()).cloned();
+                s.map(|s| {
+                    f.set_scope(s);
+                    f.clear_history();
                 })
-                .is_none()
-            {' \
+            })
+            .is_none()
+            .then_some(SCOPE_GONE),' \
   geode-shell \
-  the_load_glyph_then_typing_and_enter_loads_the_scope_undoably
+  enter_on_a_scope_loads_it_and_returns_to_current
 
-# A name gone since the open loads nothing AND says so.
-run_mutation "scope-picker: a vanished scope is reported on the status bar" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '            if shell.load_saved_scope(&name, cx).is_err() {' \
-  '            if shell.load_saved_scope(&name, cx).is_err() && false {' \
-  geode-shell \
-  picking_a_scope_removed_under_the_picker_says_so
-
-# The rows are the frame's LIVE saved scopes, not the configuration as
+# The Saved rows are the frame's LIVE saved scopes, not the configuration as
 # loaded (which a scope saved or reloaded into the frame since has not
 # reached).
-run_mutation "scope-picker: rows are the frame's live saved scopes" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '        ChoiceDialogState::scopes(frame.saved_scopes(), frame.scope())' \
-  '        ChoiceDialogState::scopes(
-            &super::hot_reload::rebuild_saved_scopes(&view.services.config, false),
-            frame.scope(),
-        )' \
+run_mutation "scope dialog: Saved rows are the frame's live saved scopes" \
+  crates/geode-shell/src/shell/rows.rs \
+  '                    view.saved_scopes(),' \
+  '                    &super::hot_reload::rebuild_saved_scopes(&self.services.config, false),' \
   geode-shell \
   a_scope_saved_after_startup_is_listed_and_loads
 
@@ -18358,13 +18341,19 @@ run_mutation "scope dialog: mod+s names a term" \
   geode-shell \
   mod_s_on_a_term_opens_its_name_entry
 
-# o pushes the saved-scope chooser.
-run_mutation "scope dialog: o pushes the saved chooser" \
+# o pushes the Saved screen over Current.
+run_mutation "scope dialog: o pushes the Saved screen" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
-  '            crate::shell::choicedialog::open_scopes(shell, window, cx);' \
-  '' \
+  '        ("o", true, false) => {
+            if let Some(state) = shell.scope_dialog.as_mut() {
+                super::saved_view::push(state);
+            }' \
+  '        ("o", true, false) => {
+            if let Some(state) = shell.scope_dialog.as_mut() {
+                let _ = state;
+            }' \
   geode-shell \
-  o_and_s_push_the_saved_chooser_and_the_save_prompt
+  o_opens_saved_with_scopes_then_expressions_in_name_order
 
 # s pushes the save prompt.
 run_mutation "scope dialog: s pushes the save prompt" \
@@ -18372,7 +18361,7 @@ run_mutation "scope dialog: s pushes the save prompt" \
   '            crate::shell::objectdialog::render::open_save_scope(shell, window, cx);' \
   '' \
   geode-shell \
-  o_and_s_push_the_saved_chooser_and_the_save_prompt
+  o_pushes_saved_and_s_pushes_the_save_prompt
 
 # A row's double-click opens the step that edits it, as enter does.
 run_mutation "scope dialog: a row double-click acts as enter" \
@@ -18498,37 +18487,199 @@ run_mutation "scope dialog: escape leaves the text step untouched" \
   geode-shell \
   escape_leaves_the_text_step_without_a_change
 
-# The toolbar's load glyph opens the saved-scope chooser.
-run_mutation "scope-picker: the load glyph click opens the picker" \
+# ---- Scope dialog: the Saved screen and its doors ----
+
+# The toolbar's load glyph opens the Scope dialog on its Saved screen.
+run_mutation "scope dialog: the load glyph opens Saved" \
   crates/geode-shell/src/shell/render.rs \
-  '                choicedialog::open_scopes(view, window, cx);' \
+  '                super::scopedialog::view::open_saved(view, window, cx);' \
   '                let _ = (view, window, cx);' \
   geode-shell \
-  clicking_the_load_glyph_opens_a_typeable_picker
+  the_load_glyph_opens_saved_alone_and_enter_closes
 
-# The load glyph reads pressed while its picker is up.
-run_mutation "scope-picker: the load glyph holds its pressed state while open" \
+# The load glyph reads pressed while Saved is up.
+run_mutation "scope dialog: the load glyph holds its pressed state while Saved is up" \
   crates/geode-shell/src/shell/toolbar.rs \
   '            scope_open.then_some("scope-load-chip-open"),' \
   '            None,' \
   geode-shell \
-  clicking_the_load_glyph_opens_a_typeable_picker
+  the_load_glyph_opens_saved_alone_and_enter_closes
 
-# With no saved scope the list gives way to the how-to-save hint.
-run_mutation "scope-picker: an empty set paints the save hint" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '    let body = if no_scopes {' \
-  '    let body = if false {' \
+# The pressed state is "Saved is the Scope dialog's top layer".
+run_mutation "scope dialog: the load glyph's pressed state reads the top layer" \
+  crates/geode-shell/src/shell/render.rs \
+  '            .is_some_and(super::scopedialog::saved_view::in_saved);' \
+  '            .is_some_and(|_| false);' \
   geode-shell \
-  with_no_saved_scopes_the_picker_says_how_to_save_one
+  the_load_glyph_opens_saved_alone_and_enter_closes
 
-# With no saved scope Enter is inert, so the footer offers only Escape.
-run_mutation "scope-picker: an empty set's footer drops enter" \
-  crates/geode-shell/src/shell/choicedialog.rs \
-  '        ("scope-empty-hints", SCOPE_EMPTY_HINTS)' \
-  '        (hints_selector, hints)' \
+# frame::scope_saved is the Saved screen's own action.
+run_mutation "scope dialog: frame::scope_saved opens Saved" \
+  crates/geode-shell/src/shell/input.rs \
+  '            // toggle or `escape` closes it.
+            super::scopedialog::view::open_saved(self, window, cx);' \
+  '            // toggle or `escape` closes it.
+            let _ = window;' \
   geode-shell \
-  with_no_saved_scopes_the_picker_says_how_to_save_one
+  config_scopes_and_config_expressions_open_saved
+
+# config::expressions opens Saved as config::scopes does.
+run_mutation "scope dialog: config::expressions opens Saved" \
+  crates/geode-shell/src/shell/input.rs \
+  '        } else if action.0 == "config::scopes" || action.0 == "config::expressions" {' \
+  '        } else if action.0 == "config::scopes" {' \
+  geode-shell \
+  config_scopes_and_config_expressions_open_saved
+
+# The dialog-opener list holds frame::scope_saved with the dispatch arm.
+run_mutation "scope dialog: frame::scope_saved is listed as a dialog opener" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '            | "frame::scope"
+            | "frame::scope_saved"' \
+  '            | "frame::scope"' \
+  geode-shell \
+  opens_dialog_matches_what_dispatch_pushes
+
+# The Saved rows derive with Current's under one key.
+run_mutation "scope dialog: a refresh derives the Saved rows" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        self.saved.refresh(saved, named, scope, key);' \
+  '' \
+  geode-shell \
+  o_opens_saved_with_scopes_then_expressions_in_name_order
+
+# An applied expression paints its tag.
+run_mutation "scope dialog: an applied expression paints its tag" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '                .when(shown.applied, |el| {' \
+  '                .when(false, |el| {' \
+  geode-shell \
+  o_opens_saved_with_scopes_then_expressions_in_name_order
+
+# A section with no saved definition paints its empty row.
+run_mutation "scope dialog: an empty Saved section paints its empty row" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        if screen.section_is_empty(section) {' \
+  '        if false {' \
+  geode-shell \
+  an_empty_section_paints_its_empty_row
+
+# The filter decides membership only: rows go back into row order, so the
+# sections and their name order hold.
+run_mutation "scope dialog: the Saved filter keeps sections in row order" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        matched.sort_by_key(|m| m.row);' \
+  '' \
+  geode-shell \
+  the_filter_keeps_sections_and_escape_restores
+
+# escape out of the filter restores the query it was entered with.
+run_mutation "scope dialog: escape out of the Saved filter restores its entry query" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        if dialogmode::exit_filter(&mut saved.mode, &saved.entry_query, &mut saved.query, exit) {' \
+  '        if dialogmode::exit_filter(
+            &mut saved.mode,
+            &saved.entry_query,
+            &mut saved.query,
+            dialogmode::FilterExit::Keep,
+        ) {' \
+  geode-shell \
+  the_filter_keeps_sections_and_escape_restores
+
+# A restored query re-filters the rows it restores.
+run_mutation "scope dialog: a restored Saved query re-filters" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '            saved.refilter();' \
+  '' \
+  geode-shell \
+  the_filter_keeps_sections_and_escape_restores
+
+# Typing in Saved's filter reaches its query.
+run_mutation "scope dialog: the field's Change sets the Saved query" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        state.saved.set_query(text);' \
+  '        let _ = text;' \
+  geode-shell \
+  the_filter_keeps_sections_and_escape_restores
+
+# Saved's filter mode puts focus in the shared input.
+run_mutation "scope dialog: Saved's filter mode focuses the input" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '            (state.saved.mode, false, state.saved.query.as_str())' \
+  '            (crate::dialogmode::DialogMode::Normal, false, state.saved.query.as_str())' \
+  geode-shell \
+  the_filter_keeps_sections_and_escape_restores
+
+# A press on Saved's frozen filter row enters filter mode.
+run_mutation "scope dialog: the Saved filter row's press enters filter mode" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '                super::scopedialog::saved_view::enter_filter(state);' \
+  '                let _ = state;' \
+  geode-shell \
+  clicking_the_filter_row_enters_filter_mode
+
+# A saved scope removed since the rows derived refuses rather than leaving.
+run_mutation "scope dialog: a vanished saved scope refuses" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '.err().map(|_| SCOPE_GONE),' \
+  '.err().map(|_| SCOPE_GONE).filter(|_| false),' \
+  geode-shell \
+  entering_a_vanished_scope_says_so
+
+# An expression removed since the rows derived is not added by name.
+run_mutation "scope dialog: a vanished expression refuses" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '            if defined {' \
+  '            if true {' \
+  geode-shell \
+  entering_a_vanished_expression_says_so
+
+# A Saved commit leaves for the layer beneath (Current), not always closing.
+run_mutation "scope dialog: a Saved commit returns to Current" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '    let after = state.layers.commit_saved_row();' \
+  '    let after = After::Close;' \
+  geode-shell \
+  enter_on_a_scope_loads_it_and_returns_to_current
+
+# escape from Saved over Current returns there.
+run_mutation "scope dialog: escape from Saved returns to Current" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '            let after = state.layers.escape();' \
+  '            let after = After::Close;' \
+  geode-shell \
+  escape_from_saved_alone_closes_and_from_current_returns
+
+# Saved as the bottom layer: its commit closes the dialog.
+run_mutation "scope dialog: a one-shot Saved commit closes the dialog" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        After::Close => shell.close_modal(window, cx),' \
+  '        After::Close => {}' \
+  geode-shell \
+  the_load_glyph_opens_saved_alone_and_enter_closes
+
+# e and n on a scope row say how to do it instead.
+run_mutation "scope dialog: e on a saved scope refuses with the way" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        "e" if on_scope => state.error = Some(EDIT_SCOPE.into()),' \
+  '        "e" if on_scope => {}' \
+  geode-shell \
+  e_and_n_on_a_scope_row_refuse_with_the_way_to_do_it
+
+run_mutation "scope dialog: n on a saved scope refuses with the way" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        "n" if on_scope => state.error = Some(NEW_SCOPE.into()),' \
+  '        "n" if on_scope => {}' \
+  geode-shell \
+  e_and_n_on_a_scope_row_refuse_with_the_way_to_do_it
+
+# A Saved row's double-click commits it, as enter does.
+run_mutation "scope dialog: a Saved row double-click commits" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '    if click_count == 2 {' \
+  '    if false {' \
+  geode-shell \
+  a_row_double_click_commits_it
 
 # ---- Scope dialog: lane provenance, rows, saved rows and layers ----
 

@@ -7,28 +7,21 @@ use geode_core::named::{NamedExpr, NamedExpressions};
 use geode_core::scope::Scope;
 use geode_core::scopes::SavedScopes;
 
-#[allow(dead_code)] // Read by the Saved screen, which the view does not paint yet.
 pub(crate) const SCOPES_NOTE: &str = "enter replaces the current scope";
-#[allow(dead_code)] // Read by the Saved screen, which the view does not paint yet.
 pub(crate) const EXPRESSIONS_NOTE: &str = "enter adds to the current scope";
-#[allow(dead_code)] // Read by the Saved screen, which the view does not paint yet.
 pub(crate) const NO_SCOPES: &str = "no saved scopes · s saves the current one";
-#[allow(dead_code)] // Read by the Saved screen, which the view does not paint yet.
 pub(crate) const NO_EXPRESSIONS: &str = "no saved expressions · mod+s names one";
 
 /// A summary term longer than this is cut, so one long expression does not
 /// push the rest of the summary out of the row.
-#[allow(dead_code)] // Read by the Saved screen, which the view does not paint yet.
 const TERM_CHARS: usize = 24;
 
-#[allow(dead_code)] // Read by the Saved screen, which the view does not paint yet.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum SavedId {
     Scope(String),
     Expression(String),
 }
 
-#[allow(dead_code)] // Read by the Saved screen, which the view does not paint yet.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SavedKind {
     Scope {
@@ -43,7 +36,6 @@ pub(crate) enum SavedKind {
     },
 }
 
-#[allow(dead_code)] // Read by the Saved screen, which the view does not paint yet.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SavedRow {
     pub id: SavedId,
@@ -51,7 +43,6 @@ pub(crate) struct SavedRow {
     pub kind: SavedKind,
 }
 
-#[allow(dead_code)] // Read by the Saved screen, which the view does not paint yet.
 pub(crate) fn saved_rows(
     saved: &SavedScopes,
     named: &NamedExpressions,
@@ -86,7 +77,6 @@ pub(crate) fn saved_rows(
 /// One line per saved scope: each constrained column with its one value or
 /// its value count, each named reference, each expression term (cut), and
 /// the quoted text, joined ` · `. An empty scope reads "everything".
-#[allow(dead_code)] // Read by the Saved screen, which the view does not paint yet.
 pub(crate) fn summary(scope: &Scope) -> String {
     let mut parts: Vec<String> = Vec::new();
     for d in scope.dimensions.iter().filter(|d| !d.values.is_empty()) {

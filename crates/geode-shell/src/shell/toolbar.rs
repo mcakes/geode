@@ -188,8 +188,8 @@ fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
 /// benefit. `grouping_open` is whether the Grouping dialog is up right
 /// now — the readout paints its pressed fill for as long as it is (a
 /// control that owns a popup stays visibly pressed until it closes);
-/// `scope_open` is the same for the saved-scope chooser and the load glyph, which
-/// `on_load` opens.
+/// `scope_open` is the same for the load glyph and the Scope dialog's Saved
+/// screen, which `on_load` opens.
 /// `scope_dialog_open` is whether the Scope dialog is up; the `+` that
 /// opens it holds its pressed fill for as long as it is. `on_term_open` and
 /// `on_term_close` take the expression term's index; `on_named_open` and
@@ -509,12 +509,13 @@ pub fn toolbar(
             on_add(window, cx)
         }),
     );
-    // The load glyph opens the saved-scope chooser. Always
-    // painted: loading a saved scope is as useful on an empty scope as on
-    // a full one, and the chooser says how to save one when none exist. It
-    // sits before the conditional save glyph so save appearing never moves
-    // it, and it holds its pressed fill while the chooser is up, as the
-    // grouping readout does. `FolderOpen` is in the default icon bundle.
+    // The load glyph opens the Scope dialog's Saved screen
+    // (`frame::scope_saved`). Always painted: loading a saved scope is as
+    // useful on an empty scope as on a full one, and the screen says how to
+    // save one when none exist. It sits before the conditional save glyph so
+    // save appearing never moves it, and it holds its pressed fill while
+    // the Saved screen is up, as the grouping readout does. `FolderOpen` is
+    // in the default icon bundle.
     verbs = verbs.child(
         verb(
             "scope-load-chip",
@@ -527,10 +528,10 @@ pub fn toolbar(
         )
         .tooltip(tips::tip(
             "tip-scope-load-chip",
-            "Load a named scope",
-            // No chord: `frame::scope` opens the Scope dialog, not this
-            // chooser, and the chooser has no action of its own yet.
-            None,
+            "Saved scopes and expressions",
+            // Unbound by default: the tip names a chord only once a keymap
+            // binds `frame::scope_saved`.
+            Some("frame::scope_saved"),
             None,
         ))
         .on_mouse_down(MouseButton::Left, move |_event, window, cx| {

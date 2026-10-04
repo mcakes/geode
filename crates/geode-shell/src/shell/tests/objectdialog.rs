@@ -2285,7 +2285,7 @@ fn a_scope_shows_its_named_expressions(cx: &mut gpui::TestAppContext) {
         cx,
         services_with_named_expressions("liq"),
         dir.path(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -2324,7 +2324,7 @@ fn space_ticks_an_available_named_expression_into_the_file(cx: &mut gpui::TestAp
         cx,
         services_with_named_expressions("liq"),
         dir.path(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -2352,7 +2352,7 @@ fn unticking_every_named_expression_drops_the_key(cx: &mut gpui::TestAppContext)
         cx,
         services_with_named_expressions("liq"),
         dir.path(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -2386,7 +2386,7 @@ fn space_on_a_named_expression_never_opens_values(cx: &mut gpui::TestAppContext)
         cx,
         services_with_named_expressions("liq"),
         dir.path(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -2421,7 +2421,7 @@ fn a_missing_named_expression_warns_on_its_row_and_still_commits(cx: &mut gpui::
         cx,
         services_with_named_expressions("gone"),
         dir.path(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -2451,7 +2451,7 @@ fn a_missing_named_expressions_note_paints_in_danger_text(cx: &mut gpui::TestApp
         cx,
         services_with_named_expressions("gone"),
         dir.path(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -2496,12 +2496,8 @@ fn open_scopes_field(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext
 #[gpui::test]
 fn the_scopes_text_field_keeps_its_plain_tab(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     open_scopes_field(&shell, &mut cx, "text");
     assert!(
         edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
@@ -2528,12 +2524,8 @@ fn the_scopes_text_field_keeps_its_plain_tab(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn the_scopes_expression_field_suggests_and_tab_inserts(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     open_expression_field(&shell, &mut cx);
     assert!(
         cx.debug_bounds("scope-expr-row-npv").is_some(),
@@ -2559,12 +2551,8 @@ fn the_scopes_expression_field_suggests_and_tab_inserts(cx: &mut gpui::TestAppCo
 #[gpui::test]
 fn the_scopes_expression_field_undoes_an_insertion(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     open_expression_field(&shell, &mut cx);
     cx.simulate_input("np");
     cx.simulate_keystrokes("tab");
@@ -2581,12 +2569,8 @@ fn the_scopes_expression_field_undoes_an_insertion(cx: &mut gpui::TestAppContext
 #[gpui::test]
 fn the_scopes_expression_field_refuses_an_unknown_column(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     open_expression_field(&shell, &mut cx);
     cx.simulate_input("bokk = 'A'");
     cx.simulate_keystrokes("enter");
@@ -2608,12 +2592,8 @@ fn the_scopes_expression_field_requests_values_under_the_edited_scope(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     cx.update(|_, app| {
         let seen = seen.clone();
@@ -2644,7 +2624,7 @@ fn the_scopes_expression_field_requests_values_under_the_edited_scope(
 fn o_overwrites_the_saved_scope_with_the_frames_current_one(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let services = services_with_a_saved_scope();
-    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), OBJECT_SCOPES);
 
     let frame_scope = Scope {
         dimensions: vec![DimensionSelection {
@@ -2698,7 +2678,7 @@ fn o_overwrites_the_saved_scope_with_the_frames_current_one(cx: &mut gpui::TestA
 fn o_confirms_before_overwriting(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let services = services_with_a_user_owned_scope();
-    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), OBJECT_SCOPES);
 
     let frame_scope = Scope {
         dimensions: vec![DimensionSelection {
@@ -2775,7 +2755,7 @@ fn services_with_a_user_owned_scope() -> ShellServices {
 fn o_on_a_desk_owned_scope_forks_without_asking_and_says_so(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let services = services_with_a_saved_scope();
-    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), OBJECT_SCOPES);
     shell.update(&mut cx, |s, cx| {
         s.frame.update(cx, |f, _| {
             f.shared_mut().set_scope(Scope {
@@ -2818,7 +2798,7 @@ fn o_on_a_desk_owned_scope_forks_without_asking_and_says_so(cx: &mut gpui::TestA
 fn o_on_a_user_owned_scope_still_asks_first(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let services = services_with_a_user_owned_scope();
-    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), OBJECT_SCOPES);
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -2920,7 +2900,7 @@ fn services_with_a_scope_the_app_itself_wrote() -> ShellServices {
 fn o_on_a_scope_that_already_matches_the_frame_says_so(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let services = services_with_a_scope_the_app_itself_wrote();
-    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), OBJECT_SCOPES);
 
     // Exactly what the saved scope already holds.
     shell.update(&mut cx, |s, cx| {
@@ -3210,12 +3190,8 @@ fn n_refuses_a_name_only_the_presentation_overlay_holds(cx: &mut gpui::TestAppCo
 #[gpui::test]
 fn n_on_scopes_creates_an_empty_scope(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     shell.update(&mut cx, |shell, cx| {
         shell.frame.update(cx, |f, _| {
             f.shared_mut().set_scope(Scope {
@@ -3249,12 +3225,8 @@ fn n_on_scopes_creates_an_empty_scope(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn c_duplicates_the_selected_scope_under_a_new_name(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     cx.simulate_keystrokes("c");
     cx.run_until_parked();
     assert_eq!(
@@ -3290,12 +3262,8 @@ fn c_duplicates_the_selected_scope_under_a_new_name(cx: &mut gpui::TestAppContex
 #[gpui::test]
 fn c_refuses_when_the_source_vanished_before_enter(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     cx.simulate_keystrokes("c");
     cx.run_until_parked();
     assert_eq!(
@@ -3604,12 +3572,8 @@ fn scope_save_current_stacks_over_views_without_touching_it(cx: &mut gpui::TestA
 #[gpui::test]
 fn deliver_values_routes_by_key_and_drops_stale_outcomes(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     cx.simulate_keystrokes("enter"); // open `mine`
     // The stage opens on book, skipping the inert Dimensions header.
     cx.simulate_keystrokes("enter"); // Values stage
@@ -3673,12 +3637,8 @@ fn deliver_values_routes_by_key_and_drops_stale_outcomes(cx: &mut gpui::TestAppC
 #[gpui::test]
 fn the_values_stage_paints_its_rows(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     cx.simulate_keystrokes("enter"); // open `mine`
     // The stage opens on book, skipping the inert Dimensions header.
     cx.simulate_keystrokes("enter"); // Values stage
@@ -3727,12 +3687,8 @@ fn the_values_stage_paints_its_rows(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn entering_the_values_stage_requests_the_columns_distinct_values(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     let requested = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     cx.update(|_, cx| {
         let requested = requested.clone();
@@ -3788,12 +3744,8 @@ fn ticking_a_value_writes_the_selection_and_unticking_all_removes_it(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     // The stage opens on book; another Enter opens its Values stage.
     cx.simulate_keystrokes("enter");
     cx.simulate_keystrokes("enter");
@@ -3840,12 +3792,8 @@ fn ticking_a_value_writes_the_selection_and_unticking_all_removes_it(
 #[gpui::test]
 fn ctrl_a_and_ctrl_x_tick_and_clear_and_reorder_is_refused(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     // The stage opens on book, skipping the inert Dimensions header.
     cx.simulate_keystrokes("enter");
     cx.simulate_keystrokes("shift-j");
@@ -3904,12 +3852,8 @@ fn a_query_in_the_values_stage_narrows_the_rows_and_ctrl_a_ticks_only_them(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     cx.simulate_keystrokes("enter"); // open `mine`
     // The stage opens on book, skipping the inert Dimensions header.
     cx.simulate_keystrokes("enter"); // Values stage
@@ -3990,12 +3934,8 @@ fn a_query_in_the_values_stage_narrows_the_rows_and_ctrl_a_ticks_only_them(
 #[gpui::test]
 fn a_broken_expression_is_refused_and_a_good_one_is_written(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     cx.simulate_keystrokes("enter");
     cx.simulate_keystrokes("shift-g"); // last row: expression
     cx.simulate_keystrokes("i");
@@ -4022,12 +3962,8 @@ fn a_broken_expression_is_refused_and_a_good_one_is_written(cx: &mut gpui::TestA
 #[gpui::test]
 fn d_r_and_o_refuse_inside_the_values_stage(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     // The stage opens on book; another Enter opens its Values stage.
     cx.simulate_keystrokes("enter");
     cx.simulate_keystrokes("enter");
@@ -4073,12 +4009,8 @@ fn d_r_and_o_refuse_inside_the_values_stage(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn space_on_a_selected_scopes_dimension_names_the_values_door(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     let requested = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     cx.update(|_, cx| {
         let requested = requested.clone();
@@ -4113,12 +4045,8 @@ fn space_on_a_selected_scopes_dimension_names_the_values_door(cx: &mut gpui::Tes
 #[gpui::test]
 fn x_on_a_selected_scopes_dimension_removes_it_and_clears_its_note(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     cx.simulate_keystrokes("enter");
     // The stage opens on book, skipping the inert Dimensions header.
     cx.simulate_keystrokes("x");
@@ -4150,7 +4078,7 @@ fn x_on_an_available_scopes_row_is_refused(cx: &mut gpui::TestAppContext) {
         cx,
         services_with_a_saved_scope_and_an_available_dimension(),
         dir.path(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     cx.simulate_keystrokes("enter");
     // The stage opens on book, skipping the Dimensions header.
@@ -7744,7 +7672,7 @@ fn draft_expression(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> 
     })
 }
 
-/// `config::expressions` opens the browse list with each name and its
+/// The Expressions object dialog opens the browse list with each name and its
 /// expression as the preview.
 #[gpui::test]
 fn config_expressions_lists_each_name_with_its_expression(cx: &mut gpui::TestAppContext) {
@@ -7753,7 +7681,7 @@ fn config_expressions_lists_each_name_with_its_expression(cx: &mut gpui::TestApp
         cx,
         services_with_expressions(),
         dir.path(),
-        "config::expressions",
+        OBJECT_EXPRESSIONS,
     );
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.domain),
@@ -7784,7 +7712,7 @@ fn a_new_named_expression_is_written_to_the_user_file(cx: &mut gpui::TestAppCont
         cx,
         services_with_expressions(),
         dir.path(),
-        "config::expressions",
+        OBJECT_EXPRESSIONS,
     );
     cx.simulate_keystrokes("n");
     cx.simulate_input("hedges");
@@ -7836,7 +7764,7 @@ fn escaping_a_fresh_named_expression_writes_nothing(cx: &mut gpui::TestAppContex
         cx,
         services_with_expressions(),
         dir.path(),
-        "config::expressions",
+        OBJECT_EXPRESSIONS,
     );
     cx.simulate_keystrokes("n");
     cx.simulate_input("hedges");
@@ -7873,7 +7801,7 @@ fn the_expressions_field_refuses_an_unknown_column(cx: &mut gpui::TestAppContext
         cx,
         services_with_expressions(),
         dir.path(),
-        "config::expressions",
+        OBJECT_EXPRESSIONS,
     );
     cx.simulate_keystrokes("enter i");
     cx.run_until_parked();
@@ -7901,7 +7829,7 @@ fn the_expressions_field_suggests_columns(cx: &mut gpui::TestAppContext) {
         cx,
         services_with_expressions(),
         dir.path(),
-        "config::expressions",
+        OBJECT_EXPRESSIONS,
     );
     cx.simulate_keystrokes("enter i");
     cx.run_until_parked();
@@ -7925,7 +7853,7 @@ fn deleting_a_named_expression_names_its_users(cx: &mut gpui::TestAppContext) {
         cx,
         services_with_expressions(),
         dir.path(),
-        "config::expressions",
+        OBJECT_EXPRESSIONS,
     );
     shell.update(&mut cx, |s, cx| {
         s.frame.update(cx, |f, _| {
@@ -7985,7 +7913,7 @@ fn c_copies_a_named_expression_with_its_text(cx: &mut gpui::TestAppContext) {
         cx,
         services_with_expressions(),
         dir.path(),
-        "config::expressions",
+        OBJECT_EXPRESSIONS,
     );
     cx.simulate_keystrokes("c");
     cx.run_until_parked();
@@ -8261,12 +8189,8 @@ fn a_double_click_on_a_scopes_dimension_row_opens_its_values_and_not_a_field(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     cx.simulate_keystrokes("enter"); // mine
     cx.run_until_parked();
     let row = cx
@@ -8722,12 +8646,8 @@ fn i_and_n_have_buttons_that_do_what_their_keys_do(cx: &mut gpui::TestAppContext
 #[gpui::test]
 fn the_i_button_is_withheld_on_a_list_item_row(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     // Open mine, the only saved scope, on its first dimension, book.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -9183,12 +9103,8 @@ fn the_edit_footer_names_only_what_the_selected_row_offers(cx: &mut gpui::TestAp
 #[gpui::test]
 fn the_scopes_dimensions_list_offers_no_reorder_chip(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (_shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (_shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     cx.simulate_keystrokes("enter");
     // The stage opens on book, skipping the inert Dimensions header.
     cx.run_until_parked();
@@ -9208,7 +9124,7 @@ fn clicking_an_available_dimensions_tick_opens_its_values_stage(cx: &mut gpui::T
         cx,
         services_with_a_saved_scope_and_an_available_dimension(),
         dir.path(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -10049,14 +9965,14 @@ fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
             "j j j j e",
         ),
         (
-            "config::scopes",
+            OBJECT_SCOPES,
             services_with_a_saved_scope,
             "dimensions",
             "enter",
         ),
         ("config::colors", services_with_colours, "token", "enter"),
         (
-            "config::expressions",
+            OBJECT_EXPRESSIONS,
             services_with_expressions,
             "expression",
             "enter",
@@ -10325,12 +10241,8 @@ fn the_back_button_leaves_a_column_stage_for_its_view(cx: &mut gpui::TestAppCont
 #[gpui::test]
 fn the_back_button_leaves_the_values_stage_for_the_scope(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     cx.simulate_keystrokes("enter"); // open `mine`
     cx.simulate_keystrokes("enter"); // Values stage on book
     cx.run_until_parked();

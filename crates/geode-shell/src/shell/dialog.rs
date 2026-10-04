@@ -232,6 +232,7 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
             | "frame::add_expression"
             | "frame::grouping"
             | "frame::scope"
+            | "frame::scope_saved"
             | "tile::add"
             | "tile::open_with"
             | "tile::link_group"
@@ -574,6 +575,8 @@ pub(crate) fn sync_dialog_text(
         Some(DialogKind::Scope) => {
             // Current has no field: keys reach the dialog through the shell.
             // The text step owns the input, its draft the source of truth.
+            // The Saved screen's filter is a mode dialog's: the input mirrors
+            // its query and has focus only while filtering.
             let Some(state) = shell.scope_dialog.as_ref() else {
                 return;
             };
@@ -584,10 +587,13 @@ pub(crate) fn sync_dialog_text(
                     input.update(cx, |i, cx| i.set_value(draft, window, cx));
                 }
                 input.read(cx).focus_handle(cx).focus(window, cx);
-            } else {
-                shell.focus_handle.focus(window, cx);
+                return;
             }
-            return;
+            if !super::scopedialog::saved_view::in_saved(state) {
+                shell.focus_handle.focus(window, cx);
+                return;
+            }
+            (state.saved.mode, false, state.saved.query.as_str())
         }
         // Filter-only dialogs keep their own focus path (see `refocus_top`).
         _ => return,
@@ -698,6 +704,13 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
                 return;
             };
             dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);
+        }
+        // The Saved screen's frozen filter row; a no-op on any other layer.
+        Some(DialogKind::Scope) => {
+            if let Some(state) = shell.scope_dialog.as_mut() {
+                state.error = None;
+                super::scopedialog::saved_view::enter_filter(state);
+            }
         }
         _ => {}
     }

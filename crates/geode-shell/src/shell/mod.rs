@@ -1048,7 +1048,8 @@ impl ShellView {
                 }
                 Some(dialog::DialogKind::Scope) => {
                     if let Some(state) = view.scope_dialog.as_mut() {
-                        // Only the text step types; Current ignores the field.
+                        // The text step types its draft; the Saved screen
+                        // filters while in filter mode; Current ignores it.
                         scopedialog::view::on_query_changed(state, &query);
                     }
                 }
