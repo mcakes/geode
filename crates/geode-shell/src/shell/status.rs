@@ -173,7 +173,8 @@ pub fn status_bar(
         );
     }
     if let Some(segment) = store_waiting {
-        // Muted, like ingest loading: the open is progressing, not failing.
+        // Muted, like ingest loading, and with the same top-edge strip
+        // (below): the open is progressing, not failing.
         // A failed wait arrives as the stopped segment above instead. No
         // click: there is nothing to act on, and a pointer action would need
         // a keyboard route. The tooltip names who holds the store.
@@ -375,6 +376,11 @@ pub fn status_bar(
     // absolute overlay pinned to the top edge, so its presence never
     // moves or resizes the bar itself (the window test pins both
     // `origin.y` and `size.height` across the idle/loading transition).
+    // One strip serves both kinds of ongoing work: a running load and the
+    // store open waiting for the collector, so a long wait shows progress
+    // and not just a label. It keeps the `ingest-strip` id and selector
+    // because ingestion is its original and most frequent cause; nothing
+    // distinguishes the two by the strip.
     div()
         .relative()
         .flex_none()
@@ -382,7 +388,7 @@ pub fn status_bar(
         .h(scale::design(HEIGHT))
         .debug_selector(|| "shell-status-bar".to_string())
         .child(bar)
-        .when(ingest.is_some(), |el| {
+        .when(ingest.is_some() || store_waiting.is_some(), |el| {
             el.child(
                 div()
                     .absolute()

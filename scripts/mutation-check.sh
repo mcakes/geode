@@ -1360,6 +1360,13 @@ run_mutation "store segment: the status bar paints it" \
   geode-shell \
   the_store_waiting_segment_paints_only_while_the_open_waits
 
+run_mutation "store segment: the wait runs the progress strip" \
+  crates/geode-shell/src/shell/status.rs \
+  '        .when(ingest.is_some() || store_waiting.is_some(), |el| {' \
+  '        .when(ingest.is_some(), |el| {' \
+  geode-shell \
+  the_store_waiting_segment_paints_only_while_the_open_waits
+
 # The store lease (lease.rs). The app and the collector hand the store over
 # through lock files; a probe must not read as a second app, a stop must end
 # the wait, and only DuckDB's own lock conflict is waited out.
@@ -15798,7 +15805,7 @@ run_mutation "ingest: a stale skip does not start the strip" \
 # Some. Painting them unconditionally survives every entity test.
 run_mutation "status: the strip paints only while loading" \
   crates/geode-shell/src/shell/status.rs \
-  '        .when(ingest.is_some(), |el| {' \
+  '        .when(ingest.is_some() || store_waiting.is_some(), |el| {' \
   '        .when(true, |el| {' \
   geode-shell \
   the_ingest_strip_and_segment_paint_only_while_a_load_is_running

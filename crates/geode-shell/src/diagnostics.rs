@@ -397,7 +397,8 @@ pub struct Diagnostics {
     /// The status segment for `stopped`, rebuilt when a thread stops.
     stopped_segment: Option<StoppedSegment>,
     /// Set while the store open waits for the collector to hand the store
-    /// over; cleared when it opens. Recorded only: nothing paints it yet.
+    /// over; cleared when it opens or the request loop stops. The status
+    /// bar's store-waiting segment is prepared from this field.
     store_waiting: Option<StoreWaiting>,
     /// Prepared from `store_waiting` whenever it changes.
     store_waiting_segment: Option<StoreWaitingSegment>,

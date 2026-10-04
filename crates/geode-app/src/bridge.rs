@@ -9013,9 +9013,9 @@ grain = "underlying"
         assert_eq!(segment(&vcx), None, "the open clears the segment");
     }
 
-    /// Both store events in one burst share `Key::Store`: the late
-    /// `StoreOpened` replaces the pending `StoreWaiting`, so no segment
-    /// is ever shown.
+    /// Both store events in one burst before the drain runs leave no
+    /// segment. This pins the end state only; that the shared `Key::Store`
+    /// coalesces the pair is `events::tests::a_store_opened_replaces_a_pending_store_waiting`.
     #[gpui::test]
     fn a_store_burst_that_ends_opened_shows_no_segment(cx: &mut gpui::TestAppContext) {
         let f = catalog_fixture(cx);
