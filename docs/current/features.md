@@ -1500,10 +1500,17 @@ arrives after another classification is shown applies nothing (`import of
 <file> was for <name> — not applied`), as does `y` after a reload changed
 the source column (`… was for <from> values — not applied`), since the
 plan's sources are the old column's values. Only the latest file operation
-is answered, so a newer import or export supersedes an older plan. A plan
-landing while the label editor, a name prompt or another question is open
-is dropped with `import of <file> not shown: finish the open edit and import
-again`, rather than take the keyboard from work in hand.
+is answered, so a newer import or export supersedes an older one at any
+step (its read, its plan, or a held plan) and says `import of <file>
+replaced by a newer file operation`. The question takes the keyboard, so a
+plan is asked about only while the tile is the focused tile and nothing
+holds the keys: not while another tile is focused, a `/` search, the label
+editor, a name prompt or another question is open, or a shell input (the
+palette, the command line) has focus. Otherwise it waits, saying `import of
+<file> ready — focus this tile to answer`, and is asked when the tile is
+next focused or its own search, field or question closes, after the same
+classification and source-column checks; a stray `y` typed elsewhere never
+applies it. One plan waits at a time: a newer import replaces it.
 
 **Session.** The table saves the classification's name, the sort and the
 cursor's source value. An unreadable key is dropped with a notice and the
@@ -1520,8 +1527,8 @@ Known limitations:
   classifications do not chain.
 - The import's open dialog starts where the platform puts it; only the save
   dialog opens in the last-used folder.
-- An import plan overtaken by a newer export or import is dropped without a
-  notice.
+- A plan waiting for the keyboard is not asked about when a palette or
+  command line closes over the focused tile; focusing the tile again asks.
 - Applying an import at `y` runs on the UI thread (see
   [performance](performance.md#known-gaps)); planning does not.
 

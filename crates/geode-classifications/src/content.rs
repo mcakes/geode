@@ -227,6 +227,12 @@ impl TileContent for ClassificationsContent {
         self.tile.update(cx, |t, _| t.set_visible(visible))
     }
 
+    /// Kept for a planned import: its question takes the keyboard, so it is
+    /// asked only on the focused tile and otherwise waits for focus.
+    fn set_focused(&self, focused: bool, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.set_focused(focused, cx))
+    }
+
     fn closed(&self, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.closed(cx))
     }

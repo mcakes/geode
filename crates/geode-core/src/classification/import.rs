@@ -52,7 +52,11 @@ impl ImportPlan {
     }
 
     /// Apply the planned labels over `dim` (which may have moved on since
-    /// planning: the file is authoritative for its rows) as one undo entry.
+    /// planning) as one undo entry. The file is authoritative for the rows
+    /// the plan counted: each takes the file's label whatever `dim` says
+    /// now. Rows the plan found unchanged are not re-asserted, so a label
+    /// written on one of them meanwhile stays; nor is a counted row that
+    /// already holds the file's label recorded in the entry.
     pub fn apply(&self, dim: &DerivedDimension) -> (DerivedDimension, UndoEntry) {
         let mut next = dim.clone();
         let mut entry = UndoEntry::default();

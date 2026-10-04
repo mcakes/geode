@@ -24,7 +24,8 @@
 //! the update, then asks the data tier to write the classification as the
 //! tile shows it; only the latest file operation's answer is acted on.
 //! Import CSV asks for a file in the open dialog, reads it through the data
-//! tier, plans it over the shown object and asks y/n with the counts; `y`
+//! tier, plans it over the shown object and asks y/n with the counts (a
+//! plan landing while the keyboard is elsewhere waits for focus); `y`
 //! applies the plan over the object shown then as one write and one undo
 //! step. Each step is bound to the classification the import began on.
 //!
@@ -157,6 +158,20 @@ struct Awaiting {
 /// The switcher's refusal while there is nothing to list.
 const NOTHING_TO_SWITCH: &str = "no classifications to switch to";
 
+/// A planned import waiting for the keyboard: asked about when the tile is
+/// next the focused tile with nothing open in it. Arming takes focus, so a
+/// plan landing while the trader types elsewhere would take the keys, and a
+/// stray `y` would apply it.
+struct HeldImport {
+    tag: u64,
+    name: String,
+    from: String,
+    file: String,
+    plan: ImportPlan,
+    /// The window the plan landed in, which the confirm focuses.
+    window: AnyWindowHandle,
+}
+
 /// The header's notices, by how long each lives. None stays for good: a
 /// notice that outlived its cause would read as a standing fault.
 #[derive(Default)]
@@ -229,6 +244,13 @@ pub struct ClassificationsTile {
     values_loaded: bool,
     /// The file operation waiting for its answer; any other is stale.
     file_op: Option<FileOp>,
+    /// An import's file operation tag and file while its plan is made off
+    /// the UI thread.
+    planning: Option<(u64, String)>,
+    /// A planned import waiting until the tile may take the keyboard.
+    held: Option<HeldImport>,
+    /// Whether this is the focused tile, as the shell last said.
+    focused: bool,
     /// The last file operation's tag.
     file_tag: u64,
     /// The directory of the last file exported or imported here, where the
@@ -368,6 +390,9 @@ impl ClassificationsTile {
             observed: Vec::new(),
             values_loaded: false,
             file_op: None,
+            planning: None,
+            held: None,
+            focused: false,
             file_tag: 0,
             file_dir: None,
             values_notice: None,
@@ -1017,6 +1042,7 @@ impl ClassificationsTile {
         let observed = all.then_some(self.observed.as_slice());
         let text = classification::export(dim, observed);
         let rows = files::export_rows(dim, observed);
+        let replaced = self.overtake_import();
         self.file_tag += 1;
         let params = TextFileParams {
             key: QueryKey(self.id.0),
@@ -1035,6 +1061,31 @@ impl ClassificationsTile {
                 });
             }
             Err(refusal) => self.refuse(busy_text(refusal), cx),
+        }
+        self.say_replaced(replaced, cx);
+    }
+
+    /// Take the import a newer file operation overtakes, whichever step it
+    /// is at (its read, its plan, or held for the keyboard), and return its
+    /// file: it must not vanish without a word.
+    fn overtake_import(&mut self) -> Option<String> {
+        let waiting = match self.file_op.take() {
+            Some(FileOp::Import { path, .. }) => Some(files::file_name(&path)),
+            Some(FileOp::Export { .. }) | None => None,
+        };
+        let planning = self.planning.take().map(|(_, file)| file);
+        let held = self.held.take().map(|h| h.file);
+        waiting.or(planning).or(held)
+    }
+
+    fn say_replaced(&mut self, replaced: Option<String>, cx: &mut Context<Self>) {
+        if let Some(file) = replaced {
+            self.notices
+                .outcome
+                .retain(|n| *n != Notice::status(files::ready(&file)));
+            self.notices.outcome(Notice::status(files::replaced(&file)));
+            self.rebuild_chrome();
+            cx.notify();
         }
     }
 
@@ -1119,6 +1170,7 @@ impl ClassificationsTile {
             let file = files::file_name(&path);
             return self.refuse(Notice::status(files::not_applied(&file, &name)), cx);
         }
+        let replaced = self.overtake_import();
         self.file_tag += 1;
         let params = TextFileParams {
             key: QueryKey(self.id.0),
@@ -1139,6 +1191,7 @@ impl ClassificationsTile {
             }
             Err(refusal) => self.refuse(busy_text(refusal), cx),
         }
+        self.say_replaced(replaced, cx);
     }
 
     /// The file read for classification `name`: planned off the UI thread
@@ -1167,6 +1220,7 @@ impl ClassificationsTile {
         };
         let dim = self.history.current(&config_dim).clone();
         let from = dim.from.clone();
+        self.planning = Some((tag, file.clone()));
         let planning = cx.background_spawn(async move { plan_import(&dim, &text) });
         cx.spawn_in(window, async move |this, cx| {
             let planned = planning.await;
@@ -1182,9 +1236,9 @@ impl ClassificationsTile {
     /// file operation's, for the classification and source column it was
     /// made over. Nothing is written until `y`; a file that changes nothing
     /// or is refused whole asks nothing. Rejected rows are listed whatever
-    /// the plan. An open label field, name prompt or question is the
-    /// trader's work in hand: the import is dropped rather than take the
-    /// keyboard from it.
+    /// the plan. The question takes the keyboard, so it is armed only while
+    /// the tile may take it ([`Self::keyboard_free`]); otherwise the plan is
+    /// held and asked about when the tile next may.
     #[allow(clippy::too_many_arguments)]
     fn import_planned(
         &mut self,
@@ -1199,21 +1253,14 @@ impl ClassificationsTile {
         if tag != self.file_tag {
             return;
         }
-        if self.shown().as_deref() != Some(name.as_str()) {
-            return self.refuse(Notice::status(files::not_applied(&file, &name)), cx);
-        }
-        if self.config_dim().is_none_or(|d| d.from != from) {
-            return self.refuse(Notice::status(files::not_applied_from(&file, &from)), cx);
+        self.planning = None;
+        if let Err(notice) = self.import_current(&name, &from, &file) {
+            return self.refuse(notice, cx);
         }
         let plan = match planned {
             Ok(plan) => plan,
             Err(why) => return self.refuse(format!("import refused: {why}"), cx),
         };
-        if !plan.is_noop()
-            && (self.editor.is_some() || self.prompt.is_some() || self.confirm.is_some())
-        {
-            return self.refuse(Notice::status(files::not_shown(&file)), cx);
-        }
         self.notices.outcome.clear();
         if plan.is_noop() {
             self.notices
@@ -1226,21 +1273,108 @@ impl ClassificationsTile {
                 .outcome(Notice::warning(files::rejected_notice(&plan.rejected)));
         }
         if !plan.is_noop() {
-            self.close_menu(cx);
-            let question = files::import_question(&file, &plan);
-            confirm::arm(
-                self,
-                Pending::Import {
-                    name,
-                    from,
-                    file,
-                    plan,
-                },
-                question,
-                window,
-                cx,
-            );
+            let held = HeldImport {
+                tag,
+                name,
+                from,
+                file,
+                plan,
+                window: window.window_handle(),
+            };
+            if self.keyboard_free(window, cx) {
+                self.ask_import(held, window, cx);
+            } else {
+                self.notices
+                    .outcome(Notice::status(files::ready(&held.file)));
+                self.held = Some(held);
+            }
         }
+        self.rebuild_chrome();
+        cx.notify();
+    }
+
+    /// Whether an import planned for classification `name` over source
+    /// column `from` may still be asked about; else the notice refusing it.
+    fn import_current(&self, name: &str, from: &str, file: &str) -> Result<(), Notice> {
+        if self.shown().as_deref() != Some(name) {
+            return Err(Notice::status(files::not_applied(file, name)));
+        }
+        if self.config_dim().is_none_or(|d| d.from != from) {
+            return Err(Notice::status(files::not_applied_from(file, from)));
+        }
+        Ok(())
+    }
+
+    /// Whether the tile may take the keyboard for a question nobody just
+    /// asked for: it is the focused tile, nothing in it holds the keys (a
+    /// `/` search, the label editor, a prompt, a question), and no input
+    /// outside it does (focus is on the shell root or within the tile).
+    fn keyboard_free(&self, window: &Window, cx: &mut Context<Self>) -> bool {
+        if !self.focused
+            || self.find_entry.is_some()
+            || self.editor.is_some()
+            || self.prompt.is_some()
+            || self.confirm.is_some()
+        {
+            return false;
+        }
+        window.focused(cx).is_none() || self.table.focus_handle(cx).within_focused(window, cx)
+    }
+
+    /// Arm the import's question.
+    fn ask_import(&mut self, held: HeldImport, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(cx);
+        let question = files::import_question(&held.file, &held.plan);
+        confirm::arm(
+            self,
+            Pending::Import {
+                name: held.name,
+                from: held.from,
+                file: held.file,
+                plan: held.plan,
+            },
+            question,
+            window,
+            cx,
+        );
+    }
+
+    /// Offer a held import once the current update is over: the tile may
+    /// have just gained focus or closed what held the keys. Deferred, as
+    /// arming focuses and notifies, and `set_focused` arrives during the
+    /// shell's draw, where a notify is dropped.
+    fn offer_held_later(&self, cx: &mut Context<Self>) {
+        let Some(handle) = self.held.as_ref().map(|h| h.window) else {
+            return;
+        };
+        let this = cx.weak_entity();
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                this.update(cx, |t, cx| t.offer_held(window, cx)).ok();
+            });
+        });
+    }
+
+    /// Ask about the held import if the tile may take the keyboard now,
+    /// checked again first: the classification, its source column or the
+    /// latest file operation may have changed while it waited.
+    fn offer_held(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.held.is_none() || !self.keyboard_free(window, cx) {
+            return;
+        }
+        let Some(held) = self.held.take() else {
+            return;
+        };
+        if held.tag != self.file_tag {
+            return;
+        }
+        if let Err(notice) = self.import_current(&held.name, &held.from, &held.file) {
+            return self.refuse(notice, cx);
+        }
+        self.notices
+            .outcome
+            .retain(|n| *n != Notice::status(files::ready(&held.file)));
+        self.ask_import(held, window, cx);
         self.rebuild_chrome();
         cx.notify();
     }
@@ -1563,6 +1697,7 @@ impl ClassificationsTile {
         }
         drop(e);
         self.sync_editor(cx);
+        self.offer_held_later(cx);
     }
 
     /// Drop the editor where no window is at hand, blurring it later
@@ -1759,6 +1894,7 @@ impl ClassificationsTile {
         if p.input.read(cx).focus_handle(cx).is_focused(window) {
             window.blur(cx);
         }
+        self.offer_held_later(cx);
         cx.notify();
     }
 
@@ -2044,10 +2180,14 @@ impl ClassificationsTile {
             }
             FindEvent::Committed(q) => {
                 self.find_entry = None;
+                self.offer_held_later(cx);
                 q
             }
             FindEvent::Cancelled => match self.find_entry.take() {
-                Some(entry) => entry,
+                Some(entry) => {
+                    self.offer_held_later(cx);
+                    entry
+                }
                 None => return,
             },
         };
@@ -2293,7 +2433,19 @@ impl ClassificationsTile {
     /// shown or hidden changes nothing.
     pub fn set_visible(&mut self, _visible: bool) {}
 
+    /// The shell's word on whether this is the focused tile, given from its
+    /// render. No notify here: one sent during the draw is dropped. A held
+    /// import is offered once the draw is over.
+    pub fn set_focused(&mut self, focused: bool, cx: &mut Context<Self>) {
+        self.focused = focused;
+        if focused {
+            self.offer_held_later(cx);
+        }
+    }
+
     pub fn closed(&mut self, cx: &mut Context<Self>) {
+        self.held = None;
+        self.planning = None;
         self.menu = None;
         self.release_editor(cx);
         self.release_prompt(cx);
@@ -2610,6 +2762,7 @@ impl ConfirmHost for ClassificationsTile {
                 cx.notify();
             }
         }
+        self.offer_held_later(cx);
     }
 
     fn cancelled(&mut self, pending: Pending, _: &mut Window, cx: &mut Context<Self>) {
@@ -2623,6 +2776,7 @@ impl ConfirmHost for ClassificationsTile {
         self.notices.outcome(Notice::status(said));
         self.rebuild_chrome();
         cx.notify();
+        self.offer_held_later(cx);
     }
 }
 

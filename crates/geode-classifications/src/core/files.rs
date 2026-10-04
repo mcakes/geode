@@ -115,10 +115,17 @@ pub fn not_applied_from(file: &str, from: &str) -> String {
     format!("import of {file} was for {from} values \u{2014} not applied")
 }
 
-/// What an import says when its plan landed while the trader had a field
-/// or question open, which it does not take the keyboard from.
-pub fn not_shown(file: &str) -> String {
-    format!("import of {file} not shown: finish the open edit and import again")
+/// What an import says when its plan landed while the keyboard was
+/// elsewhere (another tile, a search, a field or question in this one): it
+/// waits, and is asked when this tile is next focused with nothing open.
+pub fn ready(file: &str) -> String {
+    format!("import of {file} ready \u{2014} focus this tile to answer")
+}
+
+/// What an import says when a newer file operation overtook it before it
+/// was asked about.
+pub fn replaced(file: &str) -> String {
+    format!("import of {file} replaced by a newer file operation")
 }
 
 /// What an import answered after another classification was shown says.
@@ -258,8 +265,12 @@ mod tests {
             "import of r.csv was for book values \u{2014} not applied"
         );
         assert_eq!(
-            not_shown("r.csv"),
-            "import of r.csv not shown: finish the open edit and import again"
+            ready("r.csv"),
+            "import of r.csv ready \u{2014} focus this tile to answer"
+        );
+        assert_eq!(
+            replaced("r.csv"),
+            "import of r.csv replaced by a newer file operation"
         );
     }
 }

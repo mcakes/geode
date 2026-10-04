@@ -3405,6 +3405,8 @@ grain = "underlying"
         /// Run every file request the tiles asked since the last call
         /// through the data tier's file operation, on the real disk, and
         /// post each answer to the bridge's drain as the file worker does.
+        /// The `geode-files` worker's queue and thread are bypassed:
+        /// `geode_data::files::run` is called directly, on this thread.
         fn run_file_requests(&mut self) -> usize {
             let asked: Vec<_> = self
                 .requests

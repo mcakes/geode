@@ -255,6 +255,9 @@ fn open_over(
     vcx.update(|window, cx| {
         let _ = window.draw(cx);
         built.shell_focus.focus(window, cx);
+        // The shell's render tells the focused tile it is, as it does a
+        // fresh occupant on its first frame.
+        built.content.set_focused(true, cx);
     });
     (
         Harness {
@@ -2829,9 +2832,10 @@ fn a_newer_import_supersedes_an_older_plan(cx: &mut gpui::TestAppContext) {
     let second = h.file_requests();
     assert_eq!(second.len(), 1, "{second:?}");
     assert!(second[0].tag > first.tag);
+    assert_eq!(h.notices(&vcx), [REPLACED]);
     h.land(&mut vcx);
     assert_eq!(h.confirm(&vcx), None, "the first plan was overtaken");
-    assert!(h.notices(&vcx).is_empty());
+    assert_eq!(h.notices(&vcx), [REPLACED]);
     h.read_as(&mut vcx, &second[0], "underlying_ref,region\nNKY,Asia\n");
     assert_eq!(
         h.confirm(&vcx).as_deref(),
@@ -2839,12 +2843,24 @@ fn a_newer_import_supersedes_an_older_plan(cx: &mut gpui::TestAppContext) {
     );
 }
 
-const NOT_SHOWN: &str = "import of region.csv not shown: finish the open edit and import again";
+const READY: &str = "import of region.csv ready \u{2014} focus this tile to answer";
+const QUESTION: &str =
+    "import region.csv: 2 changed, 1 new, 1 cleared, 1 rejected \u{2014} y applies";
+
+impl Harness {
+    /// The shell's word on whether this is the focused tile, through the
+    /// door its render calls, then whatever that deferred.
+    fn focus_tile(&self, vcx: &mut gpui::VisualTestContext, focused: bool) {
+        vcx.update(|_, cx| self.content.set_focused(focused, cx));
+        self.land(vcx);
+    }
+}
 
 /// A plan landing on an open label field leaves the field as it is: the
-/// trader's typing is never discarded for a question.
+/// trader's typing is never discarded for a question. Held, it is asked
+/// once the field closes.
 #[gpui::test]
-fn a_plan_landing_on_an_open_editor_drops_the_import(cx: &mut gpui::TestAppContext) {
+fn a_plan_landing_on_an_open_editor_is_held(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = editing(cx);
     let p = h.import(&mut vcx, "region.csv");
     h.goto(&mut vcx, "NKY");
@@ -2854,12 +2870,20 @@ fn a_plan_landing_on_an_open_editor_drops_the_import(cx: &mut gpui::TestAppConte
     assert_eq!(h.confirm(&vcx), None);
     let (text, _, _) = h.editor(&vcx).expect("the editor stays open");
     assert_eq!(text, "Pac");
-    assert_eq!(h.notices(&vcx), [NOT_SHOWN]);
+    assert!(
+        h.notices(&vcx).contains(&READY.to_string()),
+        "{:?}",
+        h.notices(&vcx)
+    );
     assert!(h.edits(&mut vcx).is_empty());
+    h.press(&mut vcx, "escape");
+    h.land(&mut vcx);
+    assert_eq!(h.confirm(&vcx).as_deref(), Some(QUESTION));
+    assert!(!h.notices(&vcx).contains(&READY.to_string()));
 }
 
 #[gpui::test]
-fn a_plan_landing_on_an_open_prompt_drops_the_import(cx: &mut gpui::TestAppContext) {
+fn a_plan_landing_on_an_open_prompt_is_held(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = editing(cx);
     let p = h.import(&mut vcx, "region.csv");
     h.act(&mut vcx, "classifications::new");
@@ -2867,11 +2891,11 @@ fn a_plan_landing_on_an_open_prompt_drops_the_import(cx: &mut gpui::TestAppConte
     h.read_as(&mut vcx, &p, IMPORT_TEXT);
     assert_eq!(h.confirm(&vcx), None);
     assert!(h.prompt(&vcx).is_some(), "the prompt stays open");
-    assert_eq!(h.notices(&vcx), [NOT_SHOWN]);
+    assert!(h.notices(&vcx).contains(&READY.to_string()));
 }
 
 #[gpui::test]
-fn a_plan_landing_on_another_question_drops_the_import(cx: &mut gpui::TestAppContext) {
+fn a_plan_landing_on_another_question_is_held(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_with(
         cx,
         config_layered(EDIT, &["region"], &[]),
@@ -2882,7 +2906,152 @@ fn a_plan_landing_on_another_question_drops_the_import(cx: &mut gpui::TestAppCon
     let asked = h.confirm(&vcx).expect("the delete question");
     h.read_as(&mut vcx, &p, IMPORT_TEXT);
     assert_eq!(h.confirm(&vcx), Some(asked), "the delete question stands");
-    assert_eq!(h.notices(&vcx), [NOT_SHOWN]);
+    assert!(h.notices(&vcx).contains(&READY.to_string()));
+    // Answered no, the delete question gives way to the held import.
+    h.press(&mut vcx, "n");
+    h.land(&mut vcx);
+    assert_eq!(h.confirm(&vcx).as_deref(), Some(QUESTION));
+}
+
+/// A plan landing while a `/` search is typed: the search keeps the
+/// keyboard, so a `y` typed into it never answers the import.
+#[gpui::test]
+fn a_plan_landing_during_a_search_is_held(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.find(&mut vcx, FindEvent::Changed("s".into()));
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), None, "the search keeps the keyboard");
+    assert!(h.notices(&vcx).contains(&READY.to_string()));
+    h.find(&mut vcx, FindEvent::Changed("sy".into()));
+    assert!(h.edits(&mut vcx).is_empty());
+    h.find(&mut vcx, FindEvent::Committed("sy".into()));
+    h.land(&mut vcx);
+    assert_eq!(h.confirm(&vcx).as_deref(), Some(QUESTION));
+}
+
+/// A plan landing while another tile is focused is held until this one is
+/// focused again; only then does it take the keyboard.
+#[gpui::test]
+fn a_plan_landing_on_an_unfocused_tile_is_held_until_focused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.focus_tile(&mut vcx, false);
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.notices(&vcx).contains(&READY.to_string()));
+    h.focus_tile(&mut vcx, true);
+    assert_eq!(h.confirm(&vcx).as_deref(), Some(QUESTION));
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&imported_region())]);
+}
+
+/// A shell input (the palette, the command line) holds the keyboard over
+/// the focused tile: the plan waits for it.
+#[gpui::test]
+fn a_plan_landing_while_a_shell_input_holds_the_keyboard_is_held(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    // Held for the test: a dropped handle reads as nothing focused.
+    let _input = vcx.update(|window, cx| {
+        let input = cx.focus_handle();
+        input.focus(window, cx);
+        input
+    });
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.notices(&vcx).contains(&READY.to_string()));
+}
+
+/// A held plan is checked again when it is asked: the classification
+/// switched meanwhile is refused, not asked about.
+#[gpui::test]
+fn a_held_plan_for_a_switched_classification_is_refused_on_focus(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.focus_tile(&mut vcx, false);
+    h.read_as(&mut vcx, &p, "underlying_ref,region\nNKY,Asia\n");
+    assert_eq!(h.confirm(&vcx), None);
+    h.press(&mut vcx, "g c k enter");
+    assert_eq!(h.shown_name(&vcx).as_deref(), Some("desk"));
+    h.focus_tile(&mut vcx, true);
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notices(&vcx),
+        ["import of region.csv was for region \u{2014} not applied"]
+    );
+}
+
+#[gpui::test]
+fn a_held_plan_for_a_moved_source_column_is_refused_on_focus(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.focus_tile(&mut vcx, false);
+    h.read_as(&mut vcx, &p, IMPORT_TEXT);
+    let moved = EDIT.replace("from = \"underlying_ref\"", "from = \"book\"");
+    vcx.update(|_, cx| h.factory.set_config(config(&moved), cx));
+    h.focus_tile(&mut vcx, true);
+    assert_eq!(h.confirm(&vcx), None);
+    assert_eq!(
+        h.notices(&vcx),
+        ["import of region.csv was for underlying_ref values \u{2014} not applied"]
+    );
+}
+
+/// A reload moving the classification onto another source column while
+/// the plan was made: the plan's sources are the old column's values.
+#[gpui::test]
+fn a_plan_landing_after_the_source_column_moved_is_refused(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let p = h.import(&mut vcx, "region.csv");
+    h.answer_file(&mut vcx, &p, TextFileResult::Read(Ok(IMPORT_TEXT.into())));
+    let moved = EDIT.replace("from = \"underlying_ref\"", "from = \"book\"");
+    vcx.update(|_, cx| h.factory.set_config(config(&moved), cx));
+    h.land(&mut vcx);
+    assert_eq!(h.confirm(&vcx), None);
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["import of region.csv was for underlying_ref values \u{2014} not applied"]
+    );
+}
+
+const REPLACED: &str = "import of a.csv replaced by a newer file operation";
+
+/// A newer file operation overtaking an import still waiting for its read
+/// says so: the import does not vanish without a word.
+#[gpui::test]
+fn a_newer_file_operation_replacing_a_waiting_import_says_so(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let first = h.import(&mut vcx, "a.csv");
+    h.act(&mut vcx, EXPORT);
+    h.save_as(&mut vcx, Some("out.csv"));
+    assert_eq!(h.notices(&vcx), [REPLACED]);
+    h.answer_file(
+        &mut vcx,
+        &first,
+        TextFileResult::Read(Ok(IMPORT_TEXT.into())),
+    );
+    h.land(&mut vcx);
+    assert_eq!(h.confirm(&vcx), None, "the overtaken read is dropped");
+}
+
+#[gpui::test]
+fn a_newer_file_operation_replacing_a_held_import_says_so(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    let first = h.import(&mut vcx, "a.csv");
+    h.focus_tile(&mut vcx, false);
+    h.read_as(&mut vcx, &first, IMPORT_TEXT);
+    let b = std::env::temp_dir().join("b.csv");
+    h.tile
+        .update(&mut vcx, |t, cx| t.import_from("region".into(), b, cx));
+    assert!(
+        h.notices(&vcx).contains(&REPLACED.to_string()),
+        "{:?}",
+        h.notices(&vcx)
+    );
+    h.focus_tile(&mut vcx, true);
+    assert_eq!(h.confirm(&vcx), None, "the held plan went with it");
 }
 
 /// A reload that moved the classification onto another source column while

@@ -53,8 +53,8 @@ the frame's config door.
 - `core/files.rs`: `FileOp`, the export or import waiting on its answer
   (tag, classification, path), and the notices' text: `exported`, the
   import question, `nothing_to_change`, `rejected_notice` (the first
-  `REJECTED_LISTED` = 20 rows, then `and <k> more`), `imported` and the
-  `not applied` / `not shown` refusals.
+  `REJECTED_LISTED` = 20 rows, then `and <k> more`), `imported`, the
+  `not applied` refusals, `ready` (a held plan) and `replaced`.
 - `core/prompt.rs`: `Prompt` (`NewName`, `NewColumn`, `Rename`) and
   `submit`, which validates the trimmed answer (`validate_name`,
   `validate_source`) into the next `Step`: the column question, a create,
@@ -196,9 +196,21 @@ Import opens `prompt_for_paths` (one file) and reads with
 `TextFileOp::Read { max_bytes: MAX_IMPORT_BYTES }`. The read text is
 planned by `plan_import` on the background executor over a copy of the
 current object; `import_planned` drops a plan another file operation
-overtook, refuses one landing after a switch or a source-column change,
-and drops one landing while the editor, a prompt or a question is open
-(`not shown`). A refused file (header, size, parse) shows `import refused:
+overtook and refuses one landing after a switch or a source-column change.
+Arming a confirm takes focus, so the question is armed only while
+`keyboard_free` holds: the tile is the focused tile (`set_focused`, kept
+from the shell's render, never notifying) with no `/` search, editor,
+prompt or question open, and window focus is nothing or contains the
+table (the shell root, not a palette or another input). Otherwise the
+plan waits in the one `held` slot (`HeldImport`, a newer plan replacing
+it) with `import of <file> ready — focus this tile to answer`.
+`offer_held_later` defers `offer_held` past the current update (the shell
+calls `set_focused` mid-draw) when the tile gains focus, a search ends, the
+editor or prompt closes, or a question is answered; `offer_held` re-checks
+the tag, classification and source column (refusing with the same notices)
+before arming. A newer export or import overtaking an import at any step
+(read, plan, held) says `import of <file> replaced by a newer file
+operation` (`overtake_import`). A refused file (header, size, parse) shows `import refused:
 …`; rejected rows show one warning; a plan changing nothing says so and
 asks nothing. Otherwise the confirm bar holds `Pending::Import` with the
 plan. `y` (`apply_import`) re-checks the classification and its source
@@ -213,8 +225,10 @@ and queues one `ConfigEdit`. The apply runs on the UI thread.
   carries shows its mapped values alone.
 - Rename and delete do not rewrite references; `references` misses ad hoc
   lane chains, pricer views and view sort keys.
-- An import plan overtaken by a newer file operation is dropped without a
-  notice; the open dialog does not start in `file_dir`.
+- The open dialog does not start in `file_dir`.
+- A held import is offered again only on the tile's own transitions; a
+  palette or command line closing over the focused tile does not re-offer
+  it until the tile is refocused or an input of its own closes.
 - Applying an import at `y` runs on the UI thread (about 28 ms at 100,000
   changed rows).
 

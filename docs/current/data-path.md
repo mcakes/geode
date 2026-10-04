@@ -628,11 +628,13 @@ once with `DataEvent::TextFile`, keyed by the asking tile's key and its tag
 
 - **Read** returns the whole file as UTF-8 text. A file whose size exceeds
   the request's `max_bytes` is refused before any of it is read (`<path> is
-  larger than 10 MB`, the limit stated in bytes below a megabyte); the length
+  larger than 10 MB`; the worker's message states the limit in bytes below
+  1 MiB and in binary megabytes above, printed as "MB"); the length
   read is checked again afterwards, so a file that grows between the two is
   refused rather than read past the limit. Text that is not UTF-8 is an error
   (`<path> is not UTF-8 text`). The limit for a classification import is
-  `geode_core::classification::import::MAX_IMPORT_BYTES` (10 MB); the
+  `geode_core::classification::import::MAX_IMPORT_BYTES` (10 MiB, which
+  the worker's refusal prints as "10 MB"); the
   import plan then refuses more than `MAX_IMPORT_ROWS` (100,000) data rows.
 - **Write** replaces the file atomically: the text goes to a sibling
   temporary (`.<name>.geode-tmp`), is synced, closed, and renamed over the
