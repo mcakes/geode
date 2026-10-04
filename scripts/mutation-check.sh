@@ -33047,8 +33047,8 @@ run_mutation "link: a package across underlyings emits no underlying" \
 # pull hands back the same allocation, which the frame reads as no change.
 run_mutation "link: a panel posts its underlying as the scope" \
   crates/geode-marketdata/src/tile.rs \
-  '                CursorScope::Path(underlying_scope(u))' \
-  '                { let _ = u; CursorScope::Nothing }' \
+  '                Some(u) if !echoes_its_group => CursorScope::Path(underlying_scope(u)),' \
+  '                Some(u) if !echoes_its_group => { let _ = u; CursorScope::Nothing }' \
   geode-marketdata a_clean_panel_emits_its_underlying_and_no_board
 
 run_mutation "link: a clean panel posts no board" \
