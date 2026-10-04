@@ -34552,6 +34552,20 @@ run_mutation "link: the header shows a NULL refusal" \
   '    let refused = None::<Group>.and_then(|g| {' \
   geode-tile an_emitter_header_shows_its_null_refusal
 
+# A refusal alone is text enough for the cluster: an emitter with no status
+# and no notice still lays out the text part and paints the refusal in it.
+run_mutation "link: a refusal alone opens the cluster text" \
+  crates/geode-tile/src/header.rs \
+  '    let text = (!c.status.is_empty() || !c.notices.is_empty() || refusal.is_some()).then(|| {' \
+  '    let text = (!c.status.is_empty() || !c.notices.is_empty()).then(|| {' \
+  geode-tile a_quiet_emitter_header_shows_its_null_refusal
+
+run_mutation "link: the cluster text paints the refusal" \
+  crates/geode-tile/src/header.rs \
+  '            .children(refusal.as_ref().map(|n| {' \
+  '            .children(None::<&notice::Notice>.map(|n| {' \
+  geode-tile a_quiet_emitter_header_shows_its_null_refusal
+
 # ---- Vol slice viewer ----
 #
 # geode-volslice: one underlying's smiles per expiry and kind. The pure core

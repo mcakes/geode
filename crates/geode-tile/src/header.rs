@@ -882,6 +882,9 @@ mod tests {
         /// overflow a narrow header.
         left_runs: usize,
         notice: Notice,
+        /// Whether the strip hands the cluster its status and notice; a
+        /// quiet strip leaves a link refusal as the cluster's only text.
+        quiet: bool,
         /// The strip's own dismissals, as a module keeps them.
         dismissed: crate::notice::Dismissals,
         /// Whether the strip hands the cluster a dismiss.
@@ -908,13 +911,15 @@ mod tests {
             let parent = self.parent.clone();
             let mut cluster = Cluster::new(TILE);
             cluster.mode = self.mode;
-            cluster.status.push(
-                div()
-                    .debug_selector(|| "strip-status".into())
-                    .child("2 pricing…")
-                    .into_any_element(),
-            );
-            cluster.notices = self.dismissed.visible([self.notice.clone()]);
+            if !self.quiet {
+                cluster.status.push(
+                    div()
+                        .debug_selector(|| "strip-status".into())
+                        .child("2 pricing…")
+                        .into_any_element(),
+                );
+                cluster.notices = self.dismissed.visible([self.notice.clone()]);
+            }
             if self.dismiss {
                 cluster.on_dismiss = Some(notice::on_dismiss(&cx.entity(), |s: &mut Strip| {
                     &mut s.dismissed
@@ -973,6 +978,7 @@ mod tests {
                 times: vec![plain_time()],
                 left_runs: 0,
                 notice: Notice::warning("not saved"),
+                quiet: false,
                 dismissed: Default::default(),
                 dismiss: true,
                 mode: Mode::Normal,
@@ -1272,6 +1278,23 @@ mod tests {
             !painted(vcx, "tile-link-refusal-3"),
             "cleared with the refusal"
         );
+    }
+
+    /// A refusal is text enough for the cluster on its own: an emitter with
+    /// no status and no notice still shows why its group kept its scope.
+    #[gpui::test]
+    fn a_quiet_emitter_header_shows_its_null_refusal(cx: &mut TestAppContext) {
+        let (view, _, _, vcx) = open_strip(cx);
+        view.update(vcx, |s, cx| {
+            s.quiet = true;
+            cx.notify();
+        });
+        link(&view, vcx, None, Some(Group::A));
+        assert!(!painted(vcx, "strip-status"), "sanity: no status");
+        assert!(!painted(vcx, "tile-notice-3-0"), "sanity: no notice");
+        assert!(!painted(vcx, "tile-link-refusal-3"), "nothing refused yet");
+        refuse(&view, vcx, Some("book"));
+        assert!(painted(vcx, "tile-link-refusal-3"));
     }
 
     /// Publish the builtin keymap as the live `Chords`, with `mod` as alt,
