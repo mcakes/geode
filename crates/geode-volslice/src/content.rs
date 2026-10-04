@@ -19,7 +19,8 @@ use crate::KIND;
 use crate::tile::VolsliceTile;
 
 /// Registered actions and their palette titles. [`DEFAULT_KEYMAP`] binds
-/// every one; the palette lists them too.
+/// every one but `fix_diff_y`, which the action menu, the header's y chip,
+/// `:ylim` and the palette reach; the palette lists them all.
 pub const ACTIONS: &[(&str, &str)] = &[
     ("volslice::strip_down", "Next expiry"),
     ("volslice::strip_up", "Previous expiry"),
@@ -45,6 +46,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("volslice::reset_view", "Reset view"),
     ("volslice::split_shrink", "Shrink the upper pane"),
     ("volslice::split_grow", "Grow the upper pane"),
+    ("volslice::fix_diff_y", "Fix/free the difference y-axis"),
+    ("volslice::menu", "Actions\u{2026}"),
     // The popup verbs: registered beside the rest so the fragment binds
     // them and the palette lists them.
     ("volslice::commit", "Commit"),
@@ -52,6 +55,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     // The diff chooser's tick and clear: `space` and `ctrl+x` while it is up.
     ("volslice::tick", "Tick/untick this difference"),
     ("volslice::clear_ticks", "Untick every difference"),
+    // The action menu's pick: `enter` while it is up.
+    ("volslice::menu_pick", "Menu: pick"),
     // The underlying picker's row steps. Its field types every bare key,
     // so the shared `j`/`k` list steps cannot reach it; the arrows can.
     ("volslice::list_down", "Next row"),
@@ -110,6 +115,7 @@ context = "volslice && mode == normal"
 "0" = "volslice::reset_view"
 "[" = "volslice::split_shrink"
 "]" = "volslice::split_grow"
+"." = "volslice::menu"
 
 # The underlying picker: a field, so only these keys are claimed and
 # every other bare key types.
@@ -121,16 +127,25 @@ context = "volslice && mode == insert"
 "down" = "volslice::list_down"
 "up" = "volslice::list_up"
 
-# The diff chooser: a fieldless, ticked list. The tile publishes `tilelist`
-# while it is up, so the shell's shared `j`/`k` and arrows step its rows;
-# the strip's own `j`/`k` and `space` are normal-mode bindings and stay out.
+# The diff chooser and the action menu: fieldless lists. The tile
+# publishes `tilelist` while either is up, so the shell's shared `j`/`k`
+# and arrows step its rows; the strip's own `j`/`k` and `space` are
+# normal-mode bindings and stay out. `popup` names which list is up, so
+# the chooser's tick never reaches the action menu.
 [[bindings]]
-context = "volslice && mode == menu"
+context = "volslice && mode == menu && popup == diff"
 [bindings.keys]
 "space" = "volslice::tick"
 "ctrl+x" = "volslice::clear_ticks"
 "enter" = "volslice::commit"
 "escape" = "volslice::cancel"
+
+[[bindings]]
+context = "volslice && mode == menu && popup == actions"
+[bindings.keys]
+"enter" = "volslice::menu_pick"
+"escape" = "volslice::cancel"
+"." = "volslice::cancel"
 "#;
 
 pub struct VolsliceContent {
@@ -326,7 +341,7 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
         let ids: Vec<&str> = ACTIONS.iter().map(|(id, _)| *id).collect();
         let bindings = doc.table["bindings"].as_array().unwrap();
-        assert_eq!(bindings.len(), 3, "normal, insert and menu");
+        assert_eq!(bindings.len(), 4, "normal, insert, chooser and action menu");
         let mut bound = 0;
         for b in bindings {
             for (key, action) in b["keys"].as_table().unwrap() {
@@ -335,7 +350,7 @@ mod tests {
                 bound += 1;
             }
         }
-        assert_eq!(bound, 36);
+        assert_eq!(bound, 40);
         // And the registry the app builds accepts every binding.
         let (data, _rx) = DataHandle::for_tests();
         let mut registry = ActionRegistry::default();

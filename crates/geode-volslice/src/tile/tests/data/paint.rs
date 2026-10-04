@@ -681,3 +681,5 @@ fn the_done_state_in_one_frame(cx: &mut gpui::TestAppContext) {
     );
     assert!(h.notices(&vcx).is_empty(), "{:?}", h.notices(&vcx));
 }
+
+mod menu;

@@ -10,6 +10,7 @@
 //! render: the header's text, the strip's rows, the footer's notice.
 
 mod data;
+mod menu;
 mod picker;
 mod pointer;
 
@@ -43,7 +44,7 @@ use gpui_component::{ActiveTheme as _, Theme, h_flex, v_flex};
 
 use crate::commands::{self, Command, Diff};
 use crate::content::ACTIONS;
-use crate::core::build::{Plan, with_split};
+use crate::core::build::{Plan, restyled};
 use crate::core::docs::{CHAIN, CVI};
 use crate::core::model::{Kind, Loaded, Pair, State, StripRow, toggle_pair};
 use crate::core::session;
@@ -164,6 +165,7 @@ struct HeaderKey {
     mark: Option<DraftMark>,
     hidden: BTreeSet<Kind>,
     diffs: Vec<Pair>,
+    diff_ylim: Option<(f64, f64)>,
 }
 
 /// What the strip's rows were built from: the rows, the active set and
@@ -171,7 +173,6 @@ struct HeaderKey {
 type StripKey = (Vec<StripRow>, Option<BTreeSet<NaiveDate>>, [Hsla; 7]);
 
 /// Prepared paint input, each part with the inputs it was built from.
-#[derive(Default)]
 struct Chrome {
     header: Option<HeaderModel>,
     header_key: Option<HeaderKey>,
@@ -180,6 +181,10 @@ struct Chrome {
     notice: Option<geode_tile::notice::Notice>,
     notice_key: Option<(Vec<String>, Vec<String>)>,
     hints: Vec<FooterHint>,
+    /// The action menu's element names and the `\u{22ef}` button's
+    /// selector, formatted once per tile.
+    menu_ids: geode_tile::menu::MenuIds,
+    menu_selector: SharedString,
     /// How many parts were rebuilt, for the test that paint formats nothing.
     #[cfg(test)]
     builds: usize,
@@ -237,6 +242,7 @@ impl VolsliceTile {
         // never per frame.
         cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
             this.chrome.hints = header::footer_hints(cx);
+            this.rehint_menu(cx);
             cx.notify();
         })
         .detach();
@@ -260,8 +266,20 @@ impl VolsliceTile {
         let mut health = HealthWatch::new(diagnostics.clone(), id);
         health.reask(cx, |d| d.health_for_datasets(&[CVI, CHAIN]));
         let chrome = Chrome {
+            header: None,
+            header_key: None,
+            strip: Vec::new(),
+            strip_key: None,
+            notice: None,
+            notice_key: None,
             hints: header::footer_hints(cx),
-            ..Chrome::default()
+            menu_ids: geode_tile::menu::MenuIds::new(
+                format!("volslice-menu-{}", id.0),
+                format!("volslice-menu-row-{}", id.0),
+            ),
+            menu_selector: format!("volslice-menu-button-{}", id.0).into(),
+            #[cfg(test)]
+            builds: 0,
         };
         let mut tile = VolsliceTile {
             id,
@@ -331,6 +349,7 @@ impl VolsliceTile {
                 || k.mark != self.loaded.draft.as_ref().map(|(_, m)| *m)
                 || k.hidden != self.state.hidden
                 || k.diffs != self.state.diffs
+                || k.diff_ylim != self.state.diff_ylim
         });
         if header_stale {
             let key = HeaderKey {
@@ -340,6 +359,7 @@ impl VolsliceTile {
                 mark: self.loaded.draft.as_ref().map(|(_, m)| *m),
                 hidden: self.state.hidden.clone(),
                 diffs: self.state.diffs.clone(),
+                diff_ylim: self.state.diff_ylim,
             };
             self.chrome.header = Some(HeaderModel::prepare(
                 key.underlying.as_deref(),
@@ -385,6 +405,7 @@ impl VolsliceTile {
                 self.chrome.builds += 1;
             }
         }
+        self.refresh_menu(cx);
     }
 
     /// The underlying the header names: the one whose documents are on
@@ -418,26 +439,29 @@ impl VolsliceTile {
     }
 
     /// The key context's `mode`: `insert` while the picker's field holds
-    /// the keys, `menu` while the fieldless diff chooser is up, `normal`
-    /// otherwise.
+    /// the keys, `menu` while a fieldless list (the diff chooser or the
+    /// action menu) is up, `normal` otherwise.
     fn mode(&self) -> &'static str {
         match self.popup {
             Some(Popup::Picker(_)) => "insert",
-            Some(Popup::Diff(_)) => "menu",
+            Some(Popup::Diff(_) | Popup::Actions(_)) => "menu",
             None => "normal",
         }
     }
 
     /// No `.counts()`: the bare digits are kind toggles, and a counting
     /// context would make the matcher swallow them as a pending count.
-    /// `tilelist` only under the diff chooser: the picker's field must type
+    /// `tilelist` only under a fieldless list: the picker's field must type
     /// `j` and `k`, which the shared list steps would otherwise claim.
+    /// `popup` names the list, so the chooser's keys and the action menu's
+    /// bind apart.
     pub fn key_context(&self) -> KeyContext {
         let ctx = KeyContext::new(crate::KIND).pair("mode", self.mode());
-        if matches!(self.popup, Some(Popup::Diff(_))) {
-            ctx.tilelist()
-        } else {
-            ctx
+        match &self.popup {
+            Some(p @ (Popup::Diff(_) | Popup::Actions(_))) => {
+                ctx.pair("popup", p.kind()).tilelist()
+            }
+            _ => ctx,
         }
     }
 
@@ -463,7 +487,14 @@ impl VolsliceTile {
         self.dispatch_log.push(action.clone());
         if !matches!(
             verb,
-            "commit" | "cancel" | "list_down" | "list_up" | "tick" | "clear_ticks"
+            "commit"
+                | "cancel"
+                | "list_down"
+                | "list_up"
+                | "tick"
+                | "clear_ticks"
+                | "menu"
+                | "menu_pick"
         ) {
             self.close_popup(window, cx);
         }
@@ -507,6 +538,9 @@ impl VolsliceTile {
             }
             "split_shrink" => self.step_split(-SPLIT_STEP, cx),
             "split_grow" => self.step_split(SPLIT_STEP, cx),
+            "menu" => self.toggle_menu(window, cx),
+            "menu_pick" => self.pick_highlighted(window, cx),
+            "fix_diff_y" => self.fix_diff_y(cx),
             "commit" => self.commit_popup(window, cx),
             "tick" => self.tick_popup(cx),
             "clear_ticks" => self.clear_popup_ticks(cx),
@@ -578,6 +612,7 @@ impl VolsliceTile {
                 toggle_pair(&mut self.state.diffs, p);
                 self.resubmit(cx);
             }
+            Command::Ylim(ylim) => self.set_diff_ylim(ylim, cx),
         }
         Ok(())
     }
@@ -660,7 +695,7 @@ impl VolsliceTile {
         }
         self.state.split = split;
         self.version += 1;
-        self.model = with_split(&self.model, split, self.version);
+        self.model = restyled(&self.model, split, self.state.diff_ylim, self.version);
         cx.notify();
     }
 
@@ -780,9 +815,7 @@ impl VolsliceTile {
         let bounds_cell = self.chart_bounds.clone();
         let divider = self.divider_rect(rem_px);
         let drag = self.drag;
-        let view = self
-            .view
-            .unwrap_or_else(|| View::with_min_span(self.model.full(), 0.0));
+        let view = self.painted_view();
         div()
             .id(ElementId::NamedInteger(
                 SharedString::new_static("volslice-chart-surface"),
@@ -818,6 +851,12 @@ impl VolsliceTile {
                 let tile = tile.clone();
                 move |event: &MouseDownEvent, window, cx| {
                     tile.update(cx, |t, cx| t.chart_pressed(event, window, cx));
+                }
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let tile = tile.clone();
+                move |event: &MouseDownEvent, window, cx| {
+                    tile.update(cx, |t, cx| t.chart_right_pressed(event, window, cx));
                 }
             })
             .when_some(divider, |el, band| {
@@ -885,6 +924,10 @@ impl Render for VolsliceTile {
                 self.health.chip(),
                 Mode::from_key_mode(self.mode()),
                 link_chips(&self.frame, cx),
+                header::MenuButton {
+                    selector: self.chrome.menu_selector.clone(),
+                    open: matches!(self.popup, Some(Popup::Actions(_))),
+                },
             )
         });
         let reads_one = self

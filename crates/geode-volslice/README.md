@@ -11,24 +11,29 @@ data tier's vol door; the crate computes none of them.
   launch table `{ underlying = "<u>" }`), the tile's `TileContent` door
   (`follows()` is `true`), `ACTIONS` and the `DEFAULT_KEYMAP` fragment.
 - `commands.rs`: the `:` line (`underlying <ref>`, `x <coordinate>`,
-  `diff <kind> - <kind> | off`, or with the Unicode minus) and its
-  completions.
+  `diff <kind> - <kind> | off`, or with the Unicode minus, and `ylim <lo>
+  <hi> | off`) and its completions.
 - `core/`: pure state, tested without gpui. `build.rs` turns a batch's
   answers into the xy model (a failed job is a notice, a short outcome
   builds nothing); `session.rs` round-trips the session table, dropping an
   unreadable key with a notice and clamping the split to the chart's bounds.
   `model.rs`'s `toggle_pair` is the one door that turns a difference on or
   off, keeping turn-on order and never a pair beside its reverse.
+  `menu.rs` builds the `.` action menu's rows from the state.
 - `tile/`: the hosted entity and its tests. `tile/data.rs` is the data
   flow: the two document reads, the followed group's board, the vol batch
   and the model swap. `tile/picker.rs` holds the two choosers: the
   underlying picker (a field over the diagnostics catalog's `cvi_params` and
   `option_chain` underlyings) and the diff chooser (every ordered pair of
-  loaded kinds, ticked). `tile/pointer.rs` holds the chart's wheel, drag
-  and divider gestures and the strip's presses.
+  loaded kinds, ticked), and the popup enum the action menu shares.
+  `tile/menu.rs` is the action menu's lifecycle (`MenuHost`, `.`, `⋯`, the
+  chart's right press) and the differences axis's fixed domain
+  (`fix_diff_y`, `set_diff_ylim`). `tile/pointer.rs` holds the chart's
+  wheel, drag and divider gestures and the strip's presses.
 - `header.rs`: the header (underlying, coordinate, a chip per loaded kind
-  with its digit, the diff chip, link chips, the two datasets' health, the
-  shell's × last) and the footer (the first notice with a count of the rest,
+  with its digit, the diff chip, the fixed-domain chip while one is set,
+  link chips, the two datasets' health, the action menu's `⋯`, the shell's
+  × last) and the footer (the first notice with a count of the rest,
   the key hints).
 - `strip.rs`: the expiry strip beside the chart: a dot in the expiry's
   color (filled when active), the date and a digit per kind that has the
@@ -81,7 +86,10 @@ chain and reads as a smooth hump.
 
 Difference pairs (`d`) paint in a lower pane under the vol pane, several at
 once, expiry by expiry in the order they were turned on. A pair and its
-reverse are never both on.
+reverse are never both on. The pane's axis (`build::DIFF_AXIS`, the lower
+left) autoscales to what the view shows unless a fixed domain is set
+(`State::diff_ylim`, `:ylim`, the menu's `Fix diff y-axis`); values past a
+fixed domain clip to the pane and still read in the tooltip.
 
 - Curve minus curve is at equal strike: the minuend is evaluated dense and
   the subtrahend at the minuend's strikes (`Grid::Job`), plotted at the
@@ -125,6 +133,17 @@ data returns.
 | `=` / `-` | Zoom about the view's centre |
 | `0` | Reset the view to the data's extent |
 | `[` / `]` | Shrink or grow the upper pane by a twentieth, within 0.2..0.8 |
+| `.` | Action menu (open or close) |
+
+The action menu (`.`, the header's `⋯`, or a right press on the chart's
+plot of a focused tile) lists `Underlying…`, `Coordinate: <current>`, the
+three kinds and `Densities` as ticked toggles, `Difference…`, `Fix diff
+y-axis` (`volslice::fix_diff_y`, no default key: its lane names `:ylim`)
+and `Reset view`, each with its live key. The shared `j`/`k` or arrows step
+its enabled rows, `enter` or a click picks, `escape` or `.` closes it. A
+pick closes the menu and dispatches the row's action; a disabled row
+(`Underlying…` while following, an unloaded kind, `Fix diff y-axis` with no
+difference shown) gives its reason as a notice.
 
 In the picker, `enter` commits, `escape` cancels, `up`/`down` step and every
 other bare key types; `tab` completes. In the chooser the shared `j`/`k` or
@@ -138,22 +157,31 @@ ctrl+click, shift+click or right press adds or removes it, on a focused
 tile (macOS delivers ctrl+click as a right press with control cleared; the
 tile answers no `press_context`, so the shell's right-press route only
 focuses; a left press holding alt or cmd is the shell's); a kind chip click is its digit and the
-diff chip `d`; the wheel zooms about the pointer or pans, a plot drag pans
-and a divider drag sets the split.
+diff chip `d`, the fixed-domain chip `volslice::fix_diff_y` (freeing it)
+and `⋯` is `.`; the wheel zooms about the pointer or pans, a plot drag pans,
+a right press on a plot opens the action menu on a focused tile, and a
+divider drag sets the split.
 
 ## Commands and session
 
 The `:` line takes `underlying <ref>` (refused while following), `x
-<strike|moneyness|log-moneyness|delta>` and `diff <kind> - <kind> | off`,
+<strike|moneyness|log-moneyness|delta>`, `ylim <lo> <hi> | off` and `diff
+<kind> - <kind> | off`,
 where the minus is ` - ` or `−`: a pair toggles that difference (turning it
 on turns its reverse off) and `off` turns every pair off; `none` is read as
 `off`. Turning on a pair naming a kind that is not loaded is refused
-`<kind> is not loaded`; turning one off never is.
+`<kind> is not loaded`; turning one off never is. `ylim` fixes the
+differences axis's y domain in its own units, or with a `%` suffix per
+value (`-2% 2%` is `-0.02 0.02`); `off` or `auto` autoscales it again. It
+refuses a lower end not strictly below the upper (`the lower limit must be
+below the upper`), a value that is not a finite number, and any other
+count of values (`usage: :ylim <lo> <hi> | off`). `0` resets the x view and
+keeps the fixed domain.
 
 The session table holds `version = 1`, `coordinate`, `hidden`, `density`
 and `split` always, and `underlying`, `expiries`, `diffs` (a list of
-`[minuend, subtrahend]` pairs in turn-on order) and `view` while set; the
-cursor is not saved. A session holding the single-pair `diff` key of an
+`[minuend, subtrahend]` pairs in turn-on order), `view` and `ylim` (the
+fixed differences domain, `[lo, hi]`) while set; the cursor is not saved. A session holding the single-pair `diff` key of an
 older build restores it as one pair; `diffs` wins beside it. A value that
 cannot be read drops its key with `session: dropped <key>: <why>`, and so
 does a `diffs` list naming a pair twice or a pair and its reverse; a split
@@ -197,6 +225,8 @@ with another notice behind it:
   draft that since left or changed mark, a superseded publication) clear
   under the new strip and chips.
 - `following A — set the underlying there` for `u` while following.
+- `no differences shown` for `volslice::fix_diff_y` while the differences
+  axis shows nothing to freeze.
 
 ## Known limitations
 
@@ -215,8 +245,6 @@ with another notice behind it:
   `shift+space` is the same verb.
 - Keyboard zoom anchors at the view's centre; only the wheel anchors at the
   pointer.
-- There is no `.` action menu: the header chips are clickable and the
-  palette lists every action.
 - A standing `vol request refused` notice is retried by the next state
   change (a key, a draft edit, a publication), not by a group scope change
   that keeps the underlying.
@@ -259,9 +287,19 @@ with another notice behind it:
   the barrier's deadline.
 - The picker holds the keys in `insert` mode and publishes no `tilelist`:
   its field types `j` and `k`, which the shared list steps would claim; the
-  arrows step it. The diff chooser has no field: it reports `mode == menu`
-  and publishes `tilelist`, so the shell's `j`/`k` step it and the strip's
-  own `j`/`k` stay out.
+  arrows step it. The diff chooser and the action menu have no field: each
+  reports `mode == menu` and publishes `tilelist`, so the shell's `j`/`k`
+  step it and the strip's own `j`/`k` stay out. Each also reports `popup`
+  (`diff` or `actions`), and their bindings are scoped by it, so the
+  chooser's `space` tick never reaches the action menu.
+- One popup is up at a time. A popup's outside-press closer closes only
+  the popup it was painted for (`outside_press`): the `⋯` button toggles in
+  the capture phase and may already have swapped the action menu in.
+- The fixed differences domain lives in the chart model
+  (`XyModel::with_y_limit`), so it is applied under a new model version
+  (`build::restyled`, and every built model) and the element's chrome cache
+  cannot keep the old scale. `fix_diff_y` freezes `XyModel::side_domain` at
+  the painted view, the very domain the element scales over.
 - `ctrl+space` and `shift+space` refuse to deactivate the last active
   expiry; `space` or `enter` on another row moves off it.
 - `space` belongs to the strip in `normal` mode and to the chooser's tick
@@ -282,10 +320,12 @@ with another notice behind it:
 - Every pointer action has its key: a strip press is `space` (ctrl or
   shift: `ctrl+space`/`shift+space`), a kind chip its digit, the diff chip
   `d`, a chooser row `space` and its Apply row `enter`, a strip right press
-  `ctrl+space`, the wheel `=`/`-`
+  `ctrl+space`, a chart plot right press and `⋯` `.`, an action menu row
+  `enter`, the fixed-domain chip `:ylim off`, the wheel `=`/`-`
   and `h`/`l`, a drag `h`/`l`, the divider `[`/`]`. A strip press acts only on a tile the
   shell had already told it is focused (`TileContent::set_focused`), so the
-  press that focuses a tile changes nothing else.
+  press that focuses a tile changes nothing else; so does a chart right
+  press, which opens the action menu only on a focused tile.
 - Pans and zooms go through the x axis's scale (`pan_sign`, `about`), so a
   reversed delta axis moves the way it reads. Keyboard zoom anchors at the
   view's centre, wheel zoom at the pointer.

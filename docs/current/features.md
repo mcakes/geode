@@ -1235,6 +1235,19 @@ pair off (`none` is read as `off`). Pairs paint, and list in the legend and
 tooltip, expiry by expiry in the order they were turned on, each labelled
 `<pair> <expiry>`.
 
+The differences axis autoscales to what the view shows, so a pan or a zoom
+rescales it. Fixed, it keeps one y domain whatever the view: `:ylim <lo>
+<hi>` sets it in the axis's own units (`-0.02 0.02` is ±2 vol points) or
+with a `%` suffix per value (`-2% 2%`), refusing a range whose lower end is
+not below its upper or a value that is not a finite number, and `:ylim off`
+(or `auto`) frees it. The action menu's `Fix diff y-axis` row
+(`volslice::fix_diff_y`, also in the palette) freezes the domain the axis
+shows at that moment, or frees a fixed one; with no difference shown it
+refuses `no differences shown`. While fixed, the header shows a chip such
+as `y −2%…2%` whose click frees it. Values past the domain are clipped to
+the pane and still read in the tooltip. `0` resets the x view only. The
+density axes always autoscale.
+
 - Curve minus curve is at equal strike: the minuend is evaluated dense and
   the subtrahend at the minuend's strikes through `Grid::Job`, so the two
   never interpolate; it is a line at the minuend's x.
@@ -1314,9 +1327,23 @@ whose picture is on screen:
   publication that reinstalled the documents) clear; the strip, chips and
   header stay, so the next change still has a batch to ask.
 
+**Action menu.** `.`, the header's `⋯` button, or a right press on the
+chart's plot of a focused tile opens the shared tile menu (a right press
+that only focuses the tile does nothing else; the strip's right press keeps
+adding or removing a row). Its rows, each with its live key: `Underlying…`
+(disabled while following, naming the group), `Coordinate: <current>`, the
+three kinds as ticked toggles (a kind with nothing loaded is disabled),
+`Densities`, `Difference…`, `Fix diff y-axis` (ticked while fixed) and
+`Reset view`. The shared `j`/`k` and arrows step its enabled rows, `enter`
+or a click picks, and `escape` or `.` closes it; a pick closes the menu and
+dispatches the row's action through the path its key takes, and a disabled
+row's pick shows its reason as a notice. The strip's keys stay out while
+it is up.
+
 **Session.** The tile saves its coordinate, hidden kinds, densities, split,
 and while set its underlying, active expiries, shown pairs (`diffs`, in
-order) and view; the cursor is not saved. An unreadable value drops its key
+order), view and fixed differences domain (`ylim = [lo, hi]`); the cursor
+is not saved. An unreadable value drops its key
 with a notice. A session saved with a single `diff` pair restores it as the
 one pair shown.
 
@@ -1335,8 +1362,6 @@ one pair shown.
 - On macOS, `ctrl+space` may be taken by the system's input-source
   shortcut and never reach the tile; `shift+space` is the same verb.
 - Keyboard zoom anchors at the view's centre, the wheel at the pointer.
-- There is no `.` action menu; the header chips and the palette carry the
-  actions.
 - A standing `vol request refused` notice is retried by the next state
   change (a key, a draft edit, a publication), not by a group scope change
   that keeps the underlying.

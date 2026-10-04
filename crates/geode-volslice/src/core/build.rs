@@ -238,7 +238,7 @@ pub const DENSITY_ALPHA: f32 = 0.55;
 
 /// The y formats in `Axis::ALL` order: vols on the left of either pane,
 /// densities on the right.
-const Y_FORMAT: [YFormat; 4] = [
+pub const Y_FORMAT: [YFormat; 4] = [
     YFormat::Percent,
     YFormat::Plain,
     YFormat::Percent,
@@ -315,11 +315,21 @@ pub fn padded(full: (f64, f64), min: f64) -> (f64, f64) {
     (centre - min / 2.0, centre + min / 2.0)
 }
 
-/// The same slots at another split, under a new version: the element's
-/// caches tell models apart by version alone.
-pub fn with_split(model: &XyModel, split: f32, version: u64) -> Arc<XyModel> {
+/// The same slots at another split or differences y domain, under a new
+/// version: the element's caches tell models apart by version alone.
+pub fn restyled(
+    model: &XyModel,
+    split: f32,
+    diff_ylim: Option<(f64, f64)>,
+    version: u64,
+) -> Arc<XyModel> {
     XyModel::new(version, model.x, model.y_format, split, model.slots.clone())
+        .with_y_limit(DIFF_AXIS, diff_ylim)
 }
+
+/// The differences axis: the lower pane's left side. A fixed y domain
+/// (`State::diff_ylim`) applies here alone; the density axes autoscale.
+pub const DIFF_AXIS: Axis = Axis::BottomLeft;
 
 fn failure(role: &Role, e: &str) -> String {
     match role {
@@ -1593,7 +1603,7 @@ mod tests {
     #[test]
     fn a_split_change_is_a_new_version_with_the_same_slots() {
         let b = built(&mut State::default());
-        let m = with_split(&b.model, 0.5, 8);
+        let m = restyled(&b.model, 0.5, None, 8);
         assert_eq!(
             (m.version, m.split, m.slots.len()),
             (8, 0.5, b.model.slots.len())

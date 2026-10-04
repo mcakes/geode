@@ -1,8 +1,10 @@
-//! The tile's two choosers. The underlying picker is a field over the
+//! The tile's popups. The underlying picker is a field over the
 //! diagnostics catalog's underlyings, ranked as typed; the diff chooser is
 //! a fieldless, ticked list of every ordered pair of loaded kinds. Both
-//! rank through `geode_shell::choice::ChoiceList`. Opening either closes the
-//! other; any other tile verb closes the one open before it runs.
+//! rank through `geode_shell::choice::ChoiceList`. The third, the `.`
+//! action menu, is the shared `geode_tile::menu` (`tile::menu`). One popup
+//! is up at a time: opening one closes the other, and any other tile verb
+//! closes the one open before it runs.
 //!
 //! The chooser ticks as the shell's dimension picker does: it opens with
 //! the shown pairs ticked, `space` (or a row click) ticks or unticks the
@@ -102,9 +104,29 @@ impl DiffState {
     }
 }
 
+/// The open `.` action menu and its element names.
+pub(crate) struct ActionsState {
+    pub(crate) menu: geode_tile::menu::Menu<geode_shell::actions::ActionId>,
+    pub(crate) ids: geode_tile::menu::MenuIds,
+}
+
 pub(crate) enum Popup {
     Picker(PickerState),
     Diff(DiffState),
+    Actions(ActionsState),
+}
+
+impl Popup {
+    /// Which popup this is, as the key context's `popup` pair names it;
+    /// an outside-press closer compares it so it closes only the popup it
+    /// was painted for.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Popup::Picker(_) => "picker",
+            Popup::Diff(_) => "diff",
+            Popup::Actions(_) => "actions",
+        }
+    }
 }
 
 fn labels_of(options: &[String]) -> Vec<SharedString> {
@@ -246,11 +268,33 @@ impl VolsliceTile {
         cx.notify();
     }
 
-    /// Step the open list by one row, clamped.
+    /// A press outside the popup painted as `painted`: it closes that
+    /// popup only while it is still the one up. The `\u{22ef}` button's
+    /// capture-phase press and a chart right press run before or beside it
+    /// and may already have swapped the action menu in, which this press
+    /// must leave open.
+    pub(super) fn outside_press(
+        &mut self,
+        painted: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.popup.as_ref().map(Popup::kind) == Some(painted) {
+            self.close_popup(window, cx);
+        }
+    }
+
+    /// Step the open list by one row, clamped. The action menu steps over
+    /// its enabled rows.
     pub(super) fn step_popup(&mut self, delta: i64, cx: &mut Context<Self>) -> bool {
         let list = match &mut self.popup {
             Some(Popup::Picker(p)) => &mut p.list,
             Some(Popup::Diff(d)) => &mut d.list,
+            Some(Popup::Actions(a)) => {
+                a.menu.step(delta as isize);
+                cx.notify();
+                return true;
+            }
             None => return false,
         };
         list.nav_clamped(NavCommand::Move(delta));
@@ -280,7 +324,8 @@ impl VolsliceTile {
                     self.resubmit(cx);
                 }
             }
-            None => {}
+            // The action menu picks through `menu_pick`.
+            Some(Popup::Actions(_)) | None => {}
         }
     }
 
@@ -299,7 +344,7 @@ impl VolsliceTile {
                     cx.notify();
                 }
             }
-            None => {}
+            Some(Popup::Actions(_)) | None => {}
         }
     }
 
@@ -308,7 +353,7 @@ impl VolsliceTile {
         let list = match &mut self.popup {
             Some(Popup::Picker(p)) => &mut p.list,
             Some(Popup::Diff(d)) => &mut d.list,
-            None => return,
+            Some(Popup::Actions(_)) | None => return,
         };
         if list.highlighted() != row && list.set_highlighted(row) {
             cx.notify();
@@ -365,7 +410,7 @@ impl VolsliceTile {
         let (list, labels) = match &self.popup {
             Some(Popup::Picker(p)) => (&p.list, &p.labels),
             Some(Popup::Diff(d)) => (&d.list, &d.labels),
-            None => return None,
+            Some(Popup::Actions(_)) | None => return None,
         };
         Some((
             list.painted()
@@ -378,13 +423,24 @@ impl VolsliceTile {
 }
 
 /// Paint the open popup, hung from the header's right edge. Rows are the
-/// list's painted window, labelled from the prepared strings.
+/// list's painted window, labelled from the prepared strings; the action
+/// menu is the shared menu door's.
 pub(crate) fn render_popup(
     popup: &Popup,
     tile: &Entity<VolsliceTile>,
     tile_id: u64,
     cx: &App,
 ) -> gpui::Deferred {
+    if let Popup::Actions(a) = popup {
+        return geode_tile::menu::render_menu(
+            &a.menu,
+            &a.ids,
+            Anchor::TopRight,
+            tile,
+            |t: &mut VolsliceTile, window, cx| t.outside_press("actions", window, cx),
+            cx,
+        );
+    }
     let theme = cx.theme();
     let hover = control::paint(
         theme,
@@ -396,17 +452,18 @@ pub(crate) fn render_popup(
     let (list, labels, kind) = match popup {
         Popup::Picker(p) => (&p.list, &p.labels, "picker"),
         Popup::Diff(d) => (&d.list, &d.labels, "diff"),
+        Popup::Actions(_) => unreachable!("painted by the menu door above"),
     };
     let mut surface = popover::surface(cx)
         .id(ElementId::Name(SharedString::new_static(match popup {
             Popup::Picker(_) => "volslice-picker",
-            Popup::Diff(_) => "volslice-diff",
+            _ => "volslice-diff",
         })))
         .debug_selector(move || format!("volslice-{kind}-{tile_id}"))
         .occlude()
         .on_mouse_down_out({
             let tile = tile.clone();
-            move |_, window, cx| tile.update(cx, |t, cx| t.close_popup(window, cx))
+            move |_, window, cx| tile.update(cx, |t, cx| t.outside_press(kind, window, cx))
         });
     if let Popup::Picker(p) = popup {
         surface = surface.child(
@@ -430,7 +487,7 @@ pub(crate) fn render_popup(
     }
     let diff = match popup {
         Popup::Diff(d) => Some(d),
-        Popup::Picker(_) => None,
+        _ => None,
     };
     if list.painted_len() == 0 {
         surface = surface.child(popover::empty_row(

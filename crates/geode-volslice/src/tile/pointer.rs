@@ -46,7 +46,7 @@ pub(crate) enum Drag {
 impl VolsliceTile {
     /// The chart's bounds, its layout at a zero origin and that origin's
     /// rect, from the last frame; `None` before the first paint.
-    fn geometry(&self, rem_px: f32) -> Option<(Bounds<Pixels>, Layout, Rect)> {
+    pub(super) fn geometry(&self, rem_px: f32) -> Option<(Bounds<Pixels>, Layout, Rect)> {
         let bounds = self.chart_bounds.get()?;
         let rect = Rect::new(
             0.0,

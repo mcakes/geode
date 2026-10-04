@@ -3,5 +3,6 @@
 
 pub mod build;
 pub mod docs;
+pub mod menu;
 pub mod model;
 pub mod session;

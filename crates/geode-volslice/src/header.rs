@@ -1,7 +1,8 @@
 //! The tile's header and footer: what it reads (the underlying, the
-//! coordinate), one chip per loaded kind, the difference chip, the link
-//! chips and the datasets' health; below the chart, the first notice and
-//! the key hints.
+//! coordinate), one chip per loaded kind, the difference chip, the fixed
+//! differences y-axis chip while one is set, the link chips, the datasets'
+//! health and the action menu's `\u{22ef}`; below the chart, the first
+//! notice and the key hints.
 //!
 //! [`HeaderModel::prepare`] and [`footer_notice`] format their text when
 //! the tile's state changes and [`footer_hints`] when the chords do; paint
@@ -9,6 +10,8 @@
 //! same action its key does, so the pointer and the keyboard cannot
 //! disagree.
 
+use geode_chart::core::scale::{LinearScale, fmt_percent, fmt_tick, unsigned_zero};
+use geode_chart::xy::YFormat;
 use geode_core::link::{DraftMark, Group};
 use geode_shell::actions::ActionId;
 use geode_shell::keymap::{Keystroke, Modifiers, parse_binding};
@@ -18,12 +21,14 @@ use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::{kbd, scale};
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
-use geode_tile::header::{Cluster, HealthChip, Mode, TileLinks};
+use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks};
 use geode_tile::notice::{Notice, Tone as NoticeTone};
 use gpui::prelude::*;
 use gpui::{App, Div, ElementId, Entity, MouseButton, MouseDownEvent, SharedString, div};
 use gpui_component::{Theme, h_flex, v_flex};
 
+use crate::core::build::{DIFF_AXIS, Y_FORMAT};
+use crate::core::menu::FIX_DIFF_Y;
 use crate::core::model::{Kind, Loaded, Pair, State};
 use crate::tile::VolsliceTile;
 
@@ -73,6 +78,47 @@ pub(crate) struct HeaderModel {
     /// so the chip stays short; `diff` with none shown.
     pub diff: SharedString,
     pub diff_set: bool,
+    /// `y \u{2212}2%\u{2026}2%` while the differences axis is fixed, in
+    /// the axis's own format; `None` while it autoscales.
+    pub ylim: Option<SharedString>,
+}
+
+/// The `\u{22ef}` button's per-tile selector, formatted once, and whether
+/// its menu is up.
+pub(crate) struct MenuButton {
+    pub selector: SharedString,
+    pub open: bool,
+}
+
+/// The fixed differences domain as the chip names it, in the axis's tick
+/// format: each end with the fewest decimals that print it exactly (a
+/// typed `-2% 2%` reads `\u{2212}2%\u{2026}2%`), and no finer than the
+/// step a ten-tick axis over the range would take (a frozen autoscaled
+/// domain reads to that step). Never a signed zero; the labels' minus.
+pub(crate) fn ylim_text((lo, hi): (f64, f64)) -> String {
+    let format = Y_FORMAT[DIFF_AXIS.index()];
+    // In the units the label prints: a percent axis reads a hundredth.
+    let unit = match format {
+        YFormat::Percent => 100.0,
+        YFormat::Plain => 1.0,
+    };
+    let finest = LinearScale::nice_step((hi - lo) * unit, 10);
+    let end = |v: f64| {
+        let shown = v * unit;
+        let step = (0..6)
+            .map(|d| 10f64.powi(-d))
+            .find(|step| {
+                let at = (shown / step).round() * step;
+                (shown - at).abs() <= 1e-9 * shown.abs().max(1.0)
+            })
+            .map_or(finest, |step| step.max(finest));
+        let text = match format {
+            YFormat::Percent => fmt_percent(v, step / unit),
+            YFormat::Plain => fmt_tick(v, step),
+        };
+        unsigned_zero(text).replacen('-', "\u{2212}", 1)
+    };
+    format!("y {}\u{2026}{}", end(lo), end(hi))
 }
 
 const KIND_ACTIONS: [&str; 3] = ["volslice::kind_1", "volslice::kind_2", "volslice::kind_3"];
@@ -118,6 +164,7 @@ impl HeaderModel {
             (diff_text(&state.diffs).into(), true)
         };
         HeaderModel {
+            ylim: state.diff_ylim.map(|r| ylim_text(r).into()),
             underlying: underlying
                 .map(|u| SharedString::from(u.to_string()))
                 .unwrap_or(SharedString::new_static(NO_UNDERLYING)),
@@ -253,6 +300,7 @@ pub(crate) fn render_header(
     health: Option<&HealthChip>,
     mode: Mode,
     links: TileLinks,
+    menu: MenuButton,
 ) -> Div {
     let bare = control::paint(
         theme,
@@ -334,11 +382,46 @@ pub(crate) fn render_header(
         ))
         .child(h.diff.clone()),
     );
+    // The fixed differences axis: a set chip whose click frees it, as the
+    // action menu's `Fix diff y-axis` row and `:ylim off` do.
+    if let Some(ylim) = &h.ylim {
+        let label = ylim.clone();
+        left = left.child(
+            chip_control(
+                ElementId::Name(SharedString::new_static("volslice-ylim-chip")),
+                theme,
+                control::for_chip(theme, &diff_paint, theme.background),
+                tile,
+                FIX_DIFF_Y,
+            )
+            .debug_selector(move || format!("volslice-ylim-chip-{tile_id}-{label}"))
+            .text_color(diff_paint.text)
+            .when_some(diff_paint.fill, |d, fill| d.bg(fill))
+            .tooltip(tips::tip(
+                "tip-volslice-ylim",
+                "Free the difference y-axis",
+                Some(FIX_DIFF_Y),
+                None,
+            ))
+            .child(ylim.clone()),
+        );
+    }
     let mut cluster = Cluster::new(TileId(tile_id));
     cluster.close = close.cloned();
     cluster.mode = mode;
     cluster.links = links;
     cluster.health = health;
+    cluster.menu = Some(MenuTrigger {
+        id: ElementId::Name(SharedString::new_static("volslice-menu-button")),
+        selector: menu.selector,
+        tip_selector: SharedString::new_static("tip-volslice-menu"),
+        action: "volslice::menu",
+        open: menu.open,
+        on_press: std::rc::Rc::new({
+            let tile = tile.clone();
+            move |window, cx| tile.update(cx, |t, cx| t.toggle_menu(window, cx))
+        }),
+    });
     geode_tile::header::frame(
         stack.and_then(|s| s.marker(theme, TileId(tile_id))),
         left,
@@ -427,11 +510,28 @@ mod tests {
             ("diff \u{00b7} 3 pairs", true),
             "past two pairs, a count"
         );
+        assert_eq!(h3.ylim, None, "autoscaled: no chip");
+        state.diff_ylim = Some((-0.02, 0.02));
+        let h = HeaderModel::prepare(Some("SPX.Z"), &state, &fixture());
+        assert_eq!(
+            h.ylim.as_ref().map(|s| s.as_ref()),
+            Some("y \u{2212}2%\u{2026}2%")
+        );
         loaded.draft = None;
         let h = HeaderModel::prepare(None, &State::default(), &loaded);
         assert_eq!(h.underlying.as_ref(), NO_UNDERLYING);
         assert_eq!(h.chips.len(), 2, "only loaded kinds");
         assert_eq!((h.diff.as_ref(), h.diff_set), ("diff", false));
+    }
+
+    /// The chip reads at the step its range needs, with the labels' minus
+    /// and no signed zero.
+    #[test]
+    fn the_ylim_chip_reads_in_the_axis_format() {
+        assert_eq!(ylim_text((-0.02, 0.02)), "y \u{2212}2%\u{2026}2%");
+        assert_eq!(ylim_text((-0.0123, 0.0234)), "y \u{2212}1.2%\u{2026}2.3%");
+        assert_eq!(ylim_text((-0.00001, 0.05)), "y 0%\u{2026}5%");
+        assert_eq!(ylim_text((-0.015, 0.03)), "y \u{2212}1.5%\u{2026}3%");
     }
 
     #[test]
