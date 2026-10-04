@@ -2,7 +2,9 @@
 
 use std::time::Instant;
 
-use geode_collector::{Args, Command, demo_root, parse_args, run_with_levels, status, store_for};
+use geode_collector::{
+    Args, Command, demo_root, install, install_job, parse_args, run_with_levels, status, store_for,
+};
 
 fn main() {
     // Keep the guard until the explicit exit below: dropping it flushes and
@@ -26,11 +28,24 @@ fn main() {
             0
         }
         Ok(Args {
-            command: Command::Install { .. } | Command::Uninstall { .. },
-            ..
+            command: command @ (Command::Install { .. } | Command::Uninstall { .. }),
+            demo_rows,
         }) => {
-            tracing::error!(target: "geode::collector", "install and uninstall are not available in this build");
-            2
+            let outcome = install_job(demo_rows).and_then(|job| match command {
+                Command::Install { dry_run } => install::install(&job, dry_run),
+                Command::Uninstall { dry_run } => install::uninstall(&job, dry_run),
+                _ => unreachable!("matched install or uninstall"),
+            });
+            match outcome {
+                Ok(text) => {
+                    println!("{}", text.trim_end());
+                    0
+                }
+                Err(message) => {
+                    tracing::error!(target: "geode::collector", "{message}");
+                    1
+                }
+            }
         }
     };
     drop(logging.guard);

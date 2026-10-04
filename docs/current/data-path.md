@@ -428,9 +428,12 @@ build is never read. A mutation entry checks that a mismatch refuses.
 - Session-bound transports (a Bloomberg Desktop API needs a logged-in
   Terminal; network shares need the user's session) run in a collector only
   while the user is logged in.
-- Desk policy may forbid login agents or scheduled tasks. Without a
-  collector the app opens the store directly through the same lease, with no
-  wait.
+- A collector runs only once `geode-collector install` has registered it, as
+  a macOS LaunchAgent or a Windows logon task
+  ([crate README](../../crates/geode-collector/README.md#install)); the app
+  never starts one. Desk policy may forbid login agents or scheduled tasks.
+  Without a collector the app opens the store directly through the same
+  lease, with no wait.
 
 ## Ingestion and publication
 

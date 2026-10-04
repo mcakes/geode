@@ -5,6 +5,7 @@
 //! to [`run`] (the collector loop, `run.rs`) or [`status`] (`status.rs`).
 //! The current contracts are in `docs/current/data-path.md`.
 
+pub mod install;
 mod run;
 mod status;
 
@@ -109,6 +110,20 @@ fn usage(reason: &str) -> String {
 /// The demo directory for `demo_rows`, as the app names it.
 pub fn demo_root(demo_rows: Option<usize>) -> Option<PathBuf> {
     demo_rows.map(geode_compose::demo::demo_dir)
+}
+
+/// The login job for this executable and `demo_rows`: the absolute running
+/// binary, and launchd's output files in `<user config>/logs` beside the
+/// daily logs.
+pub fn install_job(demo_rows: Option<usize>) -> Result<install::Job, String> {
+    let exe = std::env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .map_err(|err| format!("cannot locate this executable: {err}"))?;
+    let (_, user) = geode_compose::config_dirs();
+    let logs = user
+        .ok_or("no user configuration directory (APPDATA or HOME is not set)")?
+        .join("logs");
+    Ok(install::job(&exe, demo_rows, &logs))
 }
 
 /// The store the app opens with the same arguments: configuration from the

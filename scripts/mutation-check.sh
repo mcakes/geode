@@ -1453,6 +1453,31 @@ run_mutation "collector: an app is confirmed by a second probe" \
   geode-collector \
   an_app_is_confirmed_by_a_second_probe
 
+# The login job (geode-collector install.rs). launchd restarts only a
+# failed exit: a second collector and a changed binary exit 0 and must stay
+# down. Paths in the job documents are XML-escaped. A bootout of a job not
+# loaded is ignored, any other bootout failure stops the install.
+run_mutation "collector install: KeepAlive restarts only a failed exit" \
+  crates/geode-collector/src/install.rs \
+  '    key_bool(&mut out, 2, "SuccessfulExit", false);' \
+  '    key_bool(&mut out, 2, "SuccessfulExit", true);' \
+  geode-collector \
+  the_plist_has_the_spec_keys
+
+run_mutation "collector install: job documents escape an ampersand" \
+  crates/geode-collector/src/install.rs \
+  $'            \'&\' => out.push_str("&amp;"),' \
+  $'            \'&\' => out.push(\'&\'),' \
+  geode-collector \
+  the_plist_and_task_escape_paths
+
+run_mutation "collector install: only a not-loaded bootout is ignored" \
+  crates/geode-collector/src/install.rs \
+  '                Tolerate::NotLoaded => not_loaded(&exit),' \
+  '                Tolerate::NotLoaded => true,' \
+  geode-collector \
+  a_failed_bootout_other_than_not_loaded_stops_the_install
+
 run_mutation "lease: a probe creates no lock file" \
   crates/geode-data/src/lease.rs \
   '    let file = match OpenOptions::new().read(true).write(true).open(&path) {' \

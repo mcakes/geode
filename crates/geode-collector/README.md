@@ -19,14 +19,54 @@ geode-collector status [--demo [rows]]             who holds the store
 ```
 
 `--demo` takes the app's grammar (default 100,000 rows) and names the same
-demo store. A usage error exits 2. `install` and `uninstall` are not built
-yet and exit 2.
+demo store. A usage error exits 2; a failed `install` or `uninstall` exits
+1 with the failing step.
+
+## Install
+
+`install` registers the running binary (its absolute, canonical path) to
+start at login and starts it now; `uninstall` reverses it. Install is the
+only opt-in: the app never starts a collector. `--dry-run` prints every file
+the plan would create, write or remove, the document it would write, and
+each command, and does none of it. On macOS even a dry run asks `id -u` for
+the `gui/<uid>` domain it prints.
+
+**macOS.** A LaunchAgent, label `com.geode.collector` (`.demo-<rows>` for a
+demo store), in `~/Library/LaunchAgents/<label>.plist`: `ProgramArguments`
+= the binary, `run`, and `--demo <rows>` for a demo store; `RunAtLoad`;
+`KeepAlive = { SuccessfulExit = false }`, so launchd restarts a crash or an
+exit 70 but not an exit 0 (a second collector, a changed binary);
+`ProcessType = Background`; `LowPriorityIO`. launchd's stdout and stderr go
+to `collector-stdout.log` and `collector-stderr.log` in the logs directory;
+their names fall outside the daily `collector.*.log` trim, so they are never
+pruned and grow until removed by hand. The sequence: create the logs
+directory, write the plist, `launchctl bootout gui/<uid>/<label>` (a job not
+loaded, exit 3 or 113, is ignored; any other failure stops the install),
+then `launchctl bootstrap gui/<uid> <plist>`. Uninstall boots the job out
+and removes the plist.
+
+**Windows.** A per-user Task Scheduler task `Geode\Collector`
+(`Geode\Collector.demo-<rows>` for a demo store, the label's suffix): a
+logon trigger and an interactive-token principal for `USERDOMAIN\USERNAME`,
+`RestartOnFailure` every `PT1M` up to 3 times, `ExecutionTimeLimit` `PT0S`
+(none). The XML is staged in the temp directory as UTF-16 with a BOM and
+removed afterwards whatever the outcome. The sequence: `schtasks /End`
+(any failure ignored), `schtasks /Create /TN <task> /XML <file> /F`, then
+`schtasks /Run` so it starts now, as launchd's `RunAtLoad` does. Uninstall
+ends the task and runs `schtasks /Delete /TN <task> /F`, which fails when
+no such task exists.
+
+Other platforms refuse with `install is supported on macOS and Windows`.
+The plans are pure (`install_plan`, `uninstall_plan`) and run through a
+`Runner`; tests use a recording runner and a temporary home, so no test
+reaches `launchctl`, `schtasks` or the real `~/Library/LaunchAgents`.
 
 ## What lives here
 
 | Module | Holds |
 |---|---|
-| `lib.rs` | `Command`, `Args`, `parse_args`; `demo_root` and `store_for`, the store the app opens with the same arguments. |
+| `lib.rs` | `Command`, `Args`, `parse_args`; `demo_root` and `store_for`, the store the app opens with the same arguments; `install_job`, the login job for the running binary. |
+| `install.rs` | `Job`, `job`, `task_name`; the document builders `launchd_plist` and `schtasks_xml` (with `xml_escape`, `utf16_with_bom`); `Platform`, `Host`, the `Runner` trait and `SystemRunner`; `Plan` with `install_plan`/`uninstall_plan`, `describe` (the dry run) and `execute`; `install`/`uninstall` and their `_with` forms. |
 | `run.rs` | `run`/`run_with_levels`, the loop below; `ExeStamp` and `exe_changed`; the poll intervals; `BusyTimer` (a refused stamp read's escalation), `confirmed` (the two-probe app check) and `stop_report` (how a stopped hold is logged); the event sink (`Events`). |
 | `status.rs` | `status(db)`: `collector: running\|not running; app: present\|absent; store: <db>`, from two lock probes. |
 | `main.rs` | Installs logging with the `collector` prefix, dispatches, drops the log guard, exits with the returned status. |
@@ -82,3 +122,10 @@ the sink waits: it logs, updates a map or a list, and returns.
 - A changed `data.db_path` takes effect only when the collector restarts:
   it holds the lease on the store it started with, and warns at each
   acquire while the configuration names another.
+- The registered path is the binary that ran `install`. Installing from
+  `target/debug` registers that build; a later `cargo build` replaces it in
+  place, which the loop's changed-binary exit then picks up.
+- Task Scheduler's `RestartOnFailure` restarts a task that fails to start;
+  whether a nonzero exit code counts as a failure is Task Scheduler's
+  decision and has not been checked on a Windows machine. Registering the
+  task is a run check there, not a CI test.
