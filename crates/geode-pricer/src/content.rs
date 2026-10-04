@@ -487,21 +487,12 @@ impl TileContent for PricerContent {
         true
     }
 
-    /// The cursor row's sole underlying as a one-value path; nothing where
-    /// the row names none, which leaves the group's scope as it is. A
-    /// pricer posts no documents.
+    /// The cursor row's path: a group row's levels, or a line's enclosing
+    /// group path plus its sole underlying (`PricerTile::emission`).
+    /// Nothing with no cursor row, which leaves the group's scope as it is.
+    /// A pricer posts no documents and has no filter layer.
     fn emission(&self, cx: &App) -> geode_core::link::Emission {
-        use geode_core::link::{CursorScope, Emission, underlying_scope};
-        Emission {
-            cursor: self
-                .tile
-                .read(cx)
-                .cursor_underlying()
-                .map_or(CursorScope::Nothing, |u| {
-                    CursorScope::Path(underlying_scope(&u))
-                }),
-            ..Emission::default()
-        }
+        self.tile.read(cx).emission()
     }
 
     /// Every cursor move, edit and load notifies the tile, so observing it

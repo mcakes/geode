@@ -32937,12 +32937,82 @@ run_mutation "link: a promoted snapshot tells the shell the emission changed" \
   '            // underlying, and a link group keeps the old scope.' \
   geode-blotter a_snapshot_promoted_by_a_flip_tells_the_shell_the_emission_changed
 
-# A pricer posts its cursor line's underlying, the one `g m` opens on.
+# A pricer posts its cursor path: a group row its own levels, a line its
+# enclosing group's path plus its underlying (the one `g m` opens on). A
+# NULL or empty level refuses rather than widening every follower.
 run_mutation "link: the pricer emits the cursor line's underlying" \
   crates/geode-pricer/src/content.rs \
-  '                    CursorScope::Path(underlying_scope(&u))' \
-  '                    { let _ = &u; CursorScope::Nothing }' \
+  '        self.tile.read(cx).emission()' \
+  '        { let _ = &self.tile; let _ = cx; geode_core::link::Emission::default() }' \
   geode-pricer the_emission_is_the_cursor_lines_underlying
+
+run_mutation "link: a pricer group row posts its path" \
+  crates/geode-pricer/src/tile.rs \
+  '                let group_row = if is_group {
+                    Some(g)
+                } else {' \
+  '                let group_row = if is_group {
+                    None
+                } else {' \
+  geode-pricer a_pricer_group_row_emits_its_path
+
+run_mutation "link: a pricer line posts its enclosing group path" \
+  crates/geode-pricer/src/tile.rs \
+  '                } else {
+                    self.model.parent(g)
+                };' \
+  '                } else {
+                    None
+                };' \
+  geode-pricer a_pricer_line_emits_its_group_path_and_its_underlying
+
+run_mutation "link: a pricer leg posts its enclosing group path" \
+  crates/geode-pricer/src/tile.rs \
+  '                } else {
+                    self.model.parent(g)
+                };' \
+  '                } else {
+                    None
+                };' \
+  geode-pricer a_pricer_leg_emits_its_enclosing_groups_path
+
+run_mutation "link: a pricer line adds its underlying" \
+  crates/geode-pricer/src/tile.rs \
+  '                        if !is_group
+                            && let Some(u) = self.underlying_at(g)' \
+  '                        if false
+                            && let Some(u) = self.underlying_at(g)' \
+  geode-pricer a_pricer_line_emits_its_group_path_and_its_underlying
+
+run_mutation "link: a pricer line under an underlying group posts it once" \
+  crates/geode-pricer/src/tile.rs \
+  '                            && !pairs.iter().any(|(n, _)| n == UNDERLYING)' \
+  '                            && true' \
+  geode-pricer a_pricer_group_row_emits_its_path
+
+run_mutation "link: a NULL pricer group value refuses" \
+  crates/geode-pricer/src/tile.rs \
+  '            None => return Err(name.clone()),' \
+  '            None => continue,' \
+  geode-pricer a_pricer_null_group_value_refuses
+
+run_mutation "link: an empty pricer group value refuses" \
+  crates/geode-pricer/src/tile.rs \
+  '        match value.as_deref().filter(|v| !v.is_empty()) {
+            Some(v) => pairs.push((name.clone(), v.to_string())),
+            None => return Err(name.clone()),' \
+  '        match value.as_deref() {
+            Some(v) => pairs.push((name.clone(), v.to_string())),
+            None => return Err(name.clone()),' \
+  geode-pricer an_empty_or_null_group_value_refuses_at_its_level
+
+run_mutation "link: the pricer reports its unscoped flag" \
+  crates/geode-pricer/src/tile.rs \
+  '            cursor,
+            unscoped: self.unscoped,' \
+  '            cursor,
+            unscoped: false,' \
+  geode-pricer a_pricer_with_no_cursor_row_emits_nothing
 
 run_mutation "link: the pricer can emit before it holds a line" \
   crates/geode-pricer/src/content.rs \
@@ -32962,13 +33032,13 @@ run_mutation "link: a pricer cursor move tells the shell" \
         }))' \
   geode-pricer a_cursor_move_tells_the_shell_the_emission_changed
 
-# A package across underlyings names no single one: it posts no scope,
-# which leaves the group's scope as it was instead of naming its first leg.
-run_mutation "link: a package across underlyings emits no scope" \
+# A package across underlyings names no single one: it posts its group
+# path without an underlying instead of naming its first leg.
+run_mutation "link: a package across underlyings emits no underlying" \
   crates/geode-pricer/src/core/sheet.rs \
   '                Some(_) => return None,' \
   '                Some(_) => {}' \
-  geode-pricer a_package_across_two_underlyings_emits_no_scope
+  geode-pricer a_pricer_package_across_underlyings_emits_its_path_without_an_underlying
 
 # A market-data panel posts its underlying and, while its draft is not
 # clean and the upload builder assembles it, that whole document. The rows
@@ -33075,8 +33145,8 @@ run_mutation "link: the production roster emits" \
 
 run_mutation "link: the production pricer emits its cursor line" \
   crates/geode-pricer/src/content.rs \
-  '                    CursorScope::Path(underlying_scope(&u))' \
-  '                    { let _ = &u; CursorScope::Nothing }' \
+  '        self.tile.read(cx).emission()' \
+  '        { let _ = &self.tile; let _ = cx; geode_core::link::Emission::default() }' \
   geode-app the_production_blotter_emits_its_cursor_path_into_a_group_a_pricer_follows
 
 run_mutation "link: the production follower reads its group through its own handle" \
