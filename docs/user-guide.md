@@ -357,9 +357,17 @@ workspace's separate values and returns it to the shared context.
 
 Press `mod+u` on a tile to choose what it **emits** or **follows** in one of
 four groups, A–D. For example, make a blotter emit A and a second blotter or
-vol-slice tile follow A. Moving the first blotter's cursor to a row naming
-one underlying updates the followers. A total or mixed row leaves the
-group's last underlying in place.
+vol-slice tile follow A. Moving the first blotter's cursor to a row sends
+the group that row's grouping path, narrowed by the blotter's own scope and
+filter, so a follower shows the rows under the cursor. The total row sends
+the blotter's whole view. A row whose path passes through an empty value
+cannot be sent: the group keeps what it had and the emitting tile's header
+says `group A not updated · book is NULL`.
+
+**Settings → Linked scope includes tile filter** turns off sending the
+emitter's own `:filter`. A choice that would link groups in a loop (A
+following B while emitting back into it) is refused with `would link B
+back into A`.
 
 A follower uses the group's scope in place of the workspace scope, while
 keeping its workspace's grouping and as-of. The scope bar still edits the
@@ -368,9 +376,12 @@ group letter with an up arrow for emitting and a down arrow for following.
 Choose **follow · workspace** to return a tile to its workspace scope, or
 **emit · none** to stop changing a group.
 
-Blotters and pricers can follow and emit; market-data panels can emit their
-underlying and draft; vol-slice tiles can follow. Market-data panels keep
-their own underlying, and timeseries tiles use their own series list.
+Blotters, pricers and market-data panels can follow and emit; vol-slice
+tiles can follow. A market-data panel or vol-slice tile following a group
+shows the group's one underlying, and nothing when the group names several.
+While following, a market-data panel's underlying is set by the group: `u`
+says `following A — set the underlying there`. Timeseries tiles use their
+own series list.
 
 ### Restore and customize
 

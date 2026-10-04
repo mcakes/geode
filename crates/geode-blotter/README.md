@@ -131,7 +131,9 @@ cargo bench -p geode-blotter   # the pure core
   group row adds nothing beyond its levels; the total row's path is empty.
   A NULL or empty grouping value on the path refuses
   (`CursorScope::NullIn(column)`): a scope cannot select NULL, and dropping
-  the level would widen every follower to all its values. The tile reads
+  the level would widen every follower to all its values. The shared tile
+  header shows the refusal from frame state (an empty value too reads `…
+  is NULL`); the blotter posts no notice of its own. The tile reads
   the one shown row at the cursor and skips the selection walk
   `dimension_context` does: the shell pulls on every notification while the
   tile emits, and a selection never changes the cursor's path. Before the

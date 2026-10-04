@@ -564,6 +564,11 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - Link chooser rows; solid group chips including on Alduin and Solarized Light,
   letter polarity differing between chips on 15 themes; the `following A · SPX.Z`
   status segment; a restart restoring membership.
+- Link path emission: the `group A not updated · book is NULL` warning in an
+  emitting tile's header (blotter and pricer, wide and narrow tiles, alone and
+  beside module notices); a market-data panel's follow and both-ways chips; its
+  `⋯` menu's disabled `Load underlying…` row with the reason `following A`; the
+  `would link B back into A` notice with the chooser still open.
 - Density fill contrast on light and dark themes; negative lobes after a long demo
   walk; curve x extent against the chain; expiry colors on light and dark.
 - The `⋯` button, action menu placement, `y −2.75%…2.75%` ylim chip, out-of-domain

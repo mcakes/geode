@@ -165,10 +165,13 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   moved`, any other draft change closes silently. Every commit that keeps its
   value takes the `Bulk` out before `close_editor`, which would otherwise
   undo it, and every verb that reads the draft closes the editor first.
-- Emitting into a link group (`TileContent::emission`), a panel posts its
-  underlying (the first part of its document key) as a one-value
-  `underlying_ref` scope; with no underlying it posts nothing, which leaves
-  the group's scope as it was. The column is `geode_core::link::UNDERLYING`,
+- Emitting into a link group (`TileContent::emission`), a panel reports
+  its underlying (the first part of its document key) as a one-value
+  `underlying_ref` path (`CursorScope::Path`), no filter layer and no
+  `:unscoped` flag; the shell composes it over the panel's base, so a panel
+  following nothing posts its lane's scope ∧ its underlying. With no
+  underlying it reports `CursorScope::Nothing`, which leaves the group's
+  scope as it was. The column is `geode_core::link::UNDERLYING`,
   not read from the dataset: every built-in
   document dataset keys first on `underlying_ref`, as `accepts()` and the
   launch path also assume, and a panel over a dataset keyed first on another
@@ -205,10 +208,13 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   notification (`sync_followed_underlying`) and switches through `set_key`,
   so a dirty draft is parked as on any switch; the switch's requery answers
   the flip barrier on delivery, and a move that keeps the underlying, or
-  leaves none, self-arrives. While following, `u`, `:underlying`/`:key`, a
-  picker opened earlier and the add-time auto-prompt refuse with
-  `following A — set the underlying there`, and the menu's `Load
-  underlying…` row is greyed `following A`. Unfollowing keeps the
+  leaves none, self-arrives. Only the first key part is compared, and a
+  switch sets a one-part key. While following, `u`, `:underlying`/`:key`
+  and a picker opened earlier refuse with `following A — set the
+  underlying there`, the add-time auto-prompt does not open, and the
+  menu's `Load underlying…` row is greyed `following A`. A panel that
+  follows and emits into one group composes over its lane, so its posting
+  (lane ∧ its underlying) replaces a co-emitter's: the last posting wins. Unfollowing keeps the
   underlying the group last gave. The session saves the underlying as
   always; session restore records the follow in the frame before the panel
   is built and notifies nothing, so `MarketDataTile::new` reads the followed

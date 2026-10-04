@@ -334,27 +334,46 @@ pulls:
 
 | Module | Follows | Scope it posts | Board it posts | Posts nothing when |
 |---|---|---|---|---|
-| Blotter | Yes | Its base and `:filter` layer, then the cursor row's grouping path (plus a leaf row's own single values) | None | No snapshot has arrived, or the path passes through a NULL grouping value (the tile header says so) |
-| Pricer | Yes | The cursor row's one underlying, as a one-value `underlying_ref` scope | None | The sheet has no cursor row, or the row is a package across underlyings or a grouping row |
-| Market data | No | The panel's underlying, as a one-value `underlying_ref` scope | Its draft document, while the draft is not clean | The panel has no underlying |
+| Blotter | Yes | Its base and `:filter` layer, then the cursor row's grouping path (plus a leaf row's own single values) | None | No snapshot has arrived, or the path passes through a NULL or empty grouping value (the tile header says so) |
+| Pricer | Yes | Its base, then the grouping path of the cursor's group row (a line, leg or package adds its sole `underlying_ref`) | None | The sheet has no cursor row, or the path passes through a NULL or empty grouping value (the tile header says so) |
+| Market data | Yes, by underlying | Its base, then its underlying as a one-value `underlying_ref` path | Its draft document, while the draft is not clean | The panel has no underlying |
 | Timeseries | No | Does not emit | | |
 | Vol slice | Yes | Does not emit | | |
 
-An emission with no scope leaves the group's scope as it was, so resting the
-cursor on a total or a mixed row does not clear what the group's followers
-show. A module can emit before it has data: the capability does not depend
-on loaded state, so a restored membership survives a tile whose first
-answer has not arrived.
+The shell composes each posting as `base ∧ layer ∧ path`
+([composition](shell.md#link-groups)): the base is the emitter's lane
+scope, or the scope of a different group it follows (a tile emitting into
+the group it follows composes over its lane); the layer is the tile's
+`:filter` layer while `[links] include_tile_filter` is on; the path is
+last. The "Scope it posts" column above is that composition. A total row
+has an empty path and posts the base (and layer) alone, so resting the
+cursor on it widens the group back to the emitter's whole view. A path
+through a NULL or empty grouping value posts nothing: a scope cannot say
+`IS NULL`, and dropping the level would widen every follower to all its
+values. The group keeps its scope and the emitter's header shows `group A
+not updated · book is NULL` until a pull that is not refused, until it
+leaves or switches group, or until it closes. A module can emit before it has data:
+the capability does not depend on loaded state, so a restored membership
+survives a tile whose first answer has not arrived.
 
 Following replaces the frame scope a tile reads with the group's. The
-blotter and the pricer query under that scope, so they can follow. The
-market-data panel and the timeseries tile never read the frame's scope: a
-group would change nothing they show, so they cannot follow, the chooser
-offers them no follow row, and a market-data panel does not take its
-underlying from a group. A timeseries tile neither follows nor emits and
-has no chooser at all. A blotter or pricer set `:unscoped` ignores the
-scope of a group it follows, as it ignores the workspace's, while its
-header still shows the chip.
+blotter and the pricer query under that scope. The market-data panel and
+the vol slice viewer take their underlying from it: the scope's one
+`underlying_ref` value (`geode_core::link::underlying_of`), or none when it
+names zero or several. Because the composed scope carries the emitter's
+base as well as its path, a group names one underlying only when the path
+or the base fixes one: a total row over a lane naming several underlyings
+names none, and a path value the base excludes gives an impossible scope,
+which names none either. A timeseries tile never reads the frame's scope:
+it neither follows nor emits and has no chooser at all. A blotter or pricer
+set `:unscoped` ignores the scope of a group it follows, as it ignores the
+workspace's, while its header still shows the chip.
+
+A path level on a non-text column (the pricer's `strike`, `qty`, `barrier`
+or a shift column, when the sheet is grouped by one) is emitted like any
+other level. A pricer following the group refuses that scope explicitly
+(`scope refused: 'strike' is not a text column, so it cannot be
+selected by value`), while a blotter follower's SQL honours it.
 
 The vol slice viewer follows without querying under the scope: it reads
 the group's one `underlying_ref` value (`underlying_of`) as its underlying,
@@ -936,14 +955,16 @@ be overwritten. An echo delivered before transport success follows the
 ordinary Editing update policy. If that changes the draft, the later success
 cannot mark it Sent.
 
-### Link group emission
+### Link groups
 
 A panel emitting into a [link group](#link-groups) posts where it is and,
 while its draft is not clean, the draft document it paints.
 
-The scope is the panel's underlying (the first part of its document key) as
-a one-value `underlying_ref` scope. A panel with no underlying posts
-nothing, which leaves the group's scope as it was.
+Its path is the panel's underlying (the first part of its document key) as
+a one-value `underlying_ref` path, which the shell composes over the
+panel's base like any emitter's: the panel has no `:filter` layer, so a
+panel following nothing posts its lane's scope ∧ its underlying. A panel
+with no underlying posts nothing, which leaves the group's scope as it was.
 
 The board entry is the panel's draft document: its dataset, its document
 key, and the rows the upload builder assembles from the painted base, the
@@ -972,10 +993,36 @@ one-cell commit, which refills its cell through the table entity, and a
 refused `:upload` that cancels an open selection editor and takes its live
 steps back out of the draft.
 
-A panel emits only. It does not read the frame's scope and does not take
-its underlying from a group, so it cannot follow one: its chooser lists the
-emit rows alone. No tile reads the board, so a posted draft is not displayed
-anywhere else.
+A panel also follows, by underlying only. While it follows a group its
+underlying is the group scope's one `underlying_ref` value; the rest of the
+scope is ignored. Only the first part of the panel's key is compared, and a
+switch sets a one-part key. A scope naming zero or several underlyings
+leaves the panel on none, the empty state, rather than on an underlying the
+group no longer selects. Every frame notification compares the two, and a
+change goes through the ordinary key switch, so a dirty draft is parked
+under its underlying as on any switch; the switch's request answers the
+flip barrier on delivery, and a move that keeps the underlying, or leaves
+none, answers it at once.
+
+While following, the group owns the underlying. `u`, `:underlying` and
+`:key` refuse with `following A — set the underlying there`; a picker
+opened before the panel joined the group refuses its pick the same way;
+the `⋯` menu's `Load underlying…` row is disabled with the reason
+`following A`; and a panel added while following does not prompt for an
+underlying. Unfollowing keeps the underlying the group last gave. The
+session still saves the panel's underlying; a restored follower opens on
+its group's restored underlying instead, read when the panel is built,
+since session restore records the follow before any tile exists and
+notifies nothing.
+
+A panel that follows and emits into one group composes over its lane, as
+any such emitter does, so it posts lane ∧ its underlying and replaces
+whatever a co-emitter posted: the last posting wins, and the group then
+names the panel's underlying until another emitter moves.
+
+The vol slice viewer reads a group's `cvi_params` draft from the board (see
+[Vol slice](#vol-slice)); no other tile reads the board, so a posted
+dividend schedule is not displayed anywhere else.
 
 ## Timeseries
 
@@ -1334,7 +1381,11 @@ a picker over the diagnostics catalog's `cvi_params` and `option_chain`
 underlyings; `:underlying` sets one) unless it follows a link group, when
 it reads the group's single `underlying_ref` value and `u` and
 `:underlying` are refused naming the group. A group naming none or several
-underlyings paints `no underlying in A`. A tile added with no underlying
+underlyings paints `no underlying in A`. A group's scope is its emitter's
+base composed with its path (see [link groups](#link-groups)), so it names
+one underlying less often than the cursor row alone would: a blotter total
+row over a lane naming several underlyings, or a path value the lane
+excludes, names none. A tile added with no underlying
 and no group prompts with the picker at once. Following is compared through
 `FrameView::following()` on every frame notification, since following a
 group whose scope was never written moves no version; while following, the
@@ -2093,13 +2144,22 @@ new named color) is for `underlying_ref` on line, leg and
 package rows (a package's when its legs share one); a grouping row's context
 is empty, so it offers none.
 
-Emitting into a [link group](#link-groups), the pricer posts the same
-underlying `g m` opens on, as the group's scope, so the two never name
-different underlyings for one row: a line's or a leg's own, a package's when
-its legs share one. A package across underlyings, a grouping row, and a
-sheet with no cursor row post no scope, which leaves the group's scope as it
-was. Every cursor move, edit and load tells the shell to pull. The pricer
-posts no documents.
+Emitting into a [link group](#link-groups), the pricer reports the cursor
+row's path and its `:unscoped` flag, and the shell composes the path over
+the tile's base; the pricer has no `:filter` layer. A grouping row's path is
+one value per kept grouping level, root first. A line, a leg or a package
+posts the path of the grouping row enclosing it (a leg's parent is a
+grouping row, not its package), then its sole underlying as
+`underlying_ref`, the same underlying `g m` opens on, so the two never name
+different underlyings for one row: a line's or a leg's own, a package's
+when its legs share one. A package across underlyings adds none and posts
+the enclosing path alone; under an `underlying_ref` grouping level the
+underlying is already on the path and is not added twice. The pricer's row
+context names nothing beyond the underlying, so a line adds no other
+column. A NULL or empty grouping value on the path refuses: the group keeps
+its scope and the tile header names the column. A sheet with no cursor row
+posts no scope. Every cursor move, edit and load tells the shell to pull.
+The pricer posts no documents.
 
 The action menu offers repricing, packaging, unpackaging, undo, redo, deletion,
 the sheet verbs (Open sheet…, Rename sheet…, New sheet, Remove sheet…; see

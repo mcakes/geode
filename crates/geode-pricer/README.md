@@ -388,7 +388,11 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   A NULL or empty group value refuses (`CursorScope::NullIn`) rather than
   widening followers; an empty sheet posts nothing, which leaves the
   group's scope as it was. The emission carries `:unscoped` and no filter
-  layer (the pricer has none). It is read from the model on each pull:
+  layer (the pricer has none). A kept level on a non-text column
+  (`strike`, `qty`, `barrier`, a shift) is emitted like any other; a
+  following pricer then refuses the group's scope (`'strike' is not a text
+  column`), while a following blotter's SQL honours it. It is read from the
+  model on each pull:
   nothing to keep in step. `emits` is true before a sheet has loaded: the shell
   drops a restored membership for a tile that answers false right after
   create. `watch_emission` observes the tile entity, which every cursor

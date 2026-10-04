@@ -81,7 +81,7 @@ The main configuration documents have distinct owners:
 
 | Document | Defines |
 |---|---|
-| `app.toml` | Theme, primary modifier, UI settings, logging, time zone, pricing, vol model, and timeseries settings |
+| `app.toml` | Theme, primary modifier, UI settings, logging, time zone, link groups, pricing, vol model, and timeseries settings |
 | `datasets.toml` | Dataset families, columns, roles, types, grains, retention, local publication, and `computed` |
 | `views.toml` | Queryable views, joins, columns, expressions, grouping, and sorting |
 | `sources.toml` | File, subscription, fetch, and reference snapshot sources with readiness and adapter settings |
@@ -732,6 +732,20 @@ filesystem naming is stable across configured display zones.
 `memory`, plus `default`. Third-party targets remain
 capped at `warn`. Runtime level changes persist through the same ordered user
 configuration write path.
+
+`[links] include_tile_filter` decides whether a link-group emitter's own
+`:filter` layer is composed into the scope it posts (base, then layer, then
+cursor path; see [link groups](shell.md#link-groups)). It is a boolean, on
+by default, so a follower shows the rows under the emitter's cursor as the
+emitter shows them; off, a tile filter stays local to its tile and followers
+see the emitter's base and path alone. A missing key or a non-boolean value
+reads as on, without a diagnostic. The settings dialog's `Linked scope
+includes tile filter` row (category Links, `On` / `Off`) steps it and
+persists it to the user layer through `config_write`; a failed write logs
+a `geode::config` warning and keeps the change for the session. A hot reload
+applies a changed value. Either way every emitter is re-pulled at once:
+the rule moves no frame version, so the ordinary re-pull would not notice
+it.
 
 ## Pricing
 

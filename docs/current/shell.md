@@ -813,13 +813,14 @@ group that were both never written: both hold the empty scope at generation
 zero, equal content under an equal number, so nothing requeries and nothing
 needs to.)
 
-Only a tile whose reading takes the frame's scope can follow: its module
+Only a tile whose content the frame's scope decides can follow: its module
 answers `TileContent::follows()` true, which the blotter and the pricer do
-(they query under it) and the vol slice viewer does (it reads its underlying
-from it). A timeseries tile and a market-data panel never read the scope and
-answer false, so the chooser offers them no follow row and `set_follow` refuses
-them: a group's chip over content the group does not select would misreport
-what the tile shows.
+(they query under it), and the vol slice viewer and the market-data panel do
+(each takes its underlying from it, the scope's one `underlying_ref`; see
+[features](features.md#link-groups)). A timeseries tile never reads the scope
+and answers false, so the chooser offers it no follow row and `set_follow`
+refuses it: a group's chip over content the group does not select would
+misreport what the tile shows.
 
 Group scope generations come from the same frame-wide counter as the lanes',
 so a number names one scope in any lane or group.
@@ -857,12 +858,25 @@ through its handle, cannot link a tile or post for one. Its only write for a
 group is `set_scope` / `clear_scope` through its own handle while it follows
 one. (A module does write the frame for other things through that handle:
 it reports its arrival at a flip barrier and registers its watches.) What a
-module does is answer `TileContent::emission()`: an optional scope and a
-list of board entries. The blotter and the pricer post the cursor row's one
-underlying as a one-value `underlying_ref` scope
-(`geode_core::link::underlying_scope`); a market-data panel posts its
-underlying and, while its draft is not clean (`Editing`, `Behind` and `Sent`
-alike), its draft document (see [features](features.md)). Each entry carries
+module does is answer `TileContent::emission()` with the parts of a posting
+(`geode_core::link::Emission`): where its cursor stands (`CursorScope`), its
+own `:filter` layer, its `:unscoped` flag, and its board entries. The shell,
+which knows the tile's lane and memberships, composes the scope
+(`geode_core::link::compose`; see **Composition** below). The cursor part
+is one of:
+
+- `Path(scope)`: the cursor row's grouping path, one value per level, root
+  first, plus a leaf row's own single-valued columns. The blotter, the
+  pricer and the market-data panel each build it from their own rows (see
+  [features](features.md#link-groups)); the market-data panel's is its one
+  underlying. A total row's path is empty.
+- `NullIn(column)`: the path passes through a NULL, or an empty value, in
+  `column`. Nothing is posted (see **The NULL refusal** below).
+- `Nothing`: no snapshot or no cursor row yet, or a market-data panel with no
+  underlying. The group's scope is left as it is.
+
+Only a market-data panel posts board entries: its draft document, while
+the draft is not clean (`Editing`, `Behind` and `Sent` alike). Each entry carries
 a `DraftMark` (`Editing`, `Behind` or `Sent`, with `label()` the word a
 follower shows, none for a live edit): the rows alone cannot tell a live
 edit from the old base held behind a newer document or an upload awaiting
@@ -873,8 +887,8 @@ the tile's entity. `TileContent::watch_emission(changed)`
 has the module subscribe to its own entity and call `changed`, which carries
 nothing. The shell holds that subscription exactly while the tile emits. On
 each call it defers a pull until the update that called it has finished, then
-reads `emission()` and posts it with `Frame::post_emission`; deferring lets a
-module call `changed` from inside its own update. Joining a group pulls once
+reads `emission()`, composes it and posts it with `Frame::post_emission`;
+deferring lets a module call `changed` from inside its own update. Joining a group pulls once
 at once, so the group hears the tile's current emission without waiting for
 its next change.
 
@@ -885,13 +899,69 @@ A post writes only what changed:
   and notifies nobody, so a pull on every notification of an emitting tile
   is cheap. It also does not retake a board key another emitter posted
   since, or restore a scope another writer moved.
-- An emission with no scope leaves the group's scope as it is. The cursor
-  resting on a row that names no single underlying does not clear the
-  group.
+- A posting with no scope (`Nothing`, or a refused `NullIn`) leaves the
+  group's scope as it is. A total row is not that case: its empty path
+  posts the base alone, which widens the group back to the emitter's whole
+  view.
 - A scope equal to the group's draws no generation. A tile that follows and
-  emits into one group therefore does not loop: its own emission moves the
-  group once, the frame change reaches the tile, the shell pulls again, and
-  the equal emission ends it there.
+  emits into one group therefore does not loop: it composes over its lane,
+  not over the group, so its own posting moves the group once, the frame
+  change reaches the tile, the shell pulls again, and the equal posting ends
+  it there.
+
+**Composition.** A posting's scope is
+`base.and_then(layer).and_then(path)` (`Scope::and_then`: selections on one
+column intersect, so a path value outside the base gives an impossible
+scope, never a wider one). The layer is included only while
+`[links] include_tile_filter` is on (the default; see
+[configuration](configuration.md#theme-time-and-logging)), so a follower
+shows the rows under the emitter's cursor as the emitter shows them; off,
+tile filters stay local to their tile. An `:unscoped` emitter's base is
+empty, matching what it shows. The base (`Frame::emit_base`) is:
+
+- for a tile emitting into the group it follows, its lane's scope. Composed
+  over the group's own scope it would narrow the group further on every
+  pass, a ratchet no row could undo: its total row could never widen the
+  group back;
+- for a tile following another group, that group's scope, so a chain
+  `A → B` carries A's selection into B;
+- for a tile following nothing, its lane's scope.
+
+**Re-pulls.** An emitter's base moves without the tile announcing anything:
+a lane scope edit, the followed group moving, a pin. The shell's frame
+observer therefore re-pulls every emitter whenever the frame's generation
+has advanced since its last re-pull (`ShellView::repull_emitters`); equal
+postings write nothing, so the pass is cheap and a chain settles after one
+extra pass. Emitters are re-pulled oldest posting first (the frame keeps
+them in last-posted order, a tile moving to the back when its posting
+changes), so a group two tiles emit into stays on the one whose posting
+changed most recently rather than on whichever tile id sorts last. Changing
+`include_tile_filter`, from the settings dialog or a reload, moves no frame
+number, so it re-pulls every emitter unconditionally.
+
+**Loops.** A membership that follows one group and emits into another is an
+edge between them; a loop of such edges (`A → B` and `B → A`, or longer)
+would narrow every group on it a little more on each pass. `set_follow`
+and `set_emit` refuse a change that would close one
+(`Frame::closing_cycle`; the tile's own current edge is left out, since the
+change replaces it), leave the frame untouched and put `would link B back
+into A` on the status bar's notice. The link chooser asks the same question
+before it closes: a row that would close a loop keeps the chooser open,
+with the same notice, so another row can be picked. A restored session
+whose records close a loop restores tiles in id order and drops the later
+tile's emit, with a `geode::session` warning naming the tile and the edge.
+
+**The NULL refusal.** A scope cannot say `IS NULL`, and leaving a NULL level out of the path would widen every follower
+to all of that column's values, a plausible wrong answer. So a path through
+a NULL or an empty value posts nothing and the frame records the column for
+the tile (`Frame::link_refusal`). The tile's shared header paints it from
+frame state as a warning in its cluster text, `group A not updated · book
+is NULL`, for every emitting module without plumbing; it takes no press and
+cannot be dismissed (a hidden refusal would hide its successor). It clears
+with the tile's next pull that is not itself refused, when the tile leaves
+or switches the group it emits into, and when the tile closes. A tile emitting into no group records
+none. A NULL in a leaf row's own columns is not a refusal: that column is
+simply left out of the path.
 
 **The board** is derived, not stored: each group's board is rebuilt from the
 last emission of every tile emitting into it, the latest post winning a key
@@ -959,11 +1029,12 @@ scope is saved under `[links.<letter>]` (see
 [session format](#session-format)). A group keeps its last scope across a
 restart: it is set on the group before any tile exists, so a restored
 follower's first query reads it with no emitter present. Restored empty, a
-follower that showed one underlying would show the whole book under the same
-chip, and an emitter restored on a total row posts no scope to correct it. A
-restored emitter is subscribed and pulled once after the first render, and
-moves the group only when its cursor names an underlying. A group's board is
-not session state: it is rebuilt from what its emitters post.
+follower that showed one position's rows would show the whole book under the
+same chip until its emitter is pulled. A restored emitter is subscribed and
+pulled once after the first render and then posts as it would live: its
+cursor's path over its base, its base alone on a total row, nothing when it
+has no cursor row yet or its path is refused. A group's board is not
+session state: it is rebuilt from what its emitters post.
 
 Moving a group's scope advances the frame generation the session writer
 treats as dirt, but the writer compares its snapshot without the groups'
@@ -983,8 +1054,16 @@ older than the last one the group held.
   chip and the status bar still names the group.
 - The vol-slice viewer reads a group's `cvi_params` draft. Other document
   kinds can be posted to the board but have no consumer in the shipped tiles.
-- A market-data panel cannot follow a group: it does not take its underlying
-  from one.
+- A market-data panel follows by underlying only: it takes the group
+  scope's one `underlying_ref` and ignores the rest, and a scope naming zero
+  or several underlyings leaves it on none. A panel that follows and emits
+  into one group posts lane ∧ its underlying, replacing whatever a
+  co-emitter posted: the last posting wins.
+- A path level on a non-text column (the pricer's `strike`, `qty`,
+  `barrier` or a shift column) is emitted like any other. A pricer
+  following the group refuses it explicitly (`scope refused: 'strike' is
+  not a text column, so it cannot be selected by value`); a blotter
+  follower's SQL honours it.
 
 ## Module hosting and delivery
 
@@ -1384,8 +1463,10 @@ a module occupant to end the membership. A record behind a placeholder keeps
 its two keys as read and writes them back on every save, so the membership
 returns with the module. A restored `follow` on a tile whose module does not
 follow, and a restored `emit` on one whose module does not emit, are cleared
-once the occupant exists. A restored emitter is subscribed, and its emission
-pulled, after the render that created the occupants: pulled between two
+once the occupant exists. A restored membership that would close a loop of
+groups drops the later tile's emit (see [link groups](#link-groups)). A
+restored emitter is subscribed, and its emission pulled, after the render
+that created the occupants: pulled between two
 occupants of one pass, a follower would start on a different scope according
 to whether its tile id sorts before or after its emitter's. Restoring a
 membership moves no lane version and no group scope generation, so it opens
