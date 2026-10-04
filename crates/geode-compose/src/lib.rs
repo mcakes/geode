@@ -86,6 +86,8 @@ pub struct EngineSetup {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Infallible: problems become diagnostics, and without a `datasets` document
+/// the schema is empty.
 pub fn engine_setup(config: &Config, db_path: PathBuf, adapters: AdapterRegistry) -> EngineSetup {
     let mut diagnostics = Vec::new();
     let mut schema = match config.doc("datasets") {

@@ -134,6 +134,8 @@ fn sleep_checking_stop(duration: Duration, stop: &AtomicBool) -> bool {
 /// disconnected inbound queue drops the message; the feed counts refusals
 /// and the bus warns only on the first. There is no immediate retry.
 /// Generator and serializer panics are not caught.
+///
+/// Public only so a `geode-app` test can publish through the real bus.
 pub fn publish_one(
     feed: &ChannelFeed,
     kind: &Arc<dyn DocumentKind>,

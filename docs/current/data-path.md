@@ -742,7 +742,7 @@ the commands already queued have run and answered. See
 ### The demo position system
 
 `--demo` registers `demo_positions` (`DemoPositions` in
-[`demo.rs`](../../crates/geode-app/src/demo.rs)), which moves positions by
+[`demo.rs`](../../crates/geode-compose/src/demo.rs)), which moves positions by
 rewriting the risk CSVs the `demo` source polls:
 
 - It validates first. Every named position must appear in some CSV, or the

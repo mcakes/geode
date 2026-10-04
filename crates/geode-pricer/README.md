@@ -298,10 +298,13 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - The `pricer_sheets` declaration is frozen: tables are created with
   `CREATE TABLE IF NOT EXISTS` and publishes insert positionally, so once a
   database holds the dataset its column list and order cannot change without
-  a migration (none exists). `geode-app` declares it in the builtin layer and
-  replaces any differing layer redeclaration with it, with an error
-  diagnostic. `sheet` is `categorical = false`: sheet names are
-  not a scope dimension and an autosave must not rebuild an ENUM.
+  a migration (none exists). The declaration (and the computed `pricer`
+  one) is defined in `geode_core::builtin` and re-exported at its old paths
+  here; `geode_compose::builtin_data_layer` declares it in the builtin layer
+  and `geode_compose::pin_app_datasets` replaces any differing layer
+  redeclaration with it, with an error diagnostic. `sheet` is
+  `categorical = false`: sheet names are not a scope dimension and an
+  autosave must not rebuild an ENUM.
 - A document answer decodes (`rows_from_snapshot`) against the declaration's
   column list, not the answer's: a zero-row answer is no document, and a
   missing, wrong-typed or NULL column, attributes that differ between rows, or

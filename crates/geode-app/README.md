@@ -27,7 +27,7 @@ Config directories:
 
 | Layer | Where |
 |---|---|
-| Builtin | compiled in (`geode_shell::defaults`, plus `builtin_layer`'s keymap, the pricer's bundled views and templates, its two datasets: `pricer_sheets` and the computed `pricer`, and the builtin market-data panels) |
+| Builtin | compiled in (`geode_shell::defaults`, plus `builtin_layer`'s keymap, the pricer's bundled views and templates and the builtin market-data panels, then `geode_compose::builtin_data_layer`: the two app datasets and the `--demo` layer) |
 | Desk | `$GEODE_DESK_CONFIG`, if set |
 | User | `$APPDATA/geode` when set, otherwise `$HOME/.config/geode` |
 
@@ -43,32 +43,17 @@ validate completeness. Delete the whole directory after changes to demo schema
 columns or series generation, since existing tables and cached values are
 not migrated.
 
-Document producers run asynchronously through the normal subscription path;
-data need not be available in the first frame. Demo series use fixed weekday
-sessions from 14:30 to 21:00 UTC, without holiday or daylight-saving rules.
-`demo_kdb` advertises identities; `demo_rest` exercises manual identity entry.
-
-`demo_positions` carries a Move LHU by rewriting the risk CSVs in the source
-directory, so a move persists across `--demo` launches until the directory is
-deleted. A move to another book's LHU leaves the position's `Book` unchanged.
-
-`demo_refdb` answers the `refdb` snapshot source every 30 s with the ten demo
-underlyings. Every third poll renames one row, so two in three polls are
-skipped as unchanged and the third publishes a new generation. The poll count
-lives in the process, so each launch starts again from revision 0. Its
-`calendar` column is an exchange calendar code; no holiday dates are modelled.
+The demo transports, their behavior and the store and config paths live in
+[`geode-compose`](../geode-compose/README.md).
 
 ## What lives here
 
 | Module | Holds |
 |---|---|
-| `main` | Startup composition: logging, config, registry and keymap, roster (module factories, then the row menu's actions: `add_dimension_actions` registers `geode-nemo`'s two Open in Nemo actions, then `geode-positions`' Move LHU, disabled unless startup resolved a position service), service, and window. Pure argument parsing and user-path resolution; `config_dirs` reads the environment. |
+| `main` | Startup composition: logging, config, registry and keymap, roster (module factories, then the row menu's actions: `add_dimension_actions` registers `geode-nemo`'s two Open in Nemo actions, then `geode-positions`' Move LHU, disabled unless startup resolved a position service), service, and window. Pure argument parsing; store and config paths come from `geode_compose::paths`. |
 | `bridge` | Service setup and module factories (loads `panels` against the registered document kinds and kind actions and builds one market-data factory per accepted panel; refused panels, including one named after another module's kind, become composition diagnostics in the shell's config section), window event routing (including stopped data threads, and the handle's `Busy`-refusal total read on each drained event into `Diagnostics`), catalog refresh/retry (a `Stopped` refusal drops the demand), the startup schema's reference datasets handed to `Diagnostics` at attach, reference reads at the frame's as-of and poll-now requests drained from `Diagnostics` (only the latest-tagged `DataEvent::Reference` is stored; a refusal is stored with its reason, never retried), the live reference cache behind `ReferenceGlobal` (every reference dataset read at `AsOf::Live` under `REFERENCE_KEY` at attach and on each of its publishes; only a dataset's latest tag is applied, the global is set only when a table changed, `Ok(None)` removes the table, a failed read keeps it and warns once per run of failures on `geode::reference`, a `Busy` refusal rereads after one second with one timer per dataset, `Stopped` drops the demand), position-service resolution from `positions.toml` (`positions_configured`), each `DataEvent::Command` routed to `ShellView::note_command`, and forwarding view reloads to the data service (a refused hand-off is a diagnostic). |
 | `events` | Coalesced pending state with a one-slot wakeup channel. Retains publication book unions and highest-tagged query results; upload outcomes have separate `(tile key, tag)` entries; local-write, position-command, and reference-table outcomes never coalesce. |
-| `demo` | `--demo`: the temp directory, the emitted sources, the compiled-in demo config layer (including `positions.toml`), and `DemoPositions` (`demo_positions`), the demo position system: a Move LHU rewrites the `LHU` field in the same risk CSV, then its sentinel with a strictly later `as_of`, after refusing any unknown position before writing. `Book` is not rewritten. |
-| `demo_bus` | Demo-only CVI, dividend and option-chain producers publishing through `ChannelAdapter` and the normal document writers/parsers. The startup burst publishes each key `startup_repeats` times, so the chain producer, which rotates through one expiry per publish, sends every expiry of every underlying before the first cadence wait. A producer's `next` returns `None` to skip a publish: the chain producer prices off the latest CVI document the CVI producer stored for that underlying (`cvi_next`/`chain_next`) and skips until there is one. The same adapter accepts configured uploads, whose bus messages follow subscription ingestion. |
-| `demo_refdb` | Demo mode's reference database (`DemoRefDb`, `demo_refdb`): the `underlyings` table with hand-written vendor tickers, currencies, calendars, exchanges and multipliers. Snapshot side only; `fail_next` and the query delay exercise the degraded and slow paths in tests. |
-| `demo_series` | Demo mode's fetch adapter: seeded, span-independent one-minute bars for two dozen identities, behind two sources (`demo_kdb` with a catalogue, `demo_rest` without). |
+| `demo_tests` | Tests of `geode_compose`'s demo modules that need the bridge, `builtin_layer`, a feature module or a window. |
 | `crash` | Log-file trimming at startup and the process panic hook: marked containment boundaries log without a report; other panics attempt a report before chaining the previous hook. |
 | `assets` | The asset source: gpui-kit's component icons plus the catalogue icons Geode's own surfaces name. |
 
@@ -114,10 +99,15 @@ cargo check -p geode-app --features profiling
   `data_setup` and `ConfigReloaded` arms.
 - Every local-write outcome for `pricer_sheets` reaches the pricer factory
   (`save_answered`/`forget_answered`), in the writer's order: a pricer tile
-  can wait on one exact outcome with no timeout. `geode_compose::pin_app_datasets` keeps
-  the builtin declaration of `pricer_sheets` and of the computed `pricer`
-  against a differing layer redeclaration, at startup and on reload, with
-  an error diagnostic.
+  can wait on one exact outcome with no timeout.
+  `geode_compose::pin_app_datasets` keeps the builtin declaration of
+  `pricer_sheets` and of the computed `pricer` against a differing layer
+  redeclaration, at startup and on reload, with an error diagnostic.
+- The app and the collector build equal schemas and sources from the same
+  desk and user directories:
+  `the_app_and_the_collector_build_the_same_schema_and_sources` compares the
+  app's `builtin_layer` through `bridge::data_setup` with
+  `geode_compose::builtin_data_layer` through `engine_setup`.
 - At quit, `stop_at_quit` attempts each pricer tile's unsaved-sheet flush
   before starting data shutdown on a background executor. Admitted writes
   precede `Shutdown` and the writer drains them, but submission/write failures

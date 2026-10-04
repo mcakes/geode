@@ -1,5 +1,5 @@
 //! Seeded CVI grids and dividend schedules as [`geode_core::document::DocumentRows`].
-//! Generators retain independent state per key. `geode-app`'s demo bus passes
+//! Generators retain independent state per key. `geode-compose`'s demo bus passes
 //! their rows to `geode-documents` for wire encoding; this module performs no I/O.
 
 /// Stable per-key hash for RNG seeds, fallback spot levels and dividend IDs.

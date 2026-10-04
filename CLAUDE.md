@@ -67,8 +67,15 @@ filter gate, before any toolchain step.
 - `geode-tile` sits between `geode-shell` and the feature modules. It depends
   on `geode-shell` and `geode-core`, never on `geode-data` or a feature
   module; `geode-shell` never depends on it.
-- `geode-app` is the composition root: it registers adapters, document kinds,
-  pricers, module factories, and opens the window.
+- `geode-compose` is the gpui-free half of the composition root: the builtin
+  data layer, `engine_setup`, store and config paths, and the demo
+  transports. It depends on `geode-core`, `geode-data`, `geode-documents` and
+  `geode-demo-data`, never on gpui, `geode-shell`, `geode-tile` or a feature
+  module (check: `cargo tree -p geode-compose -e normal | grep -c gpui` is 0).
+- `geode-app` is the only composition root that adds UI: it builds on
+  `geode-compose`, registers pricers, vol models, module factories and
+  panels, and opens the window. The app and the collector must build equal
+  schemas and sources; a test in `geode-app` holds them to it.
 - Only `geode-data` owns source I/O and DuckDB connections. Only the ingest
   runner owns the writer.
 - Calculation crates remain leaves behind request/outcome traits. UI modules

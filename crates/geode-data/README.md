@@ -54,7 +54,7 @@ which declares an unwinding body once as `DataEvent::ThreadStopped { thread,
 reason }` and never restarts it; the crash file is still written. A new
 long-lived thread must use it, or its death is silent. Two threads are
 deliberately outside it: the channel adapter's dispatcher
-(`geode-channel-<name>`) and `geode-app`'s demo bus. They are transport-tier
+(`geode-channel-<name>`) and `geode-compose`'s demo bus. They are transport-tier
 threads standing in for a vendor client's own threads, which Geode will not
 own either, and are created without an event sink. See
 [containment and liveness](../../docs/current/data-path.md#containment-and-liveness).

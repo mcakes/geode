@@ -3033,7 +3033,10 @@ documents. The [generator guide](../../crates/geode-demo-data/README.md)
 describes risk grains, deliberate ingestion edge cases, document sequences,
 and the demo configuration files. `geode-app --demo` writes risk files under
 a seed-specific temporary directory and streams serialized documents through
-its in-process adapter. Its position service, `demo_positions`, rewrites
+an in-process adapter. The demo transports (the document bus, the series
+sources, the reference database and the position service) live in
+[`geode-compose`](../../crates/geode-compose/README.md), so a headless
+process can run them too. The position service, `demo_positions`, rewrites
 those risk files to carry a Move LHU, so a move survives a relaunch until
 the directory is deleted.
 Both use the same ingestion, parsing, query, and delivery paths as configured
@@ -3047,7 +3050,9 @@ advertises identities and another requires manual entry. Document production
 and ingestion are asynchronous; starting the app does not guarantee data is
 ready for the first frame.
 
-`geode-app` is the composition root. It loads configuration, initializes GPUI
+`geode-app` is the composition root. It builds the engine configuration
+through `geode-compose` (the store-deciding builtin documents, paths,
+adapters and `engine_setup`), loads configuration, initializes GPUI
 and logging, builds registries, creates the data service and bridge, registers
 module factories and the row menu's actions (Open in Nemo, from
 `geode-nemo`, then Move LHU, from `geode-positions`), installs globals, and opens the window. Cross-layer policy

@@ -11,12 +11,12 @@ Dependencies point toward smaller and more stable crates:
 ```text
                          geode-app
                  composition and process setup
-                  /           |             \
-          feature modules     |          geode-data
-            |       \         |              |
-            |    geode-tile   |              |
-            |       /         |              |
-            └──► geode-shell ◄┘              |
+                  /           |        \          \
+          feature modules     |     geode-compose  |
+            |       \         |   (gpui-free half) |
+            |    geode-tile   |         |          |
+            |       /         |         ▼          ▼
+            └──► geode-shell ◄┘        geode-data ◄┘
                      |                       |
                geode-widgets                 |
                      |                       |
@@ -67,14 +67,25 @@ which also uses them for its row menu; `geode-tile` re-exports them for tiles.
 Feature crates such as `geode-blotter`, `geode-marketdata`,
 `geode-timeseries`, `geode-volslice`, `geode-classifications`, and
 `geode-pricer` implement the shell's module contract and may ask the data
-service through `DataHandle`. They do not depend on sibling features. `geode-app` constructs shared
-services, registers module factories (one market-data factory per accepted
-`panels` entry), adapters, document kinds, kind actions, and pricers, and
-opens the window. Market-data panels are configuration checked there against
-the registered document kinds and kind actions; a kind action's behavior is
-code in the module that dispatches it. Diagnostics implements `PageFactory`
+service through `DataHandle`. They do not depend on sibling features.
+`geode-compose` builds the engine configuration: the schema with the app's
+datasets pinned, sources, dimensions, document kinds, the clock and the
+adapters. `geode-app` adds the UI-facing services: it registers module
+factories (one market-data factory per accepted `panels` entry), kind
+actions, and pricers, and opens the window. Market-data panels are
+configuration checked there against the registered document kinds and kind
+actions; a kind action's behavior is code in the module that dispatches it. Diagnostics implements `PageFactory`
 and `PageContent`; `geode-nemo` and `geode-positions` implement row-menu
 `DimensionAction`s. The app registers these alongside the tile factories.
+
+`geode-compose` is the part of composition a headless process can use. It
+holds the builtin documents that decide the store (`builtin_data_layer`:
+the app's `pricer_sheets` and `pricer` declarations, which live in
+`geode_core::builtin`, plus the `--demo` layer), `engine_setup`, the store
+and config paths, and the demo transports. It never depends on gpui. The
+app's builtin layer is its own documents plus the data layer, so a process
+built from the data layer alone and the same desk and user directories has
+the app's schema and sources; `geode-app` tests that contract.
 
 Reusable presentation is kept below features. `geode-widgets` holds shared
 stateful controls; `geode-chart` holds chart preparation and painting. It is

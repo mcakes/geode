@@ -333,7 +333,7 @@ grain = "position"
 source_name = "SC"
 
 # ---- CVI parameter documents. ----
-# geode-app::demo_bus publishes through the generated `[cvi]` source and
+# geode_compose::demo_bus publishes through the generated `[cvi]` source and
 # the demo_bus channel adapter. Each key replaces one complete document.
 
 [cvi_params]
@@ -460,7 +460,7 @@ retention = "7d"
 
 # ---- Underlying reference data. ----
 # One row per underlying: system ticker to vendor tickers and static
-# attributes. `geode-app::demo_refdb` serves it through the generated
+# attributes. `geode_compose::demo_refdb` serves it through the generated
 # `[refdb]` snapshot source; every third poll revises one name.
 [underlyings]
 family = "reference"
