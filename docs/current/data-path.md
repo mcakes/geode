@@ -484,12 +484,16 @@ and coalescer path. A topic with nothing to send is simply not answered.
 **Known topics.** Patterns can carry wildcards, but a GET names one concrete
 topic, so the store records the concrete topics each subscribed source has
 published from in `subscription_topics` (source, topic, first seen, last
-received). The receiver carries a topic to the runner with its first
-document this run, and again once 24 hours have passed, so a long run keeps
-the record current; every other document carries none, and the NOTIFY path
-pays no extra write. The publish records the topic in its own transaction,
-so a rolled-back publish records nothing and a recorded topic always names
-one that published. A repeat keeps the later receive time. At open, before
+received). A NOTIFY document carries its topic to the runner on the topic's
+first document this run, and again once 24 hours have passed, so a long run
+keeps the record current; every other NOTIFY document carries none, and the
+NOTIFY path pays no extra write. The publish records the topic in its own
+transaction, so a rolled-back publish records nothing. A recovered document
+always carries its topic, because an answered GET proves the topic alive:
+the store records it in the transaction when the reply publishes, and with
+one upsert (no identifier, no generation) when the reply is unchanged. A
+reply never uses the run's NOTIFY record slot, so the topic's first NOTIFY
+still records it. A repeat keeps the later receive time. At open, before
 the ingest runner takes the writer, the service deletes each subscribed
 source's topics last received more than `recover_max_age` ago and reads the
 rest; a recorded topic no current pattern matches stays in the table but is
@@ -503,7 +507,11 @@ not made its topic known yet.
 **The window.** The receiver opens a recovery window before the request
 goes out, so no reply arrives with nothing to judge it. The window ends at
 `recover_timeout` plus a one-second grace for replies already in flight, or
-sooner once every asked topic has answered. Two rules judge each reply:
+sooner once every asked topic has answered; only replies close it early. A
+NOTIFY on an asked topic received at or after the window's start covers that
+topic for the window's report, since it shows the feed live; one received
+before the start (queued across the outage) does not. Two rules judge each
+reply:
 
 1. A NOTIFY for the same key received at or after the window's start beats
    the reply, which is dropped. The subscription was live before the
@@ -518,7 +526,8 @@ sooner once every asked topic has answered. Two rules judge each reply:
    anything (`store::compare`: `EXCEPT ALL` both ways over the payload
    columns, so duplicates count and NULL cells compare equal). An equal
    document returns `DocumentOutcome::Unchanged`: no file ID, no generation
-   ID, no `Published`, no topic record. The runner reports it as
+   ID, no `Published`. Its topic is still recorded (see known topics
+  above). The runner reports it as
    `IngestEvent::Unchanged`, which clears the key's load lane as a publish
    would. A key with no live generation always publishes. The comparison
    reads stored rows rather than a remembered hash, so it holds across
@@ -530,20 +539,21 @@ A reply on an asked topic answers it even when rule 1 drops it, because the
 transport did respond. A reply on a topic the request did not name takes
 the normal path, rule 1 included, but answers nothing, so it can neither
 close a window early nor change its report. A reply after the deadline, or
-with no window open, is dropped and counted in the next window's end line
-(or, failing one, the line logged when the subscription ends).
+with no window open, is dropped and counted in the end line of the window
+that closes next (or, failing one, the line logged when the subscription
+ends).
 
 Only one window is open at a time. A reconnect while one is open
-supersedes it: the old window is dropped without a report, since it never
-reached its deadline, and the new one starts at the most recent disconnect
-and asks again for every known topic.
+supersedes it: the old window is dropped without a health report (it logs
+one info line), since it never reached its deadline, and the new one starts
+at the most recent disconnect and asks again for every known topic.
 
 | Window outcome | `<source>:recovery` (load lane) |
 |---|---|
 | `recover` returned an error | `Degraded "recovery failed: <error>"`; no window opens |
-| No asked topic answered by the deadline | `Degraded "recovery: no replies for N topics"` |
-| Some asked topics answered | `Ok`; the detail and the log line give the unanswered count and name up to five. Retired instruments stop answering, so this is not a failure. |
-| Every asked topic answered | `Ok` |
+| No reply by the deadline, and N asked topics not notified since the start | `Degraded "recovery: no replies for N topics"` |
+| Some asked topics answered | `Ok`; the detail and the log line give the count neither answered nor notified and name up to five, sorted. Retired instruments stop answering, so this is not a failure. |
+| Every asked topic answered or notified since the start | `Ok` |
 
 Each finished window also logs one `geode::ingest` line with its summary and
 the late replies dropped. A superseded window and a window open at stop
@@ -569,11 +579,15 @@ recovery after `unsubscribe` is refused. The demo producers publish on
 `marketdata/<kind>/<underlying>/NOTIFY`, the level the demo sources
 subscribe to and recover from. The demo bus lives in the app process, so
 it holds only what this run's producers have published, never anything
-published while the app was closed. A demo source that subscribes after
-part of the startup burst has been dispatched gets that part only through
-recovery. Demo option-chain documents share one topic per underlying, so
-recovery restores only the last-published expiry per underlying; the others
-stay as stored until the cadence republishes them.
+published while the app was closed. At launch the sources subscribe
+before the producers start, so the start-time recovery asks an empty bus
+and nothing answers; the producers' startup burst then notifies every
+recorded topic inside the window, which covers them, and
+`<source>:recovery` stays `Ok`. Recovery itself therefore proves nothing
+in the demo until a reconnect, or a later release with a bus that
+outlives the app. Demo option-chain documents share one topic per
+underlying, so recovery restores only the last-published expiry per
+underlying; the others stay as stored until the cadence republishes them.
 
 Limits:
 
@@ -591,13 +605,13 @@ Limits:
   reconnects inside one window, a stale reply can publish over a NOTIFY
   received between the two starts, and the key stays stale until its next
   NOTIFY.
-- An unchanged recovered document does not refresh its topic's
-  `last_received`, and the receiver counts the topic as recorded for the
-  run, so later NOTIFYs on it do not record it either until the 24-hour
-  re-record. A failed first publish does the same. A topic whose runs are
-  shorter than a day and each start with an unchanged recovery therefore
-  ages out after `recover_max_age` while still live. Its next run's first
-  document records it again, but that run's start recovers nothing for it.
+- NOTIFYs refresh a topic's record at most once per run or per 24 hours;
+  a recovery reply also refreshes it, unchanged or not, since an answered
+  GET proves the topic alive. A topic that neither publishes nor answers
+  for `recover_max_age` is pruned at the next open, and that run's start
+  recovers nothing for it until its next document records it again. A
+  NOTIFY document whose publish fails still uses the run's record slot, so
+  later NOTIFYs on that topic do not record it until the 24-hour re-record.
 - The rule 1 evidence holds one entry per key for the receiver's life,
   with no eviction, like the coalescer's release times.
 - A transport without recovery keeps the full gap: its keys stay stale

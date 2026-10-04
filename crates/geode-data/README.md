@@ -74,8 +74,8 @@ for capacity, coalescing, and worker shutdown behavior.
 | `handle` | `DataHandle`, `Refusal`, and `Request`: queries, distinct values, the catalog, a document by key, a series fetch, identities, a reference table, a snapshot poll-now (by dataset), an upload, a Move LHU command, a local publish, and a local forget. |
 | `source` | Directory discovery, sentinel parsing, and readiness classification. Configuration types are shared with `geode-core`; stable-mtime readiness is accepted by configuration but unsupported at runtime. |
 | `adapter` | Subscription, upload, fetch, snapshot (`SnapshotQuery`, through `Adapter::snapshot`), and position-command (`PositionCommands`, through `Adapter::positions`, `None` by default) capabilities; a registry, bounded message sink, and topic matching. `Subscription::recovery` offers an optional `Recovery` side that asks for the latest document per concrete topic; its replies arrive on the subscription's sink marked `Message::recovered`. Includes the in-process `ChannelAdapter`, which keeps the last message per topic and answers recovery from it into the asking subscription's sink only; the app can register additional implementations such as its demo series adapter. |
-| `ingest` | The discovery scheduler, the cold-start priority ladder, the per-file load pipeline, the grain split and conflict detector, the ingest runner (one thread, one writer connection, four queues), the subscribed-source receiver (which records each topic's first document per run for the store and runs a `RecoveryWindow` at start and after each reconnect, judging replies under the two recovery rules), the `Coalescer`, the fetch worker, and the snapshot worker (one per snapshot source: poll at start, every interval and on poll-now; read and conform only, publishing through the runner; query failures on the discovery lane, publish outcomes on the load lane). |
-| `store` | The DuckDB store: DDL generated from the schema, the per-file publish transaction and backfill guard, document publish (a recovered document is first compared with live by `compare` and returns `DocumentOutcome::Unchanged` when equal), `topics` (the concrete topics each subscribed source published from: recorded in the publish transaction, pruned by `recover_max_age` and read at open), reference snapshot publish (a snapshot equal to the live partition publishes nothing) and read, the series family's bitemporal append (`append_series`, the one door series rows enter by), retention, the freshness catalog in source time, and the payload-table drift check made at open. |
+| `ingest` | The discovery scheduler, the cold-start priority ladder, the per-file load pipeline, the grain split and conflict detector, the ingest runner (one thread, one writer connection, four queues), the subscribed-source receiver (which carries each topic's first NOTIFY document per run, and every recovered document, to the store for recording, and runs a `RecoveryWindow` at start and after each reconnect, judging replies under the two recovery rules and counting NOTIFYs since the start toward its report), the `Coalescer`, the fetch worker, and the snapshot worker (one per snapshot source: poll at start, every interval and on poll-now; read and conform only, publishing through the runner; query failures on the discovery lane, publish outcomes on the load lane). |
+| `store` | The DuckDB store: DDL generated from the schema, the per-file publish transaction and backfill guard, document publish (a recovered document is first compared with live by `compare` and returns `DocumentOutcome::Unchanged` when equal), `topics` (the concrete topics each subscribed source published from: recorded in the publish transaction, or by itself for an unchanged recovered document, pruned by `recover_max_age` and read at open), reference snapshot publish (a snapshot equal to the live partition publishes nothing) and read, the series family's bitemporal append (`append_series`, the one door series rows enter by), retention, the freshness catalog in source time, and the payload-table drift check made at open. |
 | `query` | Scope lowering, grain-aware view compilation, distinct values, document and series queries, catalog reads, and the read pool. View/document planning, provenance, and execution share a worker transaction; superseded results are dropped. |
 | `pricing` | App-supplied pricer registry and a separate bounded worker queue. Queued batches coalesce by key; cancellation stops a running batch at the next line boundary. |
 | `vol` | App-supplied vol model registry and a bounded worker queue shaped like `pricing`'s: batches coalesce by key, cancellation stops a running batch at the next job boundary, a panicking job fails alone. A `Grid::Job(j)` slice is resolved to the strikes earlier job `j` evaluated at, or fails naming why; `evaluate` runs a batch in place under the same rules. |
@@ -141,8 +141,8 @@ often tripped:
   transition are one step under the lock.
 - Source-wide conditions use their own load-lane keys from
   `health::condition_key` (`<source>:queue`, `<source>:backlog`,
-  `<source>:recovery`) so each is
-  reported and cleared alone; health events still carry the source name.
+  `<source>:recovery`) so each is reported and cleared alone; health
+  events still carry the source name.
 - The runner's document and series queues have no fixed capacity; a source
   past `BACKLOG_DEPTH` (64) queued feed documents and series reports
   `<source>:backlog` (`Degraded "ingest backlog N"`, re-reported at each
@@ -150,10 +150,11 @@ often tripped:
   at the last crossing (65, 129, …), not a live count, and holds while the
   queue drains until the clear. Local writes are not counted.
 - A recovered document equal to the key's live generation publishes
-  nothing: no file ID, no generation ID, no `Published`, no topic record.
-  Only recovered documents pay the comparison; the NOTIFY path is
-  unchanged. A recovery reply loses to a NOTIFY for its key received since
-  the window started. See
+  nothing: no file ID, no generation ID, no `Published`. Its topic is still
+  recorded, because an answered GET proves the topic alive, and a reply
+  never uses the run's NOTIFY record slot. Only recovered documents pay
+  the comparison; the NOTIFY path is unchanged. A recovery reply loses to
+  a NOTIFY for its key received since the window started. See
   [recovery on subscribe](../../docs/current/data-path.md#recovery-on-subscribe).
 - Load notes (`LoadNotes`: extra source columns, absent optional ones) ride
   `IngestEvent::Published`; the service warns once per distinct combination,

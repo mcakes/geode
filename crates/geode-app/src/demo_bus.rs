@@ -648,7 +648,7 @@ mod tests {
     /// Upload bytes must reach the subscribed source and return through an
     /// ordinary document query. The demo `sophis` target routes the upload to
     /// `marketdata/dividend/XYZ/NOTIFY`; the dividend subscription parses and stores it.
-    /// Each event receive has a timeout so a silent pipeline fails the test.
+    /// Each awaited event has one overall deadline, so a silent pipeline fails the test.
     #[test]
     fn an_uploaded_dividend_document_echoes_through_the_real_data_service() {
         use geode_core::config::{Config, ConfigSources};
