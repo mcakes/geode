@@ -210,8 +210,10 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   `following A — set the underlying there`, and the menu's `Load
   underlying…` row is greyed `following A`. Unfollowing keeps the
   underlying the group last gave. The session saves the underlying as
-  always; a restored follower is switched when the shell restores its
-  follow. The tile stores no group; its header reads `link_chips` from its
+  always; session restore records the follow in the frame before the panel
+  is built and notifies nothing, so `MarketDataTile::new` reads the followed
+  group's underlying itself and opens on it, leaving the saved underlying's
+  draft parked. The tile stores no group; its header reads `link_chips` from its
   frame handle at paint.
 
 ## Input and popup contracts

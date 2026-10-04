@@ -34819,6 +34819,17 @@ run_mutation "link: the load row names the followed group" \
   '                Some(_) => Ok(()),' \
   geode-marketdata load_underlying_is_disabled_while_following
 
+# Session restore records the follow before the panel exists and notifies
+# nothing: a restored follower reads the group's underlying when built, or
+# it shows its saved one under a group that names another.
+run_mutation "link: a restored follower opens on the group's underlying" \
+  crates/geode-marketdata/src/tile.rs \
+  '            if f.following().is_some() {
+                geode_core::link::underlying_of(f.scope()).map(|u| vec![u.to_owned()])' \
+  '            if false {
+                geode_core::link::underlying_of(f.scope()).map(|u| vec![u.to_owned()])' \
+  geode-marketdata a_restored_follower_opens_on_the_groups_underlying
+
 # ---- Vol slice viewer ----
 #
 # geode-volslice: one underlying's smiles per expiry and kind. The pure core

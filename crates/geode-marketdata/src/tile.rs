@@ -716,6 +716,19 @@ impl MarketDataTile {
                     .collect::<Vec<_>>()
             })
             .filter(|k| !k.is_empty());
+        // A restored follower takes the group's underlying now, not its
+        // saved one: session restore records the follow and the group's
+        // scope before the panel exists and notifies nothing, so waiting for
+        // a frame notification would show the saved underlying under a
+        // group that names another. The saved key's draft stays parked.
+        let key = {
+            let f = frame.read(cx);
+            if f.following().is_some() {
+                geode_core::link::underlying_of(f.scope()).map(|u| vec![u.to_owned()])
+            } else {
+                key
+            }
+        };
         // Restore per-key drafts from [drafts.<display key>]. Install the current key's
         // entry and leave the others parked. The legacy draft field supplies the
         // current draft only when the per-key table has no entry for it.
@@ -5702,17 +5715,39 @@ mod tests {
         restored: Option<toml::Table>,
         egress: Vec<(String, Vec<String>)>,
     ) -> (Harness, gpui::VisualTestContext) {
-        open_framed(cx, spec, restored, egress, |frame| {
-            FrameRef::new(frame, WorkspaceIx::FIRST)
-        })
+        open_framed(
+            cx,
+            spec,
+            restored,
+            egress,
+            |frame| FrameRef::new(frame, WorkspaceIx::FIRST),
+            |_| {},
+        )
     }
 
     /// [`open`] with the frame handle the shell hands an occupant: bound
     /// to the tile's own id, so the tile reads its link-group membership.
     fn open_bound(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
-        open_framed(cx, &CVI, None, Vec::new(), |frame| {
-            FrameRef::for_tile(frame, WorkspaceIx::FIRST, TileId(TILE))
-        })
+        open_restored_bound(cx, None, |_| {})
+    }
+
+    /// [`open_bound`] over a session record, with the frame seeded by
+    /// `seed` BEFORE the factory builds the panel: what session restore
+    /// does, writing memberships and postings into the frame and
+    /// notifying nothing.
+    fn open_restored_bound(
+        cx: &mut gpui::TestAppContext,
+        restored: Option<toml::Table>,
+        seed: fn(&mut Frame),
+    ) -> (Harness, gpui::VisualTestContext) {
+        open_framed(
+            cx,
+            &CVI,
+            restored,
+            Vec::new(),
+            |frame| FrameRef::for_tile(frame, WorkspaceIx::FIRST, TileId(TILE)),
+            seed,
+        )
     }
 
     /// [`open_spec_with_egress`] with the tile's frame handle built by
@@ -5723,6 +5758,7 @@ mod tests {
         restored: Option<toml::Table>,
         egress: Vec<(String, Vec<String>)>,
         bind: fn(Entity<Frame>) -> FrameRef,
+        seed: fn(&mut Frame),
     ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
         // The shell's own reclaims ride along, exactly as `main.rs`
@@ -5750,8 +5786,11 @@ mod tests {
                     // is its lane and tests address it as `f.shared()` /
                     // `f.shared_mut()`. A test that pins must reach the tile's
                     // lane through its `FrameRef` instead.
-                    let frame =
-                        cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
+                    let frame = cx.new(|_| {
+                        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
+                        seed(&mut f);
+                        f
+                    });
                     let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
                     let occupant = factory.create(
                         TileId(TILE),
@@ -17568,6 +17607,51 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         );
         h.deliver(&mut vcx, req.tag, Arc::new(cvi(BASE)));
         assert!(!h.barrier_open(&vcx), "the delivery is the arrival");
+    }
+
+    /// Session restore writes the follow and the group's scope into the
+    /// frame before the panel exists and notifies nothing, so a restored
+    /// follower takes the group's underlying when it is built, not its
+    /// saved one: otherwise it would show the saved underlying under a
+    /// group that names another until something else notified the frame.
+    #[gpui::test]
+    fn a_restored_follower_opens_on_the_groups_underlying(cx: &mut gpui::TestAppContext) {
+        let mut restored = toml::Table::new();
+        restored.insert(
+            "underlying".into(),
+            toml::Value::Array(vec![toml::Value::String("SPX.Z".into())]),
+        );
+        let (h, mut vcx) = open_restored_bound(cx, Some(restored), |f| {
+            use geode_core::link::{Group, Membership, Posting};
+            f.link_for_test(
+                EMITTER,
+                Membership {
+                    follow: None,
+                    emit: Some(Group::A),
+                },
+            );
+            f.post_for_test(
+                EMITTER,
+                Posting {
+                    scope: Some(geode_core::link::path_scope(&[(
+                        "underlying_ref".to_string(),
+                        "NDX".to_string(),
+                    )])),
+                    board: Vec::new(),
+                },
+            );
+            f.link_for_test(
+                TileId(TILE),
+                Membership {
+                    follow: Some(Group::A),
+                    emit: None,
+                },
+            );
+        });
+        assert_eq!(key_of(&h, &vcx), Some(vec!["NDX".to_string()]));
+        h.visible(&mut vcx, true);
+        let req = h.document_request().expect("the first question");
+        assert_eq!(req.document_key, vec!["NDX".to_string()]);
     }
 
     /// A group scope that names no single underlying leaves the panel on
