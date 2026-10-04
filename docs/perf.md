@@ -2707,4 +2707,18 @@ the same grid fix) and the change:
 The small shape reads unchanged. The large shape reads 10 to 15 percent
 slower on the means, but two runs of the same build differ by 19 percent
 at this load and the ordinary path's per-row work is unchanged, so this is
-not resolved as a regression; a quiet-machine rerun should settle it.
+not resolved as a regression at that load.
+
+A quieter rerun settles it (same machine, 2026-10-04, branch head against
+its merge base 66e308a4 with the same grid fix, two alternating pairs;
+load average 3.0 at the first branch run, 6.6 at the first merge-base run,
+rising to 7 to 12 during the second pair from other sessions):
+
+| Benchmark | Merge base | Branch |
+|---|---|---|
+| `publish_document/20x30` | 3.86, 3.88 ms | 3.87, 3.91 ms |
+| `publish_document/200x300` | 90.5, 90.2 ms | 92.8, 93.2 ms |
+
+The small shape is unchanged. The large shape reads about 3 percent
+slower, within the spread seen between runs of one build at higher load;
+no regression on the ordinary path.
