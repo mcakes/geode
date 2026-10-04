@@ -10,6 +10,7 @@ pub mod files;
 pub mod handle;
 pub mod health;
 pub mod ingest;
+pub mod lease;
 pub mod positions;
 pub mod pricing;
 pub mod query;

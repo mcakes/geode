@@ -1297,6 +1297,30 @@ run_mutation "stamp: a direct open stamps the store" \
   geode-data \
   a_direct_open_stamps_the_store_with_this_builds_format
 
+# The store lease (lease.rs). The app and the collector hand the store over
+# through lock files; a probe must not read as a second app, a stop must end
+# the wait, and only DuckDB's own lock conflict is waited out.
+run_mutation "lease: the app lock retries to absorb a probe" \
+  crates/geode-data/src/lease.rs \
+  'const APP_LOCK_RETRY: Duration = Duration::from_secs(1);' \
+  'const APP_LOCK_RETRY: Duration = Duration::ZERO;' \
+  geode-data \
+  a_probe_does_not_refuse_the_app
+
+run_mutation "lease: a stop cancels the wait" \
+  crates/geode-data/src/lease.rs \
+  '        if should_stop() {' \
+  '        if false {' \
+  geode-data \
+  a_stop_during_the_wait_cancels_promptly
+
+run_mutation "lease: only a lock conflict is retried" \
+  crates/geode-data/src/lease.rs \
+  '            Err(err) if is_lock_conflict(&err) => err,' \
+  '            Err(err) if true => err,' \
+  geode-data \
+  a_non_lock_open_error_is_not_retried
+
 run_mutation "store: the memory limit escapes a quote" \
   crates/geode-data/src/store/mod.rs \
   $'limit.replace(\'\\\'\', "\'\'")' \
