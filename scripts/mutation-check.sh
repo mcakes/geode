@@ -18118,8 +18118,8 @@ run_mutation "grouping dialog: saving an equal chain writes nothing" \
 # A fork records the inherited value, so drift and revert see it.
 run_mutation "grouping dialog: a save that forks records its baseline" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '        fork_record(&config, doc, &name, &mut edits).map(|_| fork_notice_of(&config, doc, &name));' \
-  '        None::<Layer>.map(|_| fork_notice_of(&config, doc, &name));' \
+  '        fork_record(&config, doc, name, &mut edits).map(|_| fork_notice_of(&config, doc, name));' \
+  '        None::<Layer>.map(|_| fork_notice_of(&config, doc, name));' \
   geode-shell \
   saving_over_an_inherited_slot_forks_it_without_asking
 
@@ -25610,8 +25610,17 @@ run_mutation "scope expr: add mode offers the frame's own names" \
 # until then the staged name would read as missing.
 run_mutation "scope expr: saving refreshes the frame's definitions at once" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '            if f.replace_named_expressions(named) {' \
-  '            if false && f.replace_named_expressions(named) {' \
+  '    apply::refresh_definitions_now(shell, cx);' \
+  '    let _ = ();' \
+  geode-shell \
+  mod_s_saves_the_text_as_a_named_expression_and_stages_it
+
+# The shared refresh carries the named-expression half the save relies on.
+run_mutation "scope expr: the refresh replaces the frame's named expressions" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        let named_changed = f.replace_named_expressions(named);' \
+  '        let _ = named;
+        let named_changed = false;' \
   geode-shell \
   mod_s_saves_the_text_as_a_named_expression_and_stages_it
 
