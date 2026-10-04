@@ -96,8 +96,8 @@ for capacity, coalescing, and worker shutdown behavior.
 ```sh
 cargo test -p geode-data
 cargo bench -p geode-data      # ingestion, document/series writes, view/series queries
-zsh scripts/mutation-check.sh --anchors-only
-zsh scripts/mutation-check.sh --changed  # mutations for changed source files
+bash scripts/mutation-check.sh --anchors-only
+bash scripts/mutation-check.sh --changed  # mutations for changed source files
 ```
 
 The requery budget and current reference measurements are in

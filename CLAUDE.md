@@ -28,6 +28,12 @@ Current documentation is authoritative:
 - Each crate README — local module map, commands, and narrow invariants.
 - `docs/current/performance.md` — budgets, instrumentation, current reference
   values, and known gaps.
+- `docs/current/real-sources.md` — where vendor clients plug in, what each
+  simulator stands in for, and which feed shapes are guessed.
+- `docs/agent-practices.md` — how work is run, reviewed, verified, and merged,
+  and hazards that have cost time.
+- `docs/open-items.md` — open follow-ups and owed display checks; remove an
+  item when it is done.
 
 `docs/phase-history.md` and `docs/superpowers/` are implementation archives.
 They may describe superseded behavior and are not required reading. Consult
@@ -44,16 +50,29 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo bench --workspace --no-run
 cargo check -p geode-shell --features test-support --all-targets
 
-zsh scripts/mutation-check.sh "name substring"   # targeted mutation entries
-zsh scripts/mutation-check.sh --changed           # entries for changed files
-zsh scripts/mutation-check.sh --anchors-only      # validate anchors, filters and entries, no Cargo
-zsh scripts/mutation-check.sh --build-check "name substring"  # compile mutations, no tests
+bash scripts/mutation-check.sh "name substring"   # targeted mutation entries
+bash scripts/mutation-check.sh --changed           # entries for changed files
+bash scripts/mutation-check.sh --anchors-only      # validate anchors, filters and entries, no Cargo
+bash scripts/mutation-check.sh --build-check "name substring"  # compile mutations, no tests
 ```
 
 CI runs formatting, Clippy, tests, benchmark compilation, and the shell
 `test-support` check on macOS and Windows. The macOS job first runs the
 mutation checker's unit tests and the `--anchors-only` anchor and test-name
-filter gate, before any toolchain step.
+filter gate, before any toolchain step. The mutation harness runs under bash
+or zsh, including Git Bash on Windows (not PowerShell); it needs Python 3 as
+`python3` or `python`, or set `PYTHON`.
+
+The repository does not require `sccache`; some machines configure it in the
+user-level Cargo config. Where it is configured, Cargo needs access to its
+local cache service; run it with approved permissions when the sandbox blocks
+that connection. Cargo caches failed `rustc -vV` probes in the target
+directory's `.rustc_info.json`, so a sandbox `Operation not permitted` can keep
+breaking ordinary terminal builds. After that failure, remove only the
+generated `.rustc_info.json` and rerun Cargo with cache-service access. Do not clean compiled artifacts or disable
+the user's global cache configuration. For an intentional per-command Rust
+wrapper bypass, use `RUSTC_WRAPPER= CARGO_CACHE_RUSTC_INFO=0`; native builds
+may still use separately configured `CC`/`CXX` wrappers.
 
 ## Dependency and ownership rules
 

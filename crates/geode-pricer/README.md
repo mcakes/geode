@@ -24,7 +24,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
 | `entry` | Where `o` and `shift+o` land, lifting a typed package out of a leg position, the entry bar's label, and entry history. |
 | `complete` | Entry-bar completion: the slot at the caret, suggestions, hint, and the Tab cycle. |
-| `clip` | The yank register and where `p`/`shift+p` land. |
+| `clip` | The yank register and where `p` (or `ctrl+v`)/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
 | `commands` | The `:` vocabulary (including `:autosize [reset]`, `:package [n]`/`:unpackage`, `:group <columns>`/`:group slot <n>`/`:group none`/`:unpin`): parse and completions (`:group` completes `rollup::groupable_vocabulary`, `none` and `slot`; `none` is reserved, never a column). |
 | `storage` | The frozen `pricer_sheets` declaration; conversion between sheets, document rows, and a document answer. |

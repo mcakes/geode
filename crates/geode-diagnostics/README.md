@@ -52,7 +52,7 @@ the header's back control through the shell-actions handle. The retired
 `g s`, `g d`, `g r`, `g c`, `g l`, and `g p` jump directly to a section.
 `tab` / `shift+tab` (and `ctrl+tab` / `ctrl+shift+tab`) step the section's
 views, wrapping; only Config (Current issues, History, Effective values)
-and Reference (its declared datasets) have views, and elsewhere the keys are consumed and do nothing. `y` copies the
+and Reference (its declared datasets) have views, and elsewhere the keys are consumed and do nothing. `y` (or `ctrl+c`) copies the
 active row's full details in any table; `r` refreshes the catalog;
 `z shift+r` / `z shift+m` expand or collapse all datasets; `o` in Config
 opens the config directory. In Log, `-` / `=` step the minimum shown level
@@ -224,6 +224,15 @@ cargo bench -p geode-diagnostics --bench log_filter
   stops there, so the page would close only on the second press. The row's
   own click (select, double-click) still fires. The wrapper explicitly
   focuses the page so a row click also exits a focused filter.
+- gpui-component's `TableState::set_selected_row` emits `SelectRow` after
+  the update that called it, so two selections in one update (a rebuild
+  at a fallback row, then at the found row) deliver both echoes after the
+  second. A subscriber that obeys a stale echo by selecting again starts a
+  ping-pong between the two rows that never ends (a hang at full CPU). The
+  page's `SelectRow` subscriber therefore drops an echo for a row the
+  table no longer holds; a click selects before it emits, so a click
+  always passes. Any other subscriber that calls back into
+  `set_selected_row` needs the same guard.
 - Visibility calls `Diagnostics::watch()`/`unwatch()` and notifies in the
   same update; a watch queues the initial catalog. A visible as-of change
   requests a refresh; a hidden page requests one when it is shown again.
