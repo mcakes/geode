@@ -12,6 +12,7 @@ columnar; hot paths avoid per-frame allocation and repeated formatting.
 | View requery at one million rows | Under 50 ms |
 | Chart cache miss at the 500,000-point cap into 1,600 columns | Under 2 ms |
 | Ingest and source work | Never blocks the UI or drops a foreground outcome |
+| Store handoff, background collector to app (`acquire_app` to an open store) | Under 500 ms typical; the cap is the 2 s release drain plus the checkpoint |
 
 These are path budgets, not general claims about every operation. Cold ingest,
 document publication, and vendor latency have different shapes and must be
@@ -138,6 +139,9 @@ the measurement log for fixture and hardware details.
 | Path | Shape | Median |
 |---|---|---:|
 | Warm database reopen | populated demo store | 5.0 ms |
+| Store handoff, collector idle | `--demo 100000`: `acquire_app` to `Store::open` | 222 ms |
+| Store handoff, collector just opened | the same, its bus's startup burst in flight (about 130 documents drained) | 828 ms |
+| Store handoff, a large file loading | 1,000,000-row CSV under way; 2,000,000 rows (1GB `memory_limit`) | 1.93 s; 4.46 s |
 | View requery | 1,000,000 rows, no text filter, depth two | 2.51 ms |
 | View requery, no context columns | 1,000,000 rows, underlying-grain measures only, depth two | 20.5 ms |
 | View requery, roster's context columns | the same view with `underlying_ref`, `position_ref`, `instrument_ref` | 35.0 ms |
@@ -364,6 +368,19 @@ joined on the unique source value, if the idle figure stays over budget.
   pipeline. Concurrent staging is on hold until the real path and a network
   share are measured.
 - CI compiles benchmarks but has no stable regression baseline.
+- The store handoff misses its 500 ms target in two shapes. Right after the
+  collector opened, its release drains the demo bus's startup burst (about
+  130 documents) and the handoff takes about 0.8 s. With a file load under
+  way the release lets the load finish, so the handoff is the rest of that
+  load: about 1.9 s at 1,000,000 rows and 4.5 s at 2,000,000, past the 2 s
+  drain cap; a load longer than 15 s fails the app's open. Idle, it is
+  about 0.1 to 0.25 s, quantized by the collector's 100 ms hold poll and the
+  app's 100 ms open retry.
+- Under the default `[collector] memory_limit` (512MB) DuckDB aborts the
+  collector on large CSV loads (an internal assertion in its temporary
+  memory manager): on the second 2,000,000-row file in one process, and
+  intermittently after about 3,000,000 rows of 1,000,000-row files. The
+  service manager restarts it. 1GB loaded the same files.
 - The vol slice `model_build` bench (`cargo bench -p geode-volslice`) measured
   about 200 µs with 1,000-point curves under heavy machine load (see the
   measurement log). It times `core::build::model` alone, the work a repaint

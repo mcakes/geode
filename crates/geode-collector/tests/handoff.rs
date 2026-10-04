@@ -7,7 +7,10 @@
 //! there). The user `app.toml` sets `data.db_path` and `[log] collector =
 //! "debug"`, so the collector's publish lines reach
 //! `<temp home>/.config/geode/logs/collector.*.log`, which the tests read.
-//! The real user configuration is never read or written.
+//! `GEODE_SERVICE=1` drops the collector's stderr log layer, so a child's
+//! stderr (`<root>/stderr.txt`) holds only panics and aborts, shown when a
+//! collector exits unexpectedly. The real user configuration is never read
+//! or written.
 //!
 //! Rules that keep these tests bounded and honest:
 //!
@@ -132,6 +135,11 @@ impl World {
     /// A store at `<root>/store/g.duckdb` fed by one directory source,
     /// `files`, polling the inbox every second into dataset `risk`.
     fn files() -> World {
+        World::files_with("")
+    }
+
+    /// [`World::files`] with `app_extra` appended to the user `app.toml`.
+    fn files_with(app_extra: &str) -> World {
         let (dir, home, user, desk, inbox, tmp) = World::dirs();
         let db = dir
             .path()
@@ -142,7 +150,7 @@ impl World {
         std::fs::write(
             user.join("app.toml"),
             format!(
-                "config_version = 1\n[data]\ndb_path = {:?}\n[log]\ncollector = \"debug\"\ningest = \"debug\"\n",
+                "config_version = 1\n[data]\ndb_path = {:?}\n[log]\ncollector = \"debug\"\ningest = \"debug\"\n{app_extra}",
                 db.to_str().unwrap()
             ),
         )
@@ -201,13 +209,37 @@ impl World {
         cmd.env("HOME", &self.home)
             .env_remove("APPDATA")
             .env_remove("LOCALAPPDATA")
-            .env_remove("GEODE_SERVICE")
+            .env("GEODE_SERVICE", "1")
             .env("GEODE_DESK_CONFIG", &self.desk)
             .env("TMPDIR", &self.tmp)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(self.stderr_file());
         cmd
+    }
+
+    /// Children's stderr (panics, an abort's message), appended to
+    /// `<root>/stderr.txt` and shown when a collector exits unexpectedly.
+    fn stderr_file(&self) -> File {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.stderr_path())
+            .unwrap()
+    }
+
+    fn stderr_path(&self) -> PathBuf {
+        self.home.with_file_name("stderr.txt")
+    }
+
+    /// A failure message for a collector that exited: its status, stderr
+    /// and log.
+    fn exited_message(&self, status: ExitStatus) -> String {
+        let stderr = std::fs::read_to_string(self.stderr_path()).unwrap_or_default();
+        format!(
+            "the collector exited ({status:?})\n--- stderr\n{stderr}\n--- log\n{}",
+            self.log()
+        )
     }
 
     fn collector(&self) -> Proc {
@@ -265,7 +297,7 @@ impl World {
     fn wait_holding(&self, collector: &mut Proc, holds: usize, limit: Duration) {
         wait_until(&format!("hold {holds}"), limit, || {
             if let Some(status) = collector.exited() {
-                panic!("the collector exited ({status:?}):\n{}", self.log());
+                panic!("{}", self.exited_message(status));
             }
             (self.count(FILES_OK) >= holds).then_some(())
         });
@@ -498,7 +530,7 @@ fn a_handoff_keeps_the_documents_the_collector_received() {
     let underlyings = geode_demo_data::demo_underlyings();
     wait_until("every CVI document published", WAIT, || {
         if let Some(status) = collector.exited() {
-            panic!("the collector exited ({status:?}):\n{}", world.log());
+            panic!("{}", world.exited_message(status));
         }
         let done = published(&world.log());
         underlyings
@@ -641,8 +673,9 @@ fn fifo_writer_when_read(path: &Path) -> File {
 /// The race is made deterministic with a FIFO in the desk directory: the
 /// collector reads every desk `*.toml` when it loads its configuration, once
 /// at start and again at each acquire after the stamp check, and blocks on
-/// the FIFO until the test writes it. The test takes the store as the app
-/// while the collector is blocked there, then lets it go on to its open.
+/// the FIFO until the test opens and closes its write end. The test takes
+/// the store as the app while the collector is blocked there, then lets it
+/// go on to its open.
 #[test]
 fn a_lost_race_is_a_yield_not_an_exit() {
     let _serial = serial();
@@ -665,7 +698,7 @@ fn a_lost_race_is_a_yield_not_an_exit() {
     drop(held);
     wait_until("the yield", WAIT, || {
         if let Some(status) = collector.exited() {
-            panic!("the collector exited ({status:?}):\n{}", world.log());
+            panic!("{}", world.exited_message(status));
         }
         world.log().contains(YIELDED).then_some(())
     });
@@ -675,4 +708,232 @@ fn a_lost_race_is_a_yield_not_an_exit() {
     assert!(!world.log().contains("exiting with status"));
     drop(store);
     drop(lease);
+}
+
+// ---- the handoff measurement (spec §7): not a test
+
+/// The handoff time recorded in `docs/perf.md`: from `acquire_app` to an
+/// open store, against the collector running idle, right after it opened
+/// (the demo bus's startup burst in flight), and loading large files.
+/// Inert unless `GEODE_MEASURE_HANDOFF` is set:
+///
+/// ```text
+/// GEODE_MEASURE_HANDOFF=1 cargo test --release -p geode-collector \
+///     --test handoff -- --ignored measure_handoff --nocapture
+/// ```
+///
+/// `GEODE_MEASURE_RUNS` (default 10) sets the runs per case;
+/// `GEODE_MEASURE_SKIP_DEMO` skips the demo cases. Emitting the
+/// 100,000-row demo store and loading the large files take minutes, so its
+/// waits are longer than the tests'; each is still bounded.
+///
+/// The large-file cases are 1,000,000-row files under the default
+/// `[collector] memory_limit` (512MB) and 2,000,000-row files under 1GB: at
+/// 512MB DuckDB aborts the collector on the second 2,000,000-row load
+/// (`temporary_memory_manager.cpp` assertion), so that shape cannot run at
+/// the default.
+#[test]
+#[ignore = "a measurement: set GEODE_MEASURE_HANDOFF=1 and build with --release"]
+fn measure_handoff() {
+    if std::env::var_os("GEODE_MEASURE_HANDOFF").is_none() {
+        return;
+    }
+    let _serial = serial();
+    let runs = std::env::var("GEODE_MEASURE_RUNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    if std::env::var_os("GEODE_MEASURE_SKIP_DEMO").is_none() {
+        measure_demo(runs);
+    }
+    measure_large_files(runs, 1_000_000, None);
+    measure_large_files(runs, 2_000_000, Some("1GB"));
+}
+
+const PUBLISHED: &str = "geode::collector: published ";
+const LONG: Duration = Duration::from_secs(600);
+
+/// One handoff's figures.
+struct Sample {
+    took: Duration,
+    waited: bool,
+    /// Publishes logged from the call to `acquire_app` to the release line:
+    /// what the release drained, plus any publish in the 100 ms before the
+    /// collector saw the app.
+    drained: usize,
+    /// The collector's own `released the store to the app in N ms`.
+    release_ms: Option<u64>,
+}
+
+/// Take the store, read the release's figures from the log, give the store
+/// back, and wait until the collector has opened it again (`marker`, a
+/// health line logged once per hold, appears once more).
+fn handoff_once(world: &World, collector: &mut Proc, marker: &str) -> Sample {
+    let published_before = world.count(PUBLISHED);
+    let released_before = world.count(RELEASED);
+    let (lease, store, took, waited) = take_store(&world.db);
+    let log = wait_until("the release line", WAIT, || {
+        if let Some(status) = collector.exited() {
+            panic!("{}", world.exited_message(status));
+        }
+        let log = world.log();
+        (log.matches(RELEASED).count() > released_before).then_some(log)
+    });
+    let at = log.rfind(RELEASED).unwrap();
+    let drained = log[..at].matches(PUBLISHED).count() - published_before;
+    let release_ms = log[at + RELEASED.len()..]
+        .trim_start()
+        .strip_prefix("in ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok());
+    let holds = world.count(marker);
+    drop(store);
+    drop(lease);
+    wait_until("the collector to hold again", WAIT, || {
+        (world.count(marker) > holds).then_some(())
+    });
+    Sample {
+        took,
+        waited,
+        drained,
+        release_ms,
+    }
+}
+
+/// Wait until no publish has been logged for `quiet`.
+fn wait_quiet(world: &World, quiet: Duration, limit: Duration) {
+    let mut last = world.count(PUBLISHED);
+    let mut since = Instant::now();
+    wait_until("a quiet collector", limit, || {
+        let now = world.count(PUBLISHED);
+        if now != last {
+            last = now;
+            since = Instant::now();
+        }
+        (since.elapsed() >= quiet).then_some(())
+    });
+}
+
+fn report(label: &str, samples: &[Sample]) {
+    let mut ms: Vec<f64> = samples
+        .iter()
+        .map(|s| s.took.as_secs_f64() * 1000.0)
+        .collect();
+    ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = ms.len();
+    let median = if n.is_multiple_of(2) {
+        (ms[n / 2 - 1] + ms[n / 2]) / 2.0
+    } else {
+        ms[n / 2]
+    };
+    println!(
+        "{label}: n {n}, median {median:.0} ms, min {:.0} ms, max {:.0} ms",
+        ms[0],
+        ms[n - 1]
+    );
+    for s in samples {
+        println!(
+            "  {:>6.0} ms  waited {}  drained {:>3}  collector release {:?} ms",
+            s.took.as_secs_f64() * 1000.0,
+            s.waited,
+            s.drained,
+            s.release_ms
+        );
+    }
+}
+
+/// The populated demo store (`--demo 100000`): the collector idle, then
+/// right after each reopen.
+fn measure_demo(runs: usize) {
+    let world = World::demo(100_000);
+    let mut collector = world.collector();
+    let marker = "geode::collector: cvi: ok";
+    wait_until("the demo store emitted and opened", LONG, || {
+        if let Some(status) = collector.exited() {
+            panic!("{}", world.exited_message(status));
+        }
+        (world.count(marker) >= 1).then_some(())
+    });
+    wait_quiet(&world, Duration::from_secs(3), LONG);
+
+    let mut idle = Vec::new();
+    for _ in 0..runs {
+        idle.push(handoff_once(&world, &mut collector, marker));
+        // The reopened collector's bus bursts again; let it settle.
+        wait_quiet(&world, Duration::from_secs(2), LONG);
+    }
+    report("demo 100000, collector idle", &idle);
+
+    // Right after each reopen: the bus's startup burst is in flight.
+    let mut burst = Vec::new();
+    handoff_once(&world, &mut collector, marker);
+    for _ in 0..runs {
+        burst.push(handoff_once(&world, &mut collector, marker));
+    }
+    report("demo 100000, right after the collector opened", &burst);
+    assert!(collector.exited().is_none());
+}
+
+/// Three large CSVs dropped into the directory source; the store is taken
+/// once discovery has queued them and the first load is under way. The
+/// release lets that load finish and leaves the others for the next hold.
+fn measure_large_files(runs: usize, rows: usize, memory_limit: Option<&str>) {
+    const FILES: usize = 3;
+    let world = World::files_with(
+        &memory_limit
+            .map(|limit| format!("[collector]\nmemory_limit = {limit:?}\n"))
+            .unwrap_or_default(),
+    );
+    let mut collector = world.collector();
+    world.wait_holding(&mut collector, 1, WAIT);
+    let books: Vec<String> = (0..20).map(|b| format!("BK{b:03}")).collect();
+    let book_refs: Vec<&str> = books.iter().map(String::as_str).collect();
+    let mut body = String::with_capacity(rows * 32);
+    body.push_str(CSV_HEADER);
+    body.push('\n');
+    for i in 0..rows {
+        body.push_str(&format!(
+            "{},L{},P{i},C{},{}.25\n",
+            books[i % books.len()],
+            i % 7,
+            i % 13,
+            i % 1000
+        ));
+    }
+    let ready = format!("polled files: {FILES} ready");
+
+    let mut samples = Vec::new();
+    for run in 0..runs {
+        let polled = world.count(&ready);
+        let names: Vec<String> = (0..FILES).map(|k| format!("big{run}_{k}")).collect();
+        for name in &names {
+            write_with_sentinel(&world.inbox, name, &body, &book_refs);
+        }
+        wait_until("discovery to queue the files", WAIT, || {
+            (world.count(&ready) > polled).then_some(())
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        samples.push(handoff_once(&world, &mut collector, FILES_OK));
+        wait_until("the files loaded after the handoff", LONG, || {
+            if let Some(status) = collector.exited() {
+                panic!("{}", world.exited_message(status));
+            }
+            let done = published(&world.log());
+            names
+                .iter()
+                .all(|n| done.contains_key(&("risk".to_string(), n.clone())))
+                .then_some(())
+        });
+        for name in &names {
+            let _ = std::fs::remove_file(world.inbox.join(format!("{name}.csv")));
+            let _ = std::fs::remove_file(world.inbox.join(format!("{name}.csv.done")));
+        }
+    }
+    report(
+        &format!(
+            "{FILES} files of {rows} rows, the first loading (memory_limit {})",
+            memory_limit.unwrap_or("default")
+        ),
+        &samples,
+    );
 }

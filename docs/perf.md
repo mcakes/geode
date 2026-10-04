@@ -2798,3 +2798,61 @@ previous quarter hour).
 
 Both sit well inside the 8 ms UI budget: the edit itself (history, the TOML
 object) adds about 0.3 ms to the rows rebuild a values answer or reload pays.
+
+## Collector to app store handoff (2026-10-04)
+
+```text
+GEODE_MEASURE_HANDOFF=1 cargo test --release -p geode-collector \
+    --test handoff -- --ignored measure_handoff --nocapture
+```
+
+The real `geode-collector` binary (release profile) holds a temp store. The
+measurement process plays the app: `lease::acquire_app` with the app's 15 s
+deadline and `Store::open` as its open, timed from the call to the open
+store. The open is the bare store open, not `DataService::spawn_as(App)`:
+the app's schema check and reader pool come after it and are not counted.
+After each handoff the store is given back and the next run starts once the
+collector has opened it again. "Drained" counts the collector's publish
+lines from the call to its release line: what the release drained, plus any
+publish in the up to 120 ms before the collector confirmed the app (a 100 ms
+hold poll and a second probe 20 ms later). "Release" is the collector's own
+`released the store to the app in N ms`, which covers the drain and the
+service shutdown, not the hold poll or the app's 100 ms open retry.
+
+Conditions: Apple M5 Pro (18 cores, 48 GB), rustc 1.96.0, DuckDB 1.5.5
+(crate 1.10505.0), release profile, load average 6 to 10. Ten runs per
+case. The large-file cases come from one run, the demo cases from the next;
+in that next run the collector aborted in its large-file case (below).
+
+| case | median | min | max | drained | release |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `--demo 100000`, collector idle (2 s with no publish before each run) | 222 ms | 119 ms | 231 ms | 0 to 1 | 29 to 106 ms |
+| `--demo 100000`, right after the collector opened (its bus's startup burst and recovery in flight) | 828 ms | 762 ms | 890 ms | 112 to 138 | 631 to 805 ms |
+| three 1,000,000-row CSVs, the first loading (default `memory_limit` 512MB) | 1,927 ms | 1,682 ms | 2,366 ms | 1 | 1,448 to 2,115 ms |
+| three 2,000,000-row CSVs, the first loading (`memory_limit` 1GB) | 4,458 ms | 3,781 ms | 4,831 ms | 1 | 3,250 to 4,234 ms |
+
+Idle sits in two bands, about 120 ms and about 225 ms: the collector's
+100 ms hold poll and the app's 100 ms open retry quantize the wait; the
+release itself is about 50 ms. With the startup burst queued, the release
+drains about 130 documents within the 2 s deadline and the handoff stays
+under 1 s, over the 500 ms target. For the large files, the CSVs are
+dropped into a directory source polling every second; the store is taken
+300 ms after discovery logs all three ready, so the first load is under
+way. The release lets that load finish (the drain discards only queued
+files), so the handoff is the remainder of one file's load: about 1.9 s at
+1,000,000 rows and 4.5 s at 2,000,000, past both the 500 ms target and the
+2 s drain cap, and growing with the file. A file large enough to load for
+more than 15 s would make the app's open fail with `the background
+collector did not release the store within 15 s`. Not tuned here.
+
+Under the default `[collector] memory_limit` of 512MB, DuckDB aborts the
+collector process (`Assertion failed: (new_remaining_size != 0), function
+SetRemainingSizeAndUpdateReservation, file temporary_memory_manager.cpp,
+line 28`, SIGABRT): on the second 2,000,000-row file loaded in one process,
+four times out of four, and in one of two runs of the 1,000,000-row case,
+on the fourth file (3,000,000 rows already loaded by that process). At 1GB
+and at 8GB three 2,000,000-row files load in one process; the 1GB case
+above ran to completion. The app sets no limit. Under launchd the abort is
+a failed exit, so the collector restarts and the next file loads in a
+fresh process.
+

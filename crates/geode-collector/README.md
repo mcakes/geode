@@ -83,6 +83,7 @@ reaches `launchctl`, `schtasks` or the real `~/Library/LaunchAgents`.
 | `run.rs` | `run`/`run_with_levels`, the loop below; `ExeStamp` and `exe_changed`; the poll intervals; `BusyTimer` (a refused stamp read's escalation), `confirmed` (the two-probe app check) and `stop_report` (how a stopped hold is logged); the event sink (`Events`). |
 | `status.rs` | `status(db)`: `collector: running\|not running; app: present\|absent; store: <db>`, from two lock probes. |
 | `main.rs` | Installs logging with the `collector` prefix, dispatches, drops the log guard, exits with the returned status. |
+| `tests/handoff.rs` | Cross-process tests: the built binary in a temp home against a temp store, this process (or a child of it) as the app. Also `measure_handoff`, the handoff measurement in `docs/perf.md` (ignored; `GEODE_MEASURE_HANDOFF=1`, release build). Unix only. |
 
 ## The loop
 
@@ -140,6 +141,13 @@ the sink waits: it logs, updates a map or a list, and returns.
   `target/debug` registers that build, and `cargo clean` or removing the
   checkout deletes it while the service manager keeps retrying; install
   prints a warning for a path under `target`.
+- The release lets a file load under way finish, so a handoff during a
+  large CSV load lasts the rest of that load (about 1.9 s at 1,000,000
+  rows, 4.5 s at 2,000,000), past the 2 s drain; a load longer than the
+  app's 15 s open deadline fails the app's open. Under the default
+  `memory_limit` (512MB) DuckDB can abort the collector on large CSV loads
+  (an assertion in its temporary memory manager); the service manager
+  restarts it. See `docs/current/performance.md`.
 - A changed binary takes effect at the collector's next release (exit 75).
   launchd restarts it after its 10 s throttle. On Windows a running
   executable cannot be replaced, so a new build needs `install` again,
