@@ -1408,6 +1408,20 @@ impl SaveFixture {
         })
     }
 
+    /// `key` dispatched and the frame's saved scopes read in one update:
+    /// no task runs between them, so the batch has not flushed and only the
+    /// handler's own refresh can have resolved the change.
+    fn key_and_read_saved(&mut self, key: &str, name: &str) -> bool {
+        let frame = frame_of(&self.shell, &self.vcx);
+        let held = self.vcx.update(|window, cx| {
+            window.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx);
+            frame.read(cx).saved_scopes().contains_key(name)
+        });
+        self.vcx.run_until_parked();
+        draw(&mut self.vcx);
+        held
+    }
+
     fn saved_error(&self) -> Option<String> {
         error(&self.shell, &self.vcx)
     }
@@ -1482,9 +1496,11 @@ fn c_copies_a_scope_under_a_new_name(cx: &mut gpui::TestAppContext) {
     assert!(!f.queued(), "a taken name writes nothing");
     f.keys("backspace backspace backspace backspace backspace backspace backspace");
     f.type_text("eu2");
-    f.keys("enter");
+    assert!(
+        f.key_and_read_saved("enter", "eu2"),
+        "resolved before the flush"
+    );
     assert_eq!(f.top(), Some(Layer::Saved));
-    assert!(f.has_saved("eu2"), "resolved at once");
     assert_eq!(f.saved_summary("eu2").as_deref(), Some("book BK001"));
     assert_eq!(f.saved_cursor(), Some(SavedId::Scope("eu2".into())));
     assert_eq!(f.notice(), None, "a new name forks nothing");
@@ -1535,10 +1551,9 @@ fn d_deletes_a_user_scope_after_yes(cx: &mut gpui::TestAppContext) {
         Some(("Delete 'eu' from your config?".into(), None, "Delete"))
     );
     assert!(!f.queued(), "nothing queued before the answer");
-    f.keys("y");
+    assert!(!f.key_and_read_saved("y", "eu"), "removed before the flush");
     assert!(!f.painted("scope-dialog-confirm"));
     assert_eq!(f.top(), Some(Layer::Saved));
-    assert!(!f.has_saved("eu"));
     assert_eq!(visible_names(&f.shell, &f.vcx), ["desk_eu", "big", "liq"]);
     assert_eq!(f.saved_cursor(), Some(SavedId::Expression("big".into())));
     f.flush();
