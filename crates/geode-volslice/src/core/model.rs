@@ -74,6 +74,41 @@ impl Pair {
             self.subtrahend.label()
         )
     }
+
+    /// The same two kinds the other way round.
+    pub fn reverse(self) -> Pair {
+        Pair {
+            minuend: self.subtrahend,
+            subtrahend: self.minuend,
+        }
+    }
+
+    /// Whether either side is the chain: such a difference sits at the
+    /// chain's strikes as points with the quote's spread as a bar.
+    pub fn has_chain(self) -> bool {
+        self.minuend == Kind::Chain || self.subtrahend == Kind::Chain
+    }
+
+    /// The curve side of a pair with the chain; for two curves, the minuend.
+    pub fn curve(self) -> Kind {
+        if self.minuend.is_curve() {
+            self.minuend
+        } else {
+            self.subtrahend
+        }
+    }
+}
+
+/// Turn a pair on or off in an ordered set of pairs, keeping the order the
+/// pairs were turned on in. Turning a pair on turns its reverse off: the
+/// two are one difference negated, and both would paint it twice.
+pub fn toggle_pair(pairs: &mut Vec<Pair>, pair: Pair) {
+    if let Some(i) = pairs.iter().position(|p| *p == pair) {
+        pairs.remove(i);
+    } else {
+        pairs.retain(|p| *p != pair.reverse());
+        pairs.push(pair);
+    }
 }
 
 /// What is loaded: the published CVI as of the frame, the followed
@@ -157,7 +192,9 @@ pub struct State {
     pub active: Option<BTreeSet<NaiveDate>>,
     pub cursor: usize,
     pub density: bool,
-    pub diff: Option<Pair>,
+    /// The differences shown, in the order they were turned on (paint and
+    /// legend order). Never a pair and its reverse ([`toggle_pair`]).
+    pub diffs: Vec<Pair>,
     pub split: f32,
     /// A saved zoom in x units; `None` follows the data's extent.
     pub view: Option<(f64, f64)>,
@@ -172,7 +209,7 @@ impl Default for State {
             active: None,
             cursor: 0,
             density: false,
-            diff: None,
+            diffs: Vec::new(),
             split: DEFAULT_SPLIT,
             view: None,
         }
@@ -465,6 +502,41 @@ pub(crate) mod tests {
             "cvi draft \u{2212} cvi"
         );
         assert_eq!(Kind::parse(" CVI draft "), Some(Kind::Draft));
+    }
+
+    #[test]
+    fn toggling_a_pair_keeps_order_and_turns_its_reverse_off() {
+        let p = |a, b| Pair::new(a, b).unwrap();
+        let mut pairs = Vec::new();
+        toggle_pair(&mut pairs, p(Kind::Cvi, Kind::Chain));
+        toggle_pair(&mut pairs, p(Kind::Draft, Kind::Cvi));
+        toggle_pair(&mut pairs, p(Kind::Draft, Kind::Chain));
+        assert_eq!(
+            pairs,
+            [
+                p(Kind::Cvi, Kind::Chain),
+                p(Kind::Draft, Kind::Cvi),
+                p(Kind::Draft, Kind::Chain)
+            ]
+        );
+        toggle_pair(&mut pairs, p(Kind::Chain, Kind::Cvi));
+        assert_eq!(
+            pairs,
+            [
+                p(Kind::Draft, Kind::Cvi),
+                p(Kind::Draft, Kind::Chain),
+                p(Kind::Chain, Kind::Cvi)
+            ],
+            "the reverse went off and the pair joined last"
+        );
+        toggle_pair(&mut pairs, p(Kind::Draft, Kind::Cvi));
+        assert_eq!(
+            pairs,
+            [p(Kind::Draft, Kind::Chain), p(Kind::Chain, Kind::Cvi)],
+            "a second toggle turns it off"
+        );
+        assert_eq!(p(Kind::Chain, Kind::Draft).curve(), Kind::Draft);
+        assert!(p(Kind::Chain, Kind::Draft).has_chain() && !p(Kind::Cvi, Kind::Draft).has_chain());
     }
 
     #[test]

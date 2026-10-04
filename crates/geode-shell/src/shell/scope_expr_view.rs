@@ -1,27 +1,23 @@
 //! Edit the frame's expression layer in the shared dialog Input. The dialog
-//! has three modes ([`Mode`]), chosen by the door that opens it:
+//! has two modes ([`Mode`]), chosen by the door that opens it:
 //!
-//! - **Whole** (`frame::scope_expression`): seeded with the whole
-//!   expression; Enter replaces it and an empty field clears it.
 //! - **Term** (a click on one of the toolbar's term chips): seeded with
 //!   that top-level `and` term (`Expr::conjuncts`); Enter replaces that
 //!   term alone and an empty field removes it. The other terms keep their
 //!   order. The mode carries the seeded term: if the scope changed
 //!   underneath so that index no longer holds it, an edit or a removal
 //!   refuses inline rather than touch a different term.
-//! - **Add** (`frame::add_expression`, the toolbar's add-a-filter menu):
-//!   empty; Enter joins the typed expression to the current one with
-//!   `and` (or sets it when there is none), and an empty field closes
-//!   without a change when no named expressions are staged.
+//! - **Add** (`frame::add_expression`, `x` in the Scope dialog): empty;
+//!   Enter joins the typed expression to the current one with `and` (or
+//!   sets it when there is none), and an empty field closes without a
+//!   change when no named expressions are staged.
 //!
-//! Whole and Add also stage named expressions: a named row's accept
-//! stages its name as a `≡ name` chip above the field, and Enter applies
-//! the staged names with the text in one `set_scope`. Whole opens with the
-//! frame's names staged and Enter replaces them (an empty field with
-//! nothing staged clears both); Add opens with none and Enter appends the
-//! ones the frame lacks. Backspace at the field's start with no selection
-//! removes the last chip; a chip's `×` removes that chip. Term mode offers
-//! and stages no names.
+//! Add also stages named expressions: a named row's accept stages its
+//! name as a `≡ name` chip above the field, and Enter applies the staged
+//! names with the text in one `set_scope`. Add opens with none staged and
+//! Enter appends the ones the frame lacks. Backspace at the field's start
+//! with no selection removes the last chip; a chip's `×` removes that
+//! chip. Term mode offers and stages no names.
 //!
 //! `mod+s` in every mode turns the field into a name entry for the
 //! typed text (suggestions off, staged chips kept); on an empty field it
@@ -35,10 +31,11 @@
 //! nothing to stage: the name replaces the term in one `set_scope` and the
 //! dialog closes.
 //!
-//! Every scope change goes through `Frame`'s undoable `set_scope` path. A parse
-//! error stays inline in every mode, and editing clears the error. Escape
-//! from expression entry closes without applying the draft; definitions already
-//! queued by save-as-named remain. Each open seeds a draft from the current frame.
+//! Every scope change goes through `Frame`'s undoable `set_scope` path. A
+//! parse error stays inline in every mode, and editing clears the error.
+//! Escape from expression entry closes without applying the draft;
+//! definitions already queued by save-as-named remain. Each open seeds a
+//! draft from the current frame.
 //!
 //! While typing, `expr_suggest` lists what fits at the caret and warns
 //! about schema problems. Enter refuses a syntax error or an unknown
@@ -74,8 +71,6 @@ use super::scale;
 /// Which part of the expression the dialog edits.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
-    /// The whole expression.
-    Whole,
     /// Top-level `and` term `index`, in `Expr::conjuncts` order, and the
     /// term the dialog was seeded with. A commit edits the term only while
     /// it is still `seeded` at `index`: the index alone could name a
@@ -95,7 +90,6 @@ impl Mode {
 
     pub fn title(&self) -> &'static str {
         match self {
-            Mode::Whole => "Scope expression",
             Mode::Term { .. } => "Edit scope term",
             Mode::Add => "Add scope expression",
         }
@@ -104,7 +98,6 @@ impl Mode {
     /// The one-line note under the field, if the mode needs one.
     pub fn note(&self) -> Option<&'static str> {
         match self {
-            Mode::Whole => None,
             Mode::Term { .. } => Some("Edits this term only; the other terms stay."),
             Mode::Add => Some("Joined to the current expression with and."),
         }
@@ -114,8 +107,6 @@ impl Mode {
     /// which removes the last chip from the field's start.
     fn hints(&self, staged: bool) -> &'static [Hint] {
         match (self, staged) {
-            (Mode::Whole, false) => WHOLE_HINTS,
-            (Mode::Whole, true) => WHOLE_STAGED_HINTS,
             (Mode::Term { .. }, _) => TERM_HINTS,
             (Mode::Add, false) => ADD_HINTS,
             (Mode::Add, true) => ADD_STAGED_HINTS,
@@ -123,9 +114,8 @@ impl Mode {
     }
 
     /// The text the field opens with.
-    pub fn seed(&self, expression: Option<&Expr>) -> String {
+    pub fn seed(&self) -> String {
         match self {
-            Mode::Whole => expression.map(ToString::to_string).unwrap_or_default(),
             Mode::Term { seeded, .. } => seeded.to_string(),
             Mode::Add => String::new(),
         }
@@ -138,7 +128,7 @@ pub const TERM_GONE: &str = "This term is no longer in the scope expression";
 /// A save with an empty (or whitespace-only) field, which names nothing.
 pub const SAVE_EMPTY: &str = "nothing to save — the expression is empty";
 
-/// The name entry's label in Whole and Add.
+/// The name entry's label in Add.
 const NAMING_LABEL: &str = "Save this expression as a named expression · name";
 
 /// The name entry's label in Term mode, where the name replaces the term.
@@ -171,21 +161,11 @@ impl ScopeExprState {
     }
 }
 
-/// The names `mode` opens with staged: the frame's own names in Whole
-/// (Enter replaces them), none in Add and Term.
-pub fn seed_staged(mode: &Mode, current: &Scope) -> Vec<String> {
-    match mode {
-        Mode::Whole => current.named.clone(),
-        Mode::Term { .. } | Mode::Add => Vec::new(),
-    }
-}
-
 /// The named rows the field offers: every defined name not already
 /// staged, previewed by its text (or, when invalid, by its reason). Term
 /// mode edits one term of the text, where a name has no place, so it
 /// offers none. Add mode joins `frame_named`, so it leaves those out too:
-/// staging one would change nothing at Enter. Whole mode replaces them,
-/// and opens with them staged.
+/// staging one would change nothing at Enter.
 pub fn named_offers(
     mode: &Mode,
     defined: &NamedExpressions,
@@ -195,7 +175,6 @@ pub fn named_offers(
     let joined: &[String] = match mode {
         Mode::Term { .. } => return Vec::new(),
         Mode::Add => frame_named,
-        Mode::Whole => &[],
     };
     defined
         .names()
@@ -215,19 +194,16 @@ pub fn named_offers(
 }
 
 /// The scope a new expression will be ANDed with, which narrows its value
-/// suggestions. Whole replaces the expression and the names, so the
-/// expression is dropped and the names are the staged ones. Add joins
-/// both, so the expression is kept and the staged names join the frame's.
-/// Term keeps the other terms. The in-progress text never narrows.
+/// suggestions. Add joins both, so the expression is kept and the staged
+/// names join the frame's. Term keeps the other terms. The in-progress
+/// text never narrows.
 pub fn request_scope(mode: &Mode, current: &Scope, staged: &[String]) -> Scope {
     let mut scope = current.clone();
     match mode {
-        Mode::Whole => scope.named = staged.to_vec(),
         Mode::Add => append_missing(&mut scope.named, staged),
         Mode::Term { .. } => {}
     }
     scope.expression = match mode {
-        Mode::Whole => None,
         Mode::Add => current.expression.clone(),
         Mode::Term { index, .. } => current.expression.as_ref().and_then(|e| {
             Expr::from_conjuncts(
@@ -273,14 +249,13 @@ fn append_missing(named: &mut Vec<String>, staged: &[String]) {
 /// Apply `text` and the `staged` names to `frame`'s lane as `mode` says.
 /// `Ok(changed)` means the dialog closes; `Err(message)` stays inline (a
 /// parse error, an unknown column, or [`TERM_GONE`]). Every change goes
-/// through `FrameViewMut::set_scope`, so undo sees it. Whole and Add change the
+/// through `FrameViewMut::set_scope`, so undo sees it. Add changes the
 /// names and the expression in ONE `set_scope`: two calls would leave two
 /// undo entries, and one undo would restore half the edit.
 ///
-/// Whole sets the names to `staged` and the expression to the text, so
-/// an empty field with nothing staged clears both. Add appends the staged
-/// names the frame lacks and joins the text with `and`; with neither, it
-/// changes nothing. Term ignores `staged` (it never has any).
+/// Add appends the staged names the frame lacks and joins the text with
+/// `and`; with neither, it changes nothing. Term ignores `staged` (it never
+/// has any).
 pub fn apply(
     frame: &mut FrameViewMut<'_>,
     mode: &Mode,
@@ -290,12 +265,6 @@ pub fn apply(
 ) -> Result<bool, String> {
     let parsed = commit_text(text, vocab)?;
     match mode {
-        Mode::Whole => {
-            let mut scope = frame.scope().clone();
-            scope.named = staged.to_vec();
-            scope.expression = parsed;
-            Ok(frame.set_scope(scope))
-        }
         Mode::Term { index, seeded } => frame
             .replace_expression_term(*index, seeded, parsed)
             .map_err(|_| TERM_GONE.to_string()),
@@ -315,18 +284,6 @@ pub fn apply(
 // ---------------------------------------------------------------------
 
 const WIDTH: f32 = 640.0;
-
-const WHOLE_HINTS: &[Hint] = &[
-    Hint::Key("tab"),
-    Hint::Text("insert ·"),
-    Hint::Key("up"),
-    Hint::Key("down"),
-    Hint::Text("move ·"),
-    Hint::Key("enter"),
-    Hint::Text("set · empty clears ·"),
-    Hint::Key("escape"),
-    Hint::Text("close"),
-];
 
 const TERM_HINTS: &[Hint] = &[
     Hint::Key("tab"),
@@ -348,20 +305,6 @@ const ADD_HINTS: &[Hint] = &[
     Hint::Text("move ·"),
     Hint::Key("enter"),
     Hint::Text("add ·"),
-    Hint::Key("escape"),
-    Hint::Text("close"),
-];
-
-const WHOLE_STAGED_HINTS: &[Hint] = &[
-    Hint::Key("tab"),
-    Hint::Text("insert ·"),
-    Hint::Key("up"),
-    Hint::Key("down"),
-    Hint::Text("move ·"),
-    Hint::Key("backspace"),
-    Hint::Text("remove chip ·"),
-    Hint::Key("enter"),
-    Hint::Text("set ·"),
     Hint::Key("escape"),
     Hint::Text("close"),
 ];
@@ -404,7 +347,8 @@ pub fn open_term(
     open(view, mode, window, cx);
 }
 
-/// Open the dialog in `mode`, seeded from the frame's current expression.
+/// Open the dialog in `mode`, seeded with the mode's text (Term's term,
+/// or nothing in Add) and nothing staged.
 /// A no-op when this kind is already open (see `dialog::can_open`). The
 /// seed is written AFTER the door (`open_shell_dialog_with_key` resets the
 /// field to empty), and `set_value` emits no `Change`, so the state starts
@@ -413,14 +357,9 @@ pub fn open(view: &mut ShellView, mode: Mode, window: &mut Window, cx: &mut Cont
     if !dialog::can_open(view, dialog::DialogKind::ScopeExpr) {
         return;
     }
-    let current = view.target_frame().read(cx).scope();
-    let seed = mode.seed(current.expression.as_ref());
-    let staged = seed_staged(&mode, current);
+    let seed = mode.seed();
     let title = mode.title();
-    view.scope_expr_dialog = Some(ScopeExprState {
-        staged,
-        ..ScopeExprState::new(mode)
-    });
+    view.scope_expr_dialog = Some(ScopeExprState::new(mode));
     // A row click needs the shell entity to accept through; `build` is
     // handed only `&ShellView`.
     let entity = cx.entity();
@@ -630,7 +569,11 @@ fn naming_key(
 /// Stash the text and turn the field into a name entry. An empty field
 /// refuses with [`SAVE_EMPTY`] before any name is asked for, since no
 /// name could be saved for it.
-fn begin_naming(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+pub(super) fn begin_naming(
+    shell: &mut ShellView,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
     let text = shell.dialog_input.read(cx).value().to_string();
     let Some(state) = shell.scope_expr_dialog.as_mut() else {
         return;
@@ -782,7 +725,7 @@ fn build(
     column = column.child(if state.naming.is_some() {
         let label = match state.mode {
             Mode::Term { .. } => NAMING_TERM_LABEL,
-            Mode::Whole | Mode::Add => NAMING_LABEL,
+            Mode::Add => NAMING_LABEL,
         };
         dialog::name_row(&shell.dialog_input, label, cx)
     } else {
@@ -834,7 +777,7 @@ fn build(
                 &[ks],
                 match state.mode {
                     Mode::Term { .. } => "name this term",
-                    Mode::Whole | Mode::Add => "save as named",
+                    Mode::Add => "save as named",
                 },
             )
             .debug_selector(|| "scope-expr-save-hint".to_string())
@@ -983,43 +926,11 @@ mod tests {
     #[test]
     fn each_mode_seeds_its_own_text() {
         let e = parse_expr("a = 1 and (b = 2 or c = 3)").unwrap();
-        assert_eq!(
-            Mode::Whole.seed(Some(&e)),
-            "(a = 1) and ((b = 2) or (c = 3))"
-        );
-        assert_eq!(Mode::Whole.seed(None), "");
         let term = Mode::term(1, Some(&e)).unwrap();
-        assert_eq!(term.seed(Some(&e)), "(b = 2) or (c = 3)");
+        assert_eq!(term.seed(), "(b = 2) or (c = 3)");
         assert_eq!(Mode::term(2, Some(&e)), None, "no such term");
         assert_eq!(Mode::term(0, None), None);
-        assert_eq!(Mode::Add.seed(Some(&e)), "");
-    }
-
-    #[test]
-    fn whole_mode_replaces_and_empty_clears() {
-        let mut f = frame_with(Some("a = 1 and b = 2"));
-        assert_eq!(
-            apply(
-                &mut f.shared_mut(),
-                &Mode::Whole,
-                "c = 3",
-                &[],
-                &ExprVocab::default()
-            ),
-            Ok(true)
-        );
-        assert_eq!(terms(&f), vec!["c = 3"]);
-        assert_eq!(
-            apply(
-                &mut f.shared_mut(),
-                &Mode::Whole,
-                "  ",
-                &[],
-                &ExprVocab::default()
-            ),
-            Ok(true)
-        );
-        assert_eq!(f.shared().scope().expression, None);
+        assert_eq!(Mode::Add.seed(), "");
     }
 
     #[test]
@@ -1139,7 +1050,7 @@ mod tests {
     #[test]
     fn a_parse_error_changes_nothing_in_every_mode() {
         let f0 = frame_with(Some("a = 1"));
-        for mode in [Mode::Whole, term_mode(&f0, 0), Mode::Add] {
+        for mode in [term_mode(&f0, 0), Mode::Add] {
             let mut f = frame_with(Some("a = 1"));
             let err = apply(
                 &mut f.shared_mut(),
@@ -1165,9 +1076,8 @@ mod tests {
             expression: Some(parse_expr("x = 'a' and y = 'b'").unwrap()),
             ..Scope::default()
         };
-        assert_eq!(request_scope(&Mode::Whole, &current, &[]).expression, None);
         assert_eq!(
-            request_scope(&Mode::Whole, &current, &[]).dimensions,
+            request_scope(&Mode::Add, &current, &[]).dimensions,
             current.dimensions
         );
         assert_eq!(
@@ -1187,8 +1097,8 @@ mod tests {
         list.iter().map(ToString::to_string).collect()
     }
 
-    /// Whole replaces the names, so its values are narrowed by the staged
-    /// names alone; Add joins them, so by the frame's plus the staged.
+    /// Add joins the staged names to the frame's, so its values are
+    /// narrowed by both.
     #[test]
     fn request_scope_narrows_by_the_staged_names() {
         let current = Scope {
@@ -1197,41 +1107,11 @@ mod tests {
             ..Scope::default()
         };
         assert_eq!(
-            request_scope(&Mode::Whole, &current, &names(&["liq"])).named,
-            names(&["liq"])
-        );
-        assert_eq!(
             request_scope(&Mode::Add, &current, &names(&["hedges", "big"])).named,
             names(&["liq", "hedges", "big"])
         );
         let term = Mode::term(0, current.expression.as_ref()).unwrap();
         assert_eq!(request_scope(&term, &current, &[]).named, current.named);
-    }
-
-    /// Whole sets the names and the expression in one `set_scope`, so one
-    /// undo restores the whole prior scope.
-    #[test]
-    fn whole_apply_sets_names_and_text_in_one_undo_step() {
-        let mut f = frame_with(Some("a = 1"));
-        let before = f.shared().scope().clone();
-        assert_eq!(
-            apply(
-                &mut f.shared_mut(),
-                &Mode::Whole,
-                "b = 2",
-                &names(&["liq"]),
-                &ExprVocab::default()
-            ),
-            Ok(true)
-        );
-        assert_eq!(f.shared().scope().named, names(&["liq"]));
-        assert_eq!(terms(&f), vec!["b = 2"]);
-        assert!(f.shared_mut().undo_scope());
-        assert_eq!(
-            f.shared().scope(),
-            &before,
-            "one undo restores names and text"
-        );
     }
 
     /// Add appends only the names the frame lacks, and joins the text,
@@ -1259,8 +1139,7 @@ mod tests {
         assert_eq!(f.shared().scope(), &before);
     }
 
-    /// An empty field with names staged applies the names alone, in both
-    /// modes; Whole also clears the expression.
+    /// An empty field with names staged applies the names alone.
     #[test]
     fn empty_text_with_staged_names_applies_the_names() {
         let mut f = frame_with(None);
@@ -1276,23 +1155,9 @@ mod tests {
         );
         assert_eq!(f.shared().scope().named, names(&["liq"]));
         assert_eq!(f.shared().scope().expression, None);
-        let mut f = frame_with(Some("a = 1"));
-        assert_eq!(
-            apply(
-                &mut f.shared_mut(),
-                &Mode::Whole,
-                "",
-                &names(&["hedges"]),
-                &ExprVocab::default()
-            ),
-            Ok(true)
-        );
-        assert_eq!(f.shared().scope().named, names(&["hedges"]));
-        assert_eq!(f.shared().scope().expression, None);
     }
 
-    /// An empty field with nothing staged: Whole clears the expression
-    /// and the names, Add changes nothing.
+    /// An empty field with nothing staged changes nothing in Add.
     #[test]
     fn empty_text_with_nothing_staged_keeps_todays_results() {
         let mut f = frame_with(Some("a = 1"));
@@ -1311,18 +1176,6 @@ mod tests {
             Ok(false)
         );
         assert_eq!(f.shared().scope(), &before);
-        assert_eq!(
-            apply(
-                &mut f.shared_mut(),
-                &Mode::Whole,
-                "",
-                &[],
-                &ExprVocab::default()
-            ),
-            Ok(true)
-        );
-        assert_eq!(f.shared().scope().expression, None);
-        assert!(f.shared().scope().named.is_empty());
     }
 
     /// Offers leave out staged names; Term mode offers none; an invalid
@@ -1349,7 +1202,7 @@ mod tests {
         assert_ne!(offers[0].preview, "npv >");
         assert_eq!(offers[1].preview, "npv > 0");
         assert!(!offers[1].broken);
-        let offers = named_offers(&Mode::Whole, &defined, &names(&["liq"]), &names(&["liq"]));
+        let offers = named_offers(&Mode::Add, &defined, &names(&["liq"]), &[]);
         assert_eq!(offers.len(), 1);
         assert_eq!(offers[0].name, "bad");
         let e = parse_expr("a = 1").unwrap();

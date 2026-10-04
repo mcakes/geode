@@ -79,8 +79,9 @@ after the anchor. Each `next_document` call for an underlying returns its next
 expiry in rotation, keyed `[underlying, YYYY-MM-DD]`, so twelve calls cover
 the whole chain and the thirteenth wraps. The caller passes the underlying's
 latest CVI document: the generator slices it with `DemoVolModel` at the expiry
-(clamped to the CVI's first and last terms, so an expiry past the last term
-takes that term's smile) to get the forward and each strike's curve vol. That
+(the model extrapolates past either end of the terms, so an expiry past the
+last term is priced off the curve the viewer paints there) to get the forward
+and each strike's curve vol. That
 keeps the chain near the surface the vol viewer draws. Sixty strikes sit on
 the 1-2-5 increment nearest 0.55% of the forward, 44 below the at-the-money
 strike and 15 above, less any that would not be positive. Each strike's mid

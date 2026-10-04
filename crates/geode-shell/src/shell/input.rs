@@ -164,7 +164,6 @@ impl ShellView {
         // its own bare keys before dispatch, so only external actions close it here.
         self.notice = None;
         self.stack_list = None;
-        self.add_filter_menu = None;
         self.row_menu = None;
     }
 
@@ -503,18 +502,14 @@ impl ShellView {
             // An unknown name (hand-bound, or removed since startup) is a no-op.
             let _ = self.load_saved_scope(name, cx);
         } else if action.0 == "frame::scope" {
-            // Open the scope picker over the frame's live saved scopes; its
-            // pick loads through the same `load_saved_scope` as above.
-            choicedialog::open_scopes(self, window, cx);
+            // The Scope dialog on Current: the lane's scope by ingredient.
+            super::scopedialog::view::open(self, window, cx);
         } else if action.0 == "frame::as_of" {
             // Open the as-of selector.
             asof_view::open(self, window, cx);
-        } else if action.0 == "frame::scope_expression" {
-            // Open the frame-expression editor on the whole expression.
-            scope_expr_view::open(self, scope_expr_view::Mode::Whole, window, cx);
         } else if action.0 == "frame::add_expression" {
             // Open the expression editor in add mode: the typed expression is
-            // joined to the current one with `and` (the `+` menu's Expression row).
+            // joined to the current one with `and` (`x` in the Scope dialog).
             scope_expr_view::open(self, scope_expr_view::Mode::Add, window, cx);
         } else if action.0 == "frame::clear_expression" {
             // Drop the whole expression layer through the undoable set_scope path.
@@ -1107,15 +1102,6 @@ impl ShellView {
             self.handle_palette_key(event, window, cx);
             cx.notify();
             return;
-        }
-
-        if self.add_filter_menu.is_some() {
-            // The add-a-filter menu consumes every bare key; a chord passes to the
-            // matcher below, and its dispatch closes the menu.
-            let is_chord = convert_keystroke(&event.keystroke).is_some_and(|ks| ks.mods.is_chord());
-            if self.handle_add_filter_key(event.keystroke.key.as_str(), is_chord, window, cx) {
-                return;
-            }
         }
 
         if self.row_menu.is_some() {

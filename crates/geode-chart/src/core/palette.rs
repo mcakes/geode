@@ -1,7 +1,12 @@
-//! The default series colours: the theme's five chart colours, each
-//! adjusted toward the foreground for contrast against the background.
+//! Series colors from the theme. [`Palette`] is the theme's five chart
+//! colors, cycled; [`HuePalette`] is an unbounded sequence whose neighbours
+//! sit a golden angle apart in hue, each with a paler companion. Both pass
+//! every color through [`readable_on`] against the background.
 
-use geode_core::colour::{Rgb, readable_on};
+use std::f32::consts::TAU;
+
+use geode_core::colour::oklab::{Lch, lab_to_lch, srgb_to_oklab, to_srgb_in_gamut};
+use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio, readable_on};
 use gpui::Hsla;
 
 /// Cyclic assignment of five theme chart colours to series slots.
@@ -50,10 +55,136 @@ impl Palette {
     }
 }
 
+/// The golden angle in degrees, `360 (1 - 1/phi)`: a step no whole number
+/// of turns returns to, so a hue sequence stepping by it never repeats, and
+/// each new hue lands in the widest gap the earlier ones leave.
+pub const GOLDEN_ANGLE: f32 = 137.507_76;
+
+/// The chroma a [`HuePalette`] keeps at least, in OKLCH: below it hues a
+/// golden angle apart stop reading as different colors.
+pub const MIN_CHROMA: f32 = 0.10;
+
+/// How far a companion's OKLCH lightness moves from its color.
+pub const COMPANION_LIGHTNESS: f32 = 0.14;
+
+/// The share of its color's chroma a companion keeps.
+pub const COMPANION_CHROMA: f32 = 0.45;
+
+/// How many indices decide a [`HuePalette`]'s companion direction: the
+/// companions go toward the background only if every one of these can.
+pub const DIRECTION_SPAN: usize = 24;
+
+/// An unbounded sequence of series colors for series that sit side by side
+/// in position, such as expiries in date order: index `i` has the OKLCH hue
+/// of the theme's first chart color plus `i` golden angles, at the mean
+/// lightness and the median chroma of the theme's five chart colors (the
+/// median, because a theme often carries one near-grey chart color that
+/// would drag a mean down; at least [`MIN_CHROMA`], clipped to the display
+/// gamut per hue). Neighbouring
+/// indices are therefore about 137.5° apart in hue and no two indices share
+/// one. Indices 8, 13 and 21 apart (Fibonacci numbers) come closest, about
+/// 20°, 12° and 8° apart.
+///
+/// Each color passes through [`readable_on`] like [`Palette`]'s, so it
+/// meets [`READABLE_RATIO`] against the background wherever the lightness
+/// path toward the foreground reaches it; otherwise the path's endpoint is
+/// returned without a contrast guarantee.
+///
+/// [`HuePalette::companion`] is the same hue at [`COMPANION_CHROMA`] of the
+/// chroma and [`COMPANION_LIGHTNESS`] away in lightness, a lighter-weight
+/// shade of the series. The direction is the palette's, not the index's:
+/// toward the background when every one of the first [`DIRECTION_SPAN`]
+/// indices still meets the ratio that way, toward the foreground for every
+/// index otherwise, so one chart never mixes paler and darker companions.
+/// It then passes through [`readable_on`] too.
+///
+/// Each call converts and bisects; callers prepare colors when the theme
+/// or the indices change, never per frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HuePalette {
+    /// Radians.
+    base_hue: f32,
+    lightness: f32,
+    chroma: f32,
+    background: Rgb,
+    foreground: Rgb,
+    /// Whether companions move toward the background (decided once).
+    toward_background: bool,
+}
+
+impl HuePalette {
+    pub fn from_theme(chart: [Hsla; 5], background: Hsla, foreground: Hsla) -> Self {
+        let lch = chart.map(|c| lab_to_lch(srgb_to_oklab(to_rgb(c))));
+        let n = lch.len() as f32;
+        let mut chromas = lch.map(|c| c.c);
+        chromas.sort_by(f32::total_cmp);
+        let mut palette = Self {
+            base_hue: lch[0].h,
+            lightness: lch.iter().map(|c| c.l).sum::<f32>() / n,
+            chroma: chromas[chromas.len() / 2].max(MIN_CHROMA),
+            background: to_rgb(background),
+            foreground: to_rgb(foreground),
+            toward_background: false,
+        };
+        palette.toward_background = (0..DIRECTION_SPAN).all(|i| {
+            let pale = palette.shifted(i, palette.background);
+            contrast_ratio(pale, palette.background) >= READABLE_RATIO
+        });
+        palette
+    }
+
+    /// The hue of `index`, in radians.
+    fn hue(&self, index: usize) -> f32 {
+        // Reduced per step so a large index keeps its precision.
+        let turns = (index as f64 * GOLDEN_ANGLE as f64).rem_euclid(360.0) as f32;
+        (self.base_hue + turns.to_radians()).rem_euclid(TAU)
+    }
+
+    fn readable(&self, rgb: Rgb) -> Rgb {
+        readable_on(rgb, self.background, self.foreground)
+    }
+
+    fn full(&self, index: usize) -> Rgb {
+        self.readable(to_srgb_in_gamut(Lch {
+            l: self.lightness,
+            c: self.chroma,
+            h: self.hue(index),
+        }))
+    }
+
+    /// The color for the `index`-th series.
+    pub fn color(&self, index: usize) -> Hsla {
+        to_hsla(self.full(index))
+    }
+
+    /// `index`'s color moved a companion step toward `target`'s lightness,
+    /// its chroma cut to the companion's share.
+    fn shifted(&self, index: usize, target: Rgb) -> Rgb {
+        let full = lab_to_lch(srgb_to_oklab(self.full(index)));
+        let target_l = lab_to_lch(srgb_to_oklab(target)).l;
+        let step = COMPANION_LIGHTNESS.copysign(target_l - full.l);
+        to_srgb_in_gamut(Lch {
+            l: (full.l + step).clamp(0.0, 1.0),
+            c: full.c * COMPANION_CHROMA,
+            h: full.h,
+        })
+    }
+
+    /// The companion of [`HuePalette::color`] for the same index: a
+    /// lighter-weight shade of it, moved the palette's one way.
+    pub fn companion(&self, index: usize) -> Hsla {
+        let target = if self.toward_background {
+            self.background
+        } else {
+            self.foreground
+        };
+        to_hsla(self.readable(self.shifted(index, target)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geode_core::colour::{READABLE_RATIO, contrast_ratio};
     use gpui::{hsla, rgb};
 
     #[test]
@@ -131,6 +262,160 @@ mod tests {
             checked >= 5 * 40,
             "the sweep saw {checked} checks — bundled themes missing?"
         );
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// The shorter angle between two colors' OKLCH hues, in degrees.
+    fn hue_distance(a: Hsla, b: Hsla) -> f32 {
+        use std::f32::consts::PI;
+        let h = |c: Hsla| lab_to_lch(srgb_to_oklab(to_rgb(c))).h;
+        ((h(b) - h(a) + PI).rem_euclid(TAU) - PI).abs().to_degrees()
+    }
+
+    fn oklab_distance(a: Hsla, b: Hsla) -> f32 {
+        let (a, b) = (srgb_to_oklab(to_rgb(a)), srgb_to_oklab(to_rgb(b)));
+        ((a.l - b.l).powi(2) + (a.a - b.a).powi(2) + (a.b - b.b).powi(2)).sqrt()
+    }
+
+    fn relative(c: Hsla) -> f32 {
+        geode_core::colour::oklab::relative_luminance(to_rgb(c))
+    }
+
+    /// The first expiries a strip shows, for the sweeps below.
+    const SHOWN: usize = 24;
+
+    /// Every check a hue palette must pass on one theme, as failures.
+    fn hue_failures(name: &str, p: &HuePalette, background: Hsla) -> Vec<String> {
+        let mut failures = Vec::new();
+        let bg = to_rgb(background);
+        for i in 0..SHOWN {
+            let (c, pale) = (p.color(i), p.companion(i));
+            for (what, x) in [("color", c), ("companion", pale)] {
+                let ratio = contrast_ratio(to_rgb(x), bg);
+                if ratio < READABLE_RATIO {
+                    failures.push(format!("{name}: {what} {i} at {ratio:.2}:1"));
+                }
+            }
+            if i + 1 < SHOWN {
+                let d = hue_distance(c, p.color(i + 1));
+                if d < 100.0 {
+                    failures.push(format!(
+                        "{name}: {i} and {} only {d:.0} degrees apart",
+                        i + 1
+                    ));
+                }
+            }
+            for j in i + 1..SHOWN {
+                if hue_distance(c, p.color(j)) < 5.0 {
+                    failures.push(format!("{name}: {i} and {j} share a hue"));
+                }
+            }
+            let d = oklab_distance(c, pale);
+            if d < 0.08 {
+                failures.push(format!("{name}: {i}'s companion only {d:.3} from it"));
+            }
+        }
+        // One direction for the whole palette: a chart never mixes paler
+        // and darker companions.
+        let lighter: Vec<bool> = (0..SHOWN)
+            .map(|i| relative(p.companion(i)) > relative(p.color(i)))
+            .collect();
+        if lighter.iter().any(|l| *l != lighter[0]) {
+            failures.push(format!("{name}: companions go both ways: {lighter:?}"));
+        }
+        failures
+    }
+
+    #[test]
+    fn neighbours_are_a_golden_angle_apart_and_never_repeat() {
+        let chart: [Hsla; 5] = [
+            rgb(0x2563eb).into(),
+            rgb(0x16a34a).into(),
+            rgb(0xdc2626).into(),
+            rgb(0xca8a04).into(),
+            rgb(0x9333ea).into(),
+        ];
+        let light = hsla(0.0, 0.0, 1.0, 1.0);
+        let dark = hsla(0.0, 0.0, 0.08, 1.0);
+        let on_light = HuePalette::from_theme(chart, light, dark);
+        let on_dark = HuePalette::from_theme(chart, dark, light);
+        let mut failures = hue_failures("light", &on_light, light);
+        failures.extend(hue_failures("dark", &on_dark, dark));
+        assert!(failures.is_empty(), "{failures:#?}");
+        let d = hue_distance(on_light.color(0), on_light.color(1));
+        assert!((d - GOLDEN_ANGLE).abs() < 1.0, "{d}");
+        assert!(
+            hue_distance(on_light.color(0), chart[0]) < 1.0,
+            "index 0 is the first chart color's hue"
+        );
+        assert!(
+            relative(on_dark.companion(0)) > relative(on_dark.color(0)),
+            "on a dark ground the companion is lighter"
+        );
+    }
+
+    /// One near-grey chart color must not drag the series' chroma down:
+    /// the chroma is the median of the five, not the mean.
+    #[test]
+    fn the_chroma_is_the_chart_colors_median() {
+        let c = |x: u32| -> Hsla { rgb(x).into() };
+        let chart = [
+            c(0x2563eb),
+            c(0x16a34a),
+            c(0xdc2626),
+            c(0x9333ea),
+            c(0x777777),
+        ];
+        let lch = chart.map(|h| lab_to_lch(srgb_to_oklab(to_rgb(h))).c);
+        let mut sorted = lch;
+        sorted.sort_by(f32::total_cmp);
+        let p = HuePalette::from_theme(chart, hsla(0.0, 0.0, 1.0, 1.0), hsla(0.0, 0.0, 0.0, 1.0));
+        assert_eq!(p.chroma, sorted[2]);
+        assert!(p.chroma > lch.iter().sum::<f32>() / 5.0, "above the mean");
+    }
+
+    /// Grey chart colors still give hues that read apart: chroma is floored.
+    #[test]
+    fn a_grey_theme_still_gets_distinct_hues() {
+        let g = |l| hsla(0.0, 0.0, l, 1.0);
+        let p = HuePalette::from_theme([g(0.3), g(0.4), g(0.5), g(0.6), g(0.35)], g(1.0), g(0.0));
+        let failures = hue_failures("grey", &p, g(1.0));
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// Pale chart colors on white would give pale series: each color is
+    /// floored to the readable ratio, and its companion stays apart.
+    #[test]
+    fn faint_chart_colors_are_floored_to_readable() {
+        let faint: Hsla = rgb(0xffff99).into();
+        let white = hsla(0.0, 0.0, 1.0, 1.0);
+        let p = HuePalette::from_theme([faint; 5], white, hsla(0.0, 0.0, 0.0, 1.0));
+        let failures = hue_failures("faint", &p, white);
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[gpui::test]
+    fn every_bundled_themes_hue_palette_is_readable_and_separated(cx: &mut gpui::TestAppContext) {
+        use gpui_component::{ActiveTheme, Theme};
+        cx.update(gpui_component::init);
+        let (service, _) = geode_shell::theme::load_bundled();
+        let mut failures = Vec::new();
+        let mut themes = 0;
+        for name in service.names() {
+            let entry = service.resolve(&name).unwrap().clone();
+            cx.update(|cx| {
+                Theme::global_mut(cx).apply_config(&entry);
+                let t = cx.theme();
+                let p = HuePalette::from_theme(
+                    [t.chart_1, t.chart_2, t.chart_3, t.chart_4, t.chart_5],
+                    t.background,
+                    t.foreground,
+                );
+                themes += 1;
+                failures.extend(hue_failures(&name, &p, t.background));
+            });
+        }
+        assert!(themes >= 40, "the sweep saw {themes} themes");
         assert!(failures.is_empty(), "{failures:#?}");
     }
 }

@@ -68,7 +68,9 @@ pub(crate) struct HeaderModel {
     pub underlying: SharedString,
     pub coordinate: SharedString,
     pub chips: Vec<KindChip>,
-    /// `diff: <minuend> \u{2212} <subtrahend>`, or `diff` with no pair set.
+    /// `diff: <minuend> \u{2212} <subtrahend>`, one or two shown pairs in
+    /// their order and parted by commas; `diff \u{00b7} N pairs` past two,
+    /// so the chip stays short; `diff` with none shown.
     pub diff: SharedString,
     pub diff_set: bool,
 }
@@ -110,9 +112,10 @@ impl HeaderModel {
                 }
             })
             .collect();
-        let (diff, diff_set) = match state.diff {
-            Some(p) => (diff_text(p).into(), true),
-            None => (SharedString::new_static("diff"), false),
+        let (diff, diff_set) = if state.diffs.is_empty() {
+            (SharedString::new_static("diff"), false)
+        } else {
+            (diff_text(&state.diffs).into(), true)
         };
         HeaderModel {
             underlying: underlying
@@ -126,8 +129,15 @@ impl HeaderModel {
     }
 }
 
-fn diff_text(p: Pair) -> String {
-    format!("diff: {}", p.label())
+/// The most pairs the diff chip names one by one.
+const DIFF_CHIP_NAMED: usize = 2;
+
+fn diff_text(pairs: &[Pair]) -> String {
+    if pairs.len() > DIFF_CHIP_NAMED {
+        return format!("diff \u{00b7} {} pairs", pairs.len());
+    }
+    let labels: Vec<String> = pairs.iter().map(|p| p.label()).collect();
+    format!("diff: {}", labels.join(", "))
 }
 
 /// The footer's notice: the first notice, and how many more stand behind
@@ -161,8 +171,8 @@ const FOOTER_HINTS: &[(&[(&str, &str)], &str)] = &[
         &[("volslice::strip_down", "j"), ("volslice::strip_up", "k")],
         "expiry",
     ),
-    (&[("volslice::solo", "enter")], "solo"),
-    (&[("volslice::toggle_expiry", "space")], "toggle"),
+    (&[("volslice::solo", "space")], "solo"),
+    (&[("volslice::toggle_expiry", "shift+space")], "add"),
     (&[("volslice::coordinate", "x")], "coord"),
     (&[("volslice::density", "shift+d")], "dens"),
     (&[("volslice::diff", "d")], "diff"),
@@ -392,7 +402,10 @@ mod tests {
         loaded.draft = loaded.draft.map(|(rows, _)| (rows, DraftMark::Sent));
         let mut state = State::default();
         state.toggle_kind(Kind::Chain);
-        state.diff = Pair::new(Kind::Draft, Kind::Cvi);
+        state.diffs = vec![
+            Pair::new(Kind::Draft, Kind::Cvi).unwrap(),
+            Pair::new(Kind::Cvi, Kind::Chain).unwrap(),
+        ];
         let h = HeaderModel::prepare(Some("SPX.Z"), &state, &loaded);
         assert_eq!(h.underlying.as_ref(), "SPX.Z");
         assert_eq!(h.coordinate.as_ref(), "moneyness");
@@ -400,7 +413,20 @@ mod tests {
         assert_eq!(labels, ["cvi", "cvi draft \u{00b7} sent", "chain"]);
         assert_eq!(h.chips[2].digit.key, "3");
         assert!(h.chips[2].hidden && !h.chips[0].hidden);
-        assert_eq!(h.diff.as_ref(), "diff: cvi draft \u{2212} cvi");
+        assert_eq!(
+            h.diff.as_ref(),
+            "diff: cvi draft \u{2212} cvi, cvi \u{2212} chain",
+            "every shown pair, in order"
+        );
+        state
+            .diffs
+            .push(Pair::new(Kind::Draft, Kind::Chain).unwrap());
+        let h3 = HeaderModel::prepare(Some("SPX.Z"), &state, &fixture());
+        assert_eq!(
+            (h3.diff.as_ref(), h3.diff_set),
+            ("diff \u{00b7} 3 pairs", true),
+            "past two pairs, a count"
+        );
         loaded.draft = None;
         let h = HeaderModel::prepare(None, &State::default(), &loaded);
         assert_eq!(h.underlying.as_ref(), NO_UNDERLYING);
@@ -449,7 +475,7 @@ mod tests {
             [
                 "expiry \u{00b7}",
                 "solo \u{00b7}",
-                "toggle \u{00b7}",
+                "add \u{00b7}",
                 "coord \u{00b7}",
                 "dens \u{00b7}",
                 "diff"

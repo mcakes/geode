@@ -651,7 +651,6 @@ pub(super) fn config_with_mod(mod_key: &str) -> Config {
     })
 }
 
-mod addfilter;
 mod adhoc_grouping;
 mod asof;
 mod autosize;
@@ -680,6 +679,7 @@ mod picker;
 mod pin;
 mod reload;
 mod row_menu;
+mod scope_dialog;
 mod scope_expr;
 mod scope_provenance;
 mod scopebar;

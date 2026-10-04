@@ -82,6 +82,29 @@ cargo run -p geode-chart --example xy
 - Callers use `Palette` to resolve series colors from the theme and pass the
   rem scale to the element. An element reads theme tokens for its grid and
   axes; it never reads module or shell state.
+- `Palette` cycles the theme's five chart colors. `HuePalette` is for series
+  that sit side by side in position (expiries in date order), where
+  neighbours must not look alike: index `i` has the OKLCH hue of the
+  theme's first chart color plus `i` golden angles (`GOLDEN_ANGLE`, about
+  137.5°), at the mean lightness and median chroma of the five chart
+  colors (a near-grey chart color would drag a mean down; chroma at least
+  `MIN_CHROMA`, clipped to gamut per hue). Neighbours are
+  about 137.5° apart and no hue repeats; indices 8, 13 and 21 apart come
+  closest (about 20°, 12° and 8°). `HuePalette::companion` is the same hue
+  at `COMPANION_CHROMA` of the chroma and `COMPANION_LIGHTNESS` away in
+  lightness, a lighter-weight shade. The direction is chosen once per
+  palette: toward the background (paler) only if every one of the first
+  `DIRECTION_SPAN` (24) indices still meets the readable ratio that way,
+  toward the foreground for every index otherwise, so one chart never
+  mixes paler and darker companions.
+- Both palettes pass every color through `readable_on` against the
+  background: a color under `READABLE_RATIO` (3:1) moves toward the
+  foreground's lightness, and if that path cannot reach the ratio its
+  endpoint is returned without a guarantee. Every bundled theme's chart
+  colors, and the first 24 `HuePalette` colors and companions, meet it (the
+  palette tests sweep them). A `HuePalette` color costs a conversion and a
+  bisection per call: callers prepare colors when the theme or the indices
+  change, never per frame.
 
 ### `timeseries`
 

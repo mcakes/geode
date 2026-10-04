@@ -357,12 +357,15 @@ joined on the unique source value, if the idle figure stays over budget.
   share are measured.
 - CI compiles benchmarks but has no stable regression baseline.
 - The vol slice `model_build` bench (`cargo bench -p geode-volslice`) measured
-  about 100 µs with 1,000-point curves (see the measurement log). It times
-  `core::build::model` alone, the work a repaint does on the UI thread when a
-  batch answers, over twelve active monthly expiries with the published CVI, a
-  draft and a 60-strike chain at each, densities on and a `cvi draft − chain`
-  difference, in moneyness, the batch answered once by the stand-in model
-  outside the timed loop. Its target is under 1 ms. The delta coordinate
+  about 200 µs with 1,000-point curves under heavy machine load (see the
+  measurement log). It times `core::build::model` alone, the work a repaint
+  does on the UI thread when a batch answers, over twelve active monthly
+  expiries with the published CVI, a draft and a 60-strike chain at each,
+  densities on and two differences (`cvi draft − chain` and `cvi − cvi
+  draft`), in moneyness, the batch answered once by the stand-in model
+  outside the timed loop. Each active expiry's color and companion are
+  resolved there once through `HuePalette` (an OKLCH conversion and a
+  contrast bisection each). Its target is under 1 ms. The delta coordinate
   (reversed, with NaN density gaps) is not benchmarked.
 - The pricer's `/` cells read the live sheet through the index `/` built. A
   price-only delivery (the refill-only path) drops them and has the table

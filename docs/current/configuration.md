@@ -681,6 +681,12 @@ a 3:1 contrast ratio. Custom themes can prevent the available lightness range
 from reaching that target; untinted semantic tokens retain their exact color.
 See [color resolution](typed-documents.md#colors-and-numeric-formatting).
 
+The bundled choices include Kanagawa Wave, Dragon, and Lotus; Rosé Pine,
+Rosé Pine Moon, and Rosé Pine Dawn; and GitHub Light and GitHub Dark Dimmed.
+Use the complete displayed name in `[theme] name`, Settings, or the command
+palette. Lotus, Dawn, and GitHub Light are light themes. Theme assets and
+upstream attribution are documented in [the theme catalogue](../../assets/themes/README.md).
+
 Default chart series use an explicit five-color palette chosen for each named
 variant. Bundled palettes are checked for at least 3:1 background contrast
 and separation between all five resolved colors. Chip and control text uses

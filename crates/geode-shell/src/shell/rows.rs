@@ -16,6 +16,22 @@ impl ShellView {
         if let Some(state) = self.keybindings.as_mut() {
             state.refresh_rows(&self.services.registry, &self.services.keymap, revision);
         }
+        if self.scope_dialog.is_some() {
+            let frame = self.target_frame();
+            let key = super::scopedialog::view::rows_key(frame.entity().read(cx));
+            let view = frame.read(cx);
+            if let Some(state) = self.scope_dialog.as_mut()
+                && !state.is_current(key)
+            {
+                state.refresh(
+                    view.scope(),
+                    view.named_expressions(),
+                    view.loaded_from(),
+                    view.saved_scopes(),
+                    key,
+                );
+            }
+        }
         // The live object dialog only: a parked one is re-keyed when it is revealed
         // (`close_modal`), since nothing reads it while it is covered.
         let Some(domain) = self.object_dialog.as_ref().map(|state| state.domain) else {
@@ -64,6 +80,13 @@ impl ShellView {
                     &state.query
                 ),
                 "prepared rows are stale: the object dialog changed an input without refresh_dialog_rows"
+            );
+        }
+        if let Some(state) = self.scope_dialog.as_ref() {
+            let key = super::scopedialog::view::rows_key(self.target_frame().entity().read(cx));
+            assert!(
+                state.is_current(key),
+                "prepared rows are stale: the scope dialog's lane changed without refresh_dialog_rows"
             );
         }
     }

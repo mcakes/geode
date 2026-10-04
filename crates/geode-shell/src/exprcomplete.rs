@@ -9,8 +9,8 @@
 //! for this completion state. Only a reply matching the column's current
 //! loading tag is accepted. Superseded loading entries are discarded so returning
 //! to their columns can request values again; ready and failed entries remain
-//! until invalidated. A narrowing-scope change clears all values. Frame Whole/Add
-//! dialogs can also offer named expressions: accepting one stages its name and
+//! until invalidated. A narrowing-scope change clears all values. The frame's
+//! Add dialog can also offer named expressions: accepting one stages its name and
 //! erases the typed prefix without inserting a column reference.
 
 use std::collections::HashMap;
