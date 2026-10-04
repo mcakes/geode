@@ -554,25 +554,132 @@ pub(super) fn queue_slot_chain(
     chain: &[String],
     cx: &mut Context<ShellView>,
 ) -> Result<Option<String>, String> {
+    queue_definition(
+        shell,
+        super::groupings::DOC,
+        &slot.to_string(),
+        toml::Value::Array(chain.iter().cloned().map(toml::Value::String).collect()),
+        cx,
+    )
+}
+
+/// Who holds `name` in `doc`, pending batch included.
+#[allow(dead_code)] // Read by the Saved screen's delete/revert gates, not routed yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Owner {
+    /// No layer defines it.
+    Absent,
+    /// The user layer holds it; `over` is the lower layer it shadows, if any.
+    User { over: Option<Layer> },
+    /// Only lower layers define it; writing it forks.
+    Inherited(Layer),
+}
+
+/// Who holds `name` in `doc`, read from the configuration with the pending
+/// batch applied: a definition queued a moment ago is already the user's, so
+/// a caller gating delete, revert or an overwrite question sees it before the
+/// flush. The last layer defining the name wins, the merge's own rule.
+#[allow(dead_code)] // Read by the Saved screen's delete/revert gates, not routed yet.
+pub(crate) fn definition_owner(shell: &ShellView, doc: &str, name: &str) -> Owner {
+    let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+    owner_in(&config, doc, name)
+}
+
+#[allow(dead_code)] // Reached through the two callers above, not routed yet.
+fn owner_in(config: &Config, doc: &str, name: &str) -> Owner {
+    let holders: Vec<Layer> = config
+        .layered_docs(doc)
+        .iter()
+        .filter(|d| d.table.contains_key(name))
+        .map(|d| d.layer)
+        .collect();
+    match holders.last() {
+        None => Owner::Absent,
+        Some(Layer::User) => Owner::User {
+            over: holders.iter().rev().copied().find(|l| *l != Layer::User),
+        },
+        Some(&winner) => Owner::Inherited(winner),
+    }
+}
+
+/// Queue `value` as `name`'s user-layer definition in `doc` with zero delay,
+/// joining any pending batch; a write over an inherited entry records the
+/// sidecar entry in the same batch, so drift and revert see it.
+/// `Ok(Some(notice))` when it forked, with the fork's announcement. Refuses,
+/// with nothing queued, without a writable user directory. No object dialog
+/// is involved: the caller owns any draft and any question asked first.
+///
+/// The fork read is pending-aware: a name forked a moment ago is already the
+/// user's, and forking it again would overwrite its recorded baseline.
+pub(crate) fn queue_definition(
+    shell: &mut ShellView,
+    doc: &'static str,
+    name: &str,
+    value: toml::Value,
+    cx: &mut Context<ShellView>,
+) -> Result<Option<String>, String> {
     let Some(user_dir) = shell.user_dir.clone() else {
         return Err("no writable user config directory — nothing was changed".to_string());
     };
-    let name = slot.to_string();
-    let doc = super::groupings::DOC;
-    // Pending-aware: a slot forked a moment ago is already the user's, and
-    // forking it again would overwrite its recorded baseline.
     let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
     let mut edits: BTreeMap<(&'static str, String), ObjectEdit> = BTreeMap::new();
     let notice =
-        fork_record(&config, doc, &name, &mut edits).map(|_| fork_notice_of(&config, doc, &name));
-    edits.insert(
-        (doc, name),
-        Some(toml::Value::Array(
-            chain.iter().cloned().map(toml::Value::String).collect(),
-        )),
-    );
+        fork_record(&config, doc, name, &mut edits).map(|_| fork_notice_of(&config, doc, name));
+    edits.insert((doc, name.to_string()), Some(value));
     queue_batch(shell, edits, user_dir, Duration::ZERO, None, cx);
     Ok(notice)
+}
+
+/// Remove `name`'s user-layer entry from `doc` and its sidecar keys, zero
+/// delay. Delete and revert are this one operation — removing the user copy
+/// reveals whatever lower copy it shadowed — so the caller gates which
+/// applies. Only keys that exist are queued, so a missing sidecar is never
+/// created just to remove nothing from it; with nothing to remove, nothing is
+/// queued and the call succeeds.
+#[allow(dead_code)] // Called by the Saved screen's delete/revert, not routed yet.
+pub(crate) fn remove_definition(
+    shell: &mut ShellView,
+    doc: &'static str,
+    name: &str,
+    cx: &mut Context<ShellView>,
+) -> Result<(), String> {
+    let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+    let mut keys: Vec<(&'static str, String)> = Vec::new();
+    if matches!(owner_in(&config, doc, name), Owner::User { .. }) {
+        keys.push((doc, name.to_string()));
+    }
+    keys.extend(
+        super::override_keys_of(&config, doc, name)
+            .into_iter()
+            .map(|k| (super::OVERRIDES_DOC, k)),
+    );
+    match commit_removal(shell, keys, cx) {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    }
+}
+
+/// Rebuild the target frame's saved scopes and named expressions from the
+/// configuration with the pending batch applied, so a definition queued a
+/// moment ago resolves before its flush timer fires; until then the next key
+/// would see the name as missing. With no batch pending there is nothing to
+/// do: the frame already holds the live configuration's definitions.
+///
+/// Saved-scope diagnostics are not reported here: the flush's reload reports
+/// them for the same documents, and reporting both would log each twice.
+pub(crate) fn refresh_definitions_now(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let Some(config) = config_with_pending(shell) else {
+        return;
+    };
+    let named = crate::shell::hot_reload::rebuild_named_expressions(&config);
+    let saved = crate::shell::hot_reload::rebuild_saved_scopes(&config, false);
+    shell.target_frame().update(cx, |f, cx| {
+        let named_changed = f.replace_named_expressions(named);
+        let saved_changed = f.replace_saved_scopes(saved);
+        if named_changed || saved_changed {
+            cx.notify();
+        }
+    });
 }
 
 /// Capture the batch's initial documents and schedule its accumulated edits. Callers

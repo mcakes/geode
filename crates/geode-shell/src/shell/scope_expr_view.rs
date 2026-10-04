@@ -679,14 +679,7 @@ fn save_named(
         toml::Value::Table(object),
         cx,
     )?;
-    if let Some(config) = apply::config_with_pending(shell) {
-        let named = super::hot_reload::rebuild_named_expressions(&config);
-        shell.target_frame().update(cx, |f, cx| {
-            if f.replace_named_expressions(named) {
-                cx.notify();
-            }
-        });
-    }
+    apply::refresh_definitions_now(shell, cx);
     if let Some((index, seeded)) = term {
         // The term was checked above and nothing between changes the
         // frame's scope, so the swap cannot refuse here; a refusal would

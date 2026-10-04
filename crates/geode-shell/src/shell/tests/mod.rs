@@ -682,6 +682,7 @@ mod row_menu;
 mod scope_dialog;
 mod scope_expr;
 mod scope_provenance;
+mod scope_writes;
 mod scopebar;
 mod scopepicker;
 mod session;
