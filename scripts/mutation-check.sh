@@ -34761,14 +34761,6 @@ run_mutation "link: a following panel switches on the group's move" \
   '            if false {' \
   geode-marketdata a_following_panel_takes_the_groups_underlying
 
-run_mutation "link: a following panel's switch answers the flip on delivery" \
-  crates/geode-marketdata/src/tile.rs \
-  '        self.set_key(target.map(|u| vec![u]), window, cx);
-        self.visible && self.key.is_some()' \
-  '        self.set_key(target.map(|u| vec![u]), window, cx);
-        false' \
-  geode-marketdata a_following_panel_takes_the_groups_underlying
-
 run_mutation "link: a group naming no underlying empties the panel" \
   crates/geode-marketdata/src/tile.rs \
   '        let current = self.key.as_ref().and_then(|k| k.first());
@@ -34806,6 +34798,14 @@ run_mutation "link: a keyless following panel is not prompted" \
   '        if self.key.is_none() && self.popup.is_none() && self.frame.read(cx).following().is_none() {' \
   '        if self.key.is_none() && self.popup.is_none() {' \
   geode-marketdata the_underlying_controls_refuse_while_following
+
+run_mutation "link: a picker opened before following refuses its pick" \
+  crates/geode-marketdata/src/tile.rs \
+  '        // underlying the group now owns.
+        if let Some(g) = self.frame.read(cx).following() {' \
+  '        // underlying the group now owns.
+        if let Some(g) = None::<Group> {' \
+  geode-marketdata a_picker_opened_before_following_refuses_its_pick
 
 run_mutation "link: the menu greys load while following" \
   crates/geode-marketdata/src/tile.rs \

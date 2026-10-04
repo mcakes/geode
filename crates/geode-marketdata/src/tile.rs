@@ -17716,6 +17716,34 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         );
     }
 
+    /// A picker opened before the panel joined a group cannot set the
+    /// underlying the group now owns: the pick closes it with the refusal.
+    #[gpui::test]
+    fn a_picker_opened_before_following_refuses_its_pick(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_bound(cx);
+        h.with_document(&mut vcx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&["NKY.Z", "SPX.Z"]));
+            cx.notify();
+        });
+        h.dispatch(&mut vcx, "load_underlying", None);
+        h.set_picker_text(&mut vcx, "NKY");
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(key_of(&h, &vcx), Some(vec!["SPX.Z".to_string()]));
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("following A \u{2014} set the underlying there".to_string())
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.popup.is_none()),
+            "the picker closed"
+        );
+        assert!(h.document_request().is_none(), "nothing asked for NKY.Z");
+    }
+
     /// Leaving the group keeps the underlying it last gave, and the
     /// panel's own controls work again.
     #[gpui::test]
