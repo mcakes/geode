@@ -8,10 +8,9 @@
 //! unrelated queries and sets its mode explicitly. Pointer handlers use the same
 //! edit/commit helpers and run input synchronization themselves.
 //!
-//! Object, column, and Values stages paint the draft immediately. Accepted changes join
+//! Object and column stages paint the draft immediately. Accepted changes join
 //! the shared persistence batch; there is no save key. Forking an inherited definition
-//! is announced, while deletion, reversion, and overwriting a user-owned scope require
-//! confirmation. Confirmation blocks unrelated keyboard and pointer mutations until
+//! is announced, while deletion and reversion require confirmation. Confirmation blocks unrelated keyboard and pointer mutations until
 //! answered.
 //!
 //! Stage entry derives from active configuration with pending edits folded in,
@@ -23,7 +22,6 @@
 use std::rc::Rc;
 
 use geode_core::config::{Layer, Severity, check_object_name, load_views};
-use geode_core::query::{DistinctOutcome, DistinctParams};
 use geode_core::schema::SchemaSpec;
 use geode_core::view::{DatasetPresentationSpec, ViewSpec};
 use gpui::prelude::*;
@@ -35,7 +33,6 @@ use super::apply;
 use super::colours;
 use super::dataset_columns;
 use super::schema;
-use super::scopes;
 use super::sources;
 use super::views;
 use super::{
@@ -49,7 +46,7 @@ use crate::keymap::{Keystroke, Modifiers};
 use crate::listfilter;
 use crate::vimnav;
 
-use super::super::{SCOPES_KEY, ShellEvent, ShellView};
+use super::super::ShellView;
 // Aliased: `colours` (unqualified, `use super::colours;` above) is the
 // `Domain::Colors` adapter; this is `shell::colours`, the gpui<->pure theme bridge — a
 // different module, one directory further out, that the adapter itself never touches.
@@ -191,7 +188,6 @@ fn step_back(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellV
     };
     match state.stage {
         Stage::Naming => state.cancel_naming(),
-        Stage::Values { .. } => leave_values_stage(shell, cx),
         Stage::Column { .. } => leave_column_stage(shell, cx),
         Stage::Edit { .. } => leave_edit(shell, cx),
         Stage::Browse => {}
@@ -221,9 +217,6 @@ pub(crate) fn crumb_text(shell: &ShellView) -> String {
         // without this the stage would say nothing about which column it
         // is editing. Same arrow the blotter's own rollup path uses.
         Stage::Column { object, column } => format!("{object} › {column}"),
-        // Same shape as the column stage's crumb ("Crumb `<object> › <column>`") — the
-        // Values stage is a projection over one column exactly as the column stage is.
-        Stage::Values { object, column } => format!("{object} › {column}"),
         Stage::Browse | Stage::Naming => {
             // The frame's leading rows are not objects of the domain.
             let n = state
@@ -250,11 +243,9 @@ fn handle_key(
     cx: &mut Context<ShellView>,
 ) -> bool {
     match shell.object_dialog.as_ref().map(|s| &s.stage) {
-        // Column and Values stages use the edit key table over their projected draft
-        // fields; their Enter and Escape targets depend on the current projection.
-        Some(Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }) => {
-            handle_edit_key(shell, ks, window, cx)
-        }
+        // The Column stage uses the edit key table over its projected draft fields;
+        // its Enter and Escape targets depend on the projection.
+        Some(Stage::Edit { .. } | Stage::Column { .. }) => handle_edit_key(shell, ks, window, cx),
         Some(Stage::Naming) => handle_naming_key(shell, ks, window, cx),
         _ => handle_browse_key(shell, ks, window, cx),
     }
@@ -410,25 +401,12 @@ fn handle_browse_key(
                 cx.notify();
                 return true;
             }
-            // `c`: copy the row under the cursor under a new name —
-            // `Domain::duplicable` alone, so an unclaimed `c` on every other domain
-            // falls through to the `_` arm below like any other letter with no meaning
-            // here.
-            NormalCommand::Verb('c') if state.domain.duplicable() => {
-                let name = state.rows.at(state.selected).map(|r| r.name.clone());
-                match name {
-                    Some(name) => begin_copy(shell, name),
-                    None => set_notice(shell, "nothing selected to copy".to_string()),
-                }
-                cx.notify();
-                return true;
-            }
             // Browse deletion and reversion use the same target gates as edit actions.
             NormalCommand::Verb(verb @ ('d' | 'r')) => {
                 if !state.domain.writable(&state.stage) {
                     set_notice(shell, READ_ONLY_NOTICE.to_string());
                 } else if verb == 'd' {
-                    arm_delete(shell, cx);
+                    arm_delete(shell);
                 } else {
                     arm_revert(shell);
                 }
@@ -588,19 +566,13 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         sources::seed_dataset(&mut draft, &dataset);
         draft.diagnostics = domain.validate(&draft, &shell.services.config);
     }
-    // `c`'s copy: `n` leaves `naming_seed` at its default `Empty`, so `new_draft`'s own
-    // empty object stands unchanged — this block only ever fires behind `begin_copy`'s
-    // arm.
+    // `n` leaves `naming_seed` at its default `Empty`, so `new_draft`'s own empty
+    // object stands unchanged; the value-color list's door seeds a definition.
     let seed = shell
         .object_dialog
         .as_ref()
         .map(|s| s.naming_seed.clone())
         .unwrap_or(NameSeed::Empty);
-    // A fresh named expression has no valid default: an empty expression is an
-    // invalid definition, so creating it would refuse on naming and Escape would then
-    // lose the name. Instead the field opens at once and the first valid Enter writes
-    // the object. A copy has its source's expression and is created as usual.
-    let opens_expression = domain == Domain::Expressions && seed == NameSeed::Empty;
     // One `match` rather than two `if let`s: `seed` is an owned, non-`Copy` value with
     // exactly one consumer, and a second `if let` reading it after a first one already
     // moved it needed a defensive `.clone()` that a single exhaustive match makes
@@ -608,46 +580,6 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     // could add without a reminder here too.
     match seed {
         NameSeed::Empty => {}
-        NameSeed::CopyOf(source) => {
-            // Verbatim, from the pending-aware config: inside the 250 ms
-            // write debounce `services.config` is the source as it stood
-            // before its last edit (`apply::config_with_pending`'s own
-            // doc has the trace) — the same reason `enter_edit_stage`
-            // derives from it rather than from `services.config` alone.
-            let folded = apply::config_with_pending(shell);
-            let config = folded.as_ref().unwrap_or(&shell.services.config);
-            let Some(table) = config
-                .doc(domain.doc())
-                .and_then(|doc| doc.value.get(&source))
-                .and_then(|v| v.as_table())
-                .cloned()
-            else {
-                set_notice(shell, format!("'{source}' is gone — nothing to copy"));
-                cx.notify();
-                return;
-            };
-            draft.source = table;
-            draft.fields = domain.fields_from_source(config, &draft.source);
-            draft.diagnostics = domain.validate(&draft, config);
-        }
-        NameSeed::FromFrame => {
-            // Capture current frame scope at confirmation time. Recheck emptiness
-            // because frame scope can change while the naming prompt is open.
-            let scope = shell.target_frame().read(cx).scope().clone();
-            if scope.is_empty() {
-                set_notice(shell, EMPTY_SCOPE_NOTICE.to_string());
-                cx.notify();
-                return;
-            }
-            // Pending-aware, like `c`'s copy just above: inside the
-            // 250 ms write debounce `services.config` alone is the
-            // config as it stood before the last edit, which would
-            // build the available dimensions list one keystroke stale.
-            let folded = apply::config_with_pending(shell);
-            let config = folded.as_ref().unwrap_or(&shell.services.config);
-            scopes::overwrite_with(&mut draft, &scope, config);
-            draft.diagnostics = domain.validate(&draft, config);
-        }
         NameSeed::Definition(definition) => {
             // The value-color list's seed: its color as a colors.toml entry, read
             // through the domain's own fields so the edit stage shows it.
@@ -659,27 +591,18 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         }
     }
     enter_edit_stage(shell, &name, Some(draft), cx);
-    if opens_expression {
-        // The empty-text error stays unpainted until the first Enter revalidates; the
-        // write gate re-derives it then, so an empty Enter is still refused.
-        if let Some(draft) = draft_mut(shell) {
-            draft.diagnostics.clear();
-        }
-        open_field(shell);
-    } else {
-        // Taken whatever the outcome: a refused create leaves the dialog on the edit
-        // stage, where a later `n` must not color the value.
-        let hook = shell
-            .object_dialog
-            .as_mut()
-            .and_then(|s| s.on_created.take());
-        match apply::commit_create(shell, cx) {
-            Some(notice) => set_notice(shell, notice),
-            None => {
-                if let Some(hook) = hook {
-                    crate::shell::choicedialog::drop_covered_value_color(shell);
-                    apply::color_value_once_written(shell, hook, name, cx);
-                }
+    // Taken whatever the outcome: a refused create leaves the dialog on the edit
+    // stage, where a later `n` must not color the value.
+    let hook = shell
+        .object_dialog
+        .as_mut()
+        .and_then(|s| s.on_created.take());
+    match apply::commit_create(shell, cx) {
+        Some(notice) => set_notice(shell, notice),
+        None => {
+            if let Some(hook) = hook {
+                crate::shell::choicedialog::drop_covered_value_color(shell);
+                apply::color_value_once_written(shell, hook, name, cx);
             }
         }
     }
@@ -700,11 +623,8 @@ fn begin_new_object(shell: &mut ShellView, seed: Option<String>, seed_taken: boo
         state.notice = Some("the slots are fixed — open one to fill it".to_string());
     } else {
         state.begin_naming();
-        // `n` always creates the domain's EMPTY object — `begin_copy`'s own arm is the
-        // only place `naming_seed` becomes `CopyOf`, and this door must set it back to
-        // `Empty` explicitly rather than trust `begin_naming`'s own reset, since a
-        // stale `CopyOf` from an earlier `c` would otherwise survive an `escape` and
-        // land on this door's `n`.
+        // `n` always creates the domain's EMPTY object; a seed left by another door
+        // must not survive into this one.
         state.naming_seed = NameSeed::Empty;
         // `n` on Sources seeds the new source's dataset from the browse row under the
         // cursor, and pre-fills the name field with it too when no source already holds
@@ -718,67 +638,6 @@ fn begin_new_object(shell: &mut ShellView, seed: Option<String>, seed_taken: boo
             state.query = dataset;
         }
     }
-}
-
-/// `c`: the naming stage seeded to copy `source` — `begin_new_object`'s twin, without
-/// Sources' dataset seed, since only a duplicable domain (`Domain::duplicable`) ever
-/// reaches this door — `handle_browse_key`'s own guard on the verb.
-fn begin_copy(shell: &mut ShellView, source: String) {
-    let Some(state) = shell.object_dialog.as_mut() else {
-        return;
-    };
-    if !state.domain.writable(&state.stage) {
-        state.notice = Some(READ_ONLY_NOTICE.to_string());
-        return;
-    }
-    state.begin_naming();
-    state.naming_seed = NameSeed::CopyOf(source);
-}
-
-/// The refusal `open_save_scope` and `create_from_name`'s `FromFrame`
-/// arm share: there is nothing on the frame to name and save. One
-/// string so the two sites cannot drift apart.
-const EMPTY_SCOPE_NOTICE: &str = "the frame's scope is empty — nothing to save";
-
-/// Open Scopes naming for the current frame scope. An empty frame scope opens
-/// browsing with a notice instead. Creation checks emptiness again because the
-/// frame can change while naming is open.
-// No production door reaches this since the save chip and
-// `scope::save_current` open the Scope dialog's save prompt; the object
-// dialog's own naming tests still open it until the dialog is removed.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(in crate::shell) fn open_save_scope(
-    shell: &mut ShellView,
-    window: &mut Window,
-    cx: &mut Context<ShellView>,
-) {
-    // Guard before either branch touches `object_dialog`: `open` refuses a second
-    // Scopes dialog silently, and without this check the notice or `begin_naming`
-    // below would land on whichever object dialog is live. Another domain's dialog
-    // (Views, say) is parked by `open` and comes back when Scopes closes.
-    if !dialog::can_open_object(shell, Domain::Scopes) {
-        return;
-    }
-    if shell.target_frame().read(cx).scope().is_empty() {
-        open(shell, Domain::Scopes, window, cx);
-        if let Some(state) = shell.object_dialog.as_mut() {
-            state.notice = Some(EMPTY_SCOPE_NOTICE.to_string());
-        }
-        cx.notify();
-        return;
-    }
-    open(shell, Domain::Scopes, window, cx);
-    if let Some(state) = shell.object_dialog.as_mut() {
-        state.begin_naming();
-        state.naming_seed = NameSeed::FromFrame;
-    }
-    // `begin_naming` puts the dialog in `DialogMode::Filter`, which is what gives the
-    // shared `Input` the keys — `sync_dialog_text` is the only thing allowed to move
-    // focus onto it, and `open` above already called it once for the browse stage it
-    // opened in, so this second call is what actually focuses the name field.
-    shell.refresh_dialog_rows(cx);
-    dialog::sync_dialog_text(shell, window, cx);
-    cx.notify();
 }
 
 /// Open Colors at its naming stage for the value-color list's `New named color…`,
@@ -877,8 +736,8 @@ pub(in crate::shell) fn open_column(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    // Same guard as `open_save_scope`: without it the stages below would land on whatever
-    // object dialog is live.
+    // Without this guard the stages below would land on whatever object dialog is
+    // live.
     if !dialog::can_open_object(shell, domain) {
         return;
     }
@@ -1131,8 +990,8 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
                 },
             )
         }
-        // No other domain has a column stage: Groupings, Scopes, Sources
-        // and Colors have no per-column presentation to open, and
+        // No other domain has a column stage: Groupings, Sources and
+        // Colors have no per-column presentation to open, and
         // `column_stage_target` never names a row on one.
         _ => return false,
     };
@@ -1207,115 +1066,6 @@ fn leave_column_stage(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     cx.notify();
 }
 
-/// Open Values with a loading row and request distinct values for the draft scope minus
-/// this column, using the frame's as-of selection. Store a monotonic request tag for
-/// delivery validation and enter Normal mode.
-fn enter_values_stage(shell: &mut ShellView, column: &str, cx: &mut Context<ShellView>) {
-    // Through the folded config, `enter_column_stage`'s own reason: a
-    // dimension selection made in this same dialog inside the 250 ms
-    // write debounce must still be reflected in the scope the request
-    // carries.
-    let pending = apply::config_with_pending(shell);
-    let config = pending.as_ref().unwrap_or(&shell.services.config);
-    let Some(state) = shell.object_dialog.as_ref() else {
-        return;
-    };
-    let Stage::Edit { object } = &state.stage else {
-        return;
-    };
-    let object = object.clone();
-    let Some(draft) = state.draft.as_ref() else {
-        return;
-    };
-    let scope = scopes::draft_scope(draft, config, column);
-    let as_of = shell.target_frame().read(cx).as_of().clone();
-    shell.next_picker_tag += 1;
-    let tag = shell.next_picker_tag;
-    let Some(state) = shell.object_dialog.as_mut() else {
-        return;
-    };
-    let Some(draft) = state.draft.as_mut() else {
-        return;
-    };
-    if !draft.enter_values(column, scopes::loading_field()) {
-        return;
-    }
-    // The loading placeholder has no cursor stop, so settling leaves it selected.
-    // Delivery settles again after installing the value rows.
-    let domain = state.domain;
-    draft.settle_selection(domain);
-    state.stage = Stage::Values {
-        object,
-        column: column.to_string(),
-    };
-    state.mode = DialogMode::Normal;
-    state.notice = None;
-    state.disarm();
-    state.values_tag = tag;
-    shell.object_dialog_scroll.scroll_to_item(0);
-    // An unresolved name paints as the stage's failed row, never a request:
-    // dropping it would widen the counts. The tag is recorded above, so the
-    // delivery is accepted.
-    let scope = match scope.resolve(shell.frame.read(cx).named_expressions()) {
-        Ok(scope) => scope,
-        Err(message) => {
-            deliver_values(
-                shell,
-                DistinctOutcome {
-                    key: SCOPES_KEY,
-                    tag,
-                    column: column.to_string(),
-                    values: Err(message),
-                },
-                cx,
-            );
-            return;
-        }
-    };
-    cx.emit(ShellEvent::DistinctRequested(DistinctParams {
-        key: SCOPES_KEY,
-        tag,
-        column: column.to_string(),
-        scope,
-        as_of,
-    }));
-    cx.notify();
-}
-
-/// `escape` out of the Values stage: fold one last time, restore the
-/// scope's fields, and put the cursor on the column's own row — its item
-/// row if the selection survived, its available row if it was emptied.
-fn leave_values_stage(shell: &mut ShellView, cx: &mut Context<ShellView>) {
-    let Some(state) = shell.object_dialog.as_mut() else {
-        return;
-    };
-    let Stage::Values { object, column } = state.stage.clone() else {
-        return;
-    };
-    if let Some(draft) = state.draft.as_mut() {
-        scopes::fold_values(draft);
-        draft.leave_values();
-        let rows = draft.rows();
-        let target = draft
-            .visible_rows()
-            .iter()
-            .position(|m| {
-                matches!(
-                    rows.get(m.row),
-                    Some(row @ (EditRow::Item { .. } | EditRow::Available { .. }))
-                        if draft.row_label(*row) == column
-                )
-            })
-            .unwrap_or(0);
-        draft.selected = target;
-    }
-    state.stage = Stage::Edit { object };
-    state.notice = None;
-    state.disarm();
-    scroll_to_cursor(shell);
-    cx.notify();
-}
-
 /// Open a grouping slot by its digit from browse or another slot. Its number is the
 /// object name, including unconfigured slots. Repeating the current slot's digit leaves
 /// the existing draft intact and reports that it is already open.
@@ -1360,8 +1110,8 @@ fn handle_edit_key(
     claimed
 }
 
-/// Settle the retained draft's cursor after keyboard handling, including Column and
-/// Values projections. Skip while text entry owns selection, and do nothing when no
+/// Settle the retained draft's cursor after keyboard handling, including the Column
+/// projection. Skip while text entry owns selection, and do nothing when no
 /// draft remains.
 fn settle_edit_cursor(shell: &mut ShellView) {
     let Some(state) = shell.object_dialog.as_mut() else {
@@ -1421,57 +1171,6 @@ fn handle_edit_key_inner(
         .is_some_and(|draft| draft.text_entry.is_some());
     if text_entry {
         return handle_text_key(shell, ks, window, cx);
-    }
-
-    // ---- Values stage -------------------------
-    //
-    // `ctrl+a` ticks every value the filter currently shows, `ctrl+x`
-    // clears the selection — the dimension picker's own pair, reclaimed
-    // inside `GeodeModal` already (`dialog::init_reclaimed_keybindings`),
-    // which is what lets the chord reach this handler in either mode
-    // rather than being eaten by the shared `Input` in filter mode. Placed
-    // ahead of the filter-mode split below so both modes share it — a
-    // trader mid-filter still wants "tick everything this narrowed to".
-    let in_values = draft_ref(shell).is_some_and(|d| d.values().is_some());
-    if in_values && ks.mods == Modifiers::CTRL && (ks.key == "a" || ks.key == "x") {
-        let tick_all = ks.key == "a";
-        let changed = draft_mut(shell).is_some_and(|draft| {
-            let shown: Vec<usize> = draft
-                .visible_rows()
-                .iter()
-                .filter_map(|m| match draft.rows().get(m.row) {
-                    Some(EditRow::Item { item, .. }) => Some(*item),
-                    _ => None,
-                })
-                .collect();
-            let Some(field) = draft.fields.iter_mut().find(|f| f.key == "values") else {
-                return false;
-            };
-            let FieldKind::OrderedList { items, .. } = &mut field.kind else {
-                return false;
-            };
-            let mut changed = false;
-            for (i, item) in items.iter_mut().enumerate() {
-                let want = if tick_all {
-                    shown.contains(&i) || item.included
-                } else {
-                    false
-                };
-                if item.included != want {
-                    item.included = want;
-                    changed = true;
-                }
-            }
-            changed
-        });
-        if changed {
-            revalidate(shell);
-            commit_change(shell, cx);
-        } else {
-            set_notice(shell, "nothing to change".to_string());
-        }
-        cx.notify();
-        return true;
     }
 
     // ---- Filter mode ------------------------------------------
@@ -1590,19 +1289,6 @@ fn handle_edit_key_inner(
                 // fork the user has not confirmed was taken back off the
                 // draft when they declined it. Leaving abandons exactly
                 // nothing.
-                //
-                // from the Values stage this rung goes back to the scope whose fields
-                // `leave_values_stage` restores, cursor on the dimension just edited —
-                // checked ahead of the column stage's own rung, since the two stages
-                // never overlap but the check has to name one first.
-                let in_values = shell
-                    .object_dialog
-                    .as_ref()
-                    .is_some_and(|state| matches!(state.stage, Stage::Values { .. }));
-                if in_values {
-                    leave_values_stage(shell, cx);
-                    return true;
-                }
                 // from the column stage this rung goes back one stage, not all the way
                 // out — to the view whose fields `leave_column_stage` restores, cursor
                 // on the column just edited.
@@ -1655,7 +1341,7 @@ fn handle_edit_key_inner(
                 | NormalCommand::ToggleBack
                 | NormalCommand::EditText
                 | NormalCommand::MoveItem(_)
-                | NormalCommand::Verb('d' | 'r' | 'x' | 'n' | 'o')
+                | NormalCommand::Verb('d' | 'r' | 'x' | 'n')
         )
     {
         set_notice(shell, READ_ONLY_NOTICE.to_string());
@@ -1691,11 +1377,6 @@ fn handle_edit_key_inner(
             let key = if delta < 0 { "shift+k" } else { "shift+j" };
             not_a_column_verb(shell, key);
         }
-        // Scope selections are unordered, so both dimensions and Values refuse
-        // reorders.
-        NormalCommand::MoveItem(_) if is_scopes(shell) => {
-            set_notice(shell, scopes::NO_ORDER_NOTICE.to_string())
-        }
         NormalCommand::MoveItem(delta) => {
             let skipped = draft_mut(shell).and_then(|draft| draft.move_item(delta));
             match skipped {
@@ -1721,52 +1402,17 @@ fn handle_edit_key_inner(
         NormalCommand::Verb('r') if editing_ad_hoc(shell) => {
             set_notice(shell, super::grouping_list::AD_HOC_NO_REVERT.to_string())
         }
-        NormalCommand::Verb('d') => arm_delete(shell, cx),
+        NormalCommand::Verb('d') => arm_delete(shell),
         // In a column stage `r` and `shift+r` release the field(s) to the layers below;
         // everywhere else `r` is the object's revert.
         NormalCommand::Verb('r') if in_column_stage(shell) => inherit_row(shell, cx),
         NormalCommand::Verb('R') if in_column_stage(shell) => inherit_all_rows(shell, cx),
         NormalCommand::Verb('r') => arm_revert(shell),
-        NormalCommand::Verb('o') => overwrite_scope(shell, cx),
         // `x` removes a member into its catalogue. Route its own refusal directly to
         // the notice because it differs from a final-untick refusal. Selection stays at
         // the next visible row, so no follow-scroll is needed. Column projections have
         // no member list to demote from and refuse before reaching this branch.
         NormalCommand::Verb('x') if in_column_stage(shell) => not_a_column_verb(shell, "x"),
-        // `x` drops a selected dimension outright — the definitional twin of the Values
-        // stage's ticks — but only on the dimensions list itself; on an available row
-        // there is nothing to drop (`enter` picks its values instead), and inside the
-        // Values stage a value's own row answers with `space`'s own wording rather than
-        // this domain's. A named expression drops back to its catalogue the same way,
-        // with notices that name it rather than a dimension.
-        NormalCommand::Verb('x') if is_scopes(shell) => {
-            let on_named = on_scopes_named_row(shell);
-            match draft_ref(shell).map(Draft::selected_row) {
-                Some(Some(EditRow::Available { .. })) if on_named => {
-                    set_notice(shell, "not included — space adds it".to_string())
-                }
-                Some(Some(EditRow::Available { .. })) => {
-                    set_notice(shell, "not selected — enter picks its values".to_string())
-                }
-                Some(Some(EditRow::Item { .. })) if !in_values_stage(shell) => {
-                    match draft_mut(shell).map(Draft::remove_selected) {
-                        Some(Step::Changed) => {
-                            revalidate(shell);
-                            commit_change(shell, cx);
-                        }
-                        Some(Step::Refused(reason)) => set_notice(shell, reason),
-                        _ => {}
-                    }
-                }
-                _ if on_named => {
-                    set_notice(shell, "select a named expression to drop it".to_string())
-                }
-                _ => set_notice(
-                    shell,
-                    "x drops a selected dimension — here, space unticks".to_string(),
-                ),
-            }
-        }
         NormalCommand::Verb('x') => match draft_mut(shell).map(Draft::remove_selected) {
             Some(Step::Changed) => {
                 revalidate(shell);
@@ -1820,14 +1466,11 @@ fn handle_edit_key_inner(
     true
 }
 
-/// Enter opens the selected Views or Schema column, or the selected Scopes dimension's
-/// Values stage. Other rows receive their ordinary commit notice. The route is shared
-/// by Normal and Filter modes.
+/// Enter opens the selected Views or Schema column. Other rows receive their ordinary
+/// commit notice. The route is shared by Normal and Filter modes.
 fn commit_selected_row(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     if let Some(name) = column_stage_target(shell) {
         enter_column_stage(shell, &name, cx);
-    } else if let Some(column) = values_stage_target(shell) {
-        enter_values_stage(shell, &column, cx);
     } else {
         edit_commit_notice(shell);
     }
@@ -1843,14 +1486,6 @@ fn column_stage_target(shell: &ShellView) -> Option<String> {
     draft.column_stage_target(state.domain, draft.selected_row()?)
 }
 
-/// Resolve a Scopes dimension member or candidate to its Values-stage target. No target
-/// is available while a Values projection is already open.
-fn values_stage_target(shell: &ShellView) -> Option<String> {
-    let state = shell.object_dialog.as_ref()?;
-    let draft = state.draft.as_ref()?;
-    draft.values_stage_target(state.domain, draft.selected_row()?)
-}
-
 /// `enter`'s answer for a row with nothing to open
 /// ([`commit_selected_row`]'s normal-mode fallback), and `i`'s for a
 /// row it cannot open ([`open_text_field`]): name the verb that DOES
@@ -1859,7 +1494,7 @@ fn values_stage_target(shell: &ShellView) -> Option<String> {
 /// Three answers, because there are three kinds of row here: `space` for a choice, a
 /// bool or a list entry; `i` for a `Number` or a `Text` the domain marks editable
 /// (`Domain::text_editable`); and "read-only" for the display-only `Text`s (Groupings'
-/// `slot`, Scopes' two summaries). The `i` answer arrived with the column stage's
+/// `slot`). The `i` answer arrived with the column stage's
 /// `label` and `width`, which are the first Views rows `i` can open — before them,
 /// every editable `Text` in this crate was a Sources row, where `enter` gave the
 /// read-only wording about a row `i` opens perfectly well. That was the two verbs
@@ -1981,9 +1616,6 @@ fn open_text_field(shell: &mut ShellView) {
         };
         if step == Step::Changed {
             state.mode = DialogMode::Filter;
-            // A fresh completion per opening: the last one may hold values
-            // fetched under another scope's selections.
-            state.expr = None;
         }
     }
 }
@@ -2087,15 +1719,6 @@ fn handle_text_key(
         cx.notify();
         return true;
     }
-    // ---- Scopes expression field ---------------
-    //
-    // Its suggestion keys (tab, shift+tab, the ±1 moves) come before the
-    // plain field's, whose tab would otherwise report "nothing to complete".
-    if expression_entry_open_for(shell)
-        && super::super::expr_suggest::handle_key(shell, ks, window, cx)
-    {
-        return true;
-    }
     let completions = draft_mut(shell).is_some_and(|d| d.chain_entry());
     // Chain completion rows disappear when the field closes, so follow the reset
     // cursor. Plain entry retains its unfiltered row list and edited-row selection;
@@ -2127,7 +1750,6 @@ fn handle_text_key(
     let bare = ks.mods == Modifiers::NONE;
     if bare && ks.key == "enter" {
         let domain = shell.object_dialog.as_ref().map(|state| state.domain);
-        let vocab = shell.expr_vocab.clone();
         let from_list = shell
             .object_dialog
             .as_ref()
@@ -2137,22 +1759,7 @@ fn handle_text_key(
                 draft.apply_chain()
             } else {
                 let domain = domain.expect("a draft implies an open dialog");
-                draft.apply_text_entry(&|key, text| {
-                    let text = domain.parse_text(key, text)?;
-                    // An expression naming a column the schema lacks parses,
-                    // but a scope's reader would drop the scope with a warning
-                    // later, and a named one would fail every scope ticking it;
-                    // refuse it here, with the field open.
-                    if matches!(domain, Domain::Scopes | Domain::Expressions)
-                        && key == "expression"
-                        && let Some(w) = geode_core::scope::complete::check(&text, &vocab, None)
-                            .into_iter()
-                            .next()
-                    {
-                        return Err(format!("expression: {}", w.message));
-                    }
-                    Ok(text)
-                })
+                draft.apply_text_entry(&|key, text| domain.parse_text(key, text))
             }
         });
         match step {
@@ -2226,28 +1833,6 @@ fn step_selected_row(
     filtering: bool,
     cx: &mut Context<ShellView>,
 ) {
-    // Scopes' edit stage: `space` on an available dimension opens its values rather
-    // than adding an empty selection — a fresh selection with nothing ticked is not a
-    // state this domain can save — and on a selected one it names the door, since the
-    // values themselves are the Values stage's to change. Checked ahead of the ordinary
-    // step below and never inside the Values stage itself, where a tick is exactly what
-    // `space` already means. A named expression's row is an ordinary tick list, so
-    // it takes the ordinary step.
-    if !in_values_stage(shell) && is_scopes(shell) && !on_scopes_named_row(shell) {
-        match draft_ref(shell).and_then(Draft::selected_row) {
-            Some(EditRow::Available { .. }) => {
-                if let Some(column) = values_stage_target(shell) {
-                    enter_values_stage(shell, &column, cx);
-                }
-                return;
-            }
-            Some(EditRow::Item { .. }) => {
-                set_notice(shell, "enter opens this dimension's values".to_string());
-                return;
-            }
-            _ => {}
-        }
-    }
     let stepped = draft_mut(shell).map(|draft| {
         if forward {
             draft.toggle_selected()
@@ -2300,29 +1885,12 @@ fn refuse_step(shell: &mut ShellView, reason: String) {
     set_notice(shell, format!("{reason}{hint}"));
 }
 
-/// Whether the Scopes `expression` field is the open text entry.
-fn expression_entry_open_for(shell: &ShellView) -> bool {
-    shell
-        .object_dialog
-        .as_ref()
-        .is_some_and(super::expression_entry_open)
-}
-
 /// The draft under the cursor, mutably, if the edit stage is open.
 fn draft_mut(shell: &mut ShellView) -> Option<&mut Draft> {
     shell
         .object_dialog
         .as_mut()
         .and_then(|state| state.draft.as_mut())
-}
-
-/// [`draft_mut`], immutably — for a caller that only needs to read the
-/// row under the cursor before deciding whether to mutate at all.
-fn draft_ref(shell: &ShellView) -> Option<&Draft> {
-    shell
-        .object_dialog
-        .as_ref()
-        .and_then(|state| state.draft.as_ref())
 }
 
 /// After a `Toggle`/`ToggleBack` step that just changed a Views draft's `dataset`
@@ -2407,42 +1975,6 @@ fn editing_ad_hoc(shell: &ShellView) -> bool {
     })
 }
 
-/// Is the Values stage open? [`in_column_stage`]'s own mirror, off [`Draft::values`]
-/// for the same reason: the projection is what the verbs below actually act on.
-fn in_values_stage(shell: &ShellView) -> bool {
-    shell
-        .object_dialog
-        .as_ref()
-        .and_then(|state| state.draft.as_ref())
-        .is_some_and(|draft| draft.values().is_some())
-}
-
-/// Is this dialog open on `Domain::Scopes`, whichever of its stages is on
-/// screen — the guard `MoveItem`'s and `Verb('x')`'s Scopes arms share,
-/// since both this domain's lists (the dimensions list and the Values
-/// stage's own) are unreorderable.
-fn is_scopes(shell: &ShellView) -> bool {
-    shell
-        .object_dialog
-        .as_ref()
-        .is_some_and(|state| state.domain == Domain::Scopes)
-}
-
-/// Is the cursor on a row of a scope's `named` list? Those rows tick like any
-/// list's, so the dimensions-only doors (Values, `x`'s dimension wording) must
-/// not answer for them.
-fn on_scopes_named_row(shell: &ShellView) -> bool {
-    is_scopes(shell)
-        && draft_ref(shell).is_some_and(|draft| match draft.selected_row() {
-            Some(
-                EditRow::Item { field, .. }
-                | EditRow::Available { field, .. }
-                | EditRow::Field(field),
-            ) => draft.fields.get(field).is_some_and(|f| f.key == "named"),
-            None => false,
-        })
-}
-
 /// The one answer for a verb the column stage does not own: `x`, `shift+j` and
 /// `shift+k` all reorder or demote rows of a list this stage does not install, and
 /// `d`/`r` act on the whole view the crumb has narrowed away from — so each says the
@@ -2450,18 +1982,6 @@ fn on_scopes_named_row(shell: &ShellView) -> bool {
 /// object or rows that are not on screen.
 fn not_a_column_verb(shell: &mut ShellView, key: &str) {
     set_notice(shell, format!("{key} is not a verb in a column's stage"));
-}
-
-/// The one answer for `d`/`r`/`o` inside the Values stage: the crumb has narrowed the
-/// object to one dimension's values, and none of the three destructive verbs act on
-/// those — the same reasoning [`not_a_column_verb`] gives for the column stage, with
-/// its own wording since the remedy here (`escape`) is a single key rather than a stage
-/// to name.
-fn not_a_values_verb(shell: &mut ShellView) {
-    set_notice(
-        shell,
-        "not a verb while picking values — escape first".to_string(),
-    );
 }
 
 /// Set the footer notice, if a dialog is open at all.
@@ -2502,7 +2022,6 @@ fn arm_confirm(shell: &mut ShellView, confirm: Confirm) {
     if let Some(state) = shell.object_dialog.as_mut() {
         state.confirm = Some(confirm);
         state.confirm_target = target;
-        state.confirm_detail = None;
     }
 }
 
@@ -2591,17 +2110,6 @@ pub(super) fn revalidate(shell: &mut ShellView) {
     // Fold column fields into the item before validating or rendering a write.
     if draft.column().is_some() {
         fold = draft.fold_column();
-    }
-    // Scopes: fields → source on every change, so the validator and the writer read
-    // this keystroke. The Values stage's own fold (`fold_values`) runs FIRST, ahead of
-    // `fold`: it is what keeps the stashed `dimensions` list's note in step with the
-    // ticked values, and `fold`'s own `kept` guard already knows to leave that stashed
-    // list's `source` entry alone while the stage is open (its own doc comment).
-    if domain == Domain::Scopes {
-        if draft.values().is_some() {
-            scopes::fold_values(draft);
-        }
-        scopes::fold(draft);
     }
     // Validated, then stored: `validate` needs the draft immutably and
     // the config from a sibling field, which is exactly the disjoint
@@ -2713,8 +2221,8 @@ pub(super) fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     cx.notify();
 }
 
-/// Resolve the open object or selected browse row for confirmation. Naming and Values
-/// return no target. Column projections resolve their parent object, but mutating verbs
+/// Resolve the open object or selected browse row for confirmation. Naming returns no
+/// target. Column projections resolve their parent object, but mutating verbs
 /// reject that stage before acting. Record the target on arming and compare again on
 /// confirmation because reload can reorder browse rows.
 fn target_object(shell: &ShellView) -> Option<String> {
@@ -2722,8 +2230,7 @@ fn target_object(shell: &ShellView) -> Option<String> {
     match &state.stage {
         Stage::Edit { object } | Stage::Column { object, .. } => Some(object.clone()),
         Stage::Browse => state.rows.at(state.selected).map(|row| row.name.clone()),
-        // Values-stage rows do not expose whole-scope destructive operations.
-        Stage::Naming | Stage::Values { .. } => None,
+        Stage::Naming => None,
     }
 }
 
@@ -2742,8 +2249,7 @@ fn target_row(shell: &ShellView) -> Option<ObjectRow> {
             .find(|row| &row.name == object)
             .cloned(),
         Stage::Browse => state.rows.at(state.selected).cloned(),
-        // Same reasoning as `target_object`'s own `Values` arm.
-        Stage::Naming | Stage::Values { .. } => None,
+        Stage::Naming => None,
     }
 }
 
@@ -2811,33 +2317,15 @@ fn removal_edits(
 /// Arm deletion only for a user-defined object. Inherited objects cannot be deleted by
 /// a user-layer write. A presentation-only override instead points to revert; an
 /// unconfigured grouping slot reports that it is empty.
-fn arm_delete(shell: &mut ShellView, cx: &mut Context<ShellView>) {
-    // Object deletion is unavailable inside column and Values projections. Apply the
+fn arm_delete(shell: &mut ShellView) {
+    // Object deletion is unavailable inside a column projection. Apply the
     // guard here so pointer and keyboard actions enforce the same rule.
     if in_column_stage(shell) {
         not_a_column_verb(shell, "d");
         return;
     }
-    // the same reasoning, one stage over — `d`'s confirmed effect is on the whole
-    // SCOPE, not the one dimension's values the crumb has narrowed to.
-    if in_values_stage(shell) {
-        not_a_values_verb(shell);
-        return;
-    }
     match target_row(shell) {
-        Some(row) if row.layer == Some(Layer::User) => {
-            arm_confirm(shell, Confirm::Delete);
-            let detail = in_domain(shell, Domain::Expressions)
-                .then(|| {
-                    crate::shell::scopedialog::saved_view::named_expression_users(
-                        shell, &row.name, cx,
-                    )
-                })
-                .flatten();
-            if let Some(state) = shell.object_dialog.as_mut() {
-                state.confirm_detail = detail;
-            }
-        }
+        Some(row) if row.layer == Some(Layer::User) => arm_confirm(shell, Confirm::Delete),
         // The remedy names the stage: from the list there is nothing to
         // tick, the slot has to be opened first.
         Some(row) if row.layer.is_none() => {
@@ -2865,14 +2353,6 @@ fn arm_delete(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         }
         None => set_notice(shell, no_target_notice(shell)),
     }
-}
-
-/// Is the open dialog browsing `domain`?
-fn in_domain(shell: &ShellView, domain: Domain) -> bool {
-    shell
-        .object_dialog
-        .as_ref()
-        .is_some_and(|state| state.domain == domain)
 }
 
 /// Arm reversion when a user definition or presentation overlays an inherited object.
@@ -2936,11 +2416,6 @@ fn on_inherit_clicked(
 }
 
 fn arm_revert(shell: &mut ShellView) {
-    // `arm_delete`'s own values-stage guard, for the same reason.
-    if in_values_stage(shell) {
-        not_a_values_verb(shell);
-        return;
-    }
     match target_row(shell) {
         Some(row) if row.overridden => {
             arm_confirm(shell, Confirm::Revert);
@@ -2951,76 +2426,6 @@ fn arm_revert(shell: &mut ShellView) {
         ),
         None => set_notice(shell, no_target_notice(shell)),
     }
-}
-
-/// Replace a saved scope with the current frame scope. A user-owned target requires
-/// confirmation because its previous contents will be lost. An inherited target is
-/// copied into the user layer and announced; its lower-layer copy remains available to
-/// revert. Check target ownership before mutating the draft.
-fn overwrite_scope(shell: &mut ShellView, cx: &mut Context<ShellView>) {
-    let Some(state) = shell.object_dialog.as_ref() else {
-        set_notice(shell, "nothing is open".to_string());
-        return;
-    };
-    if state.domain != Domain::Scopes {
-        set_notice(shell, "o is not a verb here".to_string());
-        return;
-    }
-    if state.draft.is_none() {
-        set_notice(shell, "nothing is open".to_string());
-        return;
-    }
-    // `arm_delete`'s own values-stage guard: `o` overwrites the whole
-    // SCOPE, not the one dimension's values the crumb has narrowed to.
-    if in_values_stage(shell) {
-        not_a_values_verb(shell);
-        return;
-    }
-    let forks = target_row(shell).is_some_and(|row| row.layer != Some(Layer::User));
-    if !forks {
-        arm_confirm(shell, Confirm::Overwrite);
-        return;
-    }
-    let notice = super::apply::fork_notice(shell, Domain::Scopes);
-    if run_overwrite(shell, cx) {
-        set_notice(shell, format!("replaced with the frame's scope; {notice}"));
-    }
-}
-
-/// Replace source and fields with current frame scope, revalidate, and use the shared
-/// edit commit path. Refuse other domains. Detect no-op overwrites explicitly so the
-/// notice distinguishes an unchanged scope from a queued change. Return whether
-/// anything was queued; all outcomes set an appropriate notice.
-fn run_overwrite(shell: &mut ShellView, cx: &mut Context<ShellView>) -> bool {
-    if shell
-        .object_dialog
-        .as_ref()
-        .is_none_or(|state| state.domain != Domain::Scopes)
-    {
-        cx.notify();
-        return false;
-    }
-    let scope = shell.target_frame().read(cx).scope().clone();
-    let config = shell.services.config.clone();
-    let changed = draft_mut(shell).is_some_and(|draft| {
-        scopes::overwrite_with(draft, &scope, &config);
-        draft.is_dirty()
-    });
-    revalidate(shell);
-    let queued = if !changed {
-        set_notice(
-            shell,
-            "already matches the frame's scope — nothing to write".to_string(),
-        );
-        false
-    } else if let Some(notice) = super::apply::commit_edit(shell, cx) {
-        set_notice(shell, notice);
-        false
-    } else {
-        true
-    };
-    cx.notify();
-    queued
 }
 
 /// Carry out the destructive act the second keystroke just confirmed.
@@ -3058,11 +2463,6 @@ fn run_confirmed(
         return;
     }
     match confirm {
-        // `o`'s confirmed answer on a user-owned scope — the same act the
-        // desk-owned case runs unasked from `overwrite_scope`.
-        Confirm::Overwrite => {
-            run_overwrite(shell, cx);
-        }
         // `d`/`r` share `apply::commit_removal` with `commit_change`'s
         // `commit_edit`: same batch, same flush, same failure
         // revert — deliberately without `blocking_diagnostic`'s gate (see
@@ -3145,9 +2545,9 @@ fn actions(shell: &ShellView) -> Vec<Action> {
     if !state.domain.writable(&state.stage) {
         return Vec::new();
     }
-    // Object delete, revert, and overwrite do not act within column or Values
-    // projections. A column's editable label or width can still expose `i`.
-    let in_column = draft.column().is_some() || draft.values().is_some();
+    // Object delete and revert do not act within a column projection. A column's
+    // editable label or width can still expose `i`.
+    let in_column = draft.column().is_some();
     let row = target_row(shell);
     let mut out = Vec::new();
     if !in_column && row.as_ref().is_some_and(|r| r.layer == Some(Layer::User)) {
@@ -3195,18 +2595,6 @@ fn actions(shell: &ShellView) -> Vec<Action> {
             destructive: false,
         });
     }
-    // The one new verb this domain adds (this module's `arm_overwrite`
-    // doc has the full reasoning): available whenever a scope is open,
-    // regardless of layer or override, since `Confirm::Overwrite`'s own
-    // commit forks a desk-owned scope the same way any other definitional
-    // edit would.
-    if !in_column && state.domain == Domain::Scopes {
-        out.push(Action {
-            key: "o",
-            label: "Overwrite from frame".to_string(),
-            destructive: true,
-        });
-    }
     out
 }
 
@@ -3228,12 +2616,9 @@ fn build(
     let Some(state) = shell.object_dialog.as_ref() else {
         return div().into_any_element();
     };
-    // Edit, Column, and Values all paint the current draft. Routing a projection to
+    // Edit and Column both paint the current draft. Routing a projection to
     // browse would display objects while keystrokes mutate unseen draft fields.
-    if matches!(
-        state.stage,
-        Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }
-    ) {
+    if matches!(state.stage, Stage::Edit { .. } | Stage::Column { .. }) {
         return build_edit(shell, entity, cx);
     }
     // The prepared list every browse handler reads; a stale one is refused here,
@@ -3534,10 +2919,6 @@ fn build(
                 if state.domain.writable(&state.stage) && state.domain.roster().is_none() {
                     hints.push(Hint::new(HintRow::Edit, &["n"], "new"));
                 }
-                // `c`: Scopes alone, beside `n`.
-                if state.domain.duplicable() {
-                    hints.push(Hint::new(HintRow::Edit, &["c"], "copy"));
-                }
                 hints.push(
                     Hint::new(HintRow::Go, &["enter"], "open").selector("objectdialog-hint-enter"),
                 );
@@ -3608,13 +2989,7 @@ fn build(
     });
 
     let top_row = if naming {
-        // Name the copy source or current-frame seed in the naming header.
-        let label = match &state.naming_seed {
-            NameSeed::CopyOf(src) => format!("Copy of {src} · name"),
-            NameSeed::Empty => format!("New {} · name", object_word(state.domain)),
-            NameSeed::FromFrame => "Save scope · name".to_string(),
-            NameSeed::Definition(_) => format!("New {} · name", object_word(state.domain)),
-        };
+        let label = format!("New {} · name", object_word(state.domain));
         dialog::name_row(&shell.dialog_input, &label, cx)
     } else {
         dialog::filter_row(&shell.dialog_input, frozen_query, cx)
@@ -3634,7 +3009,7 @@ fn build(
         // read here that derives nothing per frame.
         (None, Some(confirm)) => {
             let name = state.confirm_target.clone().unwrap_or_default();
-            confirm_row(confirm, &name, state.confirm_detail.as_deref(), entity, cx)
+            confirm_row(confirm, &name, entity, cx)
         }
         (None, None) => browse_action_bar(state, entity),
     };
@@ -3707,13 +3082,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             // has no height of its own, so opening a field (`i`) would shift the footer up
             // by a button's height and `escape` would shift it back.
             (true, _) => div().min_h_6().into_any_element(),
-            (false, Some(confirm)) => confirm_row(
-                confirm,
-                &draft.name,
-                state.confirm_detail.as_deref(),
-                entity,
-                cx,
-            ),
+            (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
             (false, None) => action_bar(shell, entity),
         }
     };
@@ -4074,21 +3443,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                     let section_key = (field, own);
                     if last_item_section != Some(section_key) {
                         last_item_section = Some(section_key);
-                        // the Values stage installs its own list under the very same
-                        // field key (`"values"`) the ordinary edit stage's `dimensions`
-                        // list would carry, so `own` alone cannot tell the two apart —
-                        // `section_header_text(Domain::Scopes, "dimensions", true)` would paint
-                        // "DIMENSIONS" over a values list. `draft.values().is_some()`
-                        // is the stage-aware override every other Values-stage site
-                        // already reads by.
-                        let (text, suffix) = if draft.values().is_some() {
-                            (
-                                "VALUES — `space` ticks · `ctrl+a` all shown · `ctrl+x` none",
-                                "members",
-                            )
-                        } else {
-                            section_header_text(domain, &draft.fields[field].key, own)
-                        };
+                        let (text, suffix) = section_header_text(domain, own);
                         let field_key = draft.fields[field].key.clone();
                         section_header = Some(
                             div()
@@ -4104,12 +3459,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                                 .into_any_element(),
                         );
                     }
-                    // Member rows show inclusion ticks and, outside Scopes, reorder
-                    // grips. Available rows reserve the grip width for alignment. Open
-                    // value fields hide ticks and grips because their rows serve
-                    // completion or text entry. Only the name is filter-highlighted;
-                    // controls are not searchable text.
-                    let draggable = domain != Domain::Scopes;
+                    // Member rows show inclusion ticks and reorder grips. Available rows
+                    // reserve the grip width for alignment. Open value fields hide ticks
+                    // and grips because their rows serve completion or text entry. Only
+                    // the name is filter-highlighted; controls are not searchable text.
                     let grip_and_tick = if draft.text_entry.is_some() {
                         None
                     } else {
@@ -4120,7 +3473,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         // gpui bubbles an element's drag arming before its
                         // `on_mouse_down`, so stopping propagation there still arms
                         // the drag.
-                        let payload = draggable.then(|| draft.row_drag(edit_row)).flatten();
+                        let payload = draft.row_drag(edit_row);
                         let grip = if own && let Some(payload) = payload {
                             let grip_id = format!("objectdialog-grip-{}", entry.name);
                             div()
@@ -4186,40 +3539,21 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                     }
                     name_row =
                         name_row.child(highlighted_text(&entry.name, &m.indices, row_paint.accent));
-                    // Show adapter notes when present, otherwise a member's column
-                    // summary. Available candidates may carry dataset presentation but
-                    // do not paint a column summary here. Notes remain separate from
-                    // the searchable row label.
-                    let note = entry.note.clone().or_else(|| {
-                        own.then(|| {
+                    // A member's column summary, muted after the name. Available
+                    // candidates may carry dataset presentation but do not paint a
+                    // summary here. The summary stays out of the searchable row label.
+                    let note = own
+                        .then(|| {
                             views::column_summary(&views::kind_default(entry), &entry.presentation)
                         })
-                        .filter(|s| !s.is_empty())
-                    });
-                    // A scope's reference to a missing or invalid named
-                    // expression refuses every query it reaches, so its note
-                    // reads as an error rather than routine detail.
-                    let broken_reference = own
-                        && domain == Domain::Scopes
-                        && draft.values().is_none()
-                        && draft.fields[field].key == "named"
-                        && matches!(entry.note.as_deref(), Some("missing" | "invalid"));
+                        .filter(|s| !s.is_empty());
                     if let Some(note) = note {
-                        let note_row = div().text_xs().child(note);
-                        name_row = name_row.child(if broken_reference {
-                            let selector = format!("objectdialog-note-danger-{}", entry.name);
-                            note_row
-                                .text_color(
-                                    super::super::chip::chip_paint(
-                                        theme,
-                                        super::super::chip::Tone::DangerText,
-                                    )
-                                    .text,
-                                )
-                                .debug_selector(move || selector)
-                        } else {
-                            note_row.text_color(theme.muted_foreground)
-                        });
+                        name_row = name_row.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(note),
+                        );
                     }
                     let name = name_row.into_any_element();
                     (
@@ -4299,11 +3633,11 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         None => on_edit_row_clicked(shell, clicked, event.click_count, window, cx),
                     });
                 });
-            // Only list rows with no open value field carry drag handlers. Exclude
-            // Scopes explicitly: its lists represent unordered selections even though
-            // the shared draft shape can produce a drag payload. Erase the two branch
-            // types because adding an ID changes the element's concrete type.
-            let row_el = match (draft.text_entry.is_none() && domain != Domain::Scopes)
+            // Only list rows with no open value field carry drag handlers. Erase the
+            // two branch types because adding an ID changes the element's concrete type.
+            let row_el = match draft
+                .text_entry
+                .is_none()
                 .then(|| draft.row_drag(edit_row))
                 .flatten()
             {
@@ -4514,13 +3848,6 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 hints.push(Hint::new(HintRow::Go, &["tab"], "complete"));
                 hints.push(Hint::new(HintRow::Go, &["enter"], "choose"));
             }
-            // The Scopes expression field lists suggestions under it,
-            // so its keys are theirs rather than a plain field's.
-            Completions::None if super::expression_entry_open(state) => {
-                hints.push(Hint::new(HintRow::Move, &["up", "down"], "move"));
-                hints.push(Hint::new(HintRow::Go, &["tab"], "insert"));
-                hints.push(Hint::new(HintRow::Go, &["enter"], "apply"));
-            }
             Completions::None => {
                 hints.push(Hint::prose(HintRow::Move, "type a value"));
                 hints.push(Hint::new(HintRow::Go, &["enter"], "apply"));
@@ -4576,10 +3903,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         hints.extend(leave(format!("back to {}", draft.name)));
         hints
     } else {
-        // Show reordering only for member rows outside Scopes. Show `x` only where
-        // membership can be changed through a catalogue. Read-only fields and list
-        // headers have no stepping hint.
-        let reorders = vocabulary == RowVocabulary::Item && state.domain != Domain::Scopes;
+        // Show reordering only for member rows. Show `x` only where membership can be
+        // changed through a catalogue. Read-only fields and list headers have no
+        // stepping hint.
+        let reorders = vocabulary == RowVocabulary::Item;
         let mut hints = vec![Hint::new(HintRow::Move, &["j", "k"], "move")];
         hints.extend(change_hint(false));
         if reorders {
@@ -4604,38 +3931,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         } else if types {
             hints.push(i_hint(selected_row));
         }
-        // the Values stage's own pair, advertised only while it is open; `enter`'s own
-        // row opens it, advertised only while it is NOT — the two can never both paint,
-        // since `values_stage_target` is `None` the instant the stage is.
-        if state.domain == Domain::Scopes && draft.values().is_some() {
-            hints.push(Hint::new(
-                HintRow::Edit,
-                &["ctrl+a", "ctrl+x"],
-                "all shown / none",
-            ));
-        }
-        if state.domain == Domain::Scopes
-            && draft.values().is_none()
-            && values_stage_target(shell).is_some()
-        {
-            hints.push(
-                Hint::new(HintRow::Go, &["enter"], "open values")
-                    .selector("objectdialog-hint-enter"),
-            );
-        }
         if opens_column {
             hints.push(open_column());
         }
-        // The Values stage's own escape rung names the scope it returns
-        // to, exactly as the column stage's `leave(format!("back to
-        // {}", draft.name))` does above — `draft.name` is the scope, not
-        // the dimension, since the crumb already narrows to the column.
-        let back = if draft.values().is_some() {
-            format!("back to {}", draft.name)
-        } else {
-            "back to the list".to_string()
-        };
-        hints.extend(leave(back));
+        hints.extend(leave("back to the list".to_string()));
         hints
     };
     let hint_line = dialog::hint_rows(&hints);
@@ -4725,32 +4024,12 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     } else {
         dialog::filter_row(&shell.dialog_input, frozen_query, cx)
     };
-    // The Scopes expression field's suggestions sit between the field and
-    // the rows, as the frame's expression dialog paints them under its own.
-    let suggestions = super::expression_entry_open(state)
-        .then_some(state.expr.as_ref())
-        .flatten()
-        .map(|c| {
-            let entity = entity.clone();
-            super::super::expr_suggest::render(
-                c,
-                &shell.expr_scroll,
-                cx.theme(),
-                move |named, label, window, cx| {
-                    entity.update(cx, |shell, cx| {
-                        super::super::expr_suggest::accept_row(shell, named, label, window, cx)
-                    });
-                },
-            )
-        });
-
     v_flex()
         .gap_2()
         .child(header)
         .children(drift_note)
         .child(diagnostics)
         .child(filter)
-        .children(suggestions)
         .child(list)
         .child(action_block)
         .child(footer)
@@ -4762,14 +4041,8 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
 /// as `Kbd` chips by `kbd::marked`. `own` distinguishes Views' own columns
 /// from the rest of its dataset's; Groupings' `dimensions` has no catalogue at all
 /// (`groupings.rs`'s own module doc), so only the first arm there is ever reached.
-/// `key` separates a scope's two lists: only `dimensions` opens a Values stage;
-/// `named` is a plain tick list.
-fn section_header_text(domain: Domain, key: &str, own: bool) -> (&'static str, &'static str) {
+fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str) {
     match (domain, own) {
-        (Domain::Scopes, true) if key == "named" => {
-            ("NAMED EXPRESSIONS — `space` ticks", "members")
-        }
-        (Domain::Scopes, false) if key == "named" => ("AVAILABLE — `space` adds", "available"),
         (Domain::Views, true) => (
             "COLUMNS — `space` hides · `shift+j` / `shift+k` reorder · `x` removes",
             "members",
@@ -4779,15 +4052,11 @@ fn section_header_text(domain: Domain, key: &str, own: bool) -> (&'static str, &
             "DIMENSIONS — `space` includes · `shift+j` / `shift+k` reorder",
             "members",
         ),
-        (Domain::Scopes, true) => ("DIMENSIONS — `enter` opens values · `x` drops", "members"),
-        (Domain::Scopes, false) => ("AVAILABLE — `enter` picks values", "available"),
-        // None of Schema, Sources, Colors or Expressions has an
-        // `OrderedList` field at all (each adapter's own module doc —
-        // every field is a plain scalar), so this arm is unreachable for
-        // all four; kept only to stay exhaustive as domains are added.
-        (Domain::Schema | Domain::Sources | Domain::Colors | Domain::Expressions, _) => {
-            ("", "members")
-        }
+        // None of Schema, Sources or Colors has an `OrderedList` field at
+        // all (each adapter's own module doc — every field is a plain
+        // scalar), so this arm is unreachable for all three; kept only to
+        // stay exhaustive as domains are added.
+        (Domain::Schema | Domain::Sources | Domain::Colors, _) => ("", "members"),
     }
 }
 
@@ -4916,8 +4185,7 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>) -> AnyElement {
 }
 
 /// Browse actions follow the same gates as keyboard input: create for writable domains
-/// without a fixed roster, copy for eligible Scopes rows, and delete/revert from the
-/// selected row's provenance. Hide them while naming. Each pointer action uses its
+/// without a fixed roster, and delete/revert from the selected row's provenance. Hide them while naming. Each pointer action uses its
 /// key's transition and then synchronizes input text and focus.
 fn browse_action_bar(state: &ObjectDialogState, entity: &Entity<ShellView>) -> AnyElement {
     let naming = matches!(state.stage, Stage::Naming);
@@ -4929,10 +4197,7 @@ fn browse_action_bar(state: &ObjectDialogState, entity: &Entity<ShellView>) -> A
         .flatten();
     let offers_d = row.is_some_and(|r| r.layer == Some(Layer::User));
     let offers_r = row.is_some_and(|r| r.overridden);
-    // `c`: the mouse form of the `c` key, offered under the same three conditions the
-    // key checks — not naming, the domain writable, and a row under the cursor to copy.
-    let offers_c = state.domain.duplicable() && row.is_some();
-    if !offers_n && !offers_c && !offers_d && !offers_r {
+    if !offers_n && !offers_d && !offers_r {
         return div().into_any_element();
     }
     let mut bar = h_flex().w(scale::design(WIDTH)).gap_2().items_center();
@@ -4969,42 +4234,6 @@ fn browse_action_bar(state: &ObjectDialogState, entity: &Entity<ShellView>) -> A
                                     Domain::Sources.name_taken(&shell.services.config, d)
                                 });
                                 begin_new_object(shell, seed, seed_taken);
-                                shell.refresh_dialog_rows(cx);
-                                dialog::sync_dialog_text(shell, window, cx);
-                                cx.notify();
-                            });
-                        }),
-                ),
-        );
-    }
-    if offers_c {
-        let ks = crate::keymap::parse_keystroke("c", Modifiers::NONE).expect("valid");
-        let entity = entity.clone();
-        // Owned, to move into the closure: `row` borrows `rows`, which the
-        // caller derived for this one frame and does not outlive it.
-        let copy_name = row.map(|r| r.name.clone()).unwrap_or_default();
-        bar = bar.child(
-            div()
-                .debug_selector(|| "objectdialog-action-c".to_string())
-                .child(
-                    Button::new("objectdialog-c")
-                        .small()
-                        .outline()
-                        .child(
-                            h_flex()
-                                .gap_1p5()
-                                .items_center()
-                                .child(kbd::chip(&ks))
-                                .child("Copy this scope"),
-                        )
-                        .on_click(move |_event, window, cx| {
-                            entity.update(cx, |shell, cx| {
-                                if let Some(state) = shell.object_dialog.as_mut()
-                                    && state.notice.take().is_some()
-                                {
-                                    cx.notify();
-                                }
-                                begin_copy(shell, copy_name.clone());
                                 shell.refresh_dialog_rows(cx);
                                 dialog::sync_dialog_text(shell, window, cx);
                                 cx.notify();
@@ -5062,28 +4291,18 @@ fn browse_action_bar(state: &ObjectDialogState, entity: &Entity<ShellView>) -> A
 fn confirm_row(
     confirm: Confirm,
     name: &str,
-    detail: Option<&str>,
     entity: &Entity<ShellView>,
     cx: &mut App,
 ) -> AnyElement {
     let yes_label = match confirm {
         Confirm::Delete => "Delete",
         Confirm::Revert => "Revert",
-        Confirm::Overwrite => "Overwrite",
     };
     let on_yes: dialog::ConfirmHandler =
         Rc::new(|shell, _window, cx| answer_confirm(shell, true, cx));
     let on_no: dialog::ConfirmHandler =
         Rc::new(|shell, _window, cx| answer_confirm(shell, false, cx));
     let selector = format!("objectdialog-confirm-prompt-{name}");
-    // Context for the question, not part of it: muted, on its own line under the row.
-    let detail = detail.map(|detail| {
-        div()
-            .debug_selector(|| "objectdialog-confirm-detail".to_string())
-            .text_sm()
-            .text_color(cx.theme().muted_foreground)
-            .child(detail.to_string())
-    });
     v_flex()
         .gap_1()
         // Names the object the prompt is about, so a test can tell which
@@ -5099,7 +4318,6 @@ fn confirm_row(
             on_no,
             cx,
         ))
-        .children(detail)
         .into_any_element()
 }
 
@@ -5186,11 +4404,10 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
             super::grouping_list::forget(shell, cx);
             leave_edit(shell, cx);
         }
-        "d" => arm_delete(shell, cx),
+        "d" => arm_delete(shell),
         "r" => arm_revert(shell),
         "i" => open_field(shell),
         "s" => super::grouping_list::arm_save(shell, cx),
-        "o" => overwrite_scope(shell, cx),
         _ => {}
     }
     shell.refresh_dialog_rows(cx);
@@ -5256,14 +4473,6 @@ fn on_edit_row_clicked(
     // the trader pressed it instead.
     if let Some(name) = column_stage_target(shell) {
         enter_column_stage(shell, &name, cx);
-        if let Some(state) = shell.object_dialog.as_mut() {
-            state.click_opened_stage = true;
-        }
-    } else if let Some(column) = values_stage_target(shell) {
-        // a dimension row is a door row exactly as a member column is — the click opens
-        // the Values stage and nothing more, so the same guard keeps the pair's second
-        // click from also opening a field there.
-        enter_values_stage(shell, &column, cx);
         if let Some(state) = shell.object_dialog.as_mut() {
             state.click_opened_stage = true;
         }
@@ -5345,8 +4554,7 @@ pub(in crate::shell) fn on_value_chip_clicked(
     cx.notify();
 }
 
-/// Select the tick's row and use the shared stepping path, including Scopes'
-/// Values-stage entry for an available dimension. Synchronize text and focus after
+/// Select the tick's row and use the shared stepping path. Synchronize text and focus after
 /// mutation. While confirmation is armed, ignore the click before moving selection or
 /// changing any value; the visible rows cannot bypass the pending question.
 fn on_tick_clicked(
@@ -5567,71 +4775,6 @@ pub(in crate::shell) fn refresh_color_choices(shell: &mut ShellView) {
             draft.refresh_color_options(&names);
         }
     }
-}
-
-/// A `DistinctOutcome` addressed to `SCOPES_KEY`, routed here by
-/// `ShellView::deliver_distinct`. Applied only when a Scopes dialog is
-/// open in the Values stage for `outcome.column` and the tag is the
-/// latest one handed out — the picker's own three guards, so a reply to
-/// a stage the trader has already left, or to a superseded request,
-/// changes nothing. `Ok` installs the ticked list as a CLEAN baseline
-/// (delivered ticks are the saved scope, not dirt); `Err` installs the
-/// failure row. A Scopes dialog covered by another domain's dialog still
-/// owns its request, so the reply reaches it wherever it is in the stack.
-pub(in crate::shell) fn deliver_values(
-    shell: &mut ShellView,
-    outcome: DistinctOutcome,
-    cx: &mut Context<ShellView>,
-) {
-    let live = shell
-        .object_dialog
-        .as_ref()
-        .is_some_and(|state| state.domain == Domain::Scopes);
-    let Some(state) = shell
-        .object_dialog
-        .iter_mut()
-        .chain(dialog::parked_objects_mut(&mut shell.modals))
-        .find(|state| state.domain == Domain::Scopes)
-    else {
-        return;
-    };
-    let Stage::Values { column, .. } = &state.stage else {
-        return;
-    };
-    if *column != outcome.column || outcome.tag != state.values_tag {
-        return;
-    }
-    let Some(draft) = state.draft.as_mut() else {
-        return;
-    };
-    let saved: Vec<String> = draft
-        .source
-        .get("dimensions")
-        .and_then(|v| v.as_table())
-        .and_then(|d| d.get(&outcome.column))
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    let fields = match &outcome.values {
-        Ok(values) => scopes::values_fields(&saved, values),
-        Err(message) => scopes::failed_field(message),
-    };
-    draft.reseed_fields(fields);
-    draft.selected = 0;
-    // Delivery replaces the loading row outside keyboard handling. Settle onto the
-    // first available stop, skipping the Values header when there are value rows.
-    draft.settle_selection(Domain::Scopes);
-    // Scroll to the settled cursor, which can differ from the initial index zero. A
-    // parked dialog does not own the shared scroll handle.
-    let selected = draft.selected;
-    if live {
-        shell.object_dialog_scroll.scroll_to_item(selected);
-    }
-    cx.notify();
 }
 
 #[cfg(test)]

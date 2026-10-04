@@ -1035,13 +1035,6 @@ fn rebuild_after_revert(state: &mut super::ObjectDialogState, config: &Config, m
             rebuilt.select_item_named(&column);
             state.stage = Stage::Edit { object };
         }
-        // A rebuilt scope also has no Values projection. Return to its object stage
-        // and reset the cursor to the first row.
-        Stage::Values { object, .. } => {
-            let object = object.clone();
-            rebuilt.selected = 0;
-            state.stage = Stage::Edit { object };
-        }
         _ => rebuilt.selected = selected,
     }
     // Rebuilding can change which rows the restored index or column name

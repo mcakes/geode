@@ -456,7 +456,7 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Toggle the frame pin for this workspace",
         "Frame",
     );
-    // Save the current frame scope through the Scopes dialog naming prompt.
+    // Save the current frame scope through the Scope dialog's save prompt.
     // Dispatch this id before matching the generic `scope::` prefix; otherwise
     // `save_current` would be interpreted as a scope name. That name is reserved
     // in scope configuration for the same reason.

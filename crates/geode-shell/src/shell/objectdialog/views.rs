@@ -169,7 +169,6 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
                         included: !presentation.hidden.unwrap_or(false),
                         presentation,
                         kind: Some(view_column_kind(column).to_string()),
-                        note: None,
                     }
                 })
                 .collect()
@@ -265,7 +264,6 @@ fn dataset_catalogue(
             included: false,
             presentation: overlay.get(&column.name).cloned().unwrap_or_default(),
             kind: Some(kind.to_string()),
-            note: None,
         });
     }
     available
@@ -2464,7 +2462,6 @@ role = "value"
             included: true,
             presentation: ColumnPresentation::default(),
             kind: kind.map(str::to_string),
-            note: None,
         }
     }
 
@@ -2533,7 +2530,6 @@ role = "value"
                 colour: Some(Colour::Named("delta".into())),
                 ..Default::default()
             },
-            note: None,
         };
         let fields = column_fields(
             &item,
@@ -2581,7 +2577,6 @@ role = "value"
             included: true,
             kind: Some("measure".into()),
             presentation: ColumnPresentation::default(),
-            note: None,
         };
         let mut fields = column_fields(&item, &[], Destination::Presentation);
         for f in &mut fields {
@@ -2825,7 +2820,6 @@ role = "value"
                 colour: Some(Colour::Named("gone".into())),
                 ..ColumnPresentation::default()
             },
-            note: None,
         };
         let mut field = column_fields(
             &item_of_kind(Some("measure")),

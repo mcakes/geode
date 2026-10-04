@@ -68,7 +68,7 @@ pub struct NamedChip {
     /// refuses to query, so the chip must read as an error, not routine state.
     pub broken: bool,
     /// The chip body's element id and debug selector (`"scope-named-chip-{name}"`).
-    /// A click on the body opens the Expressions dialog on this name.
+    /// A click on the body opens the Scope dialog's definition step on this name.
     pub selector: SharedString,
     /// The chip body's tooltip selector (`"tip-scope-named-chip-{name}"`).
     pub tip_selector: SharedString,

@@ -8879,13 +8879,12 @@ run_mutation "objectdialog: an emptied Doc object removes the user's key instead
 run_mutation "objectdialog: unticking a Doc list's last entry is allowed again" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
   '                if included
-                    && !may_empty
                     && dest == Destination::Doc
-                    && self.values.is_none()
                     && items.iter().filter(|i| i.included).count() == 1
                 {' \
   '                if false {' \
-  geode-shell unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agreeing
+  geode-shell \
+  unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agreeing
 
 # `commit_edit` resolves the user directory before moving the draft
 # baseline. With `user_dir: None`, marking an unqueued edit as saved
@@ -8952,17 +8951,7 @@ run_mutation "objectdialog: d/r ask for a presentation doc even when the domain 
   '            let mut docs = vec![Destination::Doc.doc(domain), Destination::Presentation.doc(domain)];' \
   geode-shell deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exist
 
-# ---- Saved-scope overwrite --------------------------------------------
-#
-# `o` writes the frame's scope to `scopes.toml`. Overwriting a user-owned
-# scope requires confirmation; forking a desk-owned scope writes at once
-# and announces the fork. The frame supplying the scope is unchanged.
-
-# ---- Scope fork disclosure and source-based dirtiness -----------------
-#
-# `overwrite_scope` decides whether to fork from user-layer ownership.
-# Changing that decision makes a desk-owned scope ask for confirmation
-# instead of writing and announcing the fork.
+# ---- Source-based dirtiness -------------------------------------------
 #
 # Dirtiness compares the source object because displayed summaries are
 # lossy: one value containing ", " can look identical to several values.
@@ -8973,7 +8962,8 @@ run_mutation "objectdialog: is_dirty ignores a source-only change" \
   '        self.fields != self.baseline
             || self.source != self.baseline_source' \
   '        self.fields != self.baseline' \
-  geode-shell overwrite_with_is_seen_even_when_the_painted_summary_collides
+  geode-shell \
+  a_source_only_change_is_dirty_and_writes_the_doc
 
 run_mutation "objectdialog: writes_by_destination ignores a source-only change" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
@@ -8983,7 +8973,8 @@ run_mutation "objectdialog: writes_by_destination ignores a source-only change" 
   '        if false {
             out.entry(Destination::Doc).or_default();
         }' \
-  geode-shell overwrite_with_is_seen_even_when_the_painted_summary_collides
+  geode-shell \
+  a_source_only_change_is_dirty_and_writes_the_doc
 
 # The roster includes unfilled slots. Dropping it removes empty rows
 # while configured-slot tests still pass.
@@ -9515,10 +9506,8 @@ run_mutation "objectdialog: reorder skips hidden rows" \
 # stage gate that separates those destinations.
 run_mutation "objectdialog: set_query mirrors into the open draft only in the edit stage" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if matches!(
-            self.stage,
-            Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }
-        ) && let Some(draft) = self.draft.as_mut()' \
+  '        if matches!(self.stage, Stage::Edit { .. } | Stage::Column { .. })
+            && let Some(draft) = self.draft.as_mut()' \
   '        if false
             && let Some(draft) = self.draft.as_mut()' \
   geode-shell \
@@ -9713,12 +9702,8 @@ run_mutation "dialogmode: listening overrides the mode for focus" \
 # paints the browse query and synchronizes that wrong value into the input.
 run_mutation "objectdialog: effective_query reads the edit stage's draft" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
-                draft.query.as_str()
-            }' \
-  '            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(_draft)) => {
-                self.query.as_str()
-            }' \
+  '            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.query.as_str(),' \
+  '            (Stage::Edit { .. } | Stage::Column { .. }, Some(_draft)) => self.query.as_str(),' \
   geode-shell \
   the_effective_query_is_the_stages_own
 
@@ -9886,21 +9871,9 @@ run_mutation "groupings: an unchanged chain is applied anyway" \
 run_mutation "objectdialog: the action bar stays up under the chain field" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '            (true, _) => div().min_h_6().into_any_element(),
-            (false, Some(confirm)) => confirm_row(
-                confirm,
-                &draft.name,
-                state.confirm_detail.as_deref(),
-                entity,
-                cx,
-            ),
+            (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
             (false, None) => action_bar(shell, entity),' \
-  '            (_, Some(confirm)) => confirm_row(
-                confirm,
-                &draft.name,
-                state.confirm_detail.as_deref(),
-                entity,
-                cx,
-            ),
+  '            (_, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
             (_, None) => action_bar(shell, entity),' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
@@ -12579,14 +12552,14 @@ run_mutation "objectdialog: r inherits in the column stage" \
 
 run_mutation "objectdialog: enter_column refuses re-entry" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if self.column.is_some() || self.values.is_some() {
+  '        if self.column.is_some() {
             return false;
         }
-        // Membership is what the door lists: the Views door'"'"'s `columns`' \
+        // Membership is what the door lists' \
   '        if false {
             return false;
         }
-        // Membership is what the door lists: the Views door'"'"'s `columns`' \
+        // Membership is what the door lists' \
   geode-shell \
   enter_column_refuses_re_entry_and_keeps_the_objects_own_list
 
@@ -12861,7 +12834,7 @@ run_mutation "objectdialog: the refreshed catalogue reads the pending config" \
 # must match those refusals on both Views and Schema.
 run_mutation "objectdialog: a column stage offers no destructive action" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let in_column = draft.column().is_some() || draft.values().is_some();
+  '    let in_column = draft.column().is_some();
     let row = target_row(shell);' \
   '    let in_column = false;
     let row = target_row(shell);' \
@@ -14059,7 +14032,7 @@ run_mutation "objectdialog: an inert step in filter mode names space rather than
 # advertise shift-j or shift-k.
 run_mutation "objectdialog: the edit footer paints the reorder group on a row with no item" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        let reorders = vocabulary == RowVocabulary::Item && state.domain != Domain::Scopes;' \
+  '        let reorders = vocabulary == RowVocabulary::Item;' \
   '        let reorders = true;' \
   geode-shell \
   the_edit_footer_names_only_what_the_selected_row_offers
@@ -15692,12 +15665,12 @@ run_mutation "objectdialog: the i button opens the field its key opens (spec §2
 # Without sync, pure state enters Filter while the field remains unfocused.
 run_mutation "objectdialog: press_verb syncs the dialog text after a verb (spec §20.3)" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        "o" => overwrite_scope(shell, cx),
+  '        "s" => super::grouping_list::arm_save(shell, cx),
         _ => {}
     }
     shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);' \
-  '        "o" => overwrite_scope(shell, cx),
+  '        "s" => super::grouping_list::arm_save(shell, cx),
         _ => {}
     }
     shell.refresh_dialog_rows(cx);' \
@@ -18776,8 +18749,8 @@ run_mutation "scope dialog: revert needs a lower copy" \
 # and its accepted text must not land in the covered draft.
 run_mutation "scope dialog: an accept in a pushed dialog writes the covered definition draft" \
   crates/geode-shell/src/shell/expr_suggest.rs \
-  '    } else if view.top_kind() == Some(DialogKind::Scope)' \
-  '    } else if true' \
+  '    if view.top_kind() == Some(DialogKind::Scope)' \
+  '    if true' \
   geode-shell \
   accept_in_a_pushed_dialog_does_not_touch_a_covered_definition_draft
 
@@ -22887,14 +22860,10 @@ run_mutation "objectdialog: leaving filter mode reverts the browse slot in every
   crates/geode-shell/src/shell/objectdialog/mod.rs \
   '    fn effective_query_mut(&mut self) -> &mut String {
         match (&self.stage, self.draft.as_mut()) {
-            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
-                &mut draft.query
-            }' \
+            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => &mut draft.query,' \
   '    fn effective_query_mut(&mut self) -> &mut String {
         match (&self.stage, self.draft.as_mut()) {
-            (Stage::Values { .. }, Some(draft)) => {
-                &mut draft.query
-            }' \
+            (Stage::Column { .. }, Some(draft)) => &mut draft.query,' \
   geode-shell \
   escape_reverts_the_edit_stages_own_query
 
@@ -36775,8 +36744,8 @@ run_mutation "derived: unmapped values group under NULL" \
 # shell keys would deliver them to a tile.
 run_mutation "distinct: shell keys stay with the shell" \
   crates/geode-shell/src/shell/mod.rs \
-  '        PICKER_KEY,' \
-  '        DIAGNOSTICS_KEY,' \
+  '    [PICKER_KEY, DIAGNOSTICS_KEY, EXPR_KEY, ACTION_KEY].contains(&key)' \
+  '    [DIAGNOSTICS_KEY, DIAGNOSTICS_KEY, EXPR_KEY, ACTION_KEY].contains(&key)' \
   geode-shell \
   shell_keys_are_recognised_and_tile_keys_are_not
 
@@ -37109,8 +37078,8 @@ run_mutation "value colors: the stage compares hue and tone with the color in fo
 # alone cannot see either one removed.)
 run_mutation "value colors: the new color hook fires once" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            .and_then(|s| s.on_created.take());' \
-  '            .and_then(|s| s.on_created.clone());' \
+  '        .and_then(|s| s.on_created.take());' \
+  '        .and_then(|s| s.on_created.clone());' \
   geode-shell \
   new_named_color_creates_the_color_and_colors_the_value
 
@@ -37133,8 +37102,8 @@ run_mutation "value colors: a written create colors the value" \
 # The created color removes the covered pick list.
 run_mutation "value colors: a created color drops the covered list" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                    crate::shell::choicedialog::drop_covered_value_color(shell);' \
-  '                    let _ = &shell;' \
+  '                crate::shell::choicedialog::drop_covered_value_color(shell);' \
+  '                let _ = &shell;' \
   geode-shell \
   new_named_color_creates_the_color_and_colors_the_value
 

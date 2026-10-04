@@ -7,26 +7,19 @@
 //! adapter cannot silently write inherited desk configuration.
 //!
 //! The browse stage lists objects. The edit stage holds a typed draft and may
-//! open nested choice, ordered-list, or values stages. Pure dialog state is the
+//! open nested choice, ordered-list, or column stages. Pure dialog state is the
 //! source of truth; the shared input is synchronized only through the dialog
 //! focus seam.
 
 pub mod apply;
 mod colours;
 mod dataset_columns;
-mod expressions;
 pub mod grouping_list;
 mod groupings;
 pub mod render;
 mod schema;
-pub(crate) mod scopes;
 mod sources;
 mod views;
-
-/// `ShellView::deliver_distinct` routes a `SCOPES_KEY` outcome to the Values
-/// stage's own delivery. Scoped to this crate's shell because nothing outside
-/// it needs the door.
-pub(in crate::shell) use render::deliver_values;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,7 +43,6 @@ pub const READ_ONLY_NOTICE: &str =
 pub enum Domain {
     Views,
     Groupings,
-    Scopes,
     /// Read-only: the datasets the other adapters build their choices from.
     Schema,
     /// The ingest feeds, one object per source.
@@ -58,9 +50,6 @@ pub enum Domain {
     /// The shared color vocabulary a column's `colour` field and a chart series can
     /// name — one object per named color, a hue (with its tone) or a theme token.
     Colors,
-    /// Named scope expressions: an expression text saved under a name that saved
-    /// scopes and the frame tick instead of copying it.
-    Expressions,
 }
 
 /// The current stage. Nested stages give Escape a previous stage to return to; mutable
@@ -86,23 +75,13 @@ pub enum Stage {
         object: String,
         column: String,
     },
-    /// One saved-scope dimension's distinct values projected over the same draft.
-    /// Escape restores the scope's fields and selects that dimension.
-    Values {
-        object: String,
-        column: String,
-    },
 }
 
-/// Source for a newly named object: the domain's defaults, a named saved scope, the
-/// current frame scope, or (Colors, from the value-color list's `New named color…`) a
-/// definition. Copy targets are recorded by name because a reload can reorder the
-/// browse list before creation.
+/// Source for a newly named object: the domain's defaults, or (Colors, from the
+/// value-color list's `New named color…`) a definition.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NameSeed {
     Empty,
-    CopyOf(String),
-    FromFrame,
     Definition(geode_core::colour::Definition),
 }
 
@@ -187,23 +166,19 @@ impl Domain {
         match self {
             Domain::Views => views::DOC,
             Domain::Groupings => groupings::DOC,
-            Domain::Scopes => scopes::DOC,
             Domain::Schema => schema::DOC,
             Domain::Sources => sources::DOC,
             Domain::Colors => colours::DOC,
-            Domain::Expressions => expressions::DOC,
         }
     }
 
     /// Every domain, for recognising [`Domain::already_open_notice`] strings.
-    pub const ALL: [Domain; 7] = [
+    pub const ALL: [Domain; 5] = [
         Domain::Views,
         Domain::Groupings,
-        Domain::Scopes,
         Domain::Schema,
         Domain::Sources,
         Domain::Colors,
-        Domain::Expressions,
     ];
 
     /// The status notice for a request refused because this domain's dialog is
@@ -212,11 +187,9 @@ impl Domain {
         match self {
             Domain::Views => "views is already open underneath",
             Domain::Groupings => "groupings is already open underneath",
-            Domain::Scopes => "scopes is already open underneath",
             Domain::Schema => "schema is already open underneath",
             Domain::Sources => "sources is already open underneath",
             Domain::Colors => "colors is already open underneath",
-            Domain::Expressions => "expressions is already open underneath",
         }
     }
 
@@ -225,11 +198,9 @@ impl Domain {
         match self {
             Domain::Views => "Views",
             Domain::Groupings => "Groupings",
-            Domain::Scopes => "Scopes",
             Domain::Schema => "Schema",
             Domain::Sources => "Sources",
             Domain::Colors => "Colors",
-            Domain::Expressions => "Expressions",
         }
     }
 
@@ -273,11 +244,9 @@ impl Domain {
         match self {
             Domain::Views => "views",
             Domain::Groupings => "slots",
-            Domain::Scopes => "saved",
             Domain::Schema => "datasets",
             Domain::Sources => "sources",
             Domain::Colors => "colors",
-            Domain::Expressions => "expressions",
         }
     }
 
@@ -290,11 +259,9 @@ impl Domain {
         match self {
             Domain::Views => |_, v| views::summary(v),
             Domain::Groupings => |_, v| groupings::summary(v),
-            Domain::Scopes => |_, v| scopes::summary(v),
             Domain::Schema => |_, v| schema::summary(v),
             Domain::Sources => sources::summary,
             Domain::Colors => |_, v| colours::summary(v),
-            Domain::Expressions => |_, v| expressions::summary(v),
         }
     }
 
@@ -305,12 +272,7 @@ impl Domain {
         match self {
             Domain::Views => Some(views::PRESENTATION_DOC),
             // These domains have no view-presentation overlay.
-            Domain::Groupings
-            | Domain::Scopes
-            | Domain::Schema
-            | Domain::Sources
-            | Domain::Colors
-            | Domain::Expressions => None,
+            Domain::Groupings | Domain::Schema | Domain::Sources | Domain::Colors => None,
         }
     }
 
@@ -320,12 +282,7 @@ impl Domain {
     pub(super) fn roster(self) -> Option<&'static [&'static str]> {
         match self {
             Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
-            Domain::Views
-            | Domain::Scopes
-            | Domain::Schema
-            | Domain::Sources
-            | Domain::Colors
-            | Domain::Expressions => None,
+            Domain::Views | Domain::Schema | Domain::Sources | Domain::Colors => None,
         }
     }
 
@@ -336,12 +293,6 @@ impl Domain {
         !matches!(self, Domain::Schema) || matches!(stage, Stage::Column { .. })
     }
 
-    /// May `c` copy an object under a new name? Scopes and named expressions; the
-    /// mechanism is generic.
-    pub fn duplicable(self) -> bool {
-        matches!(self, Domain::Scopes | Domain::Expressions)
-    }
-
     /// The text painted before an object's name, if this domain groups its objects.
     /// `None` on every domain but Sources — a source's row leads with the dataset it
     /// feeds (`sources::prefix`), painted dimmed ahead of the name and used as the
@@ -350,12 +301,7 @@ impl Domain {
     fn prefix_fn(self) -> Option<fn(&toml::Value) -> Option<String>> {
         match self {
             Domain::Sources => Some(sources::prefix),
-            Domain::Views
-            | Domain::Groupings
-            | Domain::Scopes
-            | Domain::Schema
-            | Domain::Colors
-            | Domain::Expressions => None,
+            Domain::Views | Domain::Groupings | Domain::Schema | Domain::Colors => None,
         }
     }
 
@@ -374,14 +320,11 @@ impl Domain {
     }
 
     /// Names reserved by syntax outside the domain's own document. Colors excludes
-    /// `none` and `sign`, which already mean built-in formatting choices. Scopes
-    /// excludes the `save_current` action name to avoid ambiguous palette dispatch;
-    /// named expressions follow the saved-scope rules. Other domains have no
-    /// additional reserved names.
+    /// `none` and `sign`, which already mean built-in formatting choices. Other
+    /// domains have no additional reserved names.
     pub fn reserved_names(self) -> &'static [&'static str] {
         match self {
             Domain::Colors => &geode_core::colour::RESERVED_NAMES,
-            Domain::Scopes | Domain::Expressions => &geode_core::scopes::RESERVED_NAMES,
             Domain::Views | Domain::Groupings | Domain::Schema | Domain::Sources => &[],
         }
     }
@@ -736,12 +679,6 @@ impl Destination {
             (Destination::Presentation, Domain::Groupings) => {
                 unreachable!("Groupings has no Presentation-destined fields")
             }
-            // Every Scopes field is `Destination::Doc` too (`scopes.rs`'s
-            // module doc: the whole object is a read-only summary), so
-            // this arm exists only to keep the match exhaustive.
-            (Destination::Presentation, Domain::Scopes) => {
-                unreachable!("Scopes has no Presentation-destined fields")
-            }
             // Schema's only writable fields are `DatasetPresentation`-
             // destined (its column stage, the arm below); no Schema
             // field carries `Presentation`, since `view_presentation.toml`
@@ -762,10 +699,6 @@ impl Destination {
             // no presentation overlay for a shared color).
             (Destination::Presentation, Domain::Colors) => {
                 unreachable!("Colors has no Presentation-destined fields")
-            }
-            // A named expression's one field is `Destination::Doc`.
-            (Destination::Presentation, Domain::Expressions) => {
-                unreachable!("Expressions has no Presentation-destined fields")
             }
             (Destination::DatasetPresentation, Domain::Schema) => {
                 geode_core::view::DATASET_PRESENTATION_DOC
@@ -807,12 +740,6 @@ pub struct ListItem {
     /// `[[columns]]` entry — a column already in `Draft::source` keeps
     /// its own table, `kind` included, untouched by this field entirely.
     pub kind: Option<String>,
-    /// Muted text painted after the name, supplied by the domain
-    /// (Scopes: a selection's values on the edit stage, a value's row
-    /// count or `not in data` on the Values stage). `None` paints
-    /// Views' own `column_summary` as before. Display only — never
-    /// written, never filtered on.
-    pub note: Option<String>,
 }
 
 /// The supported field shapes. Adapters supply choices, bounds, and validation. Options
@@ -974,8 +901,7 @@ pub enum EditRow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowVocabulary {
     /// Nothing on this row changes and nothing types: a display-only
-    /// `Text` (Groupings' `slot`, Scopes' two summaries, every Schema
-    /// row), an `OrderedList`'s own header row, a `MultiChoice`, or no
+    /// `Text` (Groupings' `slot`, every Schema row), an `OrderedList`'s own header row, a `MultiChoice`, or no
     /// row at all under an over-narrow filter.
     Inert,
     /// A value the step keys cycle and `i` cannot open: `Bool`.
@@ -1005,8 +931,8 @@ pub struct RowDrag {
     pub name: String,
 }
 
-/// A destructive operation awaiting confirmation: deleting a user object,
-/// reverting a personal override, or replacing a user-owned saved scope.
+/// A destructive operation awaiting confirmation: deleting a user object or
+/// reverting a personal override.
 ///
 /// Leaving a field or dialog requires no discard confirmation. Completed
 /// field edits enter a pending batch that outlives the dialog and flushes
@@ -1015,10 +941,6 @@ pub struct RowDrag {
 pub enum Confirm {
     Delete,
     Revert,
-    /// Confirm replacement of a user-owned saved scope with current frame scope. An
-    /// inherited scope instead receives an announced user-layer fork without a
-    /// confirmation, leaving the lower-layer definition available to revert.
-    Overwrite,
 }
 
 impl Confirm {
@@ -1029,12 +951,6 @@ impl Confirm {
         match self {
             Confirm::Delete => format!("Delete '{name}' from your config?"),
             Confirm::Revert => format!("Throw away your changes to '{name}'?"),
-            // User-owned (the only case that arms it): nothing underneath
-            // to fall back to, so the scope's previous contents really
-            // are gone.
-            Confirm::Overwrite => format!(
-                "Replace '{name}' with the frame's current scope? Its saved selection is lost."
-            ),
         }
     }
 }
@@ -1060,7 +976,7 @@ pub struct TextEntry {
 /// The object's edit buffer and the source of the painted field values. Changed fields
 /// appear immediately; `apply::commit_edit` queues their rendered objects for the
 /// shared flush. Baselines track changes already queued, not disk acknowledgement.
-/// Column and Values stages project over this same draft.
+/// The Column stage projects over this same draft.
 #[derive(Debug, Clone)]
 pub struct Draft {
     pub name: String,
@@ -1083,8 +999,8 @@ pub struct Draft {
     /// where it started changes nothing and writes nothing.
     baseline: Vec<Field>,
     /// Source at the same point as the field baseline. Compare it directly as well as
-    /// fields: different scope selections can produce identical summary strings, so
-    /// visible equality does not establish that the persisted object is unchanged.
+    /// fields: two different sources can paint identical summary strings, so visible
+    /// equality does not establish that the persisted object is unchanged.
     baseline_source: toml::Table,
     /// Cursor over [`Draft::visible_rows`] — the FILTERED list, not [`Draft::rows`] —
     /// the same convention `ObjectDialogState::selected` holds for the browse stage.
@@ -1124,10 +1040,6 @@ pub struct Draft {
     /// target, and the scope [`Draft::row_for_path`] narrows to. `Some`
     /// exactly when `parent_fields` is; [`Draft::column`] is the read.
     column: Option<String>,
-    /// Which column [`Draft::parent_fields`] was stashed for by the VALUES stage.
-    /// `Some` exactly when `parent_fields` is and `column` is `None`; the two stages
-    /// share the stash and can never both be open.
-    values: Option<String>,
     /// Column-stage destination, baseline layers, and fold target. Views edits its
     /// parent list item; Schema edits a scratch dataset item and overlay object.
     pub column_ctx: Option<ColumnContext>,
@@ -1377,26 +1289,6 @@ impl Draft {
         }
     }
 
-    /// Values-stage target for a Scopes `dimensions` member or candidate. Available
-    /// only outside column and values projections. Activation and cursor-stop checks
-    /// use the same row-addressed resolver.
-    pub fn values_stage_target(&self, domain: Domain, row: EditRow) -> Option<String> {
-        if domain != Domain::Scopes || self.column().is_some() || self.values().is_some() {
-            return None;
-        }
-        match row {
-            row @ (EditRow::Item { field, .. } | EditRow::Available { field, .. })
-                if self
-                    .fields
-                    .get(field)
-                    .is_some_and(|f| f.key == "dimensions") =>
-            {
-                Some(self.row_label(row))
-            }
-            _ => None,
-        }
-    }
-
     /// Whether a row offers a value command or opens a nested stage. Schema column
     /// fields qualify through their stage target even though their vocabulary is
     /// `Inert`.
@@ -1411,7 +1303,6 @@ impl Draft {
     pub fn is_cursor_stop(&self, domain: Domain, row: EditRow) -> bool {
         self.vocabulary_of(Some(row), domain) != RowVocabulary::Inert
             || self.column_stage_target(domain, row).is_some()
-            || self.values_stage_target(domain, row).is_some()
     }
 
     /// Apply navigation to the full visible-row list, then snap to a cursor stop. Step
@@ -1512,8 +1403,8 @@ impl Draft {
     ///
     /// `source` is compared too, not just `fields` — see
     /// `Draft::baseline_source`'s own doc for why a fields-only
-    /// comparison is not enough once a verb (Scopes' `o`) can replace
-    /// `source` out from under a painted summary.
+    /// comparison is not enough once something replaces `source` out
+    /// from under a painted summary.
     pub fn is_dirty(&self) -> bool {
         self.fields != self.baseline
             || self.source != self.baseline_source
@@ -1525,11 +1416,6 @@ impl Draft {
     /// of the draft rather than of the stage the gpui side happens to be painting.
     pub fn column(&self) -> Option<&str> {
         self.column.as_deref()
-    }
-
-    /// The column whose values are open, if [`Stage::Values`] is.
-    pub fn values(&self) -> Option<&str> {
-        self.values.as_deref()
     }
 
     /// Open a column projection by stashing parent fields and installing the seven
@@ -1546,12 +1432,7 @@ impl Draft {
         // (this stage installs no `EditRow::Item` rows, and `commit_selected_row` gates
         // on `column().is_none()` besides), so this line is what makes it
         // unrepresentable rather than merely unreached.
-        //
-        // The Values stage shares this same stash (`Draft::values`'s own
-        // doc), so it is refused here too — entering over an open Values
-        // stage would stash ITS installed fields as `parent_fields` and
-        // drop the object's own list exactly as re-entry would.
-        if self.column.is_some() || self.values.is_some() {
+        if self.column.is_some() {
             return false;
         }
         // Membership is what the door lists: the Views door's `columns` list, or — the
@@ -1749,11 +1630,8 @@ impl Draft {
     /// an index carried across would land wherever that number happens to
     /// point.
     pub fn leave_column(&mut self) {
-        // Checked before anything else touches `parent_fields`: the stash
-        // is shared with the Values stage, and `parent_fields.take()`
-        // alone cannot tell which stage it belongs to. Calling this while
-        // `column` is `None` — the Values stage open, or no stage at all
-        // — must touch nothing.
+        // Checked before anything else touches `parent_fields`: calling
+        // this with no column stage open must touch nothing.
         if self.column.is_none() {
             return;
         }
@@ -1779,51 +1657,6 @@ impl Draft {
         if let Some(column) = column {
             self.select_item_named(&column);
         }
-    }
-
-    /// Open the Values stage: stash the object's fields, install `fields` (the one
-    /// values list) as a clean baseline. Refused while any projection is already open,
-    /// for `enter_column`'s reason — a second stash would drop the object's own fields
-    /// for good.
-    pub fn enter_values(&mut self, column: &str, fields: Vec<Field>) -> bool {
-        if self.column.is_some() || self.values.is_some() {
-            return false;
-        }
-        self.parent_fields = Some(std::mem::replace(&mut self.fields, fields));
-        self.values = Some(column.to_string());
-        self.baseline = self.fields.clone();
-        self.query.clear();
-        self.selected = 0;
-        self.text_entry = None;
-        true
-    }
-
-    /// Close the Values stage: restore the object's fields and hand the
-    /// stage's own fields back for the adapter's fold
-    /// (`scopes::fold_values` has already run on every tick through
-    /// `render::revalidate`; the return is for the caller's final fold
-    /// and cursor placement). The restored baseline is the restored
-    /// fields, for `leave_column`'s reason. `None` when no Values stage
-    /// was open.
-    pub fn leave_values(&mut self) -> Option<Vec<Field>> {
-        self.values.as_ref()?;
-        // A Values stage always carries its own stash — `enter_values` is
-        // the only writer of `values` and it always sets `parent_fields`
-        // in the same call — so a `Some(values)` with no stash is a bug
-        // (a stray `leave_column`, say) rather than a state this door
-        // should silently accept, exactly the debug check `fold_column`
-        // makes for its own context.
-        debug_assert!(
-            self.parent_fields.is_some(),
-            "a Values stage always carries its own stash"
-        );
-        let parent = self.parent_fields.take()?;
-        self.values = None;
-        let own = std::mem::replace(&mut self.fields, parent);
-        self.baseline = self.fields.clone();
-        self.query.clear();
-        self.text_entry = None;
-        Some(own)
     }
 
     /// Put the cursor on the row named `name` — an ordered-list item, or
@@ -1884,25 +1717,6 @@ impl Draft {
     pub(in crate::shell::objectdialog) fn reseed_fields(&mut self, fields: Vec<Field>) {
         self.fields = fields;
         self.baseline = self.fields.clone();
-    }
-
-    /// Mutate one of the STASHED parent's ordered lists while a projection
-    /// is open — the Values stage's fold writes the scope's `dimensions`
-    /// list through here. A no-op when no stash or no such list exists.
-    pub fn with_parent_list(
-        &mut self,
-        key: &str,
-        f: impl FnOnce(&mut Vec<ListItem>, &mut Option<Vec<ListItem>>),
-    ) {
-        let Some(parent) = self.parent_fields.as_mut() else {
-            return;
-        };
-        let Some(field) = parent.iter_mut().find(|fld| fld.key == key) else {
-            return;
-        };
-        if let FieldKind::OrderedList { items, available } = &mut field.kind {
-            f(items, available);
-        }
     }
 
     /// The field keyed `key` — the installed ones first, then the
@@ -2400,21 +2214,14 @@ impl Draft {
                 // list is representable at all (see this function's doc).
                 let dest = self.fields[field].dest;
                 let label = self.fields[field].label.clone();
-                // A scope's named expressions may be emptied: no reference at all
-                // is an ordinary scope, written without the key.
-                let may_empty = self.fields[field].key == "named";
                 let FieldKind::OrderedList { items, .. } = &mut self.fields[field].kind else {
                     return Step::Inert;
                 };
                 let Some(included) = items.get(item).map(|entry| entry.included) else {
                     return Step::Inert;
                 };
-                // The Values stage may empty its list — that is "drop this dimension",
-                // folded by the adapter; the guard is a Groupings/Views rule.
                 if included
-                    && !may_empty
                     && dest == Destination::Doc
-                    && self.values.is_none()
                     && items.iter().filter(|i| i.included).count() == 1
                 {
                     return Step::Refused(format!("{label} must keep at least one entry"));
@@ -2614,13 +2421,6 @@ impl Draft {
         }
         let mut entry = items.remove(item);
         entry.included = false;
-        // A note is a property of the SELECTION (Scopes' own values, the
-        // Values stage's counts) — `fold_values`'s demotion arm clears it
-        // the same way when a tick empties a selection, and every other
-        // adapter's note is already `None`, so this is a no-op for them.
-        // Left set, a dropped dimension's available row would keep
-        // painting its old values after `x`.
-        entry.note = None;
         available.push(entry);
         let last = available.len() - 1;
         // The cursor does NOT follow the item to the end of the catalogue, for the same
@@ -2662,7 +2462,7 @@ impl Draft {
             }
         }
         // `source` underlies only `Destination::Doc` renderings
-        // (`views::doc_table`, `scopes::to_table`) — nothing presentation-
+        // (`views::doc_table`) — nothing presentation-
         // destined ever reads it — so a `source` change no field noticed
         // (see `Draft::baseline_source`'s own doc) still has to reach the
         // batch as a `Doc` write, with no field key of its own to name.
@@ -2717,7 +2517,6 @@ impl Draft {
             choice: None,
             parent_fields: None,
             column: None,
-            values: None,
             column_ctx: None,
             // An object nothing defines yet has no columns for a dataset
             // to speak for; `Domain::draft` is where the layer arrives.
@@ -2860,26 +2659,17 @@ impl Domain {
         if matches!(stage, Stage::Column { .. }) {
             return views::column_help(key);
         }
-        // the Values stage's one row is always keyed `values`, so this answers the same
-        // as the general `Domain::Scopes` arm below would — stated explicitly, ahead of
-        // it, so a future domain that grows a Values-shaped stage of its own cannot
-        // silently fall through to its OWN `help` table instead.
-        if matches!(stage, Stage::Values { .. }) {
-            return scopes::help("values");
-        }
         match self {
             Domain::Views => views::help(key),
             Domain::Sources => sources::help(key),
             Domain::Groupings => groupings::help(key),
-            Domain::Scopes => scopes::help(key),
             Domain::Colors => colours::help(key),
-            Domain::Expressions => expressions::help(key),
             Domain::Schema => schema::help(key),
         }
     }
 
     /// Whether a text field permits typed editing. Sources permits its supported
-    /// free-text settings; Scopes permits text and expression; Views and Schema permit
+    /// free-text settings; Views and Schema permit
     /// column label and width. Groupings' slot stays read-only, and Colors has no text
     /// field. Numeric and choice entry use their own field paths.
     pub fn text_editable(self, key: &str) -> bool {
@@ -2888,8 +2678,6 @@ impl Domain {
                 let _ = key;
                 false
             }
-            Domain::Scopes => matches!(key, "text" | "expression"),
-            Domain::Expressions => key == "expression",
             Domain::Views | Domain::Schema => views::text_editable(key),
             Domain::Sources => sources::text_editable(key),
         }
@@ -2907,8 +2695,6 @@ impl Domain {
                 let _ = key;
                 Ok(text.trim().to_string())
             }
-            Domain::Scopes => scopes::parse_text(key, text),
-            Domain::Expressions => expressions::parse_text(key, text),
             // Schema joins Views for the reason `text_editable` gives:
             // the two column stages are the same seven rows, so `width`
             // must have the same grammar through either door.
@@ -2927,25 +2713,20 @@ impl Domain {
         match self {
             Domain::Views => views::fields(config, object),
             Domain::Groupings => groupings::fields(config, object),
-            Domain::Scopes => scopes::fields(config, object),
             Domain::Schema => schema::fields(config, object),
             Domain::Sources => sources::fields(config, object),
             Domain::Colors => colours::fields(config, object),
-            Domain::Expressions => expressions::fields(config, object),
         }
     }
 
-    /// The fields a `c`-copied object opens with, built straight from the table
-    /// `create_from_name` just copied rather than from a named object `config` has a
-    /// row for yet — the copy has not been written when this runs. Only
-    /// [`Domain::duplicable`] and Colors (seeded with a definition by the value-color
-    /// list's `New named color…`) need the real answer: every other domain falls back
-    /// to `self.fields(config, None)`, its own empty-object shape, since nothing else
-    /// can reach this door.
+    /// The fields a seeded object opens with, built straight from the table
+    /// `create_from_name` was handed rather than from a named object `config` has a
+    /// row for yet — the object has not been written when this runs. Only Colors
+    /// (seeded with a definition by the value-color list's `New named color…`) needs
+    /// the real answer: every other domain falls back to `self.fields(config, None)`,
+    /// its own empty-object shape, since nothing else can reach this door.
     pub fn fields_from_source(self, config: &Config, table: &toml::Table) -> Vec<Field> {
         match self {
-            Domain::Scopes => scopes::fields_from_table(config, Some(table)),
-            Domain::Expressions => expressions::fields_from_table(Some(table)),
             Domain::Colors => colours::fields_from_table(Some(table)),
             Domain::Views | Domain::Groupings | Domain::Schema | Domain::Sources => {
                 self.fields(config, None)
@@ -2982,7 +2763,6 @@ impl Domain {
             choice: None,
             parent_fields: None,
             column: None,
-            values: None,
             column_ctx: None,
             // Views alone. Reloading the views a second time here (`fields` above
             // already did once) is the price of the scaffold's
@@ -3020,11 +2800,9 @@ impl Domain {
         match self {
             Domain::Views => views::to_table(draft, dest),
             Domain::Groupings => groupings::to_table(draft, dest),
-            Domain::Scopes => scopes::to_table(draft, dest),
             Domain::Schema => schema::to_table(draft, dest),
             Domain::Sources => sources::to_table(draft, dest),
             Domain::Colors => colours::to_table(draft, dest),
-            Domain::Expressions => expressions::to_table(draft, dest),
         }
     }
 
@@ -3034,11 +2812,9 @@ impl Domain {
         match self {
             Domain::Views => views::validate(draft, config),
             Domain::Groupings => groupings::validate(draft, config),
-            Domain::Scopes => scopes::validate(draft, config),
             Domain::Schema => schema::validate(draft, config),
             Domain::Sources => sources::validate(draft, config),
             Domain::Colors => colours::validate(draft, config),
-            Domain::Expressions => expressions::validate(draft, config),
         }
     }
 }
@@ -3217,10 +2993,6 @@ pub struct ObjectDialogState {
     /// if the target still resolves to this name, since a reload can re-rank the browse
     /// list under an index cursor.
     pub confirm_target: Option<String>,
-    /// A sentence painted after [`Self::confirm`]'s question: who else uses the
-    /// object (a named expression's saved scopes and the frame). Written beside the
-    /// question and cleared with it by [`Self::disarm`].
-    pub confirm_detail: Option<String>,
     /// The pending "save to slot" question (Groupings): which chain, and the
     /// slot awaiting a y/n because saving there replaces a user-owned chain.
     /// Like `confirm`, it replaces the action bar and owns keys and pointer
@@ -3229,23 +3001,14 @@ pub struct ObjectDialogState {
     /// Source dataset captured from the selected browse row when naming starts. Clear
     /// it when naming ends; it seeds the new source's dataset choice.
     pub naming_dataset: Option<String>,
-    /// Source of the object being named: defaults, a saved scope copy, or current frame
-    /// scope. Stored separately from the name input.
+    /// Source of the object being named: defaults or a color definition. Stored
+    /// separately from the name input.
     pub naming_seed: NameSeed,
     /// The one-shot hook `New named color…` arms: the color created at this naming
     /// stage colors this value. Taken by the first create, whatever its outcome;
     /// `begin_naming` clears it, so the dialog's own `n` never fires it. While it is
     /// set, escape and Back at naming pop back to the pick list.
     pub on_created: Option<ColorForValue>,
-    /// The tag of the latest distinct request the Values stage submitted
-    /// (`render::enter_values_stage`); an outcome with any other tag is stale and
-    /// dropped.
-    pub values_tag: u64,
-    /// Suggestions for the Scopes `expression` field, created on the first
-    /// refresh after it opens and dropped when it opens again, so a reopened
-    /// field never shows values fetched under another scope. Read only while
-    /// `expression_entry_open` holds.
-    pub expr: Option<crate::exprcomplete::ExprCompletion>,
     /// The browse rows: the domain's leading rows, then its configuration
     /// objects, ranked for `query`. Keyed by the config revision and, for a
     /// domain with leading rows, the frame generation they were read at.
@@ -3253,17 +3016,6 @@ pub struct ObjectDialogState {
     /// it. A parked state is refreshed when it is revealed. The edit stage's
     /// rows are the draft's and still derive in render.
     pub rows: crate::prepared::Prepared<(u64, u64), String, ObjectRow>,
-}
-
-/// Whether an `expression` field — a saved scope's or a named expression's —
-/// is the open text entry, which is the condition for its suggestions to be
-/// shown and to claim keys.
-pub(crate) fn expression_entry_open(state: &ObjectDialogState) -> bool {
-    matches!(state.domain, Domain::Scopes | Domain::Expressions)
-        && state.draft.as_ref().is_some_and(|d| {
-            matches!(d.text_entry, Some(TextEntry { row: EditRow::Field(i), .. })
-                if d.fields.get(i).is_some_and(|f| f.key == "expression"))
-        })
 }
 
 impl ObjectDialogState {
@@ -3283,13 +3035,10 @@ impl ObjectDialogState {
             draft: None,
             confirm: None,
             confirm_target: None,
-            confirm_detail: None,
             save: None,
             naming_dataset: None,
             naming_seed: NameSeed::Empty,
             on_created: None,
-            values_tag: 0,
-            expr: None,
             rows: crate::prepared::Prepared::new(),
         }
     }
@@ -3337,7 +3086,6 @@ impl ObjectDialogState {
     pub fn disarm(&mut self) {
         self.confirm = None;
         self.confirm_target = None;
-        self.confirm_detail = None;
         self.save = None;
     }
 
@@ -3402,18 +3150,16 @@ impl ObjectDialogState {
     }
 
     /// Mirror changed input text into the active stage's query, reset selection, and
-    /// clear the row-specific notice. Browse/naming use `state.query`; edit, column,
-    /// and values stages use the draft. Never write both query stores, which would
+    /// clear the row-specific notice. Browse/naming use `state.query`; edit and
+    /// column stages use the draft. Never write both query stores, which would
     /// leave an invisible stale filter when returning to browse.
     pub fn set_query(&mut self, query: String) {
-        // Edit, Column, and Values share the draft's query and selection. Keep the
+        // Edit and Column share the draft's query and selection. Keep the
         // stage sets here, in `effective_query`/`effective_selected`, and in their
         // mutable counterparts equal;
         // otherwise the input can paint one filter while bulk changes use another.
-        if matches!(
-            self.stage,
-            Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }
-        ) && let Some(draft) = self.draft.as_mut()
+        if matches!(self.stage, Stage::Edit { .. } | Stage::Column { .. })
+            && let Some(draft) = self.draft.as_mut()
         {
             draft.set_query(query);
             // Query changes reset and re-rank list selection, which may land on an
@@ -3430,16 +3176,14 @@ impl ObjectDialogState {
     }
 
     /// The query the open stage is filtering by — the draft's in
-    /// `Stage::Edit`/`Column`/`Values`, the state's own otherwise. The **read half** of
+    /// `Stage::Edit`/`Column`, the state's own otherwise. The **read half** of
     /// [`Self::set_query`]'s one-way mirror: `dialog::sync_dialog_text` writes the
     /// shared `Input` from this, so a query left sitting in the other stage's slot can
     /// never reach the screen. See [`Self::set_query`]'s doc for why this match must
     /// name exactly the same stages that one does.
     pub fn effective_query(&self) -> &str {
         match (&self.stage, self.draft.as_ref()) {
-            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
-                draft.query.as_str()
-            }
+            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.query.as_str(),
             _ => self.query.as_str(),
         }
     }
@@ -3451,9 +3195,7 @@ impl ObjectDialogState {
     /// by and leave the visible one standing.
     fn effective_query_mut(&mut self) -> &mut String {
         match (&self.stage, self.draft.as_mut()) {
-            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
-                &mut draft.query
-            }
+            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => &mut draft.query,
             _ => &mut self.query,
         }
     }
@@ -3501,17 +3243,15 @@ impl ObjectDialogState {
     }
 
     /// The cursor of the open stage, in the same slot rule as
-    /// [`Self::effective_query`]: the draft's in the edit, column and
-    /// values stages, the state's own otherwise. What the change
+    /// [`Self::effective_query`]: the draft's in the edit and column
+    /// stages, the state's own otherwise. What the change
     /// subscription scrolls to after a keystroke — the top for a filter
     /// (the reset), the edited row for an open plain field, which
     /// `set_query` keeps. See [`Self::set_query`]'s doc for why this
     /// match must name exactly the same stages that one does.
     pub fn effective_selected(&self) -> usize {
         match (&self.stage, self.draft.as_ref()) {
-            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
-                draft.selected
-            }
+            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.selected,
             _ => self.selected,
         }
     }
@@ -3524,9 +3264,7 @@ impl ObjectDialogState {
     /// costs.
     fn effective_selected_mut(&mut self) -> &mut usize {
         match (&self.stage, self.draft.as_mut()) {
-            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
-                &mut draft.selected
-            }
+            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => &mut draft.selected,
             _ => &mut self.selected,
         }
     }
@@ -3603,7 +3341,7 @@ impl ObjectDialogState {
     pub fn has_previous_stage(&self) -> bool {
         matches!(
             self.stage,
-            Stage::Edit { .. } | Stage::Naming | Stage::Column { .. } | Stage::Values { .. }
+            Stage::Edit { .. } | Stage::Naming | Stage::Column { .. }
         )
     }
 }
@@ -4435,12 +4173,30 @@ mod tests {
             choice: None,
             parent_fields: None,
             column: None,
-            values: None,
             column_ctx: None,
             dataset_layer: BTreeMap::new(),
             presentation_set: BTreeMap::new(),
             baseline_presentation_set: BTreeMap::new(),
         }
+    }
+
+    /// A source that changed under unchanged fields is still a change: it is
+    /// dirty and writes the object's doc, since the fields' painted summary
+    /// can read the same for two different sources.
+    #[test]
+    fn a_source_only_change_is_dirty_and_writes_the_doc() {
+        let mut draft = single_field_draft(FieldKind::Bool(false));
+        assert!(!draft.is_dirty());
+        assert!(draft.writes_by_destination().is_empty());
+        draft
+            .source
+            .insert("kept".to_string(), toml::Value::Boolean(true));
+        assert!(draft.is_dirty(), "a source-only change is dirty");
+        assert_eq!(
+            draft.writes_by_destination().get(&Destination::Doc),
+            Some(&Vec::new()),
+            "and it reaches the batch as a Doc write with no field key"
+        );
     }
 
     /// `Number` refused at `max` and had no way down at all, so the first
@@ -5365,7 +5121,6 @@ mod tests {
             included: false,
             presentation: ColumnPresentation::default(),
             kind: None,
-            note: None,
         }
     }
 
@@ -5988,14 +5743,12 @@ mod tests {
                                 included: true,
                                 presentation: ColumnPresentation::default(),
                                 kind: None,
-                                note: None,
                             },
                             ListItem {
                                 name: "delta".into(),
                                 included: true,
                                 presentation: ColumnPresentation::default(),
                                 kind: None,
-                                note: None,
                             },
                         ],
                         available: Some(vec![ListItem {
@@ -6003,7 +5756,6 @@ mod tests {
                             included: false,
                             presentation: ColumnPresentation::default(),
                             kind: None,
-                            note: None,
                         }]),
                     },
                     dest: Destination::Doc,
@@ -6082,14 +5834,12 @@ mod tests {
                             included: true,
                             presentation: ColumnPresentation::default(),
                             kind: None,
-                            note: None,
                         },
                         ListItem {
                             name: "npv".into(),
                             included: true,
                             presentation: ColumnPresentation::default(),
                             kind: None,
-                            note: None,
                         },
                     ],
                     available: None,

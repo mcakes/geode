@@ -231,7 +231,7 @@ pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
 /// Everything wrong with the draft as it stands: the rendered table, parsed back and
 /// read by the very reader that decides what every consumer of a named color sees
 /// (`NamedColours::from_doc`) — on the object being edited alone, wrapped in a document
-/// of its own, for the reason `sources::validate` and `scopes::validate` both give for
+/// of its own, for the reason `sources::validate` gives for
 /// doing the same: validating the whole merged doc would report every other color's
 /// problems against this one.
 pub fn validate(draft: &Draft, _config: &Config) -> Vec<Diagnostic> {

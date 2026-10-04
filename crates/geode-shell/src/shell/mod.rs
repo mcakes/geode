@@ -238,13 +238,8 @@ pub const PICKER_KEY: QueryKey = QueryKey(u64::MAX - 1);
 /// with a real tile's `TileId`-derived key.
 pub const DIAGNOSTICS_KEY: QueryKey = QueryKey(u64::MAX - 2);
 
-/// The Scopes dialog's Values stage submits its `Request::Distinct` under
-/// this key — one lower than `DIAGNOSTICS_KEY`,
-/// same reservation reasoning. `deliver_distinct` routes on it.
-pub const SCOPES_KEY: QueryKey = QueryKey(u64::MAX - 3);
-
-/// The scope expression suggestions' distinct-values requests (both the
-/// frame dialog and the Scopes dialog's `expression` field). Routed by
+/// The scope expression suggestions' distinct-values requests (the frame
+/// expression dialog and the Scope dialog's definition step). Routed by
 /// [`ShellView::deliver_distinct`] to `expr_suggest::deliver`, which drops
 /// any reply whose tag is not its column's latest.
 pub const EXPR_KEY: QueryKey = QueryKey(u64::MAX - 4);
@@ -258,14 +253,7 @@ pub const ACTION_KEY: QueryKey = QueryKey(u64::MAX - 5);
 /// Whether `key` is one of the shell's own reserved query keys. A distinct
 /// outcome under any other key belongs to the tile with that id.
 pub fn is_shell_key(key: QueryKey) -> bool {
-    [
-        PICKER_KEY,
-        DIAGNOSTICS_KEY,
-        SCOPES_KEY,
-        EXPR_KEY,
-        ACTION_KEY,
-    ]
-    .contains(&key)
+    [PICKER_KEY, DIAGNOSTICS_KEY, EXPR_KEY, ACTION_KEY].contains(&key)
 }
 
 /// The bridge's live reference reads (`Request::Reference` at `AsOf::Live`)
@@ -1808,8 +1796,8 @@ impl ShellView {
             .detach();
         }
         // Drain scope saves in the background, just like grouping saves. The
-        // Scopes dialog writes through `config_write` directly; this handles
-        // requests queued on the frame itself.
+        // Scope dialog's save prompt writes through `config_write` directly;
+        // this handles requests queued on the frame itself.
         if let Some((name, scope)) = frame.update(cx, |f, _| f.take_pending_scope_persist())
             && let Some(dir) = self.user_dir.clone()
         {
@@ -2137,18 +2125,13 @@ impl ShellView {
     }
 
     /// Deliver a distinct-value reply from the app bridge. `EXPR_KEY` routes
-    /// to the open expression field's suggestions. `SCOPES_KEY` routes
-    /// to the object dialog's Values stage. `ACTION_KEY` routes to an open
+    /// to the open expression field's suggestions. `ACTION_KEY` routes to an open
     /// action value choice. `PICKER_KEY` replies reach the dimension
     /// picker only if it is open in Values stage and both column and latest
     /// request tag match; any other key is dropped. Stale replies cause no mutation or notification.
     pub fn deliver_distinct(&mut self, outcome: DistinctOutcome, cx: &mut Context<Self>) {
         if outcome.key == EXPR_KEY {
             expr_suggest::deliver(self, outcome, cx);
-            return;
-        }
-        if outcome.key == SCOPES_KEY {
-            objectdialog::deliver_values(self, outcome, cx);
             return;
         }
         if outcome.key == ACTION_KEY {

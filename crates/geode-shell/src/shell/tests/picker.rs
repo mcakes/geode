@@ -449,12 +449,7 @@ fn a_distinct_outcome_under_another_key_never_reaches_the_picker(cx: &mut gpui::
 
 #[test]
 fn shell_keys_are_recognised_and_tile_keys_are_not() {
-    for key in [
-        PICKER_KEY,
-        DIAGNOSTICS_KEY,
-        EXPR_KEY,
-        ACTION_KEY,
-    ] {
+    for key in [PICKER_KEY, DIAGNOSTICS_KEY, EXPR_KEY, ACTION_KEY] {
         assert!(is_shell_key(key), "{key:?}");
     }
     assert!(!is_shell_key(QueryKey(1)));
