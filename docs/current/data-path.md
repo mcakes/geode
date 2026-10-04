@@ -280,8 +280,8 @@ the store within N s (PID n)`, or a lock-file error prefixed with the lock
 file's path as the error. Taking the lock creates the store's directory first
 (best-effort, as `Store::open_with` does), so a fresh machine's first launch
 does not fail on a missing directory; `lease::app_present` on a missing
-directory reports no app and creates nothing. A stop during the wait ends it at the next retry and
-the loop returns without a diagnostic or `ThreadStopped`. The service holds
+directory reports no app and creates nothing. A stop during the wait ends it
+at the next retry and the loop returns without a diagnostic or `ThreadStopped`. The service holds
 the lease as its last field, so it is released only after the writer and
 every reader connection have closed, on shutdown and on an unwind alike: a
 collector that sees the lock free can open the file at once. The app mailbox
@@ -401,8 +401,8 @@ build is never read. A mutation entry checks that a mismatch refuses.
 - The store must live on a local disk. On a file system without locking
   (some network shares), `try_lock` on `<db>.app.lock` fails with an OS error
   such as `ENOTSUP`, and the app's open fails at once with that error after
-  the lock file's path (`<db>.app.lock: …`), where DuckDB's own lock alone
-  once decided. The open is not retried and there is no fallback.
+  the lock file's path (`<db>.app.lock: …`). The open is not retried and
+  there is no fallback.
 - Requests admitted during a wait that then fails (`Held`, another window, a
   lock-file error) are never answered: the request loop takes the
   open-failure path without draining them, as for any failed open, so a tile

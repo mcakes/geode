@@ -1285,8 +1285,8 @@ only when a wait was recorded. Both events share one mailbox key, so a burst
 that ends in `StoreOpened` shows nothing. `StoreOpened` is sent when
 DuckDB's open succeeds, before the DDL and workers run. A wait that fails,
 like a failure after `StoreOpened`, ends in the request loop's
-`ThreadStopped`: `note_thread_stopped` for `geode-data` clears the wait, and the danger stopped segment's tooltip carries the lease
-error as `data service failed to open: …`, followed by `another Geode window
+`ThreadStopped`: `note_thread_stopped` for `geode-data` clears the wait,
+and the danger stopped segment's tooltip carries the lease error as `data service failed to open: …`, followed by `another Geode window
 has this store open` or `the background collector did not release the store
 within 15 s (PID n)` (15 s is `DEFAULT_STORE_DEADLINE`).
 
