@@ -1176,6 +1176,27 @@ fn n_names_a_new_expression_without_applying_it(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// Naming a new expression paints the prompt alone with the text being
+/// named under it: not the lane's scope rows, which it does not join.
+#[gpui::test]
+fn naming_a_new_expression_previews_its_text_not_the_scope(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.open_saved_over_liq();
+    f.keys("j j n");
+    f.type_text("npv < 1");
+    f.keys("enter");
+    assert!(f.painted("scope-dialog-name-field"));
+    assert!(f.painted("scope-dialog-name-preview"));
+    assert!(!f.painted("scope-dialog"), "Current's rows do not paint");
+    assert!(!f.painted("scope-dialog-row-0"));
+    // The save prompt still previews the lane's scope: that is what it saves.
+    f.keys("escape escape");
+    assert_eq!(f.top(), Some(Layer::Current));
+    f.keys("s");
+    assert!(f.painted("scope-dialog-row-0"));
+    assert!(!f.painted("scope-dialog-name-preview"));
+}
+
 /// A name already defined at any layer, or reserved, refuses under the
 /// field with nothing written.
 #[gpui::test]
@@ -1229,25 +1250,82 @@ fn the_named_chip_opens_its_definition_alone(cx: &mut gpui::TestAppContext) {
     assert_eq!(f.named_text("liq").as_deref(), Some("npv > 5"));
 }
 
-/// With no saved definitions at all, `n` opens a new expression, and the
-/// Expressions section's empty row is its pointer route.
-#[gpui::test]
-fn n_and_the_empty_expressions_row_open_a_new_definition(cx: &mut gpui::TestAppContext) {
+/// Saved opened alone over a frame with `scopes` and no saved expressions.
+fn saved_without_expressions(
+    cx: &mut gpui::TestAppContext,
+    keep_scopes: bool,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
     let (shell, mut vcx) = shell_on_liq(cx);
     frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
-        f.replace_saved_scopes(SavedScopes::new());
+        if !keep_scopes {
+            f.replace_saved_scopes(SavedScopes::new());
+        }
         f.replace_named_expressions(geode_core::named::NamedExpressions::default());
         cx.notify();
     });
     vcx.run_until_parked();
     dispatch_action(&shell, "frame::scope_saved", &mut vcx);
     draw(&mut vcx);
+    (shell, vcx)
+}
+
+/// With saved scopes but no expressions, the empty Expressions row is a
+/// cursor stop: `j` reaches it, the footer says what `enter` does there,
+/// and `n` and `enter` both start a new expression. The cursor stays on
+/// the row across the step's visit.
+#[gpui::test]
+fn the_empty_expressions_row_is_a_cursor_stop_for_n_and_enter(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = saved_without_expressions(cx, true);
+    assert_eq!(visible_names(&shell, &vcx), ["asia", "eu"]);
+    assert!(vcx.debug_bounds("scope-saved-hint-new").is_none());
+    vcx.simulate_keystrokes("j j");
+    draw(&mut vcx);
+    assert!(
+        vcx.debug_bounds("scope-saved-hint-new").is_some(),
+        "the footer offers a new expression"
+    );
     vcx.simulate_keystrokes("n");
     draw(&mut vcx);
     assert_eq!(top_layer(&shell, &vcx), definition_step(None));
     vcx.simulate_keystrokes("escape");
     draw(&mut vcx);
     assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(
+        top_layer(&shell, &vcx),
+        definition_step(None),
+        "the cursor stayed on the empty row"
+    );
+}
+
+/// The empty Scopes row is a cursor stop too; `enter` and `n` there give
+/// the scope rows' guidance.
+#[gpui::test]
+fn the_empty_scopes_row_refuses_with_the_way_to_save_one(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = saved_without_expressions(cx, false);
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(
+        error(&shell, &vcx).as_deref(),
+        Some("narrow the current scope, then save it (s)")
+    );
+    vcx.simulate_keystrokes("n");
+    draw(&mut vcx);
+    assert_eq!(
+        error(&shell, &vcx).as_deref(),
+        Some("narrow the current scope, then save it (s)")
+    );
+    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
+    vcx.simulate_keystrokes("j n");
+    draw(&mut vcx);
+    assert_eq!(top_layer(&shell, &vcx), definition_step(None));
+}
+
+/// The Expressions section's empty row is also the pointer route of `n`.
+#[gpui::test]
+fn n_and_the_empty_expressions_row_open_a_new_definition(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = saved_without_expressions(cx, false);
     let empty = vcx
         .debug_bounds("scope-saved-empty-expressions")
         .expect("the empty row paints");

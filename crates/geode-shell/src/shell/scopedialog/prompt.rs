@@ -10,7 +10,7 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, Window, div};
+use gpui::{AnyElement, App, Context, Entity, SharedString, Window, div};
 use gpui_component::{ActiveTheme as _, v_flex};
 
 use crate::footer::{Hint, HintRow};
@@ -59,6 +59,93 @@ impl Purpose {
             Purpose::Copy { .. } => "copy",
         }
     }
+
+    /// Each prompt previews what it names. The save prompt names the lane's
+    /// scope, so it paints over Current's rows; a new expression and a copy
+    /// name something else (the expression joins no scope), so they paint
+    /// alone with their own preview line.
+    fn previews_current(&self) -> bool {
+        matches!(self, Purpose::SaveScope)
+    }
+
+    /// The preview line of a prompt painted alone.
+    fn preview(&self) -> Option<SharedString> {
+        match self {
+            Purpose::SaveScope => None,
+            Purpose::NameExpression { text } => Some(text.clone().into()),
+            Purpose::Copy { from } => Some(
+                match from {
+                    SavedId::Scope(name) | SavedId::Expression(name) => name.clone(),
+                }
+                .into(),
+            ),
+        }
+    }
+}
+
+/// Whether a name prompt on top paints alone rather than over Current's
+/// rows (see [`Purpose::previews_current`]).
+pub(crate) fn paints_alone(state: &ScopeDialogState) -> bool {
+    in_name_prompt(state)
+        && state
+            .prompt
+            .as_ref()
+            .is_some_and(|p| !p.purpose.previews_current())
+}
+
+/// A prompt painted alone: the field, what it names as a mono line, the
+/// refusal, and the footer (or the question in its place).
+pub(super) fn build_alone(
+    shell: &ShellView,
+    state: &ScopeDialogState,
+    entity: &Entity<ShellView>,
+    cx: &mut App,
+) -> AnyElement {
+    let Some(prompt) = state.prompt.as_ref() else {
+        return div().into_any_element();
+    };
+    let theme = cx.theme();
+    let (muted, danger, border) = (theme.muted_foreground, theme.danger, theme.border);
+    let mut body = v_flex()
+        .gap_2()
+        .w(crate::shell::scale::design(super::view::WIDTH))
+        .children(field(shell, state, cx));
+    if let Some(preview) = prompt.purpose.preview() {
+        body = body.child(
+            div()
+                .px_2()
+                .text_sm()
+                .font_family(crate::fonts::MONO)
+                .text_color(muted)
+                .truncate()
+                .debug_selector(|| "scope-dialog-name-preview".to_string())
+                .child(preview),
+        );
+    }
+    if let Some(error) = prompt.error.clone() {
+        body = body.child(
+            div()
+                .px_2()
+                .text_xs()
+                .text_color(danger)
+                .debug_selector(|| "scope-dialog-error".to_string())
+                .child(error),
+        );
+    }
+    let footer = match pending_footer(state, entity, cx) {
+        Some(question) => question,
+        None => dialog::hint_rows(&hints(state)),
+    };
+    body.child(
+        v_flex()
+            .w_full()
+            .gap_1()
+            .pt_2()
+            .border_t_1()
+            .border_color(border)
+            .child(footer),
+    )
+    .into_any_element()
 }
 
 /// A name being typed, carried while the top layer is its step.

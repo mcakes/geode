@@ -51,9 +51,26 @@ pub(crate) const EDIT_SCOPE: &str = "load it, change it, then save over it (s)";
 pub(crate) const NEW_SCOPE: &str = "narrow the current scope, then save it (s)";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Section {
+pub(crate) enum Section {
     Scopes,
     Expressions,
+}
+
+/// Where the cursor can rest: a visible row (its index into `rows`), or a
+/// section's empty row. The empty rows are stops so that `n` and `enter`
+/// reach a first expression from the keyboard, as a press on the row does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stop {
+    Row(usize),
+    Empty(Section),
+}
+
+/// A stop's identity across a re-derive: a row by its definition, an empty
+/// row by its section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StopId {
+    Row(SavedId),
+    Empty(Section),
 }
 
 fn section_of(id: &SavedId) -> Section {
@@ -104,13 +121,15 @@ impl SavedDisplay {
 }
 
 /// The Saved screen's state inside the Scope dialog. `visible` indexes
-/// `rows` in row order; `cursor` indexes `visible`.
+/// `rows` in row order; `stops` is what paints, section by section (the
+/// visible rows, or an empty section's row); `cursor` indexes `stops`.
 pub(crate) struct SavedScreen {
     pub rows: Vec<SavedRow>,
     pub visible: Vec<usize>,
+    pub stops: Vec<Stop>,
     pub cursor: usize,
-    /// The cursor's row, so a re-derive or a re-filter keeps it there.
-    pub cursor_id: Option<SavedId>,
+    /// The cursor's stop, so a re-derive or a re-filter keeps it there.
+    pub cursor_id: Option<StopId>,
     pub mode: DialogMode,
     /// The filter: the source of truth `sync_dialog_text` mirrors.
     pub query: String,
@@ -129,6 +148,7 @@ impl SavedScreen {
         SavedScreen {
             rows: Vec::new(),
             visible: Vec::new(),
+            stops: Vec::new(),
             cursor: 0,
             cursor_id: None,
             mode: DialogMode::Normal,
@@ -186,21 +206,56 @@ impl SavedScreen {
         let mut matched = crate::listfilter::rank(&self.texts, &self.query);
         matched.sort_by_key(|m| m.row);
         self.visible = matched.into_iter().map(|m| m.row).collect();
-        let kept = self
-            .cursor_id
-            .as_ref()
-            .and_then(|id| self.visible.iter().position(|&i| &self.rows[i].id == id));
-        self.cursor = kept.unwrap_or_else(|| self.cursor.min(self.visible.len().saturating_sub(1)));
-        self.cursor_id = self.cursor_row().map(|r| r.id.clone());
+        // A section emptied by the filter has no stop; one with no
+        // definitions at all has its empty row, a stop only while no filter
+        // narrows the list: a filter that matches nothing leaves `enter`
+        // nothing to act on.
+        let mut stops = Vec::with_capacity(self.visible.len() + 2);
+        for section in [Section::Scopes, Section::Expressions] {
+            if self.section_is_empty(section) {
+                if self.query.is_empty() {
+                    stops.push(Stop::Empty(section));
+                }
+            } else {
+                stops.extend(
+                    self.visible
+                        .iter()
+                        .filter(|&&i| section_of(&self.rows[i].id) == section)
+                        .map(|&i| Stop::Row(i)),
+                );
+            }
+        }
+        self.stops = stops;
+        let kept = self.cursor_id.as_ref().and_then(|id| {
+            self.stops
+                .iter()
+                .position(|&stop| &self.stop_id(stop) == id)
+        });
+        self.cursor = kept.unwrap_or_else(|| self.cursor.min(self.stops.len().saturating_sub(1)));
+        self.cursor_id = self.cursor_stop().map(|stop| self.stop_id(stop));
+    }
+
+    fn stop_id(&self, stop: Stop) -> StopId {
+        match stop {
+            Stop::Row(i) => StopId::Row(self.rows[i].id.clone()),
+            Stop::Empty(section) => StopId::Empty(section),
+        }
+    }
+
+    pub(crate) fn cursor_stop(&self) -> Option<Stop> {
+        self.stops.get(self.cursor).copied()
     }
 
     pub(crate) fn cursor_row(&self) -> Option<&SavedRow> {
-        self.visible.get(self.cursor).map(|&i| &self.rows[i])
+        match self.cursor_stop()? {
+            Stop::Row(i) => Some(&self.rows[i]),
+            Stop::Empty(_) => None,
+        }
     }
 
     fn move_cursor(&mut self, cmd: crate::vimnav::NavCommand) {
-        self.cursor = crate::vimnav::apply(self.cursor, self.visible.len(), cmd);
-        self.cursor_id = self.cursor_row().map(|r| r.id.clone());
+        self.cursor = crate::vimnav::apply(self.cursor, self.stops.len(), cmd);
+        self.cursor_id = self.cursor_stop().map(|stop| self.stop_id(stop));
     }
 
     fn section_is_empty(&self, section: Section) -> bool {
@@ -345,8 +400,12 @@ fn normal_key(
     if ks.mods.is_chord() || ks.mods.shift {
         return Normal::Declined;
     }
+    let stop = state.saved.cursor_stop();
     let cursor = state.saved.cursor_row().map(|r| r.id.clone());
-    let on_scope = matches!(cursor, Some(SavedId::Scope(_)));
+    // The empty Scopes row stands for the scopes section: its verbs give
+    // the scope rows' guidance.
+    let on_scope =
+        matches!(cursor, Some(SavedId::Scope(_))) || stop == Some(Stop::Empty(Section::Scopes));
     match ks.key.as_str() {
         "j" | "down" => state.saved.move_cursor(crate::vimnav::NavCommand::Move(1)),
         "k" | "up" => state.saved.move_cursor(crate::vimnav::NavCommand::Move(-1)),
@@ -366,6 +425,15 @@ fn normal_key(
             return Normal::Done;
         }
         "n" => {
+            super::definition::push(shell, None, window, cx);
+            return Normal::Done;
+        }
+        // An empty row has nothing to load or toggle: `enter` there is the
+        // section's way to make a first one.
+        "enter" if stop == Some(Stop::Empty(Section::Scopes)) => {
+            state.error = Some(NEW_SCOPE.into());
+        }
+        "enter" if stop == Some(Stop::Empty(Section::Expressions)) => {
             super::definition::push(shell, None, window, cx);
             return Normal::Done;
         }
@@ -462,7 +530,10 @@ fn press_row(
         return;
     }
     state.saved.cursor = at;
-    state.saved.cursor_id = state.saved.cursor_row().map(|r| r.id.clone());
+    state.saved.cursor_id = state
+        .saved
+        .cursor_stop()
+        .map(|stop| state.saved.stop_id(stop));
     state.error = None;
     // Exactly 2, so a triple-click does not commit twice.
     if click_count == 2 {
@@ -533,6 +604,7 @@ pub(crate) fn build(
         .w_full()
         .gap_0p5()
         .debug_selector(|| "scope-saved".to_string());
+    let mut row_i = 0usize;
     for section in [Section::Scopes, Section::Expressions] {
         let names = section_names(section);
         let slug = names.slug;
@@ -555,6 +627,7 @@ pub(crate) fn build(
                 ),
         );
         if screen.section_is_empty(section) {
+            let highlighted = screen.cursor_stop() == Some(Stop::Empty(section));
             let empty = div()
                 .px_2()
                 .h(scale::design(ROW_HEIGHT))
@@ -565,27 +638,40 @@ pub(crate) fn build(
                 .text_color(muted)
                 .debug_selector(move || format!("scope-saved-empty-{slug}"))
                 .child(names.empty);
-            // No cursor rests on an empty row, so a press is the pointer
-            // route of `n` into a new expression.
+            // A press on the Expressions one starts a new expression,
+            // as `n` and `enter` there do; the Scopes one is a cursor
+            // stop only.
             list = if section == Section::Expressions {
                 let click = entity.clone();
-                list.child(
-                    empty
-                        .id("scope-saved-empty-expressions")
-                        .pointer_states(empty_states)
-                        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                            click.update(cx, |shell, cx| press_new_expression(shell, window, cx));
-                        }),
-                )
+                let el = empty.id("scope-saved-empty-expressions").on_mouse_down(
+                    MouseButton::Left,
+                    move |_event, window, cx| {
+                        click.update(cx, |shell, cx| press_new_expression(shell, window, cx));
+                    },
+                );
+                list.child(if highlighted {
+                    crate::shell::listrow::paint_row(el, paint, true)
+                } else {
+                    el.pointer_states(empty_states)
+                })
             } else {
-                list.child(empty)
+                let el = empty.id("scope-saved-empty-scopes");
+                list.child(if highlighted {
+                    crate::shell::listrow::paint_row(el, paint, true)
+                } else {
+                    el
+                })
             };
             continue;
         }
-        for (i, &row_ix) in screen.visible.iter().enumerate() {
-            if section_of(&screen.rows[row_ix].id) != section {
-                continue;
-            }
+        for (s, &stop) in screen.stops.iter().enumerate() {
+            let row_ix = match stop {
+                Stop::Row(row_ix) if section_of(&screen.rows[row_ix].id) == section => row_ix,
+                _ => continue,
+            };
+            // Selectors index `visible`: rows are stopped in visible order.
+            let i = row_i;
+            row_i += 1;
             let shown = &screen.display[row_ix];
             let el = h_flex()
                 .id(("scope-saved-row", i))
@@ -598,7 +684,7 @@ pub(crate) fn build(
                 .text_sm()
                 .rounded(radius)
                 .debug_selector(move || format!("scope-saved-row-{i}"));
-            let mut el = crate::shell::listrow::paint_row(el, paint, i == screen.cursor);
+            let mut el = crate::shell::listrow::paint_row(el, paint, s == screen.cursor);
             let detail_color = if shown.broken { danger } else { muted };
             el = el
                 .child(
@@ -644,7 +730,7 @@ pub(crate) fn build(
             let click = entity.clone();
             el = el.on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 click.update(cx, |shell, cx| {
-                    press_row(shell, i, event.click_count, window, cx)
+                    press_row(shell, s, event.click_count, window, cx)
                 });
             });
             list = list.child(el);
@@ -706,9 +792,16 @@ fn hints(state: &ScopeDialogState) -> Vec<Hint> {
     } else {
         "close"
     };
+    // `enter` says what it does on the row under the cursor.
+    let enter = match state.saved.cursor_stop() {
+        Some(Stop::Empty(Section::Expressions)) => {
+            Hint::new(HintRow::Go, &["enter"], "new expression").selector("scope-saved-hint-new")
+        }
+        _ => Hint::new(HintRow::Go, &["enter"], "load / add-remove"),
+    };
     vec![
         Hint::new(HintRow::Move, &["j", "k"], "row"),
-        Hint::new(HintRow::Go, &["enter"], "load / add-remove"),
+        enter,
         Hint::new(HintRow::Edit, &["e"], "edit expression"),
         Hint::new(HintRow::Edit, &["n"], "new expression"),
         Hint::new(HintRow::Go, &["/"], "filter"),

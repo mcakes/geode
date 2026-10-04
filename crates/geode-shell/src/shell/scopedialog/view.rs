@@ -642,7 +642,7 @@ fn enter_text_step(shell: &mut ShellView, window: &mut Window, cx: &mut Context<
 
 /// Whether Current's rows and controls take the pointer: only while Current
 /// itself is on top with no question up. Under a step drawn on this body
-/// (the text step, a name prompt) they are its preview.
+/// (the text step, the save prompt) they are its preview.
 fn takes_pointer(state: &ScopeDialogState) -> bool {
     matches!(state.layers.top(), Layer::Current) && state.pending.is_none()
 }
@@ -796,6 +796,11 @@ fn build(
     }
     if super::definition::in_definition(state) {
         return super::definition::build(shell, state, entity, cx);
+    }
+    // Only the save prompt previews the lane's scope, which is what it
+    // saves; the other name prompts preview what they name, alone.
+    if super::prompt::paints_alone(state) {
+        return super::prompt::build_alone(shell, state, entity, cx);
     }
     let theme = cx.theme();
     let paint = crate::shell::listrow::row_paint(theme);
@@ -951,7 +956,7 @@ fn build(
             el = el.on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 click.update(cx, |shell, cx| {
                     // The rows painted under a step drawn here (the text
-                    // step, a name prompt) are its preview, not controls: a
+                    // step, the save prompt) are its preview, not controls: a
                     // press there would move Current's cursor under the
                     // field, and a double-click would open a row's step
                     // over the typing.

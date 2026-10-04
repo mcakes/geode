@@ -18935,8 +18935,8 @@ run_mutation "scope dialog: a vanished definition says so" \
 # The empty Expressions row is the pointer route of n.
 run_mutation "scope dialog: the empty Expressions row opens a new definition" \
   crates/geode-shell/src/shell/scopedialog/saved_view.rs \
-  '                            click.update(cx, |shell, cx| press_new_expression(shell, window, cx));' \
-  '                            let _ = (&click, &window, &cx);' \
+  '                        click.update(cx, |shell, cx| press_new_expression(shell, window, cx));' \
+  '                        let _ = (&click, &window, &cx);' \
   geode-shell \
   n_and_the_empty_expressions_row_open_a_new_definition
 
@@ -18947,6 +18947,63 @@ run_mutation "scope dialog: a definition fork is announced" \
   '        let _ = fork;' \
   geode-shell \
   e_on_an_expression_edits_its_definition_with_a_used_by_note
+
+# An empty section's row is a cursor stop: the keyboard route to a first
+# expression when saved scopes hold the cursor.
+run_mutation "scope dialog: an empty section's row is a cursor stop" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '                    stops.push(Stop::Empty(section));' \
+  '                    let _ = section;' \
+  geode-shell \
+  the_empty_expressions_row_is_a_cursor_stop_for_n_and_enter
+
+# enter on the empty Expressions row starts a new expression.
+run_mutation "scope dialog: enter on the empty Expressions row starts one" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        "enter" if stop == Some(Stop::Empty(Section::Expressions)) => {' \
+  '        "enter" if false => {' \
+  geode-shell \
+  the_empty_expressions_row_is_a_cursor_stop_for_n_and_enter
+
+# enter on the empty Scopes row gives the scope rows' guidance.
+run_mutation "scope dialog: enter on the empty Scopes row refuses" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        "enter" if stop == Some(Stop::Empty(Section::Scopes)) => {' \
+  '        "enter" if false => {' \
+  geode-shell \
+  the_empty_scopes_row_refuses_with_the_way_to_save_one
+
+# The footer says enter starts a new expression on the empty row.
+run_mutation "scope dialog: the empty Expressions row's enter hint" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        Some(Stop::Empty(Section::Expressions)) => {' \
+  '        Some(Stop::Empty(Section::Expressions)) if false => {' \
+  geode-shell \
+  the_empty_expressions_row_is_a_cursor_stop_for_n_and_enter
+
+# Under a filter an empty row is no stop: enter with no match does nothing.
+run_mutation "scope dialog: a filtered list stops on no empty row" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '                if self.query.is_empty() {' \
+  '                if true {' \
+  geode-shell \
+  enter_with_no_match_does_nothing_and_escape_closes
+
+# A new expression's name prompt paints alone, previewing its text.
+run_mutation "scope dialog: naming an expression paints alone" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    if super::prompt::paints_alone(state) {' \
+  '    if false {' \
+  geode-shell \
+  naming_a_new_expression_previews_its_text_not_the_scope
+
+# Only the save prompt previews the lane's scope.
+run_mutation "scope dialog: only the save prompt previews the scope" \
+  crates/geode-shell/src/shell/scopedialog/prompt.rs \
+  '        matches!(self, Purpose::SaveScope)' \
+  '        true' \
+  geode-shell \
+  naming_a_new_expression_previews_its_text_not_the_scope
 
 # ---- Scope dialog: lane provenance, rows, saved rows and layers ----
 
