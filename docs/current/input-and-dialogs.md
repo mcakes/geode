@@ -289,10 +289,14 @@ names the tile it acts on, since the palette lists every kind's actions
 together. The Classifications tile's field verbs read `Classification:
 Confirm field` and `Classification: Cancel field` (`enter`/`escape` in its
 label editor, prompt and menus), not a bare `Commit`. Its configuration
-verbs, `Classification: New…`, `Rename…`, `Delete` and `Revert…`, have no
-default chord: the palette and the tile's `⋯` menu reach them, and the menu
-also opens on a right press over a grid row, at the pointer, with the cursor
-moved to that row.
+verbs, `Classification: New…`, `Rename…`, `Delete` and `Revert…`, and its
+file verbs, `Export CSV…`, `Export CSV with unclassified…` and `Import
+CSV…`, have no default chord: the palette and the tile's `⋯` menu reach
+them, and the menu also opens on a right press over a grid row, at the
+pointer, with the cursor moved to that row. The file verbs open the
+platform's save or open dialog, which is modeless and keyboard-driven by
+the platform; the tile awaits its answer without blocking and binds it to
+the classification shown when the verb ran.
 
 Binding badges are indicative: the palette takes the first compiled binding
 for an action without resolving current contexts or later shadows. They are

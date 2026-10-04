@@ -36469,6 +36469,34 @@ run_mutation "classifications: the rejected notice is bounded" \
   geode-classifications \
   the_rejected_notice_lists_twenty_then_counts
 
+# A whole-file refusal (a header for another classification) must reach
+# the trader, or the import looks as if it never happened.
+run_mutation "classifications: an import refusal reaches the notice" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '            Err(why) => return self.refuse(format!("import refused: {why}"), cx),' \
+  '            Err(_) => return,' \
+  geode-classifications \
+  a_wrong_header_is_refused_naming_both
+
+# Export writes what the tile shows: a label edit not yet reloaded is in
+# the file, not the configuration's older object.
+run_mutation "classifications: export writes the current object" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        let dim = self.history.current(&config_dim);
+        let observed = all.then_some(self.observed.as_slice());' \
+  '        let dim = &config_dim;
+        let observed = all.then_some(self.observed.as_slice());' \
+  geode-classifications \
+  export_writes_an_edit_not_yet_reloaded
+
+# The read limit is what keeps a huge file out of memory and off the plan.
+run_mutation "classifications: an import reads with the size limit" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                max_bytes: MAX_IMPORT_BYTES,' \
+  '                max_bytes: u64::MAX,' \
+  geode-classifications \
+  import_reads_the_chosen_file_with_the_size_limit
+
 # A door tile shows its edit before the write: a failed write must reach it,
 # or its labels look saved.
 run_mutation "config door: a failed write refuses its origin tiles" \

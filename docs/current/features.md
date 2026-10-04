@@ -1443,6 +1443,68 @@ shown before. A verb's notices last until the next verb or another
 classification is shown; the session restore's until the trader's first key
 or press in the tile.
 
+**Export CSV.** `Classification: Export CSV…` and `Classification: Export
+CSV with unclassified…` are registered actions, in the palette and at the
+foot of the `⋯` menu, with no default chord. Each opens the platform's save
+dialog on `<name>.csv` in the folder of the last file this tile exported or
+imported (the home folder before that); a cancelled dialog does nothing.
+The file is `<from>,<name>` then one row per mapped source, sorted by
+source, written as the tile shows the classification when the dialog is
+answered, so a label edit not yet reloaded is in it. With unclassified, every
+observed value the classification does not map gets a row with a blank
+label: the "fill this in and send it back" file. That variant is refused
+(`values not loaded yet` / `values not current — shift+r reloads them`)
+until the values are loaded and current, since stale or missing values
+would leave rows out of a file that looks complete. The dialog is modeless,
+so the export is bound to the classification it was asked for: another
+classification shown by the time it is answered writes nothing (`<name> is
+no longer shown — nothing exported`). The write goes through the data
+service's file worker ([text files](data-path.md#text-files)), atomically;
+success says `exported <n> rows to <file>`, a failure `export failed: …`,
+and a busy service `… — try again`.
+
+**Import CSV.** `Classification: Import CSV…` (palette and `⋯`, no chord)
+opens the platform's open dialog for one file and reads it through the file
+worker with a 10 MiB limit (`MAX_IMPORT_BYTES`); more than 100,000 data rows
+is refused too. The file must be UTF-8: Excel's plain "CSV" is not, and is
+refused as `import failed: <file> is not UTF-8 text` — save as "CSV UTF-8"
+instead (a leading BOM is fine). The header must be exactly `<from>,<name>`
+after trimming, case-sensitive, else the whole file is refused naming both
+(`import refused: file is underlying_ref,sector; this classification is
+underlying_ref,region`); a quoted header field is taken as written, so a
+quoted padded header is refused. Unquoted fields are trimmed; a quoted
+source keeps its spaces, so a padded source export quoted lands back on its
+own key. The file merges: each row sets its source's label, a blank label
+clears it, and sources the file does not name keep theirs. Bare-comma rows
+are skipped; a row without two fields, with an empty source, or naming a
+source twice with different labels (every such line) is rejected and the
+rest still plan. Planning runs off the UI thread over the object shown when
+the file was read, then the confirm bar asks `import <file>: <a> changed,
+<b> new, <c> cleared, <d> rejected — y applies` (the rejected count only
+when there are any). Rejected rows show beside it as one warning, `rejected:
+line <n>: <reason>; …`, listing the first 20 then `and <k> more`. A file
+that changes nothing says `import: nothing to change` and asks nothing.
+`n` says `<file> not imported`.
+
+`y` applies the plan over the object shown then, as one write through the
+config door and one undo step (`u` reverts the whole import), and says
+`imported <n> rows into <name>`. Only the rows the plan counted are
+applied: a label written meanwhile on a row the file does not name stays,
+a row the plan found already equal is not re-asserted, and a counted row
+that now already says what the file says is skipped, so `<n>` can differ
+from the question's counts. The import passes the label verbs' gates: a
+classification over a column no classification may map is never written
+(`not saved: …`), and one being reverted is refused. Each step is bound to
+the classification the import began on: a dialog, read, plan or `y` that
+arrives after another classification is shown applies nothing (`import of
+<file> was for <name> — not applied`), as does `y` after a reload changed
+the source column (`… was for <from> values — not applied`), since the
+plan's sources are the old column's values. Only the latest file operation
+is answered, so a newer import or export supersedes an older plan. A plan
+landing while the label editor, a name prompt or another question is open
+is dropped with `import of <file> not shown: finish the open edit and import
+again`, rather than take the keyboard from work in hand.
+
 **Session.** The table saves the classification's name, the sort and the
 cursor's source value. An unreadable key is dropped with a notice and the
 rest kept; a restored cursor waits for the values that hold its row.
@@ -1456,6 +1518,12 @@ Known limitations:
   keys.
 - A desk or builtin classification cannot be deleted from the tile, and
   classifications do not chain.
+- The import's open dialog starts where the platform puts it; only the save
+  dialog opens in the last-used folder.
+- An import plan overtaken by a newer export or import is dropped without a
+  notice.
+- Applying an import at `y` runs on the UI thread (see
+  [performance](performance.md#known-gaps)); planning does not.
 
 See the [crate guide](../../crates/geode-classifications/README.md) for the
 module map.

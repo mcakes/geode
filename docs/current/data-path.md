@@ -614,11 +614,14 @@ LHUs.
 
 ## Text files
 
-A tile that imports or exports a file (classification CSVs) asks the data
-service through `DataHandle::text_file` rather than touching the filesystem:
-modules perform no I/O, and a slow or network path must stall neither the UI
-thread nor the request loop. The request loop hands each request to one
-supervised worker, `geode-files`, which runs them in submission order, each
+A tile that imports or exports a file asks the data service through
+`DataHandle::text_file` rather than touching the filesystem: modules perform
+no I/O, and a slow or network path must stall neither the UI thread nor the
+request loop. The Classifications tile is its consumer today: Export CSV
+writes and Import CSV reads under the tile's key and a fresh tag, and the
+tile acts only on its latest operation's answer (see
+[features](features.md#classifications)). The request loop hands each
+request to one supervised worker, `geode-files`, which runs them in submission order, each
 inside its own panic boundary. Every admitted request is answered exactly
 once with `DataEvent::TextFile`, keyed by the asking tile's key and its tag
 (see [requests and UI delivery](request-delivery.md)).
