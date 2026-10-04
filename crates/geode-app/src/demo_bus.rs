@@ -345,6 +345,27 @@ mod tests {
     use std::collections::HashSet;
     use std::time::Instant;
 
+    /// The first event `pick` accepts, within one overall deadline. A
+    /// per-receive timeout alone never fires while unrelated events (the
+    /// demo layer's polled sources report health every few seconds) keep
+    /// arriving, so a lost event would hang the test instead of failing it.
+    fn next_event<T>(
+        rx: &std::sync::mpsc::Receiver<geode_data::DataEvent>,
+        what: &str,
+        mut pick: impl FnMut(geode_data::DataEvent) -> Option<T>,
+    ) -> T {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let event = rx
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("{what} arrives within 15 s"));
+            if let Some(found) = pick(event) {
+                return found;
+            }
+        }
+    }
+
     fn cvi_producer(underlyings: Vec<String>, anchor: NaiveDate) -> Producer {
         let mut generator = CviGenerator::new(42, underlyings.clone(), anchor);
         Producer {
@@ -719,23 +740,18 @@ mod tests {
             rows: uploaded,
         });
 
-        let timeout = Duration::from_secs(15);
-        let upload_result = loop {
-            match rx.recv_timeout(timeout).expect("an upload outcome arrives") {
-                DataEvent::Upload(outcome) => break outcome.result,
-                _ => continue,
-            }
-        };
+        let upload_result = next_event(&rx, "an upload outcome", |e| match e {
+            DataEvent::Upload(outcome) => Some(outcome.result),
+            _ => None,
+        });
         assert_eq!(upload_result, Ok(()));
 
-        let (dataset, batch) = loop {
-            match rx.recv_timeout(timeout).expect("a publish arrives") {
-                DataEvent::Published { dataset, batch, .. } if dataset == "dividend_schedule" => {
-                    break (dataset, batch);
-                }
-                _ => continue,
+        let (dataset, batch) = next_event(&rx, "a dividend publish", |e| match e {
+            DataEvent::Published { dataset, batch, .. } if dataset == "dividend_schedule" => {
+                Some((dataset, batch))
             }
-        };
+            _ => None,
+        });
         assert_eq!(
             (dataset.as_str(), batch.as_str()),
             ("dividend_schedule", "XYZ")
@@ -751,14 +767,12 @@ mod tests {
                 as_of: AsOf::Live,
             })
             .expect("the document request is admitted");
-        let snap = loop {
-            match rx.recv_timeout(timeout).expect("a query outcome arrives") {
-                DataEvent::Query(outcome) if outcome.key == QueryKey(2) => {
-                    break outcome.snapshot.expect("the document reads back");
-                }
-                _ => continue,
+        let snap = next_event(&rx, "a query outcome", |e| match e {
+            DataEvent::Query(outcome) if outcome.key == QueryKey(2) => {
+                Some(outcome.snapshot.expect("the document reads back"))
             }
-        };
+            _ => None,
+        });
 
         let expected_ids = geode_documents::dividend::mint_ids(&[ex1, ex1, ex2]);
         assert!(
@@ -826,7 +840,6 @@ mod tests {
         .expect("the demo layer opens");
         let (service, rx) = DataService::open_channel(setup.config).expect("the store opens");
 
-        let timeout = Duration::from_secs(15);
         // Upload, wait for its `Ok` and the publish it echoes as, then
         // read the document back through an ordinary document request.
         let round_trip = |service: &DataService,
@@ -842,15 +855,16 @@ mod tests {
                 rows,
             });
             let (mut ok, mut published) = (None, false);
-            while ok.is_none() || !published {
-                match rx.recv_timeout(timeout).expect("an event arrives") {
+            next_event(rx, "the upload outcome and its echo", |e| {
+                match e {
                     DataEvent::Upload(o) if o.tag == tag => ok = Some(o.result),
                     DataEvent::Published { dataset, .. } if dataset == "dividend_schedule" => {
                         published = true
                     }
                     _ => {}
                 }
-            }
+                (ok.is_some() && published).then_some(())
+            });
             assert_eq!(ok, Some(Ok(())));
             service
                 .document(&DocumentParams {
@@ -862,14 +876,12 @@ mod tests {
                     as_of: AsOf::Live,
                 })
                 .expect("the document request is admitted");
-            loop {
-                match rx.recv_timeout(timeout).expect("a query outcome arrives") {
-                    DataEvent::Query(o) if o.key == QueryKey(2) && o.tag == tag => {
-                        break o.snapshot.expect("the document reads back");
-                    }
-                    _ => continue,
+            next_event(rx, "a query outcome", |e| match e {
+                DataEvent::Query(o) if o.key == QueryKey(2) && o.tag == tag => {
+                    Some(o.snapshot.expect("the document reads back"))
                 }
-            }
+                _ => None,
+            })
         };
 
         let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
@@ -988,14 +1000,14 @@ mod tests {
             DataService::open_channel(setup.config).expect("the store opens")
         };
         let timeout = Duration::from_secs(15);
-        let wait_published = |rx: &Receiver<DataEvent>| loop {
-            match rx.recv_timeout(timeout).expect("a publish arrives") {
+        let wait_published = |rx: &Receiver<DataEvent>| {
+            next_event(rx, "a dividend publish", |e| match e {
                 DataEvent::Published { dataset, batch, .. } if dataset == "dividend_schedule" => {
                     assert_eq!(batch, "SPX");
-                    break;
+                    Some(())
                 }
-                _ => continue,
-            }
+                _ => None,
+            })
         };
         let live_amounts = |service: &DataService, rx: &Receiver<DataEvent>, tag: u64| {
             service
@@ -1008,14 +1020,12 @@ mod tests {
                     as_of: AsOf::Live,
                 })
                 .expect("the document request is admitted");
-            let snap = loop {
-                match rx.recv_timeout(timeout).expect("a query outcome arrives") {
-                    DataEvent::Query(o) if o.key == QueryKey(2) && o.tag == tag => {
-                        break o.snapshot.expect("the document reads back");
-                    }
-                    _ => continue,
+            let snap = next_event(rx, "a query outcome", |e| match e {
+                DataEvent::Query(o) if o.key == QueryKey(2) && o.tag == tag => {
+                    Some(o.snapshot.expect("the document reads back"))
                 }
-            };
+                _ => None,
+            });
             let mut amounts: Vec<f64> = (0..snap.rows())
                 .map(|i| snap.f64_value("amount", i).expect("an amount"))
                 .collect();
