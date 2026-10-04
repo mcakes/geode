@@ -2,9 +2,10 @@
 //!
 //! [`install`] sets up process-wide tracing: a reloadable level filter, the
 //! stderr and in-memory ring layers, and a daily file under `<user>/logs`
-//! named by the caller's prefix (`geode` for the app, `collector` for the
-//! background collector). Both processes share the logs directory, so each
-//! trims only its own prefix ([`trim_log_files`]).
+//! named by the caller's prefix (`geode` for the app, `collector` or
+//! `collector-demo-<rows>` for the background collector). The processes
+//! share the logs directory, so each trims only its own prefix
+//! ([`trim_log_files`]), at startup and at each daily rotation.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,8 +40,9 @@ pub struct Logging {
 /// Daily files live under `<user>/logs/<prefix>.YYYY-MM-DD.log`; their date
 /// and rotation use UTC, independently of the configured display clock.
 /// Startup trims files with this prefix to seven before opening the current
-/// log; another prefix's files in the same directory are left alone.
-/// Rotation does not prune files during the run.
+/// log, and the first write of each new UTC day trims them again, so a
+/// process running for weeks keeps seven; another prefix's files in the
+/// same directory are left alone.
 ///
 /// Retain the returned [`Logging::guard`] for the process lifetime and drop
 /// it before explicit process exits. Dropping it stops the file writer;
@@ -55,16 +57,19 @@ pub fn install(prefix: &str, stderr: bool) -> Logging {
     let file_layer = user.as_ref().and_then(|dir| {
         let logs = dir.join("logs");
         std::fs::create_dir_all(&logs).ok()?;
-        // The seven-file cap, applied once at startup — `tracing_appender`
-        // rotates going forward but never prunes files from before this
-        // run.
-        trim_log_files(&logs, prefix, 7);
+        // The seven-file cap at startup, then at each rotation (below).
+        // `tracing_appender`'s own `max_log_files` is not used: it matches
+        // any file starting with the prefix and ending in `log`, oldest
+        // created first, so the `collector` prefix would delete launchd's
+        // `collector-stdout.log` and every `collector-demo-<rows>` file.
+        trim_log_files(&logs, prefix, LOG_FILES_KEPT);
         let appender = tracing_appender::rolling::RollingFileAppender::builder()
             .rotation(tracing_appender::rolling::Rotation::DAILY)
             .filename_prefix(prefix)
             .filename_suffix("log")
             .build(&logs)
             .ok()?;
+        let appender = DailyTrim::new(appender, logs, prefix.to_string(), utc_day);
         // File writes run on a dedicated thread. The panic hook reads the
         // synchronous ring, so its report does not wait for this buffer to flush.
         let (non_blocking, guard) = tracing_appender::non_blocking(appender);
@@ -92,6 +97,57 @@ pub fn install(prefix: &str, stderr: bool) -> Logging {
         ring,
         control: Arc::new(ReloadControl(reload_handle)),
         guard: log_guard,
+    }
+}
+
+/// Daily files kept per prefix.
+const LOG_FILES_KEPT: usize = 7;
+
+/// Days since the Unix epoch, in UTC: the appender's rotation day.
+fn utc_day() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() / 86_400)
+}
+
+/// The file writer with the daily cap reapplied: the first write on a new
+/// UTC day (the one the inner appender rotates on) trims this prefix's
+/// files to [`LOG_FILES_KEPT`] after writing. It runs on the non-blocking
+/// writer's thread, so the trim never delays a log call.
+struct DailyTrim<W> {
+    inner: W,
+    dir: PathBuf,
+    prefix: String,
+    day: fn() -> u64,
+    last: u64,
+}
+
+impl<W> DailyTrim<W> {
+    fn new(inner: W, dir: PathBuf, prefix: String, day: fn() -> u64) -> DailyTrim<W> {
+        let last = day();
+        DailyTrim {
+            inner,
+            dir,
+            prefix,
+            day,
+            last,
+        }
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for DailyTrim<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        let today = (self.day)();
+        if today != self.last {
+            self.last = today;
+            trim_log_files(&self.dir, &self.prefix, LOG_FILES_KEPT);
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -125,10 +181,12 @@ pub fn prune_files(dir: &Path, prefix: &str, suffix: &str, keep: usize) {
     }
 }
 
-/// Prunes `<prefix>.*.log` files to the last `keep` matching names at startup.
-/// Daily rotation creates new files but this startup cap is not reapplied during
-/// the run. Missing directories and deletion failures are ignored; see
-/// [`prune_files`] for matching and ordering.
+/// Prunes `<prefix>.*.log` files to the last `keep` matching names, at
+/// startup and at each daily rotation. The `.` after the prefix keeps one
+/// prefix's trim off another's files (`collector.` never matches
+/// `collector-demo-1000.` or `collector-stdout.log`). Missing directories and
+/// deletion failures are ignored; see [`prune_files`] for matching and
+/// ordering.
 pub fn trim_log_files(dir: &Path, prefix: &str, keep: usize) {
     prune_files(dir, &format!("{prefix}."), ".log", keep);
 }
@@ -185,6 +243,33 @@ mod tests {
         trim_log_files(dir.path(), "geode", 7);
         assert!(dir.path().join("other.txt").exists(), "not ours to delete");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 8); // 7 kept + other.txt
+    }
+
+    /// The cap is reapplied at the first write of a new day, so a process
+    /// running for weeks keeps seven files; writes within a day trim nothing.
+    #[test]
+    fn the_first_write_of_a_new_day_trims_again() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static DAY: AtomicU64 = AtomicU64::new(100);
+        fn day() -> u64 {
+            DAY.load(Ordering::SeqCst)
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = DailyTrim::new(Vec::new(), dir.path().to_path_buf(), "geode".into(), day);
+        for day in 1..=9 {
+            touch(dir.path(), &format!("geode.2026-09-{day:02}.log"));
+        }
+        touch(dir.path(), "geode-other.2026-09-01.log");
+        writer.write_all(b"same day").unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 10);
+        DAY.store(101, Ordering::SeqCst);
+        writer.write_all(b"next day").unwrap();
+        assert_eq!(writer.inner, b"same daynext day");
+        assert!(!dir.path().join("geode.2026-09-02.log").exists());
+        assert!(dir.path().join("geode.2026-09-03.log").exists());
+        assert!(dir.path().join("geode-other.2026-09-01.log").exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 8);
     }
 
     #[test]

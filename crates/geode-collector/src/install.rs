@@ -13,15 +13,39 @@ use std::path::{Path, PathBuf};
 pub const LABEL: &str = "com.geode.collector";
 /// The Task Scheduler task name; a demo store adds the label's suffix.
 pub const TASK: &str = "Geode\\Collector";
-/// launchd's stdout and stderr files in the logs directory. Their names fall
-/// outside the daily `collector.*.log` trim, which would otherwise delete
-/// them as old daily logs.
-pub const STDOUT_LOG: &str = "collector-stdout.log";
-pub const STDERR_LOG: &str = "collector-stderr.log";
 /// Set to `1` in the LaunchAgent's environment. The collector then installs
 /// logging without its stderr layer, so launchd's unpruned stderr file holds
 /// only panics and failures from before logging started.
 pub const SERVICE_ENV: &str = "GEODE_SERVICE";
+/// The desk configuration directory. launchd agents do not inherit the
+/// shell's environment, so a value set at install time is written into the
+/// plist.
+pub const DESK_ENV: &str = "GEODE_DESK_CONFIG";
+/// How long launchd waits before restarting the collector after an exit
+/// (its default is 10 s): a persistent failure restarts once a minute.
+pub const THROTTLE_SECS: u32 = 60;
+
+/// The log file prefix for a store: `collector` for the real store,
+/// `collector-demo-<rows>` for a demo store, so a demo collector and the
+/// real one never write or trim each other's files. The daily file is
+/// `<prefix>.YYYY-MM-DD.log`; the trim matches `<prefix>.` and so never
+/// reaches another store's prefix or launchd's `<prefix>-stdout.log`.
+pub fn log_prefix(demo_rows: Option<usize>) -> String {
+    match demo_rows {
+        Some(rows) => format!("collector-demo-{rows}"),
+        None => "collector".to_string(),
+    }
+}
+
+/// launchd's stdout file for a log prefix, beside the daily logs.
+pub fn stdout_log(prefix: &str) -> String {
+    format!("{prefix}-stdout.log")
+}
+
+/// launchd's stderr file for a log prefix, beside the daily logs.
+pub fn stderr_log(prefix: &str) -> String {
+    format!("{prefix}-stderr.log")
+}
 
 /// Whether the collector logs to stderr: not when started as a service.
 pub fn log_to_stderr(service: Option<std::ffi::OsString>) -> bool {
@@ -39,11 +63,22 @@ pub struct Job {
     pub args: Vec<String>,
     /// Where launchd writes stdout and stderr.
     pub log_dir: PathBuf,
+    /// [`log_prefix`] for the store: names launchd's output files.
+    pub log_prefix: String,
+    /// `GEODE_DESK_CONFIG` at install time, absolute, for the plist's
+    /// environment.
+    pub desk_config: Option<PathBuf>,
 }
 
-/// The job for this executable and store. `exe` should be absolute: a
-/// service manager has no working directory to resolve it against.
-pub fn job(exe: &Path, demo_rows: Option<usize>, log_dir: &Path) -> Job {
+/// The job for this executable and store. `exe` and `desk_config` should be
+/// absolute: a service manager has no working directory to resolve them
+/// against.
+pub fn job(
+    exe: &Path,
+    demo_rows: Option<usize>,
+    log_dir: &Path,
+    desk_config: Option<&Path>,
+) -> Job {
     let mut args = vec!["run".to_string()];
     let mut label = LABEL.to_string();
     if let Some(rows) = demo_rows {
@@ -55,6 +90,8 @@ pub fn job(exe: &Path, demo_rows: Option<usize>, log_dir: &Path) -> Job {
         exe: exe.to_path_buf(),
         args,
         log_dir: log_dir.to_path_buf(),
+        log_prefix: log_prefix(demo_rows),
+        desk_config: desk_config.map(Path::to_path_buf),
     }
 }
 
@@ -69,9 +106,10 @@ pub fn task_name(job: &Job) -> String {
 /// The LaunchAgent property list (spec §4): `RunAtLoad`, restart unless the
 /// collector exited 0 (`KeepAlive.SuccessfulExit = false`: a second
 /// collector exits 0 and stays down; a changed binary exits 75 and a crash
-/// or a stopped thread 70, and launchd restarts them), background
-/// scheduling and I/O, stdout/stderr in the logs directory, and
-/// [`SERVICE_ENV`] so the collector keeps its log records out of stderr.
+/// or a stopped thread 70, and launchd restarts them, at most once every
+/// [`THROTTLE_SECS`]), background scheduling and I/O, stdout/stderr in the
+/// logs directory, [`SERVICE_ENV`] so the collector keeps its log records
+/// out of stderr, and [`DESK_ENV`] when the job carries a desk directory.
 pub fn launchd_plist(job: &Job) -> String {
     let mut out = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -90,13 +128,20 @@ pub fn launchd_plist(job: &Job) -> String {
     out.push_str("\t<key>KeepAlive</key>\n\t<dict>\n");
     key_bool(&mut out, 2, "SuccessfulExit", false);
     out.push_str("\t</dict>\n");
+    indent(&mut out, 1);
+    out.push_str("<key>ThrottleInterval</key>\n");
+    indent(&mut out, 1);
+    out.push_str(&format!("<integer>{THROTTLE_SECS}</integer>\n"));
     key_string(&mut out, 1, "ProcessType", "Background");
     key_bool(&mut out, 1, "LowPriorityIO", true);
     out.push_str("\t<key>EnvironmentVariables</key>\n\t<dict>\n");
     key_string(&mut out, 2, SERVICE_ENV, "1");
+    if let Some(desk) = &job.desk_config {
+        key_string(&mut out, 2, DESK_ENV, &desk.to_string_lossy());
+    }
     out.push_str("\t</dict>\n");
-    let stdout = job.log_dir.join(STDOUT_LOG);
-    let stderr = job.log_dir.join(STDERR_LOG);
+    let stdout = job.log_dir.join(stdout_log(&job.log_prefix));
+    let stderr = job.log_dir.join(stderr_log(&job.log_prefix));
     key_string(&mut out, 1, "StandardOutPath", &stdout.to_string_lossy());
     key_string(&mut out, 1, "StandardErrorPath", &stderr.to_string_lossy());
     out.push_str("</dict>\n</plist>\n");
@@ -126,12 +171,18 @@ fn key_bool(out: &mut String, depth: usize, name: &str, value: bool) {
 }
 
 /// The Task Scheduler task: a logon trigger for `user` (`DOMAIN\name`), run
-/// as that user with an interactive token, restart on failure every minute
-/// up to three times, and no time limit. The declaration names UTF-16, the
-/// encoding `schtasks /XML` reads reliably; [`utf16_with_bom`] encodes it.
+/// as that user with an interactive token, `RestartOnFailure` every minute
+/// up to three times, and no time limit. Whether `RestartOnFailure` covers
+/// a task that ran and exited nonzero (70 or 75), rather than only one that
+/// failed to start, is unverified: a Windows run check. The declaration
+/// names UTF-16, the encoding `schtasks /XML` reads reliably;
+/// [`utf16_with_bom`] encodes it.
 ///
 /// Task Scheduler captures neither stdout nor stderr, so the task sets no
 /// [`SERVICE_ENV`]: stderr records go nowhere and the daily file has them.
+/// Nor does it set [`DESK_ENV`]: a logon task runs in the user's session
+/// with the user's environment, so `GEODE_DESK_CONFIG` set for the user
+/// reaches it as it reaches the app.
 pub fn schtasks_xml(job: &Job, user: &str) -> String {
     let user = xml_escape(user);
     let uri = xml_escape(&format!("\\{}", task_name(job)));
@@ -751,6 +802,7 @@ mod tests {
             Path::new("/opt/geode/geode-collector"),
             Some(1000),
             &root.join("logs"),
+            None,
         )
     }
 
@@ -1004,31 +1056,46 @@ mod tests {
         }
     }
 
-    /// launchd's own output files sit beside the daily logs; the daily trim
-    /// must not take them for old `collector.*.log` files.
+    /// launchd's own output files sit beside the daily logs, and a demo
+    /// collector's files beside the real one's: each store's daily trim
+    /// takes only its own `<prefix>.*.log` files, never launchd's output
+    /// files or another store's (`collector-demo-1000` is not a prefix of
+    /// `collector-demo-10000.` either).
     #[test]
-    fn the_daily_trim_leaves_launchds_output_files() {
-        let dir = tempfile::tempdir().unwrap();
-        for day in 1..=9 {
-            std::fs::write(
-                dir.path().join(format!("collector.2026-09-{day:02}.log")),
-                "",
-            )
-            .unwrap();
+    fn the_daily_trim_keeps_to_its_own_store() {
+        let prefixes = [
+            log_prefix(None),
+            log_prefix(Some(1000)),
+            log_prefix(Some(10000)),
+        ];
+        assert_eq!(prefixes[0], "collector");
+        assert_eq!(prefixes[1], "collector-demo-1000");
+        for mine in &prefixes {
+            let dir = tempfile::tempdir().unwrap();
+            for prefix in &prefixes {
+                for day in 1..=9 {
+                    let name = format!("{prefix}.2026-09-{day:02}.log");
+                    std::fs::write(dir.path().join(name), "").unwrap();
+                }
+                std::fs::write(dir.path().join(stdout_log(prefix)), "out").unwrap();
+                std::fs::write(dir.path().join(stderr_log(prefix)), "err").unwrap();
+            }
+            geode_compose::logging::trim_log_files(dir.path(), mine, 7);
+            for prefix in &prefixes {
+                assert!(dir.path().join(stdout_log(prefix)).exists());
+                assert!(dir.path().join(stderr_log(prefix)).exists());
+                let daily = std::fs::read_dir(dir.path())
+                    .unwrap()
+                    .filter(|e| {
+                        let name = e.as_ref().unwrap().file_name();
+                        let name = name.to_string_lossy();
+                        name.starts_with(&format!("{prefix}.2026"))
+                    })
+                    .count();
+                let want = if prefix == mine { 7 } else { 9 };
+                assert_eq!(daily, want, "{prefix} after trimming {mine}");
+            }
         }
-        std::fs::write(dir.path().join(STDOUT_LOG), "out").unwrap();
-        std::fs::write(dir.path().join(STDERR_LOG), "err").unwrap();
-        geode_compose::logging::trim_log_files(dir.path(), "collector", 7);
-        assert!(dir.path().join(STDOUT_LOG).exists());
-        assert!(dir.path().join(STDERR_LOG).exists());
-        let daily = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter(|e| {
-                let name = e.as_ref().unwrap().file_name();
-                name.to_string_lossy().starts_with("collector.")
-            })
-            .count();
-        assert_eq!(daily, 7);
     }
 
     /// The plist is a property list `plutil` accepts, with the spec's
@@ -1043,6 +1110,7 @@ mod tests {
             Path::new("/opt/R&D/geode-collector"),
             Some(7),
             Path::new("/tmp/logs"),
+            Some(Path::new("/srv/desk")),
         );
         std::fs::write(&path, launchd_plist(&job)).unwrap();
         let lint = std::process::Command::new("plutil")
@@ -1062,7 +1130,8 @@ mod tests {
             r#""RunAtLoad":true"#,
             r#""LowPriorityIO":true"#,
             r#""ProcessType":"Background""#,
-            r#""EnvironmentVariables":{"GEODE_SERVICE":"1"}"#,
+            r#""EnvironmentVariables":{"GEODE_SERVICE":"1","GEODE_DESK_CONFIG":"\/srv\/desk"}"#,
+            r#""ThrottleInterval":60"#,
             r#""ProgramArguments":["\/opt\/R&D\/geode-collector","run","--demo","7"]"#,
         ] {
             assert!(json.contains(part), "{part} in {json}");
@@ -1074,6 +1143,7 @@ mod tests {
             Path::new("/Applications/Geode/geode-collector"),
             Some(1000),
             Path::new("/Users/me/.config/geode/logs"),
+            None,
         )
     }
 
@@ -1082,6 +1152,7 @@ mod tests {
             Path::new("/Applications/Geode/geode-collector"),
             None,
             Path::new("/Users/me/.config/geode/logs"),
+            None,
         )
     }
 
@@ -1118,17 +1189,24 @@ mod tests {
              \t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\
              \t</dict>\n"
         ));
+        assert!(plist.contains("\t<key>ThrottleInterval</key>\n\t<integer>60</integer>\n"));
         assert!(plist.contains("\t<key>ProcessType</key>\n\t<string>Background</string>\n"));
         assert!(plist.contains("\t<key>LowPriorityIO</key>\n\t<true/>\n"));
-        // Joined with the platform's separator, as the builder does.
+        // Joined with the platform's separator, as the builder does; a demo
+        // store's output files carry its prefix.
         let logs = Path::new("/Users/me/.config/geode/logs");
         assert!(plist.contains(&format!(
             "\t<key>StandardOutPath</key>\n\t<string>{}</string>\n",
-            logs.join("collector-stdout.log").display()
+            logs.join("collector-demo-1000-stdout.log").display()
         )));
         assert!(plist.contains(&format!(
             "\t<key>StandardErrorPath</key>\n\t<string>{}</string>\n",
-            logs.join("collector-stderr.log").display()
+            logs.join("collector-demo-1000-stderr.log").display()
+        )));
+        let plain = launchd_plist(&plain_job());
+        assert!(plain.contains(&format!(
+            "<string>{}</string>",
+            logs.join("collector-stdout.log").display()
         )));
         assert!(plist.trim_end().ends_with("</dict>\n</plist>"));
     }
@@ -1145,6 +1223,35 @@ mod tests {
         ));
         assert!(log_to_stderr(None));
         assert!(!log_to_stderr(Some("1".into())));
+    }
+
+    /// launchd agents do not inherit the shell's environment: a desk
+    /// directory set at install time is written into the plist, and none
+    /// is written when it was unset. The dry run shows it.
+    #[test]
+    fn the_plist_carries_the_desk_directory_when_set() {
+        let mut desk = demo_job();
+        desk.desk_config = Some(PathBuf::from("/srv/geode desk"));
+        let plist = launchd_plist(&desk);
+        assert!(plist.contains(
+            "\t<key>EnvironmentVariables</key>\n\t<dict>\n\
+             \t\t<key>GEODE_SERVICE</key>\n\t\t<string>1</string>\n\
+             \t\t<key>GEODE_DESK_CONFIG</key>\n\t\t<string>/srv/geode desk</string>\n\
+             \t</dict>\n"
+        ));
+        assert!(!launchd_plist(&demo_job()).contains("GEODE_DESK_CONFIG"));
+        let root = tempfile::tempdir().unwrap();
+        let text = install_with(
+            Platform::Launchd,
+            &desk,
+            true,
+            &host(root.path()),
+            &mut Refuse,
+        )
+        .unwrap();
+        assert!(text.contains("<string>/srv/geode desk</string>"), "{text}");
+        // A logon task runs with the user's environment: no desk entry.
+        assert!(!schtasks_xml(&desk, "DESK\\me").contains("GEODE_DESK_CONFIG"));
     }
 
     #[test]
@@ -1186,6 +1293,7 @@ mod tests {
             Path::new("/Users/me/R&D <x>/geode-collector"),
             None,
             Path::new("/Users/me/R&D/logs"),
+            None,
         );
         let plist = launchd_plist(&job);
         assert!(plist.contains("<string>/Users/me/R&amp;D &lt;x&gt;/geode-collector</string>"));
@@ -1204,6 +1312,7 @@ mod tests {
             Path::new("C:\\Program Files\\Geode\\geode-collector.exe"),
             Some(1000),
             Path::new("C:\\Users\\me\\AppData\\Roaming\\geode\\logs"),
+            None,
         );
         let task = schtasks_xml(&job, "DESK\\me");
         assert!(task.starts_with("<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n"));

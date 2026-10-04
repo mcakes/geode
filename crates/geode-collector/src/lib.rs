@@ -12,8 +12,8 @@ mod status;
 use std::path::{Path, PathBuf};
 
 pub use run::{
-    APP_POLL, EXIT_FAILED, EXIT_RESTART, ExeStamp, HOLD_POLL, STAMP_RECHECK, after_release,
-    exe_changed, run, run_with_levels,
+    APP_POLL, EXIT_FAILED, EXIT_RESTART, ExeStamp, HOLD_POLL, RELEASE_WATCHDOG, STAMP_RECHECK,
+    after_release, exe_changed, run, run_with_levels,
 };
 pub use status::status;
 
@@ -114,17 +114,22 @@ pub fn demo_root(demo_rows: Option<usize>) -> Option<PathBuf> {
 }
 
 /// The login job for this executable and `demo_rows`: the absolute running
-/// binary, and launchd's output files in `<user config>/logs` beside the
-/// daily logs.
+/// binary, launchd's output files in `<user config>/logs` beside the daily
+/// logs, and `GEODE_DESK_CONFIG` as set now, made absolute (launchd agents
+/// do not inherit the shell's environment, so the plist carries it).
 pub fn install_job(demo_rows: Option<usize>) -> Result<install::Job, String> {
     let exe = std::env::current_exe()
         .and_then(|exe| exe.canonicalize())
         .map_err(|err| format!("cannot locate this executable: {err}"))?;
-    let (_, user) = geode_compose::config_dirs();
+    let (desk, user) = geode_compose::config_dirs();
     let logs = user
         .ok_or("no user configuration directory (APPDATA or HOME is not set)")?
         .join("logs");
-    Ok(install::job(&exe, demo_rows, &logs))
+    let desk = desk
+        .map(|desk| std::path::absolute(&desk))
+        .transpose()
+        .map_err(|err| format!("cannot resolve {}: {err}", install::DESK_ENV))?;
+    Ok(install::job(&exe, demo_rows, &logs, desk.as_deref()))
 }
 
 /// The store the app opens with the same arguments: configuration from the

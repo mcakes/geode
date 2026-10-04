@@ -23,7 +23,7 @@ fn main() {
             // (`GEODE_SERVICE` set) stderr is captured to an unpruned file,
             // so records go to the daily file only.
             let stderr = install::log_to_stderr(std::env::var_os(install::SERVICE_ENV));
-            let logging = geode_compose::logging::install("collector", stderr);
+            let logging = geode_compose::logging::install(&install::log_prefix(demo_rows), stderr);
             let code = run_with_levels(demo_rows, &Instant::now, Some(&*logging.control));
             // `process::exit` runs no destructors: drop the guard first so
             // the file writer flushes.

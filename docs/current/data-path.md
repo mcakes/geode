@@ -375,7 +375,8 @@ by `<db>.collector.lock`. Its loop, in
    a second probe 20 ms later still sees it, because a `status` probe holds
    the app lock for an instant.
 6. When an app appears, `release(HANDOFF_DRAIN)` (see [release](#release)),
-   then go back to step 2.
+   then go back to step 2. The release runs under a 12 s watchdog
+   (`RELEASE_WATCHDOG`, under the app's 15 s `DEFAULT_STORE_DEADLINE`).
 
 **Death rule.** A data thread that stops while the collector holds the
 store is a death only when no app is present: the collector logs it as an
@@ -386,13 +387,27 @@ logs `app took the store first` at info and goes back to waiting. The data
 service's own open failure and every thread stop are logged once, by the
 loop, not by its event sink.
 
+**Stuck release.** A release still running when the watchdog expires (an
+adapter call that never returns, a file load longer than 12 s) logs an
+error naming the store and the elapsed time, `release … did not finish
+within 12 s; exiting so the app can open the store`, and the collector
+exits 70 after flushing its log. The OS then frees DuckDB's file lock and
+the lease locks; DuckDB rolls the unfinished transaction back, and the
+app's discovery finds the unfinished file load again. The app's open, which
+waits up to 15 s, therefore succeeds after about 12 s, and the service
+manager restarts the collector.
+
 **Upgrade.** The collector records its executable's size and modification
-time at start. After a release, if either has changed, it exits 75
-(`EXIT_RESTART`, EX_TEMPFAIL) rather than 0, so launchd's `KeepAlive =
-{ SuccessfulExit = false }` starts the new build after its 10 s throttle.
-A second collector's exit 0 is not restarted. A changed binary therefore
-takes effect at the first handoff after it is replaced, never while the
-collector holds the store.
+time at start and compares them whenever it does not hold the store: at
+the top of each pass, at each step of its waits and idles (including an
+idle on a mismatched or unreadable stamp), and after a release. A change
+exits 75 (`EXIT_RESTART`, EX_TEMPFAIL) rather than 0, so launchd's
+`KeepAlive = { SuccessfulExit = false }` starts the new build after the
+plist's 60 s `ThrottleInterval`. A second collector's exit 0 is not
+restarted. A changed binary therefore takes effect within a second of its
+replacement when the collector is not holding the store, or at the next
+handoff when it is. A missing executable (`cargo clean`, a removed
+worktree) is not a change: the collector warns once and runs on.
 
 **Memory limit.** `[collector] memory_limit` is opt-in. Unset (the
 default), the collector leaves DuckDB's own limit, as the app does. A
@@ -402,17 +417,25 @@ the same load would crash-loop. A value is to be chosen from an overnight
 footprint measurement. An invalid value warns and is ignored.
 
 **Logging.** The collector logs under `geode::collector` to its own daily
-file, `<user config>/logs/collector.YYYY-MM-DD.log`, beside the app's
-`geode.*.log`. At startup the collector trims its own files to the newest
-seven; rotation never prunes, so a collector that runs for weeks keeps every
-daily file until it restarts. Under launchd, `GEODE_SERVICE=1` drops the
-stderr layer, so `collector-stderr.log` holds only panics and failures from
-before logging started. `geode-collector status` reports, from the two lock
-probes, whether a collector and an app are present.
+file, `<user config>/logs/<prefix>.YYYY-MM-DD.log`, beside the app's
+`geode.*.log`. The prefix is per store: `collector` for the real store,
+`collector-demo-<rows>` for a demo store, and launchd's output files are
+`<prefix>-stdout.log` and `<prefix>-stderr.log`. Each process trims only
+`<prefix>.*.log`, to the newest seven, at startup and at the first write
+of each UTC day, so a demo collector and the real one never trim each
+other's files. Under launchd, `GEODE_SERVICE=1` drops the stderr layer, so
+the stderr file holds only panics and failures from before logging
+started. At start the collector logs the store (`collecting into <db>`)
+and its desk and user configuration directories. `geode-collector status`
+reports, from the two lock probes, whether a collector and an app are
+present.
 
 **Install** is the only opt-in. `geode-collector install` registers the
 running binary as a macOS LaunchAgent or a Windows logon task and starts it;
 the app never starts a collector. `--dry-run` prints the plan and does nothing.
+launchd agents do not inherit the shell's environment, so `GEODE_DESK_CONFIG`
+set at install time is written, absolute, into the plist; a Windows logon task
+runs with the user's environment.
 
 ### The store-format stamp
 
@@ -456,8 +479,9 @@ build is never read. A mutation entry checks that a mismatch refuses.
   drain cap: the release lets the running load finish, so the handoff lasts
   the rest of that load (about 1.9 s at 1,000,000 rows and 4.5 s at
   2,000,000, measured with a `memory_limit` of 512MB and 1GB
-  respectively). A load longer than the app's 15 s deadline fails the
-  app's open. Right after a collector opens, draining its startup burst takes
+  respectively). A load still running after 12 s ends the collector at
+  its release watchdog: the app opens after about 12 s, the load is rolled
+  back and rediscovered by the app. Right after a collector opens, draining its startup burst takes
   about 0.8 s; idle, a handoff takes about 0.2 s. See
   [performance](performance.md).
 - A handoff gap loses intermediate versions only. Recovery on subscribe
@@ -473,7 +497,9 @@ build is never read. A mutation entry checks that a mismatch refuses.
   transport gap; recovery on subscribe in the next owner covers it.
 - A release always runs the queued local writes, even past its deadline.
 - An adapter call that never returns delays `release`, as it delays
-  `shutdown`, and the app's wait then runs to its deadline.
+  `shutdown`. In the collector the release watchdog ends the process after
+  12 s, so the app's wait ends then rather than at its 15 s deadline; a
+  caller of `release` without a watchdog waits for the call.
 - On Windows, when DuckDB cannot name the holder (the Restart Manager's
   `RmGetList` finds none), the refusal carries no DuckDB marker. It is
   waited out while a collector holds its lease; a conflict with any other
@@ -493,9 +519,18 @@ build is never read. A mutation entry checks that a mismatch refuses.
   that asked during the up to 15 s wait has no outcome for that request and
   learns of the failure only through the open-failure diagnostic and
   `ThreadStopped`.
-- The collector's daily log files are trimmed to seven only when it
-  starts. A collector that runs for weeks without a restart keeps every
-  daily file in the logs directory until its next start.
+- A collector that exits 70 or 75 on Windows may stay down until the next
+  logon: whether Task Scheduler's `RestartOnFailure` covers a task that ran
+  and exited nonzero is unverified, a Windows run check.
+- A logout's SIGTERM, like a `launchctl bootout`, ends the collector with
+  no release drain; recovery on subscribe restores each key's latest
+  document in the next owner.
+- Boot out or uninstall a demo collector before deleting
+  `$TMPDIR/geode-demo/<rows>-42/`: a running one holds the store, and
+  launchd restarts it into a freshly emitted demo directory.
+- App builds from worktrees cut before the app lease existed take no
+  `<db>.app.lock`, so a collector never yields to them, and their open
+  fails while it holds the store.
 - The collector reads configuration when it takes the store, with no live
   reload: a hand edit to `sources.toml` made while the app is closed takes
   effect at its next acquire, its restart, or login.

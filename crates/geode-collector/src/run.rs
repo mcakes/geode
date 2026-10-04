@@ -10,8 +10,9 @@
 //!     load configuration; DataService::spawn_as(Collector); demo bus
 //!     while no app and no stopped thread: sleep HOLD_POLL
 //!     stopped: an app present is a lost race (wait again); else exit 70
-//!     release(HANDOFF_DRAIN); a changed executable exits 75 (EXIT_RESTART)
-//!     so the service manager restarts the new build
+//!     release(HANDOFF_DRAIN) under RELEASE_WATCHDOG; a stuck one exits 70
+//! a changed executable exits 75 (EXIT_RESTART) whenever the store is not
+//! held: each pass, each wait and idle step, and after a release
 //! ```
 //!
 //! The collector spawns no child process: a fork would share the lease's
@@ -61,14 +62,28 @@ const LEASE_RETRY: Duration = Duration::from_secs(1);
 const LEASE_STEP: Duration = Duration::from_millis(20);
 
 /// The exit status for a collector that cannot go on: launchd's
-/// `KeepAlive { SuccessfulExit = false }` and Task Scheduler's restart on
-/// failure start it again, throttled.
+/// `KeepAlive { SuccessfulExit = false }` starts it again, throttled by the
+/// plist's `ThrottleInterval`. Whether Task Scheduler's `RestartOnFailure`
+/// restarts a task that ran and exited nonzero is unverified (it may fire
+/// only when the task fails to start); that is a Windows run check, and
+/// until then a Windows collector that exits 70 may stay down until the
+/// next logon.
 pub const EXIT_FAILED: i32 = 70;
 
-/// The exit status after a release when the executable changed (EX_TEMPFAIL).
-/// Nonzero so launchd's `KeepAlive { SuccessfulExit = false }` starts the
-/// new build; an exit 0 would leave the collector down until the next login.
+/// The exit status when the executable changed (EX_TEMPFAIL), checked
+/// whenever the store is not held. Nonzero so launchd's
+/// `KeepAlive { SuccessfulExit = false }` starts the new build; an exit 0
+/// would leave the collector down until the next login. As for
+/// [`EXIT_FAILED`], a Task Scheduler restart after it is unverified.
 pub const EXIT_RESTART: i32 = 75;
+
+/// How long a release may take before the collector gives up on it and
+/// exits [`EXIT_FAILED`]: under the app's 15 s `DEFAULT_STORE_DEADLINE`, so
+/// a stuck release (an adapter call that never returns, a load that runs
+/// on) frees the store before the app's open gives up. The exit frees
+/// DuckDB's file lock and the lease locks; DuckDB rolls the unfinished
+/// transaction back and the next owner rediscovers an unfinished file load.
+pub const RELEASE_WATCHDOG: Duration = Duration::from_secs(12);
 
 const TARGET: &str = "geode::collector";
 
@@ -76,8 +91,8 @@ const TARGET: &str = "geode::collector";
 const OPEN_FAILURE: &str = "data service failed to open: ";
 
 /// The executable's size and modification time, recorded at start and
-/// compared after each release: a rebuilt or upgraded binary exits with
-/// [`EXIT_RESTART`] so the service manager starts the new one.
+/// compared whenever the store is not held: a rebuilt or upgraded binary
+/// exits with [`EXIT_RESTART`] so the service manager starts the new one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExeStamp {
     pub size: u64,
@@ -100,14 +115,60 @@ impl ExeStamp {
 }
 
 /// True when the executable differs from the one recorded at start: its
-/// size or modification time changed, or it could be read then and cannot
-/// now (a replacement in progress). Unreadable both times is unchanged.
+/// size or modification time changed, or it can be read now and could not
+/// be then. A missing executable now (`cargo clean`, a removed worktree, a
+/// replacement in progress) is not a change: restarting into a binary that
+/// is gone would only fail, so the collector keeps running.
 pub fn exe_changed(before: Option<ExeStamp>, after: Option<ExeStamp>) -> bool {
-    before != after
+    match after {
+        None => false,
+        Some(_) => before != after,
+    }
 }
 
-/// What the loop does after a release: exit with [`EXIT_RESTART`] when the
-/// executable changed, else `None` (go back to waiting for the app).
+/// The executable recorded at start, checked whenever the store is not
+/// held. Warns once when the executable is gone, and again only after it
+/// has been seen in between.
+pub(crate) struct ExeWatch {
+    start: Option<ExeStamp>,
+    gone_reported: bool,
+}
+
+impl ExeWatch {
+    pub(crate) fn new(start: Option<ExeStamp>) -> ExeWatch {
+        ExeWatch {
+            start,
+            gone_reported: false,
+        }
+    }
+
+    /// [`EXIT_RESTART`] when `now` is a changed executable, else `None`.
+    pub(crate) fn restart(&mut self, now: Option<ExeStamp>) -> Option<i32> {
+        if now.is_none() && self.start.is_some() {
+            if !self.gone_reported {
+                tracing::warn!(
+                    target: TARGET,
+                    "the collector executable is gone or unreadable; running on until it returns"
+                );
+                self.gone_reported = true;
+            }
+            return None;
+        }
+        self.gone_reported = false;
+        let code = after_release(exe_changed(self.start, now));
+        if let Some(code) = code {
+            tracing::info!(target: TARGET, "the collector executable changed; exiting with status {code} so the new build runs");
+        }
+        code
+    }
+
+    fn check(&mut self) -> Option<i32> {
+        self.restart(ExeStamp::current())
+    }
+}
+
+/// What the loop does on an executable check: exit with [`EXIT_RESTART`]
+/// when the executable changed, else `None` (carry on).
 pub fn after_release(changed: bool) -> Option<i32> {
     if changed { Some(EXIT_RESTART) } else { None }
 }
@@ -151,11 +212,24 @@ pub fn run_with_levels(
         }
     };
     tracing::info!(target: TARGET, "collecting into {}", db.display());
-    let exe = ExeStamp::current();
+    let (desk, user) = geode_compose::config_dirs();
+    let dir = |d: &Option<std::path::PathBuf>| {
+        d.as_ref()
+            .map_or_else(|| "none".to_string(), |d| d.display().to_string())
+    };
+    tracing::info!(target: TARGET, "configuration: desk {}, user {}", dir(&desk), dir(&user));
+    let mut exe = ExeWatch::new(ExeStamp::current());
     let mut stamp_reported: Option<StampCheck> = None;
     let mut busy_timer = BusyTimer::default();
     loop {
-        wait_for_no_app(&db);
+        // Checked whenever the store is not held, so a collector idling on
+        // a mismatch or waiting out an app also picks up a rebuild.
+        if let Some(code) = exe.check() {
+            return code;
+        }
+        if let Some(code) = wait_for_no_app(&db, &mut exe) {
+            return code;
+        }
         let mut check = stamp_check(read_format(&db));
         let busy = matches!(check, StampCheck::Busy(_));
         let app = busy && app_present(&db).unwrap_or(true);
@@ -180,7 +254,9 @@ pub fn run_with_levels(
                     );
                     stamp_reported = Some(check.clone());
                 }
-                std::thread::sleep(APP_POLL);
+                if let Some(code) = idle(APP_POLL, &mut exe) {
+                    return code;
+                }
                 continue;
             }
             StampCheck::Mismatch(found) => {
@@ -194,7 +270,9 @@ pub fn run_with_levels(
                     );
                     stamp_reported = Some(check.clone());
                 }
-                std::thread::sleep(STAMP_RECHECK);
+                if let Some(code) = idle(STAMP_RECHECK, &mut exe) {
+                    return code;
+                }
                 continue;
             }
             StampCheck::Unreadable(reason) => {
@@ -207,19 +285,20 @@ pub fn run_with_levels(
                     );
                     stamp_reported = Some(check.clone());
                 }
-                std::thread::sleep(STAMP_RECHECK);
+                if let Some(code) = idle(STAMP_RECHECK, &mut exe) {
+                    return code;
+                }
                 continue;
             }
         }
         match hold(&db, demo_root, clock, levels) {
             Held::Released => {
-                if let Some(code) = after_release(exe_changed(exe, ExeStamp::current())) {
-                    tracing::info!(target: TARGET, "the collector executable changed; exiting with status {code} so the new build runs");
+                if let Some(code) = exe.check() {
                     return code;
                 }
             }
             Held::Yielded => {}
-            Held::Stopped => return EXIT_FAILED,
+            Held::Stopped | Held::Stuck => return EXIT_FAILED,
         }
     }
 }
@@ -239,14 +318,30 @@ pub(crate) fn take_lease(db: &Path, retry: Duration) -> std::io::Result<Option<C
     }
 }
 
-/// Return once no app holds `<db>.app.lock`. A probe error counts as an app
-/// present (opening the store while unsure could stall an app's open) and
-/// is warned once per distinct error.
-fn wait_for_no_app(db: &Path) {
+/// Sleep `total` in `APP_POLL` steps, checking the executable at each:
+/// `Some(EXIT_RESTART)` as soon as it changed.
+fn idle(total: Duration, exe: &mut ExeWatch) -> Option<i32> {
+    let mut left = total;
+    while !left.is_zero() {
+        let step = left.min(APP_POLL);
+        std::thread::sleep(step);
+        left -= step;
+        if let Some(code) = exe.check() {
+            return Some(code);
+        }
+    }
+    None
+}
+
+/// Return once no app holds `<db>.app.lock`, or with `Some(EXIT_RESTART)`
+/// once the executable changed. A probe error counts as an app present
+/// (opening the store while unsure could stall an app's open) and is warned
+/// once per distinct error.
+fn wait_for_no_app(db: &Path, exe: &mut ExeWatch) -> Option<i32> {
     let mut reported: Option<String> = None;
     loop {
         match app_present(db) {
-            Ok(false) => return,
+            Ok(false) => return None,
             Ok(true) => {}
             Err(e) => {
                 let text = e.to_string();
@@ -256,7 +351,9 @@ fn wait_for_no_app(db: &Path) {
                 }
             }
         }
-        std::thread::sleep(APP_POLL);
+        if let Some(code) = idle(APP_POLL, exe) {
+            return Some(code);
+        }
     }
 }
 
@@ -324,6 +421,9 @@ enum Held {
     Yielded,
     /// A data thread stopped with no app present.
     Stopped,
+    /// The release outlasted [`RELEASE_WATCHDOG`]: exit so the OS frees
+    /// the store.
+    Stuck,
 }
 
 /// One acquire: fresh configuration, the service in the collector role and
@@ -403,7 +503,23 @@ fn hold(
     }
 
     let releasing = clock();
-    handle.release(HANDOFF_DRAIN);
+    let releaser = handle.clone();
+    if finish_within(RELEASE_WATCHDOG, move || releaser.release(HANDOFF_DRAIN)).is_err() {
+        tracing::error!(
+            target: TARGET,
+            "release of {} did not finish within {} s (after {} ms); exiting so the app can \
+             open the store",
+            db.display(),
+            RELEASE_WATCHDOG.as_secs(),
+            clock().duration_since(releasing).as_millis()
+        );
+        // Neither is dropped: their teardown could wait on the stuck
+        // release. The caller returns EXIT_FAILED, main drops the log guard
+        // (flushing this line) and exits, and the OS frees the locks.
+        std::mem::forget(bus);
+        std::mem::forget(handle);
+        return Held::Stuck;
+    }
     if let Some(bus) = bus.as_mut() {
         bus.stop();
     }
@@ -415,6 +531,39 @@ fn hold(
         releasing.duration_since(started).as_secs()
     );
     Held::Released
+}
+
+/// Run `work` on its own thread and wait at most `limit` for it. `Err(())`
+/// when it has not finished by then; the thread is left running (the
+/// caller exits the process).
+pub(crate) fn finish_within(
+    limit: Duration,
+    work: impl FnOnce() + Send + 'static,
+) -> Result<(), ()> {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("geode-collector-release".into())
+        .spawn(move || {
+            work();
+            let _ = done.send(());
+        })
+        .map_err(|_| ())?;
+    match finished.recv_timeout(limit) {
+        Ok(()) => Ok(()),
+        // A panicking `work` drops the sender: it has finished, not stuck.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(()),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(()),
+    }
+}
+
+/// The level a source's health transition is logged at: a problem
+/// (degraded, failed, pending too long) at warn; ok and an ordinary
+/// pending file at info.
+pub(crate) fn health_level(health: &Health) -> Level {
+    match health {
+        Health::Ok | Health::Pending => Level::INFO,
+        Health::PendingTooLong | Health::Degraded { .. } | Health::Failed { .. } => Level::WARN,
+    }
 }
 
 /// What the loop logs when a hold ends with a stopped thread: each open
@@ -540,10 +689,11 @@ impl Events {
             } => {
                 if self.health_changed(&source, &worst) {
                     let label = worst.label();
+                    let level = health_level(&worst);
                     if detail.is_empty() {
-                        tracing::info!(target: TARGET, "{source}: {label}");
+                        log_at(level, &format_args!("{source}: {label}"));
                     } else {
-                        tracing::info!(target: TARGET, "{source}: {label} — {detail}");
+                        log_at(level, &format_args!("{source}: {label} — {detail}"));
                     }
                 }
             }
@@ -616,10 +766,74 @@ mod tests {
         assert!(!exe_changed(stamp(10, 5), stamp(10, 5)));
         assert!(exe_changed(stamp(10, 5), stamp(11, 5)));
         assert!(exe_changed(stamp(10, 5), stamp(10, 6)));
-        // Unreadable now (mid-replacement) is a change; unreadable both
-        // times is not.
-        assert!(exe_changed(stamp(10, 5), None));
+        // Unreadable at start and readable now is a change.
+        assert!(exe_changed(None, stamp(10, 5)));
         assert!(!exe_changed(None, None));
+    }
+
+    /// A missing executable (`cargo clean`, a removed worktree) is not a
+    /// change: restarting into it would only fail. The collector runs on,
+    /// and still restarts once a new build appears.
+    #[test]
+    fn a_missing_executable_is_not_a_change() {
+        assert!(!exe_changed(stamp(10, 5), None));
+        let mut watch = ExeWatch::new(stamp(10, 5));
+        assert_eq!(watch.restart(None), None);
+        assert!(watch.gone_reported);
+        assert_eq!(watch.restart(None), None);
+        assert_eq!(watch.restart(stamp(10, 5)), None);
+        assert!(!watch.gone_reported);
+        assert_eq!(watch.restart(stamp(12, 5)), Some(EXIT_RESTART));
+    }
+
+    /// The check the loop makes whenever the store is not held: the same
+    /// executable carries on, a changed one exits for a restart.
+    #[test]
+    fn an_executable_check_restarts_on_a_change() {
+        let mut watch = ExeWatch::new(stamp(10, 5));
+        assert_eq!(watch.restart(stamp(10, 5)), None);
+        assert_eq!(watch.restart(stamp(10, 6)), Some(EXIT_RESTART));
+        let mut unread = ExeWatch::new(None);
+        assert_eq!(unread.restart(None), None);
+        assert_eq!(unread.restart(stamp(1, 1)), Some(EXIT_RESTART));
+    }
+
+    /// A release that outlasts the watchdog is reported, so the collector
+    /// exits and the OS frees the store; one that finishes is not. Both the
+    /// work and the limit are injected, so the test takes milliseconds.
+    #[test]
+    fn a_release_past_the_watchdog_is_reported() {
+        let start = Instant::now();
+        let (release, stuck) = mpsc::channel::<()>();
+        let slow = finish_within(Duration::from_millis(30), move || {
+            let _ = stuck.recv_timeout(Duration::from_secs(5));
+        });
+        assert_eq!(slow, Err(()));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        drop(release);
+        assert_eq!(
+            finish_within(Duration::from_secs(5), || {
+                std::thread::sleep(Duration::from_millis(5))
+            }),
+            Ok(())
+        );
+        assert!(RELEASE_WATCHDOG < DEFAULT_STORE_DEADLINE);
+        assert_eq!(RELEASE_WATCHDOG, Duration::from_secs(12));
+    }
+
+    #[test]
+    fn a_health_problem_is_a_warning() {
+        assert_eq!(health_level(&Health::Ok), Level::INFO);
+        assert_eq!(health_level(&Health::Pending), Level::INFO);
+        assert_eq!(health_level(&Health::PendingTooLong), Level::WARN);
+        let reason = "bad".to_string();
+        assert_eq!(
+            health_level(&Health::Degraded {
+                reason: reason.clone()
+            }),
+            Level::WARN
+        );
+        assert_eq!(health_level(&Health::Failed { reason }), Level::WARN);
     }
 
     /// A changed binary must exit nonzero: launchd's KeepAlive restarts only

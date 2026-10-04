@@ -56,8 +56,11 @@
 # does not add coverage; the fixture must exercise the behavior the mutation
 # changes.
 #
-# The exit status reports harness errors only (a BUILD, a stale entry, an
-# empty selection, bad arguments); SURVIVED, caught* and FILTER are verdicts
+# HARNESS means cargo refused the command line itself (`Usage: cargo`,
+# `error: unexpected argument`): no test ran, so it is never read as a catch.
+#
+# The exit status reports harness errors only (a BUILD, a HARNESS, a stale
+# entry, an empty selection, bad arguments); SURVIVED, caught* and FILTER are verdicts
 # read from the output lines and do not change the exit status.
 set -e
 cd "$(git rev-parse --show-toplevel)"
@@ -134,6 +137,8 @@ trap 'cleanup; exit 143' TERM
 #     says "could not compile"          -> "BUILD     $name  <-- mutation does
 #                                           not compile; no test ran" in place
 #                                           of caught or caught*; an error
+#   - any failing cargo run whose log
+#     is a cargo usage error            -> "HARNESS   $name"; an error
 #   - the filtered run passes and the
 #     full suite also passes            -> "SURVIVED  $name  <-- no test
 #                                           sees this"
@@ -180,6 +185,9 @@ skipped=0
 # Entries past the substring and --changed filters, whatever their verdict.
 selected=0
 build_failures=0
+# Entries cargo refused to run at all (a usage error): the harness's own
+# fault, reported apart from BUILD and failing the run.
+harness_failures=0
 # Stale entries in a mutation run or build check: a missing file, an
 # unreadable one, or an anchor that no longer matches. Each defends nothing,
 # so any of them fails the run; otherwise a substring selecting only stale
@@ -208,11 +216,21 @@ compile_failed() {
   grep -q "could not compile" "$log"
 }
 
+# Cargo refusing its own command line (a target flag passed as one word, an
+# unknown option) also exits nonzero with no test run. That is the harness's
+# fault, never a catch.
+cargo_usage_failed() {
+  grep -qE "Usage: cargo|error: unexpected argument" "$log"
+}
+
 # Prints the verdict for a failed cargo run: BUILD if it never compiled,
-# otherwise the catch line given.
+# HARNESS if cargo refused the command line, otherwise the catch line given.
 report_failure() {
   local name="$1" caught_line="$2"
-  if compile_failed; then
+  if cargo_usage_failed; then
+    echo "HARNESS   $name  <-- cargo refused the command line; no test ran"
+    harness_failures=$((harness_failures + 1))
+  elif compile_failed; then
     echo "BUILD     $name  <-- mutation does not compile; no test ran"
     build_failures=$((build_failures + 1))
   else
@@ -240,12 +258,16 @@ run_mutation() {
   # A `package:test` spelling targets that package's integration test
   # `tests/<test>.rs` (`--test <test>`) instead: a test that drives a
   # binary across processes lives there, not in the lib.
-  local target_flag="--lib"
+  # An array, expanded as "${target_flag[@]}": a string holding
+  # `--test handoff` splits into two words under bash but stays one under
+  # zsh, which cargo refuses. Assigned apart from `local` for bash 3.2.
+  local -a target_flag
+  target_flag=(--lib)
   if [[ "$pkg" == *:* ]]; then
-    target_flag="--test ${pkg#*:}"
+    target_flag=(--test "${pkg#*:}")
     pkg="${pkg%%:*}"
   elif [[ "$pkg" == "geode-app" ]]; then
-    target_flag="--bins"
+    target_flag=(--bins)
   fi
   if (( anchors_only )); then
     # Retain the replacement, package and test filter alongside the source
@@ -306,15 +328,20 @@ PY
     # compile and be tested in a real run. A `package:test` entry's run
     # builds that integration test, so its check does too.
     built=$((built + 1))
-    if ! cargo check -p "$pkg" $target_flag --profile test >"$log" 2>&1; then
-      echo "BUILD     $name  <-- mutation does not compile; no test ran"
-      build_failures=$((build_failures + 1))
+    if ! cargo check -p "$pkg" "${target_flag[@]}" --profile test >"$log" 2>&1; then
+      if cargo_usage_failed; then
+        echo "HARNESS   $name  <-- cargo refused the command line; nothing was checked"
+        harness_failures=$((harness_failures + 1))
+      else
+        echo "BUILD     $name  <-- mutation does not compile; no test ran"
+        build_failures=$((build_failures + 1))
+      fi
     fi
     restore
     return 0
   fi
   if [[ -n "$filter" ]]; then
-    if cargo test -p "$pkg" $target_flag -- "$filter" >"$log" 2>&1; then
+    if cargo test -p "$pkg" "${target_flag[@]}" -- "$filter" >"$log" 2>&1; then
       if grep -q "running 0 tests" "$log"; then
         echo "FILTER    $name  <-- '$filter' matches no test"
         filter=""
@@ -328,13 +355,13 @@ PY
   if [[ -n "$filter" ]]; then
     # The named test passed despite the mutation; the full suite is the
     # real verdict, and a failure here means some other test caught it.
-    if cargo test -p "$pkg" $target_flag >"$log" 2>&1; then
+    if cargo test -p "$pkg" "${target_flag[@]}" >"$log" 2>&1; then
       echo "SURVIVED  $name  <-- no test sees this"
     else
       report_failure "$name" "caught*   $name  <-- caught by a test other than '$filter'"
     fi
   else
-    if cargo test -p "$pkg" $target_flag >"$log" 2>&1; then
+    if cargo test -p "$pkg" "${target_flag[@]}" >"$log" 2>&1; then
       echo "SURVIVED  $name  <-- no test sees this"
     else
       report_failure "$name" "caught    $name"
@@ -1562,10 +1589,76 @@ run_mutation "collector: the lease is retried before exiting" \
 
 run_mutation "collector: a changed executable is detected" \
   crates/geode-collector/src/run.rs \
-  '    before != after' \
-  '    before.map(|s| s.size) != after.map(|s| s.size)' \
+  '        Some(_) => before != after,' \
+  '        Some(_) => before.map(|s| s.size) != after.map(|s| s.size),' \
   geode-collector \
   a_changed_size_or_mtime_is_a_changed_executable
+
+# A missing executable (cargo clean, a removed worktree) is not a change:
+# restarting into a binary that is gone would only fail.
+run_mutation "collector: a missing executable is not a change" \
+  crates/geode-collector/src/run.rs \
+  $'        None => false,\n        Some(_) => before != after,' \
+  $'        None => before.is_some(),\n        Some(_) => before != after,' \
+  geode-collector \
+  a_missing_executable_is_not_a_change
+
+# A collector idling on a mismatched stamp never releases, so it checks
+# its executable while it idles; without the check a rebuild never runs.
+run_mutation "collector: an idle collector restarts after a rebuild" \
+  crates/geode-collector/src/run.rs \
+  $'        if let Some(code) = exe.check() {\n            return Some(code);' \
+  $'        if let Some(code) = None::<i32> {\n            return Some(code);' \
+  geode-collector:handoff \
+  a_rebuilt_binary_restarts_an_idle_collector
+
+# A release that outlasts the watchdog makes the collector exit so the OS
+# frees the store before the app's open deadline.
+run_mutation "collector: a stuck release is reported" \
+  crates/geode-collector/src/run.rs \
+  '        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(()),' \
+  '        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(()),' \
+  geode-collector \
+  a_release_past_the_watchdog_is_reported
+
+run_mutation "collector: a health problem logs at warn" \
+  crates/geode-collector/src/run.rs \
+  '        Health::PendingTooLong | Health::Degraded { .. } | Health::Failed { .. } => Level::WARN,' \
+  '        Health::PendingTooLong | Health::Degraded { .. } | Health::Failed { .. } => Level::INFO,' \
+  geode-collector \
+  a_health_problem_is_a_warning
+
+# launchd agents do not inherit the shell's environment: the desk
+# directory reaches the collector only through the plist.
+run_mutation "collector install: the plist carries the desk directory" \
+  crates/geode-collector/src/install.rs \
+  '        key_string(&mut out, 2, DESK_ENV, &desk.to_string_lossy());' \
+  '        let _ = desk;' \
+  geode-collector \
+  the_plist_carries_the_desk_directory_when_set
+
+run_mutation "collector install: a restart is throttled to a minute" \
+  crates/geode-collector/src/install.rs \
+  'pub const THROTTLE_SECS: u32 = 60;' \
+  'pub const THROTTLE_SECS: u32 = 10;' \
+  geode-collector \
+  the_plist_has_the_spec_keys
+
+# A demo collector and the real one write and trim separate files.
+run_mutation "collector install: each store has its own log prefix" \
+  crates/geode-collector/src/install.rs \
+  '        Some(rows) => format!("collector-demo-{rows}"),' \
+  '        Some(_) => "collector".to_string(),' \
+  geode-collector \
+  the_daily_trim_keeps_to_its_own_store
+
+# The daily cap is reapplied at each rotation, not only at startup.
+run_mutation "logging: the daily cap is reapplied at rotation" \
+  crates/geode-compose/src/logging.rs \
+  '            trim_log_files(&self.dir, &self.prefix, LOG_FILES_KEPT);' \
+  '            let _ = &self.dir;' \
+  geode-compose \
+  the_first_write_of_a_new_day_trims_again
 
 run_mutation "lease: only an open refusal is a collector's handover" \
   crates/geode-data/src/lease.rs \
@@ -38548,7 +38641,10 @@ if (( build_only )); then
     echo "stale entries not built: $anchor_failures (see ANCHOR lines)"
   fi
 fi
-if (( build_failures || anchor_failures )); then
+if (( harness_failures )); then
+  echo "harness errors: $harness_failures (see HARNESS lines)"
+fi
+if (( build_failures || anchor_failures || harness_failures )); then
   exit 1
 fi
 if (( anchors_only )); then

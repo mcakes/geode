@@ -26,7 +26,8 @@ print to stdout and stderr, so a dry run or a status probe writes no file.
 Exit statuses of `run`: 0 when another collector has the store (it stays
 down), 75 (`EXIT_RESTART`, EX_TEMPFAIL) when the executable changed, so the
 service manager starts the new build, and 70 (`EXIT_FAILED`) when a data
-thread stopped with no app present or setup failed.
+thread stopped with no app present, a release outlasted its 12 s watchdog,
+or setup failed.
 
 ## Install
 
@@ -44,13 +45,21 @@ demo store), in `~/Library/LaunchAgents/<label>.plist`: `ProgramArguments`
 = the binary, `run`, and `--demo <rows>` for a demo store; `RunAtLoad`;
 `KeepAlive = { SuccessfulExit = false }`, so launchd restarts a crash, an
 exit 70 or an exit 75 (a changed binary), but not an exit 0 (a second
-collector); `ProcessType = Background`; `LowPriorityIO`;
-`EnvironmentVariables = { GEODE_SERVICE = 1 }`, which makes the collector
-install logging without its stderr layer. launchd's stdout and stderr go
-to `collector-stdout.log` and `collector-stderr.log` in the logs directory;
-their names fall outside the daily `collector.*.log` trim, so they are never
-pruned. With `GEODE_SERVICE` set, stderr holds only panics and failures
-from before logging started. The sequence: create the logs
+collector); `ThrottleInterval = 60`, so a persistent failure restarts once
+a minute rather than every 10 s; `ProcessType = Background`;
+`LowPriorityIO`; `EnvironmentVariables = { GEODE_SERVICE = 1 }`, which
+makes the collector install logging without its stderr layer, plus
+`GEODE_DESK_CONFIG` (made absolute) when it is set at install time.
+launchd agents do not inherit the shell's environment, so a desk directory
+set later, or only in a shell profile, never reaches the collector:
+install again after changing it. The dry run shows the value written, and
+the collector logs its desk and user directories at start, beside
+`collecting into <db>`. launchd's stdout and stderr go to
+`<prefix>-stdout.log` and `<prefix>-stderr.log` in the logs directory
+(`collector`, or `collector-demo-<rows>` for a demo store; see
+[Logging](#logging)); their names fall outside every daily
+`<prefix>.*.log` trim, so they are never pruned. With `GEODE_SERVICE` set,
+stderr holds only panics and failures from before logging started. The sequence: create the logs
 directory, write the plist, `launchctl bootout gui/<uid>/<label>` (a job not
 loaded, exit 3 or 113, is ignored; any other failure stops the install),
 then `launchctl bootstrap gui/<uid> <plist>`. Uninstall boots the job out
@@ -67,7 +76,9 @@ removed afterwards whatever the outcome. The sequence: `schtasks /End`
 ends the task and runs `schtasks /Delete /TN <task> /F`; a task that does
 not exist ("cannot find") is not an error, so uninstalling twice succeeds
 as on macOS. Task Scheduler captures no stderr, so the task sets no
-`GEODE_SERVICE`.
+`GEODE_SERVICE`. A logon task runs in the user's session with the user's
+environment, so `GEODE_DESK_CONFIG` set for the user reaches it and the
+task XML carries no environment.
 
 Other platforms refuse with `install is supported on macOS and Windows`.
 The plans are pure (`install_plan`, `uninstall_plan`) and run through a
@@ -79,10 +90,10 @@ reaches `launchctl`, `schtasks` or the real `~/Library/LaunchAgents`.
 | Module | Holds |
 |---|---|
 | `lib.rs` | `Command`, `Args`, `parse_args`; `demo_root` and `store_for`, the store the app opens with the same arguments; `install_job`, the login job for the running binary. |
-| `install.rs` | `Job`, `job`, `task_name`; the document builders `launchd_plist` and `schtasks_xml` (with `xml_escape`, `utf16_with_bom`); `Platform`, `Host`, the `Runner` trait and `SystemRunner`; `Plan` with `install_plan`/`uninstall_plan`, `describe` (the dry run) and `execute`; `install`/`uninstall` and their `_with` forms. |
-| `run.rs` | `run`/`run_with_levels`, the loop below; `ExeStamp` and `exe_changed`; the poll intervals; `BusyTimer` (a refused stamp read's escalation), `confirmed` (the two-probe app check) and `stop_report` (how a stopped hold is logged); the event sink (`Events`). |
+| `install.rs` | `Job`, `job`, `task_name`; `log_prefix` and the launchd output file names; the document builders `launchd_plist` and `schtasks_xml` (with `xml_escape`, `utf16_with_bom`); `Platform`, `Host`, the `Runner` trait and `SystemRunner`; `Plan` with `install_plan`/`uninstall_plan`, `describe` (the dry run) and `execute`; `install`/`uninstall` and their `_with` forms. |
+| `run.rs` | `run`/`run_with_levels`, the loop below; `ExeStamp`, `exe_changed` and `ExeWatch` (the executable check); the poll intervals and `RELEASE_WATCHDOG`; `finish_within` (the release watchdog); `BusyTimer` (a refused stamp read's escalation), `confirmed` (the two-probe app check) and `stop_report` (how a stopped hold is logged); the event sink (`Events`). |
 | `status.rs` | `status(db)`: `collector: running\|not running; app: present\|absent; store: <db>`, from two lock probes. |
-| `main.rs` | Installs logging with the `collector` prefix, dispatches, drops the log guard, exits with the returned status. |
+| `main.rs` | Installs logging with the store's prefix (`collector` or `collector-demo-<rows>`), dispatches, drops the log guard, exits with the returned status. |
 | `tests/handoff.rs` | Cross-process tests: the built binary in a temp home against a temp store, this process (or a child of it) as the app. Also `measure_handoff`, the handoff measurement in `docs/perf.md` (ignored; `GEODE_MEASURE_HANDOFF=1`, release build). They run on Windows CI too but have been run only on macOS; the lost-race and momentary-lock tests are Unix only. |
 
 ## The loop
@@ -110,9 +121,20 @@ reaches `launchctl`, `schtasks` or the real `~/Library/LaunchAgents`.
    the store: log `app took the store first` at info and go back to step 2.
    With no app present it is an error, and the process exits 70.
 7. Otherwise `release(HANDOFF_DRAIN)`, stop the bus, and log the release
-   time. If the executable's size or mtime changed since start, exit 75
-   (`EXIT_RESTART`) so the service manager starts the new build; otherwise
-   go back to step 2.
+   time. The release runs on its own thread under a 12 s watchdog
+   (`RELEASE_WATCHDOG`, under the app's 15 s open deadline). A release
+   still running then logs an error naming the store and the elapsed time
+   and exits 70: the OS frees DuckDB's file lock and the lease locks,
+   DuckDB rolls the unfinished transaction back, and the next owner
+   rediscovers an unfinished file load. Otherwise go back to step 2.
+
+Whenever the store is not held (at the top of each pass, every second of
+the waits in steps 2 and 3, the idles, and after a release) the collector
+compares its executable's size and mtime with those at start. A change
+exits 75 (`EXIT_RESTART`) so the service manager starts the new build; a
+collector idling on a mismatched stamp therefore restarts into a rebuilt
+binary too. A missing executable (`cargo clean`, a removed worktree) is not
+a change: it warns once and keeps running.
 
 The collector spawns no child process: a fork shares the lease's open file
 description, so the lock would outlive a drop until the child's exec.
@@ -120,8 +142,13 @@ description, so the lock would outlive a drop until the child's exec.
 ## Logging
 
 Everything goes to `tracing` under `geode::collector`, through the daily
-`<user config>/logs/collector.YYYY-MM-DD.log` file. Health transitions per
-source are info; publishes are debug; service diagnostics keep their
+`<user config>/logs/<prefix>.YYYY-MM-DD.log` file. The prefix is per store:
+`collector` for the real store, `collector-demo-<rows>` for a demo store, so
+a demo collector and the real one never share or trim each other's files
+(the trim matches `<prefix>.`). The files are trimmed to the newest seven
+at startup and again at each daily rotation. Health transitions per
+source are info for ok and pending, warn for degraded, failed and pending
+too long; publishes are debug; service diagnostics keep their
 severity. The service's own open failure and every thread stop are not
 logged by the sink: it holds them back, and the loop logs each once, at
 info when an app explains it (step 6) and at error otherwise. Nothing in
@@ -144,25 +171,37 @@ the sink waits: it logs, updates a map or a list, and returns.
   prints a warning for a path under `target`.
 - The release lets a file load under way finish, so a handoff during a
   large CSV load lasts the rest of that load (about 1.9 s at 1,000,000
-  rows, 4.5 s at 2,000,000), past the 2 s drain; a load longer than the
-  app's 15 s open deadline fails the app's open. See
-  `docs/current/performance.md`.
+  rows, 4.5 s at 2,000,000), past the 2 s drain. A release still running
+  after 12 s (a longer load, an adapter call that never returns) exits 70:
+  the app opens after about 12 s, the unfinished load is rolled back and
+  rediscovered by the app, and the service manager restarts the collector
+  (after up to 60 s on macOS). See `docs/current/performance.md`.
 - `[collector] memory_limit` is unset by default. A finite limit of 512MB
   made DuckDB abort the collector with an internal assertion on large CSV
   loads, and a service manager would restart it into the same load; a
   value can be set once the overnight footprint measurement chooses one.
-- A changed binary takes effect at the collector's next release (exit 75).
-  launchd restarts it after its 10 s throttle. On Windows a running
-  executable cannot be replaced, so a new build needs `install` again,
-  which ends the task first.
+- A changed binary takes effect the next time the collector does not hold
+  the store (exit 75). launchd restarts it after the plist's 60 s
+  `ThrottleInterval`, so an upgrade restart can wait up to a minute. On
+  Windows a running executable cannot be replaced, so a new build needs
+  `install` again, which ends the task first.
 - A reinstall's `launchctl bootout` or `schtasks /End` terminates a running
   collector without the release drain, so documents still pending in its
-  coalescers can be lost. Recovery on subscribe restores each key's latest
-  document in the next owner.
+  coalescers can be lost. A logout's SIGTERM is the same: no drain.
+  Recovery on subscribe restores each key's latest document in the next
+  owner.
+- Boot out or uninstall a demo collector
+  (`geode-collector uninstall --demo <rows>`) before deleting
+  `$TMPDIR/geode-demo/<rows>-42/`: a running one holds the store and its
+  lease, and launchd restarts it into a fresh demo directory.
+- App builds from worktrees cut before the app lease existed take no
+  `<db>.app.lock`, so the collector never yields to them, and their open
+  fails while it holds the store.
 - On some macOS versions `launchctl bootstrap` right after `bootout` fails
   with `5: Input/output error` while the old job finishes exiting; run
   `install` again.
 - Task Scheduler's `RestartOnFailure` restarts a task that fails to start;
   whether a nonzero exit code counts as a failure is Task Scheduler's
-  decision and has not been checked on a Windows machine. Registering the
-  task is a run check there, not a CI test.
+  decision and has not been checked on a Windows machine. Until it is, a
+  Windows collector that exits 70 or 75 may stay down until the next
+  logon. Registering the task is a run check there, not a CI test.

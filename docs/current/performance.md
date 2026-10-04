@@ -373,7 +373,9 @@ joined on the unique source value, if the idle figure stays over budget.
   130 documents) and the handoff takes about 0.8 s. With a file load under
   way the release lets the load finish, so the handoff is the rest of that
   load: about 1.9 s at 1,000,000 rows and 4.5 s at 2,000,000, past the 2 s
-  drain cap; a load longer than 15 s fails the app's open. Idle, it is
+  drain cap; a load still running after 12 s ends the collector at its
+  release watchdog, and the app opens then (the load is rolled back and
+  rediscovered). Idle, it is
   about 0.1 to 0.25 s, quantized by the collector's 100 ms hold poll and the
   app's 100 ms open retry.
 - A finite `[collector] memory_limit` of 512MB made DuckDB abort the

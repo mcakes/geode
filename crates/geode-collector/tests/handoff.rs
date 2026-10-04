@@ -7,7 +7,8 @@
 //! `--demo` store lives there; Windows' `temp_dir` reads `TMP`/`TEMP`). The
 //! user `app.toml` sets `data.db_path` and `[log] collector = "debug"`, so
 //! the collector's publish lines reach
-//! `<temp home>/.config/geode/logs/collector.*.log`, which the tests read.
+//! `<temp home>/.config/geode/logs/<prefix>.*.log` (`collector`, or
+//! `collector-demo-<rows>` for a demo store), which the tests read.
 //! `GEODE_SERVICE=1` drops the collector's stderr log layer, so a child's
 //! stderr (`<root>/stderr.txt`) holds only panics and aborts, shown when a
 //! collector exits unexpectedly. The real user configuration is never read
@@ -210,7 +211,11 @@ impl World {
     }
 
     fn command(&self, first: &str) -> Command {
-        let mut cmd = Command::new(BIN);
+        self.command_of(Path::new(BIN), first)
+    }
+
+    fn command_of(&self, bin: &Path, first: &str) -> Command {
+        let mut cmd = Command::new(bin);
         cmd.arg(first);
         if let Some(rows) = self.demo {
             cmd.args(["--demo", &rows.to_string()]);
@@ -268,17 +273,19 @@ impl World {
         String::from_utf8(out.stdout).unwrap()
     }
 
-    /// Every collector log file, oldest first, concatenated.
+    /// Every collector log file for this world's store, oldest first,
+    /// concatenated.
     fn log(&self) -> String {
         let Ok(entries) = std::fs::read_dir(self.user.join("logs")) else {
             return String::new();
         };
+        let prefix = format!("{}.", geode_collector::install::log_prefix(self.demo));
         let mut files: Vec<PathBuf> = entries
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("collector."))
+                    .is_some_and(|n| n.starts_with(&prefix))
             })
             .collect();
         files.sort();
@@ -661,6 +668,73 @@ fn a_mismatched_stamp_idles_the_collector() {
             .collect()
     };
     assert_eq!(tables, vec!["geode_meta".to_string()]);
+}
+
+/// A collector idling on a mismatched stamp never reaches a release, so it
+/// checks its executable while it idles: a rebuilt binary exits 75 for the
+/// service manager to start the new build. The test runs a copy of the
+/// binary and replaces the copy (a new file renamed over it, as a build
+/// does), so the shared binary is never touched. The collector also logs
+/// its desk and user configuration directories at start.
+///
+/// macOS only: Linux resolves the running executable to the replaced
+/// inode, and Windows refuses to replace a running executable.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_rebuilt_binary_restarts_an_idle_collector() {
+    let _serial = serial();
+    let world = World::files();
+    let other = STORE_FORMAT + 1;
+    {
+        let store = Store::open(&world.db).unwrap();
+        store
+            .writer()
+            .execute_batch(&format!(
+                "CREATE TABLE geode_meta (key VARCHAR PRIMARY KEY, value VARCHAR NOT NULL);
+                 INSERT INTO geode_meta VALUES ('store_format', '{other}');"
+            ))
+            .unwrap();
+    }
+    let bin_dir = world.tmp.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let exe = bin_dir.join("geode-collector");
+    std::fs::copy(BIN, &exe).unwrap();
+    let mut collector = Proc(
+        world
+            .command_of(&exe, "run")
+            .spawn()
+            .expect("spawn the copied geode-collector"),
+    );
+    world.wait_log(&mut collector, "collecting into", WAIT);
+    world.wait_log(
+        &mut collector,
+        &format!(
+            "configuration: desk {}, user {}",
+            world.desk.display(),
+            world.user.display()
+        ),
+        Duration::from_secs(3),
+    );
+    world.wait_log(
+        &mut collector,
+        "is stamped store format",
+        Duration::from_secs(3),
+    );
+    assert!(collector.exited().is_none());
+
+    // A rebuild: a new file with another size renamed over the old one.
+    let next = bin_dir.join("geode-collector.next");
+    std::fs::copy(BIN, &next).unwrap();
+    OpenOptions::new()
+        .append(true)
+        .open(&next)
+        .unwrap()
+        .write_all(b"rebuilt")
+        .unwrap();
+    std::fs::rename(&next, &exe).unwrap();
+    let status = wait_until("the exit after the rebuild", WAIT, || collector.exited());
+    assert_eq!(status.code(), Some(75), "{}", world.log());
+    assert!(world.log().contains("the collector executable changed"));
 }
 
 /// A `status` probe, or anything else, holding `<db>.app.lock` for an
