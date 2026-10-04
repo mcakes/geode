@@ -27,7 +27,7 @@ use crate::query::read::{ReadConfig, ReadQuery};
 use crate::query::series::compile_series;
 use crate::source::SourceSpec;
 use crate::store::catalog::BookFreshness;
-use crate::store::{Catalog, Store, StoreError};
+use crate::store::{Catalog, Store, StoreError, StoreOptions, stamp};
 use crate::vol::{VolConfig, VolSink, VolWorker};
 use chrono::{DateTime, Utc};
 use geode_core::config::{Diagnostic, Severity};
@@ -58,6 +58,27 @@ use std::time::{Duration, Instant, SystemTime};
 /// startup, read per query, and a request would need its own arm in every
 /// request match.
 pub type ContextColumns = Arc<Mutex<Vec<String>>>;
+
+/// How long the app waits for the background collector to release the
+/// store before its open fails, naming the holder.
+pub const DEFAULT_STORE_DEADLINE: Duration = Duration::from_secs(15);
+
+/// Which process opens the store, and so how the store-format stamp is
+/// treated (`store::stamp`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreRole {
+    /// Today's open plus the stamp write: this build's DDL defines the
+    /// layout, so it stamps after creating its tables. `spawn` uses this.
+    Direct,
+    /// The app: hold `<db>.app.lock` for the service's life and wait up to
+    /// `deadline` while the collector still has the store open
+    /// (`lease::acquire_app`), then the direct open and stamp write.
+    /// `DEFAULT_STORE_DEADLINE` is the app's deadline.
+    App { deadline: Duration },
+    /// The background collector: the stamp must match before any DDL runs
+    /// (an unstamped store is stamped); `memory_limit` is set on the writer.
+    Collector { memory_limit: Option<String> },
+}
 
 pub struct DataServiceConfig {
     pub db_path: PathBuf,
@@ -206,6 +227,21 @@ pub enum DataEvent {
         thread: String,
         reason: String,
     },
+    /// The app's open found the store held by another process (the
+    /// background collector handing it over) and is waiting for it. Sent
+    /// once, at the first refused open; `holder` is the PID DuckDB names,
+    /// when it names one. Requests are still admitted meanwhile and are
+    /// answered once the store opens.
+    StoreWaiting {
+        holder: Option<u32>,
+    },
+    /// The wait announced by `StoreWaiting` is over: DuckDB opened the
+    /// store. Sent only after a `StoreWaiting`, as soon as that open
+    /// succeeds, so the rest of the service's open can still fail and
+    /// follow it with `ThreadStopped`. A wait that ends without an open
+    /// sends `ThreadStopped` alone, and a stop during the wait sends
+    /// neither.
+    StoreOpened,
 }
 
 /// Forget one document of a `local = true` dataset: every generation, live
@@ -951,14 +987,96 @@ pub struct DataService {
     ingest: Arc<IngestHandle>,
     /// A dedicated read connection for service-side catalog and coverage reads.
     conn: duckdb::Connection,
+    /// The app's `<db>.app.lock` (`StoreRole::App` only). Declared last so
+    /// it drops last, on `shutdown`'s path and on an unwind alike: every
+    /// field above holds or joins a store connection, and a collector that
+    /// sees the lock free opens the file at once, so the lock must not be
+    /// released while DuckDB still has the file.
+    lease: Option<HeldLease>,
+}
+
+/// The app lease as the service holds it. In tests a probe runs as it
+/// drops, while the lock is still held, so a test can observe what is
+/// still open at the moment of release.
+struct HeldLease {
+    _lease: crate::lease::AppLease,
+    #[cfg(test)]
+    on_release: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl HeldLease {
+    fn new(lease: crate::lease::AppLease) -> Self {
+        HeldLease {
+            _lease: lease,
+            #[cfg(test)]
+            on_release: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for HeldLease {
+    fn drop(&mut self) {
+        if let Some(probe) = self.on_release.take() {
+            probe();
+        }
+    }
 }
 
 impl DataService {
     pub fn open(config: DataServiceConfig, sink: EventSink) -> Result<DataService, StoreError> {
+        Self::open_as(config, sink, &StoreRole::Direct)
+    }
+
+    pub(crate) fn open_as(
+        config: DataServiceConfig,
+        sink: EventSink,
+        role: &StoreRole,
+    ) -> Result<DataService, StoreError> {
+        let store = Self::open_store(&config, role)?;
+        Self::open_with_store(config, sink, store, role)
+    }
+
+    /// The DuckDB open alone, with the role's options: no DDL and no
+    /// stamp, so the app's open-with-wait can retry it while the store is
+    /// held without leaving anything half done.
+    pub(crate) fn open_store(
+        config: &DataServiceConfig,
+        role: &StoreRole,
+    ) -> Result<Store, StoreError> {
+        let options = match role {
+            StoreRole::Direct | StoreRole::App { .. } => StoreOptions::default(),
+            StoreRole::Collector { memory_limit } => StoreOptions {
+                memory_limit: memory_limit.clone(),
+            },
+        };
+        Store::open_with(&config.db_path, &options)
+    }
+
+    /// The rest of the open, once, on the store `open_store` returned: the
+    /// DDL (after the stamp check, for the collector), the stamp write (for
+    /// the app and a direct open) and every worker.
+    pub(crate) fn open_with_store(
+        config: DataServiceConfig,
+        sink: EventSink,
+        mut store: Store,
+        role: &StoreRole,
+    ) -> Result<DataService, StoreError> {
         // Captured before every closure below clones `sink` for its own
         // use, so `publish`'s refusal path can send through it directly.
         let stored_sink = Arc::clone(&sink);
-        let mut store = Store::open(&config.db_path)?;
+        // The collector checks the stamp before any other DDL, so a store of
+        // another format gains no table from it.
+        if matches!(role, StoreRole::Collector { .. }) {
+            store
+                .writer()
+                .execute_batch(stamp::META_DDL)
+                .map_err(|source| StoreError::Sql {
+                    statement: stamp::META_DDL.to_string(),
+                    source,
+                })?;
+            stamp::check(store.writer())?;
+        }
         // A computed dataset is answered by a module in process; it owns no
         // table and so has no generation summary to rebuild.
         for ds in config.schema.datasets.iter().filter(|d| !d.computed) {
@@ -970,6 +1088,11 @@ impl DataService {
             }
         }
         Catalog::new(store.writer()).ensure_tables()?;
+        // The app and a direct open stamp: this build's DDL just defined
+        // the layout.
+        if !matches!(role, StoreRole::Collector { .. }) {
+            stamp::write(store.writer())?;
+        }
         // Pruned and read before the runner takes the writer: the only store
         // access a subscription's recovery needs. A failure costs the recovery,
         // never the open; the source still subscribes. Only topics a pattern
@@ -1879,7 +2002,14 @@ impl DataService {
             scheduler,
             ingest,
             conn,
+            lease: None,
         })
+    }
+
+    /// Hold the app lease for the service's life; it drops after every
+    /// store connection (see the `lease` field).
+    pub(crate) fn hold_lease(&mut self, lease: crate::lease::AppLease) {
+        self.lease = Some(HeldLease::new(lease));
     }
 
     /// Replace the context columns every later query carries.
@@ -2597,7 +2727,28 @@ impl DataService {
         Ok(oldest)
     }
 
+    /// An exit stop: [`DataService::shutdown_with`] with `StopMode::Exit`.
     pub fn shutdown(&self) {
+        self.shutdown_with(crate::handle::StopMode::Exit);
+    }
+
+    /// Stop every worker. An exit stops the producers, then the readers,
+    /// then the ingest runner, which runs only the queued local writes. A
+    /// release stops the producers, has each subscription submit what its
+    /// coalescer holds, stops the scheduler, and lets the runner drain the
+    /// feeds' queued work until the release's deadline before the readers
+    /// stop. A release holds the queued files first, before any producer
+    /// stops, so none is taken while the producers stop. Either way the
+    /// app lease, the struct's last field, drops after the service itself,
+    /// once every connection is gone.
+    pub fn shutdown_with(&self, mode: crate::handle::StopMode) {
+        let release_until = match mode {
+            crate::handle::StopMode::Exit => None,
+            crate::handle::StopMode::Release { until } => Some(until),
+        };
+        if release_until.is_some() {
+            self.ingest.hold_files();
+        }
         // The file worker first: it answers only the sink.
         self.files.shutdown();
         // Upload workers next: they answer only the sink, and an upload
@@ -2631,20 +2782,36 @@ impl DataService {
         // workers above: each one's receiver thread submits documents
         // into the ingest runner, so stopping the runner while a worker
         // is still delivering would leave work queued behind a shut-down
-        // consumer.
+        // consumer. A release also submits what each coalescer holds.
         for worker in self
             .subscriptions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter_mut()
         {
-            worker.shutdown();
+            match release_until {
+                None => worker.shutdown(),
+                Some(_) => worker.shutdown_flushing(),
+            }
         }
-        self.pool.shutdown();
-        self.pricing.shutdown();
-        self.vol.shutdown();
-        self.scheduler.shutdown();
-        self.ingest.shutdown();
+        match release_until {
+            None => {
+                self.pool.shutdown();
+                self.pricing.shutdown();
+                self.vol.shutdown();
+                self.scheduler.shutdown();
+                self.ingest.shutdown();
+            }
+            Some(until) => {
+                // The scheduler before the drain, so no poll submits files
+                // the drain would only drop; the readers after it.
+                self.scheduler.shutdown();
+                self.ingest.shutdown_draining(until);
+                self.pool.shutdown();
+                self.pricing.shutdown();
+                self.vol.shutdown();
+            }
+        }
     }
 }
 
@@ -2664,6 +2831,23 @@ mod tests {
         std::sync::mpsc::Receiver<DataEvent>,
     ) {
         service_with(|_| {})
+    }
+
+    /// A release holds the runner's queued files before it stops any
+    /// producer, so no file load starts in the window before the drain
+    /// (`a_releasing_runner_takes_no_file_before_the_drain_begins` covers
+    /// the runner side). An exit does not hold them.
+    #[test]
+    fn a_release_holds_the_queued_files_and_an_exit_does_not() {
+        let (_dir, _feed, svc, _rx) = subscribed_service(Arc::new(FakeKind::new()), "demo_bus");
+        svc.shutdown_with(crate::handle::StopMode::Release {
+            until: Instant::now(),
+        });
+        assert!(svc.ingest.files_held());
+
+        let (_dir, _feed, svc, _rx) = subscribed_service(Arc::new(FakeKind::new()), "demo_bus");
+        svc.shutdown();
+        assert!(!svc.ingest.files_held());
     }
 
     /// `service()` with `prepare` run on the loaded store before the service
@@ -8060,6 +8244,173 @@ source_name = "NPV"
              publish must not double-send Ok"
         );
         svc.shutdown();
+    }
+
+    #[test]
+    fn a_direct_open_stamps_the_store_with_this_builds_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("geode.duckdb");
+        let (svc, _rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db_path.clone(),
+            schema: SchemaSpec::default(),
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+            positions: None,
+        })
+        .unwrap();
+        svc.shutdown();
+        assert_eq!(
+            stamp::read_format(&db_path).unwrap(),
+            Some(stamp::STORE_FORMAT)
+        );
+    }
+
+    fn bare_config(db_path: &std::path::Path) -> DataServiceConfig {
+        DataServiceConfig {
+            db_path: db_path.to_path_buf(),
+            schema: SchemaSpec::default(),
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+            positions: None,
+        }
+    }
+
+    #[test]
+    fn an_app_open_stamps_the_store_with_this_builds_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("geode.duckdb");
+        let sink: EventSink = Arc::new(|_| true);
+        let role = StoreRole::App {
+            deadline: Duration::from_secs(1),
+        };
+        let svc = DataService::open_as(bare_config(&db_path), sink, &role).unwrap();
+        svc.shutdown();
+        assert_eq!(
+            stamp::read_format(&db_path).unwrap(),
+            Some(stamp::STORE_FORMAT)
+        );
+    }
+
+    /// The app lease is released only once DuckDB has let go of the file:
+    /// a probe run as the lease drops, while its lock is still held, has
+    /// another process open the store, which fails while any connection
+    /// of this service is still open.
+    #[test]
+    fn the_app_lease_drops_after_every_store_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("geode.duckdb");
+        let config = bare_config(&db_path);
+        let role = StoreRole::App {
+            deadline: Duration::from_secs(1),
+        };
+        let gate = crate::lease::test_support::lock_file_gate();
+        let never = || false;
+        let (lease, store) = crate::lease::acquire_app(
+            &db_path,
+            Duration::from_secs(1),
+            &never,
+            &mut |_| {},
+            &mut || DataService::open_store(&config, &role),
+        )
+        .unwrap();
+        let sink: EventSink = Arc::new(|_| true);
+        let mut svc = DataService::open_with_store(config, sink, store, &role).unwrap();
+        svc.hold_lease(lease);
+        let opened = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&opened);
+        let probe_db = db_path.clone();
+        svc.lease.as_mut().unwrap().on_release = Some(Box::new(move || {
+            let child =
+                std::panic::catch_unwind(|| crate::lease::test_support::spawn_holder(&probe_db));
+            *seen.lock().unwrap() = Some(child.is_ok());
+        }));
+        // The probe spawns a child, which takes the spawn gate exclusively.
+        drop(gate);
+        svc.shutdown();
+        drop(svc);
+        assert_eq!(
+            *opened.lock().unwrap(),
+            Some(true),
+            "another process could not open the store as the lease dropped"
+        );
+    }
+
+    #[test]
+    fn a_collector_open_refuses_another_format_before_any_ddl() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("geode.duckdb");
+        {
+            let store = crate::store::Store::open(&db_path).unwrap();
+            store
+                .writer()
+                .execute_batch(&format!(
+                    "{} insert into geode_meta values ('store_format', '{}');",
+                    stamp::META_DDL,
+                    stamp::STORE_FORMAT + 1
+                ))
+                .unwrap();
+        }
+        let ds = crate::store::ddl::tests_support::sample_dataset();
+        let dataset = ds.name.clone();
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let sink: EventSink = Arc::new(|_| true);
+        let opened = DataService::open_as(
+            DataServiceConfig {
+                db_path: db_path.clone(),
+                schema,
+                views: Vec::new(),
+                dimensions: DerivedDimensions::default(),
+                query_workers: 1,
+                sources: Vec::new(),
+                adapters: Default::default(),
+                documents: Default::default(),
+                egress: Vec::new(),
+                clock: geode_core::clock::Clock::utc(),
+                pricer: PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
+                positions: None,
+            },
+            sink,
+            &StoreRole::Collector { memory_limit: None },
+        );
+        match opened {
+            Err(StoreError::FormatMismatch { found, expected }) => {
+                assert_eq!(
+                    (found, expected),
+                    (stamp::STORE_FORMAT + 1, stamp::STORE_FORMAT)
+                );
+            }
+            Err(other) => panic!("expected FormatMismatch, got {other}"),
+            Ok(_) => panic!("a collector opened a store of another format"),
+        }
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        let count = |pattern: &str| -> i64 {
+            conn.query_row(
+                "select count(*) from duckdb_tables() where table_name like ?",
+                [pattern],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count(&format!("{dataset}%")), 0, "no payload table created");
+        assert_eq!(count("file_generations"), 0, "no catalog table created");
     }
 
     #[test]

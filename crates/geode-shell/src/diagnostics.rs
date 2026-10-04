@@ -29,6 +29,39 @@ use crate::perf::FrameHistogram;
 /// cannot depend on the data crate, so it is repeated here.
 const REQUEST_LOOP: &str = "geode-data";
 
+/// The app's store open is waiting for another process (the background
+/// collector) to release the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreWaiting {
+    /// The holder's PID, when DuckDB named one.
+    pub holder: Option<u32>,
+}
+
+/// The status bar's store-waiting segment, prepared when the wait is noted
+/// so paint formats nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoreWaitingSegment {
+    /// Always `store: waiting for collector`.
+    pub text: SharedString,
+    /// The tooltip, naming the holder's PID when known.
+    pub detail: SharedString,
+}
+
+impl StoreWaitingSegment {
+    fn for_wait(wait: &StoreWaiting) -> Self {
+        let detail: SharedString = match wait.holder {
+            Some(pid) => {
+                format!("the background collector (PID {pid}) is handing the store over").into()
+            }
+            None => SharedString::new_static("the background collector is handing the store over"),
+        };
+        Self {
+            text: SharedString::new_static("store: waiting for collector"),
+            detail,
+        }
+    }
+}
+
 /// A data thread that died despite containment. It stays dead until the app
 /// restarts, so nothing clears it.
 #[derive(Debug, Clone, PartialEq)]
@@ -363,6 +396,12 @@ pub struct Diagnostics {
     pub stopped: Vec<StoppedThread>,
     /// The status segment for `stopped`, rebuilt when a thread stops.
     stopped_segment: Option<StoppedSegment>,
+    /// Set while the store open waits for the collector to hand the store
+    /// over; cleared when it opens or the request loop stops. The status
+    /// bar's store-waiting segment is prepared from this field.
+    store_waiting: Option<StoreWaiting>,
+    /// Prepared from `store_waiting` whenever it changes.
+    store_waiting_segment: Option<StoreWaitingSegment>,
     pub restart_required: Option<String>,
     /// A copy of `ShellView::perf`, refreshed by [`Self::refresh_frame_hist`]
     /// on the reload-poll tick — see that method's own doc comment for
@@ -439,6 +478,8 @@ impl Diagnostics {
             refused: 0,
             stopped: Vec::new(),
             stopped_segment: None,
+            store_waiting: None,
+            store_waiting_segment: None,
             restart_required: None,
             frame_hist: FrameHistogram::new(),
             memory: None,
@@ -701,9 +742,52 @@ impl Diagnostics {
             at,
         });
         self.stopped_segment = stopped_segment(&self.stopped);
+        // A stopped request loop is how a failed store wait ends (the
+        // collector never released, or another window holds the store):
+        // the stopped segment now carries that error, and a waiting
+        // segment beside it would promise an open that will never come.
+        if thread == REQUEST_LOOP {
+            self.store_waiting = None;
+            self.store_waiting_segment = None;
+        }
         self.version += 1;
         // `sections::sources_rows` renders the stopped threads.
         self.versions.sources += 1;
+    }
+
+    /// The store open is waiting for the process holding the store (the
+    /// background collector), `holder` its PID when known. Prepares the
+    /// status segment; the same wait again does not bump. A stopped request
+    /// loop also ends the wait (`note_thread_stopped`).
+    pub fn note_store_waiting(&mut self, holder: Option<u32>) {
+        let waiting = Some(StoreWaiting { holder });
+        if self.store_waiting == waiting {
+            return;
+        }
+        self.store_waiting_segment = waiting.as_ref().map(StoreWaitingSegment::for_wait);
+        self.store_waiting = waiting;
+        self.version += 1;
+    }
+
+    /// The store opened after a wait: clears `note_store_waiting`'s state.
+    /// A no-op when no wait is recorded.
+    pub fn note_store_opened(&mut self) {
+        if self.store_waiting.take().is_some() {
+            self.store_waiting_segment = None;
+            self.version += 1;
+        }
+    }
+
+    /// The wait for the store recorded by `note_store_waiting`, if one is
+    /// in progress.
+    pub fn store_waiting(&self) -> Option<&StoreWaiting> {
+        self.store_waiting.as_ref()
+    }
+
+    /// The prepared store-waiting segment, `None` unless the store open is
+    /// waiting for the collector.
+    pub fn store_waiting_segment(&self) -> Option<&StoreWaitingSegment> {
+        self.store_waiting_segment.as_ref()
     }
 
     /// The data handle's running total of `Busy` refusals. The same total
@@ -1183,6 +1267,75 @@ mod tests {
     use geode_core::query::{AsOf, QueryKey};
     use std::path::PathBuf;
     use std::time::Duration;
+
+    #[test]
+    fn a_store_wait_is_recorded_until_the_store_opens() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        assert_eq!(d.store_waiting(), None);
+        d.note_store_waiting(Some(812));
+        let v = d.version();
+        assert_eq!(d.store_waiting(), Some(&StoreWaiting { holder: Some(812) }));
+        d.note_store_waiting(Some(812));
+        assert_eq!(d.version(), v, "the same wait again does not bump");
+        d.note_store_opened();
+        assert_eq!(d.store_waiting(), None);
+        assert!(d.version() > v);
+        let v = d.version();
+        d.note_store_opened();
+        assert_eq!(d.version(), v);
+    }
+
+    #[test]
+    fn a_store_wait_prepares_its_segment_until_the_store_opens() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        assert_eq!(d.store_waiting_segment(), None);
+        d.note_store_waiting(Some(812));
+        let segment = d
+            .store_waiting_segment()
+            .expect("waiting: segment prepared");
+        assert_eq!(segment.text.as_ref(), "store: waiting for collector");
+        assert_eq!(
+            segment.detail.as_ref(),
+            "the background collector (PID 812) is handing the store over"
+        );
+        d.note_store_waiting(None);
+        assert_eq!(
+            d.store_waiting_segment().map(|s| s.detail.to_string()),
+            Some("the background collector is handing the store over".to_string()),
+            "no PID: the detail names no holder"
+        );
+        let v = d.version();
+        d.note_store_opened();
+        assert_eq!(d.store_waiting_segment(), None);
+        assert!(d.version() > v, "clearing a wait bumps");
+        let v = d.version();
+        d.note_store_opened();
+        assert_eq!(d.version(), v, "nothing to clear: no bump");
+    }
+
+    #[test]
+    fn a_stopped_request_loop_ends_the_store_wait() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_store_waiting(Some(812));
+        d.note_thread_stopped("geode-ingest", "boom".into(), SystemTime::UNIX_EPOCH);
+        assert!(
+            d.store_waiting_segment().is_some(),
+            "another thread's death says nothing about the open"
+        );
+        d.note_thread_stopped(
+            REQUEST_LOOP,
+            "the background collector did not release the store within 15 s (PID 812)".into(),
+            SystemTime::UNIX_EPOCH,
+        );
+        assert_eq!(d.store_waiting(), None);
+        assert_eq!(d.store_waiting_segment(), None);
+        assert_eq!(
+            d.stopped_segment().map(|s| s.detail.to_string()).as_deref(),
+            Some(
+                "the background collector did not release the store within 15 s (PID 812); also stopped: ingest"
+            ),
+        );
+    }
 
     fn linked(d: &mut Diagnostics, source: &str, dataset: &str) {
         d.describe_source(source, SourceSummary::for_dataset(dataset));

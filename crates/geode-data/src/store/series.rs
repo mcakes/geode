@@ -41,6 +41,9 @@ const SERIES_TYPES: [&str; 5] = ["VARCHAR", "VARCHAR", "TIMESTAMP", "TIMESTAMP",
 /// Create missing payload and coverage tables. Payload names and types come
 /// from `SERIES_COLUMNS` and `SERIES_TYPES` in matching order; the primary key
 /// is `(source, series_id, ts, received_at)`. Existing tables are not migrated.
+// Any change to this DDL bumps `STORE_FORMAT` (`store::stamp`), so a
+// collector from another build refuses this store instead of writing
+// positionally into a different layout.
 pub fn create_series_tables_sql(ds: &DatasetSpec) -> Vec<String> {
     let columns: Vec<String> = SERIES_COLUMNS
         .iter()

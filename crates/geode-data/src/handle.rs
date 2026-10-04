@@ -9,9 +9,10 @@
 //! the UI thread. See `docs/current/request-delivery.md`.
 
 use crate::egress::{UploadOutcome, UploadParams};
+use crate::lease::LeaseError;
 use crate::service::{
     ContextColumns, DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget,
-    QueryParams,
+    QueryParams, StoreRole,
 };
 use crate::supervise::REQUEST_LOOP;
 use geode_core::config::{Diagnostic, Severity};
@@ -30,7 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Maximum waiting requests on the service channel. This bound includes
 /// queries, cancellation, and other ordinary requests; it does not bound work
@@ -107,7 +108,24 @@ pub enum Request {
     },
     /// Wake the service to apply its latest pending view configuration.
     ReplaceViews,
-    Shutdown,
+    /// Stop the service, the way `mode` says.
+    Shutdown(StopMode),
+}
+
+/// How the service stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopMode {
+    /// Process exit: queued local writes run, every other queued job is
+    /// dropped (its source resends it after a restart).
+    Exit,
+    /// A handoff of the store to another process: subscriptions flush
+    /// their coalescers, and the ingest runner runs every queued document,
+    /// series and snapshot until they are empty or `until` passes. Queued
+    /// files are left for the next owner's discovery. `until` is fixed
+    /// when the release is asked for (`DataHandle::release`), so requests
+    /// still queued ahead of the stop spend the drain rather than extend
+    /// it.
+    Release { until: Instant },
 }
 
 #[derive(Debug)]
@@ -128,6 +146,10 @@ struct Inner {
     /// dying loop is refused `Stopped` rather than admitted to a queue that
     /// nothing will read. A deliberate shutdown does not set it.
     stopped: Arc<AtomicBool>,
+    /// Set by `stop` before it offers `Shutdown`. The app's open-with-wait
+    /// reads it between retries, so a stop during the wait ends it without
+    /// the loop ever reaching the channel.
+    stop_requested: Arc<AtomicBool>,
     /// Shared with the running service, which copies them onto each query.
     context_columns: ContextColumns,
 }
@@ -151,13 +173,32 @@ impl Inner {
         }
     }
 
-    /// Close admission before joining. Offer Shutdown best-effort, then drop the
-    /// sender so even a full queue eventually disconnects after queued requests
-    /// are dispatched. Downstream shutdown can still wait on running I/O.
+    /// An exit stop. See [`Inner::stop_with`].
     fn stop(&self) {
+        self.stop_with(StopMode::Exit);
+    }
+
+    /// Close admission before joining. An exit offers Shutdown best-effort,
+    /// then drops the sender, so even a full queue eventually disconnects
+    /// after queued requests are dispatched (and stops as an exit). A
+    /// release waits for queue space instead: a queue that disconnected
+    /// without its sentinel would stop as an exit and drop the work the
+    /// release must hand over. The loop is draining the queue, so the wait
+    /// lasts as long as the requests ahead of it, and it ends at once if the
+    /// loop has already gone. Downstream shutdown can still wait on running
+    /// I/O.
+    fn stop_with(&self, mode: StopMode) {
+        self.stop_requested.store(true, Ordering::Release);
         let taken = self.tx.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(tx) = taken {
-            let _ = tx.try_send(Request::Shutdown);
+            match mode {
+                StopMode::Exit => {
+                    let _ = tx.try_send(Request::Shutdown(mode));
+                }
+                StopMode::Release { .. } => {
+                    let _ = tx.send(Request::Shutdown(mode));
+                }
+            }
             drop(tx);
         }
         if let Some(t) = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -416,6 +457,23 @@ impl DataHandle {
         self.inner.stop();
     }
 
+    /// Stop the service to hand the store to another process, and join it.
+    /// Like [`DataHandle::shutdown`] it blocks; call it off any UI thread.
+    /// Unlike it, nothing the feeds delivered is dropped while `drain`
+    /// lasts: each subscription unsubscribes and submits the documents its
+    /// coalescer was holding, and the ingest runner runs every queued
+    /// document, series and snapshot until they are empty or `drain` has
+    /// passed since this call. What is left then is dropped with one
+    /// warning; queued files are left for the next owner's discovery. The
+    /// queued local writes (the app's own publishes and forgets) always
+    /// run, as at `shutdown`, even past the deadline. The store and the
+    /// app lease close before this returns.
+    pub fn release(&self, drain: Duration) {
+        self.inner.stop_with(StopMode::Release {
+            until: Instant::now() + drain,
+        });
+    }
+
     /// A handle with no service behind it: the test is the service, and
     /// reads what a module asked for.
     #[cfg(any(test, feature = "test-support"))]
@@ -429,6 +487,7 @@ impl DataHandle {
                     thread: Mutex::new(None),
                     dropped: AtomicU64::new(0),
                     stopped: Arc::default(),
+                    stop_requested: Arc::default(),
                     context_columns: Arc::default(),
                 }),
             },
@@ -467,24 +526,48 @@ impl DataService {
     /// Requests admitted before that failure have no individual outcomes. Failure
     /// to spawn the thread itself panics at the expect below.
     pub fn spawn(config: DataServiceConfig, sink: EventSink) -> DataHandle {
-        Self::spawn_with_probe(config, sink, no_probe)
+        Self::spawn_as(config, sink, StoreRole::Direct)
     }
 
-    /// [`DataService::spawn`] with a probe `serve` calls at each
+    /// [`DataService::spawn`] opening the store in `role`. For
+    /// `StoreRole::App` the request loop takes the app lease and waits for
+    /// the store while another process holds it, sending `StoreWaiting`
+    /// and then `StoreOpened`; requests are admitted (up to the channel
+    /// bound) and answered once it opens. A stop during the wait ends it
+    /// quietly. Every lease failure takes the open-failure path, with the
+    /// reason `data service failed to open: <LeaseError>`. Requests admitted
+    /// during a wait that then fails are never answered, as for any failed
+    /// open; only the failure diagnostic and `ThreadStopped` report it.
+    pub fn spawn_as(config: DataServiceConfig, sink: EventSink, role: StoreRole) -> DataHandle {
+        Self::spawn_with_probe(config, sink, role, no_probe)
+    }
+
+    /// [`DataService::spawn_as`] with a probe `serve` calls at each
     /// [`ServePoint`]; production passes [`no_probe`].
-    fn spawn_with_probe(config: DataServiceConfig, sink: EventSink, probe: Probe) -> DataHandle {
+    fn spawn_with_probe(
+        config: DataServiceConfig,
+        sink: EventSink,
+        role: StoreRole,
+        probe: Probe,
+    ) -> DataHandle {
         let (tx, rx) = sync_channel(REQUEST_BOUND);
         let pending_views = PendingViews::default();
         let service_views = Arc::clone(&pending_views);
         let stopped = Arc::new(AtomicBool::new(false));
         let loop_stopped = Arc::clone(&stopped);
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let opening = Opening {
+            config,
+            role,
+            stop_requested: Arc::clone(&stop_requested),
+        };
         let loop_sink = Arc::clone(&sink);
         let context_columns = ContextColumns::default();
         let service_context = Arc::clone(&context_columns);
         let thread =
             crate::supervise::spawn_supervised(REQUEST_LOOP.to_string(), sink, move || {
                 serve(
-                    config,
+                    opening,
                     loop_sink,
                     rx,
                     service_views,
@@ -501,6 +584,7 @@ impl DataService {
                 thread: Mutex::new(Some(thread)),
                 dropped: AtomicU64::new(0),
                 stopped,
+                stop_requested,
                 context_columns,
             }),
         }
@@ -743,7 +827,7 @@ impl PanicAnswer {
             Request::Poll { .. } => ("poll", PanicAnswer::Unanswered),
             Request::Cancel { .. } => ("cancel", PanicAnswer::Unanswered),
             Request::ReplaceViews => ("view replacement", PanicAnswer::Unanswered),
-            Request::Shutdown => ("shutdown", PanicAnswer::Unanswered),
+            Request::Shutdown(_) => ("shutdown", PanicAnswer::Unanswered),
         }
     }
 
@@ -896,8 +980,71 @@ impl PanicAnswer {
     }
 }
 
-fn serve(
+/// What the request loop opens and how: the configuration, the store role,
+/// and the stop flag an app's wait for the store watches.
+struct Opening {
     config: DataServiceConfig,
+    role: StoreRole,
+    stop_requested: Arc<AtomicBool>,
+}
+
+/// Why the request loop has no service.
+enum OpenFailure {
+    /// A stop arrived while the app waited for the store: no event.
+    Stopped,
+    /// Reported as a failed open.
+    Failed(String),
+}
+
+/// Open the service in `opening.role`. The app's open takes the lease and
+/// retries only the DuckDB open while another process holds the store; the
+/// rest of the open runs once, on the store that open returned. The lease
+/// moves into the service, which drops it after its last connection.
+fn open_service(opening: Opening, sink: &EventSink) -> Result<DataService, OpenFailure> {
+    let Opening {
+        config,
+        role,
+        stop_requested,
+    } = opening;
+    let StoreRole::App { deadline } = role else {
+        return DataService::open_as(config, Arc::clone(sink), &role)
+            .map_err(|e| OpenFailure::Failed(e.to_string()));
+    };
+    let should_stop = || stop_requested.load(Ordering::Acquire);
+    let mut waited = false;
+    let acquired = crate::lease::acquire_app(
+        &config.db_path,
+        deadline,
+        &should_stop,
+        &mut |holder| {
+            waited = true;
+            let _ = sink(DataEvent::StoreWaiting { holder });
+        },
+        &mut || DataService::open_store(&config, &role),
+    );
+    let (lease, store) = match acquired {
+        Ok(acquired) => acquired,
+        Err(LeaseError::Cancelled) => return Err(OpenFailure::Stopped),
+        Err(e) => return Err(OpenFailure::Failed(e.to_string())),
+    };
+    // `acquire_app` does not check for a stop before an open that then
+    // succeeds: a quit that arrived meanwhile must not start the service.
+    if should_stop() {
+        drop(store);
+        drop(lease);
+        return Err(OpenFailure::Stopped);
+    }
+    if waited {
+        let _ = sink(DataEvent::StoreOpened);
+    }
+    let mut service = DataService::open_with_store(config, Arc::clone(sink), store, &role)
+        .map_err(|e| OpenFailure::Failed(e.to_string()))?;
+    service.hold_lease(lease);
+    Ok(service)
+}
+
+fn serve(
+    opening: Opening,
     sink: EventSink,
     rx: Receiver<Request>,
     pending_views: PendingViews,
@@ -905,9 +1052,10 @@ fn serve(
     context_columns: ContextColumns,
     probe: Probe,
 ) {
-    let mut service = match DataService::open(config, Arc::clone(&sink)) {
+    let mut service = match open_service(opening, &sink) {
         Ok(s) => s,
-        Err(e) => {
+        Err(OpenFailure::Stopped) => return,
+        Err(OpenFailure::Failed(e)) => {
             // The service never became available: refuse later submissions
             // `Stopped` from now, and declare the loop gone although nothing
             // unwound, so the status bar says so.
@@ -929,6 +1077,8 @@ fn serve(
     }
 
     let _declare = StoppedOnUnwind(Arc::clone(&stopped));
+    // A queue that disconnects without its sentinel stops as an exit.
+    let mut stop = StopMode::Exit;
     while let Ok(req) = rx.recv() {
         probe(ServePoint::Loop(&req));
         // Check before every request: a full request queue is already a wakeup.
@@ -956,7 +1106,8 @@ fn serve(
                 let _ = sink(DataEvent::Diagnostics(diags));
             }
         }
-        if matches!(req, Request::Shutdown) {
+        if let Request::Shutdown(mode) = req {
+            stop = mode;
             break;
         }
         // One request's panic is that request's error, answered once through
@@ -981,7 +1132,7 @@ fn serve(
             );
         }
     }
-    service.shutdown();
+    service.shutdown_with(stop);
 }
 
 /// Run one request's arm. Every failure an arm returns is answered here on
@@ -1056,7 +1207,7 @@ fn dispatch(service: &DataService, sink: &EventSink, req: Request) {
         }
         Request::Cancel { key } => service.cancel(key),
         // Both are handled in `serve` before dispatch.
-        Request::ReplaceViews | Request::Shutdown => {}
+        Request::ReplaceViews | Request::Shutdown(_) => {}
     }
 }
 
@@ -1116,7 +1267,11 @@ mod tests {
         // The service starts only after the queue filled and both reloads arrived.
         let service = std::thread::spawn(move || {
             serve(
-                config,
+                Opening {
+                    config,
+                    role: StoreRole::Direct,
+                    stop_requested: Arc::default(),
+                },
                 sink,
                 requests,
                 pending,
@@ -2234,7 +2389,7 @@ mod tests {
             Request::Forget(f) => f.dataset == "marked",
             Request::Identities { source } => source == "marked",
             Request::Cancel { key } => *key == MARKED,
-            Request::ReplaceViews | Request::Shutdown => false,
+            Request::ReplaceViews | Request::Shutdown(_) => false,
         }
     }
 
@@ -2279,7 +2434,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, rx) = channel();
         let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
-        let handle = DataService::spawn_with_probe(empty_config(dir.path()), sink, probe);
+        let handle =
+            DataService::spawn_with_probe(empty_config(dir.path()), sink, StoreRole::Direct, probe);
         (dir, handle, rx)
     }
 
@@ -2775,7 +2931,12 @@ mod tests {
         }));
         let (tx, rx) = channel();
         let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
-        let h = DataService::spawn_with_probe(config, sink, panic_marked_cancel_outside);
+        let h = DataService::spawn_with_probe(
+            config,
+            sink,
+            StoreRole::Direct,
+            panic_marked_cancel_outside,
+        );
         // Rebound after `h` so a failing assertion drops it first: the held
         // pricer is released before `h`'s drop joins the dying loop, and a
         // failure is reported instead of hanging.
@@ -2840,5 +3001,326 @@ mod tests {
         assert_eq!(thread, "geode-pricing");
         assert!(reason.contains("injected delivery panic"), "{reason}");
         h.shutdown();
+    }
+
+    // The app's open: lease, open-with-wait, and the two store events.
+    // Every test that takes a lock file holds `lock_file_gate` shared, and
+    // takes it only after its `spawn_holder` call (the spawn takes the gate
+    // exclusively).
+
+    use crate::lease::test_support::{lock_file_gate, spawn_holder};
+
+    /// A `spawn_as(App)` service on `dir`'s store, recording every event.
+    fn app_service(dir: &std::path::Path, deadline: Duration) -> (DataHandle, Receiver<DataEvent>) {
+        let (tx, rx) = channel();
+        let tx = Mutex::new(tx);
+        let sink: EventSink = Arc::new(move |e| tx.lock().unwrap().send(e).is_ok());
+        let handle = DataService::spawn_as(empty_config(dir), sink, StoreRole::App { deadline });
+        (handle, rx)
+    }
+
+    fn catalog_request(handle: &DataHandle, tag: u64) -> Result<(), Refusal> {
+        handle.catalog(CatalogParams {
+            key: QueryKey(tag),
+            tag,
+            as_of: AsOf::Live,
+        })
+    }
+
+    /// Events up to and including the first that `done` accepts, which
+    /// must arrive within `within`.
+    fn events_until(
+        rx: &Receiver<DataEvent>,
+        within: Duration,
+        done: impl Fn(&DataEvent) -> bool,
+    ) -> Vec<DataEvent> {
+        let end = Instant::now() + within;
+        let mut seen = Vec::new();
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(e) => {
+                    let last = done(&e);
+                    seen.push(e);
+                    if last {
+                        return seen;
+                    }
+                }
+                Err(_) => panic!("no awaited event within {within:?}; saw {seen:?}"),
+            }
+        }
+    }
+
+    fn is_catalog(e: &DataEvent, tag: u64) -> bool {
+        matches!(e, DataEvent::Catalog(o) if o.tag == tag)
+    }
+
+    fn is_store_event(e: &DataEvent) -> bool {
+        matches!(e, DataEvent::StoreWaiting { .. } | DataEvent::StoreOpened)
+    }
+
+    fn stopped_reason(seen: &[DataEvent]) -> Option<&str> {
+        seen.iter().find_map(|e| match e {
+            DataEvent::ThreadStopped { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn an_app_open_with_no_holder_sends_no_store_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(dir.path(), Duration::from_secs(10));
+        catalog_request(&h, 7).unwrap();
+        let seen = events_until(&rx, Duration::from_secs(10), |e| {
+            is_catalog(e, 7) || matches!(e, DataEvent::ThreadStopped { .. })
+        });
+        assert_eq!(stopped_reason(&seen), None, "{seen:?}");
+        assert!(!seen.iter().any(is_store_event), "{seen:?}");
+        h.shutdown();
+        assert!(!rx.try_iter().any(|e| is_store_event(&e)));
+    }
+
+    #[test]
+    fn a_held_store_sends_waiting_then_opened_and_answers_queued_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("geode.duckdb");
+        let holder = spawn_holder(&db);
+        let child = holder.pid();
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(dir.path(), Duration::from_secs(10));
+        // Admitted while the loop waits for the store.
+        catalog_request(&h, 8).expect("a request is admitted during the wait");
+        let seen = events_until(&rx, Duration::from_secs(10), |e| {
+            matches!(
+                e,
+                DataEvent::StoreWaiting { .. } | DataEvent::ThreadStopped { .. }
+            )
+        });
+        assert!(
+            matches!(seen.last(), Some(DataEvent::StoreWaiting { holder: Some(pid) }) if *pid == child),
+            "{seen:?}"
+        );
+        drop(holder);
+        let seen = events_until(&rx, Duration::from_secs(5), |e| {
+            is_catalog(e, 8) || matches!(e, DataEvent::ThreadStopped { .. })
+        });
+        assert_eq!(stopped_reason(&seen), None, "{seen:?}");
+        let opened = seen
+            .iter()
+            .position(|e| matches!(e, DataEvent::StoreOpened))
+            .unwrap_or_else(|| panic!("no StoreOpened before the answer: {seen:?}"));
+        assert!(opened < seen.len() - 1, "{seen:?}");
+        assert_eq!(seen.iter().filter(|e| is_store_event(e)).count(), 1);
+        h.shutdown();
+    }
+
+    #[test]
+    fn a_second_window_fails_with_other_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let _gate = lock_file_gate();
+        let (first, first_rx) = app_service(dir.path(), Duration::from_secs(10));
+        catalog_request(&first, 9).unwrap();
+        events_until(&first_rx, Duration::from_secs(10), |e| is_catalog(e, 9));
+
+        let started = Instant::now();
+        let (second, rx) = app_service(dir.path(), Duration::from_secs(10));
+        let seen = events_until(&rx, Duration::from_secs(3), |e| {
+            matches!(e, DataEvent::ThreadStopped { .. })
+        });
+        assert_eq!(
+            stopped_reason(&seen),
+            Some("data service failed to open: another Geode window has this store open")
+        );
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(!seen.iter().any(is_store_event), "{seen:?}");
+        second.shutdown();
+        first.shutdown();
+    }
+
+    #[test]
+    fn a_held_store_past_the_deadline_names_the_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let holder = spawn_holder(&dir.path().join("geode.duckdb"));
+        let child = holder.pid();
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(dir.path(), Duration::from_millis(500));
+        let seen = events_until(&rx, Duration::from_secs(10), |e| {
+            matches!(e, DataEvent::ThreadStopped { .. })
+        });
+        let reason = stopped_reason(&seen).unwrap();
+        assert!(
+            reason.starts_with("data service failed to open: "),
+            "{reason}"
+        );
+        assert!(reason.contains("did not release the store"), "{reason}");
+        assert!(reason.contains(&format!("(PID {child})")), "{reason}");
+        assert_eq!(catalog_request(&h, 10), Err(Refusal::Stopped));
+        h.shutdown();
+        drop(holder);
+    }
+
+    #[test]
+    fn stopping_while_waiting_returns_promptly() {
+        let dir = tempfile::tempdir().unwrap();
+        let holder = spawn_holder(&dir.path().join("geode.duckdb"));
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(dir.path(), Duration::from_secs(15));
+        events_until(&rx, Duration::from_secs(10), |e| {
+            matches!(e, DataEvent::StoreWaiting { .. })
+        });
+        let (done_tx, done_rx) = channel();
+        std::thread::spawn(move || {
+            h.shutdown();
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a stop during the wait returns within 2 s");
+        let after: Vec<DataEvent> = rx.try_iter().collect();
+        assert_eq!(stopped_reason(&after), None, "{after:?}");
+        assert!(
+            !after.iter().any(|e| matches!(e, DataEvent::Diagnostics(d)
+                if d.iter().any(|d| d.severity == Severity::Error))),
+            "{after:?}"
+        );
+        drop(holder);
+    }
+
+    /// A release waits for queue space rather than drop its sentinel. With
+    /// the queue full while the loop waits for the store, that wait must
+    /// still end promptly: the stop flag cancels the open, the loop drops
+    /// its receiver, and the blocked send returns.
+    #[test]
+    fn release_returns_promptly_when_the_queue_is_full_during_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let holder = spawn_holder(&dir.path().join("geode.duckdb"));
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(dir.path(), Duration::from_secs(15));
+        events_until(&rx, Duration::from_secs(10), |e| {
+            matches!(e, DataEvent::StoreWaiting { .. })
+        });
+        let mut admitted = 0;
+        let refusal = loop {
+            match catalog_request(&h, admitted) {
+                Ok(()) => admitted += 1,
+                Err(refusal) => break refusal,
+            }
+            assert!(admitted <= REQUEST_BOUND as u64, "the queue never filled");
+        };
+        assert_eq!(refusal, Refusal::Busy);
+        let (done_tx, done_rx) = channel();
+        std::thread::spawn(move || {
+            h.release(crate::HANDOFF_DRAIN);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a release during the wait returns within 2 s");
+        drop(holder);
+    }
+
+    #[test]
+    fn the_app_lease_is_released_after_the_store_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("geode.duckdb");
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(dir.path(), Duration::from_secs(10));
+        catalog_request(&h, 11).unwrap();
+        events_until(&rx, Duration::from_secs(10), |e| is_catalog(e, 11));
+        assert!(crate::lease::app_present(&db).unwrap());
+        h.shutdown();
+        assert!(!crate::lease::app_present(&db).unwrap());
+        crate::store::Store::open(&db).expect("the store opens at once after shutdown");
+    }
+
+    /// A fresh machine: the store's directory does not exist yet, and the
+    /// app lease (taken before the store opens) must not fail on it.
+    #[test]
+    fn the_app_opens_a_store_whose_directory_does_not_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_dir = dir.path().join("a").join("b");
+        let _gate = lock_file_gate();
+        let (h, rx) = app_service(&store_dir, Duration::from_secs(10));
+        catalog_request(&h, 12).unwrap();
+        events_until(&rx, Duration::from_secs(10), |e| is_catalog(e, 12));
+        assert!(store_dir.join("geode.duckdb").exists());
+        h.shutdown();
+    }
+
+    /// Review focus: a handoff loses nothing the feed delivered, not even
+    /// a document a coalescer was still holding back. Three keys publish
+    /// at once; a second version of one is held by a 10 s window when the
+    /// release begins, and is live when the store is reopened.
+    #[test]
+    fn release_publishes_what_the_feed_delivered_before_it() {
+        use crate::store::ddl::tests_support::FakeKind;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("geode.duckdb");
+        let _gate = lock_file_gate();
+        let (bus, feed) = crate::adapter::ChannelAdapter::new("demo_bus");
+        let mut config = empty_config(dir.path());
+        config.adapters.register(bus);
+        config.documents.register(Arc::new(FakeKind::new()));
+        config.schema.datasets.push(cvi_dataset());
+        config.sources.push(crate::source::SourceSpec {
+            adapter: "demo_bus".into(),
+            document: Some("fake_cvi".into()),
+            topics: vec!["cvi/>".into()],
+            coalesce: Duration::from_secs(10),
+            ..crate::source::SourceSpec::directory("cvi", "cvi_params", Vec::new())
+        });
+        let (tx, rx) = channel();
+        let tx = Mutex::new(tx);
+        let sink: EventSink = Arc::new(move |e| tx.lock().unwrap().send(e).is_ok());
+        let h = DataService::spawn(config, sink);
+        // Answered only once the service is open, so the source has
+        // subscribed: the bus drops what it routes to nobody.
+        catalog_request(&h, 1).unwrap();
+        events_until(&rx, Duration::from_secs(10), |e| is_catalog(e, 1));
+        let is_publish_of = |e: &DataEvent, key: &str| matches!(e, DataEvent::Published { batch, .. } if batch == key);
+        for key in ["SPX.Z", "NDX.Z"] {
+            assert!(feed.publish(&format!("cvi/{key}"), FakeKind::message(key, [1.; 6])));
+            events_until(&rx, Duration::from_secs(10), |e| is_publish_of(e, key));
+        }
+        // Held: SPX.Z's window has ten seconds to run.
+        assert!(feed.publish(
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [2., 3., 4., 5., 6., 7.])
+        ));
+        // The bus routes and the receiver handles in order, so once the
+        // third key is published the held version is in the coalescer,
+        // not still on the bus, where the unsubscribe would drop it.
+        assert!(feed.publish("cvi/VIX.Z", FakeKind::message("VIX.Z", [1.; 6])));
+        events_until(&rx, Duration::from_secs(10), |e| is_publish_of(e, "VIX.Z"));
+        let began = Instant::now();
+        h.release(crate::HANDOFF_DRAIN);
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            began.elapsed()
+        );
+
+        let store = crate::store::Store::open(&db).expect("the store is free after release");
+        let conn = store.reader().unwrap();
+        let live = |key: &str| -> Vec<f64> {
+            let mut stmt = conn
+                .prepare(
+                    "select param from cvi_params_document_live \
+                     where underlying_ref = ? order by term, node",
+                )
+                .unwrap();
+            stmt.query_map(duckdb::params![key], |r| r.get::<_, f64>(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(live("NDX.Z"), vec![1.; 6]);
+        assert_eq!(live("VIX.Z"), vec![1.; 6]);
+        assert_eq!(
+            live("SPX.Z"),
+            vec![2., 3., 4., 5., 6., 7.],
+            "the held version was published before the store closed"
+        );
     }
 }

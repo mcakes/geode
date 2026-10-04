@@ -53,6 +53,10 @@ enum Key {
     /// `ThreadStopped`, keyed by thread: each thread stops once, and two
     /// stopping before a drain must both be delivered.
     Stopped(String),
+    /// `StoreWaiting` and `StoreOpened` share one key, so a `StoreOpened`
+    /// replaces a still-pending `StoreWaiting`: only the latest store state
+    /// matters to the status bar.
+    Store,
 }
 
 /// `seq` distinguishes uncoalesced outcomes (see `Key::Local`); events with
@@ -90,6 +94,7 @@ fn key(event: &DataEvent, seq: u64) -> Key {
         DataEvent::Health { source, .. } => Key::Health(source.clone()),
         DataEvent::Polled { source, .. } => Key::Polled(source.clone()),
         DataEvent::Diagnostics(_) => Key::Diagnostics,
+        DataEvent::StoreWaiting { .. } | DataEvent::StoreOpened => Key::Store,
     }
 }
 
@@ -582,5 +587,19 @@ mod tests {
                 DataEvent::ThreadStopped { thread, .. } if thread == expected
             ));
         }
+    }
+
+    /// The store events share a key: an open that lands before the drain
+    /// replaces the pending wait, so the status bar never shows a wait that
+    /// is already over.
+    #[gpui::test]
+    async fn a_store_opened_replaces_a_pending_store_waiting() {
+        let (tx, rx) = channel();
+        tx.try_send(DataEvent::StoreWaiting { holder: Some(812) })
+            .unwrap();
+        tx.try_send(DataEvent::StoreOpened).unwrap();
+        tx.try_send(DataEvent::LoadEnded).unwrap();
+        assert!(matches!(rx.recv().await.unwrap(), DataEvent::StoreOpened));
+        assert!(matches!(rx.recv().await.unwrap(), DataEvent::LoadEnded));
     }
 }

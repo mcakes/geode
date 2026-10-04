@@ -107,6 +107,14 @@ delay joins; panic containment does not cancel them. See
 [`subscribe.rs`](../../crates/geode-data/src/ingest/subscribe.rs), and
 [`fetch.rs`](../../crates/geode-data/src/ingest/fetch.rs).
 
+`DataHandle::release(drain)` stops the service to hand the store to another
+process, where `shutdown` stops it for process exit. Producers stop in the
+same order, but subscription workers submit what their coalescers hold before
+they join, and the ingest runner keeps running queued documents, series and
+reference snapshots until those queues are empty or `drain` has passed since
+the call; queued files are left for the next owner's discovery. See
+[release](#release).
+
 ## Containment and liveness
 
 No contained panic in the data layer ends as only a log line: a panicking
@@ -137,6 +145,10 @@ although nothing unwound. The app mailbox keys `ThreadStopped` by thread, so
 two threads stopping before one UI drain are both delivered. The status bar
 shows every stopped thread until the app restarts; see
 [stopped threads and refusals](shell.md#stopped-threads-and-refusals).
+
+The app's open first waits for the store under a lease, and a failed wait
+takes this open-failure path with the lease error as its reason; see [the
+app's open](#the-apps-open).
 
 ### The request loop
 
@@ -218,6 +230,197 @@ its `value` or `n` column is that key's error rather than a panic.
   log, not a status segment.
 - Containment does not interrupt a blocked call. A thread stuck in adapter,
   filesystem, or DuckDB I/O is neither stopped nor declared.
+
+## Store ownership and the background collector
+
+DuckDB admits one writing process per file. Two processes can want a store:
+the app, and a background collector process (planned) that keeps
+subscriptions and discovery publishing while the app is closed. They hand the
+store between them through two advisory lock files beside the database
+([`lease.rs`](../../crates/geode-data/src/lease.rs)):
+
+| File | Held by | Meaning |
+|---|---|---|
+| `<db>.app.lock` | the app's data service, from before the store opens until the service stops (quit, or a failed open, after which a collector may hold the store) | an app wants or has the store |
+| `<db>.collector.lock` | a collector, for its life | one collector per store; `lease::try_collector` gives a second one `None` |
+
+The locks are `std::fs::File::try_lock` (`flock` on macOS and Linux,
+`LockFileEx` on Windows). Nothing is written into the files; the protocol is
+the lock alone, and the OS drops it when its process dies, so a crashed app
+returns the store with no detection code. The locks are keyed by database
+path, so each demo store (`$TMPDIR/geode-demo/<rows>-42/`) and the real store
+have their own lease.
+
+The collector side asks `lease::app_present`, a probe that takes and at once
+releases `<db>.app.lock`. While an app is present a collector does not hold
+the store; when one appears, the collector releases it with
+`DataHandle::release(HANDOFF_DRAIN)` (2 s) and the app's waiting open takes
+it. `StoreRole::Collector` is that process's open: it checks the
+[store-format stamp](#the-store-format-stamp) before any DDL and sets the
+writer's `memory_limit`.
+
+### The app's open
+
+`DataService::spawn_as(config, sink, StoreRole::App { deadline })` is the
+app's open (`spawn` is the direct open). The request loop takes
+`<db>.app.lock` through `lease::acquire_app`; while DuckDB refuses the open
+with its own lock conflict (the background collector still has the file) it
+retries only the DuckDB open every 100 ms until `deadline`
+(`DEFAULT_STORE_DEADLINE`, 15 s), then runs the rest of the open (DDL, stamp,
+workers) once. The first refused open sends `DataEvent::StoreWaiting {
+holder }` (DuckDB's PID for the holder, when it names one), and DuckDB's
+successful open after it sends `StoreOpened`; an open that never waited sends
+neither. `StoreOpened` comes before the DDL and workers run, so a later
+failure of the rest of the open still ends in `ThreadStopped`.
+Requests are admitted during the wait, up to the channel bound, and answered
+once the store opens. A failure takes the [open-failure
+path](#supervised-threads), with `another Geode window has this store open`
+(the app lock stayed held for 1 s), `the background collector did not release
+the store within N s (PID n)`, or a lock-file error prefixed with the lock
+file's path as the error. Taking the lock creates the store's directory first
+(best-effort, as `Store::open_with` does), so a fresh machine's first launch
+does not fail on a missing directory; `lease::app_present` on a missing
+directory reports no app and creates nothing. A stop during the wait ends it
+at the next retry and the loop returns without a diagnostic or `ThreadStopped`. The service holds
+the lease as its last field, so it is released only after the writer and
+every reader connection have closed, on shutdown and on an unwind alike: a
+collector that sees the lock free can open the file at once. The app mailbox
+keys both store events on one key, so an open replaces a pending wait.
+The app (`bridge::start`) always opens this way, with
+`DEFAULT_STORE_DEADLINE`; tests and tools that own their store use `spawn`.
+While the wait lasts the status bar shows `store: waiting for collector`; see
+[the store-waiting segment](shell.md#the-store-waiting-segment).
+
+The app lock is retried for 1 s before the open counts as a second window,
+because a collector's probe holds it for an instant. The deadline counts from
+when the app lock is taken, so the whole open can last the deadline plus that
+second. Whether a refused open is a lock conflict is decided by DuckDB's
+message text (`Conflicting lock is held in` on Unix, `File is already open in`
+on Windows), pinned against a real conflict from a child process: a DuckDB
+upgrade that rewords it fails that test rather than turning every wait into
+an open error. Any other open error, including the same Unix prefix for a
+file system without locks, fails at once.
+
+### Release
+
+`DataHandle::release(drain)` stops the service for a handoff and blocks until
+it has stopped, like `shutdown`; call it off any UI thread. Its stop request
+waits for room in the request channel rather than being dropped when the
+channel is full, and the drain deadline is fixed when `release` is called,
+so requests still queued ahead of the stop spend the drain rather than extend
+it. In order:
+
+1. The runner stops taking queued files; a file load already running
+   finishes.
+2. The file, egress and position workers, then the fetch and snapshot
+   workers, stop as at `shutdown`.
+3. Each subscription worker sets its flush flag, then unsubscribes: its
+   receiver handles the messages already queued to it and submits every
+   document its coalescer holds, with current contents and ignoring its
+   release deadline, then exits. The flag goes first so that a receiver
+   that ends on the disconnection, rather than the stop flag, still
+   flushes.
+4. Discovery stops, so no poll submits files the drain would only drop.
+5. The ingest runner, after its current operation, runs queued documents,
+   series and reference snapshots in the usual priority order until those
+   queues are empty or the deadline passes. What is left is dropped with one
+   warning, `release: dropped N documents, N series, N snapshots at the
+   deadline`; queued files are logged at debug (`release: N queued files left
+   for the next discovery`) and left for the next owner's discovery, whose
+   stale check skips any already published. Queued local writes always run,
+   as at `shutdown`, even past the deadline.
+6. The read pool, pricing and the vol worker stop, the store closes, and the
+   app lease (a service holding one) is released last.
+
+DuckDB checkpoints its write-ahead log when the store closes, so the
+checkpoint is part of the handoff time the app waits through. Shutdown, not
+release, is the app's own quit: feed documents queued then are dropped, and a
+collector's subscriptions start after it takes the store. See
+[`service.rs`](../../crates/geode-data/src/service.rs) (`shutdown_with`) and
+[`runner.rs`](../../crates/geode-data/src/ingest/runner.rs).
+
+### The store-format stamp
+
+Two builds can write one store in turn, such as an upgraded app with an
+older collector still running, and publication writes positionally. The
+store's own tables have no drift check, and the payload tables' check sees
+too little (below). The store
+therefore carries `geode_data::STORE_FORMAT` in `geode_meta(key, value)`
+([`stamp.rs`](../../crates/geode-data/src/store/stamp.rs)):
+
+- `StoreRole::Direct` and `App` upsert `store_format` and `writer_build`
+  (`<crate version>+<GEODE_GIT_HASH>`, or `+dev` when the build sets no hash;
+  for diagnosis only, never compared) after their DDL. This build's DDL
+  defines the layout, so the app is the authority.
+- `StoreRole::Collector` creates `geode_meta` alone and reads the stamp
+  before any other DDL. A store with no stamp is stamped by the first writer
+  to open it. A different format fails the open with
+  `StoreError::FormatMismatch` (`the store has format N, this build reads
+  format M; …`), and no table is created. `stamp::read_format` reads the
+  stamp through a read-only open that never creates the file, for a check
+  before any service starts.
+
+Any change to the store's DDL bumps `STORE_FORMAT` by hand: its own tables
+(catalog, generations summary, provenance, `subscription_topics`,
+`geode_meta`) or the payload table builders in `store/ddl.rs` and
+`store/series.rs` (series payload and coverage). A comment at each DDL site
+says so. The builders bump even though their tables are drift-checked,
+because the drift check compares only column names, types and order (not
+keys or constraints, such as the series primary key) and blames the
+dataset's configuration rather than the build. Staging tables are exempt:
+each is created or replaced before every use, so a leftover from another
+build is never read. A mutation entry checks that a mismatch refuses.
+
+### Store ownership limits
+
+- Only a collector is protected by the stamp. `StoreRole::Direct` and `App`
+  never check it; they overwrite it after their DDL. An older app opening a
+  store written by a newer build therefore restamps it with its own format
+  and writes in its own layout.
+- A handoff gap loses intermediate versions only. Recovery on subscribe
+  restores each key's latest document after every subscribe; a key that
+  publishes more than once inside the gap (handoff time plus subscription
+  setup) loses the earlier versions from history. On `source_time =
+  receive`, a recovered change is stamped late by up to the gap. A source
+  whose adapter cannot recover keeps the full gap until that key's next
+  publish.
+- `ChannelAdapter` messages still in the bus's inbound channel, not yet
+  routed to a subscription when it unsubscribes, never reach that
+  subscription's receiver, so a release does not flush them. This is a
+  transport gap; recovery on subscribe in the next owner covers it.
+- A release always runs the queued local writes, even past its deadline.
+- An adapter call that never returns delays `release`, as it delays
+  `shutdown`, and the app's wait then runs to its deadline.
+- On Windows, when DuckDB cannot name the holder (the Restart Manager's
+  `RmGetList` finds none), the refusal carries no DuckDB marker, so a
+  conflict fails the open at once instead of waiting.
+- On a Unix other than macOS and Linux, DuckDB names no holder and writes no
+  marker, so a conflict fails the open at once.
+- A second Geode window on the same store fails its open after about 1 s
+  with `another Geode window has this store open`, in the stopped segment.
+- The store must live on a local disk. On a file system without locking
+  (some network shares), `try_lock` on `<db>.app.lock` fails with an OS error
+  such as `ENOTSUP`, and the app's open fails at once with that error after
+  the lock file's path (`<db>.app.lock: …`). The open is not retried and
+  there is no fallback.
+- Requests admitted during a wait that then fails (`Held`, another window, a
+  lock-file error) are never answered: the request loop takes the
+  open-failure path without draining them, as for any failed open, so a tile
+  that asked during the up to 15 s wait has no outcome for that request and
+  learns of the failure only through the open-failure diagnostic and
+  `ThreadStopped`.
+- The collector reads configuration when it takes the store, with no live
+  reload: a hand edit to `sources.toml` made while the app is closed takes
+  effect at its next acquire, its restart, or login.
+- What fails while the app is closed is recorded only by persisted file
+  health and the collector's log. Discovery-lane health (an unreachable
+  share, a failing snapshot query) does not survive into the app.
+- Session-bound transports (a Bloomberg Desktop API needs a logged-in
+  Terminal; network shares need the user's session) run in a collector only
+  while the user is logged in.
+- Desk policy may forbid login agents or scheduled tasks. Without a
+  collector the app opens the store directly through the same lease, with no
+  wait.
 
 ## Ingestion and publication
 
@@ -1326,7 +1529,7 @@ tile's health chip under the source's own name.
 | Source path missing, unreadable, or an invalid pattern | discovery | the source | `Degraded` | `path '<prefix>' not found`, `path '<prefix>' unreadable: <error>`, `invalid pattern '<pattern>': <error>` | the prefix exists and is readable |
 | Payload schema drift at open | discovery | every source of the dataset | `Failed` | `schema drift in '<dataset>': <diff>; delete the table or fix the dataset` | a restart after the table is deleted or the dataset fixed |
 | A subscription's receiver dropping messages | load | `<source>:queue` | `Degraded` | `N messages dropped since HH:MM:SS` | 60 s pass with no new drop |
-| A subscription's recovery request failing, or no topic answering it | load | `<source>:recovery` | `Degraded` | `recovery failed: <error>`, `recovery: no replies for N topics` | a later recovery window reports `Ok` (see [recovery on subscribe](#recovery-on-subscribe)) |
+| A subscription's recovery request failing, or a window ending with no reply at all while an asked topic had no NOTIFY since its start | load | `<source>:recovery` | `Degraded` | `recovery failed: <error>`, `recovery: no replies for N topics` | a later recovery window reports `Ok` (see [recovery on subscribe](#recovery-on-subscribe)) |
 | A source's documents and series queued past 64 | load | `<source>:backlog` | `Degraded` | `ingest backlog N` (re-reported at each further 64; `N` is the count at the last crossing, not a live count, and holds while draining) | that source's queue falls below 64 |
 
 `N` counts from the episode's first drop, and the time is when the receiver

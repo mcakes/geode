@@ -625,6 +625,50 @@ fn the_ingest_strip_and_segment_paint_only_while_a_load_is_running(cx: &mut gpui
     );
 }
 
+/// While the app's store open waits for the collector, the status bar paints the
+/// muted `store-waiting` segment and the shared top-edge progress strip; the
+/// open ends both when no load is running.
+#[gpui::test]
+fn the_store_waiting_segment_paints_only_while_the_open_waits(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("store-waiting").is_none(),
+        "no wait: no segment"
+    );
+    assert!(vcx.debug_bounds("ingest-strip").is_none(), "idle: no strip");
+
+    let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+    diagnostics.update(&mut vcx, |d, cx| {
+        d.note_store_waiting(Some(812));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let seg = vcx
+        .debug_bounds("store-waiting")
+        .expect("waiting: the segment paints");
+    assert!(seg.size.width > gpui::px(0.));
+    assert!(
+        vcx.debug_bounds("ingest-strip").is_some(),
+        "waiting: the progress strip paints"
+    );
+
+    diagnostics.update(&mut vcx, |d, cx| {
+        d.note_store_opened();
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("store-waiting").is_none(),
+        "opened: segment gone"
+    );
+    assert!(
+        vcx.debug_bounds("ingest-strip").is_none(),
+        "opened, no load: strip gone"
+    );
+}
+
 /// The log-level dialog selects a target, then a level, and calls
 /// `Diagnostics::request_level`. Escape from the level step returns to target
 /// selection.

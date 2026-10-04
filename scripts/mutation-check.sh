@@ -1274,6 +1274,190 @@ run_mutation "catalog: a partition's live generation is its own" \
   geode-data \
   live_generation_is_the_partitions_newest_and_moves_on_a_same_time_republish
 
+# The store-format stamp (store/stamp.rs). A collector built for one layout
+# must not write into a store of another; the app stamps what it opens.
+run_mutation "stamp: a different format refuses the collector" \
+  crates/geode-data/src/store/stamp.rs \
+  'Some(found) if found != STORE_FORMAT => Err(StoreError::FormatMismatch {' \
+  'Some(found) if false => Err(StoreError::FormatMismatch {' \
+  geode-data \
+  a_check_refuses_a_different_format_naming_both
+
+run_mutation "stamp: the collector checks before any DDL" \
+  crates/geode-data/src/service.rs \
+  '            stamp::check(store.writer())?;' \
+  '            let _ = store.writer();' \
+  geode-data \
+  a_collector_open_refuses_another_format_before_any_ddl
+
+run_mutation "stamp: a direct open stamps the store" \
+  crates/geode-data/src/service.rs \
+  '            stamp::write(store.writer())?;' \
+  '            let _ = store.writer();' \
+  geode-data \
+  a_direct_open_stamps_the_store_with_this_builds_format
+
+run_mutation "stamp: the collector's check precedes its DDL" \
+  crates/geode-data/src/service.rs \
+  '            stamp::check(store.writer())?;' \
+  '            for ds in &config.schema.datasets { let _ = store.apply_schema(ds); } stamp::check(store.writer())?;' \
+  geode-data \
+  a_collector_open_refuses_another_format_before_any_ddl
+
+run_mutation "stamp: an app open stamps the store" \
+  crates/geode-data/src/service.rs \
+  '        if !matches!(role, StoreRole::Collector { .. }) {' \
+  '        if matches!(role, StoreRole::Direct) {' \
+  geode-data \
+  an_app_open_stamps_the_store_with_this_builds_format
+
+# The app's open-with-wait (handle.rs, service.rs): the wait is announced and
+# its end too, a stop ends it, and the app lease is released only after
+# DuckDB has let go of the file.
+run_mutation "open-with-wait: StoreOpened follows StoreWaiting" \
+  crates/geode-data/src/handle.rs \
+  '    if waited {' \
+  '    if false {' \
+  geode-data \
+  a_held_store_sends_waiting_then_opened_and_answers_queued_requests
+
+run_mutation "open-with-wait: the lease outlives the store" \
+  crates/geode-data/src/service.rs \
+  $'    conn: duckdb::Connection,\n    /// The app\'s `<db>.app.lock` (`StoreRole::App` only). Declared last so\n    /// it drops last, on `shutdown`\'s path and on an unwind alike: every\n    /// field above holds or joins a store connection, and a collector that\n    /// sees the lock free opens the file at once, so the lock must not be\n    /// released while DuckDB still has the file.\n    lease: Option<HeldLease>,' \
+  $'    lease: Option<HeldLease>,\n    conn: duckdb::Connection,' \
+  geode-data \
+  the_app_lease_drops_after_every_store_connection
+
+run_mutation "open-with-wait: a stop ends the wait" \
+  crates/geode-data/src/handle.rs \
+  '        self.stop_requested.store(true, Ordering::Release);' \
+  '        let _ = &self.stop_requested;' \
+  geode-data \
+  stopping_while_waiting_returns_promptly
+
+# The store-waiting status segment (geode-shell diagnostics.rs, status.rs),
+# reached through the app's event drain: the open clears it, a failed wait
+# (the request loop's ThreadStopped) hands the bar to the stopped segment,
+# and the bar paints it only while the open waits.
+run_mutation "store segment: opened clears it" \
+  crates/geode-shell/src/diagnostics.rs \
+  $'        if self.store_waiting.take().is_some() {\n            self.store_waiting_segment = None;\n            self.version += 1;\n        }' \
+  '' \
+  geode-app \
+  store_events_show_then_clear_the_waiting_segment
+
+run_mutation "store segment: a stopped request loop ends the wait" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if thread == REQUEST_LOOP {' \
+  '        if false {' \
+  geode-app \
+  a_failed_store_wait_hands_the_bar_to_the_stopped_segment
+
+run_mutation "store segment: the status bar paints it" \
+  crates/geode-shell/src/shell/status.rs \
+  '    if let Some(segment) = store_waiting {' \
+  '    if let Some(segment) = store_waiting.filter(|_| false) {' \
+  geode-shell \
+  the_store_waiting_segment_paints_only_while_the_open_waits
+
+run_mutation "store segment: the wait runs the progress strip" \
+  crates/geode-shell/src/shell/status.rs \
+  '        .when(ingest.is_some() || store_waiting.is_some(), |el| {' \
+  '        .when(ingest.is_some(), |el| {' \
+  geode-shell \
+  the_store_waiting_segment_paints_only_while_the_open_waits
+
+# The store lease (lease.rs). The app and the collector hand the store over
+# through lock files; a probe must not read as a second app, a stop must end
+# the wait, and only DuckDB's own lock conflict is waited out.
+run_mutation "lease: the app lock retries to absorb a probe" \
+  crates/geode-data/src/lease.rs \
+  'const APP_LOCK_RETRY: Duration = Duration::from_secs(1);' \
+  'const APP_LOCK_RETRY: Duration = Duration::ZERO;' \
+  geode-data \
+  a_probe_does_not_refuse_the_app
+
+run_mutation "lease: a stop cancels the wait" \
+  crates/geode-data/src/lease.rs \
+  $'        std::thread::sleep(OPEN_STEP.min(deadline - waited));\n        if should_stop() {' \
+  $'        std::thread::sleep(OPEN_STEP.min(deadline - waited));\n        if false {' \
+  geode-data \
+  a_stop_during_the_wait_cancels_promptly
+
+run_mutation "lease: a stop cancels the lock retry" \
+  crates/geode-data/src/lease.rs \
+  $'        std::thread::sleep(APP_LOCK_STEP);\n        if should_stop() {' \
+  $'        std::thread::sleep(APP_LOCK_STEP);\n        if false {' \
+  geode-data \
+  a_stop_while_another_app_holds_the_lock_cancels_promptly
+
+run_mutation "lease: only a lock conflict is retried" \
+  crates/geode-data/src/lease.rs \
+  '        let Some(text) = conflict_text(&err) else {' \
+  '        let Some(text) = Some(err.to_string()) else {' \
+  geode-data \
+  a_non_lock_open_error_is_not_retried
+
+run_mutation "lease: the Windows holder marker is a conflict" \
+  crates/geode-data/src/lease.rs \
+  ' || message.contains("File is already open in")' \
+  ' || false' \
+  geode-data \
+  the_windows_conflict_text_is_a_conflict_only_with_duckdbs_marker
+
+run_mutation "lease: a Unix conflict needs DuckDB's holder marker" \
+  crates/geode-data/src/lease.rs \
+  '    message.contains("Conflicting lock is held in") ||' \
+  '    message.contains("Could not set lock on file") ||' \
+  geode-data \
+  a_unix_lock_failure_without_a_holder_is_not_a_conflict
+
+run_mutation "lease: the holder is the last PID in the text" \
+  crates/geode-data/src/lease.rs \
+  '.rmatch_indices("PID ")' \
+  '.match_indices("PID ")' \
+  geode-data \
+  a_pid_in_the_store_path_is_not_the_holder
+
+# DuckDB writes a bare `PID n` when it cannot read the process name.
+run_mutation "lease: the bare PID form names the holder" \
+  crates/geode-data/src/lease.rs \
+  ".is_none_or(|c| c == '(' || c.is_whitespace());" \
+  ".is_none_or(|c| c == '(');" \
+  geode-data \
+  holder_pid_parses_the_bare_form_without_a_process_name
+
+# The lock is taken before the store opens: on a fresh machine the lock's
+# open creates the store's directory, or every launch ends stopped.
+run_mutation "lease: the lock open creates the store directory" \
+  crates/geode-data/src/lease.rs \
+  $'    if let Some(parent) = path.parent() {\n        let _ = std::fs::create_dir_all(parent);\n    }\n    open_lock_file(path)' \
+  '    open_lock_file(path)' \
+  geode-data \
+  the_app_lease_creates_a_missing_store_directory
+
+# A probe of a missing directory is no app, not an error.
+run_mutation "lease: a probe of a missing directory is no app" \
+  crates/geode-data/src/lease.rs \
+  '        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),' \
+  '' \
+  geode-data \
+  a_probe_of_a_missing_directory_is_no_app_and_creates_nothing
+
+run_mutation "lease: the holder is read from DuckDB's text alone" \
+  crates/geode-data/src/lease.rs \
+  '        holder = holder_pid(&text).or(holder);' \
+  '        holder = holder_pid(&err.to_string()).or(holder);' \
+  geode-data \
+  a_pid_in_the_store_path_is_not_the_holder
+
+run_mutation "store: the memory limit escapes a quote" \
+  crates/geode-data/src/store/mod.rs \
+  $'limit.replace(\'\\\'\', "\'\'")' \
+  $'limit.replace(\'\\\'\', "\'")' \
+  geode-data \
+  open_with_sets_the_memory_limit_for_the_writer_and_its_readers
+
 run_mutation "catalog: a generation that never went live is not fresh" \
   crates/geode-data/src/store/catalog.rs \
   '                       where fg.dataset = ?
@@ -15647,7 +15831,7 @@ run_mutation "ingest: a stale skip does not start the strip" \
 # Some. Painting them unconditionally survives every entity test.
 run_mutation "status: the strip paints only while loading" \
   crates/geode-shell/src/shell/status.rs \
-  '        .when(ingest.is_some(), |el| {' \
+  '        .when(ingest.is_some() || store_waiting.is_some(), |el| {' \
   '        .when(true, |el| {' \
   geode-shell \
   the_ingest_strip_and_segment_paint_only_while_a_load_is_running
@@ -24700,6 +24884,81 @@ run_mutation "runner: shutdown also runs a feed's queued document" \
   '            DocumentWork::Publish(job) => job.source == LOCAL_SOURCE,' \
   '            DocumentWork::Publish(_job) => true,' \
   geode-data shutdown_runs_queued_local_writes_and_drops_the_rest
+
+# A release (the store handed to another process) runs the feeds' queued
+# documents, series and snapshots until its deadline, since the next owner's
+# feeds do not resend them, and leaves queued files to its discovery.
+run_mutation "release: queued feed work drains" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    if !fed || std::time::Instant::now() >= until {' \
+  '                    if true {' \
+  geode-data a_draining_runner_runs_queued_documents_series_and_snapshots_and_drops_files
+
+run_mutation "release: the deadline bounds the drain" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    if !fed || std::time::Instant::now() >= until {' \
+  '                    if !fed {' \
+  geode-data a_draining_runner_stops_at_the_deadline_and_counts_what_is_left
+
+run_mutation "release: files are left for discovery" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                        !(q.documents.is_empty() && q.series.is_empty() && q.references.is_empty());' \
+  '                        !(q.documents.is_empty() && q.series.is_empty() && q.references.is_empty() && q.items.is_empty());' \
+  geode-data a_draining_runner_runs_queued_documents_series_and_snapshots_and_drops_files
+
+run_mutation "release: files are held from the start of a release" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if q.items.is_empty() || q.hold_files {' \
+  '    if q.items.is_empty() {' \
+  geode-data a_releasing_runner_takes_no_file_before_the_drain_begins
+
+run_mutation "release: the service holds files before stopping producers" \
+  crates/geode-data/src/service.rs \
+  '        if release_until.is_some() {
+            self.ingest.hold_files();
+        }' \
+  '' \
+  geode-data a_release_holds_the_queued_files_and_an_exit_does_not
+
+run_mutation "release: coalescers flush" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        for (_key, pending) in coalescer.drain_all() {
+            self.submit(pending);
+        }' \
+  '        coalescer.drain_all();' \
+  geode-data a_flushing_shutdown_submits_the_coalescers_pending_documents
+
+# The release reaches the service: the sentinel's mode is kept, and the
+# service flushes the subscriptions for it.
+run_mutation "release: the request loop keeps the release mode" \
+  crates/geode-data/src/handle.rs \
+  '            stop = mode;' \
+  '            let _ = mode;' \
+  geode-data release_publishes_what_the_feed_delivered_before_it
+
+run_mutation "release: the service flushes the subscriptions" \
+  crates/geode-data/src/service.rs \
+  '                Some(_) => worker.shutdown_flushing(),' \
+  '                Some(_) => worker.shutdown(),' \
+  geode-data release_publishes_what_the_feed_delivered_before_it
+
+run_mutation "lease: a zero PID does not fall through to the path" \
+  crates/geode-data/src/lease.rs \
+  '            rest[..end].parse::<u32>().ok()
+        })
+        .filter(|&pid| pid != 0)' \
+  '            rest[..end].parse::<u32>().ok().filter(|&pid| pid != 0)
+        })' \
+  geode-data a_pid_of_zero_names_no_holder_and_keeps_the_last_known_one
+
+# DuckDB names PID 0 when the lock was already released; that is no holder.
+run_mutation "lease: PID 0 names no holder" \
+  crates/geode-data/src/lease.rs \
+  '        .filter(|&pid| pid != 0)
+}' \
+  '
+}' \
+  geode-data a_pid_of_zero_names_no_holder_and_keeps_the_last_known_one
 
 # At quit every unsaved sheet is saved before the data service stops.
 run_mutation "quit: the data hook stops the service without flushing sheets" \
