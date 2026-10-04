@@ -5,6 +5,11 @@ loads the layered config, builds the action registry and keymap, installs
 logging, spawns the data service, fills the module roster and opens the
 window on `geode_shell::shell::ShellView`.
 
+The `guide` tile factory is always registered, independently of data setup.
+It displays the bundled user guide through **Guide: Split** in the palette
+or **guide** in the tile picker. Its kind is reserved against market-data
+panel declarations, as are the other feature kinds.
+
 Current crate boundaries and runtime ownership:
 [`docs/current/architecture.md`](../../docs/current/architecture.md).
 Feature composition and demo behavior are described in

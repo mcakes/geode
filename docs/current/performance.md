@@ -121,6 +121,7 @@ cargo bench -p geode-timeseries
 cargo bench -p geode-volslice
 cargo bench -p geode-pricer
 cargo bench -p geode-diagnostics
+cargo bench -p geode-classifications
 cargo bench --workspace --no-run
 ```
 
@@ -140,6 +141,7 @@ the measurement log for fixture and hardware details.
 | View requery | 1,000,000 rows, no text filter, depth two | 2.51 ms |
 | View requery, no context columns | 1,000,000 rows, underlying-grain measures only, depth two | 20.5 ms |
 | View requery, roster's context columns | the same view with `underlying_ref`, `position_ref`, `instrument_ref` | 35.0 ms |
+| View requery grouped by a classification (`query_classification`) | 1,000,000 rows, `sector > underlying_ref`, two underlying-grain measures; `sector` maps the 10 observed underlyings / 5,000 values (padded); full depth / depth two; loaded machine (load 33 to 58) | 24.0 / 14.3 ms; 55.3 / 51.2 ms |
 | Series query | four slots plus ratio, daily over one year | 9.56 ms |
 | Series query with stats | two minute slots over one month | 14.5 ms |
 | Chart path rebuild | 500,000 points into 1,600 columns | 1.51 ms |
@@ -163,6 +165,8 @@ the measurement log for fixture and hardware details.
 | Line-pricer reference fill | 1,000 entries / 1,200 sheet rows, every line blank: one `fill_currencies` batch, packages folded once (folding per filled line measured 13.7 ms) | 17.4 µs |
 | Line-pricer sorted rebuild | the flat rebuild above under an `npv` descending sort over varied prices: rollup, `sort::rank`, index (heavily loaded machine; the unsorted rebuild measured 469 µs in the same run) | 549 µs |
 | Line-pricer sorted grouped rebuild | the grouped rebuild above under the same sort (the unsorted one measured 834 µs in the same run; the rank alone 102 µs) | 923 µs |
+| Classifications rebuild after an edit | 5,000 source values, half labelled, `rows` desc sort and a `/` filter active: `History::apply`, `to_toml`, `classification::rows` and the grid's relabel rebuild, before table preparation and paint (load 4.5) | 1.53 ms |
+| Classifications rows rebuild | the same grid, rows and grid only (a values answer or a reload) | 1.21 ms |
 | In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
 | Keybinding rows | builtin + 400 synthetic module actions, 200 user overrides: derive and rank, per input change | 667 µs |
@@ -183,6 +187,14 @@ two rows were recorded on a heavily loaded machine, so read them as a ratio
 rather than as reference figures: on this shape the three context columns cost
 about 70% more, mostly the position- and instrument-grain scans no shown
 measure already reads. Re-measure on an idle machine before quoting them.
+
+A derived dimension is a map probe per row, not a `CASE` with one arm per
+value: at 5,000 values the `CASE` took 2.7 s against 26 ms at ten, and the
+probe 53 to 65 ms against 12 to 24 ms, all on a loaded machine. A
+5,000-value classification therefore still sits at or just over the 50 ms
+budget there, and the probe's cost still grows with the classification's
+size. An idle re-measure is owed; the next lever is a keyed lookup table
+joined on the unique source value, if the idle figure stays over budget.
 
 ## Cache and allocation contracts
 
@@ -304,6 +316,14 @@ measure already reads. Re-measure on an idle machine before quoting them.
   to narrow only its kept rows, because the greedy word placement does not
   guarantee that a row the longer query keeps was kept by the shorter one.
 
+- A classification CSV import is planned on the background executor (60 to
+  93 ms on the UI thread at the 10 MiB / 100,000-row limits, before it
+  moved), but applying the plan at `y` (`ImportPlan::apply`, `to_toml` and
+  the grid's relabel rebuild) still runs on the UI thread: about 28 ms at
+  100,000 changed rows, over the 8 ms budget. Imports of a few thousand rows
+  stay within it. Moving the apply off the thread would need the history
+  and the pending object to accept a result computed over a copy.
+
 - Object-dialog paint still formats per-row element ids (layer, override,
   drift badges; field and provenance ids) and resolves the Colors browse
   swatches per paint; the rows themselves are prepared. Bounded by the
@@ -344,13 +364,16 @@ measure already reads. Re-measure on an idle machine before quoting them.
   pipeline. Concurrent staging is on hold until the real path and a network
   share are measured.
 - CI compiles benchmarks but has no stable regression baseline.
-- The vol slice `model_build` bench (`cargo bench -p geode-volslice`) has
-  not been measured locally; CI compiles it. It times `core::build::model`
-  alone, the work a repaint does on the UI thread when a batch answers, over
-  twelve active monthly expiries with the published CVI, a draft and a
-  60-strike chain at each, densities on and a `cvi draft − chain`
-  difference, in moneyness, the batch answered once by the stand-in model
-  outside the timed loop. Its target is under 1 ms. The delta coordinate
+- The vol slice `model_build` bench (`cargo bench -p geode-volslice`) measured
+  about 200 µs with 1,000-point curves under heavy machine load (see the
+  measurement log). It times `core::build::model` alone, the work a repaint
+  does on the UI thread when a batch answers, over twelve active monthly
+  expiries with the published CVI, a draft and a 60-strike chain at each,
+  densities on and two differences (`cvi draft − chain` and `cvi − cvi
+  draft`), in moneyness, the batch answered once by the stand-in model
+  outside the timed loop. Each active expiry's color and companion are
+  resolved there once through `HuePalette` (an OKLCH conversion and a
+  contrast bisection each). Its target is under 1 ms. The delta coordinate
   (reversed, with NaN density gaps) is not benchmarked.
 - The pricer's `/` cells read the live sheet through the index `/` built. A
   price-only delivery (the refill-only path) drops them and has the table

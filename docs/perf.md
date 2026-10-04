@@ -2722,3 +2722,79 @@ rising to 7 to 12 during the second pair from other sessions):
 The small shape is unchanged. The large shape reads about 3 percent
 slower, within the spread seen between runs of one build at higher load;
 no regression on the ordinary path.
+`cargo bench -p geode-volslice --bench model_build` (3 s measurement, load
+65 to 93 from other sessions' builds): `model_twelve_expiries_three_kinds`
+99.8 µs (96.7 to 103.1) with each curve and density at 1,000 points, twelve
+expiries, both CVI kinds with densities, the chain and a difference; the
+batch is answered outside the timed loop.
+
+## Vol slice: several differences and hue colors (2026-10-03)
+
+`cargo bench -p geode-volslice --bench model_build -- --warm-up-time 1
+--measurement-time 3`, load average 50 to 62 from other sessions' builds:
+`model_twelve_expiries_three_kinds` 205 µs (188 to 226), against 99.8 µs
+before. The bench now carries two differences (`cvi draft − chain` with
+whiskers and `cvi − cvi draft`) instead of one, and every slot's color comes
+from `HuePalette` (a gamut-clipped OKLCH color and a `readable_on` bisection
+per call) rather than an indexed array. The load was several times the
+earlier run's; the split between the second pair and the color cost was not
+measured. Still well under the 1 ms target.
+
+## Grouping by a classification: `CASE` against a map probe (2026-10-03)
+
+`cargo bench -p geode-data --bench query -- query_classification`. One
+service over one million generated rows (959,012 ingested), the `by_sector`
+view (`sector > underlying_ref`, `delta01` and `vega01`, both
+underlying-grain), unscoped, live. `sector` is a derived dimension over
+`underlying_ref` built in the bench: the distinct `underlying_ref` values
+(the demo generator produces ten) dealt round-robin into eleven sectors,
+then padded with unobserved `PADnnnnn` values to 5,000 entries. Both
+fixtures return 21 result rows. Timing is submission through snapshot
+receipt, as for `query_requery`.
+
+Conditions: Apple M5 Pro (18 cores, 48 GB), rustc 1.96.0, bench profile,
+20 samples. **The machine was heavily loaded** throughout by builds in other
+checkouts (load average 45 to 85 for the `CASE` run and map run 1, 12 rising
+to 58 for map run 2), so read rows within one run as ratios.
+
+| shape | `CASE` | map run 1 | map run 2 |
+| --- | ---: | ---: | ---: |
+| 10 values, full depth | 26.5 ms | 13.3 ms | 24.0 ms |
+| 10 values, depth 2 | 27.4 ms | 11.9 ms | 14.3 ms |
+| 5,000 values, full depth | 2,731 ms | 65.5 ms | 55.3 ms |
+| 5,000 values, depth 2 | 2,597 ms | 53.0 ms | 51.2 ms |
+
+The `CASE` (`case "underlying_ref" when … then … end`, one arm per value)
+was a hundred times over budget at 5,000 values, so `derived_case` became
+`map_extract_value(MAP([keys], [labels]), "from"::varchar)`, confirmed
+present in the pinned DuckDB (v1.5.5), where it also accepts an ENUM source.
+The map is about fifty times faster at 5,000 values and no slower at ten,
+but its cost still grows with the classification: 5,000 values sit at or
+just over 50 ms on this loaded machine. Not established: whether the growth
+is the per-row key search or parsing and binding the 5,000-pair literal on
+every requery. An idle re-measure is owed; if it stays over budget, a keyed
+lookup table joined on the unique source value is the next candidate.
+
+## Classifications rebuild after an edit (2026-10-03)
+
+`cargo bench -p geode-classifications --bench grid`. 5,000 observed source
+values (`SRC00000`..`SRC04999`, row counts spread over 0..999), the first
+2,500 labelled across twelve labels, the rest unclassified. The grid holds a
+`rows` descending sort and the `/` filter `src1`. One label edit is timed
+from a fresh `History` through `History::apply` (undo entry and next
+object), `classification::to_toml` (the object the config door writes),
+`classification::rows` (the map joined with the values) and
+`GridModel::relabelled` (re-order and re-filter, cursor kept by index). Table
+preparation (`Prepared::build`) and paint are not timed.
+
+Conditions: Apple M5 Pro (18 cores, 48 GB), rustc 1.96.0, bench profile,
+Criterion defaults. Load average 4.5 at the start (down from 23 over the
+previous quarter hour).
+
+| bench | median (low to high) |
+| --- | ---: |
+| `classifications_rebuild_after_edit_5k` | 1.53 ms (1.52 to 1.55) |
+| `classifications_rows_and_grid_5k` | 1.21 ms (1.19 to 1.23) |
+
+Both sit well inside the 8 ms UI budget: the edit itself (history, the TOML
+object) adds about 0.3 ms to the rows rebuild a values answer or reload pays.

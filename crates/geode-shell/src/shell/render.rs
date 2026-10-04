@@ -23,8 +23,8 @@ use super::drag::{
     DividerDrag, DividerDragTarget, StripSpec, TILE_DRAG_GHOST_OFFSET, TILE_DRAG_GHOST_SIZE,
 };
 use super::{
-    ShellView, addfilter, asof_view, choicedialog, commandline_view, dialog, objectdialog,
-    perf_overlay, picker, scope_expr_view, sidebar, stacklist, status, toolbar, whichkey,
+    ShellView, asof_view, commandline_view, dialog, objectdialog, perf_overlay, picker,
+    scope_expr_view, sidebar, stacklist, status, toolbar, whichkey,
 };
 
 /// Shared hover-group name for divider strips. GPUI resolves each line
@@ -401,50 +401,29 @@ impl Render for ShellView {
                 picker::open(view, Some(column), window, cx);
             });
         };
-        // The scope bar's `+` opens the add-a-filter menu, whose rows
-        // dispatch `frame::pick` and `frame::add_expression`. Same
-        // `cx.entity()`-captured shape as `on_chip_open` just above.
+        // The scope bar's `+` opens the Scope dialog on Current, the same
+        // door as `frame::scope`.
         let add_entity = cx.entity();
         let on_add = move |window: &mut Window, cx: &mut App| {
             add_entity.update(cx, |view, cx| {
-                view.open_add_filter_menu(window, cx);
+                super::scopedialog::view::open(view, window, cx);
             });
         };
-        // The open menu's panel, painted from its prepared rows. A row
-        // click commits through `commit_add_filter` (a dispatch); hovering
-        // a row highlights it.
-        let add_menu = self.add_filter_menu.as_ref().map(|menu| {
-            let pick_entity = cx.entity().downgrade();
-            let hover_entity = pick_entity.clone();
-            addfilter::render(
-                menu,
-                move |entry, window: &mut Window, cx: &mut App| {
-                    let _ = pick_entity
-                        .update(cx, |view, cx| view.commit_add_filter(entry, window, cx));
-                },
-                move |i, _window: &mut Window, cx: &mut App| {
-                    let _ = hover_entity.update(cx, |view, cx| view.hover_add_filter(i, cx));
-                },
-                cx,
-            )
-            .into_any_element()
-        });
         // The scope bar's save glyph — the mouse form of
         // `scope::save_current`, through the same door `input.rs`'s
-        // dispatch arm uses.
+        // dispatch arm uses: the Scope dialog's save prompt, alone.
         let save_chip_entity = cx.entity();
         let on_save = move |window: &mut Window, cx: &mut App| {
             save_chip_entity.update(cx, |view, cx| {
-                objectdialog::render::open_save_scope(view, window, cx);
+                super::scopedialog::view::open_save(view, window, cx);
             });
         };
-        // The scope bar's load glyph — the mouse form of
-        // `frame::scope`/`mod+o`, through the same door `input.rs`'s
-        // dispatch arm uses.
+        // The scope bar's load glyph opens the Scope dialog's Saved screen,
+        // the mouse form of `frame::scope_saved`.
         let load_chip_entity = cx.entity();
         let on_load = move |window: &mut Window, cx: &mut App| {
             load_chip_entity.update(cx, |view, cx| {
-                choicedialog::open_scopes(view, window, cx);
+                super::scopedialog::view::open_saved(view, window, cx);
             });
         };
         // The grouping readout's click — the mouse form of
@@ -453,7 +432,7 @@ impl Render for ShellView {
         let grouping_entity = cx.entity();
         let on_grouping = move |window: &mut Window, cx: &mut App| {
             grouping_entity.update(cx, |view, cx| {
-                choicedialog::open_grouping(view, window, cx);
+                objectdialog::render::open(view, objectdialog::Domain::Groupings, window, cx);
             });
         };
         // The AS OF chip's click — the mouse
@@ -484,19 +463,13 @@ impl Render for ShellView {
                 });
             });
         };
-        // A named-expression chip's body opens the Expressions dialog on
-        // that name; its `×` drops that name alone, an undoable edit like
-        // the other chips' `×`.
+        // A named-expression chip's body opens that name's definition in
+        // the Scope dialog, alone; its `×` drops that name alone, an
+        // undoable edit like the other chips' `×`.
         let named_open_entity = cx.entity();
         let on_named_open = move |name: &str, window: &mut Window, cx: &mut App| {
             named_open_entity.update(cx, |view, cx| {
-                objectdialog::render::open_object(
-                    view,
-                    objectdialog::Domain::Expressions,
-                    name,
-                    window,
-                    cx,
-                );
+                super::scopedialog::view::open_definition(view, name.to_string(), window, cx);
             });
         };
         let named_close_entity = cx.entity();
@@ -509,19 +482,25 @@ impl Render for ShellView {
                 });
             });
         };
-        // Whether the grouping picker is up: the readout holds its pressed
-        // fill for exactly as long as it is (design guide: a control that
-        // owns a popup stays visibly pressed until the popup closes). The
-        // tile picker shares the choice dialog and must not light it.
-        let grouping_open = matches!(
-            self.choice_dialog.as_ref().map(|d| &d.target),
-            Some(choicedialog::Target::Grouping { .. })
-        );
-        // The load glyph holds its pressed fill while the scope picker is up.
-        let scope_open = matches!(
-            self.choice_dialog.as_ref().map(|d| &d.target),
-            Some(choicedialog::Target::Scope { .. })
-        );
+        // Whether the Grouping dialog is up, live or covered: the readout
+        // holds its pressed fill for exactly as long as it is (design guide:
+        // a control that owns a popup stays visibly pressed until the popup
+        // closes). Another object dialog must not light it.
+        let grouping_open =
+            self.object_dialog
+                .as_ref()
+                .is_some_and(|state| state.domain == objectdialog::Domain::Groupings)
+                || self.modals.iter().any(|modal| {
+                    modal.parked_object.as_ref().is_some_and(|parked| {
+                        parked.state.domain == objectdialog::Domain::Groupings
+                    })
+                });
+        // The load glyph holds its pressed fill while the Saved screen is
+        // the Scope dialog's top layer.
+        let scope_open = self
+            .scope_dialog
+            .as_ref()
+            .is_some_and(super::scopedialog::saved_view::in_saved);
         // The pin glyph names the active workspace, whose tiles are the
         // ones on screen, not a dialog's target.
         let ws = self.active_ix();
@@ -541,7 +520,7 @@ impl Render for ShellView {
             &bar_model,
             grouping_open,
             scope_open,
-            add_menu,
+            self.scope_dialog.is_some(),
             on_chip_close,
             on_chip_open,
             on_add,
@@ -863,32 +842,6 @@ impl Render for ShellView {
                     )
                 },
             )
-            // The add-a-filter menu's click catcher: a press anywhere but
-            // the menu closes it and goes no further. The menu panel itself
-            // is deferred (painted above this) from inside the toolbar, so
-            // its rows are hit first. `occlude` is what keeps the press
-            // from also reaching the element beneath, the `+` included —
-            // otherwise a click on the `+` would close and reopen the menu.
-            // It also blocks the wheel for the tiles beneath while the menu
-            // is open, which is accepted for a two-row transient menu.
-            .when(self.add_filter_menu.is_some(), |el| {
-                el.child(
-                    div()
-                        .id("scope-add-menu-click-catcher")
-                        .absolute()
-                        .left(px(0.))
-                        .top(px(0.))
-                        .w(px(width))
-                        .h(px(viewport_height))
-                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())
-                        .occlude()
-                        // Every button: the catcher swallows every press, so a
-                        // right or middle press must close the menu too.
-                        .on_any_mouse_down(cx.listener(|view, _event, window, cx| {
-                            view.dismiss_add_filter_menu(window, cx)
-                        })),
-                )
-            })
             // The row menu: hung at its recorded point (the cursor row's
             // anchor) or at the focused tile's top-left. `render_menu`
             // closes it on a press outside itself.

@@ -15,10 +15,10 @@ xy element's in the vol slice viewer:
 
 | Module | Holds |
 |---|---|
-| `core` | Window-free geometry and labels: y scales and 1-2-5 ticks, axes and panes, layout and the plot under a point, the view window, the time x scale with its ticks and crosshair, the linear x scale with its formats, ticks and zoom and pan orientation (`linear`), dash and point-mark stroke geometry (`marks`), hit testing, decimation, and theme-derived palette values. |
-| `paint` | What elements share once they have a window: rebuild counters, a pane side's resolved y axis, the pane frame (grid and y axes), the x-axis painter, stroke builders, and `MAX_STROKE_SEGMENTS`, the ceiling on a path of separate segments. |
+| `core` | Window-free geometry and labels: y scales and 1-2-5 ticks, axes and panes, layout and the plot under a point, the view window, the time x scale with its ticks and crosshair, the linear x scale with its formats, ticks and zoom and pan orientation (`linear`), dash and point-mark stroke geometry and the outline under a filled line (`marks`), hit testing, decimation, and theme-derived palette values. |
+| `paint` | What elements share once they have a window: rebuild counters, a pane side's resolved y axis, the pane frame (grid and y axes), the x-axis painter, stroke builders, the fill builder, and `MAX_STROKE_SEGMENTS`, the ceiling on a path of separate segments. |
 | `timeseries` | `ChartModel` and `ChartSlot`, the immutable prepared input, and `ChartElement`: polylines over a session or continuous time axis, with percentile rules and density bars. |
-| `xy` | `XyModel` and `XySlot`, the immutable prepared input, and `XyElement`: lines, solid or dashed, and point marks with a range bar, over a linear x axis that can run reversed. Re-exports the axis's `XFormat` and `LinearX`. |
+| `xy` | `XyModel` and `XySlot`, the immutable prepared input, and `XyElement`: lines, solid or dashed and optionally shaded down to zero, and point marks with a range bar, over a linear x axis that can run reversed. Re-exports the axis's `XFormat` and `LinearX`. |
 
 Both elements paint through gpui-component's `Plot`, in up to two panes with
 four y axes, with cached data paths and chrome.
@@ -82,6 +82,29 @@ cargo run -p geode-chart --example xy
 - Callers use `Palette` to resolve series colors from the theme and pass the
   rem scale to the element. An element reads theme tokens for its grid and
   axes; it never reads module or shell state.
+- `Palette` cycles the theme's five chart colors. `HuePalette` is for series
+  that sit side by side in position (expiries in date order), where
+  neighbours must not look alike: index `i` has the OKLCH hue of the
+  theme's first chart color plus `i` golden angles (`GOLDEN_ANGLE`, about
+  137.5°), at the mean lightness and median chroma of the five chart
+  colors (a near-grey chart color would drag a mean down; chroma at least
+  `MIN_CHROMA`, clipped to gamut per hue). Neighbours are
+  about 137.5° apart and no hue repeats; indices 8, 13 and 21 apart come
+  closest (about 20°, 12° and 8°). `HuePalette::companion` is the same hue
+  at `COMPANION_CHROMA` of the chroma and `COMPANION_LIGHTNESS` away in
+  lightness, a lighter-weight shade. The direction is chosen once per
+  palette: toward the background (paler) only if every one of the first
+  `DIRECTION_SPAN` (24) indices still meets the readable ratio that way,
+  toward the foreground for every index otherwise, so one chart never
+  mixes paler and darker companions.
+- Both palettes pass every color through `readable_on` against the
+  background: a color under `READABLE_RATIO` (3:1) moves toward the
+  foreground's lightness, and if that path cannot reach the ratio its
+  endpoint is returned without a guarantee. Every bundled theme's chart
+  colors, and the first 24 `HuePalette` colors and companions, meet it (the
+  palette tests sweep them). A `HuePalette` color costs a conversion and a
+  bisection per call: callers prepare colors when the theme or the indices
+  change, never per frame.
 
 ### `timeseries`
 
@@ -115,6 +138,15 @@ cargo run -p geode-chart --example xy
 - `XySlot::nearest_in` is the nearest point within a window of a slot's
   points, the lower of two as near; `nearest` is the same over the whole
   slot. The tooltip reads through it with the slot's view window.
+- Each y axis autoscales to the padded extent of what the view shows of its
+  visible slots, so a pan or zoom rescales it, unless the model fixes its
+  domain: `XyModel::with_y_limit(axis, Some((lo, hi)))` (a pair that is not
+  finite and ascending is no limit; `None` autoscales again). The limit is
+  part of the model, so a caller fixing one on a painted model gives the
+  result a new version, as for any change. `XyModel::side_domain(axis,
+  view)` is the domain the element scales over, fixed or autoscaled, so a
+  host can freeze the domain it shows. Values past a fixed domain are
+  clipped by the pane's content mask and still read in the tooltip.
 - `XyModel::full()` is the x range of the slots visible at construction, and
   `(0, 0)` when there are none. A range of one x gives a view with no span,
   which paints every point at the plot's left edge and has no x ticks; a
@@ -124,6 +156,16 @@ cargo run -p geode-chart --example xy
   plot's edges, and those two knots count toward its axis's domain. A window
   of fewer than two knots is empty: the line paints nothing and adds nothing
   to its axis's domain.
+- A line with `fill` also shades the region between it and its axis's zero,
+  under its stroke, in the slot's color at `FILL_OPACITY` (0.3) of the slot's
+  own alpha, every fill in a pane before any stroke, so a fill never tints
+  another slot's line. Each finite run is its own outline, so a gap breaks the fill as
+  it breaks the line. A value below zero shades up to zero from beneath, so a
+  negative lobe is as visible as a positive one. A zero above or below the
+  plot shades to the plot's nearer edge. The outline follows the decimated
+  polyline, so a fill costs what its stroke does, and the view's clip holds
+  it to the pane as it does the line. A filled line is otherwise a line: its
+  window, axis domain, readout and crosshair are a line's.
 - A point paints a diamond at its mid when the mid is finite, and a vertical
   bar over its range when the range's two ends are finite and apart. With a
   finite mid and one end missing, the bar runs from the mid to the end that
@@ -131,10 +173,12 @@ cargo run -p geode-chart --example xy
   spread. A point with no mid and fewer than two ends, or two ends that
   meet, paints nothing; a lone end's value still reaches its axis's domain.
   A points slot's window is the points inside the view, edges included.
-- Each visible slot the view shows something of is one cached stroke path.
+- Each visible slot the view shows something of is one cached stroke path,
+  and a filled line a second, cached fill path beside it under the same key.
   The path key holds the model version, slot number, pane, view, plot
-  geometry and the rem, which sizes dashes and markers. Data is clipped to
-  its pane's plot.
+  geometry and the rem, which sizes dashes and markers; a fill's zero is the
+  side scale's, which those inputs determine. Data is clipped to its pane's
+  plot.
 - A slot too large for one path of separate segments degrades instead of
   vanishing. A points slot with more than `MAX_STROKE_SEGMENTS / 5` points in
   view paints an even stride of them and the last: every point counts as

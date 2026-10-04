@@ -56,6 +56,10 @@ impl Harness {
     pub(super) fn chooser(&self, vcx: &gpui::VisualTestContext) -> Option<(Vec<String>, usize)> {
         self.tile.read_with(vcx, |t, _| t.chooser_rows())
     }
+    /// The open chooser's ticked pairs, or `None`.
+    pub(super) fn chooser_ticks(&self, vcx: &gpui::VisualTestContext) -> Option<Vec<Pair>> {
+        self.tile.read_with(vcx, |t, _| t.chooser_ticks())
+    }
     pub(super) fn draw(&self, vcx: &mut gpui::VisualTestContext) {
         vcx.update(|window, cx| {
             window.refresh();
@@ -105,16 +109,71 @@ fn jk_move_the_cursor_and_enter_solos_through_the_keymap(cx: &mut gpui::TestAppC
     );
 }
 
-/// `space` adds a row; on the only active row it is refused and nothing
-/// goes out. A kind digit hides that kind: its own jobs leave the batch.
+/// The active set, as dates.
+fn active(h: &Harness, vcx: &gpui::VisualTestContext) -> Vec<String> {
+    h.state(vcx)
+        .active
+        .iter()
+        .flatten()
+        .map(|e| e.to_string())
+        .collect()
+}
+
+/// `space` solos the cursor's row, as `enter` does; `ctrl+space` and
+/// `shift+space` add it or take it out, and on the only active row they
+/// are refused and nothing goes out.
 #[gpui::test]
-fn space_toggles_and_a_digit_toggles_a_kind_omitting_its_jobs(cx: &mut gpui::TestAppContext) {
+fn space_solos_and_ctrl_or_shift_space_adds_or_removes(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = loaded(cx);
-    let before = h.state(&vcx).active;
-    vcx.simulate_keystrokes("space");
-    assert_eq!(h.state(&vcx).active, before, "the last active row stays");
+    vcx.simulate_keystrokes("ctrl-space");
+    assert_eq!(
+        active(&h, &vcx),
+        ["2026-10-16"],
+        "the last active row stays"
+    );
+    vcx.simulate_keystrokes("shift-space");
+    assert_eq!(active(&h, &vcx), ["2026-10-16"]);
     assert!(h.requests().is_empty(), "a refused toggle asks nothing");
-    vcx.simulate_keystrokes("j space");
+    vcx.simulate_keystrokes("j ctrl-space");
+    assert_eq!(active(&h, &vcx), ["2026-10-16", "2026-11-20"]);
+    h.answer_last(&mut vcx).expect("an add resubmits");
+    vcx.simulate_keystrokes("j shift-space");
+    assert_eq!(active(&h, &vcx), ["2026-10-16", "2026-11-20", "2026-12-18"]);
+    h.answer_last(&mut vcx).expect("an add resubmits");
+    vcx.simulate_keystrokes("k k shift-space");
+    assert_eq!(
+        active(&h, &vcx),
+        ["2026-11-20", "2026-12-18"],
+        "on an active row it takes it out"
+    );
+    h.answer_last(&mut vcx).expect("a removal resubmits");
+    vcx.simulate_keystrokes("j j space");
+    assert_eq!(active(&h, &vcx), ["2026-12-18"], "space solos");
+    h.answer_last(&mut vcx).expect("a solo resubmits");
+    assert_eq!(
+        h.dispatched(&vcx),
+        [
+            "volslice::toggle_expiry",
+            "volslice::toggle_expiry",
+            "volslice::strip_down",
+            "volslice::toggle_expiry",
+            "volslice::strip_down",
+            "volslice::toggle_expiry",
+            "volslice::strip_up",
+            "volslice::strip_up",
+            "volslice::toggle_expiry",
+            "volslice::strip_down",
+            "volslice::strip_down",
+            "volslice::solo",
+        ]
+    );
+}
+
+/// A kind digit hides that kind: its own jobs leave the batch.
+#[gpui::test]
+fn a_digit_toggles_a_kind_omitting_its_jobs(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = loaded(cx);
+    vcx.simulate_keystrokes("j ctrl-space");
     let p = h.answer_last(&mut vcx).expect("a toggle resubmits");
     assert!(maps(&p) > 0, "the chain at 2026-11-20 is asked");
     assert_eq!(
@@ -162,12 +221,15 @@ fn shift_d_requests_densities(cx: &mut gpui::TestAppContext) {
     assert!(slices(&p).iter().all(|r| !r.density));
 }
 
-/// `d` opens the chooser over `none` and every loaded pair, a fieldless
-/// list the shell's `j`/`k` step; `enter` sets the pair and its jobs ride
-/// the next batch. Reopened, the highlight starts on the pair in force.
+/// `d` opens the chooser over every loaded pair, a fieldless list the
+/// shell's `j`/`k` step; with nothing ticked `enter` shows the highlighted
+/// pair and its jobs ride the next batch. Reopened, the highlight starts
+/// on the pair shown and the pair is ticked.
 #[gpui::test]
 fn d_chooses_a_pair_and_the_batch_carries_its_diff_jobs(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = loaded(cx);
+    let cvi_chain = Pair::new(Kind::Cvi, Kind::Chain).unwrap();
+    let chain_cvi = cvi_chain.reverse();
     vcx.simulate_keystrokes("d");
     assert_eq!(h.mode(&vcx), "menu");
     assert!(h.tilelist(&vcx), "the shared list steps reach it");
@@ -175,7 +237,6 @@ fn d_chooses_a_pair_and_the_batch_carries_its_diff_jobs(cx: &mut gpui::TestAppCo
         h.chooser(&vcx),
         Some((
             vec![
-                "none".to_string(),
                 "cvi \u{2212} chain".to_string(),
                 "chain \u{2212} cvi".to_string()
             ],
@@ -185,11 +246,11 @@ fn d_chooses_a_pair_and_the_batch_carries_its_diff_jobs(cx: &mut gpui::TestAppCo
     vcx.simulate_keystrokes("j");
     assert_eq!(h.chooser(&vcx).unwrap().1, 1, "j reached the list");
     assert_eq!(h.state(&vcx).cursor, 0, "and not the strip");
-    // The front expiry has no chain: make one that does the active row.
-    vcx.simulate_keystrokes("enter");
+    vcx.simulate_keystrokes("k enter");
     assert_eq!(h.chooser(&vcx), None);
     assert_eq!(h.mode(&vcx), "normal");
-    assert_eq!(h.state(&vcx).diff, Pair::new(Kind::Cvi, Kind::Chain));
+    assert_eq!(h.state(&vcx).diffs, [cvi_chain]);
+    // The front expiry has no chain: make one that does the active row.
     let _ = h.requests();
     vcx.simulate_keystrokes("j enter");
     let p = h.answer_last(&mut vcx).expect("the pair rides the batch");
@@ -201,10 +262,92 @@ fn d_chooses_a_pair_and_the_batch_carries_its_diff_jobs(cx: &mut gpui::TestAppCo
         p.jobs
     );
     vcx.simulate_keystrokes("d");
-    assert_eq!(h.chooser(&vcx).unwrap().1, 1, "on the pair in force");
+    assert_eq!(h.chooser(&vcx).unwrap().1, 0, "on the pair shown");
+    assert_eq!(h.chooser_ticks(&vcx), Some(vec![cvi_chain]));
+    // `space` on the reverse ticks it and unticks the pair; `escape`
+    // discards the ticks.
+    vcx.simulate_keystrokes("j space");
+    assert_eq!(h.chooser_ticks(&vcx), Some(vec![chain_cvi]));
+    assert_eq!(
+        h.dispatched(&vcx).last().map(String::as_str),
+        Some("volslice::tick"),
+        "space is the chooser's while it is up"
+    );
     vcx.simulate_keystrokes("escape");
     assert_eq!(h.chooser(&vcx), None);
-    assert_eq!(h.state(&vcx).diff, Pair::new(Kind::Cvi, Kind::Chain));
+    assert_eq!(h.state(&vcx).diffs, [cvi_chain]);
+    // Unticking the only pair and applying shows none: the ticks were
+    // touched, so the highlight is not a fallback.
+    vcx.simulate_keystrokes("d space enter");
+    assert_eq!(h.state(&vcx).diffs, []);
+    // `ctrl+x` unticks everything and counts as a touch: `enter` then
+    // shows none rather than falling back to the highlight.
+    h.command(&mut vcx, "diff cvi - chain").unwrap();
+    vcx.simulate_keystrokes("d ctrl-x");
+    assert_eq!(h.chooser_ticks(&vcx), Some(vec![]));
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(h.state(&vcx).diffs, []);
+    vcx.simulate_keystrokes("d ctrl-x enter");
+    assert_eq!(
+        h.state(&vcx).diffs,
+        [],
+        "on an empty set too: no fallback to the highlight"
+    );
+    assert!(
+        h.dispatched(&vcx)
+            .contains(&"volslice::clear_ticks".to_string())
+    );
+}
+
+/// Several pairs at once, through the keys: each `space` ticks a pair in
+/// turn and `enter` shows them all in tick order; the batch carries each
+/// pair's evaluation, the shared chain map once.
+#[gpui::test]
+fn the_chooser_ticks_several_pairs_and_the_batch_asks_each(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_bound(cx, None);
+    h.show(&mut vcx);
+    h.follow_a(&mut vcx);
+    let draft = cvi(&TERMS, Some(("2026-10-16", 0.01)));
+    h.post(&mut vcx, draft_of("SPX.Z", &draft, DraftMark::Editing));
+    let (doc, _) = published();
+    let reqs = h.answer_documents(&mut vcx, &doc, &[chain("2026-10-16")]);
+    let first = vols(&reqs).last().map(|p| (*p).clone()).expect("a batch");
+    h.answer_vol(&mut vcx, &first);
+    // cvi - cvi draft, cvi - chain, cvi draft - cvi, cvi draft - chain, ...
+    vcx.simulate_keystrokes("d j space j j space k k k space enter");
+    let pairs = vec![
+        Pair::new(Kind::Cvi, Kind::Chain).unwrap(),
+        Pair::new(Kind::Draft, Kind::Chain).unwrap(),
+        Pair::new(Kind::Cvi, Kind::Draft).unwrap(),
+    ];
+    assert_eq!(h.state(&vcx).diffs, pairs);
+    let p = h.answer_last(&mut vcx).expect("the pairs ride the batch");
+    assert_eq!(maps(&p), 1, "one chain map for both chain pairs");
+    let at_chain = slices(&p)
+        .iter()
+        .filter(|r| matches!(r.grid, Grid::At(_)))
+        .count();
+    let at_curve = slices(&p)
+        .iter()
+        .filter(|r| matches!(r.grid, Grid::Job(_)))
+        .count();
+    assert_eq!((at_chain, at_curve), (2, 1), "{:?}", p.jobs);
+    let lower: Vec<String> = h.tile.read_with(&vcx, |t, _| {
+        t.model()
+            .slots
+            .iter()
+            .filter(|s| s.axis == geode_chart::Axis::BottomLeft)
+            .map(|s| s.label.to_string())
+            .collect()
+    });
+    assert_eq!(
+        lower,
+        pairs
+            .iter()
+            .map(|p| format!("{} 2026-10-16", p.label()))
+            .collect::<Vec<_>>(),
+        "in tick order"
+    );
 }
 
 fn partitions(batches: &[&str]) -> Vec<PartitionCatalog> {
@@ -360,11 +503,21 @@ fn commands_set_the_underlying_coordinate_and_pair_and_refuse_bad_input(
         h.command(&mut vcx, "diff cvi draft - cvi"),
         Err("cvi draft is not loaded".to_string())
     );
-    assert_eq!(h.state(&vcx).diff, None);
+    assert_eq!(h.state(&vcx).diffs, []);
+    let chain_cvi = Pair::new(Kind::Chain, Kind::Cvi).unwrap();
     h.command(&mut vcx, "diff chain - cvi").unwrap();
-    assert_eq!(h.state(&vcx).diff, Pair::new(Kind::Chain, Kind::Cvi));
-    h.command(&mut vcx, "diff none").unwrap();
-    assert_eq!(h.state(&vcx).diff, None);
+    assert_eq!(h.state(&vcx).diffs, [chain_cvi]);
+    h.command(&mut vcx, "diff cvi - chain").unwrap();
+    assert_eq!(
+        h.state(&vcx).diffs,
+        [chain_cvi.reverse()],
+        "turning a pair on turns its reverse off"
+    );
+    h.command(&mut vcx, "diff cvi - chain").unwrap();
+    assert_eq!(h.state(&vcx).diffs, [], "a second time turns it off");
+    h.command(&mut vcx, "diff chain - cvi").unwrap();
+    h.command(&mut vcx, "diff off").unwrap();
+    assert_eq!(h.state(&vcx).diffs, []);
     assert!(h.command(&mut vcx, "x sideways").is_err());
     let _ = h.requests();
     h.command(&mut vcx, "underlying NDX.Z").unwrap();
@@ -372,9 +525,47 @@ fn commands_set_the_underlying_coordinate_and_pair_and_refuse_bad_input(
     assert_eq!(docs(&reqs)[0].document_key, vec!["NDX.Z".to_string()]);
     assert_eq!(
         vcx.update(|_, cx| h.content.completions("diff ", 5, cx)),
-        ["cvi", "chain", "none"],
+        ["cvi", "chain", "off"],
         "the loaded kinds"
     );
+}
+
+/// A restored pair whose kind is not loaded says so, once for that pair,
+/// while the others paint; `:diff` can still turn it off (turning on such
+/// a pair is refused, turning one off never is).
+#[gpui::test]
+fn an_unloaded_pair_is_noticed_alone_and_can_be_turned_off(cx: &mut gpui::TestAppContext) {
+    let mut restored = launched_on("SPX.Z");
+    let session: toml::Table = r#"
+        expiries = ["2026-11-20"]
+        diffs = [["cvi draft", "cvi"], ["cvi", "chain"]]
+    "#
+    .parse()
+    .unwrap();
+    restored.extend(session);
+    let (h, mut vcx) = open_on(cx, restored);
+    h.show(&mut vcx);
+    let (doc, chains) = published();
+    let reqs = h.answer_documents(&mut vcx, &doc, &chains);
+    let first = vols(&reqs)[0].clone();
+    h.answer_vol(&mut vcx, &first);
+    assert_eq!(
+        h.notices(&vcx),
+        ["diff cvi draft \u{2212} cvi: cvi draft is not loaded"]
+    );
+    assert!(
+        h.labels(&vcx)
+            .contains(&"cvi \u{2212} chain 2026-11-20".to_string()),
+        "the loaded pair paints: {:?}",
+        h.labels(&vcx)
+    );
+    h.command(&mut vcx, "diff cvi draft - cvi").unwrap();
+    assert_eq!(
+        h.state(&vcx).diffs,
+        [Pair::new(Kind::Cvi, Kind::Chain).unwrap()]
+    );
+    h.answer_last(&mut vcx).expect("turning it off resubmits");
+    assert!(h.notices(&vcx).is_empty(), "{:?}", h.notices(&vcx));
 }
 
 /// While following, the underlying is the group's: `:underlying` is

@@ -561,54 +561,6 @@ fn a_frame_chord_from_the_scope_input_over_a_page_still_resolves(cx: &mut gpui::
     );
 }
 
-/// The add-a-filter menu opened over a page: a press on the page closes
-/// the menu and reaches nothing beneath. The same press with the menu
-/// closed focuses the page's input, so the catcher is what stopped it.
-#[gpui::test]
-fn a_press_on_the_page_closes_the_add_filter_menu_and_goes_no_further(
-    cx: &mut gpui::TestAppContext,
-) {
-    let (window, mut cx) = open_shell(
-        cx,
-        services_with_page(RecordingPageFactory::new("diagnostics")),
-    );
-    let shell = shell_of(&window, &mut cx);
-    dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
-    cx.update(|window, cx| {
-        let _ = window.draw(cx);
-    });
-    let plus = cx.debug_bounds("scope-pick-chip").expect("the + paints");
-    cx.simulate_click(plus.center(), gpui::Modifiers::default());
-    cx.run_until_parked();
-    assert!(shell.read_with(&cx, |s, _| s.add_filter_menu.is_some()));
-    let page = cx
-        .debug_bounds("page-diagnostics")
-        .expect("page content paints");
-    let on_input = page.origin + gpui::point(gpui::px(24.), gpui::px(8.));
-    let input_focused = |cx: &mut gpui::VisualTestContext| {
-        cx.update(|window, cx| {
-            let page = shell.read(cx).page.as_ref().unwrap();
-            let handle = page.occupant.content.focus_handle(cx);
-            handle.contains_focused(window, cx) && !handle.is_focused(window)
-        })
-    };
-    cx.simulate_click(on_input, gpui::Modifiers::default());
-    cx.run_until_parked();
-    assert!(shell.read_with(&cx, |s, _| s.add_filter_menu.is_none()));
-    assert!(shell.read_with(&cx, |s, _| s.page_open()));
-    assert!(
-        !input_focused(&mut cx),
-        "the closing press did not reach the page's input"
-    );
-    assert!(page_focused(&shell, &mut cx), "the menu returns focus home");
-    cx.simulate_click(on_input, gpui::Modifiers::default());
-    cx.run_until_parked();
-    assert!(
-        input_focused(&mut cx),
-        "control: the same press with no menu focuses the input"
-    );
-}
-
 /// Opening a page hides every tile beneath it (each hears `set_visible(false)`
 /// and no flip barrier waits on one); closing shows them again.
 #[gpui::test]

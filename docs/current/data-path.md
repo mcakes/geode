@@ -57,6 +57,7 @@ The ingestion boundaries have different capacity and replacement rules:
 | Fetch worker | Up to 64 waiting requests per source; a refused fetch is reported as an outcome. |
 | Snapshot worker | No queue: one poll runs at a time, and any number of poll-now asks made while it runs become one follow-up poll. |
 | Egress worker | Up to 8 waiting uploads per target, behind the one in flight; queue refusal emits an upload error naming the target. |
+| File worker | Up to 4 waiting text file requests behind the one in flight; a full queue answers `file worker busy` at once as that request's error outcome. |
 | Position worker | Up to 8 waiting commands behind the one in flight; a full queue is refused `position service busy` at once, answered as a command outcome. |
 | Ingest runner | No fixed capacity. Documents, series and reference snapshots are FIFO within their queues; files deduplicate by path, size, and source time. A source with more than 64 queued documents, series and snapshots reports `<source>:backlog` health; its `N` is the count at the last crossing (65, 129, …), held while the queue drains until the clear. |
 
@@ -90,7 +91,9 @@ reference snapshots, files — is dropped; its source resends it after a
 restart. The local writes are the user's last edits (the pricer saves every
 unsaved sheet at quit, before the data service is told to stop), which nothing
 would resend. Submission to the runner itself has no shutdown refusal, so
-producer ordering is required. Egress workers close their queue first
+producer ordering is required. The file worker stops first: it closes its
+queue, so a later request is answered `file worker stopped`, and joins after
+the requests already queued. Egress workers close their queue first
 (refusing further submissions), then join; jobs already queued still run and
 answer, so shutdown can wait on a slow or stuck transport — see [egress and
 uploads](#egress-and-uploads) below. The position worker stops next, the same
@@ -119,7 +122,8 @@ request loop (`geode-data`), the ingest writer (`geode-ingest`), discovery
 (`geode-pricing`), the vol worker (`geode-vol`), and one thread per fetch
 source (`geode-fetch-<source>`),
 subscribed source (`geode-subscribe-<source>`), and egress target
-(`geode-egress-<target>`), plus the position worker (`geode-positions`). A
+(`geode-egress-<target>`), plus the position worker (`geode-positions`) and
+the text file worker (`geode-files`). A
 body that unwinds past every containment boundary emits one
 `DataEvent::ThreadStopped { thread, reason }` carrying the panic payload,
 logs an error, and ends. Nothing restarts it, because a panic that
@@ -149,6 +153,7 @@ success, and the loop goes on to the next request:
 | Catalog | `Catalog` error for its key and tag |
 | Pricing | `Price` outcome with the error on every submitted line |
 | Upload | `Upload` error for its key, tag, and target |
+| Text file | `TextFile` error for its key and tag: a failed write for a write, a failed read for a read |
 | Move LHU | `Command` outcome with the error for its tag |
 | History fetch | The pair's load lane reports `Failed`, then `SeriesFetched` carries the error |
 | Local publish | Error diagnostic and `LocalPublishFailed` |
@@ -764,6 +769,46 @@ old book. Moves persist: the demo reuses its `$TMPDIR/geode-demo/<rows>-42`
 directory across `--demo` launches, so delete it to restore the generated
 LHUs.
 
+## Text files
+
+A tile that imports or exports a file asks the data service through
+`DataHandle::text_file` rather than touching the filesystem: modules perform
+no I/O, and a slow or network path must stall neither the UI thread nor the
+request loop. The Classifications tile is its consumer today: Export CSV
+writes and Import CSV reads under the tile's key and a fresh tag, and the
+tile acts only on its latest operation's answer (see
+[features](features.md#classifications)). The request loop hands each
+request to one supervised worker, `geode-files`, which runs them in submission order, each
+inside its own panic boundary. Every admitted request is answered exactly
+once with `DataEvent::TextFile`, keyed by the asking tile's key and its tag
+(see [requests and UI delivery](request-delivery.md)).
+
+- **Read** returns the whole file as UTF-8 text. A file whose size exceeds
+  the request's `max_bytes` is refused before any of it is read (`<path> is
+  larger than 10 MB`; the worker's message states the limit in bytes below
+  1 MiB and in binary megabytes above, printed as "MB"); the length
+  read is checked again afterwards, so a file that grows between the two is
+  refused rather than read past the limit. Text that is not UTF-8 is an error
+  (`<path> is not UTF-8 text`). The limit for a classification import is
+  `geode_core::classification::import::MAX_IMPORT_BYTES` (10 MiB, which
+  the worker's refusal prints as "10 MB"); the
+  import plan then refuses more than `MAX_IMPORT_ROWS` (100,000) data rows.
+- **Write** replaces the file atomically: the text goes to a sibling
+  temporary (`.<name>.geode-tmp`), is synced, closed, and renamed over the
+  target. Any failure after the temporary exists (write, sync, rename)
+  removes it, so a failed write leaves the previous file untouched and no
+  temporary behind. A missing parent directory is an error; nothing is
+  created.
+- **Refusals** never wait. `DataHandle::text_file` returns `Refusal` when the
+  request channel is full or stopped, and the tile reports it. Behind it, a
+  full file queue answers `file worker busy` and a stopped worker answers
+  `file worker stopped`, both as the request's own error outcome, so a tile
+  waiting on its tag always hears back. An I/O error names the path.
+
+Containment does not interrupt a blocked filesystem call: a read or write
+stuck on an unresponsive path holds the worker, and later requests wait
+behind it until the queue fills and refuses.
+
 ## Queries and time travel
 
 A view query compiles scope predicates and grouping into one statement for
@@ -773,6 +818,13 @@ expanding a tree node works on the prepared result rather than issuing another
 database query. User supplied scope values are bound as parameters. A computed
 dataset has no relation: the compiler refuses a view or join over it, and
 distinct-value requests skip it.
+
+A distinct-value answer carries the key it was asked under, and the app
+routes it by that key. The shell's reserved keys (the picker, saved scopes,
+expression suggestions, action values, diagnostics) stay with the shell, and
+only the picker's key feeds the picker; any other key is a tile's, delivered
+to that tile as `Delivery::Distinct`. A tile's tag counter can equal the
+picker's, so routing by tag alone could fill the picker with a tile's values.
 
 A scope reaching compilation still carrying a named-expression reference
 (`Scope.named` nonempty) is refused outright, with `StoreError::Scope("scope
@@ -902,6 +954,20 @@ dimensions resolve to their source columns, and derived measures inherit
 their inputs' attribution. Non-attributable results must return NULL, with
 validity preserved through `Snapshot`, as well as carry the attribution marker.
 
+A derived dimension is projected onto the scanned relation as one scalar map
+lookup per row (`map_extract_value` over a MAP literal of its configured
+values), shared by view and distinct-value queries. A source value no entry
+maps, and a NULL source, yield NULL; no row is multiplied, and the
+distinct-value picker drops the NULL. The lookup replaced a `CASE` with one
+arm per value, which took seconds at 5,000 values; its cost still grows with
+the classification's size (see the `query_classification` row in
+[performance](performance.md#current-reference-measurements)). The source is
+read as text, so view validation refuses a derived dimension whose source
+column is not `utf8`, naming the dimension, the column and its type: scope
+narrowing binds the same keys against the column's own type, and over a
+number the two would disagree on which rows a label covers. A `utf8` source
+interned as an ENUM is read as its label.
+
 A document request names its document by key. A key with fewer parts than the
 dataset declares reads **every document under it**: `["SPX"]` on
 `option_chain` (keyed `underlying, expiry`) returns every SPX expiry in one
@@ -1019,23 +1085,37 @@ a model the binary lacks answers every job with that reason. Batches
 coalesce by key, and cancellation by key stops a running batch at its next
 job boundary.
 
-A slice's grid is `Dense(n)` (n strikes over the document's strike range for
-that expiry), `At(strikes)` (echoed in the given order), or `Job(j)`: the
-strikes an earlier `Slice` job `j` of the same batch evaluated at. The worker
-resolves `Job(j)` to `At` before the model sees the request, so two curves
-compare at equal strikes in one round trip without the tile knowing the
-first curve's strikes in advance. A `Job` grid naming a failed job, a `Map`
-job, or a job that does not run before it fails naming why (`job 4 takes
-its strikes from job 2, which failed`); the demo model refuses a `Job` grid
-that reaches it unresolved. `geode_data::vol::evaluate` runs a batch in place on the
-calling thread under the same rules, for tests and benches.
+A slice's grid is `Dense { n, cover }` (n strictly ascending strikes, spaced
+as the model chooses, from end to end of the union of the document's strike
+range for that expiry and `cover`, an optional absolute strike span such as a
+listed chain's lowest and highest strike), `At(strikes)` (echoed in the
+given order), or `Job(j)`: the strikes an earlier `Slice` job `j` of the same
+batch evaluated at. A cover only widens the grid, so a curve is drawn at least
+as wide as the quotes beside it; how a strike past the document's own range is
+evaluated is the model's to say (the demo model continues the smile's end
+slope, floored at its minimum vol). A cover that is not an ascending pair of
+positive, finite strikes fails the job naming it. The worker resolves `Job(j)`
+to `At` before the model sees the request, so two curves compare at equal
+strikes in one round trip without the tile knowing the first curve's strikes
+in advance. A `Job` grid naming a failed job, a `Map` job, or a job that does
+not run before it fails naming why (`job 4 takes its strikes from job 2, which
+failed`); the demo model refuses a `Job` grid that reaches it unresolved.
+`geode_data::vol::evaluate` runs a batch in place on the calling thread under
+the same rules, for tests and benches.
 
 A slice asked with `density` carries `(x, pdf)` at its interior points. The
 pdf is per unit of the requested coordinate: the strike density times
 |dK/dx| by a central difference over the same neighbours, so its area is
 about one in every coordinate and two coordinates' densities compare. Where
 x does not move between neighbours (delta saturating at 0 or 1) the point is
-NaN, which a chart paints as a gap rather than a spike.
+NaN, which a chart paints as a gap rather than a spike. Because the demo
+model's density is a second difference of call prices, its smoothness is
+the grid's points per σ√t·F. It places a dense grid's points as
+`F·(1 + c·sinh(u))`, `u` even between the span's ends and `c` the
+at-the-money σ√t (at least a fiftieth of the span), so the points crowd the
+forward where a short-dated density lives and a long-dated grid is nearly
+even. Its normal CDF is accurate to about 1e-14 so that a fine grid does not
+turn the CDF's own error into noise.
 
 An `option_chain` quote carries each side, its vol and its price, whole or
 not at all, and at least one side; `mid_vol` is required and finite. The

@@ -70,6 +70,10 @@ mod watching {
                 Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
                 // This tile never uploads — nothing addressed here.
                 Delivery::Upload(_) => {}
+                // This tile asks for no distinct values — nothing addressed here.
+                Delivery::Distinct(_) => {}
+                // This tile reads and writes no files.
+                Delivery::TextFile(_) => {}
             }
         }
         fn set_visible(&self, visible: bool, cx: &mut App) {
@@ -1563,6 +1567,113 @@ fn an_upload_delivery_reaches_its_tile_and_no_other(cx: &mut gpui::TestAppContex
     assert!(
         log.borrow().iter().any(
             |r| matches!(r, crate::module::recording::Recorded::Delivered(t, 42) if *t == first)
+        ),
+        "the addressed tile must be delivered to: {:?}",
+        log.borrow()
+    );
+    assert!(
+        !log.borrow().iter().any(|r| matches!(
+            r,
+            crate::module::recording::Recorded::Delivered(t, _) if *t == second
+        )),
+        "the other tile must not be delivered to: {:?}",
+        log.borrow()
+    );
+}
+
+/// A `Delivery::Distinct` under a tile's key reaches that tile and no
+/// other — `deliver`'s keyed arm must name it, so a tile's own distinct
+/// request comes back to the tile instead of falling into the broadcast.
+#[gpui::test]
+fn a_distinct_outcome_reaches_only_its_tile(cx: &mut gpui::TestAppContext) {
+    use crate::module::Delivery;
+    use geode_core::query::{DistinctOutcome, QueryKey};
+
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let first = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let second = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_ne!(first, second, "sanity: two distinct tiles are live");
+
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.deliver(
+                Delivery::Distinct(DistinctOutcome {
+                    key: QueryKey(first.0),
+                    tag: 7,
+                    column: "underlying_ref".into(),
+                    values: Ok(vec![("SPX".into(), 3)]),
+                }),
+                window,
+                cx,
+            );
+        });
+    });
+
+    assert!(
+        log.borrow().iter().any(
+            |r| matches!(r, crate::module::recording::Recorded::Delivered(t, 7) if *t == first)
+        ),
+        "the addressed tile must be delivered to: {:?}",
+        log.borrow()
+    );
+    assert!(
+        !log.borrow().iter().any(|r| matches!(
+            r,
+            crate::module::recording::Recorded::Delivered(t, _) if *t == second
+        )),
+        "the other tile must not be delivered to: {:?}",
+        log.borrow()
+    );
+}
+
+/// A `Delivery::TextFile` under a tile's key reaches that tile and no
+/// other — `deliver`'s keyed arm must name it, so a tile's file read or
+/// write answer comes back to the tile that asked.
+#[gpui::test]
+fn a_text_file_outcome_reaches_only_its_tile(cx: &mut gpui::TestAppContext) {
+    use crate::module::Delivery;
+    use geode_core::query::QueryKey;
+    use geode_core::textfile::{TextFileOutcome, TextFileResult};
+
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let first = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let second = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_ne!(first, second, "sanity: two distinct tiles are live");
+
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.deliver(
+                Delivery::TextFile(TextFileOutcome {
+                    key: QueryKey(first.0),
+                    tag: 8,
+                    path: "classes.csv".into(),
+                    result: TextFileResult::Read(Ok("name\n".into())),
+                }),
+                window,
+                cx,
+            );
+        });
+    });
+
+    assert!(
+        log.borrow().iter().any(
+            |r| matches!(r, crate::module::recording::Recorded::Delivered(t, 8) if *t == first)
         ),
         "the addressed tile must be delivered to: {:?}",
         log.borrow()

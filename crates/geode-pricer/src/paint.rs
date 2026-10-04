@@ -335,13 +335,17 @@ impl Paints {
 }
 
 /// Which colour a painted cell takes, decided from the column's declared
-/// colour, the cell's state and its value's sign. State colours (muted
-/// stale, danger failed) win over any column colour: a wrong-looking
-/// number must never read as a healthy one.
+/// colour, the cell's state, whether its value has a value color, and its
+/// value's sign. State colours (muted stale, danger failed, muted `mixed`)
+/// win over a value's color, which wins over the column's: a wrong-looking
+/// number must never read as a healthy one, and a value's color names the
+/// value, not the column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CellColour {
     /// The state paint (`Paints::text`).
     State,
+    /// The color `value_colors` maps the cell's dimension value to.
+    Value,
     Bearish,
     Bullish,
     /// The column's named colour, in the variant for this sign (a text
@@ -349,9 +353,17 @@ pub(crate) enum CellColour {
     Named(Sign),
 }
 
-pub(crate) fn cell_colour(colour: &Colour, state: CellState, sign: Option<Sign>) -> CellColour {
+pub(crate) fn cell_colour(
+    colour: &Colour,
+    state: CellState,
+    sign: Option<Sign>,
+    value: bool,
+) -> CellColour {
     if !matches!(state, CellState::Own) {
         return CellColour::State;
+    }
+    if value {
+        return CellColour::Value;
     }
     match (colour, sign) {
         (Colour::Sign, Some(Sign::Negative)) => CellColour::Bearish,
@@ -626,41 +638,69 @@ mod tests {
     fn colour_applies_only_to_an_own_numeric_cell() {
         let (neg, pos) = (Some(Sign::Negative), Some(Sign::Positive));
         assert_eq!(
-            cell_colour(&Colour::Sign, CellState::Own, neg),
+            cell_colour(&Colour::Sign, CellState::Own, neg, false),
             CellColour::Bearish
         );
         assert_eq!(
-            cell_colour(&Colour::Sign, CellState::Own, pos),
+            cell_colour(&Colour::Sign, CellState::Own, pos, false),
             CellColour::Bullish
         );
         assert_eq!(
-            cell_colour(&Colour::Sign, CellState::Own, Some(Sign::Zero)),
+            cell_colour(&Colour::Sign, CellState::Own, Some(Sign::Zero), false),
             CellColour::State,
             "zero has no sign"
         );
         assert_eq!(
-            cell_colour(&Colour::Sign, CellState::Stale, neg),
+            cell_colour(&Colour::Sign, CellState::Stale, neg, false),
             CellColour::State,
             "stale stays muted"
         );
         assert_eq!(
-            cell_colour(&Colour::Sign, CellState::Failed, neg),
+            cell_colour(&Colour::Sign, CellState::Failed, neg, false),
             CellColour::State,
             "failed stays danger"
         );
         assert_eq!(
-            cell_colour(&Colour::None, CellState::Own, neg),
+            cell_colour(&Colour::None, CellState::Own, neg, false),
             CellColour::State
         );
         assert_eq!(
-            cell_colour(&Colour::Named("rose".into()), CellState::Own, neg),
+            cell_colour(&Colour::Named("rose".into()), CellState::Own, neg, false),
             CellColour::Named(Sign::Negative)
         );
         assert_eq!(
-            cell_colour(&Colour::Named("rose".into()), CellState::Own, None),
+            cell_colour(&Colour::Named("rose".into()), CellState::Own, None, false),
             CellColour::Named(Sign::Zero),
             "text in a named column takes the base"
         );
+    }
+
+    #[test]
+    fn a_values_color_sits_between_the_state_paint_and_the_columns_color() {
+        let neg = Some(Sign::Negative);
+        let named = Colour::Named("rose".into());
+        // Own value with a value color: it wins over every column setting.
+        for colour in [&Colour::None, &Colour::Sign, &named] {
+            assert_eq!(
+                cell_colour(colour, CellState::Own, neg, true),
+                CellColour::Value,
+                "{colour:?}"
+            );
+        }
+        // A state that is not a healthy own value keeps its state paint.
+        for state in [
+            CellState::Stale,
+            CellState::Failed,
+            CellState::Inherited,
+            CellState::Mixed,
+            CellState::Blank,
+        ] {
+            assert_eq!(
+                cell_colour(&named, state, neg, true),
+                CellColour::State,
+                "{state:?}"
+            );
+        }
     }
 
     #[gpui::test]

@@ -64,6 +64,8 @@ pub enum DialogKind {
     Picker,
     AsOf,
     ScopeExpr,
+    /// The Scope dialog (`scopedialog/view.rs`): the lane's scope by ingredient.
+    Scope,
     /// Every `choicedialog` target (tile kinds, grouping, log level): they share
     /// the one `choice_dialog` field.
     Choice,
@@ -85,6 +87,7 @@ impl DialogKind {
             DialogKind::Picker => "the picker is already open underneath",
             DialogKind::AsOf => "as-of is already open underneath",
             DialogKind::ScopeExpr => "the expression dialog is already open underneath",
+            DialogKind::Scope => "the scope dialog is already open underneath",
             DialogKind::Choice => "a choice list is already open underneath",
             DialogKind::Object => "a configuration dialog is already open underneath",
             DialogKind::Plain => "a dialog is already open underneath",
@@ -92,12 +95,13 @@ impl DialogKind {
     }
 
     /// Every kind, for [`is_already_open_notice`].
-    const ALL: [DialogKind; 8] = [
+    const ALL: [DialogKind; 9] = [
         DialogKind::Settings,
         DialogKind::Keybindings,
         DialogKind::Picker,
         DialogKind::AsOf,
         DialogKind::ScopeExpr,
+        DialogKind::Scope,
         DialogKind::Choice,
         DialogKind::Object,
         DialogKind::Plain,
@@ -225,10 +229,10 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
             | "frame::pick"
             | "scope::save_current"
             | "frame::as_of"
-            | "frame::scope_expression"
             | "frame::add_expression"
             | "frame::grouping"
             | "frame::scope"
+            | "frame::scope_saved"
             | "tile::add"
             | "tile::open_with"
             | "tile::link_group"
@@ -451,9 +455,6 @@ pub fn open_shell_dialog_with_key<F>(
     // Cancel the command line before the modal takes its key route; otherwise the line
     // would remain visible but unable to receive its own controls.
     view.cancel_command_line(window, cx);
-    // The scope bar's add-a-filter menu is transient chrome under a modal's
-    // key route; it never survives one opening.
-    view.add_filter_menu = None;
     view.close_row_menu(cx);
 
     // Recorded after the palette close above (which may itself have just
@@ -571,6 +572,47 @@ pub(crate) fn sync_dialog_text(
             };
             (state.mode, false, state.effective_query())
         }
+        Some(DialogKind::Scope) => {
+            // Current has no field: keys reach the dialog through the shell.
+            // The text step, the definition step and a name prompt own the
+            // input, each with its draft as the source of truth. A question
+            // gives the shell root focus: the field's own bindings
+            // (backspace, delete, paste) run before the dialog's key handler
+            // could claim them, and would edit the draft behind the
+            // question. Its answer hands focus back. The Saved screen's
+            // filter is a mode dialog's: the input mirrors its query and has
+            // focus only while filtering.
+            let Some(state) = shell.scope_dialog.as_ref() else {
+                return;
+            };
+            if state.pending.is_some() {
+                shell.focus_handle.focus(window, cx);
+                return;
+            }
+            let input = shell.dialog_input.clone();
+            let draft = if super::scopedialog::view::in_text_step(state) {
+                Some(state.text_draft.as_str())
+            } else if super::scopedialog::definition::in_definition(state) {
+                state.definition.as_ref().map(|d| d.draft.as_str())
+            } else if super::scopedialog::prompt::in_name_prompt(state) {
+                state.prompt.as_ref().map(|p| p.draft.as_str())
+            } else {
+                None
+            };
+            if let Some(draft) = draft {
+                let draft = draft.to_string();
+                if input.read(cx).text() != draft.as_str() {
+                    input.update(cx, |i, cx| i.set_value(draft, window, cx));
+                }
+                input.read(cx).focus_handle(cx).focus(window, cx);
+                return;
+            }
+            if !super::scopedialog::saved_view::in_saved(state) {
+                shell.focus_handle.focus(window, cx);
+                return;
+            }
+            (state.saved.mode, false, state.saved.query.as_str())
+        }
         // Filter-only dialogs keep their own focus path (see `refocus_top`).
         _ => return,
     };
@@ -604,12 +646,22 @@ pub(crate) fn refocus_top(view: &mut ShellView, window: &mut Window, cx: &mut Co
         super::expr_suggest::revealed(view, cx);
     }
     match kind {
+        // The value-color hue stage paints no field: its keys come through
+        // the shell's modal route, so focusing the unpainted input would
+        // leave no surface listening.
+        DialogKind::Choice if super::choicedialog::on_hue_stage(view) => {
+            view.focus_handle.focus(window, cx);
+        }
         DialogKind::Picker | DialogKind::Choice | DialogKind::ScopeExpr => {
             let handle = view.dialog_input.read(cx).focus_handle(cx);
             handle.focus(window, cx);
         }
         DialogKind::Plain => {}
-        DialogKind::Settings | DialogKind::Keybindings | DialogKind::Object | DialogKind::AsOf => {
+        DialogKind::Settings
+        | DialogKind::Keybindings
+        | DialogKind::Object
+        | DialogKind::AsOf
+        | DialogKind::Scope => {
             sync_dialog_text(view, window, cx);
         }
     }
@@ -663,9 +715,10 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
             let Some(state) = shell.object_dialog.as_mut() else {
                 return;
             };
-            // `build_edit` still paints the frozen row during confirmation, so guard
-            // the transition here as well as in keyboard routing.
-            if state.confirm.is_some() {
+            // `build_edit` still paints the frozen row during confirmation (and
+            // under the save prompt), so guard the transition here as well as in
+            // keyboard routing.
+            if state.confirm.is_some() || state.save.is_some() {
                 return;
             }
             state.enter_filter();
@@ -675,6 +728,17 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
                 return;
             };
             dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);
+        }
+        // The Saved screen's frozen filter row; a no-op on any other layer
+        // and while a question is up.
+        Some(DialogKind::Scope) => {
+            if let Some(state) = shell.scope_dialog.as_mut() {
+                if state.pending.is_some() {
+                    return;
+                }
+                state.error = None;
+                super::scopedialog::saved_view::enter_filter(state);
+            }
         }
         _ => {}
     }
@@ -804,6 +868,20 @@ pub(crate) fn choice_rows(
     theme: &Theme,
     on_click: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
 ) -> AnyElement {
+    choice_rows_led(list, prefix, scroll, theme, Vec::new(), on_click)
+}
+
+/// [`choice_rows`] with a leading element per row: `leads[declared row]`,
+/// taken once (a swatch for the value-color list). A missing or `None`
+/// entry paints the row as `choice_rows` does.
+pub(crate) fn choice_rows_led(
+    list: &crate::choice::ChoiceList,
+    prefix: &'static str,
+    scroll: &gpui::ScrollHandle,
+    theme: &Theme,
+    mut leads: Vec<Option<AnyElement>>,
+    on_click: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
+) -> AnyElement {
     // Keep all ranked rows in the scroll container. Wheel scrolling and keyboard
     // scroll-follow share the viewport; highlight and clicks use ranked indices.
     let paint = super::listrow::row_paint(theme);
@@ -831,10 +909,12 @@ pub(crate) fn choice_rows(
             // scrolling past it.
             .flex_shrink_0()
             .px_3()
+            .gap_2()
             .items_center()
             .text_sm()
             .rounded(theme.radius)
             .debug_selector(move || selector.clone())
+            .children(leads.get_mut(ranked.row).and_then(Option::take))
             .child(super::keybindings_view::highlighted_text(
                 text,
                 &ranked.indices,
@@ -907,15 +987,29 @@ pub(crate) fn badge(
 /// Swatch for an already-resolved data colour. The caller resolves the definition
 /// against anchors, tokens, and the active theme; this helper paints that value with a
 /// theme border, keeping data colour separate from chrome.
-pub(crate) fn swatch(colour: Hsla, selector: String, cx: &App) -> AnyElement {
+pub(crate) fn swatch(colour: Hsla, selector: impl Into<SharedString>, cx: &App) -> AnyElement {
+    let selector: SharedString = selector.into();
     div()
-        .w(scale::design(14.))
-        .h(scale::design(14.))
+        .flex_shrink_0()
+        .w(scale::design(SWATCH_SIZE))
+        .h(scale::design(SWATCH_SIZE))
         .rounded(cx.theme().radius_tokens().sm)
         .border_1()
         .border_color(cx.theme().border)
         .bg(colour)
-        .debug_selector(move || selector.clone())
+        .debug_selector(move || selector.to_string())
+        .into_any_element()
+}
+
+/// A swatch's side on the design scale.
+const SWATCH_SIZE: f32 = 14.;
+
+/// An empty slot a swatch wide, for a row with no swatch among rows that
+/// have one, so every row's text starts on the same spine.
+pub(crate) fn swatch_space() -> AnyElement {
+    div()
+        .flex_shrink_0()
+        .w(scale::design(SWATCH_SIZE))
         .into_any_element()
 }
 
@@ -1111,6 +1205,9 @@ pub(crate) fn hint_rows(hints: &[Hint]) -> AnyElement {
         }
         let last = members.len().saturating_sub(1);
         for (i, hint) in members.into_iter().enumerate() {
+            if let Some(ks) = &hint.keystroke {
+                line = line.child(super::kbd::chip(ks));
+            }
             for (k, key) in hint.keys.iter().enumerate() {
                 if k == 1
                     && let Some(between) = hint.between

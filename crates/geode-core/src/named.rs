@@ -100,6 +100,25 @@ impl NamedExpressions {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+
+    /// Test fixture: each text parsed into a `Valid` entry; panics on a parse error.
+    #[cfg(test)]
+    pub(crate) fn from_entries<'a>(entries: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
+        let map = entries
+            .into_iter()
+            .map(|(name, text)| {
+                let expr = parse_expr(text).unwrap_or_else(|e| panic!("{text:?}: {e:?}"));
+                (
+                    name.to_string(),
+                    NamedExpr::Valid {
+                        text: text.to_string(),
+                        expr,
+                    },
+                )
+            })
+            .collect();
+        Self { map }
+    }
 }
 
 #[cfg(test)]

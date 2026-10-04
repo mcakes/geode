@@ -668,6 +668,45 @@ fn set_log_level_picks_a_target_then_a_level(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// `enter` picks from the field's LIVE text, not the last `Change` the
+/// list saw: a write through `set_value` emits no `Change`, so without the
+/// re-feed the list would still be ranked against an empty query and pick
+/// the first target (`ingest`).
+#[gpui::test]
+fn enter_re_feeds_the_fields_live_text_before_picking(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "log::level");
+    vcx.update(|window, cx| {
+        let input = shell.read(cx).dialog_input.clone();
+        input.update(cx, |i, cx| i.set_value("query", window, cx));
+    });
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    let chosen = shell.read_with(&vcx, |s, _| {
+        s.choice_dialog.as_ref().and_then(|d| match &d.target {
+            crate::shell::choicedialog::Target::LogLevel { chosen, .. } => chosen.clone(),
+            _ => None,
+        })
+    });
+    assert_eq!(
+        chosen.as_deref(),
+        Some("query"),
+        "an unranked list would have picked ingest, its first row"
+    );
+}
+
+/// `tab` completes a chooser's field to the highlighted row and keeps
+/// typing there.
+#[gpui::test]
+fn tab_completes_the_field_to_the_highlighted_row(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "log::level");
+    vcx.simulate_input("que");
+    vcx.simulate_keystrokes("tab");
+    vcx.run_until_parked();
+    let field = shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(field, "query · info");
+    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
+}
+
 /// The log-level dialog's Back button returns the level step to the targets, as
 /// `escape` does, and paints only on the level step. Typing afterwards lands in the
 /// focused field and picks a target again.
@@ -708,8 +747,12 @@ fn the_back_button_returns_log_levels_to_targets(cx: &mut gpui::TestAppContext) 
 /// Choice dialogs with one step never paint a Back button.
 #[gpui::test]
 fn one_step_choice_dialogs_have_no_back_button(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = dialog_test_shell(cx, "frame::grouping");
+    let (shell, mut vcx) = dialog_test_shell(cx, "tile::add");
     assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
+    assert!(
+        shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()),
+        "fixture: a one-step choice dialog is up"
+    );
     assert!(vcx.debug_bounds("shell-modal-back").is_none());
 }
 

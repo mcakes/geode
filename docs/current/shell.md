@@ -226,6 +226,116 @@ separators part the rest. A context with no rows at all opens nothing: the
 status notice reads "no actions for this row" (`NO_ROW_ACTIONS`). That is
 also the answer with no tile focused or a tile that answers no context.
 
+#### Color…
+
+One section may end in a `Color…` row, which sets the color one dimension
+value paints in. It is for the clicked column (`DimensionContext::first`)
+when that is a text dimension with a value at the row, else for the row's
+own column (`DimensionContext::own`, the column the row stands for) under
+the same test. A text dimension is a column some dataset declares as a
+`utf8` dimension or key, or a derived dimension
+(`geode_core::colour::text_dimensions`); the shell caches the names and
+rebuilds them on a configuration reload. A row standing for no single value
+(a grand total) offers none.
+
+Picking it opens a choice list titled `Color · {column} {value}` (see
+[choice lists](input-and-dialogs.md#tile-log-and-column-choices)):
+one row per named color in `colors.toml`, alphabetical, each with its
+swatch, then the twelve presets, each with its swatch and labelled
+`preset · {name}`: `red` 0, `orange` 30, `yellow` 60, `lime` 90, `green`
+120, `teal` 150, `cyan` 180, `azure` 210, `blue` 240, `violet` 270,
+`magenta` 300 and `rose` 330, all tone normal. Then `Custom…` (with the
+swatch of the color in force), then `New named color…`, then `None`, then
+`Follow desk ({label})`
+only when the user layer holds an entry for this value and a lower layer
+holds a different, colored one. The label is the lower entry's color name,
+or for an inline entry `hue 210`, `hue 30 light`, or the token's name. It
+opens on the named color in force; on that preset when an inline entry
+equal to a preset (same hue, tone normal) is in force; on `Custom…` when
+any other inline entry is in force; or on `None` when the value has no
+color or its color is no longer defined, so `enter` on an untouched list
+changes nothing (on `Custom…` it opens the hue stage on the color in force,
+whose Apply writes nothing). A query typed and then cleared back to blank
+lights that opening row again, so `enter` on it is still no change. A row
+stands for its pick by position, so a color named `None` or `Custom…` is
+still that color. With no named color the list begins with the presets.
+
+While the query is a whole number 0–360 (360 reads as 0; `07` is 7, while
+`-5`, `1e2` or `21a` are no hue), a pinned top row `Hue {n}` with its
+swatch appears, lit, with `New named color…` pinned beneath it (the
+digits would filter it out by text), and the other rows still filter
+beneath them. Enter on `Hue {n}` writes `{ hue = n }`; moving down one
+reaches `New named color…`, which seeds the new color from the typed hue.
+Moving the highlight off the typed row keeps the move: enter does not
+re-pin an unchanged query.
+
+`New named color…` pushes the Colors dialog over the list at its naming
+stage, the name field prefilled with the value lowercased, whitespace, `.`
+and `"` replaced by `_` (`SX5E Index` offers `sx5e_index`). The new color's
+draft is seeded from the typed `Hue {n}` while the query shows one, else
+the color in force (inline or named), else hue 240, normal. Enter creates
+the color as the dialog's own `n` does: the pick list is removed at once,
+and once the color's write to `colors.toml` succeeds the value is set to
+it (`SPX colored spx`). The Colors dialog continues to its edit stage,
+where hue and tone edits repaint the value through the named color.
+`escape` or `‹` at naming returns to the list intact, writing nothing. A
+refused name (taken, reserved or invalid) stays on naming with the
+dialog's notice. A failed color write colors nothing; the value is written
+only after the color is, so it never names a color the file lacks. If the
+color is written but the reload rejects the batch, the value is still
+written and paints once the configuration is valid. If an edit made while
+the create's write was in flight extends the batch and that later write
+fails, the color is written but the value stays uncolored: the batch, with
+its pending value write, is dropped. A failed value write shows its error,
+and the color remains.
+
+`Custom…` opens the hue stage: a second stage of the same modal, under the
+same title, with the title row's `‹` back button. The preview shows the
+value's text in its resolved color beside the same text in the foreground
+color, both on the theme background, as a cell paints it in this theme,
+contrast floor included. Below it a slider runs 0–359 over a gradient of
+the wheel resolved through the current theme, beside a hue field (degrees)
+and a `Normal` | `Light` tone control; `Apply` and `Cancel` close the row.
+The field accepts a whole number 0–360 (360 reads as 0); out of range or
+empty it shows `a hue is 0–360` and disables Apply, and the last valid hue
+stays in force. The stage starts on the in-force color's hue and tone (an
+inline entry or a named hue color), else hue 240, normal. Nothing is
+written until Apply, which makes one inline pick and closes the list.
+Apply on the hue and tone of the color in force writes nothing, whether
+that color is inline or a named hue color: an inline copy of a name's hue
+would detach the value from the name. `escape`, `Cancel` or `‹`
+returns to the list as it was, writing nothing. The track and the preview
+are resolved once per theme signature (the track also per tone, the
+preview per hue and tone), in the handler that changes the key: opening
+the stage resolves both, a step or slider move only the preview, a tone
+change both. A paint only reads them, except after a theme change while
+the stage is open, which resolves once at the next paint.
+
+A pick writes only the user layer's `value_colors.toml`, through
+`config_write`, off the UI thread, keeping the rest of the file:
+
+| Pick | User-layer write |
+|---|---|
+| A color | `{dimension}.{value} = "{name}"`, the value one quoted key whatever its text (`"BRK.B"`) |
+| An inline color (a preset, typed hue, or the hue stage) | `{dimension}.{value} = { hue = n }` (`tone = "light"` only when light), one quoted key holding an inline table, replacing a string or another table in place |
+| `None`, a lower layer colors the value | `{dimension}.{value} = "none"` |
+| `None`, no lower entry | the key removed, and the dimension table with it when that empties it |
+| `Follow desk` | the key removed, and an emptied dimension table |
+
+A pick equal to the color as painted writes nothing and says nothing; a
+name `colors.toml` no longer defines paints nothing, so `None` over it
+writes nothing either (a dangling user entry with no lower one is not
+cleared this way).
+After a write the status bar reads `SPX colored blue`, `SPX colored hue 210`,
+`SPX colored hue 30 light`, `SPX colored warning`, `SPX colored blue preset`,
+`SPX color cleared` or `SPX follows the desk`. A preset row says `SPX
+colored blue preset`; a typed hue or the stage says `SPX colored hue
+240`, even when the hue equals a preset. The ordinary reload repaints. A
+failed write (a dimension entry that is not a table, an unreadable file)
+shows the writer's error as the notice and leaves the file untouched. With no user
+configuration directory the notice reads `no user configuration directory:
+the color was not saved`.
+
 While open, the menu owns the keys: `j`/`down` and `k`/`up` step over
 enabled rows, `enter` picks the highlighted row, and `escape` closes it.
 Any other bare key is consumed. A chord passes to the matcher, and its
@@ -238,8 +348,8 @@ one, restored from its factory's `launch_state` of the context, as a
 `tile::open_with` pick does. When a dismissal (`escape`, a press outside)
 closes it, focus returns to the scope bar's text field only if that field
 held focus and a key opened the menu; otherwise to the shell root. Opening
-the menu closes the palette, the command line, the stack list and the
-add-a-filter menu, and takes the shell root's focus.
+the menu closes the palette, the command line and the stack list, and takes
+the shell root's focus.
 
 A crate adds a row by implementing `dimension::DimensionAction`: `id`,
 `title`, the `column` whose section it sits in, `available` (enabled, or
@@ -453,10 +563,20 @@ numbered slot, or the lane's own ad hoc chain. The ad hoc chain is stored on
 the lane beside the choice, so it survives a switch to a slot and can be
 returned to (`frame::grouping_adhoc`, "Ad hoc grouping", no default
 binding; with no chain stored it reports that in the status bar). The
+Grouping dialog is where a chain is typed, edited, and saved to a slot. The
 toolbar's grouping readout reads `n · chain` for a slot, `* · chain` for an
-ad hoc chain, and `view default` otherwise. The frame holds one shared lane
-and one lane per pinned workspace. An unpinned workspace reads and writes
-the shared lane; a pinned one reads and writes only its own. Definitions
+ad hoc chain, and `view default` otherwise; a click on it opens the
+Grouping dialog on the lane (see
+[configuration dialogs](configuration-dialogs.md#the-grouping-dialog)).
+A lane also remembers the saved scope its scope was last loaded from or saved
+as (`loaded_from`). Every load of a saved scope sets it, even when the scope
+was already current, and so does a successful save; clearing the scope forgets
+it; every other edit keeps it, and undo and redo leave it alone. Clearing a
+followed link group's scope leaves the lane's provenance alone. A pinned
+workspace's lane starts with a copy of the shared lane's.
+The frame holds one shared lane and one lane per pinned workspace. An
+unpinned workspace reads and writes the shared lane; a pinned one reads and
+writes only its own. Definitions
 stay shared across lanes — grouping slot contents, saved scopes, named
 expressions — as do recent publications and the data and config versions.
 
@@ -472,6 +592,11 @@ workspace reads the shared lane again. A grouping reload (`replace_slots`)
 bumps grouping in every lane, hidden pinned ones included, and clears an
 active slot that no longer exists in each lane separately; saving a slot
 (`save_slot`) bumps grouping only in the lanes where that slot is active.
+`stage_slot` holds a chain in a slot in memory ahead of its config write
+and queues no write of its own. A changed chain bumps grouping in the lanes
+on that slot and the frame's config version, because a tile pinned to the
+slot follows config, and the promotion's reload finds equal slots and bumps
+nothing; an equal chain bumps nothing.
 A reload that changes `groupings`, `datasets` or `dimensions` also checks
 each lane's ad hoc chain against the groupable columns. A chain naming a
 column outside them is dropped whole, with a warning, and a lane it was
@@ -639,33 +764,35 @@ the name is defined again or removed. The `×` inside a named chip removes that
 name (`FrameViewMut::drop_named`, undoable through `set_scope`) and does nothing
 else. Named chips are keyed by name, so their element ids survive a
 neighbour's removal. The chip body has the chips' hover and pressed fills,
-and a click on it opens the Expressions dialog on that name
-(`objectdialog::render::open_object`): a defined name opens in its edit
-stage, an invalid one included, since editing it is how it gets fixed; a
-missing name opens the Browse list with the notice `'<name>' is not
-defined`. The keyboard route to one name's removal is the scope expression
-dialog: `frame::scope_expression` opens it in Whole mode with the frame's
-names staged as chips, backspace at the field's start removes the last one,
-and Enter applies the rest (see
-[input and dialogs](input-and-dialogs.md#frame-expression)). A scope whose
-only content is a name is not empty: the chips row and the save glyph paint
-for it.
+and a click on it opens that name's definition in the Scope dialog, alone
+(`scopedialog::view::open_definition`): a defined name opens seeded with its
+text, an invalid one included, since editing it is how it gets fixed; a
+missing name opens nothing and says `that expression no longer exists` on
+the status bar. The keyboard route to one name's removal, and to every other
+chip's, is the [Scope dialog](input-and-dialogs.md#scope-dialog): `d` on
+that name's `≡` row. A scope whose only content is a name is not empty: the
+chips row and the save glyph paint for it.
 
 The load glyph (a folder-open icon, `scope-load-chip`) follows the `+` and
-paints whatever the scope holds, empty included; a click opens the scope
-picker (`frame::scope`, `mod+o`; see
-[input and dialogs](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices)),
-and the glyph holds its pressed fill while the picker is open. The save
-glyph, when the scope is savable, comes after it, so its appearance never
-moves the load glyph.
+paints whatever the scope holds, empty included; a click opens the Scope
+dialog on its [Saved](input-and-dialogs.md#saved) screen, alone
+(`frame::scope_saved`), and the glyph holds its pressed fill while Saved is
+the dialog's top layer. Its tooltip, `Saved scopes and expressions`, names
+`frame::scope_saved`'s chord once one is bound; it has none by default, and
+from the keyboard Saved is also `o` in the Scope dialog. The save glyph, when
+the scope is savable, comes after it, so its appearance never moves the load
+glyph. A click on it opens the Scope dialog's
+[save prompt](input-and-dialogs.md#save-prompt) alone, as
+`scope::save_current` does, seeded with the saved scope the lane's scope was
+loaded from.
 
-The `+` verb opens the "Add a filter" menu under itself: "Dimension…"
-dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression` (whose dialog offers the
-named expressions beside typed text), and each row shows its action's live
-binding, if any. The `+` holds its
-pressed fill while the menu is open. The menu is shell-owned transient state
-(`shell/addfilter.rs`), not gpui-component's `PopupMenu`, because its rows
-dispatch the shell's string actions and label them from the shell keymap.
+The `+` verb opens the [Scope dialog](input-and-dialogs.md#scope-dialog)
+(`frame::scope`, `mod+o`), where every ingredient is added — by key, or by
+pointer through each section header's `add` control or an empty section's
+row — and holds its pressed fill while that dialog is open; its tooltip names `frame::scope`'s
+chord. It paints on an empty scope too, since adding a filter is how a scope
+starts. Opened while the scope text field held focus, the dialog hands focus
+back to the field when it closes.
 
 ### Link groups
 
@@ -806,7 +933,7 @@ still pending.
 
 **The chooser.** `tile::link_group` (`mod+u`, the palette, and a click on the
 status bar's `following` segment) opens the link chooser on the focused tile
-(see [input and dialogs](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices)).
+(see [input and dialogs](input-and-dialogs.md#tile-log-and-column-choices)).
 It lists the follow rows for a tile whose module follows and the emit rows
 for one whose module emits. A tile that does neither (a timeseries tile) has
 nothing to choose: no dialog opens and the status bar reads `this tile has
@@ -869,9 +996,11 @@ feature.
 
 `Delivery` is an exhaustive enum. Adding a new outcome type forces every
 occupant to decide how it handles that variant at compile time. Query, pricing,
-and series outcomes route by tile key. A series fetch completion has no tile
-key and is broadcast to visible occupants because several tiles may watch the
-same `(identity, source)` pair.
+series, upload, and text file outcomes route by tile key, and so does a
+distinct-values answer under a tile's key (`Delivery::Distinct`); answers
+under the shell's own keys (`shell::is_shell_key`) never reach a tile. A
+series fetch completion has no tile key and is broadcast to visible occupants
+because several tiles may watch the same `(identity, source)` pair.
 
 The app bridge supplies these deliveries from a coalescing mailbox. See
 [requests and UI delivery](request-delivery.md) for admission/refusal,
@@ -887,7 +1016,7 @@ neither built nor painted, and the page takes the tile surface's rect: from
 the sidebar's right edge to the window's, and from below the toolbar (and
 the historical as-of stripe) to the status bar. The toolbar, which is also
 the window's title bar, the stripe, the sidebar, and the status bar stay,
-and every toolbar control (scope field, chips, `+` menu, as-of chip,
+and every toolbar control (scope field, chips, `+`, as-of chip,
 grouping readout, pin) stays live over the page, so the frame's scope and
 as-of stay visible and editable beside it. Modals, the palette, which-key,
 the performance overlay, and notifications paint above the page as they do
@@ -1164,7 +1293,7 @@ The writer emits `config_version = 1` and these records:
 | `workspaces.N` | Main tree, focused tile, optional fullscreen tile, and focused region |
 | `workspaces.N.docks.<side>` | Left, right, or bottom dock tree, focused tile, visibility, and size |
 | `workspaces.N.tiles.<id>` | Module name, its opaque state table, and the link groups the tile is in: `follow` and `emit`, each a group letter `"a"` to `"d"`, written only when set |
-| `frame` | Dimension selections, named-expression references, text/expression scope, grouping (`slot`, or `ad_hoc` with `grouping = "ad_hoc"` while the ad hoc chain is active), and as-of |
+| `frame` | Dimension selections, named-expression references, text/expression scope, grouping (`slot`, or `ad_hoc` with `grouping = "ad_hoc"` while the ad hoc chain is active), as-of, and `loaded_from`, the saved scope the lane's scope was last loaded from or saved as |
 | `workspaces.N.frame` | Pinned lane for workspace N (same fields as `frame`); present iff workspace N is pinned |
 | `links.<letter>` | One link group's scope, under `scope`, in the encoding `frame` uses for its own (dimension selections, text, expression, named-expression references); written only for a group whose scope is not empty, and an absent table reads as an empty scope |
 | `palette.usage` | Per-row usage count and last-used timestamp |
@@ -1177,6 +1306,11 @@ back to `slot` when one is present, else to each view's own grouping. A
 restored chain is checked against the groupable columns like a reloaded
 one. Each pinned workspace's record restores its own ad hoc chain, or none;
 a pin made at runtime copies the shared lane's.
+
+`loaded_from` is restored only when a saved scope of that name still exists;
+otherwise it is dropped with a `geode::session` trace. A value that is not a
+non-blank string warns and is ignored. A pinned workspace's record restores
+its own provenance, or none, never the shared lane's.
 
 Trees use recursive `leaf`, `split`, and `stack` nodes. Splits store orientation,
 children, and ratios; stacks store tile IDs and the active member index. All
@@ -1306,6 +1440,54 @@ the common door for ordered, atomic edits. Accepted writes to one directory
 run in submission order on the background executor. The target file is parsed
 before editing, temporary files live beside it and do not end in `.toml`, and
 rename exposes either the old or new complete file to the reload poll.
+
+### The config door
+
+A module never writes configuration: it queues whole-object edits through its
+tile's handle with `FrameRef::queue_config_edits`, which stamps the tile as
+each edit's `origin` and notifies the frame, so no caller forgets the notify.
+Each `ConfigEdit` names a document, an object, and the whole new value, or
+`None` to remove the user layer's object. On its frame observation the shell
+drains the queue into the object dialogs' pending batch, with the same 250 ms
+debounce, user-layer promotion and revert on failure, so a burst of edits from
+a tile becomes one write and one reload, and a later edit to the same object
+replaces an earlier one. The write reaches tiles through the reload it causes;
+queuing moves no frame version.
+
+Setting an object whose winning copy comes from the desk or builtin layer
+forks it as an object-dialog edit does: the shadowed copy is recorded in the
+user `overrides.toml` sidecar in the same batch, so drift and the `r` revert
+see it. Whether an object is inherited is read with the pending batch folded
+in, and with earlier edits of the same drain applied, so an object forked a
+moment ago is already the user's and a second edit neither forks again nor
+overwrites the recorded baseline.
+
+The tile that asked hears the outcome through the frame: a fork posts
+`TileNotice::Forked` (`copied '<name>' to your config — Revert… restores the
+<layer> copy`, naming the layer the copy shadows; not the dialogs' wording,
+whose `r` no tile binds), and a refusal posts
+`TileNotice::Refused` once per tile per drain. The shell posts from a deferred
+update and then notifies the frame once; the tile drains its own notices with
+`Frame::take_tile_notices` on that notification. Notices live on the frame,
+not a lane, so a pin or unpin keeps them; closing the tile drops the ones it
+never took, so they neither accumulate nor reach a later occupant under the
+same id. An edit with no origin forks the
+same way but tells no one. With no writable user directory nothing is queued
+and the refusal also shows as the status bar's configuration write error.
+
+The door does not validate. A caller validates the object before queuing it
+(a classification through `geode_core::classification::validate`). An edit
+whose in-memory reload is rejected, keeping the last good configuration, is
+still written to the user file; the status bar then reports
+`saved to disk · rejected by the merge` with the error count.
+
+A tile shows its edit before the write, so the batch remembers each origin
+tile once and tells it when its edit is not what is in force: a failed write,
+which reverts memory to the batch's start, posts `TileNotice::Refused` with
+the status bar's `config not saved — reverted: …`, and a written batch whose
+merge was rejected posts `saved to disk · rejected by the merge — showing the
+configuration in force`. Either goes to every tile whose edits joined the
+batch, deferred and followed by one frame notification, as the drain posts.
 
 Hot reload keeps the last valid configuration when a changed document is
 rejected by the file, modifier, clock, or keymap checks. Later typed readers

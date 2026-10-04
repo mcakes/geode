@@ -118,15 +118,15 @@ fn three_object_dialogs_pop_in_order(cx: &mut gpui::TestAppContext) {
     open_palette_action(&mut cx, "Edit colors");
     cx.simulate_keystrokes("enter"); // delta's edit stage
     cx.run_until_parked();
-    open_palette_action(&mut cx, "Edit scopes");
+    open_palette_action(&mut cx, "Edit sources");
     assert_eq!(
         domains(&shell, &cx),
-        vec![Domain::Views, Domain::Colors, Domain::Scopes]
+        vec![Domain::Views, Domain::Colors, Domain::Sources]
     );
     dispatch_action(&shell, "config::colors", &mut cx);
     assert_eq!(
         domains(&shell, &cx),
-        vec![Domain::Views, Domain::Colors, Domain::Scopes]
+        vec![Domain::Views, Domain::Colors, Domain::Sources]
     );
     assert_eq!(
         shell.read_with(&cx, |s, _| s.notice.clone()).as_deref(),
@@ -261,12 +261,8 @@ fn a_shared_batch_failure_rebuilds_every_contributing_draft(cx: &mut gpui::TestA
 #[gpui::test]
 fn a_covered_scopes_values_stage_receives_its_delivery(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     cx.simulate_keystrokes("enter"); // mine
     cx.simulate_keystrokes("enter"); // book's Values stage
     cx.run_until_parked();
@@ -302,12 +298,8 @@ fn a_covered_scopes_values_stage_receives_its_delivery(cx: &mut gpui::TestAppCon
 #[gpui::test]
 fn a_covered_expression_field_receives_its_values(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     cx.update(|_, app| {
         let seen = seen.clone();
@@ -357,12 +349,8 @@ fn a_covered_expression_field_receives_its_values(cx: &mut gpui::TestAppContext)
 #[gpui::test]
 fn a_reload_refreshes_a_covered_object_expression_field(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (shell, mut cx) = dialog_test_shell_in_dir(
-        cx,
-        services_with_a_saved_scope(),
-        dir.path(),
-        "config::scopes",
-    );
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_saved_scope(), dir.path(), OBJECT_SCOPES);
     open_expression_field(&shell, &mut cx);
     cx.simulate_input("zzcol = 'x'");
     cx.run_until_parked();

@@ -29,6 +29,10 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         | "expressions" => Some(1),
         // One complete definition per color name.
         "colors" => Some(1),
+        // A dimension's values merge per value; one value's entry (a color
+        // name or an inline `{ hue }` / `{ token }` table) is replaced whole,
+        // so a user hue never deep-merges into a desk token.
+        "value_colors" => Some(2),
         // One complete definition per pricer view name.
         "pricer_views" => Some(1),
         // One complete definition per pricer template name.
@@ -167,6 +171,40 @@ mod tests {
         assert!(
             risk.get("columns").is_none(),
             "atomic override must drop desk-only fields"
+        );
+    }
+
+    #[test]
+    fn value_colors_replace_an_entry_whole_and_merge_a_dimension_per_value() {
+        // Depth 2: a dimension's values merge per value, and one value's
+        // entry (a name or an inline table) is replaced whole.
+        let merged = merge_docs(
+            crate::config::VALUE_COLORS_DOC,
+            &[
+                doc(
+                    Layer::Desk,
+                    "value_colors",
+                    "[underlying_ref]\nSPX = \"blue\"\nNDX = { token = \"warning\" }\nRUT = \"amber\"\n",
+                ),
+                doc(
+                    Layer::User,
+                    "value_colors",
+                    "[underlying_ref]\nSPX = \"teal\"\nNDX = { hue = 30 }\n",
+                ),
+            ],
+        );
+        let dimension = merged.value["underlying_ref"].as_table().unwrap();
+        assert_eq!(dimension["SPX"].as_str(), Some("teal"));
+        assert_eq!(
+            dimension["RUT"].as_str(),
+            Some("amber"),
+            "the desk's other values survive a user override of one"
+        );
+        let ndx = dimension["NDX"].as_table().unwrap();
+        assert_eq!(ndx.get("hue").and_then(|v| v.as_integer()), Some(30));
+        assert!(
+            ndx.get("token").is_none(),
+            "the user's table replaces the desk's whole, never merging a token beside the hue"
         );
     }
 

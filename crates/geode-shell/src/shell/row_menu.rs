@@ -244,10 +244,10 @@ impl ShellView {
 
     /// Open the menu on `context`, hung at `at`. A no-op while a modal is
     /// open; with no rows the notice says so and nothing opens. Closes the
-    /// palette, the command line, the stack list and the add-a-filter menu
-    /// first, and takes the shell root's focus, as the add-a-filter menu
-    /// does. `by_pointer` is a right press: that press moved focus to the
-    /// tile, so the menu never hands focus back to the scope bar's field.
+    /// palette, the command line and the stack list first, and takes the
+    /// shell root's focus, so its keys reach the shell. `by_pointer` is a
+    /// right press: that press moved focus to the tile, so the menu never
+    /// hands focus back to the scope bar's field.
     pub(crate) fn open_row_menu(
         &mut self,
         context: DimensionContext,
@@ -259,7 +259,7 @@ impl ShellView {
         if self.modal_open() {
             return;
         }
-        let rows = menu_rows(&context, &self.services.roster);
+        let rows = menu_rows(&context, &self.services.roster, &self.text_dims);
         if rows.is_empty() {
             self.notice = Some(NO_ROW_ACTIONS.into());
             cx.notify();
@@ -268,10 +268,9 @@ impl ShellView {
         self.close_palette(window, cx);
         self.leave_command_line(window, cx);
         self.close_stack_list(cx);
-        self.close_add_filter_menu(cx);
         self.matcher.cancel();
-        // Recorded before the root takes focus, as the add-a-filter menu
-        // records it.
+        // Recorded before the root takes focus: the root is about to hold
+        // it, so this is the only record of whether the field did.
         let return_to_filter = !by_pointer && self.filter_field_focused(window, cx);
         self.row_menu = Some(RowMenu {
             menu: Menu::new(rows, self.services.keymap.bindings()),
@@ -423,6 +422,9 @@ impl MenuHost for ShellView {
                     action: index,
                 };
                 action.run(&open.context, &mut acx);
+            }
+            RowPick::Color { column, value } => {
+                choicedialog::open_value_color(self, column, value, window, cx);
             }
         }
     }

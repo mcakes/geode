@@ -5,6 +5,8 @@
 //! [`DimensionContext`] into the shell's row menu: one section per column
 //! that has rows, the clicked column first.
 
+use std::collections::BTreeSet;
+
 use geode_core::context::DimensionContext;
 use gpui::SharedString;
 
@@ -52,13 +54,19 @@ pub enum RowPick {
     Open { kind: &'static str },
     /// Run the roster's action at `index`.
     Action { index: usize },
+    /// Open the color pick list for `value` of `column`.
+    Color { column: String, value: String },
 }
+
+/// The row menu's color row.
+pub const COLOR_ROW: &str = "Color\u{2026}";
 
 impl MenuPick for RowPick {
     fn element_name(&self) -> SharedString {
         match self {
             RowPick::Open { kind } => format!("row-menu-open-{kind}").into(),
             RowPick::Action { index } => format!("row-menu-action-{index}").into(),
+            RowPick::Color { .. } => "row-menu-color".into(),
         }
     }
 }
@@ -66,10 +74,16 @@ impl MenuPick for RowPick {
 /// The row menu for `ctx`: for each column in menu order (`ctx.first`,
 /// then the rest in context order), a section headed `{column} · {value}`
 /// holding "Open {Kind}" for every kind whose first accepted column (in
-/// menu order) this is, then every action on this column. Sections with
+/// menu order) this is, then every action on this column, then the one
+/// `Color…` row when this column is the color target (see
+/// `color_target`; `text_dims` names the text dimensions). Sections with
 /// no rows are left out; sections are parted by separators. Empty when
 /// nothing applies.
-pub fn menu_rows(ctx: &DimensionContext, roster: &ModuleRoster) -> Vec<Row<RowPick>> {
+pub fn menu_rows(
+    ctx: &DimensionContext,
+    roster: &ModuleRoster,
+    text_dims: &BTreeSet<String>,
+) -> Vec<Row<RowPick>> {
     let mut order: Vec<&(String, String)> = Vec::new();
     if let Some(first) = &ctx.first {
         order.extend(ctx.values.iter().filter(|(c, _)| c == first));
@@ -80,6 +94,7 @@ pub fn menu_rows(ctx: &DimensionContext, roster: &ModuleRoster) -> Vec<Row<RowPi
             .filter(|(c, _)| Some(c) != ctx.first.as_ref()),
     );
 
+    let color = color_target(ctx, text_dims);
     let mut rows: Vec<Row<RowPick>> = Vec::new();
     let mut placed: Vec<&'static str> = Vec::new();
     for (column, value) in order {
@@ -107,6 +122,15 @@ pub fn menu_rows(ctx: &DimensionContext, roster: &ModuleRoster) -> Vec<Row<RowPi
                 ));
             }
         }
+        if color.is_some_and(|(c, _)| c == column) {
+            section.push(Row::Action(ActionRow::new(
+                RowPick::Color {
+                    column: column.clone(),
+                    value: value.clone(),
+                },
+                COLOR_ROW,
+            )));
+        }
         if section.is_empty() {
             continue;
         }
@@ -117,6 +141,20 @@ pub fn menu_rows(ctx: &DimensionContext, roster: &ModuleRoster) -> Vec<Row<RowPi
         rows.extend(section);
     }
     rows
+}
+
+/// The `(column, value)` the menu's one `Color…` row is for: the clicked
+/// column when it is a text dimension with a value at the row, else the
+/// row's own column under the same test.
+fn color_target<'a>(
+    ctx: &'a DimensionContext,
+    text_dims: &BTreeSet<String>,
+) -> Option<&'a (String, String)> {
+    [ctx.first.as_ref(), ctx.own.as_ref()]
+        .into_iter()
+        .flatten()
+        .filter(|column| text_dims.contains(*column))
+        .find_map(|column| ctx.values.iter().find(|(c, _)| c == column))
 }
 
 #[cfg(test)]
@@ -167,7 +205,7 @@ mod tests {
             ("position_ref", "P7"),
         ]);
         assert_eq!(
-            shape(&menu_rows(&ctx, &roster())),
+            shape(&menu_rows(&ctx, &roster(), &BTreeSet::new())),
             vec![
                 "# underlying_ref \u{b7} SPX",
                 "Open Cvi",
@@ -185,14 +223,14 @@ mod tests {
     fn the_clicked_column_leads() {
         let mut ctx = DimensionContext::of(&[("underlying_ref", "SPX"), ("position_ref", "P7")]);
         ctx.first = Some("position_ref".into());
-        let s = shape(&menu_rows(&ctx, &roster()));
+        let s = shape(&menu_rows(&ctx, &roster(), &BTreeSet::new()));
         assert_eq!(s[0], "# position_ref \u{b7} P7");
     }
 
     #[test]
     fn a_disabled_action_keeps_its_reason() {
         let ctx = DimensionContext::of(&[("position_ref", "P7")]);
-        let rows = menu_rows(&ctx, &roster());
+        let rows = menu_rows(&ctx, &roster(), &BTreeSet::new());
         let lhu = rows
             .iter()
             .find_map(|r| match r {
@@ -214,7 +252,7 @@ mod tests {
         both.accepts = &["position_ref", "underlying_ref"];
         r.add(Box::new(both));
         let ctx = DimensionContext::of(&[("underlying_ref", "SPX"), ("position_ref", "P7")]);
-        let s = shape(&menu_rows(&ctx, &r));
+        let s = shape(&menu_rows(&ctx, &r, &BTreeSet::new()));
         assert_eq!(s.iter().filter(|t| *t == "Open Both").count(), 1);
         let under = s
             .iter()
@@ -230,14 +268,111 @@ mod tests {
 
     #[test]
     fn an_empty_or_actionless_context_has_no_rows() {
-        assert!(menu_rows(&DimensionContext::default(), &roster()).is_empty());
-        assert!(menu_rows(&DimensionContext::of(&[("lhu", "7")]), &roster()).is_empty());
+        assert!(menu_rows(&DimensionContext::default(), &roster(), &BTreeSet::new()).is_empty());
+        assert!(
+            menu_rows(
+                &DimensionContext::of(&[("lhu", "7")]),
+                &roster(),
+                &BTreeSet::new()
+            )
+            .is_empty()
+        );
+    }
+
+    fn text(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn color_is_offered_once_for_the_rows_own_text_dimension() {
+        let mut ctx = DimensionContext::of(&[("book", "BK1"), ("underlying_ref", "SPX")]);
+        ctx.own = Some("underlying_ref".into());
+        let rows = menu_rows(
+            &ctx,
+            &ModuleRoster::default(),
+            &text(&["book", "underlying_ref"]),
+        );
+        assert_eq!(
+            shape(&rows),
+            ["# underlying_ref \u{b7} SPX", "Color\u{2026}"],
+            "one row, in the own value's section; `book` gets none"
+        );
+        let picked = rows.iter().find_map(|r| match r {
+            Row::Action(a) => Some(a.pick().clone()),
+            _ => None,
+        });
+        assert_eq!(
+            picked,
+            Some(RowPick::Color {
+                column: "underlying_ref".into(),
+                value: "SPX".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_clicked_text_dimension_takes_color_from_the_rows_own() {
+        let mut ctx = DimensionContext::of(&[("book", "BK1"), ("underlying_ref", "SPX")]);
+        ctx.own = Some("underlying_ref".into());
+        ctx.first = Some("book".into());
+        let rows = menu_rows(
+            &ctx,
+            &ModuleRoster::default(),
+            &text(&["book", "underlying_ref"]),
+        );
+        assert_eq!(shape(&rows), ["# book \u{b7} BK1", "Color\u{2026}"]);
+        // A clicked column that is not a text dimension falls back to own.
+        ctx.first = Some("strike".into());
+        let rows = menu_rows(
+            &ctx,
+            &ModuleRoster::default(),
+            &text(&["book", "underlying_ref"]),
+        );
+        assert_eq!(
+            shape(&rows),
+            ["# underlying_ref \u{b7} SPX", "Color\u{2026}"]
+        );
+    }
+
+    #[test]
+    fn no_color_row_without_a_text_dimension_value_at_the_row() {
+        let mut ctx = DimensionContext::of(&[("underlying_ref", "SPX")]);
+        // Not a text dimension.
+        ctx.own = Some("underlying_ref".into());
+        assert!(menu_rows(&ctx, &ModuleRoster::default(), &text(&[])).is_empty());
+        // A text dimension the row holds no single value of.
+        ctx.own = Some("book".into());
+        assert!(menu_rows(&ctx, &ModuleRoster::default(), &text(&["book"])).is_empty());
+        // No own, nothing clicked.
+        ctx.own = None;
+        assert!(menu_rows(&ctx, &ModuleRoster::default(), &text(&["underlying_ref"])).is_empty());
+    }
+
+    #[test]
+    fn color_sits_last_in_a_section_other_rows_already_fill() {
+        let mut ctx = DimensionContext::of(&[("underlying_ref", "SPX"), ("position_ref", "P7")]);
+        ctx.own = Some("underlying_ref".into());
+        let rows = menu_rows(&ctx, &roster(), &text(&["underlying_ref"]));
+        let shape = shape(&rows);
+        let section = shape
+            .iter()
+            .position(|r| r.starts_with("# underlying_ref"))
+            .unwrap();
+        let end = shape[section..]
+            .iter()
+            .position(|r| r == "|")
+            .map_or(shape.len(), |i| section + i);
+        assert_eq!(shape[end - 1], "Color\u{2026}", "{shape:?}");
+        assert!(
+            end - section > 2,
+            "the section's own rows are still there: {shape:?}"
+        );
     }
 
     #[test]
     fn picks_name_the_kind_or_the_action_index() {
         let ctx = DimensionContext::of(&[("underlying_ref", "SPX"), ("position_ref", "P7")]);
-        let picks: Vec<RowPick> = menu_rows(&ctx, &roster())
+        let picks: Vec<RowPick> = menu_rows(&ctx, &roster(), &BTreeSet::new())
             .iter()
             .filter_map(|r| match r {
                 Row::Action(a) => Some(a.pick().clone()),

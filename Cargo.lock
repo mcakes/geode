@@ -2505,11 +2505,13 @@ dependencies = [
  "async-channel",
  "chrono",
  "geode-blotter",
+ "geode-classifications",
  "geode-core",
  "geode-data",
  "geode-demo-data",
  "geode-diagnostics",
  "geode-documents",
+ "geode-guide",
  "geode-marketdata",
  "geode-nemo",
  "geode-positions",
@@ -2561,6 +2563,20 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "proptest",
+]
+
+[[package]]
+name = "geode-classifications"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "geode-core",
+ "geode-data",
+ "geode-shell",
+ "geode-tile",
+ "gpui-component",
+ "gpui-pre",
+ "toml 1.1.4+spec-1.1.0",
 ]
 
 [[package]]
@@ -2638,6 +2654,22 @@ dependencies = [
  "geode-core",
  "proptest",
  "quick-xml",
+]
+
+[[package]]
+name = "geode-guide"
+version = "0.1.0"
+dependencies = [
+ "geode-core",
+ "geode-shell",
+ "geode-tile",
+ "gpui-component",
+ "gpui-pre",
+ "html5ever",
+ "markdown",
+ "markup5ever_rcdom",
+ "regex",
+ "toml 1.1.4+spec-1.1.0",
 ]
 
 [[package]]

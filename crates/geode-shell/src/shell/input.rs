@@ -164,7 +164,6 @@ impl ShellView {
         // its own bare keys before dispatch, so only external actions close it here.
         self.notice = None;
         self.stack_list = None;
-        self.add_filter_menu = None;
         self.row_menu = None;
     }
 
@@ -363,16 +362,16 @@ impl ShellView {
             objectdialog::render::open(self, objectdialog::Domain::Views, window, cx);
         } else if action.0 == "config::groupings" {
             objectdialog::render::open(self, objectdialog::Domain::Groupings, window, cx);
-        } else if action.0 == "config::scopes" {
-            objectdialog::render::open(self, objectdialog::Domain::Scopes, window, cx);
+        } else if action.0 == "config::scopes" || action.0 == "config::expressions" {
+            // Saved scopes and expressions are managed on the Scope dialog's
+            // Saved screen; the palette titles stay where traders look.
+            super::scopedialog::view::open_saved(self, window, cx);
         } else if action.0 == "config::schema" {
             objectdialog::render::open(self, objectdialog::Domain::Schema, window, cx);
         } else if action.0 == "config::sources" {
             objectdialog::render::open(self, objectdialog::Domain::Sources, window, cx);
         } else if action.0 == "config::colors" {
             objectdialog::render::open(self, objectdialog::Domain::Colors, window, cx);
-        } else if action.0 == "config::expressions" {
-            objectdialog::render::open(self, objectdialog::Domain::Expressions, window, cx);
         } else if action.0 == "config::view_column" {
             // Pull the focused tile's columns now; the list keeps this copy.
             choicedialog::open_columns(self, objectdialog::Domain::Views, window, cx);
@@ -470,8 +469,12 @@ impl ShellView {
         } else if action.0 == "frame::scope_clear" {
             // Palette-only (no chord — occasional deliberate act, not
             // muscle memory): clear the whole scope, itself undoable.
+            // Clearing an empty scope still forgets its provenance, which
+            // observers keyed on the generation have to hear.
             self.target_frame().update(cx, |f, cx| {
-                if f.clear_scope() {
+                let before = f.generation();
+                f.clear_scope();
+                if f.generation() != before {
                     cx.notify();
                 }
             });
@@ -491,26 +494,26 @@ impl ShellView {
         } else if action.0 == "scope::save_current" {
             // `scope::save_current` must precede the generic `scope::` prefix match,
             // otherwise it would load a scope named `save_current`. That name is reserved
-            // by the Scopes domain. Seed the naming prompt from the current frame scope.
-            objectdialog::render::open_save_scope(self, window, cx);
+            // by the Scopes domain. Opens the Scope dialog's save prompt alone.
+            super::scopedialog::view::open_save(self, window, cx);
         } else if let Some(name) = action.0.strip_prefix("scope::") {
             // Load a saved scope through `FrameViewMut::set_scope`, making the change undoable.
             // These per-scope actions are palette-reachable and bindable by user keymaps.
             // An unknown name (hand-bound, or removed since startup) is a no-op.
             let _ = self.load_saved_scope(name, cx);
         } else if action.0 == "frame::scope" {
-            // Open the scope picker over the frame's live saved scopes; its
-            // pick loads through the same `load_saved_scope` as above.
-            choicedialog::open_scopes(self, window, cx);
+            // The Scope dialog on Current: the lane's scope by ingredient.
+            super::scopedialog::view::open(self, window, cx);
+        } else if action.0 == "frame::scope_saved" {
+            // The Scope dialog on its Saved screen, one-shot: a load, a
+            // toggle or `escape` closes it.
+            super::scopedialog::view::open_saved(self, window, cx);
         } else if action.0 == "frame::as_of" {
             // Open the as-of selector.
             asof_view::open(self, window, cx);
-        } else if action.0 == "frame::scope_expression" {
-            // Open the frame-expression editor on the whole expression.
-            scope_expr_view::open(self, scope_expr_view::Mode::Whole, window, cx);
         } else if action.0 == "frame::add_expression" {
             // Open the expression editor in add mode: the typed expression is
-            // joined to the current one with `and` (the `+` menu's Expression row).
+            // joined to the current one with `and` (`x` in the Scope dialog).
             scope_expr_view::open(self, scope_expr_view::Mode::Add, window, cx);
         } else if action.0 == "frame::clear_expression" {
             // Drop the whole expression layer through the undoable set_scope path.
@@ -520,8 +523,8 @@ impl ShellView {
                 }
             });
         } else if action.0 == "frame::grouping" {
-            // Open the same grouping picker as the toolbar readout.
-            choicedialog::open_grouping(self, window, cx);
+            // The Grouping dialog: the same one `config::groupings` opens.
+            objectdialog::render::open(self, objectdialog::Domain::Groupings, window, cx);
         } else if action.0 == "tile::link_group" {
             // Open the link chooser on the focused tile.
             choicedialog::open_link_group(self, window, cx);
@@ -1103,15 +1106,6 @@ impl ShellView {
             self.handle_palette_key(event, window, cx);
             cx.notify();
             return;
-        }
-
-        if self.add_filter_menu.is_some() {
-            // The add-a-filter menu consumes every bare key; a chord passes to the
-            // matcher below, and its dispatch closes the menu.
-            let is_chord = convert_keystroke(&event.keystroke).is_some_and(|ks| ks.mods.is_chord());
-            if self.handle_add_filter_key(event.keystroke.key.as_str(), is_chord, window, cx) {
-                return;
-            }
         }
 
         if self.row_menu.is_some() {

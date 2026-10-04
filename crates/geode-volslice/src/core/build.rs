@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use chrono::NaiveDate;
 use geode_chart::Axis;
-use geode_chart::core::palette::Palette;
+use geode_chart::core::palette::HuePalette;
 use geode_chart::xy::{SlotKind, Style, XAxis, XFormat, XyModel, XySlot, YFormat};
 use geode_core::document::DocumentRows;
 use geode_core::query::QueryKey;
@@ -18,10 +18,22 @@ use geode_core::vol::{
 };
 use gpui::Hsla;
 
+use crate::core::docs::ChainExpiry;
 use crate::core::model::{Kind, Loaded, Pair, State, StripRow};
 
-/// Points per dense curve.
-pub const GRID_N: usize = 200;
+/// Points per dense curve over the CVI's node ladder widened to the listed
+/// chain. The density is a second difference over these points, so its
+/// smoothness is points per σ√t·F at the forward, where it has its mass.
+/// The model chooses the spacing; the demo model packs points toward the
+/// forward on the scale of σ√t, so that count holds however wide the
+/// chain. A thousand is enough that even spread evenly over the widest
+/// demo chain (under half the forward) they put some sixty across the
+/// σ√t·F of a one-week, 20%-vol expiry (2.8% of the forward), past the
+/// twenty-five that reads as a smooth hump; the vol curve's wings stay
+/// fine too. A curve's path is decimated to its pixel columns, so the
+/// count costs the chart nothing per frame; the model evaluates a Black
+/// price per point, once per batch.
+pub const GRID_N: usize = 1000;
 
 /// What each job of a batch is for, by position.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,8 +46,15 @@ pub enum Role {
     },
     /// The chain's coordinates; `trace: false` when only the difference needs them.
     Chain { expiry: NaiveDate, trace: bool },
-    /// A curve evaluated at the other side's strikes, for the difference.
-    DiffCurve { kind: Kind, expiry: NaiveDate },
+    /// A curve evaluated at another kind's strikes for a difference: the
+    /// minuend curve's (`Grid::Job`) for two curves, the chain's (`Grid::At`)
+    /// when `at` is the chain. Asked once per `(kind, expiry, at)` however
+    /// many pairs read it.
+    DiffCurve {
+        kind: Kind,
+        expiry: NaiveDate,
+        at: Kind,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -44,7 +63,8 @@ pub struct Plan {
     pub jobs: Vec<VolJob>,
     pub roles: Vec<Role>,
     pub coordinate: Coordinate,
-    pub diff: Option<Pair>,
+    /// The pairs shown, in their paint order.
+    pub diffs: Vec<Pair>,
     /// Strip position (the palette index) and date of each active expiry.
     pub active: Vec<(usize, NaiveDate)>,
 }
@@ -59,6 +79,21 @@ impl Plan {
             jobs: self.jobs.clone(),
         }
     }
+}
+
+/// The strike span a dense curve at a chain's expiry must reach: its
+/// lowest and highest listed strike, so a curve is drawn at least as wide
+/// as the quotes. Asked whether or not the chain is shown, so toggling the
+/// chain does not move the curves' x extent. `None` without a chain, or
+/// with no positive finite strike in it.
+pub fn cover(chain: Option<&ChainExpiry>) -> Option<(f64, f64)> {
+    let mut strikes = chain?
+        .strikes
+        .iter()
+        .copied()
+        .filter(|k| k.is_finite() && *k > 0.0);
+    let first = strikes.next()?;
+    Some(strikes.fold((first, first), |(lo, hi), k| (lo.min(k), hi.max(k))))
 }
 
 pub fn batch(state: &State, loaded: &Loaded, strip: &[StripRow]) -> Plan {
@@ -79,6 +114,11 @@ pub fn batch(state: &State, loaded: &Loaded, strip: &[StripRow]) -> Plan {
         density,
     };
     for &(_, expiry) in &active {
+        let chain = loaded.chain_at(expiry);
+        let grid = Grid::Dense {
+            n: GRID_N,
+            cover: cover(chain),
+        };
         let mut dense_job = [None; 3];
         for kind in [Kind::Cvi, Kind::Draft] {
             let Some(document) = doc_of[kind.index()] else {
@@ -86,13 +126,14 @@ pub fn batch(state: &State, loaded: &Loaded, strip: &[StripRow]) -> Plan {
             };
             let trace = state.visible(loaded, kind);
             let minuend = state
-                .diff
-                .is_some_and(|p| p.minuend == kind && p.subtrahend.is_curve());
+                .diffs
+                .iter()
+                .any(|p| p.minuend == kind && p.subtrahend.is_curve());
             if trace || minuend {
                 dense_job[kind.index()] = Some(jobs.len());
                 jobs.push(VolJob::Slice {
                     document,
-                    request: slice(expiry, Grid::Dense(GRID_N), trace && state.density),
+                    request: slice(expiry, grid.clone(), trace && state.density),
                 });
                 roles.push(Role::Curve {
                     kind,
@@ -101,12 +142,9 @@ pub fn batch(state: &State, loaded: &Loaded, strip: &[StripRow]) -> Plan {
                 });
             }
         }
-        let chain = loaded.chain_at(expiry);
         if let Some(c) = chain {
             let trace = state.visible(loaded, Kind::Chain);
-            let in_pair = state
-                .diff
-                .is_some_and(|p| p.minuend == Kind::Chain || p.subtrahend == Kind::Chain);
+            let in_pair = state.diffs.iter().any(|p| p.has_chain());
             if trace || in_pair {
                 jobs.push(VolJob::Map(MapRequest {
                     expiry,
@@ -119,39 +157,35 @@ pub fn batch(state: &State, loaded: &Loaded, strip: &[StripRow]) -> Plan {
                 roles.push(Role::Chain { expiry, trace });
             }
         }
-        let Some(pair) = state.diff else { continue };
-        if pair.minuend.is_curve() && pair.subtrahend.is_curve() {
-            let (Some(of), Some(document)) = (
-                dense_job[pair.minuend.index()],
-                doc_of[pair.subtrahend.index()],
-            ) else {
-                continue;
-            };
-            jobs.push(VolJob::Slice {
-                document,
-                request: slice(expiry, Grid::Job(of), false),
-            });
-            roles.push(Role::DiffCurve {
-                kind: pair.subtrahend,
-                expiry,
-            });
-        } else {
-            let curve = if pair.minuend.is_curve() {
-                pair.minuend
+        // Each pair's curve at the other side's strikes. Two pairs reading
+        // the same evaluation share its job.
+        let mut asked: Vec<(Kind, Kind)> = Vec::new();
+        for pair in &state.diffs {
+            let (kind, at) = if pair.has_chain() {
+                (pair.curve(), Kind::Chain)
             } else {
-                pair.subtrahend
+                (pair.subtrahend, pair.minuend)
             };
-            let (Some(document), Some(c)) = (doc_of[curve.index()], chain) else {
+            let Some(document) = doc_of[kind.index()] else {
                 continue;
             };
+            if asked.contains(&(kind, at)) {
+                continue;
+            }
+            let grid = match (at, chain) {
+                (Kind::Chain, Some(c)) => Grid::At(c.strikes.clone()),
+                (Kind::Chain, None) => continue,
+                (minuend, _) => match dense_job[minuend.index()] {
+                    Some(of) => Grid::Job(of),
+                    None => continue,
+                },
+            };
+            asked.push((kind, at));
             jobs.push(VolJob::Slice {
                 document,
-                request: slice(expiry, Grid::At(c.strikes.clone()), false),
+                request: slice(expiry, grid, false),
             });
-            roles.push(Role::DiffCurve {
-                kind: curve,
-                expiry,
-            });
+            roles.push(Role::DiffCurve { kind, expiry, at });
         }
     }
     Plan {
@@ -159,18 +193,52 @@ pub fn batch(state: &State, loaded: &Loaded, strip: &[StripRow]) -> Plan {
         jobs,
         roles,
         coordinate: state.coordinate,
-        diff: state.diff,
+        diffs: state.diffs.clone(),
         active,
     }
 }
 
+/// A curve-and-chain difference at the chain's strikes, from the curve's
+/// vols there: the mid's difference as the point, and the bar the quote's
+/// spread gives it. `curve − chain` runs from `curve − ask` to
+/// `curve − bid`; `chain − curve` from `bid − curve` to `ask − curve`. A
+/// one-sided quote's NaN side carries through, so the bar is the half the
+/// quote has, as on the chain's own trace.
+fn chain_diff(
+    pair: Pair,
+    curve: &[geode_core::vol::SlicePoint],
+    chain: &ChainExpiry,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let at = |side: &[f64]| -> Vec<f64> {
+        curve
+            .iter()
+            .zip(side)
+            .map(|(p, q)| {
+                if pair.minuend == Kind::Chain {
+                    q - p.vol
+                } else {
+                    p.vol - q
+                }
+            })
+            .collect()
+    };
+    let mid = at(&chain.mid);
+    let (lo, hi) = if pair.minuend == Kind::Chain {
+        (at(&chain.bid), at(&chain.ask))
+    } else {
+        (at(&chain.ask), at(&chain.bid))
+    };
+    (mid, lo, hi)
+}
+
 /// A density line's opacity against its curve's expiry color, so the pdf
-/// reads as a companion of the smile rather than a second smile.
+/// reads as a companion of the smile rather than a second smile. Its fill
+/// is the chart's fill opacity of this.
 pub const DENSITY_ALPHA: f32 = 0.55;
 
 /// The y formats in `Axis::ALL` order: vols on the left of either pane,
 /// densities on the right.
-const Y_FORMAT: [YFormat; 4] = [
+pub const Y_FORMAT: [YFormat; 4] = [
     YFormat::Percent,
     YFormat::Plain,
     YFormat::Percent,
@@ -247,18 +315,46 @@ pub fn padded(full: (f64, f64), min: f64) -> (f64, f64) {
     (centre - min / 2.0, centre + min / 2.0)
 }
 
-/// The same slots at another split, under a new version: the element's
-/// caches tell models apart by version alone.
-pub fn with_split(model: &XyModel, split: f32, version: u64) -> Arc<XyModel> {
+/// The same slots at another split or differences y domain, under a new
+/// version: the element's caches tell models apart by version alone.
+pub fn restyled(
+    model: &XyModel,
+    split: f32,
+    diff_ylim: Option<(f64, f64)>,
+    version: u64,
+) -> Arc<XyModel> {
     XyModel::new(version, model.x, model.y_format, split, model.slots.clone())
+        .with_y_limit(DIFF_AXIS, diff_ylim)
 }
+
+/// The differences axis: the lower pane's left side. A fixed y domain
+/// (`State::diff_ylim`) applies here alone; the density axes autoscale.
+pub const DIFF_AXIS: Axis = Axis::BottomLeft;
 
 fn failure(role: &Role, e: &str) -> String {
     match role {
-        Role::Curve { kind, expiry, .. } | Role::DiffCurve { kind, expiry } => {
+        Role::Curve { kind, expiry, .. } | Role::DiffCurve { kind, expiry, .. } => {
             format!("no {} curve at {expiry}: {e}", kind.label())
         }
         Role::Chain { expiry, .. } => format!("no chain coordinates at {expiry}: {e}"),
+    }
+}
+
+/// An expiry's color and its companion ([`HuePalette`]), resolved once
+/// per model build.
+pub type Shades = (Hsla, Hsla);
+
+/// The color a difference paints in at an expiry with `shades`: the
+/// expiry's color, except that a pair of the draft with the chain takes
+/// the companion. Pairs at one expiry are told apart by their mark first
+/// (two curves are a line, anything with the chain points with bars) and,
+/// of the two pairs with the chain, by this color.
+pub fn diff_color(pair: Pair, shades: Shades) -> Hsla {
+    let (color, companion) = shades;
+    if pair.has_chain() && pair.curve() == Kind::Draft {
+        companion
+    } else {
+        color
     }
 }
 
@@ -266,11 +362,17 @@ fn failure(role: &Role, e: &str) -> String {
 /// outcome shorter than its plan (a cancelled batch) answers `None`:
 /// indexing it would pair results with the wrong roles, and a newer
 /// batch supersedes it anyway.
+///
+/// Colors come from `palette` by strip position: each expiry's own hue,
+/// the published curve and the draft in its color (the draft dashed), the
+/// chain in its companion, a density at [`DENSITY_ALPHA`] of its curve's.
+/// Differences follow every trace, expiry by expiry and each expiry's
+/// pairs in their order ([`diff_color`]).
 pub fn model(
     plan: &Plan,
     outcome: &VolSliceOutcome,
     loaded: &Loaded,
-    palette: &Palette,
+    palette: &HuePalette,
     split: f32,
     version: u64,
 ) -> Option<Built> {
@@ -278,6 +380,19 @@ pub fn model(
     if outcome.results.len() < n || plan.roles.len() < n {
         return None;
     }
+    // Each active expiry's two shades, once: a palette color costs a
+    // conversion and a contrast bisection.
+    let shades: Vec<Shades> = plan
+        .active
+        .iter()
+        .map(|&(pos, _)| (palette.color(pos), palette.companion(pos)))
+        .collect();
+    let shades_of = |expiry: NaiveDate| -> Shades {
+        plan.active
+            .iter()
+            .position(|(_, e)| *e == expiry)
+            .map_or_else(|| (palette.color(0), palette.companion(0)), |i| shades[i])
+    };
     let results = &outcome.results[..n];
     let slice = |i: usize| match &results[i] {
         Ok(VolResult::Slice(s)) => Some(s),
@@ -313,6 +428,7 @@ pub fn model(
     // lookup, not by adjacency, so it cannot pair with another expiry's.
     let mut curve_at: HashMap<(Kind, NaiveDate), usize> = HashMap::new();
     let mut chain_of: HashMap<NaiveDate, usize> = HashMap::new();
+    let mut diff_at: HashMap<(Kind, NaiveDate, Kind), usize> = HashMap::new();
     for (i, role) in plan.roles[..n].iter().enumerate() {
         match *role {
             Role::Curve { kind, expiry, .. } => {
@@ -321,7 +437,9 @@ pub fn model(
             Role::Chain { expiry, .. } => {
                 chain_of.insert(expiry, i);
             }
-            Role::DiffCurve { .. } => {}
+            Role::DiffCurve { kind, expiry, at } => {
+                diff_at.insert((kind, expiry, at), i);
+            }
         }
     }
 
@@ -347,11 +465,7 @@ pub fn model(
             }
             continue;
         }
-        let color = plan
-            .active
-            .iter()
-            .find(|(_, e)| *e == expiry)
-            .map_or_else(|| palette.colour(0), |(pos, _)| palette.colour(*pos));
+        let (color, companion) = shades_of(expiry);
         match *role {
             Role::Curve { kind, trace, .. } => {
                 let Some(s) = slice(i) else { continue };
@@ -372,6 +486,7 @@ pub fn model(
                     SlotKind::Line {
                         xs: s.points.iter().map(|p| p.x).collect(),
                         ys: s.points.iter().map(|p| p.vol).collect(),
+                        fill: false,
                     },
                 );
                 if let Some(density) = &s.density {
@@ -384,9 +499,11 @@ pub fn model(
                         },
                         Axis::Right,
                         style,
+                        // Shaded down to zero, a negative lobe up to it.
                         SlotKind::Line {
                             xs: density.iter().map(|(x, _)| *x).collect(),
                             ys: density.iter().map(|(_, pdf)| *pdf).collect(),
+                            fill: true,
                         },
                     );
                 }
@@ -413,7 +530,7 @@ pub fn model(
                 push(
                     &mut slots,
                     format!("chain {expiry}"),
-                    color,
+                    companion,
                     Axis::Left,
                     Style::Solid,
                     SlotKind::Points {
@@ -424,71 +541,79 @@ pub fn model(
                     },
                 );
             }
-            Role::DiffCurve { kind, .. } => {
-                let (Some(pair), Some(other)) = (plan.diff, slice(i)) else {
+            // Painted below, once every trace is.
+            Role::DiffCurve { .. } => {}
+        }
+    }
+
+    for (&(_, expiry), &shade) in plan.active.iter().zip(&shades) {
+        for &pair in &plan.diffs {
+            let label = format!("{} {expiry}", pair.label());
+            let color = diff_color(pair, shade);
+            if !pair.has_chain() {
+                // Equal strikes: the subtrahend was evaluated at the
+                // minuend's, so the points pair by position.
+                let at = diff_at.get(&(pair.subtrahend, expiry, pair.minuend));
+                let minuend = curve_at.get(&(pair.minuend, expiry));
+                let (Some(other), Some(minuend)) = (
+                    at.copied().and_then(slice),
+                    minuend.copied().and_then(slice),
+                ) else {
                     continue;
                 };
-                let label = format!("{} {expiry}", pair.label());
-                if pair.subtrahend.is_curve() && pair.minuend.is_curve() {
-                    // Equal strikes: the subtrahend was evaluated at the
-                    // minuend's, so the points pair by position.
-                    let minuend = curve_at.get(&(pair.minuend, expiry)).copied();
-                    let Some(minuend) = minuend.and_then(slice) else {
-                        continue;
-                    };
-                    if minuend.points.len() != other.points.len() {
-                        continue;
-                    }
-                    push(
-                        &mut slots,
-                        label,
-                        color,
-                        Axis::BottomLeft,
-                        Style::Solid,
-                        SlotKind::Line {
-                            xs: minuend.points.iter().map(|p| p.x).collect(),
-                            ys: minuend
-                                .points
-                                .iter()
-                                .zip(&other.points)
-                                .map(|(a, b)| a.vol - b.vol)
-                                .collect(),
-                        },
-                    );
-                } else {
-                    // The curve was evaluated at the chain strikes and
-                    // sits at the chain's x.
-                    let (Some(xs), Some(c)) = (
-                        chain_of.get(&expiry).copied().and_then(map),
-                        loaded.chain_at(expiry),
-                    ) else {
-                        continue;
-                    };
-                    if xs.len() != other.points.len() || c.mid.len() != other.points.len() {
-                        continue;
-                    }
-                    let sign = if pair.minuend == kind { 1.0 } else { -1.0 };
-                    let diff: Vec<f64> = other
-                        .points
-                        .iter()
-                        .zip(&c.mid)
-                        .map(|(p, mid)| sign * (p.vol - mid))
-                        .collect();
-                    push(
-                        &mut slots,
-                        label,
-                        color,
-                        Axis::BottomLeft,
-                        Style::Solid,
-                        SlotKind::Points {
-                            xs: xs.clone(),
-                            mid: diff.clone(),
-                            lo: diff.clone(),
-                            hi: diff,
-                        },
-                    );
+                if minuend.points.len() != other.points.len() {
+                    continue;
                 }
+                push(
+                    &mut slots,
+                    label,
+                    color,
+                    Axis::BottomLeft,
+                    Style::Solid,
+                    SlotKind::Line {
+                        xs: minuend.points.iter().map(|p| p.x).collect(),
+                        ys: minuend
+                            .points
+                            .iter()
+                            .zip(&other.points)
+                            .map(|(a, b)| a.vol - b.vol)
+                            .collect(),
+                        fill: false,
+                    },
+                );
+                continue;
             }
+            // The curve was evaluated at the chain strikes and sits at the
+            // chain's x; the quote's bid and ask carry over as the bar.
+            let curve = pair.curve();
+            let (Some(other), Some(xs), Some(c)) = (
+                diff_at
+                    .get(&(curve, expiry, Kind::Chain))
+                    .copied()
+                    .and_then(slice),
+                chain_of.get(&expiry).copied().and_then(map),
+                loaded.chain_at(expiry),
+            ) else {
+                continue;
+            };
+            let n = other.points.len();
+            if xs.len() != n || [&c.mid, &c.bid, &c.ask].iter().any(|v| v.len() != n) {
+                continue;
+            }
+            let (mid, lo, hi) = chain_diff(pair, &other.points, c);
+            push(
+                &mut slots,
+                label,
+                color,
+                Axis::BottomLeft,
+                Style::Solid,
+                SlotKind::Points {
+                    xs: xs.clone(),
+                    mid,
+                    lo,
+                    hi,
+                },
+            );
         }
     }
 
@@ -501,17 +626,18 @@ pub fn model(
     }
     // A pair naming a kind with nothing loaded (restored, or kept while a
     // draft left) asks no difference job: without this it paints nothing,
-    // silently. Worded as `:diff` refuses such a pair.
-    if let Some(pair) = plan.diff
-        && let Some(k) = [pair.minuend, pair.subtrahend]
+    // silently. Said per pair, worded as `:diff` refuses such a pair.
+    for pair in &plan.diffs {
+        if let Some(k) = [pair.minuend, pair.subtrahend]
             .into_iter()
             .find(|k| !loaded.has(*k))
-    {
-        notices.push(format!(
-            "diff {}: {} is not loaded",
-            pair.label(),
-            k.label()
-        ));
+        {
+            notices.push(format!(
+                "diff {}: {} is not loaded",
+                pair.label(),
+                k.label()
+            ));
+        }
     }
 
     let model = XyModel::new(version, x_axis(plan.coordinate), Y_FORMAT, split, slots);
@@ -562,7 +688,112 @@ mod tests {
         };
         assert_eq!(
             (*document, &request.grid, request.density),
-            (1, &Grid::Dense(GRID_N), false)
+            (
+                1,
+                &Grid::Dense {
+                    n: GRID_N,
+                    cover: None
+                },
+                false
+            )
+        );
+    }
+
+    /// The dense grids of a chain expiry reach its lowest and highest
+    /// listed strike, the chain shown or not, so hiding the chain does not
+    /// move the curves' x extent.
+    #[test]
+    fn a_chain_expirys_curves_cover_its_listed_strikes_shown_or_not() {
+        let dense = |p: &Plan| -> Vec<Grid> {
+            p.roles
+                .iter()
+                .zip(&p.jobs)
+                .filter_map(|(r, j)| match (r, j) {
+                    (Role::Curve { .. }, VolJob::Slice { request, .. }) => {
+                        Some(request.grid.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let want = Grid::Dense {
+            n: GRID_N,
+            cover: Some((85.0, 115.0)),
+        };
+        let mut st = State {
+            active: Some([d("2026-11-20")].into()),
+            ..State::default()
+        };
+        assert_eq!(dense(&plan(&mut st)), [want.clone(), want.clone()]);
+        st.toggle_kind(Kind::Chain);
+        let p = plan(&mut st);
+        assert!(!p.roles.iter().any(|r| matches!(r, Role::Chain { .. })));
+        assert_eq!(dense(&p), [want.clone(), want]);
+    }
+
+    #[test]
+    fn a_cover_is_the_chains_positive_finite_strike_span() {
+        use crate::core::model::tests::chain;
+        let mut c = chain("2026-11-20");
+        assert_eq!(cover(Some(&c)), Some((85.0, 115.0)));
+        c.strikes = vec![110.0, f64::NAN, 90.0, -5.0, 0.0, 120.0, f64::INFINITY];
+        assert_eq!(cover(Some(&c)), Some((90.0, 120.0)), "in any order");
+        c.strikes = vec![f64::NAN, 0.0];
+        assert_eq!(cover(Some(&c)), None);
+        assert_eq!(cover(None), None);
+    }
+
+    /// A one-week expiry beside a chain about as wide as the widest demo
+    /// chain (46% of the forward): the density's steepest step between
+    /// neighbours stays a small fraction of its peak, which takes some 25
+    /// points or more per σ√t·F.
+    #[test]
+    fn a_one_week_density_across_a_wide_chain_is_smooth() {
+        use crate::core::model::tests::{chain, cvi};
+        let mut c = chain("2026-10-08");
+        c.strikes = (0..=46).map(|i| 70.0 + i as f64).collect();
+        for side in [&mut c.bid, &mut c.mid, &mut c.ask] {
+            *side = vec![0.2; 47];
+        }
+        let l = Loaded {
+            cvi: Some(cvi(&["2026-10-08", "2026-12-18"], None)),
+            draft: None,
+            chain: vec![c],
+        };
+        let s = strip(&l, d(TODAY));
+        let mut st = State {
+            active: Some([d("2026-10-08")].into()),
+            density: true,
+            ..State::default()
+        };
+        st.reconcile(&s);
+        let p = batch(&st, &l, &s);
+        let b = model(&p, &answer(&p), &l, &palette(), st.split, 1).unwrap();
+        assert!(b.notices.is_empty(), "{:?}", b.notices);
+        let density = b
+            .model
+            .slots
+            .iter()
+            .find(|s| s.label.contains("density"))
+            .unwrap();
+        let SlotKind::Line { xs, ys, .. } = &density.kind else {
+            panic!()
+        };
+        assert!(
+            xs[0] < 0.71 && xs[xs.len() - 1] > 1.15,
+            "across the chain: {}..{}",
+            xs[0],
+            xs[xs.len() - 1]
+        );
+        let peak = ys.iter().copied().fold(f64::MIN, f64::max);
+        let steepest = ys
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            steepest / peak < 0.025,
+            "steepest step {} of the peak",
+            steepest / peak
         );
     }
 
@@ -606,7 +837,7 @@ mod tests {
     #[test]
     fn curve_minus_curve_evaluates_the_subtrahend_at_the_minuends_strikes() {
         let mut st = State {
-            diff: Pair::new(Kind::Draft, Kind::Cvi),
+            diffs: Pair::new(Kind::Draft, Kind::Cvi).into_iter().collect(),
             ..State::default()
         };
         let p = plan(&mut st);
@@ -633,7 +864,8 @@ mod tests {
             p.roles[i],
             Role::DiffCurve {
                 kind: Kind::Cvi,
-                expiry: d("2026-10-16")
+                expiry: d("2026-10-16"),
+                at: Kind::Draft,
             }
         );
         let VolJob::Slice { document, request } = &p.jobs[i] else {
@@ -656,7 +888,7 @@ mod tests {
         let expiries = [d("2026-10-16"), d("2026-12-18")];
         let mut st = State {
             active: Some(expiries.into()),
-            diff: Pair::new(Kind::Draft, Kind::Cvi),
+            diffs: Pair::new(Kind::Draft, Kind::Cvi).into_iter().collect(),
             ..State::default()
         };
         let p = plan(&mut st);
@@ -711,6 +943,7 @@ mod tests {
                 Role::DiffCurve {
                     kind: Kind::Cvi,
                     expiry,
+                    ..
                 } => Some(*expiry),
                 _ => None,
             })
@@ -724,7 +957,7 @@ mod tests {
     #[test]
     fn a_hidden_minuend_still_gets_its_dense_job_without_a_trace() {
         let mut st = State {
-            diff: Pair::new(Kind::Draft, Kind::Cvi),
+            diffs: Pair::new(Kind::Draft, Kind::Cvi).into_iter().collect(),
             ..State::default()
         };
         st.toggle_kind(Kind::Draft);
@@ -740,7 +973,7 @@ mod tests {
     fn curve_minus_chain_evaluates_the_curve_at_the_chain_strikes() {
         let mut st = State {
             active: Some([d("2026-11-20")].into()),
-            diff: Pair::new(Kind::Chain, Kind::Cvi),
+            diffs: Pair::new(Kind::Chain, Kind::Cvi).into_iter().collect(),
             ..State::default()
         };
         st.toggle_kind(Kind::Chain);
@@ -766,7 +999,7 @@ mod tests {
     #[test]
     fn a_pair_whose_kind_is_absent_at_an_expiry_adds_nothing_there() {
         let mut st = State {
-            diff: Pair::new(Kind::Cvi, Kind::Chain),
+            diffs: Pair::new(Kind::Cvi, Kind::Chain).into_iter().collect(),
             ..State::default()
         };
         let p = plan(&mut st); // front term has no chain
@@ -783,13 +1016,46 @@ mod tests {
         );
     }
 
-    fn palette() -> Palette {
+    fn palette() -> HuePalette {
         let c = |l| gpui::hsla(0.0, 0.0, l, 1.0);
-        Palette::from_theme([c(0.1), c(0.2), c(0.3), c(0.4), c(0.5)], c(1.0), c(0.0))
+        HuePalette::from_theme([c(0.1), c(0.2), c(0.3), c(0.4), c(0.5)], c(1.0), c(0.0))
     }
 
     fn answer(plan: &Plan) -> VolSliceOutcome {
-        let config = VolConfig::with(Arc::new(geode_pricing::DemoVolModel));
+        answer_by(plan, Arc::new(geode_pricing::DemoVolModel))
+    }
+
+    /// The stand-in, except that it refuses `REFUSED`: the per-expiry
+    /// failure the notice tests need, now that the stand-in itself
+    /// extrapolates to any expiry.
+    struct Refusing;
+    const REFUSED: &str = "2027-06-18";
+    impl geode_core::vol::VolModel for Refusing {
+        fn name(&self) -> &str {
+            "refusing"
+        }
+        fn kind(&self) -> &str {
+            "cvi_params"
+        }
+        fn slice(
+            &self,
+            doc: &DocumentRows,
+            req: &SliceRequest,
+        ) -> Result<geode_core::vol::SliceResult, geode_core::vol::VolError> {
+            if req.expiry == d(REFUSED) {
+                return Err(geode_core::vol::VolError(format!(
+                    "no params for {REFUSED}"
+                )));
+            }
+            geode_pricing::DemoVolModel.slice(doc, req)
+        }
+        fn coordinates(&self, req: &MapRequest) -> Result<Vec<f64>, geode_core::vol::VolError> {
+            geode_pricing::DemoVolModel.coordinates(req)
+        }
+    }
+
+    fn answer_by(plan: &Plan, model: Arc<dyn geode_core::vol::VolModel>) -> VolSliceOutcome {
+        let config = VolConfig::with(model);
         let params = plan.params(QueryKey(1), 1, Instant::now());
         VolSliceOutcome {
             key: params.key,
@@ -805,6 +1071,32 @@ mod tests {
         state.reconcile(&s);
         let p = batch(state, &l, &s);
         model(&p, &answer(&p), &l, &palette(), state.split, 7).unwrap()
+    }
+
+    /// `built`, answered by a model that refuses `REFUSED`.
+    fn built_refusing(state: &mut State) -> Built {
+        let l = fixture();
+        let s = strip(&l, d(TODAY));
+        state.reconcile(&s);
+        let p = batch(state, &l, &s);
+        let o = answer_by(&p, Arc::new(Refusing));
+        model(&p, &o, &l, &palette(), state.split, 7).unwrap()
+    }
+
+    /// 2027-06-18 lies past the fixture CVI's last term: the stand-in
+    /// extrapolates, so both curves paint there beside the chain.
+    #[test]
+    fn an_expiry_past_the_last_term_paints_its_curves() {
+        let mut st = State {
+            active: Some([d("2027-06-18")].into()),
+            ..State::default()
+        };
+        let b = built(&mut st);
+        assert!(b.notices.is_empty(), "{:?}", b.notices);
+        let labels: Vec<&str> = b.model.slots.iter().map(|s| s.label.as_ref()).collect();
+        for want in ["cvi 2027-06-18", "cvi draft 2027-06-18", "chain 2027-06-18"] {
+            assert!(labels.contains(&want), "{want}: {labels:?}");
+        }
     }
 
     #[test]
@@ -826,11 +1118,17 @@ mod tests {
             ]
         );
         assert_eq!(b.model.slots[1].style, Style::Dashed);
-        assert_eq!(b.model.slots[0].color, palette().colour(0));
+        assert_eq!(b.model.slots[0].color, palette().color(0));
         assert_eq!(
             b.model.slots[2].color,
-            palette().colour(1),
+            palette().color(1),
             "the strip position, not the active index"
+        );
+        assert_eq!(b.model.slots[3].color, palette().color(1), "the draft too");
+        assert_eq!(
+            b.model.slots[4].color,
+            palette().companion(1),
+            "the chain is its expiry's companion"
         );
         let SlotKind::Points { lo, hi, .. } = &b.model.slots[4].kind else {
             panic!()
@@ -841,18 +1139,24 @@ mod tests {
     }
 
     #[test]
-    fn densities_paint_on_the_right_axis() {
+    fn densities_paint_filled_on_the_right_axis_and_curves_unfilled() {
         let mut st = State {
             density: true,
             ..State::default()
         };
         let b = built(&mut st);
+        let fills = |s: &XySlot| matches!(s.kind, SlotKind::Line { fill: true, .. });
+        let (densities, rest): (Vec<_>, Vec<_>) = b
+            .model
+            .slots
+            .iter()
+            .partition(|s| s.label.contains("density"));
+        assert_eq!(densities.len(), 2, "cvi and draft");
         assert!(
-            b.model
-                .slots
-                .iter()
-                .any(|s| s.axis == Axis::Right && s.label.contains("density"))
+            densities.iter().all(|s| s.axis == Axis::Right && fills(s)),
+            "{densities:?}"
         );
+        assert!(!rest.iter().any(|s| fills(s)), "{rest:?}");
     }
 
     #[test]
@@ -861,7 +1165,7 @@ mod tests {
         // diff is 0.01 at every strike (the stand-in's atm lifts every point).
         let mut st = State {
             active: Some([d("2026-12-18")].into()),
-            diff: Pair::new(Kind::Draft, Kind::Cvi),
+            diffs: Pair::new(Kind::Draft, Kind::Cvi).into_iter().collect(),
             ..State::default()
         };
         let b = built(&mut st);
@@ -882,7 +1186,7 @@ mod tests {
     fn a_curve_minus_chain_difference_sits_at_the_chain_x() {
         let mut st = State {
             active: Some([d("2026-11-20")].into()),
-            diff: Pair::new(Kind::Chain, Kind::Cvi),
+            diffs: Pair::new(Kind::Chain, Kind::Cvi).into_iter().collect(),
             ..State::default()
         };
         let b = built(&mut st);
@@ -902,15 +1206,20 @@ mod tests {
         let SlotKind::Points { mid, lo, hi, .. } = &diff.kind else {
             panic!()
         };
-        assert_eq!((mid, mid), (lo, hi), "a difference has no spread");
+        // `chain − cvi`: the quote's bid and ask less the curve, a bar a
+        // spread wide about the mid's difference.
+        for k in 0..mid.len() {
+            assert!((lo[k] - (mid[k] - 0.01)).abs() < 1e-12, "{k}: {lo:?}");
+            assert!((hi[k] - (mid[k] + 0.01)).abs() < 1e-12, "{k}: {hi:?}");
+        }
     }
 
     #[test]
     fn swapping_a_curve_chain_pair_negates_the_difference() {
-        let at = |pair| {
+        let at = |pair: Option<Pair>| {
             let mut st = State {
                 active: Some([d("2026-11-20")].into()),
-                diff: pair,
+                diffs: pair.into_iter().collect(),
                 ..State::default()
             };
             let b = built(&mut st);
@@ -939,7 +1248,7 @@ mod tests {
         let s = strip(&l, d(TODAY));
         let mut st = State {
             active: Some([d("2026-11-20")].into()),
-            diff: Pair::new(Kind::Cvi, Kind::Chain),
+            diffs: Pair::new(Kind::Cvi, Kind::Chain).into_iter().collect(),
             ..State::default()
         };
         st.reconcile(&s);
@@ -956,29 +1265,191 @@ mod tests {
         };
         let mid = &l.chain_at(d("2026-11-20")).unwrap().mid;
         let diff = b.model.slots.iter().find(|s| s.axis == Axis::BottomLeft);
-        let SlotKind::Points { mid: ys, .. } = &diff.unwrap().kind else {
+        let SlotKind::Points {
+            mid: ys, lo, hi, ..
+        } = &diff.unwrap().kind
+        else {
             panic!()
         };
         let k = 0;
         let expected = curve.points[k].vol - mid[k];
         assert!(expected.abs() > 1e-6, "the fixture separates them");
         assert_eq!(ys[k], expected);
+        let c = l.chain_at(d("2026-11-20")).unwrap();
+        assert_eq!(
+            (lo[k], hi[k]),
+            (
+                curve.points[k].vol - c.ask[k],
+                curve.points[k].vol - c.bid[k]
+            ),
+            "the curve less the ask, up to the curve less the bid"
+        );
+    }
+
+    /// A one-sided quote's missing side carries into the difference as a
+    /// NaN end, so the bar is the half the quote has.
+    #[test]
+    fn a_one_sided_quote_gives_its_difference_a_half_bar() {
+        let mut l = fixture();
+        l.chain[0].bid[1] = f64::NAN;
+        let s = strip(&l, d(TODAY));
+        let mut st = State {
+            active: Some([d("2026-11-20")].into()),
+            diffs: vec![Pair::new(Kind::Cvi, Kind::Chain).unwrap()],
+            ..State::default()
+        };
+        st.reconcile(&s);
+        let p = batch(&st, &l, &s);
+        let b = model(&p, &answer(&p), &l, &palette(), st.split, 1).unwrap();
+        let diff = b.model.slots.iter().find(|s| s.axis == Axis::BottomLeft);
+        let SlotKind::Points { mid, lo, hi, .. } = &diff.unwrap().kind else {
+            panic!()
+        };
+        assert!(mid[1].is_finite() && lo[1].is_finite(), "{mid:?} {lo:?}");
+        assert!(hi[1].is_nan(), "curve − bid has no bid: {hi:?}");
+    }
+
+    /// Two pairs at once: the jobs they share (dense curves, the chain's
+    /// map, an evaluation at the chain's strikes) are asked once per
+    /// expiry; each pair paints its own slot per expiry, in the order the
+    /// pairs were turned on.
+    #[test]
+    fn several_pairs_share_their_jobs_and_paint_in_turn_on_order() {
+        let pairs = vec![
+            Pair::new(Kind::Draft, Kind::Chain).unwrap(),
+            Pair::new(Kind::Cvi, Kind::Draft).unwrap(),
+            Pair::new(Kind::Cvi, Kind::Chain).unwrap(),
+        ];
+        let mut st = State {
+            active: Some([d("2026-11-20"), d("2026-12-18")].into()),
+            diffs: pairs.clone(),
+            ..State::default()
+        };
+        let p = plan(&mut st);
+        let count = |want: &dyn Fn(&Role) -> bool| p.roles.iter().filter(|r| want(r)).count();
+        assert_eq!(
+            count(&|r| matches!(r, Role::Curve { .. })),
+            4,
+            "{:?}",
+            p.roles
+        );
+        assert_eq!(
+            count(&|r| matches!(r, Role::Chain { .. })),
+            1,
+            "one chain expiry"
+        );
+        let diff_roles: Vec<&Role> = p
+            .roles
+            .iter()
+            .filter(|r| matches!(r, Role::DiffCurve { .. }))
+            .collect();
+        assert_eq!(
+            diff_roles,
+            [
+                &Role::DiffCurve {
+                    kind: Kind::Draft,
+                    expiry: d("2026-11-20"),
+                    at: Kind::Chain
+                },
+                &Role::DiffCurve {
+                    kind: Kind::Draft,
+                    expiry: d("2026-11-20"),
+                    at: Kind::Cvi
+                },
+                &Role::DiffCurve {
+                    kind: Kind::Cvi,
+                    expiry: d("2026-11-20"),
+                    at: Kind::Chain
+                },
+                &Role::DiffCurve {
+                    kind: Kind::Draft,
+                    expiry: d("2026-12-18"),
+                    at: Kind::Cvi
+                },
+            ],
+            "no chain at 2026-12-18, so only the curves' pair there"
+        );
+
+        let b = built(&mut st);
+        let lower: Vec<(String, Hsla, bool)> = b
+            .model
+            .slots
+            .iter()
+            .filter(|s| s.axis == Axis::BottomLeft)
+            .map(|s| {
+                (
+                    s.label.to_string(),
+                    s.color,
+                    matches!(s.kind, SlotKind::Points { .. }),
+                )
+            })
+            .collect();
+        let (pos1, pos2) = (1, 2);
+        assert_eq!(
+            lower,
+            [
+                (
+                    format!("{} 2026-11-20", pairs[0].label()),
+                    palette().companion(pos1),
+                    true
+                ),
+                (
+                    format!("{} 2026-11-20", pairs[1].label()),
+                    palette().color(pos1),
+                    false
+                ),
+                (
+                    format!("{} 2026-11-20", pairs[2].label()),
+                    palette().color(pos1),
+                    true
+                ),
+                (
+                    format!("{} 2026-12-18", pairs[1].label()),
+                    palette().color(pos2),
+                    false
+                ),
+            ]
+        );
+        assert!(b.notices.is_empty(), "{:?}", b.notices);
+    }
+
+    /// A pair and its reverse read the same evaluation at the chain's
+    /// strikes. The tile never holds both, but a state that did asks it
+    /// once and paints both pairs from it.
+    #[test]
+    fn a_pair_and_its_reverse_share_one_evaluation() {
+        let p = Pair::new(Kind::Cvi, Kind::Chain).unwrap();
+        let mut st = State {
+            active: Some([d("2026-11-20")].into()),
+            diffs: vec![p, p.reverse()],
+            ..State::default()
+        };
+        let plan = plan(&mut st);
+        let evaluations = plan
+            .roles
+            .iter()
+            .filter(|r| matches!(r, Role::DiffCurve { .. }))
+            .count();
+        assert_eq!(evaluations, 1, "{:?}", plan.roles);
+        let b = built(&mut st);
+        let lower = b.model.slots.iter().filter(|s| s.axis == Axis::BottomLeft);
+        assert_eq!(lower.count(), 2);
     }
 
     #[test]
     fn failed_jobs_become_deduplicated_notices() {
-        // 2027-06-18 is past the last term: both curves refuse there, and
-        // the cvi's evaluation at the chain strikes for the difference
-        // refuses with the very same words as its dense curve.
+        // The model refuses 2027-06-18: both curves fail there, and the
+        // cvi's evaluation at the chain strikes for the difference fails
+        // with the very same words as its dense curve.
         let mut st = State {
-            active: Some([d("2026-10-16"), d("2027-06-18")].into()),
-            diff: Pair::new(Kind::Cvi, Kind::Chain),
+            active: Some([d("2026-10-16"), d(REFUSED)].into()),
+            diffs: Pair::new(Kind::Cvi, Kind::Chain).into_iter().collect(),
             ..State::default()
         };
-        let b = built(&mut st);
+        let b = built_refusing(&mut st);
         assert_eq!(b.notices.len(), 2, "one per kind: {:?}", b.notices);
-        assert!(
-            b.notices[0].starts_with("no cvi curve at 2027-06-18: expiry 2027-06-18 is outside"),
+        assert_eq!(
+            b.notices[0], "no cvi curve at 2027-06-18: no params for 2027-06-18",
             "{:?}",
             b.notices
         );
@@ -991,17 +1462,17 @@ mod tests {
         );
     }
 
-    /// Past the last term both dense curves refuse, and the difference
+    /// Where the model refuses, both dense curves fail, and the difference
     /// reading the minuend's strikes fails because its source did: the two
     /// curves' notices say why, and the difference adds none.
     #[test]
     fn a_difference_whose_strikes_failed_adds_no_notice() {
         let mut st = State {
-            active: Some([d("2027-06-18")].into()),
-            diff: Pair::new(Kind::Draft, Kind::Cvi),
+            active: Some([d(REFUSED)].into()),
+            diffs: Pair::new(Kind::Draft, Kind::Cvi).into_iter().collect(),
             ..State::default()
         };
-        let b = built(&mut st);
+        let b = built_refusing(&mut st);
         assert_eq!(b.notices.len(), 2, "{:?}", b.notices);
         assert!(
             b.notices.iter().all(|n| !n.contains("job")),
@@ -1051,7 +1522,7 @@ mod tests {
         l.draft = None;
         let s = strip(&l, d(TODAY));
         let mut st = State {
-            diff: Pair::new(Kind::Draft, Kind::Cvi),
+            diffs: Pair::new(Kind::Draft, Kind::Cvi).into_iter().collect(),
             ..State::default()
         };
         st.reconcile(&s);
@@ -1061,7 +1532,17 @@ mod tests {
             b.notices,
             vec!["diff cvi draft \u{2212} cvi: cvi draft is not loaded".to_string()]
         );
-        st.diff = Pair::new(Kind::Cvi, Kind::Chain);
+        st.diffs = vec![
+            Pair::new(Kind::Cvi, Kind::Chain).unwrap(),
+            Pair::new(Kind::Chain, Kind::Draft).unwrap(),
+        ];
+        let p = batch(&st, &l, &s);
+        let b = model(&p, &answer(&p), &l, &palette(), st.split, 1).unwrap();
+        assert_eq!(
+            b.notices,
+            vec!["diff chain \u{2212} cvi draft: cvi draft is not loaded".to_string()],
+            "said for the pair that names it, not its neighbour"
+        );
         let p = batch(&st, &fixture(), &s);
         let b = model(&p, &answer(&p), &fixture(), &palette(), st.split, 1).unwrap();
         assert!(b.notices.is_empty(), "both loaded: {:?}", b.notices);
@@ -1122,7 +1603,7 @@ mod tests {
     #[test]
     fn a_split_change_is_a_new_version_with_the_same_slots() {
         let b = built(&mut State::default());
-        let m = with_split(&b.model, 0.5, 8);
+        let m = restyled(&b.model, 0.5, None, 8);
         assert_eq!(
             (m.version, m.split, m.slots.len()),
             (8, 0.5, b.model.slots.len())

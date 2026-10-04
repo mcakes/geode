@@ -1,8 +1,20 @@
-//! The tile's two choosers. The underlying picker is a field over the
+//! The tile's popups. The underlying picker is a field over the
 //! diagnostics catalog's underlyings, ranked as typed; the diff chooser is
-//! a fieldless list of `none` and every ordered pair of loaded kinds. Both
-//! rank through `geode_shell::choice::ChoiceList`. Opening either closes the
-//! other; any other tile verb closes the one open before it runs.
+//! a fieldless, ticked list of every ordered pair of loaded kinds. Both
+//! rank through `geode_shell::choice::ChoiceList`. The third, the `.`
+//! action menu, is the shared `geode_tile::menu` (`tile::menu`). One popup
+//! is up at a time: opening one closes the other, and any other tile verb
+//! closes the one open before it runs.
+//!
+//! The chooser ticks as the shell's dimension picker does: it opens with
+//! the shown pairs ticked, `space` (or a row click) ticks or unticks the
+//! highlighted pair, `ctrl+x` unticks every pair, and `enter` (or the
+//! Apply row) applies the ticks. An untouched, empty tick set applies the
+//! highlighted pair alone, so `d`, a step and `enter` still shows one pair;
+//! `ctrl+x` counts as a touch even on an empty set, so `ctrl+x enter`
+//! shows none. `escape` and a click outside
+//! discard the ticks. Ticking a pair unticks its reverse
+//! ([`toggle_pair`]).
 //!
 //! The picker holds the keys in `insert` mode: its field types every bare
 //! key, so it publishes no `tilelist` (the shared `j`/`k` steps would
@@ -13,27 +25,29 @@
 
 use geode_core::document::split_key;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
+use geode_shell::keymap::{Keystroke, Modifiers, parse_binding};
 use geode_shell::popover;
-use geode_shell::shell::control;
+use geode_shell::shell::{control, kbd, scale};
 use geode_shell::vimnav::NavCommand;
 use gpui::prelude::*;
 use gpui::{
     Anchor, App, Context, ElementId, Entity, Focusable as _, KeyDownEvent, SharedString, Window,
     div,
 };
-use gpui_component::ActiveTheme as _;
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::{ActiveTheme as _, h_flex};
 
 use super::VolsliceTile;
 use crate::core::docs::{CHAIN, CVI};
-use crate::core::model::{Pair, State};
+use crate::core::model::{Pair, State, toggle_pair};
 
 /// The picker's own key context, where `tab` and `shift-tab` are reserved
 /// from `Root`'s focus cycling (`crate::init`) so the field's listener
 /// completes with them instead.
 pub const PICKER_CONTEXT: &str = "volslice-picker";
 
-const NONE: &str = "none";
+/// The chooser's empty state: fewer than two kinds are loaded.
+const NO_PAIRS: &str = "two kinds must be loaded to compare";
 
 pub(crate) struct PickerState {
     pub(crate) input: Entity<InputState>,
@@ -45,13 +59,74 @@ pub(crate) struct PickerState {
 pub(crate) struct DiffState {
     pub(crate) list: ChoiceList,
     pub(crate) labels: Vec<SharedString>,
-    /// Indexed like the options: `None` for the `none` row.
-    pub(crate) pairs: Vec<Option<Pair>>,
+    /// Indexed like the options.
+    pub(crate) pairs: Vec<Pair>,
+    /// The ticked pairs in the order they were ticked: what `enter`
+    /// applies. A shown pair whose kind is not loaded has no row and
+    /// stays ticked.
+    pub(crate) ticked: Vec<Pair>,
+    /// Whether a tick changed since the chooser opened.
+    pub(crate) touched: bool,
+    /// The Apply row's keys (`space`, `ctrl+x`, `enter`), parsed once at
+    /// open: paint parses nothing.
+    pub(crate) keys: [Keystroke; 3],
+}
+
+impl DiffState {
+    /// The pairs `enter` applies: the ticks, or the highlighted pair alone
+    /// when the ticks are untouched and empty.
+    fn applied(&self) -> Vec<Pair> {
+        if self.touched || !self.ticked.is_empty() {
+            return self.ticked.clone();
+        }
+        self.list
+            .highlighted_option()
+            .map(|i| vec![self.pairs[i]])
+            .unwrap_or_default()
+    }
+
+    /// Untick every pair, listed or not (the shell picker's `ctrl+x`). A
+    /// touch even when nothing was ticked: the trader said "none here", so
+    /// `enter` must not fall back to the highlight.
+    fn clear(&mut self) {
+        self.ticked.clear();
+        self.touched = true;
+    }
+
+    /// Tick or untick the highlighted pair. `false` with no row.
+    fn tick(&mut self) -> bool {
+        let Some(i) = self.list.highlighted_option() else {
+            return false;
+        };
+        toggle_pair(&mut self.ticked, self.pairs[i]);
+        self.touched = true;
+        true
+    }
+}
+
+/// The open `.` action menu and its element names.
+pub(crate) struct ActionsState {
+    pub(crate) menu: geode_tile::menu::Menu<geode_shell::actions::ActionId>,
+    pub(crate) ids: geode_tile::menu::MenuIds,
 }
 
 pub(crate) enum Popup {
     Picker(PickerState),
     Diff(DiffState),
+    Actions(ActionsState),
+}
+
+impl Popup {
+    /// Which popup this is, as the key context's `popup` pair names it;
+    /// an outside-press closer compares it so it closes only the popup it
+    /// was painted for.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Popup::Picker(_) => "picker",
+            Popup::Diff(_) => "diff",
+            Popup::Actions(_) => "actions",
+        }
+    }
 }
 
 fn labels_of(options: &[String]) -> Vec<SharedString> {
@@ -139,21 +214,43 @@ impl VolsliceTile {
 
     pub(super) fn open_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_popup(window, cx);
-        let mut pairs = vec![None];
-        pairs.extend(State::pairs(&self.loaded).into_iter().map(Some));
-        let options: Vec<String> = pairs
-            .iter()
-            .map(|p| p.map_or_else(|| NONE.to_string(), |p| p.label()))
-            .collect();
-        let current = self.state.diff.map(|p| p.label());
+        let pairs = State::pairs(&self.loaded);
+        let options: Vec<String> = pairs.iter().map(|p| p.label()).collect();
+        let first = self.state.diffs.first().map(|p| p.label());
         let mut list = ChoiceList::new(options.clone(), DEFAULT_CAP);
-        list.place(current.as_deref());
+        list.place(first.as_deref());
+        let key = |k: &str| {
+            parse_binding(k, Modifiers::NONE)
+                .ok()
+                .and_then(|mut keys| keys.pop())
+                .expect("the chooser's keys parse")
+        };
         self.popup = Some(Popup::Diff(DiffState {
             list,
             labels: labels_of(&options),
             pairs,
+            ticked: self.state.diffs.clone(),
+            touched: false,
+            keys: [key("space"), key("ctrl+x"), key("enter")],
         }));
         cx.notify();
+    }
+
+    /// `ctrl+x` in the chooser: untick every pair.
+    pub(super) fn clear_popup_ticks(&mut self, cx: &mut Context<Self>) {
+        if let Some(Popup::Diff(d)) = &mut self.popup {
+            d.clear();
+            cx.notify();
+        }
+    }
+
+    /// `space` in the chooser: tick or untick the highlighted pair.
+    pub(super) fn tick_popup(&mut self, cx: &mut Context<Self>) {
+        if let Some(Popup::Diff(d)) = &mut self.popup
+            && d.tick()
+        {
+            cx.notify();
+        }
     }
 
     /// Close whichever popup is open. The picker's field is blurred first
@@ -171,11 +268,33 @@ impl VolsliceTile {
         cx.notify();
     }
 
-    /// Step the open list by one row, clamped.
+    /// A press outside the popup painted as `painted`: it closes that
+    /// popup only while it is still the one up. The `\u{22ef}` button's
+    /// capture-phase press and a chart right press run before or beside it
+    /// and may already have swapped the action menu in, which this press
+    /// must leave open.
+    pub(super) fn outside_press(
+        &mut self,
+        painted: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.popup.as_ref().map(Popup::kind) == Some(painted) {
+            self.close_popup(window, cx);
+        }
+    }
+
+    /// Step the open list by one row, clamped. The action menu steps over
+    /// its enabled rows.
     pub(super) fn step_popup(&mut self, delta: i64, cx: &mut Context<Self>) -> bool {
         let list = match &mut self.popup {
             Some(Popup::Picker(p)) => &mut p.list,
             Some(Popup::Diff(d)) => &mut d.list,
+            Some(Popup::Actions(a)) => {
+                a.menu.step(delta as isize);
+                cx.notify();
+                return true;
+            }
             None => return false,
         };
         list.nav_clamped(NavCommand::Move(delta));
@@ -184,8 +303,8 @@ impl VolsliceTile {
     }
 
     /// `enter`: the picker sets the highlighted underlying and asks again;
-    /// the chooser sets the highlighted pair and resubmits. A picker with
-    /// nothing ranked stays open.
+    /// the chooser applies its ticks ([`DiffState::applied`]) and
+    /// resubmits. A picker with nothing ranked stays open.
     pub(super) fn commit_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &mut self.popup {
             Some(Popup::Picker(p)) => {
@@ -198,29 +317,34 @@ impl VolsliceTile {
                 self.set_underlying(u, cx);
             }
             Some(Popup::Diff(d)) => {
-                let Some(i) = d.list.pick() else {
-                    return;
-                };
-                let pair = d.pairs[i];
+                let next = d.applied();
                 self.close_popup(window, cx);
-                if self.state.diff != pair {
-                    self.state.diff = pair;
+                if self.state.diffs != next {
+                    self.state.diffs = next;
                     self.resubmit(cx);
                 }
             }
-            None => {}
+            // The action menu picks through `menu_pick`.
+            Some(Popup::Actions(_)) | None => {}
         }
     }
 
-    /// A painted row pressed: highlight it, then commit as `enter` would.
+    /// A painted row pressed: highlight it, then, in the picker, commit as
+    /// `enter` would; in the chooser, tick as `space` would.
     pub(super) fn popup_pick(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let list = match &mut self.popup {
-            Some(Popup::Picker(p)) => &mut p.list,
-            Some(Popup::Diff(d)) => &mut d.list,
-            None => return,
-        };
-        if list.set_highlighted(row) {
-            self.commit_popup(window, cx);
+        match &mut self.popup {
+            Some(Popup::Picker(p)) => {
+                if p.list.set_highlighted(row) {
+                    self.commit_popup(window, cx);
+                }
+            }
+            Some(Popup::Diff(d)) => {
+                if d.list.set_highlighted(row) {
+                    d.tick();
+                    cx.notify();
+                }
+            }
+            Some(Popup::Actions(_)) | None => {}
         }
     }
 
@@ -229,7 +353,7 @@ impl VolsliceTile {
         let list = match &mut self.popup {
             Some(Popup::Picker(p)) => &mut p.list,
             Some(Popup::Diff(d)) => &mut d.list,
-            None => return,
+            Some(Popup::Actions(_)) | None => return,
         };
         if list.highlighted() != row && list.set_highlighted(row) {
             cx.notify();
@@ -271,13 +395,22 @@ impl VolsliceTile {
         }
     }
 
+    /// The chooser's ticked pairs, in tick order.
+    #[cfg(test)]
+    pub(crate) fn chooser_ticks(&self) -> Option<Vec<Pair>> {
+        match &self.popup {
+            Some(Popup::Diff(d)) => Some(d.ticked.clone()),
+            _ => None,
+        }
+    }
+
     /// The open popup's rows and highlighted row, as painted.
     #[cfg(test)]
     pub(crate) fn chooser_rows(&self) -> Option<(Vec<String>, usize)> {
         let (list, labels) = match &self.popup {
             Some(Popup::Picker(p)) => (&p.list, &p.labels),
             Some(Popup::Diff(d)) => (&d.list, &d.labels),
-            None => return None,
+            Some(Popup::Actions(_)) | None => return None,
         };
         Some((
             list.painted()
@@ -290,13 +423,24 @@ impl VolsliceTile {
 }
 
 /// Paint the open popup, hung from the header's right edge. Rows are the
-/// list's painted window, labelled from the prepared strings.
+/// list's painted window, labelled from the prepared strings; the action
+/// menu is the shared menu door's.
 pub(crate) fn render_popup(
     popup: &Popup,
     tile: &Entity<VolsliceTile>,
     tile_id: u64,
     cx: &App,
 ) -> gpui::Deferred {
+    if let Popup::Actions(a) = popup {
+        return geode_tile::menu::render_menu(
+            &a.menu,
+            &a.ids,
+            Anchor::TopRight,
+            tile,
+            |t: &mut VolsliceTile, window, cx| t.outside_press("actions", window, cx),
+            cx,
+        );
+    }
     let theme = cx.theme();
     let hover = control::paint(
         theme,
@@ -308,17 +452,18 @@ pub(crate) fn render_popup(
     let (list, labels, kind) = match popup {
         Popup::Picker(p) => (&p.list, &p.labels, "picker"),
         Popup::Diff(d) => (&d.list, &d.labels, "diff"),
+        Popup::Actions(_) => unreachable!("painted by the menu door above"),
     };
     let mut surface = popover::surface(cx)
         .id(ElementId::Name(SharedString::new_static(match popup {
             Popup::Picker(_) => "volslice-picker",
-            Popup::Diff(_) => "volslice-diff",
+            _ => "volslice-diff",
         })))
         .debug_selector(move || format!("volslice-{kind}-{tile_id}"))
         .occlude()
         .on_mouse_down_out({
             let tile = tile.clone();
-            move |_, window, cx| tile.update(cx, |t, cx| t.close_popup(window, cx))
+            move |_, window, cx| tile.update(cx, |t, cx| t.outside_press(kind, window, cx))
         });
     if let Popup::Picker(p) = popup {
         surface = surface.child(
@@ -340,13 +485,33 @@ pub(crate) fn render_popup(
                 .child(Input::new(&p.input).appearance(false).w_full()),
         );
     }
+    let diff = match popup {
+        Popup::Diff(d) => Some(d),
+        _ => None,
+    };
     if list.painted_len() == 0 {
-        surface = surface.child(popover::empty_row(theme, "no underlyings known"));
+        surface = surface.child(popover::empty_row(
+            theme,
+            if diff.is_some() {
+                NO_PAIRS
+            } else {
+                "no underlyings known"
+            },
+        ));
     }
     let lit = list.highlighted();
     for (i, r) in list.painted().iter().enumerate() {
         let label = labels[r.row].clone();
         let selector = label.clone();
+        // A chooser row leads with its tick slot, the same width ticked or
+        // not, so the labels share one edge (the shell menu's tick).
+        let tick = diff.map(|d| {
+            let on = d.ticked.contains(&d.pairs[r.row]);
+            div()
+                .w(scale::design(geode_tile::menu::TICK_SLOT))
+                .flex_shrink_0()
+                .child(if on { "\u{2713}" } else { "" })
+        });
         surface = surface.child(
             popover::row_shell(
                 theme,
@@ -359,11 +524,51 @@ pub(crate) fn render_popup(
                     move |window, cx| tile.update(cx, |t, cx| t.popup_pick(i, window, cx))
                 },
             )
+            .gap_1()
             .on_mouse_move({
                 let tile = tile.clone();
                 move |_, _, cx| tile.update(cx, |t, cx| t.popup_hover(i, cx))
             })
+            .children(tick)
             .child(label),
+        );
+    }
+    // The chooser's pointer form of `enter`, its keys named beside it.
+    if let Some(d) = diff.filter(|_| list.painted_len() > 0) {
+        surface = surface.child(
+            div()
+                .mt_0p5()
+                .pt_0p5()
+                .border_t_1()
+                .border_color(theme.border)
+                .child(
+                    popover::row_shell(
+                        theme,
+                        hover,
+                        ElementId::Name(SharedString::new_static("volslice-diff-apply")),
+                        false,
+                        move || format!("volslice-diff-apply-{tile_id}"),
+                        {
+                            let tile = tile.clone();
+                            move |window, cx| tile.update(cx, |t, cx| t.commit_popup(window, cx))
+                        },
+                    )
+                    .justify_between()
+                    .child("Apply")
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(kbd::chip(&d.keys[0]))
+                            .child("tick")
+                            .child(kbd::chip(&d.keys[1]))
+                            .child("clear")
+                            .child(kbd::chip(&d.keys[2]))
+                            .child("apply"),
+                    ),
+                ),
         );
     }
     popover::anchor_popup(surface, Anchor::TopRight)

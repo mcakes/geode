@@ -9,6 +9,15 @@ know Vim, write configuration files, or understand how Geode is built. The
 walkthrough uses generated demo data and the default keys; your desk may
 provide different views, grouping presets, and shortcuts.
 
+To read this guide beside your work, open the command palette with `ctrl+k`
+and choose **Guide: Split** (or choose **guide** in the tile picker). The
+**User guide** tile works offline. **Contents** (`c`) opens the chapter list;
+`[` and `]` move between sections, `j`/`k` scroll, and Page Up/Down move a
+page. `/` highlights matching text; `n` and `Shift-N` move between matching
+sections, and Escape clears the highlights. Press `.` or the header's **⋯**
+for the guide's actions and shortcuts. The controls and footer also show keys.
+The tile remembers its section when you reopen Geode.
+
 - [How to think about Geode](#how-to-think-about-geode)
 - [A first walkthrough](#a-first-walkthrough)
 - [Try the other tools](#try-the-other-tools)
@@ -314,10 +323,18 @@ using it on live market data.
 
 Add a **Volslice** tile and choose SPX in the underlying picker that opens.
 Press `u` to reopen that picker later. The viewer shows the
-published CVI curves and option-chain marks for the selected expiries. Use
-`j`/`k` to move through expiries, Enter to show one, and Space to toggle it.
+published CVI curves and option-chain marks for the selected expiries, each
+expiry in its own color and the chain in a lighter-weight shade of it. Every
+expiry has a CVI curve: the vol model interpolates between the CVI's terms
+and extrapolates past them. Use `j`/`k` to
+move through expiries and Space to show only that one; `shift+space` (or
+`ctrl+space`) adds it to the expiries shown or takes it out. With the mouse,
+click an expiry to show only it, and shift-click, ctrl-click or right-click
+to add it.
 The `1`, `2`, and `3` keys toggle published CVI, a linked CVI draft, and the
-chain; `d` chooses a difference to plot below them.
+chain. `d` chooses differences to plot below them: Space ticks each one you
+want, `ctrl+x` clears the ticks, Enter shows them. A difference against the chain carries the quote's
+bid-ask spread as a bar.
 
 To compare an edit before uploading it, focus the SPX CVI panel, press
 `mod+u`, and choose **emit · A**. In the vol-slice tile, press `mod+u` and

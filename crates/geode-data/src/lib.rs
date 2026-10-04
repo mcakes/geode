@@ -6,6 +6,7 @@
 pub mod adapter;
 pub mod documents;
 pub mod egress;
+pub mod files;
 pub mod handle;
 pub mod health;
 pub mod ingest;

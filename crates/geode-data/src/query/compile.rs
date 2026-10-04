@@ -191,31 +191,35 @@ fn sql_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-/// Project a derived dimension as a scalar `CASE` over its source column.
-/// This preserves row cardinality even if mapping keys repeat, and unmapped
-/// values become NULL. A lookup join could multiply rows or match rolled-up
-/// NULL keys.
+/// Project a derived dimension as one scalar map lookup per row over its
+/// source column. This preserves row cardinality, and unmapped values become
+/// NULL. A lookup join could multiply rows or match rolled-up NULL keys; a
+/// `CASE` with one arm per value took seconds at a million rows once a
+/// classification held thousands of values. The lookup is far cheaper but
+/// still grows with the classification's size (see `query_classification`
+/// in the performance guide).
 fn derived_expr(d: &geode_core::dimensions::DerivedDimension) -> String {
     format!("{} as \"{}\"", derived_case(d), d.name)
 }
 
-/// Unaliased derived-dimension `CASE`, shared with distinct-value queries
+/// Unaliased derived-dimension lookup, shared with distinct-value queries
 /// that name the output `value` instead of the dimension's name.
 pub(crate) fn derived_case(d: &geode_core::dimensions::DerivedDimension) -> String {
     if d.values.is_empty() {
         return "NULL::varchar".to_string();
     }
-    let arms: Vec<String> = d
-        .values
-        .iter()
-        .map(|(source, derived)| {
-            format!("when {} then {}", sql_literal(source), sql_literal(derived))
-        })
-        .collect();
+    let keys: Vec<String> = d.values.keys().map(|k| sql_literal(k)).collect();
+    let vals: Vec<String> = d.values.values().map(|v| sql_literal(v)).collect();
+    // One scalar map lookup per row. `map_extract_value` is NULL for a
+    // missing key (and a NULL source), so unmapped values stay NULL, and no
+    // row is multiplied. The keys are text; view validation refuses a
+    // non-text source, and the cast maps an ENUM-interned source to its
+    // label (a no-op on VARCHAR).
     format!(
-        "case \"{from}\" {arms} end",
-        from = d.from,
-        arms = arms.join(" ")
+        "map_extract_value(MAP([{}], [{}]), \"{from}\"::varchar)",
+        keys.join(", "),
+        vals.join(", "),
+        from = d.from
     )
 }
 
@@ -239,7 +243,7 @@ fn scan(relation: &str, derived: &[&geode_core::dimensions::DerivedDimension]) -
 
 /// Derived dimensions among `columns` whose source column exists at
 /// `grain`. A dimension whose source is not on the table would compile to
-/// a `case` over a column that is not there.
+/// a map lookup over a column that is not there.
 fn derived_for<'a>(
     ds: &DatasetSpec,
     columns: &[String],
@@ -2417,6 +2421,71 @@ kind = "measure"
 "#;
         let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
         ViewSpec::from_doc(&doc).0.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn an_unmapped_or_null_source_groups_under_null_and_no_row_is_lost_or_multiplied() {
+        // The map probe must answer NULL for a source no entry maps and for a
+        // NULL source, and must neither drop nor repeat a row: otherwise the
+        // desk totals stop adding up to the book totals they relabel. The
+        // quoted source and label pin the literal escaping inside MAP([...]).
+        let (_d, store) = fixture();
+        store
+            .writer()
+            .execute_batch(
+                "insert into risk_snapshot_underlying_live values
+                   ('O''Neil','L0','P2','C','I2','SPX', 100, 'b', 1, 1, now()),
+                   ('BK5','L0','P3','C','I3','SPX', 1000, 'b', 1, 1, now()),
+                   (NULL,'L0','P4','C','I4','SPX', 10000, 'b', 1, 1, now());",
+            )
+            .unwrap();
+        let dims = {
+            let doc = merge_docs(
+                "dimensions",
+                &[LayerDoc::builtin(
+                    "dimensions",
+                    "[desk]\nfrom = \"book\"\n[desk.values]\n\
+                     EU = [\"BK0\"]\n\"Desk 'Q'\" = [\"O'Neil\"]\n",
+                )
+                .unwrap()],
+            );
+            DerivedDimensions::from_doc(&doc).0
+        };
+        let q = compile_view(
+            store.writer(),
+            &desk_view(),
+            &schema(),
+            &Scope::default(),
+            &dims,
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let mut rows = run(&store, &q, &["row_depth", "desk", "delta01"]);
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                // The grand total: every row once, BK0's 10 + 20 included.
+                vec![
+                    "Some(0.0)".to_string(),
+                    "None".into(),
+                    "Some(11130.0)".into()
+                ],
+                vec!["Some(1.0)".into(), "None".into(), "Some(11000.0)".into()],
+                vec![
+                    "Some(1.0)".into(),
+                    "Some(\"Desk 'Q'\")".into(),
+                    "Some(100.0)".into()
+                ],
+                vec![
+                    "Some(1.0)".into(),
+                    "Some(\"EU\")".into(),
+                    "Some(30.0)".into()
+                ],
+            ],
+            "BK5 (unmapped) and the NULL book share the NULL group: {rows:?}"
+        );
     }
 
     #[test]

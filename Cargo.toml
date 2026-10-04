@@ -11,7 +11,9 @@ members = [
     "crates/geode-chart",
     "crates/geode-timeseries",
     "crates/geode-volslice",
+    "crates/geode-classifications",
     "crates/geode-diagnostics",
+    "crates/geode-guide",
     "crates/geode-documents",
     "crates/geode-pricing",
     "crates/geode-pricer",
@@ -38,6 +40,7 @@ geode-pricing = { path = "crates/geode-pricing" }
 geode-chart = { path = "crates/geode-chart" }
 geode-timeseries = { path = "crates/geode-timeseries" }
 geode-volslice = { path = "crates/geode-volslice" }
+geode-classifications = { path = "crates/geode-classifications" }
 geode-pricer = { path = "crates/geode-pricer" }
 
 # Logging versions match gpui's resolved `tracing` family, avoiding a second

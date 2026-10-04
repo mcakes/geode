@@ -83,6 +83,29 @@ non-array mapped value warns; non-string elements inside arrays are skipped.
 The reader does not validate `from` against a dataset. `base_column` performs
 one lookup, so chained derived dimensions are not recursively resolved.
 
+A classification created at runtime is held to stricter rules at creation
+than the reader applies to a hand-written file
+([`classification::validate`](../../crates/geode-core/src/classification/validate.rs)).
+Its name must be an identifier (`[A-Za-z_][A-Za-z0-9_]*`) so a scope
+expression can name it bare. It may not be a scope-expression keyword
+(`and`, `or`, `not`, `in`, `like`, `true`, `false`), `config_version`, a
+dataset column, or an existing derived dimension, each compared without
+regard to case. The expression parser matches keywords ignoring case, so
+`NOT` still negates, and DuckDB resolves identifiers ignoring case, so `Book`
+beside the column `book` would be ambiguous in the compiled SQL. Its source
+must be a column that is groupable in some dataset and `utf8` wherever it is
+declared, and never itself a derived dimension: classifications do not chain,
+since `base_column` resolves only one level. Rename and delete do not rewrite
+the groupings, views, saved scopes and named expressions that name a
+classification; `validate::references` counts them so the confirmation can
+say how many will break.
+
+The Classifications tile is `dimensions`' runtime writer, and it writes each
+entry whole: the classification's `from` and every label's source list, as
+`classification::to_toml` renders it (labels and sources sorted), through
+the config door. A hand-written entry's comments and key order inside that
+object do not survive an edit from the tile; the rest of the file does.
+
 ## Views and presentation
 
 [`ViewSpec`](../../crates/geode-core/src/view.rs) reads dataset, joins,
@@ -94,7 +117,8 @@ primary dataset, a `dimension` column's reachability through the grouping, a
 join, or a declared grain carrying it alongside the whole grouping (the
 unanimity rule; `ViewSpec::ungrouped_dimensions` lists those columns for both
 validation and the compiler), and grouping references. Derived dimensions
-must resolve to a source column in the primary dataset. It does not validate
+must resolve to a `utf8` source column in the primary dataset; a non-text
+source is refused (see [data path](data-path.md)). It does not validate
 derived SQL or sort keys. The compiler emits them into SQL; DuckDB binding
 and execution can reject them.
 
@@ -261,6 +285,46 @@ foreground. This is a target, not a guarantee for arbitrary themes: if the
 available lightness path never reaches that contrast, its endpoint is
 returned. Untinted semantic tokens retain their exact theme color. Sign
 tinting applies contrast adjustment to all three variants, including zero.
+
+[`ValueColors::from_doc`](../../crates/geode-core/src/colour/values.rs) reads
+`value_colors.toml`: one table per dimension, each mapping a value's text to a
+`colors.toml` name or an inline `{ hue }` / `{ token }` table. Values match
+exactly, so `spx` is not `SPX`. An inline table is read by
+`Definition::from_table`, the same reader `colors.toml` uses, so the two
+cannot drift; `tint_sign` is refused there because a value has no sign, and
+each refusal is an error at the entry's path (plus `.hue` or `.token` for a
+field) that drops the entry. An inline entry is stored under the internal key
+`inline {dimension}.{value}`, which `check_object_name` refuses, so no color
+name can ever equal it. `NamedColours::get` resolves inline keys, so every
+paint path does, while `NamedColours::names()` and every listing omit them.
+Five shapes are refused with an error that drops the entry: a dimension that
+is not a table, an entry that is neither a string nor a table, `sign` (a
+column color mode, not a color), a name starting with `#` (an absolute
+color), and an empty value. An
+entry of `none` reads as unmapped without a diagnostic; it is how a higher
+layer clears a lower layer's color. A dimension whose entries are all cleared
+or refused is absent. The reader does not consult the schema or the color
+definitions.
+
+[`check_value_colors`](../../crates/geode-core/src/colour/values.rs) then
+prunes what cannot paint. A dimension is text, per `dimension_kind`, when some
+dataset declares it as a utf8 `dimension` or `key` column, or when it is a
+derived dimension (its values are labels); `text_dimensions` lists exactly
+those names. Three warnings each remove their entry: a dimension no dataset or
+derived dimension declares, a declared dimension that is never text (a numeric
+`strike` is not colored by its printed number), and a value naming a color
+`colors.toml` does not define, which paints without a color. Inline entries
+take the two dimension checks and skip the unknown-name check, since they
+name no `colors.toml` color; a pruned dimension drops its inline definitions
+with it. A value is inline only when its color key is its own
+`inline {dimension}.{value}`: a string entry spelled like another value's
+inline key borrows nothing, takes the unknown-name warning, and is pruned.
+What survives is
+exactly what a tile may look up, so paint performs no second validity check.
+`NamedColours::from_config` returns the color definitions together with the
+checked mapping (`NamedColours::values`), so one `Arc<NamedColours>` never
+pairs a mapping from one reload with definitions from another; its
+diagnostics are the colors reader's, the value reader's, then the check's.
 
 [`format_number`](../../crates/geode-core/src/format.rs) scales, rounds, then
 applies grouping and negative notation. Its returned sign follows the

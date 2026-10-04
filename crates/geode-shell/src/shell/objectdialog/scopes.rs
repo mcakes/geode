@@ -14,7 +14,7 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::named::{NamedExpr, NamedExpressions};
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
-use geode_core::scopes::{saved_scopes_from_doc, scope_to_table};
+use geode_core::scopes::saved_scopes_from_doc;
 
 use super::ListItem;
 use super::{Destination, Draft, Field, FieldKind};
@@ -376,26 +376,8 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
 /// painted summary says, and goes through that same door every other
 /// field edit already does.
 pub fn overwrite_with(draft: &mut Draft, scope: &Scope, config: &Config) {
-    draft.source = scope_table_as_toml(scope);
+    draft.source = super::apply::scope_as_toml(scope);
     draft.fields = fields_from_table(config, Some(&draft.source));
-}
-
-/// `scope_to_table` (geode-core) as the `toml::Table` `Draft::source`
-/// holds: an object's own inner table, not the object wrapped under its
-/// own name.
-///
-/// Round-tripped through [`super::object_text`] — the one spelling of
-/// what a flush actually produces — rather than hand-converted, for the
-/// same reason `groupings::rendered_doc_table` goes through a real
-/// parse instead of trusting a bespoke conversion: the one honest check
-/// of what `saved_scopes_from_doc` will read back is the text a write
-/// would really contain.
-fn scope_table_as_toml(scope: &Scope) -> toml::Table {
-    let text = super::object_text("scope", toml_edit::Item::Table(scope_to_table(scope)));
-    text.parse::<toml::Table>()
-        .ok()
-        .and_then(|parsed| parsed.get("scope").and_then(|v| v.as_table()).cloned())
-        .unwrap_or_default()
 }
 
 /// Normalize text and parse expressions before committing typed entry. Invalid

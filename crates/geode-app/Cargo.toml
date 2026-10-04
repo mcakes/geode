@@ -37,6 +37,7 @@ geode-marketdata = { path = "../geode-marketdata" }
 geode-timeseries.workspace = true
 # The vol slice viewer's factory shares the bridge's DataHandle.
 geode-volslice.workspace = true
+geode-classifications.workspace = true
 # The bridge routes pricing and local-sheet outcomes to this factory.
 geode-pricer.workspace = true
 # Row menu actions registered at the composition root: Open in Nemo.
@@ -44,6 +45,7 @@ geode-nemo.workspace = true
 # Row menu actions registered at the composition root: Move LHU.
 geode-positions.workspace = true
 geode-diagnostics = { path = "../geode-diagnostics" }
+geode-guide = { path = "../geode-guide" }
 geode-demo-data = { path = "../geode-demo-data" }
 # Register concrete document parsers at the application boundary. Demo producers
 # also use their writers to serialize documents for ChannelAdapter ingestion.

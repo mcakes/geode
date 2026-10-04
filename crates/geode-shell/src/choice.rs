@@ -95,6 +95,27 @@ impl ChoiceList {
         true
     }
 
+    /// Put declared option `declared` first in the ranked order and light it,
+    /// whether or not the query matched it: a row the caller pins above what
+    /// the query ranks (the value-color list's typed `Hue {n}`). The next
+    /// rerank drops the pin; the caller pins again after a query change.
+    pub fn pin_top(&mut self, declared: usize) {
+        if declared >= self.options.len() {
+            return;
+        }
+        let entry = match self.ranked.iter().position(|r| r.row == declared) {
+            Some(at) => self.ranked.remove(at),
+            None => Ranked {
+                row: declared,
+                indices: Vec::new(),
+            },
+        };
+        self.ranked.insert(0, entry);
+        self.highlighted = 0;
+        self.window = 0;
+        self.follow();
+    }
+
     /// The highlighted option's index in the DECLARED list — what a pick
     /// means. `None` only with nothing ranked.
     pub fn highlighted_option(&self) -> Option<usize> {
@@ -625,5 +646,20 @@ mod tests {
             key: "enter".into(),
         };
         assert!(route(&ctrl_enter).is_none(), "only a BARE enter picks");
+    }
+
+    #[test]
+    fn a_pinned_row_ranks_first_and_lights_whatever_the_query_ranks() {
+        let mut list = ChoiceList::new(opts(&["Hue 210", "blue", "b210"]), 12);
+        list.set_query("210");
+        list.pin_top(0);
+        assert_eq!(list.ranked()[0].row, 0);
+        assert_eq!(list.highlighted_text(), Some("Hue 210"));
+        assert_eq!(list.ranked().len(), 2, "the rest still filter beneath it");
+        // A pinned row the query does not match is put in anyway.
+        list.set_query("blue");
+        list.pin_top(0);
+        assert_eq!(list.ranked()[0].row, 0);
+        assert_eq!(list.highlighted_text(), Some("Hue 210"));
     }
 }

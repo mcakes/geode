@@ -144,10 +144,17 @@ workspace switches `mod+1` to `mod+9` context-free, beside the palette
 toggle and the other application-wide chords, because a switch is
 navigation that must reach from a page as well as from the tile surface.
 `mod+u` (`tile::link_group`, the
-[link group chooser](input-and-dialogs.md#grouping-scope-tile-log-and-column-choices))
-sits in the same context-free block beside `mod+g` and `mod+o`. It acts on
+[link group chooser](input-and-dialogs.md#tile-log-and-column-choices))
+sits in the same context-free block beside `mod+g` (`frame::grouping`) and
+`mod+o` (`frame::scope`, "Scope…", the
+[Scope dialog](input-and-dialogs.md#scope-dialog)). It acts on
 the focused tile, so over a page the chord still dispatches and the action
 is refused with `close the page first (esc)`.
+`frame::scope_saved` ("Saved scopes and expressions…") opens that dialog on
+its [Saved](input-and-dialogs.md#saved) screen and has no default binding:
+`o` inside the dialog and the toolbar's load glyph already reach it, and
+the palette lists it for a user who wants a chord.
+
 Predicates support flags, comparisons, boolean operators, and parentheses:
 
 ```text
@@ -338,6 +345,15 @@ which beats the workspace's duplicate inside the tile. Under `mode ==
 insert` (the underlying picker's field) it binds `enter`, `escape` and
 `up`/`down` (`volslice::list_down`/`list_up`); under `mode == menu` (the
 difference chooser) `enter` and `escape`, its steps being the shared ones.
+The classifications fragment binds its label verbs under `mode == normal`
+(`enter`/`c` edit, `x` clear, `y y` copy, `p` paste, `u` undo, `ctrl+r`
+redo, `shift+r` refresh, `.` the `⋯` menu, `g c` the switcher, `v`/`shift+v`
+a row selection); under `mode == visual` the verbs that act on a selection
+and `escape`; under `mode == insert` (the label editor and the New/Rename
+field) `enter`, `escape` and `up`/`down` over the typeahead; under `mode ==
+menu` `enter`, `escape` and `.`. `y` and `g` alone are unbound, so `y y` and
+`g c` stay reachable. New, rename, delete and revert have no default chord:
+the palette and the `⋯` menu reach them.
 The diagnostics page's fragment binds only its verbs (`[`/`]`, `z o`/`z c`,
 `enter` and `space`, `tab`/`shift+tab` for a section's views, `/`, and a key
 per toolbar control) under `mode == normal` and `escape` under `mode ==

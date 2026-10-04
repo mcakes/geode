@@ -177,7 +177,7 @@ fn a_kind_already_in_the_stack_is_refused(cx: &mut gpui::TestAppContext) {
 /// Revealed, the text and caret come back and the field has focus.
 #[gpui::test]
 fn a_covered_expression_dialog_gets_its_typed_text_back(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = dialog_test_shell(cx, "frame::scope_expression");
+    let (shell, mut vcx) = dialog_test_shell(cx, "frame::add_expression");
     vcx.simulate_input("book = ");
     let before = shell.read_with(&vcx, |s, _| {
         format!("{:?}", s.scope_expr_dialog.as_ref().unwrap().completion)
@@ -245,7 +245,7 @@ fn accept_in_a_pushed_dialog_does_not_touch_a_covered_object_draft(cx: &mut gpui
         cx,
         super::objectdialog::services_with_a_saved_scope(),
         dir.path(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     super::objectdialog::open_expression_field(&shell, &mut vcx);
     vcx.simulate_input("boo");
@@ -255,7 +255,7 @@ fn accept_in_a_pushed_dialog_does_not_touch_a_covered_object_draft(cx: &mut gpui
         "boo"
     );
 
-    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
     assert_eq!(
         kinds(&shell, &mut vcx),
         vec![DialogKind::Object, DialogKind::ScopeExpr]
@@ -326,6 +326,10 @@ fn opens_dialog_matches_what_dispatch_pushes(cx: &mut gpui::TestAppContext) {
         // pushes over a dialog with a tile focused is asserted by
         // `the_chooser_is_refused_over_a_page_and_listed_as_a_dialog_opener`.
         "tile::link_group",
+        // The lane's scope is empty here: nothing to save, a status notice
+        // and no prompt. That it opens over a nonempty scope is asserted by
+        // `scope_save_current_opens_the_prompt_alone_and_escape_closes`.
+        "scope::save_current",
     ];
     let (window, mut vcx) = open_shell(cx, super::picker::services_with_pickable());
     let shell = shell_of(&window, &mut vcx);
@@ -391,7 +395,7 @@ fn a_dialog_chord_pushes_over_the_object_edit_stage(cx: &mut gpui::TestAppContex
     let (shell, mut vcx) = dialog_test_shell_with(
         cx,
         super::objectdialog::services_with_a_saved_scope(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     vcx.simulate_keystrokes("enter"); // open `mine`'s edit stage
     assert_eq!(
@@ -646,7 +650,7 @@ fn a_click_on_a_dialog_row_under_the_palette_does_not_open_it(cx: &mut gpui::Tes
     let (shell, mut vcx) = dialog_test_shell_with(
         cx,
         super::objectdialog::services_with_a_saved_scope(),
-        "config::scopes",
+        OBJECT_SCOPES,
     );
     let row = vcx
         .debug_bounds("objectdialog-row-mine")
@@ -813,7 +817,7 @@ fn a_reload_refreshes_a_covered_expression_dialogs_suggestions(cx: &mut gpui::Te
     let (shell, mut vcx) = dialog_test_shell_with(
         cx,
         services_with_one_dataset_column(),
-        "frame::scope_expression",
+        "frame::add_expression",
     );
     vcx.simulate_input("zzcol = 'x'");
     vcx.run_until_parked();

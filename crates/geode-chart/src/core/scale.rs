@@ -110,6 +110,27 @@ impl LinearScale {
     }
 }
 
+/// `domain` widened outward to the nearest multiples of the 1-2-5 step
+/// that gives about `count_hint` ticks over it: a superset of `domain`
+/// whose ends are tick values. A domain with no span, or one too far from
+/// zero for its step, comes back as it was.
+pub fn nice_outward((lo, hi): (f64, f64), count_hint: usize) -> (f64, f64) {
+    let step = LinearScale::nice_step(hi - lo, count_hint);
+    if !(step > 0.0 && step.is_finite()) {
+        return (lo, hi);
+    }
+    // Adding zero turns a `-0.0` end into `0.0`.
+    let (a, b) = (
+        (lo / step).floor() * step + 0.0,
+        (hi / step).ceil() * step + 0.0,
+    );
+    if a.is_finite() && b.is_finite() && a <= lo && b >= hi && a < b {
+        (a, b)
+    } else {
+        (lo, hi)
+    }
+}
+
 /// A tick label with the decimals its step needs and no more.
 pub fn fmt_tick(value: f64, step: f64) -> String {
     let decimals = if step >= 1.0 || step <= 0.0 || !step.is_finite() {
@@ -179,6 +200,25 @@ pub fn axis_domain(values: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nice_outward_widens_to_tick_values_and_never_narrows() {
+        let (a, b) = nice_outward((-0.0123, 0.0234), 5);
+        assert!(
+            (a - -0.02).abs() < 1e-12 && (b - 0.03).abs() < 1e-12,
+            "{a} {b}"
+        );
+        assert_eq!(
+            nice_outward((-0.02, 0.02), 4),
+            (-0.02, 0.02),
+            "already ticks"
+        );
+        let (a, b) = nice_outward((0.101, 0.199), 5);
+        assert!(a <= 0.101 && b >= 0.199, "a superset: {a} {b}");
+        assert_eq!(nice_outward((1.0, 1.0), 5), (1.0, 1.0), "no span");
+        assert_eq!(nice_outward((-1e-9, 0.0), 5).1, 0.0, "no signed zero");
+        assert!(nice_outward((-1e-9, 0.0), 5).1.is_sign_positive());
+    }
 
     #[test]
     fn maps_the_domain_onto_the_range_bottom_up() {

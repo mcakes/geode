@@ -157,6 +157,9 @@ pub enum DataEvent {
     /// Upload result, addressed by the requesting tile's key. Every
     /// admitted upload request answers exactly one.
     Upload(UploadOutcome),
+    /// A tile's text file read or write, addressed by the requesting
+    /// tile's key.
+    TextFile(geode_core::textfile::TextFileOutcome),
     /// A position-system command's answer, addressed by the requester's tag.
     /// Every command `DataHandle::move_lhu` admits normally answers exactly
     /// one, including a refusal decided before it reached the position
@@ -911,6 +914,9 @@ pub struct DataService {
     /// One worker per upload target. They only answer the sink, so they
     /// stop first and depend on nothing below.
     egress: EgressWorkers,
+    /// The text file worker. Like the upload workers it only answers the
+    /// sink, so it stops early and depends on nothing below.
+    files: crate::files::FileWorker,
     /// The position-command worker. Like the upload workers it only answers
     /// the sink, so it stops early and depends on nothing below.
     positions: PositionWorker,
@@ -1841,6 +1847,7 @@ impl DataService {
             validate_views(&config.views, &config.schema, &config.dimensions);
         let egress =
             EgressWorkers::spawn(&config.egress, &config.adapters, Arc::clone(&stored_sink));
+        let files = crate::files::FileWorker::spawn(Arc::clone(&stored_sink));
         let positions = PositionWorker::spawn(
             &config.positions,
             &config.adapters,
@@ -1858,6 +1865,7 @@ impl DataService {
             refused_views,
             drifted,
             egress,
+            files,
             positions,
             subscriptions: std::sync::Mutex::new(subscriptions),
             fetchers: std::sync::Mutex::new(fetchers),
@@ -2075,6 +2083,11 @@ impl DataService {
     /// including a refusal decided here, arrives as one `DataEvent::Upload`.
     pub fn upload(&self, params: UploadParams) {
         self.egress.upload(params, &self.config.documents);
+    }
+
+    /// Queue a text file read or write; answered by `DataEvent::TextFile`.
+    pub fn text_file(&self, params: geode_core::textfile::TextFileParams) {
+        self.files.submit(params);
     }
 
     /// Queue a position command on the position worker. Every outcome,
@@ -2585,7 +2598,9 @@ impl DataService {
     }
 
     pub fn shutdown(&self) {
-        // Upload workers first: they answer only the sink, and an upload
+        // The file worker first: it answers only the sink.
+        self.files.shutdown();
+        // Upload workers next: they answer only the sink, and an upload
         // echoing onto a bus should not arrive after its subscriptions stop.
         self.egress.shutdown();
         // The position worker for the same reason: it answers only the sink.
@@ -4044,20 +4059,31 @@ mod tests {
         };
         assert!(reason.contains(" messages dropped since "), "{reason}");
         assert!(detail.starts_with("cvi:queue: "), "{detail}");
+        let health = Arc::clone(&service.health);
+        let queue = crate::health::condition_key("cvi", crate::health::QUEUE);
         service.shutdown();
         // Stopping the subscription ends the receiver: its open episode is
-        // cleared, not left on the chip until restart. Nothing else could
-        // turn the source Ok inside the 60 s quiet interval.
-        let cleared = until_within(&rx, Duration::from_secs(5), |e| match e {
+        // cleared, not left on the chip until restart. The flood can also
+        // leave the source's backlog lane Degraded (under load the runner
+        // falls behind), so the source need not turn Ok: what clears is
+        // the queue lane, and the chip stops showing the queue's episode.
+        let moved_on = until_within(&rx, Duration::from_secs(5), |e| match e {
             DataEvent::Health {
                 source,
-                worst: Health::Ok,
-                ..
-            } if source == "cvi" => Some(()),
+                worst,
+                detail,
+            } if source == "cvi" && (worst == Health::Ok || !detail.starts_with("cvi:queue: ")) => {
+                Some(())
+            }
             _ => None,
         });
         assert!(
-            cleared.is_some(),
+            moved_on.is_some(),
+            "the chip leaves the queue's episode when the subscription ends"
+        );
+        assert_eq!(
+            health.load_lane("cvi", &queue),
+            Some(Health::Ok),
             "the queue Degraded clears when the subscription ends"
         );
     }

@@ -4,7 +4,6 @@
 //! input routing, persistence, and occupant lifecycle live in sibling modules.
 
 mod add_tile;
-pub mod addfilter;
 pub mod aggregates;
 pub mod asof_rows;
 pub mod asof_view;
@@ -38,12 +37,14 @@ pub mod row_menu;
 mod rows;
 pub mod scale;
 pub mod scope_expr_view;
+mod scopedialog;
 mod session_io;
 pub mod settings_view;
 pub mod sidebar;
 pub mod stacklist;
 pub mod status;
 pub mod toolbar;
+mod value_color;
 pub mod whichkey;
 
 pub use keys::convert_keystroke;
@@ -254,6 +255,19 @@ pub const EXPR_KEY: QueryKey = QueryKey(u64::MAX - 4);
 /// open choice dialog, which drops a reply whose tag is not its own.
 pub const ACTION_KEY: QueryKey = QueryKey(u64::MAX - 5);
 
+/// Whether `key` is one of the shell's own reserved query keys. A distinct
+/// outcome under any other key belongs to the tile with that id.
+pub fn is_shell_key(key: QueryKey) -> bool {
+    [
+        PICKER_KEY,
+        DIAGNOSTICS_KEY,
+        SCOPES_KEY,
+        EXPR_KEY,
+        ACTION_KEY,
+    ]
+    .contains(&key)
+}
+
 /// The bridge's live reference reads (`Request::Reference` at `AsOf::Live`)
 /// submit under this key — one lower than `ACTION_KEY`, same reservation
 /// reasoning. Their answers never reach the shell's delivery routes: the
@@ -275,6 +289,21 @@ pub struct Pickable {
     pub column: String,
     pub role: &'static str,
     pub datasets: Vec<String>,
+}
+
+/// The names `Color…` may be offered for: `geode_core::colour::text_dimensions`
+/// over the current datasets and derived dimensions. Cached on the shell
+/// and rebuilt with [`pickable_columns`].
+pub fn text_dimension_names(config: &Config) -> std::collections::BTreeSet<String> {
+    let (schema, _) = config
+        .doc("datasets")
+        .map(SchemaSpec::from_doc)
+        .unwrap_or_default();
+    let (dims, _) = config
+        .doc("dimensions")
+        .map(DerivedDimensions::from_doc)
+        .unwrap_or_default();
+    geode_core::colour::text_dimensions(&schema, &dims)
 }
 
 /// Collect categorical dataset columns in schema order, merging repeated
@@ -695,15 +724,10 @@ pub struct ShellView {
     /// `notice`), and dropped by `render`'s generic staleness check when
     /// its tile stops being the focused member.
     stack_list: Option<stacklist::StackList>,
-    /// The scope bar's open "Add a filter" menu, or `None` when closed.
-    /// Owns the keyboard while open (`handle_key_down`'s own branch),
-    /// closed by any dispatch (which is also how a row commits), by the
-    /// palette or a dialog opening, and by a click outside it.
-    add_filter_menu: Option<addfilter::AddFilterMenu>,
     /// The row menu (`tile::context_menu`), or `None` when closed. Owns
-    /// the keyboard while open, as `add_filter_menu` does, and closes the
-    /// same ways: any dispatch, the palette or a dialog opening, a press
-    /// outside it.
+    /// the keyboard while open (`handle_key_down`'s own branch) and
+    /// closes on any dispatch, the palette or a dialog opening, or a
+    /// press outside it.
     row_menu: Option<row_menu::RowMenu>,
     /// Reusable storage for the per-frame tile diff. Each reconciliation
     /// clears and refills it, retaining capacity between renders.
@@ -760,6 +784,8 @@ pub struct ShellView {
     /// Columns added later remain reachable through the two-stage `frame::pick`
     /// flow even though they have no new per-column palette action.
     pickable: Vec<Pickable>,
+    /// Cached [`text_dimension_names`]; rebuilt when `pickable` is.
+    pub(crate) text_dims: std::collections::BTreeSet<String>,
     /// Cached [`expr_vocab`] for the current datasets and dimensions: the
     /// scope expression suggestions' columns. Reload rebuilds it beside
     /// `pickable` and re-ranks an open expression field against it.
@@ -787,14 +813,20 @@ pub struct ShellView {
     /// State for the open scope expression dialog. Created by
     /// [`scope_expr_view::open`] and cleared when its kind pops.
     scope_expr_dialog: Option<scope_expr_view::ScopeExprState>,
-    /// State for the open grouping or tile-kind picker. Created by
-    /// `choicedialog::open_grouping` or `open_tile_kinds`, and cleared when its
-    /// kind pops.
+    /// The Scope dialog's state while it is in the stack.
+    pub(crate) scope_dialog: Option<scopedialog::view::ScopeDialogState>,
+    /// State for the open choice dialog: the scope, tile-kind, column,
+    /// log-level, action-value or link-group picker. Created by one of
+    /// `choicedialog`'s `open_*` doors, and cleared when its kind pops.
     choice_dialog: Option<choicedialog::ChoiceDialogState>,
     /// Scroll state for the choice dialog's row list
     /// (`dialog::choice_rows`'s viewport) — the `settings_scroll` split,
     /// one dialog over.
     choice_dialog_scroll: ScrollHandle,
+    /// The value-color hue stage's slider, while that stage is open:
+    /// created when `Custom…` opens it (never in render), dropped with the
+    /// stage and with the choice dialog.
+    hue_slider: Option<choicedialog::HueSlider>,
     /// Scroll state for the scope expression suggestions' row list. Refresh
     /// scrolls it to the top; a highlight move follows the lit row.
     expr_scroll: ScrollHandle,
@@ -1016,6 +1048,14 @@ impl ShellView {
                         // The field IS the value; typing clears the last
                         // failed commit's message.
                         scope_expr_view::on_query_changed(state);
+                    }
+                }
+                Some(dialog::DialogKind::Scope) => {
+                    if let Some(state) = view.scope_dialog.as_mut() {
+                        // The text step, the definition step and a name
+                        // prompt type their draft; the Saved screen filters
+                        // while in filter mode; Current ignores it.
+                        scopedialog::view::on_query_changed(state, &query);
                     }
                 }
                 Some(dialog::DialogKind::Plain) | None => {}
@@ -1320,6 +1360,13 @@ impl ShellView {
                 if let Some(chain) = record.ad_hoc {
                     s.restore_ad_hoc(chain, record.ad_hoc_active);
                 }
+                if !s.restore_loaded_from(record.loaded_from.clone()) {
+                    tracing::warn!(
+                        target: "geode::session",
+                        "restored scope provenance dropped: no saved scope '{}'",
+                        record.loaded_from.as_deref().unwrap_or_default()
+                    );
+                }
                 s.set_as_of(record.as_of);
                 s.clear_history();
             });
@@ -1358,6 +1405,15 @@ impl ShellView {
                 // `clear_history`, like every other restored value.
                 if let Some(chain) = record.ad_hoc {
                     lane.restore_ad_hoc(chain, record.ad_hoc_active);
+                }
+                // `pin` copied the shared lane's provenance; the record names
+                // this lane's own, and a record without one clears the copy.
+                if !lane.restore_loaded_from(record.loaded_from.clone()) {
+                    tracing::warn!(
+                        target: "geode::session",
+                        "restored scope provenance dropped: no saved scope '{}'",
+                        record.loaded_from.as_deref().unwrap_or_default()
+                    );
                 }
                 lane.set_as_of(record.as_of);
                 lane.clear_history();
@@ -1451,6 +1507,7 @@ impl ShellView {
         // The dimension pickers' column list — see
         // `pickable`'s field doc.
         let pickable = pickable_columns(&services.config);
+        let text_dims = text_dimension_names(&services.config);
         let expr_vocab = std::rc::Rc::new(expr_vocab(&services.config));
         let page_entries: Vec<crate::module::PageEntry> = services.pages.entries().collect();
 
@@ -1517,7 +1574,6 @@ impl ShellView {
             focused_sent: None,
             notice: None,
             stack_list: None,
-            add_filter_menu: None,
             row_menu: None,
             scratch_all_tiles: HashSet::new(),
             scratch_active_tiles: HashSet::new(),
@@ -1531,6 +1587,7 @@ impl ShellView {
             pricing_baseline,
             vol_baseline,
             pickable,
+            text_dims,
             expr_vocab,
             picker: None,
             next_picker_tag: 0,
@@ -1539,8 +1596,10 @@ impl ShellView {
             as_of_scroll: ScrollHandle::new(),
             as_of_data_version: 0,
             scope_expr_dialog: None,
+            scope_dialog: None,
             choice_dialog: None,
             choice_dialog_scroll: ScrollHandle::new(),
+            hue_slider: None,
             expr_scroll: ScrollHandle::new(),
             object_dialog: None,
             object_dialog_scroll: ScrollHandle::new(),
@@ -1590,7 +1649,11 @@ impl ShellView {
             DialogKind::Picker => self.picker = None,
             DialogKind::AsOf => self.as_of_dialog = None,
             DialogKind::ScopeExpr => self.scope_expr_dialog = None,
-            DialogKind::Choice => self.choice_dialog = None,
+            DialogKind::Scope => self.scope_dialog = None,
+            DialogKind::Choice => {
+                self.choice_dialog = None;
+                self.hue_slider = None;
+            }
             DialogKind::Object => {
                 self.object_dialog = None;
                 // The next object dialog down, if any, becomes live again.
@@ -1757,6 +1820,50 @@ impl ShellView {
             })
             .detach();
         }
+        // Whole-object config edits queued by a module tile join the object
+        // dialogs' pending batch: one debounce, one write, one reload. The
+        // tile that asked hears of a fork or a refusal through the frame;
+        // with no user directory the refusal also shows on the status bar.
+        let edits = frame.update(cx, |f, _| f.take_pending_config_edits());
+        if !edits.is_empty() {
+            let mut origins: Vec<TileId> = edits.iter().filter_map(|e| e.origin).collect();
+            let posted: Vec<(TileId, crate::frame::TileNotice)> =
+                match objectdialog::apply::queue_edits(self, edits, cx) {
+                    Ok(notices) => notices
+                        .into_iter()
+                        .map(|(t, n)| (t, crate::frame::TileNotice::Forked(n)))
+                        .collect(),
+                    Err(e) => {
+                        self.config_write_error = Some(e.clone().into());
+                        cx.notify();
+                        // One refusal per tile, however many of its edits
+                        // the drain refused together.
+                        origins.sort_unstable();
+                        origins.dedup();
+                        origins
+                            .into_iter()
+                            .map(|t| (t, crate::frame::TileNotice::Refused(e.clone())))
+                            .collect()
+                    }
+                };
+            if !posted.is_empty() {
+                // Deferred: this runs inside the frame's own observer, and a
+                // tile reads its notices on the frame notification below.
+                // That notification re-enters this observer; it is harmless
+                // because the edit queue was drained above, and posting moves
+                // no frame version, so it opens no flip and starts no
+                // requery.
+                let frame = frame.clone();
+                cx.defer(move |cx| {
+                    frame.update(cx, |f, cx| {
+                        for (tile, notice) in posted {
+                            f.post_tile_notice(tile, notice);
+                        }
+                        cx.notify();
+                    })
+                });
+            }
+        }
         // A pressed header link chip opens the chooser on its own tile.
         if let Some(tile) = frame.update(cx, |f, _| f.take_pending_link_chooser()) {
             self.open_link_chooser_on(tile, window, cx);
@@ -1783,6 +1890,19 @@ impl ShellView {
                     i.set_value(frame_text, window, cx);
                 });
             }
+        }
+        // A dialog whose list reads the frame (the Groupings list's leading
+        // rows) re-derives when the frame changes under it; a stale `*` row
+        // would offer a chain that no longer exists, and the Scope dialog,
+        // whose rows are the lane's scope. Last, after every `frame.update`
+        // above, so the key carries the final generation.
+        if self
+            .object_dialog
+            .as_ref()
+            .is_some_and(|state| state.domain.applies_from_browse())
+            || self.scope_dialog.is_some()
+        {
+            self.refresh_dialog_rows(cx);
         }
         cx.notify();
     }
@@ -1907,7 +2027,7 @@ impl ShellView {
     /// Load saved scope `name` into [`Self::target_frame`]'s lane through
     /// `load_scope` (so it is one undoable `set_scope` step and honours a
     /// workspace pin), notifying on a change. The one path both the
-    /// `scope::<name>` actions and the scope picker take. `Err` when no
+    /// `scope::<name>` actions and the saved-scope chooser take. `Err` when no
     /// saved scope has that name; `Ok(false)` when it is already current.
     pub(crate) fn load_saved_scope(
         &mut self,
@@ -1915,8 +2035,11 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) -> Result<bool, String> {
         self.target_frame().update(cx, |f, cx| {
+            let before = f.generation();
             let loaded = f.load_scope(name);
-            if let Ok(true) = loaded {
+            // Loading the scope in force changes only the lane's provenance;
+            // observers keyed on the generation still have to hear it.
+            if f.generation() != before {
                 cx.notify();
             }
             loaded
@@ -2015,9 +2138,9 @@ impl ShellView {
     /// Deliver a distinct-value reply from the app bridge. `EXPR_KEY` routes
     /// to the open expression field's suggestions. `SCOPES_KEY` routes
     /// to the object dialog's Values stage. `ACTION_KEY` routes to an open
-    /// action value choice. Other replies reach the dimension
+    /// action value choice. `PICKER_KEY` replies reach the dimension
     /// picker only if it is open in Values stage and both column and latest
-    /// request tag match. Stale replies cause no mutation or notification.
+    /// request tag match; any other key is dropped. Stale replies cause no mutation or notification.
     pub fn deliver_distinct(&mut self, outcome: DistinctOutcome, cx: &mut Context<Self>) {
         if outcome.key == EXPR_KEY {
             expr_suggest::deliver(self, outcome, cx);
@@ -2029,6 +2152,11 @@ impl ShellView {
         }
         if outcome.key == ACTION_KEY {
             choicedialog::deliver_action_values(self, outcome, cx);
+            return;
+        }
+        // Only the picker's own key reaches it: a tile's tag counter can
+        // match the picker's, and its values would then fill the picker.
+        if outcome.key != PICKER_KEY {
             return;
         }
         let Some(state) = self.picker.as_mut() else {

@@ -4,6 +4,13 @@
 //! adjustment are shared by cells, swatches, and charts.
 
 pub mod oklab;
+pub mod values;
+
+pub use values::{
+    DimensionColors, DimensionKind, NO_COLOR, PRESETS, ValueColorState, ValueColors, ValueEntry,
+    ValuePick, ValueWrite, check_value_colors, dimension_kind, inline_key, inline_label, preset_of,
+    read_inline, text_dimensions, value_color_state, value_write,
+};
 
 use crate::config::{Diagnostic, MergedDoc, Severity, check_object_name};
 pub use crate::format::Sign;
@@ -140,6 +147,158 @@ impl Definition {
         }
         out
     }
+
+    /// Read one definition table under the `colors.toml` rules: `hue` 0–360
+    /// (360 reads as 0) with an optional `tone`, or a `token`, never both and
+    /// never neither, and an optional `tint_sign`. An error drops the
+    /// definition (`None`); a bad `tone` or `tint_sign` warns and falls back.
+    /// Diagnostics carry `path` (plus `.hue`, `.tone`, `.token` or
+    /// `.tint_sign` for a field) and begin with `subject` (`color 'blue'`).
+    /// `colors.toml` and the inline entries of `value_colors.toml` share it,
+    /// so their rules cannot drift.
+    pub fn from_table(
+        table: &toml::Table,
+        path: &str,
+        subject: &str,
+    ) -> (Option<Definition>, Vec<Diagnostic>) {
+        let mut diags = Vec::new();
+        let at = |suffix: &str| {
+            if suffix.is_empty() {
+                path.to_string()
+            } else {
+                format!("{path}.{suffix}")
+            }
+        };
+        let diag = |severity: Severity, path: String, message: String| Diagnostic {
+            severity,
+            layer: None,
+            file: None,
+            message,
+            path: Some(path),
+        };
+        let hue = table.get("hue");
+        let token = table.get("token");
+        // Read ahead of the hue/token split: the key is valid beside
+        // either, so neither arm owns it.
+        let tint_sign = match table.get("tint_sign") {
+            None => false,
+            Some(v) => match v.as_bool() {
+                Some(b) => b,
+                None => {
+                    diags.push(diag(
+                        Severity::Warning,
+                        at("tint_sign"),
+                        format!(
+                            "{subject}: 'tint_sign' must be true or false (got {v}); using false"
+                        ),
+                    ));
+                    false
+                }
+            },
+        };
+        let base = match (hue, token) {
+            (Some(_), Some(_)) => {
+                refuse_both(&mut diags, path, subject);
+                return (None, diags);
+            }
+            (None, None) => {
+                diags.push(diag(
+                    Severity::Error,
+                    at(""),
+                    format!("{subject}: neither 'hue' nor 'token'; dropped"),
+                ));
+                return (None, diags);
+            }
+            (Some(h), None) => {
+                let Some(degrees) = h.as_float().or_else(|| h.as_integer().map(|i| i as f64))
+                else {
+                    diags.push(diag(
+                        Severity::Error,
+                        at("hue"),
+                        format!("{subject}: 'hue' must be a number (got {h}); dropped"),
+                    ));
+                    return (None, diags);
+                };
+                if !(0.0..=360.0).contains(&degrees) {
+                    diags.push(diag(
+                        Severity::Error,
+                        at("hue"),
+                        format!("{subject}: 'hue' must be 0..360 (got {degrees}); dropped"),
+                    ));
+                    return (None, diags);
+                }
+                let tone = match table.get("tone").and_then(|v| v.as_str()) {
+                    None | Some("normal") => Tone::Normal,
+                    Some("light") => Tone::Light,
+                    Some(other) => {
+                        diags.push(diag(
+                            Severity::Warning,
+                            at("tone"),
+                            format!(
+                                "{subject}: 'tone' must be \"normal\" or \"light\" (got {other:?}); using normal"
+                            ),
+                        ));
+                        Tone::Normal
+                    }
+                };
+                Base::Hue {
+                    degrees: (degrees % 360.0) as f32,
+                    tone,
+                }
+            }
+            (None, Some(t)) => {
+                if table.get("tone").is_some() {
+                    diags.push(diag(
+                        Severity::Warning,
+                        at("tone"),
+                        format!("{subject}: 'tone' has no effect beside 'token'; ignored"),
+                    ));
+                }
+                match t.as_str().and_then(Token::parse) {
+                    Some(token) => Base::Token(token),
+                    None => {
+                        diags.push(diag(
+                            Severity::Error,
+                            at("token"),
+                            format!("{subject}: unknown token {t}; dropped"),
+                        ));
+                        return (None, diags);
+                    }
+                }
+            }
+        };
+        (Some(Definition { base, tint_sign }), diags)
+    }
+
+    /// The definition as a `colors.toml` entry table: `hue` (an integer when
+    /// whole) with `tone` only when light, or `token`; `tint_sign` only when
+    /// on. [`Self::from_table`] reads it back unchanged.
+    pub fn to_table(&self) -> toml::Table {
+        let mut table = toml::Table::new();
+        match &self.base {
+            Base::Hue { degrees, tone } => {
+                let hue = if degrees.fract() == 0.0 {
+                    toml::Value::Integer(*degrees as i64)
+                } else {
+                    toml::Value::Float(f64::from(*degrees))
+                };
+                table.insert("hue".to_string(), hue);
+                if *tone == Tone::Light {
+                    table.insert("tone".to_string(), toml::Value::String("light".to_string()));
+                }
+            }
+            Base::Token(token) => {
+                table.insert(
+                    "token".to_string(),
+                    toml::Value::String(token.name().to_string()),
+                );
+            }
+        }
+        if self.tint_sign {
+            table.insert("tint_sign".to_string(), toml::Value::Boolean(true));
+        }
+        table
+    }
 }
 
 /// A column's `color` key already spells these two.
@@ -153,19 +312,27 @@ pub const RESERVED_PREFIX: char = '#';
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NamedColours {
     by_name: BTreeMap<String, Definition>,
+    /// The checked value → color mapping, carried with the definitions it
+    /// names: a tile that holds one `Arc<NamedColours>` can never see a
+    /// mapping from one reload beside definitions from another.
+    values: ValueColors,
+    /// Inline value colors' definitions by internal key
+    /// ([`values::inline_key`]), copied from `values`: `get` resolves them so
+    /// every paint path does, while `names` and every listing never show them.
+    inline: BTreeMap<String, Definition>,
 }
 
-/// Report mutually exclusive `hue` and `token` fields. The caller skips
-/// the rejected definition after recording this diagnostic.
-fn refuse_both(diags: &mut Vec<Diagnostic>, at: &dyn Fn(&str) -> String, name: &str) {
+/// Report mutually exclusive `hue` and `token` fields at `path`. The caller
+/// drops the rejected definition after recording this diagnostic.
+fn refuse_both(diags: &mut Vec<Diagnostic>, path: &str, subject: &str) {
     diags.push(Diagnostic {
         severity: Severity::Error,
         layer: None,
         file: None,
         message: format!(
-            "color '{name}': both 'hue' and 'token' — a color is one or the other; dropped"
+            "{subject}: both 'hue' and 'token' — a color is one or the other; dropped"
         ),
-        path: Some(at("")),
+        path: Some(path.to_string()),
     });
 }
 
@@ -173,31 +340,24 @@ impl NamedColours {
     pub fn from_doc(doc: &MergedDoc) -> (NamedColours, Vec<Diagnostic>) {
         let mut out = NamedColours::default();
         let mut diags = Vec::new();
-        let diag = |severity: Severity, path: String, m: String| Diagnostic {
-            severity,
+        let refused = |path: String, message: String| Diagnostic {
+            severity: Severity::Error,
             layer: None,
             file: None,
-            message: m,
+            message,
             path: Some(path),
         };
         for (name, value) in &doc.value {
             if name == "config_version" {
                 continue;
             }
-            let at = |suffix: &str| {
-                if suffix.is_empty() {
-                    format!("{}.{name}", crate::config::COLORS_DOC)
-                } else {
-                    format!("{}.{name}.{suffix}", crate::config::COLORS_DOC)
-                }
-            };
+            let path = format!("{}.{name}", crate::config::COLORS_DOC);
             if RESERVED_NAMES.contains(&name.as_str())
                 || name.starts_with(RESERVED_PREFIX)
                 || check_object_name(name).is_err()
             {
-                diags.push(diag(
-                    Severity::Error,
-                    at(""),
+                diags.push(refused(
+                    path,
                     format!(
                         "color '{name}': the name is reserved or not a valid object name — dropped"
                     ),
@@ -205,114 +365,24 @@ impl NamedColours {
                 continue;
             }
             let Some(table) = value.as_table() else {
-                diags.push(diag(
-                    Severity::Error,
-                    at(""),
+                diags.push(refused(
+                    path,
                     format!("color '{name}': not a table — dropped"),
                 ));
                 continue;
             };
-            let hue = table.get("hue");
-            let token = table.get("token");
-            // Read ahead of the hue/token split: the key is valid beside
-            // either, so neither arm owns it.
-            let tint_sign = match table.get("tint_sign") {
-                None => false,
-                Some(v) => match v.as_bool() {
-                    Some(b) => b,
-                    None => {
-                        diags.push(diag(
-                            Severity::Warning,
-                            at("tint_sign"),
-                            format!(
-                                "color '{name}': 'tint_sign' must be true or false (got {v}); using false"
-                            ),
-                        ));
-                        false
-                    }
-                },
-            };
-            let base = match (hue, token) {
-                (Some(_), Some(_)) => {
-                    refuse_both(&mut diags, &at, name);
-                    continue;
-                }
-                (None, None) => {
-                    diags.push(diag(
-                        Severity::Error,
-                        at(""),
-                        format!("color '{name}': neither 'hue' nor 'token'; dropped"),
-                    ));
-                    continue;
-                }
-                (Some(h), None) => {
-                    let Some(degrees) = h.as_float().or_else(|| h.as_integer().map(|i| i as f64))
-                    else {
-                        diags.push(diag(
-                            Severity::Error,
-                            at("hue"),
-                            format!("color '{name}': 'hue' must be a number (got {h}); dropped"),
-                        ));
-                        continue;
-                    };
-                    if !(0.0..=360.0).contains(&degrees) {
-                        diags.push(diag(
-                            Severity::Error,
-                            at("hue"),
-                            format!(
-                                "color '{name}': 'hue' must be 0..360 (got {degrees}); dropped"
-                            ),
-                        ));
-                        continue;
-                    }
-                    let tone = match table.get("tone").and_then(|v| v.as_str()) {
-                        None | Some("normal") => Tone::Normal,
-                        Some("light") => Tone::Light,
-                        Some(other) => {
-                            diags.push(diag(
-                                Severity::Warning,
-                                at("tone"),
-                                format!(
-                                    "color '{name}': 'tone' must be \"normal\" or \"light\" (got {other:?}); using normal"
-                                ),
-                            ));
-                            Tone::Normal
-                        }
-                    };
-                    Base::Hue {
-                        degrees: (degrees % 360.0) as f32,
-                        tone,
-                    }
-                }
-                (None, Some(t)) => {
-                    if table.get("tone").is_some() {
-                        diags.push(diag(
-                            Severity::Warning,
-                            at("tone"),
-                            format!("color '{name}': 'tone' has no effect beside 'token'; ignored"),
-                        ));
-                    }
-                    match t.as_str().and_then(Token::parse) {
-                        Some(token) => Base::Token(token),
-                        None => {
-                            diags.push(diag(
-                                Severity::Error,
-                                at("token"),
-                                format!("color '{name}': unknown token {t}; dropped"),
-                            ));
-                            continue;
-                        }
-                    }
-                }
-            };
-            out.by_name
-                .insert(name.clone(), Definition { base, tint_sign });
+            let (definition, entry_diags) =
+                Definition::from_table(table, &path, &format!("color '{name}'"));
+            diags.extend(entry_diags);
+            if let Some(definition) = definition {
+                out.by_name.insert(name.clone(), definition);
+            }
         }
         (out, diags)
     }
 
     pub fn get(&self, name: &str) -> Option<&Definition> {
-        self.by_name.get(name)
+        self.by_name.get(name).or_else(|| self.inline.get(name))
     }
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.by_name.keys().map(String::as_str)
@@ -322,6 +392,50 @@ impl NamedColours {
     }
     pub fn insert(&mut self, name: String, def: Definition) {
         self.by_name.insert(name, def);
+    }
+
+    /// The value → color mapping these definitions were checked against;
+    /// empty unless built by [`Self::from_config`] or [`Self::with_values`].
+    pub fn values(&self) -> &ValueColors {
+        &self.values
+    }
+
+    pub fn with_values(mut self, values: ValueColors) -> NamedColours {
+        self.inline = values
+            .inline()
+            .map(|(key, definition)| (key.to_string(), definition.clone()))
+            .collect();
+        self.values = values;
+        self
+    }
+
+    /// The color definitions and the value mapping checked against them
+    /// and the declared dimensions, from the merged configuration. The
+    /// diagnostics are the colors reader's, the value reader's, then the
+    /// check's.
+    pub fn from_config(config: &crate::config::Config) -> (NamedColours, Vec<Diagnostic>) {
+        let (named, mut diags) = config
+            .doc(crate::config::COLORS_DOC)
+            .map(NamedColours::from_doc)
+            .unwrap_or_default();
+        let (values, value_diags) = config
+            .doc(crate::config::VALUE_COLORS_DOC)
+            .map(ValueColors::from_doc)
+            .unwrap_or_default();
+        diags.extend(value_diags);
+        let schema = config
+            .doc("datasets")
+            .map(|d| crate::schema::SchemaSpec::from_doc(d).0)
+            .unwrap_or_default();
+        let dims = config
+            .doc("dimensions")
+            .map(|d| crate::dimensions::DerivedDimensions::from_doc(d).0)
+            .unwrap_or_default();
+        let (values, check_diags) = values::check_value_colors(values, &named, |name| {
+            values::dimension_kind(&schema, &dims, name)
+        });
+        diags.extend(check_diags);
+        (named.with_values(values), diags)
     }
 }
 
@@ -620,6 +734,38 @@ mod tests {
             },
             background: grey(0.1),
         }
+    }
+
+    #[test]
+    fn to_table_round_trips_through_from_table() {
+        let cases = [
+            Definition::hue(210.0, Tone::Normal),
+            Definition::hue(30.0, Tone::Light),
+            Definition::hue(12.5, Tone::Normal),
+            Definition::token(Token::Warning),
+            Definition::hue(240.0, Tone::Normal).tinted(),
+        ];
+        for definition in cases {
+            let table = definition.to_table();
+            let (read, diags) = Definition::from_table(&table, "x", "x");
+            assert!(diags.is_empty(), "{definition:?}: {diags:?}");
+            assert_eq!(read.as_ref(), Some(&definition), "{table:?}");
+        }
+        let whole = Definition::hue(210.0, Tone::Normal).to_table();
+        assert_eq!(
+            whole.get("hue").and_then(|v| v.as_integer()),
+            Some(210),
+            "a whole hue is an integer"
+        );
+        assert!(whole.get("tone").is_none(), "tone only when light");
+        assert!(whole.get("tint_sign").is_none(), "tint_sign only when on");
+        assert_eq!(
+            Definition::hue(30.0, Tone::Light)
+                .to_table()
+                .get("tone")
+                .and_then(|v| v.as_str()),
+            Some("light")
+        );
     }
 
     #[test]

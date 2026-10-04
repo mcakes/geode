@@ -5,7 +5,9 @@
 
 use geode_blotter::BlotterFactory;
 use geode_core::colour::NamedColours;
-use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, load_views, merge_docs};
+use geode_core::config::{
+    Config, DIMENSIONS_DOC, Diagnostic, Layer, LayerDoc, Severity, load_views, merge_docs,
+};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::DocumentKind;
 use geode_core::egress_config;
@@ -32,12 +34,13 @@ use geode_shell::diagnostics::{CatalogRequest, Diagnostics, ReferenceLane, Sourc
 use geode_shell::module::placeholder::PLACEHOLDER_KIND;
 use geode_shell::module::{Delivery, UploadDelivery};
 use geode_shell::reference::ReferenceGlobal;
-use geode_shell::shell::{DIAGNOSTICS_KEY, REFERENCE_KEY, ShellEvent, ShellView};
+use geode_shell::shell::objectdialog::shadow_of;
+use geode_shell::shell::{DIAGNOSTICS_KEY, REFERENCE_KEY, ShellEvent, ShellView, is_shell_key};
 use geode_shell::vimfind::FindStyle;
 use gpui::{App, AsyncApp, Entity, WindowHandle};
 use gpui_component::Root;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -71,6 +74,11 @@ pub struct DataSetup {
     /// Error per refused panel for the shell's config section.
     pub panels: Vec<PanelSpec>,
     pub panel_diagnostics: Vec<Diagnostic>,
+    /// Each classification's winning layer and, for the ones a user copy
+    /// shadows, the layer of the copy beneath it, for the classifications
+    /// factory's startup snapshot.
+    pub classification_layers: BTreeMap<String, Layer>,
+    pub classification_shadowed: BTreeMap<String, Layer>,
 }
 
 /// Tile and page kinds other modules own. A panel of one of these names
@@ -81,8 +89,10 @@ pub(crate) const MODULE_KINDS: &[&str] = &[
     "blotter",
     "timeseries",
     "volslice",
+    "classifications",
     "pricer",
     "diagnostics",
+    "guide",
     PLACEHOLDER_KIND,
 ];
 
@@ -140,7 +150,7 @@ pub fn data_setup(
     let (views, d) = load_views(config);
     diagnostics.extend(d);
     let (dimensions, d) = config
-        .doc("dimensions")
+        .doc(DIMENSIONS_DOC)
         .map(DerivedDimensions::from_doc)
         .unwrap_or_default();
     diagnostics.extend(d);
@@ -169,10 +179,8 @@ pub fn data_setup(
     diagnostics.extend(d);
     let (positions, d) = geode_data::positions::resolve(positions_spec, &adapters);
     diagnostics.extend(d);
-    let (colours, colour_diags) = config
-        .doc(geode_core::config::COLORS_DOC)
-        .map(NamedColours::from_doc)
-        .unwrap_or_default();
+    // Definitions and the value mapping checked against them, as one.
+    let (colours, colour_diags) = NamedColours::from_config(config);
     diagnostics.extend(colour_diags);
     // Resolve the configured pricer, defaulting to mock. An unavailable name
     // warns and leaves the implementation absent; the pricing worker returns
@@ -251,6 +259,8 @@ pub fn data_setup(
         .filter(|d| d.local)
         .map(|d| d.name.clone())
         .collect();
+    let (classification_layers, classification_shadowed) =
+        classification_provenance(config, &dimensions);
     Some(DataSetup {
         config: DataServiceConfig {
             db_path,
@@ -285,7 +295,35 @@ pub fn data_setup(
         pricer_key: pricer_config_key(config),
         panels,
         panel_diagnostics,
+        classification_layers,
+        classification_shadowed,
     })
+}
+
+/// Each classification's winning layer, and the classifications whose user
+/// copy shadows a definition in a lower layer, with that layer: the ones a
+/// revert would restore, and what it restores. Read from the layered `dimensions` documents, the same
+/// provenance the object dialog badges.
+fn classification_provenance(
+    config: &Config,
+    dims: &DerivedDimensions,
+) -> (BTreeMap<String, Layer>, BTreeMap<String, Layer>) {
+    let layers: BTreeMap<String, Layer> = dims
+        .all()
+        .filter_map(|d| {
+            config
+                .explain(DIMENSIONS_DOC, &d.name)
+                .map(|l| (d.name.clone(), l))
+        })
+        .collect();
+    let shadowed = layers
+        .iter()
+        .filter(|(_, layer)| **layer == Layer::User)
+        .filter_map(|(name, _)| {
+            shadow_of(config, DIMENSIONS_DOC, name).map(|(lower, _)| (name.clone(), lower))
+        })
+        .collect();
+    (layers, shadowed)
 }
 
 /// Keep the app's own datasets exactly as it declares them. `pricer_sheets`
@@ -581,8 +619,9 @@ pub fn pricer_templates_from_config(
 /// presentation overlays (the pricer's column plan is built from all three),
 /// the colors they may name (a named column's cells and header are painted
 /// from them, so a `colors.toml` edit alone must reach open tiles), the
-/// retired `pricer_views` doc (so one added at runtime raises its
-/// retirement diagnostic without a restart), merged `pricer_templates`, the
+/// `value_colors` mapping those colors carry (likewise), the retired
+/// `pricer_views` doc (so one added at runtime raises its retirement
+/// diagnostic without a restart), merged `pricer_templates`, the
 /// `dimensions` doc (a frame scope over the pricer may name a derived
 /// dimension, so an edit to it must re-apply open tiles' scopes), raw
 /// `app.pricing.refresh`, `app.pricing.underlyings` and
@@ -596,6 +635,8 @@ pub struct PricerConfigKey {
     view_presentation: Option<toml::Table>,
     dataset_presentation: Option<toml::Table>,
     colors: Option<toml::Table>,
+    /// The value mapping the pricer's colors carry.
+    value_colors: Option<toml::Table>,
     pricer_views: Option<toml::Table>,
     templates: Option<toml::Table>,
     /// The derived dimensions a frame scope over the pricer may name.
@@ -614,9 +655,12 @@ pub fn pricer_config_key(config: &Config) -> PricerConfigKey {
         colors: config
             .doc(geode_core::config::COLORS_DOC)
             .map(|d| d.value.clone()),
+        value_colors: config
+            .doc(geode_core::config::VALUE_COLORS_DOC)
+            .map(|d| d.value.clone()),
         pricer_views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),
         templates: config.doc(PRICER_TEMPLATES_DOC).map(|d| d.value.clone()),
-        dimensions: config.doc("dimensions").map(|d| d.value.clone()),
+        dimensions: config.doc(DIMENSIONS_DOC).map(|d| d.value.clone()),
         refresh: config.get("app", "pricing.refresh").cloned(),
         underlyings: config.get("app", "pricing.underlyings").cloned(),
         payout_currency: config.get("app", "pricing.payout_currency").cloned(),
@@ -656,6 +700,9 @@ pub struct Bridge {
     /// The vol slice viewer's factory, sharing the data handle. Its expiry
     /// colors come from the theme, so no reload reaches it.
     pub volslice: Rc<geode_volslice::VolsliceFactory>,
+    /// The classifications factory, sharing the handle. Retained so every
+    /// reload pushes it the dimensions, schema, views and layers it reads.
+    pub classifications: Rc<geode_classifications::ClassificationsFactory>,
     /// The line pricer's factory, sharing the handle. Retained so a reload
     /// reaches its views and settings.
     pub pricer: Rc<PricerFactory>,
@@ -730,7 +777,7 @@ pub fn start(
     setup: DataSetup,
     find_style: FindStyle,
     stale_after: Duration,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> Bridge {
     for d in &setup.diagnostics {
         tracing::warn!(target: "geode::query", "{d}");
@@ -777,6 +824,21 @@ pub fn start(
         setup.colours.clone(),
     ));
     let volslice = Rc::new(geode_volslice::VolsliceFactory::new(handle.clone()));
+    // Pushed its startup snapshot now, before any tile is restored; every
+    // reload pushes the next one.
+    let classifications = Rc::new(geode_classifications::ClassificationsFactory::new(
+        handle.clone(),
+    ));
+    classifications.set_config(
+        geode_classifications::ClassificationsConfig {
+            dims: setup.dimensions.clone(),
+            schema: startup_schema.clone(),
+            views: setup.views.clone(),
+            layers: setup.classification_layers,
+            shadowed: setup.classification_shadowed,
+        },
+        cx,
+    );
     let factory = Rc::new(BlotterFactory::new(
         handle.clone(),
         setup.views,
@@ -817,6 +879,7 @@ pub fn start(
         panels,
         timeseries,
         volslice,
+        classifications,
         pricer,
         underlyings,
         handle,
@@ -1216,6 +1279,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let factory = factory.clone();
         let panels = panels.clone();
         let timeseries = timeseries.clone();
+        let classifications = bridge.classifications.clone();
+        let startup_schema = bridge.schema.clone();
         let diagnostics = diagnostics.clone();
         move |shell, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
@@ -1233,10 +1298,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 }
                 // Parse named colors separately to retain their own validation diagnostics;
                 // load_views uses them for reference checks but does not return those errors.
-                let (colours, colour_diags) = config
-                    .doc(geode_core::config::COLORS_DOC)
-                    .map(NamedColours::from_doc)
-                    .unwrap_or_default();
+                // Definitions and the value mapping checked against them, as one.
+                let (colours, colour_diags) = NamedColours::from_config(config);
                 for d in &colour_diags {
                     tracing::warn!(target: "geode::query", "{d}");
                 }
@@ -1244,7 +1307,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 timeseries.set_colours(colours.clone());
                 factory.set_colours(colours);
                 let (dims, _) = config
-                    .doc("dimensions")
+                    .doc(DIMENSIONS_DOC)
                     .map(DerivedDimensions::from_doc)
                     .unwrap_or_default();
                 // Refresh factory settings on ConfigReloaded. The stale
@@ -1256,12 +1319,25 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // edits require restart and do not emit ConfigReloaded; a later eligible
                 // reload can update this factory before the service's schema is rebuilt.
                 let mut pin_diags = Vec::new();
+                let mut pinned = None;
                 if let Some(mut schema) = config.doc("datasets").map(|d| SchemaSpec::from_doc(d).0)
                 {
                     pin_diags.extend(pin_app_datasets(&mut schema, config));
+                    pinned = Some(Rc::new(schema.clone()));
                     factory.set_schema(schema);
                 }
                 factory.set_dims(dims.clone());
+                // The classifications snapshot, from the same dims, pinned
+                // schema (the startup one when no datasets doc loaded) and
+                // views; pushed once the config borrow has ended.
+                let (layers, shadowed) = classification_provenance(config, &dims);
+                let classification_config = geode_classifications::ClassificationsConfig {
+                    dims: dims.clone(),
+                    schema: pinned.unwrap_or_else(|| startup_schema.clone()),
+                    views: views.clone(),
+                    layers,
+                    shadowed,
+                };
                 // A refused hand-off leaves the service on the old views while
                 // the factory builds tiles against the new ones: say so.
                 let handoff = match handle.replace_views(views, dims) {
@@ -1279,7 +1355,9 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         path: None,
                     }),
                 };
-                // The config borrow has ended; diagnostics can now be updated through cx.
+                // The config borrow has ended; the factory's tiles and the
+                // diagnostics can now be updated through cx.
+                classifications.set_config(classification_config, cx);
                 let reload_diags: Vec<Diagnostic> = presentation_diags
                     .into_iter()
                     .chain(colour_diags)
@@ -1367,14 +1445,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // pricer's are collected here.
                 let (specs, _) = load_views(config);
                 let (views, diags) = pricer_views_from_specs(config, &specs);
-                let (colours, _) = config
-                    .doc(geode_core::config::COLORS_DOC)
-                    .map(NamedColours::from_doc)
-                    .unwrap_or_default();
+                // Definitions and the value mapping checked against them, as one.
+                let (colours, _) = NamedColours::from_config(config);
                 // The dimensions doc's own diagnostics are the
                 // ConfigReloaded observer's to report.
                 let (dims, _) = config
-                    .doc("dimensions")
+                    .doc(DIMENSIONS_DOC)
                     .map(DerivedDimensions::from_doc)
                     .unwrap_or_default();
                 let (refresh, refresh_diag) = pricing_refresh_from_config(config);
@@ -1486,6 +1562,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             )
                         });
                     }
+                    // Routed by the requesting tile's key, like an upload.
+                    DataEvent::TextFile(outcome) => {
+                        shell.update(cx, |s, cx| s.deliver(Delivery::TextFile(outcome), window, cx));
+                    }
                     DataEvent::Query(outcome) => {
                         shell.update(cx, |s, cx| {
                             s.deliver(Delivery::Query(outcome), window, cx)
@@ -1560,9 +1640,18 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             }
                         });
                     }
-                    // The picker validates request tag, column, and open state in deliver_distinct.
+                    // Shell keys go to the shell's own consumers (picker,
+                    // scopes, expression suggestions, action values), which
+                    // validate tag and column themselves; any other key is a
+                    // tile's, delivered like a query.
                     DataEvent::Distinct(outcome) => {
-                        shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
+                        if is_shell_key(outcome.key) {
+                            shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
+                        } else {
+                            shell.update(cx, |s, cx| {
+                                s.deliver(Delivery::Distinct(outcome), window, cx)
+                            });
+                        }
                     }
                     DataEvent::Catalog(outcome) => {
                         let Some((tag, request)) = catalog_refresh.in_flight.get() else {
@@ -2120,6 +2209,9 @@ role = "key"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer,
             handle,
             events: rx,
@@ -2630,6 +2722,22 @@ role = "attribute"
         );
     }
 
+    /// The pricer's colors carry the value mapping, so a `value_colors`
+    /// edit alone must change the key and re-run the pricer's reload.
+    #[test]
+    fn the_pricer_reload_key_changes_with_value_colors() {
+        let with = |text: &str| {
+            Config::from_docs(vec![
+                LayerDoc::builtin(geode_core::config::VALUE_COLORS_DOC, text).unwrap(),
+            ])
+        };
+        assert_ne!(
+            pricer_config_key(&with("[underlying_ref]\nSPX = \"blue\"\n")),
+            pricer_config_key(&with("[underlying_ref]\nSPX = \"teal\"\n")),
+            "a value-color edit alone must re-run the pricer's reload"
+        );
+    }
+
     /// The retired doc is part of the key: one added at runtime, with no
     /// other pricer-relevant edit, must still reach the reload path that
     /// raises its retirement diagnostic.
@@ -2750,6 +2858,642 @@ role = "attribute"
         });
         vcx.run_until_parked();
         assert_eq!(bridge.pricer.view_names(), vec!["slim"]);
+    }
+
+    /// The `ConfigReloaded` observer hands the blotter factory colors that
+    /// carry the checked value mapping, not the definitions alone.
+    #[gpui::test]
+    fn a_config_reload_hands_the_blotter_factory_the_value_colors(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            // The observer refreshes factories only when a `views` doc exists.
+            builtin: vec![
+                LayerDoc::builtin("views", SLIM_VIEW).unwrap(),
+                LayerDoc::builtin(geode_core::config::COLORS_DOC, "[blue]\nhue = 240\n").unwrap(),
+                LayerDoc::builtin(
+                    "dimensions",
+                    "[region]\nfrom = \"underlying_ref\"\n[region.values]\nUS = [\"SPX\"]\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    geode_core::config::VALUE_COLORS_DOC,
+                    "[region]\nUS = \"blue\"\n",
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        assert!(
+            bridge.factory.colours().values().is_empty(),
+            "fixture: built with no value mapping"
+        );
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            bridge
+                .factory
+                .colours()
+                .values()
+                .get("region", "US")
+                .map(|c| &**c),
+            Some("blue")
+        );
+    }
+
+    /// Builtin `desk` and `region`; the user layer redefines `desk` and adds
+    /// `sector`.
+    const BUILTIN_DIMS: &str = "[desk]\nfrom = \"book\"\n[region]\nfrom = \"underlying_ref\"\n";
+    const USER_DIMS: &str = "[desk]\nfrom = \"book\"\n[sector]\nfrom = \"book\"\n";
+
+    fn assert_classifications_snapshot(config: &geode_classifications::ClassificationsConfig) {
+        let names: Vec<&str> = config.dims.all().map(|d| d.name.as_str()).collect();
+        assert_eq!(names.len(), 3, "{names:?}");
+        for name in ["desk", "region", "sector"] {
+            assert!(names.contains(&name), "{names:?}");
+        }
+        assert_eq!(
+            config.layers,
+            BTreeMap::from([
+                ("desk".to_string(), Layer::User),
+                ("region".to_string(), Layer::Builtin),
+                ("sector".to_string(), Layer::User),
+            ])
+        );
+        // Only the user copy with a lower definition beneath it shadows one,
+        // and the snapshot names that lower layer.
+        assert_eq!(
+            config.shadowed,
+            BTreeMap::from([("desk".to_string(), Layer::Builtin)])
+        );
+    }
+
+    /// The classifications factory holds its snapshot from startup, before
+    /// any tile is restored and before any reload.
+    #[gpui::test]
+    fn startup_pushes_the_classifications_snapshot(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("dimensions.toml"), USER_DIMS).unwrap();
+        let mut builtin = crate::builtin_layer(Some(dir.path()));
+        builtin.push(LayerDoc::builtin("dimensions", BUILTIN_DIMS).unwrap());
+        let config = Config::load(&ConfigSources {
+            builtin,
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        let setup = data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .unwrap();
+        let views = setup.views.len();
+        let bridge =
+            cx.update(|cx| start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let snapshot = bridge.classifications.config().expect("pushed at startup");
+        assert_classifications_snapshot(&snapshot);
+        assert_eq!(snapshot.views.len(), views);
+        assert!(
+            Rc::ptr_eq(&snapshot.schema, &bridge.schema),
+            "the startup schema"
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// The `ConfigReloaded` observer pushes the classifications factory the
+    /// reloaded dimensions with their layers.
+    #[gpui::test]
+    fn a_config_reload_pushes_the_classifications_snapshot(cx: &mut gpui::TestAppContext) {
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("dimensions.toml"), USER_DIMS).unwrap();
+        let services = test_shell_services_with_sources(ConfigSources {
+            // The observer refreshes factories only when a `views` doc exists.
+            builtin: vec![
+                LayerDoc::builtin("views", SLIM_VIEW).unwrap(),
+                LayerDoc::builtin("dimensions", BUILTIN_DIMS).unwrap(),
+            ],
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        assert!(
+            bridge.classifications.config().is_none(),
+            "fixture: built with no snapshot"
+        );
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        let snapshot = bridge.classifications.config().expect("pushed on reload");
+        assert_classifications_snapshot(&snapshot);
+        assert!(
+            snapshot.views.iter().any(|v| v.name == "slim"),
+            "the reloaded views"
+        );
+    }
+
+    // --- Classifications through the composition root -----------------
+
+    /// The dataset the end-to-end classifications are checked against, as
+    /// the module's own fixtures declare it: `underlying_ref` is a
+    /// groupable text column there, so a classification over it may be
+    /// written (with no measure at a grain it is not groupable).
+    const CLASS_DATASETS: &str = r#"
+[risk.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk.columns.delta]
+type = "f64"
+role = "measure"
+grain = "position"
+[risk.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+    const CLASS_DIMS: &str =
+        "[region]\nfrom = \"underlying_ref\"\n[region.values]\nEurope = [\"SX5E\", \"DAX\"]\n";
+
+    /// A shell assembled as startup assembles it (`add_bridge_modules`, the
+    /// roster's actions and keymap fragments, the bridge's drain) with two
+    /// classifications tiles showing `region` (1, focused, and 2) and a
+    /// recording tile (3), over a writable user directory. The
+    /// classifications factory holds its snapshot before any tile is
+    /// restored, as `start` pushes it.
+    struct ClassificationsShell {
+        vcx: gpui::VisualTestContext,
+        shell: Entity<ShellView>,
+        handle: DataHandle,
+        requests: std::sync::mpsc::Receiver<geode_data::Request>,
+        events: crate::events::Sender,
+        tail: Arc<std::sync::Mutex<geode_shell::diagnostics::ActionTail>>,
+        _user: tempfile::TempDir,
+    }
+
+    impl ClassificationsShell {
+        fn open(cx: &mut gpui::TestAppContext) -> ClassificationsShell {
+            let user = tempfile::tempdir().unwrap();
+            let (handle, requests) = DataHandle::for_tests();
+            let (tx, rx) = crate::events::channel();
+            let mut bridge = test_bridge(handle.clone());
+            bridge.events = rx;
+            let sources = ConfigSources {
+                builtin: vec![
+                    LayerDoc::builtin("datasets", CLASS_DATASETS).unwrap(),
+                    LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+                    LayerDoc::builtin("dimensions", CLASS_DIMS).unwrap(),
+                ],
+                desk: None,
+                user: Some(user.path().to_path_buf()),
+            };
+            let mut services = test_shell_services_with_sources(sources);
+            let config = services.config.clone();
+            let dims = DerivedDimensions::from_doc(config.doc(DIMENSIONS_DOC).unwrap()).0;
+            let schema = SchemaSpec::from_doc(config.doc("datasets").unwrap()).0;
+            let (layers, shadowed) = classification_provenance(&config, &dims);
+            cx.update(|cx| {
+                bridge.classifications.set_config(
+                    geode_classifications::ClassificationsConfig {
+                        dims,
+                        schema: Rc::new(schema),
+                        views: Vec::new(),
+                        layers,
+                        shadowed,
+                    },
+                    cx,
+                )
+            });
+
+            let mut roster = ModuleRoster::new();
+            crate::add_bridge_modules(&mut roster, &bridge);
+            roster.add(Box::new(RecordingFactory::new("rec")));
+            roster.register_actions(&mut services.registry);
+            let (fragments, diags) = roster.keymap_fragments();
+            assert!(diags.is_empty(), "{diags:?}");
+            let layered = geode_shell::keymap::fragments::splice(
+                &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+                &fragments,
+            );
+            let (keymap, diags) = build_keymap(&layered, services.mod_alias, &services.registry);
+            assert!(diags.is_empty(), "{diags:?}");
+            services.keymap = keymap;
+            services.roster = roster;
+
+            let mut table = geode_shell::session::to_toml(
+                &Workspaces::new(),
+                &TileRecords::new(),
+                None,
+                &geode_shell::session::PinnedRecords::new(),
+                &geode_shell::palette_usage::PaletteUsage::new(),
+                &geode_shell::session::PageRecords::new(),
+            );
+            let ws1: toml::Table = r#"
+                focused = 1
+                [node]
+                kind = "split"
+                orientation = "horizontal"
+                ratios = [0.34, 0.33, 0.33]
+                [[node.children]]
+                kind = "leaf"
+                id = 1
+                [[node.children]]
+                kind = "leaf"
+                id = 2
+                [[node.children]]
+                kind = "leaf"
+                id = 3
+                [tiles.1]
+                module = "classifications"
+                [tiles.1.state]
+                version = 1
+                name = "region"
+                [tiles.2]
+                module = "classifications"
+                [tiles.2.state]
+                version = 1
+                name = "region"
+                [tiles.3]
+                module = "rec"
+            "#
+            .parse()
+            .unwrap();
+            if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+                ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+            }
+            let restored = geode_shell::session::from_toml(&table).unwrap();
+            assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+            services.workspaces = restored.workspaces;
+            services.restored_tiles = restored.tiles;
+            let tail = services.action_tail.clone();
+
+            cx.update(gpui_component::init);
+            cx.update(geode_classifications::init);
+            let user_dir = user.path().to_path_buf();
+            let window = cx
+                .update(|cx| {
+                    cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                        let view =
+                            cx.new(|cx| ShellView::new(services, None, Some(user_dir), window, cx));
+                        cx.new(|cx| Root::new(view, window, cx))
+                    })
+                })
+                .unwrap();
+            cx.update(|cx| attach(&bridge, window, cx));
+            let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+            let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+                root.view().clone().downcast::<ShellView>().unwrap()
+            });
+            let mut s = ClassificationsShell {
+                vcx,
+                shell,
+                handle,
+                requests,
+                events: tx,
+                tail,
+                _user: user,
+            };
+            s.draw();
+            assert_eq!(
+                s.shell.read_with(&s.vcx, |sh, _| (
+                    sh.occupant_kind(TileId(1)),
+                    sh.occupant_kind(TileId(2)),
+                    sh.occupant_kind(TileId(3))
+                )),
+                (
+                    Some("classifications"),
+                    Some("classifications"),
+                    Some("rec")
+                )
+            );
+            s
+        }
+
+        fn draw(&mut self) {
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            self.vcx.run_until_parked();
+        }
+
+        /// The values reads the tiles asked since the last call, in order.
+        fn distinct_requests(&self) -> Vec<geode_core::query::DistinctParams> {
+            self.requests
+                .try_iter()
+                .filter_map(|r| match r {
+                    geode_data::Request::Distinct(p) => Some(p),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Post a values answer to the bridge's real drain.
+        fn answer(&mut self, key: QueryKey, tag: u64, values: &[(&str, u64)]) {
+            self.events
+                .try_send(DataEvent::Distinct(geode_core::query::DistinctOutcome {
+                    key,
+                    tag,
+                    column: "underlying_ref".into(),
+                    values: Ok(values.iter().map(|(s, n)| (s.to_string(), *n)).collect()),
+                }))
+                .unwrap();
+            self.draw();
+        }
+
+        fn focused(&self) -> Option<TileId> {
+            self.shell.read_with(&self.vcx, |s, _| {
+                s.services().workspaces.active().focused_tile()
+            })
+        }
+
+        fn dispatched(&self, id: &str) -> usize {
+            let h = geode_shell::diagnostics::fnv1a(id);
+            self.tail
+                .lock()
+                .unwrap()
+                .recent()
+                .filter(|x| *x == h)
+                .count()
+        }
+
+        /// Run `title` from the shell's palette.
+        fn palette(&mut self, title: &str) {
+            self.vcx.simulate_keystrokes("ctrl-k");
+            self.draw();
+            self.vcx.simulate_input(title);
+            self.vcx.simulate_keystrokes("enter");
+            self.draw();
+        }
+    }
+
+    /// A tile-keyed values answer through the bridge's drain reaches the
+    /// classifications tile that asked; a shell-keyed one (the picker's,
+    /// over the same column) reaches the open picker and no tile.
+    #[gpui::test]
+    fn a_tile_keyed_distinct_reaches_a_classifications_tile_and_a_picker_one_does_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut s = ClassificationsShell::open(cx);
+        let asked = s.distinct_requests();
+        let first = asked
+            .iter()
+            .find(|p| p.key == QueryKey(1))
+            .expect("tile 1 asks for its values")
+            .clone();
+        assert_eq!(first.column, "underlying_ref");
+        assert!(
+            asked.iter().any(|p| p.key == QueryKey(2)),
+            "tile 2 asks under its own key"
+        );
+        assert!(
+            s.vcx.debug_bounds("classifications-row-SMI").is_none(),
+            "fixture: SMI is not in the map"
+        );
+
+        // The picker asks for the same column under the shell's key.
+        let shell = s.shell.clone();
+        s.vcx.update(|window, cx| {
+            shell.update(cx, |view, cx| {
+                geode_shell::shell::picker::open(view, Some("underlying_ref".into()), window, cx);
+            });
+        });
+        s.draw();
+        let picked = s
+            .distinct_requests()
+            .into_iter()
+            .find(|p| p.key == geode_shell::shell::PICKER_KEY)
+            .expect("the picker asks for its values");
+        s.answer(picked.key, picked.tag, &[("SMI", 4), ("DAX", 2)]);
+        assert_eq!(
+            s.shell
+                .read_with(&s.vcx, |sh, _| sh.picker().and_then(|p| p.values.clone())),
+            Some(Ok(vec![("SMI".to_string(), 4), ("DAX".to_string(), 2)])),
+            "the shell's key reaches the picker"
+        );
+        assert!(
+            s.vcx.debug_bounds("classifications-row-SMI").is_none(),
+            "and no tile"
+        );
+        s.vcx.simulate_keystrokes("escape");
+        s.draw();
+
+        s.answer(QueryKey(1), first.tag, &[("SMI", 4), ("DAX", 2)]);
+        assert!(
+            s.vcx.debug_bounds("classifications-row-SMI").is_some(),
+            "the tile's own answer fills its grid"
+        );
+    }
+
+    /// A classifications action run from the palette reaches the focused
+    /// classifications tile only: the refresh asks for that tile's values
+    /// alone, and with another kind focused it asks for none.
+    #[gpui::test]
+    fn a_palette_classifications_action_reaches_only_the_focused_classifications_tile(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut s = ClassificationsShell::open(cx);
+        s.distinct_requests();
+        assert_eq!(s.focused(), Some(TileId(1)), "fixture");
+
+        s.palette("Classification: Refresh values");
+        assert_eq!(
+            s.dispatched("classifications::refresh"),
+            1,
+            "fixture: the palette dispatched the refresh"
+        );
+        let keys: Vec<QueryKey> = s.distinct_requests().iter().map(|p| p.key).collect();
+        assert_eq!(keys, [QueryKey(1)], "only the focused tile refreshed");
+
+        s.vcx.simulate_keystrokes("alt-l alt-l");
+        s.draw();
+        assert_eq!(
+            s.focused(),
+            Some(TileId(3)),
+            "fixture: the recorder focused"
+        );
+        s.palette("Classification: Refresh values");
+        assert_eq!(
+            s.dispatched("classifications::refresh"),
+            2,
+            "fixture: the palette dispatched it again"
+        );
+        assert!(
+            s.distinct_requests().is_empty(),
+            "no classifications tile acted for another kind's focus"
+        );
+    }
+
+    /// A label set in a classifications tile goes through the config door:
+    /// past the debounce the shell's `dimensions` document carries it, and
+    /// the reload hands the data service the relabelled dimension.
+    #[gpui::test]
+    fn a_label_edit_reaches_the_dimensions_doc_and_the_data_service(cx: &mut gpui::TestAppContext) {
+        let mut s = ClassificationsShell::open(cx);
+        let tag = s
+            .distinct_requests()
+            .iter()
+            .find(|p| p.key == QueryKey(1))
+            .expect("tile 1 asks for its values")
+            .tag;
+        // SMI, unclassified, leads the default order under the cursor.
+        s.answer(QueryKey(1), tag, &[("SMI", 4), ("DAX", 2), ("SX5E", 1)]);
+        assert!(
+            s.handle.pending_dimensions_for_tests().is_none(),
+            "fixture: no views handed over yet"
+        );
+
+        s.vcx.simulate_keystrokes("c");
+        s.draw();
+        s.vcx.simulate_input("Alpine");
+        s.vcx.simulate_keystrokes("enter");
+        s.draw();
+        s.vcx.executor().advance_clock(Duration::from_millis(300));
+        s.draw();
+
+        let label = |dims: &DerivedDimensions, source: &str| {
+            dims.get("region")
+                .and_then(|d| d.values.get(source).cloned())
+        };
+        let shell_dims = s.shell.read_with(&s.vcx, |sh, _| {
+            DerivedDimensions::from_doc(sh.config().doc(DIMENSIONS_DOC).unwrap()).0
+        });
+        assert_eq!(label(&shell_dims, "SMI").as_deref(), Some("Alpine"));
+        assert_eq!(
+            label(&shell_dims, "DAX").as_deref(),
+            Some("Europe"),
+            "the whole object, the other labels kept"
+        );
+        let handed = s
+            .handle
+            .pending_dimensions_for_tests()
+            .expect("the reload replaced the service's views");
+        assert_eq!(label(&handed, "SMI").as_deref(), Some("Alpine"));
+    }
+
+    impl ClassificationsShell {
+        /// Run every file request the tiles asked since the last call
+        /// through the data tier's file operation, on the real disk, and
+        /// post each answer to the bridge's drain as the file worker does.
+        /// The `geode-files` worker's queue and thread are bypassed:
+        /// `geode_data::files::run` is called directly, on this thread.
+        fn run_file_requests(&mut self) -> usize {
+            let asked: Vec<_> = self
+                .requests
+                .try_iter()
+                .filter_map(|r| match r {
+                    geode_data::Request::TextFile(p) => Some(p),
+                    _ => None,
+                })
+                .collect();
+            for p in &asked {
+                let result = geode_data::files::run(p);
+                self.events
+                    .try_send(DataEvent::TextFile(geode_core::textfile::TextFileOutcome {
+                        key: p.key,
+                        tag: p.tag,
+                        path: p.path.clone(),
+                        result,
+                    }))
+                    .unwrap();
+            }
+            self.draw();
+            asked.len()
+        }
+    }
+
+    /// A CSV round trip through the composition root: Export writes the
+    /// shown classification to the file the save dialog names, on disk;
+    /// the file edited there and imported through the open dialog asks
+    /// y/n, and past the debounce the shell's `dimensions` document
+    /// carries the file's labels, the ones it does not name kept.
+    #[gpui::test]
+    fn a_classification_exported_edited_and_imported_reaches_the_dimensions_doc(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut s = ClassificationsShell::open(cx);
+        let tag = s
+            .distinct_requests()
+            .iter()
+            .find(|p| p.key == QueryKey(1))
+            .expect("tile 1 asks for its values")
+            .tag;
+        s.answer(QueryKey(1), tag, &[("SMI", 4), ("DAX", 2), ("SX5E", 1)]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("region.csv");
+
+        s.palette("Classification: Export CSV");
+        assert_eq!(s.dispatched("classifications::export"), 1, "fixture");
+        let target = path.clone();
+        s.vcx.simulate_new_path_selection(|_| Some(target));
+        s.draw();
+        assert_eq!(s.run_file_requests(), 1, "one write");
+        let region = s.shell.read_with(&s.vcx, |sh, _| {
+            DerivedDimensions::from_doc(sh.config().doc(DIMENSIONS_DOC).unwrap()).0
+        });
+        let region = region.get("region").expect("fixture").clone();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written, geode_core::classification::export(&region, None));
+        assert!(written.contains("DAX,Europe"), "{written}");
+
+        // DAX moves, SMI gains a label; SX5E is not named and stays.
+        std::fs::write(&path, "underlying_ref,region\nDAX,DACH\nSMI,Alpine\n").unwrap();
+        s.palette("Classification: Import CSV");
+        assert_eq!(s.dispatched("classifications::import"), 1, "fixture");
+        let chosen = path.clone();
+        s.vcx.simulate_path_prompt_response(|_| Some(vec![chosen]));
+        s.draw();
+        assert_eq!(s.run_file_requests(), 1, "one read");
+        s.vcx.simulate_keystrokes("y");
+        s.draw();
+        s.vcx.executor().advance_clock(Duration::from_millis(300));
+        s.draw();
+
+        let shell_dims = s.shell.read_with(&s.vcx, |sh, _| {
+            DerivedDimensions::from_doc(sh.config().doc(DIMENSIONS_DOC).unwrap()).0
+        });
+        let label = |source: &str| {
+            shell_dims
+                .get("region")
+                .and_then(|d| d.values.get(source).cloned())
+        };
+        assert_eq!(label("DAX").as_deref(), Some("DACH"));
+        assert_eq!(label("SMI").as_deref(), Some("Alpine"));
+        assert_eq!(
+            label("SX5E").as_deref(),
+            Some("Europe"),
+            "merged, not replaced"
+        );
     }
 
     /// A desk `pricer_templates` layer: a `CONDOR` and a broken `RR`
@@ -5785,6 +6529,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -5894,6 +6641,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -5995,6 +6745,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6115,6 +6868,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6177,6 +6933,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6245,6 +7004,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             pricer_key: None,
             positions_configured: false,
@@ -6306,6 +7068,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6400,6 +7165,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6473,6 +7241,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6549,6 +7320,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory: factory.clone(),
@@ -6627,6 +7401,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory: factory.clone(),
@@ -6728,6 +7505,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6825,6 +7605,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -6889,6 +7672,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -7032,6 +7818,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -7101,6 +7890,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,
@@ -7818,6 +8610,9 @@ role = "attribute"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
+                handle.clone(),
+            )),
             pricer: test_pricer(&handle),
             handle,
             factory,

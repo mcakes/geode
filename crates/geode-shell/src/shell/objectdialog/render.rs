@@ -39,9 +39,9 @@ use super::scopes;
 use super::sources;
 use super::views;
 use super::{
-    ColumnContext, ColumnDoor, ColumnLayers, Completions, Confirm, Destination, Domain, Draft,
-    EditRow, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE, RowDrag,
-    RowVocabulary, Stage, Step,
+    ColorForValue, ColumnContext, ColumnDoor, ColumnLayers, Completions, Confirm, Destination,
+    Domain, Draft, EditRow, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow,
+    READ_ONLY_NOTICE, RowDrag, RowVocabulary, Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::footer::{Hint, HintRow};
@@ -67,6 +67,13 @@ use super::super::scale;
 const ROW_HEIGHT: f32 = 44.0;
 /// Rows visible before the list scrolls — see `palette::VISIBLE_ROWS`.
 const VISIBLE_ROWS: usize = 10;
+/// A Groupings row is one line: its number, then its chain. Measured at 23px
+/// on the design scale; rounded up so the eleventh row never clips.
+const GROUPING_ROW_HEIGHT: f32 = 24.0;
+/// The view default, the ad hoc row and nine slots, with no scrolling.
+const GROUPING_VISIBLE_ROWS: usize = 11;
+/// The lead column a row's number sits in, wide enough for one mono digit.
+const GROUPING_LEAD_WIDTH: f32 = 14.0;
 /// Target dialog content width in pixels — the keybinding dialog's, so
 /// the two modals are the same object on screen.
 const WIDTH: f32 = 640.0;
@@ -96,13 +103,25 @@ pub fn open(
         window,
         cx,
         dialog::DialogKind::Object,
-        domain.title(),
+        domain.dialog_title(),
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
         // This dialog's mode owns focus. Install its state before opening so shared
         // input synchronization sees Normal mode and blurs the input for command keys.
         false,
     );
+    // Open on the lane's current choice, so a bare `enter` changes nothing.
+    // The door above derived the rows, so the active row is already listed.
+    if domain.applies_from_browse() {
+        let active =
+            super::grouping_list::active_row(view.target_frame().read(cx).grouping_choice());
+        if let Some(state) = view.object_dialog.as_mut()
+            && let Some(ix) = state.rows.position(|row| row.name == active)
+        {
+            state.selected = ix;
+            view.object_dialog_scroll.scroll_to_item(ix);
+        }
+    }
     // the crumb plus the pill, sharing the same title-row slot every Geode modal has —
     // see `crumb_text`'s own doc for what the crumb says in each stage.
     dialog::set_title_extra(view, |shell, cx| {
@@ -146,7 +165,7 @@ pub fn open(
                 .as_ref()
                 .is_some_and(ObjectDialogState::has_previous_stage)
         },
-        |shell, _window, cx| step_back(shell, cx),
+        step_back,
     );
 }
 
@@ -154,13 +173,22 @@ pub fn open(
 /// back rung runs, after discarding what the earlier Escape rungs would (see
 /// [`ObjectDialogState::abandon_for_back`]). Does nothing while a confirmation is
 /// pending. The modal's click handler synchronizes the shared input afterwards.
-fn step_back(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+fn step_back(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let Some(state) = shell.object_dialog.as_mut() else {
         return;
     };
     if !state.abandon_for_back() {
         return;
     }
+    // Naming opened from the value-color list: Back pops to the list, as escape does.
+    let pops = state.stage == Stage::Naming && state.on_created.is_some();
+    if pops {
+        shell.close_modal(window, cx);
+        return;
+    }
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
     match state.stage {
         Stage::Naming => state.cancel_naming(),
         Stage::Values { .. } => leave_values_stage(shell, cx),
@@ -180,7 +208,13 @@ pub(crate) fn crumb_text(shell: &ShellView) -> String {
         return String::new();
     };
     match &state.stage {
-        Stage::Edit { object } if state.domain == Domain::Groupings => format!("ctrl+{object}"),
+        Stage::Edit { object } if state.domain == Domain::Groupings => {
+            if super::grouping_list::is_ad_hoc(state.domain, object) {
+                "ad hoc".to_string()
+            } else {
+                format!("ctrl+{object}")
+            }
+        }
         Stage::Edit { .. } => String::new(),
         // The one crumb that is a PATH rather than a count or a chord:
         // the edit header still paints the object's name alone, so
@@ -191,7 +225,13 @@ pub(crate) fn crumb_text(shell: &ShellView) -> String {
         // Values stage is a projection over one column exactly as the column stage is.
         Stage::Values { object, column } => format!("{object} › {column}"),
         Stage::Browse | Stage::Naming => {
-            let n = state.rows.rows().len();
+            // The frame's leading rows are not objects of the domain.
+            let n = state
+                .rows
+                .rows()
+                .iter()
+                .filter(|row| !super::grouping_list::is_lead(state.domain, &row.name))
+                .count();
             format!("{n} {}", state.domain.crumb_noun())
         }
     }
@@ -215,8 +255,8 @@ fn handle_key(
         Some(Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }) => {
             handle_edit_key(shell, ks, window, cx)
         }
-        Some(Stage::Naming) => handle_naming_key(shell, ks, cx),
-        _ => handle_browse_key(shell, ks, cx),
+        Some(Stage::Naming) => handle_naming_key(shell, ks, window, cx),
+        _ => handle_browse_key(shell, ks, window, cx),
     }
 }
 
@@ -226,7 +266,12 @@ fn handle_key(
 /// Normal-mode Enter opens the selected object. Tab is consumed so it cannot insert
 /// a literal tab into the filter. The ladder's close rung remains unclaimed for the
 /// shell's modal handler.
-fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
+fn handle_browse_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
     // read before `state` takes its `&mut` borrow of `shell.object_dialog` below, whose
     // lifetime spans the rest of this function — `seed_dataset_under_cursor` needs a
     // plain `&ShellView`, which a live sibling `&mut` borrow would refuse. `None` on
@@ -251,6 +296,10 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
         cx.notify();
     }
 
+    // The save prompt owns input exactly as a confirm does.
+    if state.save.is_some() {
+        return super::grouping_list::handle_save_key(shell, ks, window, cx);
+    }
     // A confirmation owns input in browse as well as edit, ahead of the Escape ladder
     // and ordinary commands.
     if state.confirm.is_some() {
@@ -266,6 +315,19 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
         cx.notify();
         return true;
     }
+
+    // Groupings' list owns `enter`, the digits and its letters in normal
+    // mode. Whatever it declines falls through to the shared vocabulary.
+    if state.mode == DialogMode::Normal
+        && state.domain.applies_from_browse()
+        && ks.key != "escape"
+        && let Some(claimed) = super::grouping_list::handle_key(shell, ks, window, cx)
+    {
+        return claimed;
+    }
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return false;
+    };
 
     if state.mode == DialogMode::Normal {
         // Modifier-agnostic on `escape`, exactly as `handle_key_down`'s
@@ -373,12 +435,6 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
                 cx.notify();
                 return true;
             }
-            // a bare digit names a slot on the one domain whose objects are numbered;
-            // elsewhere it is dropped below.
-            NormalCommand::Digit(n) if state.domain == Domain::Groupings => {
-                jump_to_slot(shell, n, cx);
-                return true;
-            }
             // `Toggle`, `EditText`, `MoveItem` and the rest of the letter
             // verbs are the edit stage's, and the browse footer
             // advertises none of them — so they are claimed and dropped
@@ -437,17 +493,33 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
     false
 }
 
-/// The naming stage's keys: `escape` backs out to browse with nothing written; `enter`
+/// The naming stage's keys: `escape` backs out to browse with nothing written (or, when
+/// the value-color list opened this naming stage, pops back to that list); `enter`
 /// checks the name and creates; everything else is the focused `Input`'s to type. The
 /// name is `state.query` — mirrored from the field by the same subscription a filter
 /// uses.
-fn handle_naming_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
+fn handle_naming_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
     if let Some(state) = shell.object_dialog.as_mut()
         && state.notice.take().is_some()
     {
         cx.notify();
     }
     if ks.key == "escape" {
+        // Opened by the value-color list's `New named color…`: escape pops back to
+        // the list, intact, rather than to a browse list nobody opened.
+        if shell
+            .object_dialog
+            .as_ref()
+            .is_some_and(|s| s.on_created.is_some())
+        {
+            shell.close_modal(window, cx);
+            return true;
+        }
         // `cancel_naming` is the whole transition — `Stage::Browse`,
         // `DialogMode::Normal`, an empty `query` — and `dialog::sync_dialog_text`
         // empties the field and blurs it to match on this handler's return.
@@ -532,7 +604,7 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     // One `match` rather than two `if let`s: `seed` is an owned, non-`Copy` value with
     // exactly one consumer, and a second `if let` reading it after a first one already
     // moved it needed a defensive `.clone()` that a single exhaustive match makes
-    // unnecessary — the compiler enforces there is nothing a fourth `NameSeed` variant
+    // unnecessary — the compiler enforces there is nothing a new `NameSeed` variant
     // could add without a reminder here too.
     match seed {
         NameSeed::Empty => {}
@@ -576,6 +648,15 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
             scopes::overwrite_with(&mut draft, &scope, config);
             draft.diagnostics = domain.validate(&draft, config);
         }
+        NameSeed::Definition(definition) => {
+            // The value-color list's seed: its color as a colors.toml entry, read
+            // through the domain's own fields so the edit stage shows it.
+            let folded = apply::config_with_pending(shell);
+            let config = folded.as_ref().unwrap_or(&shell.services.config);
+            draft.source = definition.to_table();
+            draft.fields = domain.fields_from_source(config, &draft.source);
+            draft.diagnostics = domain.validate(&draft, config);
+        }
     }
     enter_edit_stage(shell, &name, Some(draft), cx);
     if opens_expression {
@@ -585,8 +666,22 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
             draft.diagnostics.clear();
         }
         open_field(shell);
-    } else if let Some(notice) = apply::commit_create(shell, cx) {
-        set_notice(shell, notice);
+    } else {
+        // Taken whatever the outcome: a refused create leaves the dialog on the edit
+        // stage, where a later `n` must not color the value.
+        let hook = shell
+            .object_dialog
+            .as_mut()
+            .and_then(|s| s.on_created.take());
+        match apply::commit_create(shell, cx) {
+            Some(notice) => set_notice(shell, notice),
+            None => {
+                if let Some(hook) = hook {
+                    crate::shell::choicedialog::drop_covered_value_color(shell);
+                    apply::color_value_once_written(shell, hook, name, cx);
+                }
+            }
+        }
     }
     cx.notify();
 }
@@ -645,9 +740,13 @@ fn begin_copy(shell: &mut ShellView, source: String) {
 /// string so the two sites cannot drift apart.
 const EMPTY_SCOPE_NOTICE: &str = "the frame's scope is empty — nothing to save";
 
-/// Open Scopes naming for the current frame scope from palette or toolbar. An empty
-/// frame scope opens browsing with a notice instead. Creation checks emptiness again
-/// because the frame can change while naming is open.
+/// Open Scopes naming for the current frame scope. An empty frame scope opens
+/// browsing with a notice instead. Creation checks emptiness again because the
+/// frame can change while naming is open.
+// No production door reaches this since the save chip and
+// `scope::save_current` open the Scope dialog's save prompt; the object
+// dialog's own naming tests still open it until the dialog is removed.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::shell) fn open_save_scope(
     shell: &mut ShellView,
     window: &mut Window,
@@ -682,40 +781,29 @@ pub(in crate::shell) fn open_save_scope(
     cx.notify();
 }
 
-/// Open `domain`'s dialog straight into `name`'s edit stage (a scope-bar named chip's
-/// click). A name no layer of the pending-aware config defines stays in Browse with a
-/// notice: `enter_edit` would otherwise build an empty draft for it, and a field edit
-/// there would write a new object the user never asked to create. A defined object
-/// whose content is invalid still opens, since editing it is how it gets fixed.
-pub(in crate::shell) fn open_object(
+/// Open Colors at its naming stage for the value-color list's `New named color…`,
+/// over the list. The name field holds `name`, the draft is seeded with `seed`, and
+/// the created color colors `hook`'s value (`on_created`). Escape or Back at naming
+/// pops back to the list. Nothing opens when a Colors dialog is already in the stack
+/// (`can_open_object` says so).
+pub(in crate::shell) fn open_new_color(
     shell: &mut ShellView,
-    domain: Domain,
-    name: &str,
+    name: String,
+    seed: geode_core::colour::Definition,
+    hook: ColorForValue,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    // `open` refuses this domain silently when it is already open; without this
-    // guard the edit below would land on whatever object dialog is live (see
-    // `open_save_scope`).
-    if !dialog::can_open_object(shell, domain) {
+    if !dialog::can_open_object(shell, Domain::Colors) {
         return;
     }
-    let defined = {
-        let folded = apply::config_with_pending(shell);
-        let config = folded.as_ref().unwrap_or(&shell.services.config);
-        config
-            .layered_docs(domain.doc())
-            .iter()
-            .any(|layered| layered.table.contains_key(name))
-    };
-    open(shell, domain, window, cx);
-    if defined {
-        enter_edit_stage(shell, name, None, cx);
-    } else {
-        set_notice(shell, format!("'{name}' is not defined"));
+    open(shell, Domain::Colors, window, cx);
+    if let Some(state) = shell.object_dialog.as_mut() {
+        state.begin_naming();
+        state.naming_seed = NameSeed::Definition(seed);
+        state.query = name;
+        state.on_created = Some(hook);
     }
-    // `open` synchronized the shared input for Browse; the edit stage needs its own
-    // pass so focus and text match the stage now on screen.
     shell.refresh_dialog_rows(cx);
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
@@ -789,7 +877,7 @@ pub(in crate::shell) fn open_column(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    // Same guard as `open_object`: without it the stages below would land on whatever
+    // Same guard as `open_save_scope`: without it the stages below would land on whatever
     // object dialog is live.
     if !dialog::can_open_object(shell, domain) {
         return;
@@ -846,8 +934,9 @@ fn on_row_clicked(
     // a question owns the mouse as well as the keys. A click here would both open the
     // row (answering the question with a shrug — `enter_edit` clears the confirm) and,
     // worse, move the cursor off the row the question is about, so `enter` would then
-    // act on a different object from the one the prompt names.
-    if state.confirm.is_some() {
+    // act on a different object from the one the prompt names. The save
+    // prompt is a question too.
+    if state.confirm.is_some() || state.save.is_some() {
         return;
     }
     let Some(ix) = state.rows.position(|r| r.name == clicked) else {
@@ -858,7 +947,17 @@ fn on_row_clicked(
     let opens = state.stage != Stage::Naming;
     let name = clicked.to_string();
     shell.object_dialog_scroll.scroll_to_item(ix);
-    if opens {
+    if opens
+        && shell
+            .object_dialog
+            .as_ref()
+            .is_some_and(|s| s.domain.applies_from_browse())
+    {
+        // A click is `enter` on that row: a filled row applies and closes;
+        // an empty slot opens its chain field, which `click` marks as
+        // click-opened so a double-click's second half completes nothing.
+        super::grouping_list::click(shell, &name, window, cx);
+    } else if opens {
         enter_edit_stage(shell, &name, None, cx);
         // The browse list is a door too (`ObjectDialogState::
         // click_opened_stage`): a double-click's second half lands on
@@ -905,7 +1004,7 @@ fn open_selected(shell: &mut ShellView, cx: &mut Context<ShellView>) {
 /// already-built draft until the queued creation reaches active configuration. Reset
 /// the viewport and request repaint. Input text and focus are synchronized by the
 /// caller's keyboard or pointer path after the pure state transition.
-fn enter_edit_stage(
+pub(super) fn enter_edit_stage(
     shell: &mut ShellView,
     name: &str,
     new: Option<Draft>,
@@ -1290,6 +1389,13 @@ fn handle_edit_key_inner(
         cx.notify();
     }
 
+    if shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.save.is_some())
+    {
+        return super::grouping_list::handle_save_key(shell, ks, window, cx);
+    }
     if armed_confirm(shell).is_some() {
         match dialog::ConfirmAnswer::from_key(ks) {
             Some(dialog::ConfirmAnswer::Yes) => answer_confirm(shell, true, cx),
@@ -1607,6 +1713,14 @@ fn handle_edit_key_inner(
                 None => set_notice(shell, "that is as far as this row goes".to_string()),
             }
         }
+        NormalCommand::Verb('d') if editing_ad_hoc(shell) => {
+            super::grouping_list::forget(shell, cx);
+            leave_edit(shell, cx);
+            return true;
+        }
+        NormalCommand::Verb('r') if editing_ad_hoc(shell) => {
+            set_notice(shell, super::grouping_list::AD_HOC_NO_REVERT.to_string())
+        }
         NormalCommand::Verb('d') => arm_delete(shell, cx),
         // In a column stage `r` and `shift+r` release the field(s) to the layers below;
         // everywhere else `r` is the object's revert.
@@ -1684,6 +1798,14 @@ fn handle_edit_key_inner(
                 return true;
             }
             set_notice(shell, format!("{n} is not a verb here"));
+        }
+        NormalCommand::Verb('s')
+            if shell
+                .object_dialog
+                .as_ref()
+                .is_some_and(|state| state.domain.saves_into_roster()) =>
+        {
+            super::grouping_list::arm_save(shell, cx)
         }
         // A letter this stage has no verb for. Named rather than
         // dropped: `d` and `r` have just taught the user that
@@ -1795,7 +1917,7 @@ pub(crate) fn scroll_to_choice(shell: &ShellView) {
 
 /// Shared `i` route for keyboard and action buttons. Groupings opens its whole chain
 /// field; other domains open the selected row's permitted value editor.
-fn open_field(shell: &mut ShellView) {
+pub(super) fn open_field(shell: &mut ShellView) {
     let groupings = shell
         .object_dialog
         .as_ref()
@@ -1952,6 +2074,19 @@ fn handle_text_key(
         cx.notify();
         return true;
     }
+    // ---- `mod+s` in a chain field opened from the list ----
+    //
+    // Takes the typed chain into the draft, then asks which slot to save
+    // it to. A refused chain keeps the field open with the refusal.
+    let from_list = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.chain_from_list);
+    if from_list && ks.key == "s" && ks.mods == shell.services.mod_alias {
+        super::grouping_list::save_from_field(shell, cx);
+        cx.notify();
+        return true;
+    }
     // ---- Scopes expression field ---------------
     //
     // Its suggestion keys (tab, shift+tab, the ±1 moves) come before the
@@ -1966,11 +2101,20 @@ fn handle_text_key(
     // cursor. Plain entry retains its unfiltered row list and edited-row selection;
     // follow that cursor instead of jumping to the first row.
     if ks.key == "escape" {
+        let from_list = shell
+            .object_dialog
+            .as_ref()
+            .is_some_and(|state| state.chain_from_list);
         if let Some(state) = shell.object_dialog.as_mut()
             && let Some(draft) = state.draft.as_mut()
         {
             draft.cancel_text_entry();
             state.mode = DialogMode::Normal;
+        }
+        if from_list {
+            // The field was the whole visit: back to the list, on the row it came from.
+            leave_edit(shell, cx);
+            return true;
         }
         if completions {
             shell.object_dialog_scroll.scroll_to_item(0);
@@ -1984,6 +2128,10 @@ fn handle_text_key(
     if bare && ks.key == "enter" {
         let domain = shell.object_dialog.as_ref().map(|state| state.domain);
         let vocab = shell.expr_vocab.clone();
+        let from_list = shell
+            .object_dialog
+            .as_ref()
+            .is_some_and(|state| state.chain_from_list);
         let step = draft_mut(shell).map(|draft| {
             if completions {
                 draft.apply_chain()
@@ -2008,6 +2156,12 @@ fn handle_text_key(
             }
         });
         match step {
+            Some(Step::Changed | Step::Inert) if from_list => {
+                if let Some(state) = shell.object_dialog.as_mut() {
+                    state.mode = DialogMode::Normal;
+                }
+                super::grouping_list::finish_list_chain(shell, window, cx);
+            }
             Some(Step::Changed) => {
                 if let Some(state) = shell.object_dialog.as_mut() {
                     state.mode = DialogMode::Normal;
@@ -2245,6 +2399,14 @@ fn in_column_stage(shell: &ShellView) -> bool {
         .is_some_and(|draft| draft.column().is_some())
 }
 
+/// Whether the open edit stage is the lane's ad hoc chain.
+fn editing_ad_hoc(shell: &ShellView) -> bool {
+    shell.object_dialog.as_ref().is_some_and(|state| {
+        matches!(&state.stage, Stage::Edit { object }
+            if super::grouping_list::is_ad_hoc(state.domain, object))
+    })
+}
+
 /// Is the Values stage open? [`in_column_stage`]'s own mirror, off [`Draft::values`]
 /// for the same reason: the projection is what the verbs below actually act on.
 fn in_values_stage(shell: &ShellView) -> bool {
@@ -2303,7 +2465,7 @@ fn not_a_values_verb(shell: &mut ShellView) {
 }
 
 /// Set the footer notice, if a dialog is open at all.
-fn set_notice(shell: &mut ShellView, notice: String) {
+pub(super) fn set_notice(shell: &mut ShellView, notice: String) {
     if let Some(state) = shell.object_dialog.as_mut() {
         state.notice = Some(notice);
     }
@@ -2349,6 +2511,16 @@ fn armed_confirm(shell: &ShellView) -> Option<Confirm> {
     shell.object_dialog.as_ref().and_then(|state| state.confirm)
 }
 
+/// Whether a question (a confirm or the save prompt) owns input. A pointer
+/// handler returns early on it: a click behind the question would act on
+/// the rows the question is about.
+pub(super) fn question_up(shell: &ShellView) -> bool {
+    shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.confirm.is_some() || state.save.is_some())
+}
+
 /// Queue the changed draft and announce a definition fork if one is accepted. Read
 /// `would_fork` before the commit advances its baseline. A validation or directory
 /// refusal takes precedence over the fork notice. Memory application and disk writes
@@ -2363,6 +2535,11 @@ fn commit_change(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         .and_then(|state| state.draft.as_ref())
         .is_some_and(|draft| draft.is_dirty());
     if !dirty {
+        return;
+    }
+    // The ad hoc chain is the frame's, not a config object: its edits never
+    // reach the pending batch.
+    if super::grouping_list::commit_ad_hoc(shell, cx) {
         return;
     }
     let fork =
@@ -2400,7 +2577,7 @@ fn scroll_to_cursor(shell: &mut ShellView) {
 /// tick click all call it, and none of them knows or should know that a
 /// projection is open. A fold anywhere else would be a fold each of those
 /// call sites had to remember.
-fn revalidate(shell: &mut ShellView) {
+pub(super) fn revalidate(shell: &mut ShellView) {
     let Some(state) = shell.object_dialog.as_mut() else {
         return;
     };
@@ -2481,12 +2658,22 @@ fn landing_rows(shell: &ShellView) -> Vec<ObjectRow> {
         return Vec::new();
     };
     match apply::config_with_pending(shell) {
-        Some(config) => state.domain.objects(&config),
+        // The leading rows come from the frame, not the config: carry over
+        // the ones already derived, so a position in this list is a position
+        // in the painted one.
+        Some(config) => state
+            .rows
+            .rows()
+            .iter()
+            .filter(|row| super::grouping_list::is_lead(state.domain, &row.name))
+            .cloned()
+            .chain(state.domain.objects(&config))
+            .collect(),
         None => state.rows.rows().to_vec(),
     }
 }
 
-fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+pub(super) fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
         Some(Stage::Edit { object } | Stage::Column { object, .. }) => object.clone(),
         _ => String::new(),
@@ -2689,7 +2876,7 @@ fn in_domain(shell: &ShellView, domain: Domain) -> bool {
 /// does. Scopes are read off the raw pending-aware doc, not the reader, so a
 /// scope the reader drops for some other fault still counts as a user.
 /// Deleting never edits these users; the sentence is what says so.
-fn named_expression_users(shell: &ShellView, name: &str, cx: &App) -> Option<String> {
+pub(crate) fn named_expression_users(shell: &ShellView, name: &str, cx: &App) -> Option<String> {
     let pending = apply::config_with_pending(shell);
     let config = pending.as_ref().unwrap_or(&shell.services.config);
     let users: Vec<String> = config
@@ -2943,7 +3130,8 @@ fn run_confirmed(
                     } else {
                         "reverted"
                     };
-                    let outcome = apply::commit_removal(shell, keys, cx);
+                    let origin = shell.object_dialog.as_ref().map(|s| s.domain);
+                    let outcome = apply::commit_removal(shell, keys, origin, cx);
                     after_removal(shell, &name, cx);
                     match outcome {
                         // The removal joined the batch; the flush (no
@@ -3005,6 +3193,15 @@ fn actions(shell: &ShellView) -> Vec<Action> {
             destructive: true,
         });
     }
+    // The ad hoc chain's row has no layer, so the two blocks above offer
+    // nothing; its own destructive verb is forgetting it.
+    if editing_ad_hoc(shell) {
+        out.push(Action {
+            key: "d",
+            label: "Forget this chain".to_string(),
+            destructive: true,
+        });
+    }
     // `i` is a button wherever the selected row is one it opens — the footer's own test
     // (`RowVocabulary`), plus Groupings' whole-chain `i` which is live on every row
     // there. Never while a text field is open, though `build_edit` withdraws the whole
@@ -3017,6 +3214,13 @@ fn actions(shell: &ShellView) -> Vec<Action> {
         out.push(Action {
             key: "i",
             label: "Edit value".to_string(),
+            destructive: false,
+        });
+    }
+    if state.domain.saves_into_roster() && draft.text_entry.is_none() {
+        out.push(Action {
+            key: "s",
+            label: "Save to slot…".to_string(),
             destructive: false,
         });
     }
@@ -3065,6 +3269,21 @@ fn build(
     // never repaired.
     #[cfg(debug_assertions)]
     shell.assert_rows_current(cx);
+    let one_line = state.domain.applies_from_browse();
+    let (row_height, visible_rows) = if one_line {
+        (GROUPING_ROW_HEIGHT, GROUPING_VISIBLE_ROWS)
+    } else {
+        (ROW_HEIGHT, VISIBLE_ROWS)
+    };
+    // Read once per build: which row stands for the lane's choice.
+    let active_row = one_line
+        .then(|| super::grouping_list::active_row(shell.target_frame().read(cx).grouping_choice()));
+    // Which rows offer `save`: the frame's answer, as `s` reads it.
+    let held = if one_line {
+        super::grouping_list::HeldChains::of(&shell.target_frame().read(cx))
+    } else {
+        super::grouping_list::HeldChains::default()
+    };
     let theme = cx.theme();
     // Copied out so the row closures below don't hold the `theme` borrow.
     let row_paint = super::super::listrow::row_paint(theme);
@@ -3090,7 +3309,7 @@ fn build(
         .id("objectdialog-list")
         .w(scale::design(WIDTH))
         .h(scale::design(
-            (state.rows.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT),
+            (state.rows.len().max(1) as f32 * row_height).min(visible_rows as f32 * row_height),
         ))
         .overflow_y_scroll()
         .track_scroll(&shell.object_dialog_scroll)
@@ -3109,7 +3328,9 @@ fn build(
             .gap_3()
             .px_2()
             .py_1()
-            .rounded(theme.radius);
+            .rounded(theme.radius)
+            // The hover group the trailing `edit`/`save` controls reveal on.
+            .when(one_line, |el| el.group("objectdialog-row"));
         let row_el = super::super::listrow::paint_row(row_el, row_paint, is_selected);
 
         // A prefixed row paints `<prefix> · ` muted ahead of the name: one shared
@@ -3122,17 +3343,49 @@ fn build(
             theme.muted_foreground,
             row_paint.accent,
         );
-        let label = v_flex().gap_0p5().child(head).child(
-            div()
-                .font_family(crate::fonts::MONO)
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(crate::palette::highlighted_runs(
-                    &text.secondary,
-                    &shown.secondary,
-                    row_paint.accent,
-                )),
-        );
+        let label = if one_line {
+            // A row with no chain (an empty slot, no ad hoc chain yet) reads muted.
+            let muted = !super::grouping_list::has_chain(row)
+                && row.name != super::grouping_list::VIEW_DEFAULT;
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .w(scale::design(GROUPING_LEAD_WIDTH))
+                        .font_family(crate::fonts::MONO)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(crate::palette::highlighted_runs(
+                            &text.primary,
+                            &shown.primary,
+                            row_paint.accent,
+                        )),
+                )
+                .child(
+                    div()
+                        .font_family(crate::fonts::MONO)
+                        .text_sm()
+                        .when(muted, |el| el.text_color(theme.muted_foreground))
+                        .child(crate::palette::highlighted_runs(
+                            &text.secondary,
+                            &shown.secondary,
+                            row_paint.accent,
+                        )),
+                )
+        } else {
+            v_flex().gap_0p5().child(head).child(
+                div()
+                    .font_family(crate::fonts::MONO)
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(crate::palette::highlighted_runs(
+                        &text.secondary,
+                        &shown.secondary,
+                        row_paint.accent,
+                    )),
+            )
+        };
 
         // Show the winning layer, user override, and drift markers. Unconfigured roster
         // entries have no winning layer and receive no fabricated provenance.
@@ -3167,6 +3420,34 @@ fn build(
                 cx,
             ));
         }
+        if one_line {
+            if row.name == super::grouping_list::VIEW_DEFAULT {
+                markers = markers.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(super::grouping_list::VIEW_DEFAULT_NOTE),
+                );
+            }
+            if row.name == super::grouping_list::AD_HOC && super::grouping_list::has_chain(row) {
+                markers = markers.child(dialog::badge(
+                    "ad hoc",
+                    theme.muted_foreground,
+                    theme.border,
+                    Some("objectdialog-adhoc".to_string()),
+                    cx,
+                ));
+            }
+            if active_row.as_deref() == Some(row.name.as_str()) {
+                markers = markers.child(dialog::badge(
+                    "active",
+                    theme.primary,
+                    theme.primary,
+                    Some("objectdialog-active".to_string()),
+                    cx,
+                ));
+            }
+        }
 
         // a swatch before the label, resolved from this row's own saved color —
         // painted only when the color actually resolves (a dropped or invalid one
@@ -3181,13 +3462,25 @@ fn build(
                 dialog::swatch(hsla, format!("objectdialog-swatch-{}", row.name), cx)
             });
 
+        let controls = one_line
+            .then(|| super::grouping_list::row_controls(row, is_selected, &held, entity))
+            .flatten();
+
         let entity_for_row = entity.clone();
         let clicked = row.name.clone();
         let selector_name = row.name.clone();
         let row_el = row_el
             .children(swatch)
             .child(label)
-            .child(markers)
+            // One trailing group, so `justify_between` keeps the label left
+            // and the controls beside the markers at the right.
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .children(controls)
+                    .child(markers),
+            )
             // Keyed by the object's own name, not its index: the list is
             // re-ranked under the cursor by every keystroke, so a
             // position-keyed selector (or click handler) would name a
@@ -3239,7 +3532,9 @@ fn build(
 
     // Advertise only keys supported by the current stage and mode. Filter-mode
     // Enter keeps the query; normal-mode Enter opens the selected object.
-    let hints: Vec<Hint> = if state.confirm.is_some() {
+    let hints: Vec<Hint> = if let Some(hints) = save_hints(state) {
+        hints
+    } else if state.confirm.is_some() {
         // The edit footer's own three lines: a question on screen is the
         // whole vocabulary until it is answered.
         vec![
@@ -3254,6 +3549,9 @@ fn build(
         ]
     } else {
         match state.mode {
+            DialogMode::Normal if state.domain.applies_from_browse() => {
+                super::grouping_list::list_hints(state.query.is_empty())
+            }
             DialogMode::Normal => {
                 let mut hints = vec![
                     Hint::new(HintRow::Move, &["j", "k"], "move"),
@@ -3268,11 +3566,6 @@ fn build(
                 // `c`: Scopes alone, beside `n`.
                 if state.domain.duplicable() {
                     hints.push(Hint::new(HintRow::Edit, &["c"], "copy"));
-                }
-                // a digit opens that slot — Groupings only, the one domain whose
-                // objects are numbered.
-                if state.domain == Domain::Groupings {
-                    hints.push(Hint::range(HintRow::Go, "1", "9", "open slot"));
                 }
                 hints.push(
                     Hint::new(HintRow::Go, &["enter"], "open").selector("objectdialog-hint-enter"),
@@ -3349,6 +3642,7 @@ fn build(
             NameSeed::CopyOf(src) => format!("Copy of {src} · name"),
             NameSeed::Empty => format!("New {} · name", object_word(state.domain)),
             NameSeed::FromFrame => "Save scope · name".to_string(),
+            NameSeed::Definition(_) => format!("New {} · name", object_word(state.domain)),
         };
         dialog::name_row(&shell.dialog_input, &label, cx)
     } else {
@@ -3359,17 +3653,19 @@ fn build(
     // action bar, in the edit stage's place for it (outside the list, so the rows never
     // shift under it) — and, while a question stands, the confirm row in the bar's
     // place, exactly as `build_edit` swaps them.
-    let action_block = match state.confirm {
+    let action_block = match (&state.save, state.confirm) {
+        // The save prompt takes the bar's place as a confirm does.
+        (Some(save), _) => super::grouping_list::save_prompt(state, save, entity, cx),
         // The RECORDED target, never the cursor's current answer: after
         // a reload re-ranks the list the index names a different row,
         // and the prompt must name the object the answer is about — the
         // one `run_confirmed` will refuse for otherwise. Also the one
         // read here that derives nothing per frame.
-        Some(confirm) => {
+        (None, Some(confirm)) => {
             let name = state.confirm_target.clone().unwrap_or_default();
             confirm_row(confirm, &name, state.confirm_detail.as_deref(), entity, cx)
         }
-        None => browse_action_bar(state, entity),
+        (None, None) => browse_action_bar(state, entity),
     };
 
     v_flex()
@@ -3379,6 +3675,25 @@ fn build(
         .child(action_block)
         .child(footer)
         .into_any_element()
+}
+
+/// The footer while the save prompt is up, or `None` when it is not: the
+/// digits and `escape` while it asks for a slot, the confirm footer's own
+/// lines while a user-owned slot awaits its y/n.
+fn save_hints(state: &ObjectDialogState) -> Option<Vec<Hint>> {
+    let save = state.save.as_ref()?;
+    Some(if save.replace.is_some() {
+        vec![
+            Hint::prose(HintRow::Go, "this needs an answer first"),
+            Hint::new(HintRow::Go, &["enter"], "go ahead"),
+            Hint::new(HintRow::Go, &["escape"], "leave it alone"),
+        ]
+    } else {
+        vec![
+            Hint::range(HintRow::Go, "1", "9", "save and activate that slot"),
+            Hint::new(HintRow::Go, &["escape"], "back"),
+        ]
+    })
 }
 
 /// Typed-entry label shared by footer sites: choice rows invite choosing a value; other
@@ -3412,20 +3727,24 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // Build actions before borrowing the theme. Hide the action bar while a value field
     // is open: pointer actions must not arm a destructive question over a focused text
     // input when keyboard actions cannot reach those verbs.
-    let action_block = match (draft.text_entry.is_some(), state.confirm) {
-        // `min_h_6` for the same reason `action_bar` itself carries it: this
-        // placeholder sits where that bar would, and a bare `div()` with no children
-        // has no height of its own, so opening a field (`i`) would shift the footer up
-        // by a button's height and `escape` would shift it back.
-        (true, _) => div().min_h_6().into_any_element(),
-        (false, Some(confirm)) => confirm_row(
-            confirm,
-            &draft.name,
-            state.confirm_detail.as_deref(),
-            entity,
-            cx,
-        ),
-        (false, None) => action_bar(shell, entity),
+    let action_block = if let Some(save) = state.save.as_ref() {
+        super::grouping_list::save_prompt(state, save, entity, cx)
+    } else {
+        match (draft.text_entry.is_some(), state.confirm) {
+            // `min_h_6` for the same reason `action_bar` itself carries it: this
+            // placeholder sits where that bar would, and a bare `div()` with no children
+            // has no height of its own, so opening a field (`i`) would shift the footer up
+            // by a button's height and `escape` would shift it back.
+            (true, _) => div().min_h_6().into_any_element(),
+            (false, Some(confirm)) => confirm_row(
+                confirm,
+                &draft.name,
+                state.confirm_detail.as_deref(),
+                entity,
+                cx,
+            ),
+            (false, None) => action_bar(shell, entity),
+        }
     };
     let theme = cx.theme();
     let row_paint = super::super::listrow::row_paint(theme);
@@ -3484,10 +3803,17 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         cx,
                     ))
                 })
-                .child(div().text_lg().child(draft.name.clone()))
+                .child(
+                    div()
+                        .text_lg()
+                        .child(super::grouping_list::title_of(state.domain, &draft.name)),
+                )
                 .into_any_element()
         }
-        _ => div().text_lg().child(draft.name.clone()).into_any_element(),
+        _ => div()
+            .text_lg()
+            .child(super::grouping_list::title_of(state.domain, &draft.name))
+            .into_any_element(),
     };
 
     // The object header: its name, and the same two provenance markers
@@ -3996,7 +4322,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                     entity_for_row.update(cx, |shell, cx| match open {
                         Some(Completions::Chain) => {
-                            on_completion_clicked(shell, clicked, window, cx)
+                            on_completion_clicked(shell, clicked, event.click_count, window, cx)
                         }
                         Some(_) => {}
                         None => on_edit_row_clicked(shell, clicked, event.click_count, window, cx),
@@ -4175,7 +4501,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let i_hint = |row: Option<EditRow>| -> Hint {
         Hint::new(HintRow::Edit, &["i"], i_hint_word(row, draft)).selector("objectdialog-hint-i")
     };
-    let hints: Vec<Hint> = if state.confirm.is_some() {
+    let hints: Vec<Hint> = if let Some(hints) = save_hints(state) {
+        hints
+    } else if state.confirm.is_some() {
         vec![
             Hint::prose(HintRow::Go, "this needs an answer first"),
             Hint::new(HintRow::Go, &["enter"], "go ahead"),
@@ -4196,6 +4524,18 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 hints.push(Hint::new(HintRow::Move, &["up", "down"], "move"));
                 hints.push(Hint::new(HintRow::Go, &["tab"], "complete"));
                 hints.push(Hint::new(HintRow::Go, &["enter"], "apply"));
+                if state.chain_from_list {
+                    // The chip shows the user's own alias, so it is a
+                    // keystroke rather than a spec, which parses with none.
+                    hints.push(Hint::keystroke(
+                        HintRow::Go,
+                        Keystroke {
+                            key: "s".to_string(),
+                            mods: shell.services.mod_alias,
+                        },
+                        "save to slot…",
+                    ));
+                }
             }
             Completions::Choice => {
                 hints.push(Hint::prose(HintRow::Move, "type to narrow"));
@@ -4286,6 +4626,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             hints.push(
                 Hint::new(HintRow::Edit, &["i"], "type a chain").selector("objectdialog-hint-i"),
             );
+            if state.domain.saves_into_roster() {
+                hints.push(Hint::new(HintRow::Edit, &["s"], "save to slot…"));
+            }
             hints.push(Hint::range(HintRow::Go, "1", "9", "jump to slot"));
         } else if types {
             hints.push(i_hint(selected_row));
@@ -4328,7 +4671,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // One fixed-height line shows the latest notice, otherwise selected-field help.
     // Keep it blank during confirmation, but retain grammar help during text entry.
     // Fixed line height and truncation prevent footer movement.
-    let help = if state.confirm.is_some() {
+    let help = if state.confirm.is_some() || state.save.is_some() {
         ""
     } else {
         selected_row
@@ -4392,7 +4735,11 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // field names the object and the row it is editing.
     let filter = if let Some(entry) = draft.text_entry {
         let label = if entry.completions == Completions::Chain {
-            format!("slot {} · chain", draft.name)
+            if super::grouping_list::is_ad_hoc(state.domain, &draft.name) {
+                "ad hoc · chain".to_string()
+            } else {
+                format!("slot {} · chain", draft.name)
+            }
         } else {
             // Use the field label when the entry names a field; other row shapes use
             // the shared row label rather than assuming all entries are field rows.
@@ -4864,9 +5211,14 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
         return;
     }
     match key {
+        "d" if editing_ad_hoc(shell) => {
+            super::grouping_list::forget(shell, cx);
+            leave_edit(shell, cx);
+        }
         "d" => arm_delete(shell, cx),
         "r" => arm_revert(shell),
         "i" => open_field(shell),
+        "s" => super::grouping_list::arm_save(shell, cx),
         "o" => overwrite_scope(shell, cx),
         _ => {}
     }
@@ -4894,8 +5246,8 @@ fn on_edit_row_clicked(
     {
         cx.notify();
     }
-    // Ignore row clicks while a confirmation owns input, before moving selection.
-    if armed_confirm(shell).is_some() {
+    // Ignore row clicks while a question owns input, before moving selection.
+    if question_up(shell) {
         return;
     }
     let domain = shell.object_dialog.as_ref().map(|state| state.domain);
@@ -5000,7 +5352,7 @@ pub(in crate::shell) fn on_value_chip_clicked(
     let Some(draft) = state.draft.as_ref() else {
         return;
     };
-    if state.confirm.is_some() || draft.text_entry.is_some() {
+    if state.confirm.is_some() || state.save.is_some() || draft.text_entry.is_some() {
         return;
     }
     if position >= draft.visible_rows().len() {
@@ -5048,7 +5400,7 @@ fn on_tick_clicked(
         cx.notify();
         return;
     }
-    if armed_confirm(shell).is_some() {
+    if question_up(shell) {
         return;
     }
     let Some(draft) = draft_mut(shell) else {
@@ -5068,9 +5420,15 @@ fn on_tick_clicked(
 /// Filter mode and synchronize the focused input. A failed completion leaves selection
 /// on the clicked row. Completion and confirmation cannot coexist: opening a field
 /// hides the action bar, and confirmation blocks field entry.
+///
+/// The second half of a double-click whose first half opened this field (an
+/// empty slot clicked in the Groupings list) is dropped: it lands on
+/// whichever completion now sits where the list row was, a dimension the
+/// trader never aimed at. See `ObjectDialogState::click_opened_stage`.
 fn on_completion_clicked(
     shell: &mut ShellView,
     position: usize,
+    click_count: usize,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
@@ -5078,6 +5436,17 @@ fn on_completion_clicked(
         && state.notice.take().is_some()
     {
         cx.notify();
+    }
+    if question_up(shell) {
+        return;
+    }
+    if let Some(state) = shell.object_dialog.as_mut() {
+        if click_count <= 1 {
+            // A fresh click sequence forgets what the last one opened.
+            state.click_opened_stage = false;
+        } else if state.click_opened_stage {
+            return;
+        }
     }
     let completed = draft_mut(shell).is_some_and(|draft| {
         if position >= draft.visible_rows().len() {
@@ -5182,7 +5551,7 @@ pub(in crate::shell) fn on_row_dropped(
         cx.notify();
         return;
     }
-    if armed_confirm(shell).is_some() {
+    if question_up(shell) {
         return;
     }
     let Some(draft) = draft_mut(shell) else {

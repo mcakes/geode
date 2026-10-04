@@ -27,7 +27,6 @@ impl ShellView {
         // Palette toggles are recognized ahead of command-line key ownership;
         // close that prompt first so only the new surface owns input.
         self.close_stack_list(cx);
-        self.close_add_filter_menu(cx);
         self.close_row_menu(cx);
         // Pending matcher state cannot survive an overlay with separate key
         // routing, or later shell keys could complete an abandoned sequence.
@@ -117,13 +116,10 @@ impl ShellView {
                 self.persist_theme(cx);
             }
             PaletteItem::Scope(name) => {
-                // Load the live saved scope, notifying only when the frame changed.
+                // The `scope::<name>` actions' own path, notifying whenever
+                // the frame changed (provenance included).
                 let name = name.clone();
-                self.target_frame().update(cx, |f, cx| {
-                    if let Ok(true) = f.load_scope(&name) {
-                        cx.notify();
-                    }
-                });
+                let _ = self.load_saved_scope(&name, cx);
             }
         }
     }

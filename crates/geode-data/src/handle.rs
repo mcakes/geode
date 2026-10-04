@@ -23,6 +23,7 @@ use geode_core::query::{
     QueryOutcome, ReferenceOutcome, ReferenceParams,
 };
 use geode_core::series::{SeriesOutcome, SeriesParams};
+use geode_core::textfile::{TextFileOp, TextFileOutcome, TextFileParams, TextFileResult};
 use geode_core::view::ViewSpec;
 use geode_core::vol::{VolSliceOutcome, VolSliceParams};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -87,6 +88,8 @@ pub enum Request {
     /// Document upload to an egress target, answered with DataEvent::Upload
     /// from the service thread (a refusal) or the target's worker.
     Upload(UploadParams),
+    /// Text file read or write, answered with DataEvent::TextFile by the file worker.
+    TextFile(TextFileParams),
     /// Position-system command, answered with DataEvent::Command from the
     /// service thread (a refusal) or the position worker.
     MoveLhu(MoveLhuParams),
@@ -225,6 +228,16 @@ impl DataHandle {
     /// prevent that outcome. Admission does not acknowledge transport success.
     pub fn upload(&self, params: UploadParams) -> Result<(), Refusal> {
         self.send(Request::Upload(params))
+    }
+
+    /// Queue a text file read or write. `Err(Busy)` means the queue was full
+    /// and a later submission can succeed; `Err(Stopped)` means the service
+    /// can no longer serve and no outcome is owed. Either way the caller
+    /// reports the refusal. Serviced requests normally emit one
+    /// `DataEvent::TextFile`, including a full or stopped file worker's
+    /// refusal; startup and event-delivery failures can prevent that outcome.
+    pub fn text_file(&self, params: TextFileParams) -> Result<(), Refusal> {
+        self.send(Request::TextFile(params))
     }
 
     /// Queue a Move LHU command. `Err(Busy)` means the queue was full and a
@@ -432,6 +445,20 @@ impl DataHandle {
     pub fn fill_for_tests(&self) {
         while self.cancel(QueryKey(u64::MAX)) {}
     }
+
+    /// The derived dimensions of the view replacement waiting in the
+    /// mailbox, if any: what the last `replace_views` handed the service.
+    /// A test is the service of a `for_tests` handle and nothing drains
+    /// the mailbox, so this reads the latest hand-off.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pending_dimensions_for_tests(&self) -> Option<DerivedDimensions> {
+        self.inner
+            .pending_views
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|r| r.dimensions.clone())
+    }
 }
 
 impl DataService {
@@ -569,6 +596,12 @@ enum PanicAnswer {
         tag: u64,
         target: String,
     },
+    TextFile {
+        key: QueryKey,
+        tag: u64,
+        path: std::path::PathBuf,
+        write: bool,
+    },
     Command {
         tag: u64,
         count: usize,
@@ -666,6 +699,15 @@ impl PanicAnswer {
                     key: p.key,
                     tag: p.tag,
                     target: p.target.clone(),
+                },
+            ),
+            Request::TextFile(p) => (
+                "text_file",
+                PanicAnswer::TextFile {
+                    key: p.key,
+                    tag: p.tag,
+                    path: p.path.clone(),
+                    write: matches!(p.op, TextFileOp::Write { .. }),
                 },
             ),
             Request::MoveLhu(p) => (
@@ -796,6 +838,24 @@ impl PanicAnswer {
                     tag,
                     target,
                     result: Err(reason),
+                }));
+            }
+            PanicAnswer::TextFile {
+                key,
+                tag,
+                path,
+                write,
+            } => {
+                let result = if write {
+                    TextFileResult::Written(Err(reason))
+                } else {
+                    TextFileResult::Read(Err(reason))
+                };
+                let _ = sink(DataEvent::TextFile(TextFileOutcome {
+                    key,
+                    tag,
+                    path,
+                    result,
                 }));
             }
             PanicAnswer::Command { tag, count, lhu } => {
@@ -986,6 +1046,7 @@ fn dispatch(service: &DataService, sink: &EventSink, req: Request) {
         Request::Publish(publish) => service.publish(publish),
         Request::Forget(forget) => service.forget(forget),
         Request::Upload(params) => service.upload(params),
+        Request::TextFile(params) => service.text_file(params),
         Request::MoveLhu(params) => service.move_lhu(params),
         Request::Fetch(params) => service.fetch(&params),
         Request::Identities { source } => {
@@ -2166,6 +2227,7 @@ mod tests {
             Request::Price(p) => p.key == MARKED,
             Request::VolSlices(p) => p.key == MARKED,
             Request::Upload(p) => p.key == MARKED,
+            Request::TextFile(p) => p.key == MARKED,
             Request::MoveLhu(p) => p.tag == MARKED.0,
             Request::Fetch(p) => p.key == MARKED,
             Request::Publish(p) => p.dataset == "marked",
@@ -2383,6 +2445,64 @@ mod tests {
             if o.key == MARKED && o.tag == 5 && o.target == "sophis"
                 && o.result.as_ref().is_err_and(|r| panicked(r, "upload")))),
             "{seen:?}"
+        );
+    }
+
+    /// A write's panic answers as a failed write, not a failed read: the
+    /// tile tells an export failure from an import one by the variant.
+    #[test]
+    fn a_panicking_text_file_write_is_answered_as_a_failed_write_on_its_key() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.text_file(TextFileParams {
+            key: MARKED,
+            tag: 6,
+            path: "out.csv".into(),
+            op: TextFileOp::Write { text: "x".into() },
+        })
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::TextFile(o)
+            if o.key == MARKED && o.tag == 6
+                && matches!(&o.result, TextFileResult::Written(Err(r)) if panicked(r, "text_file")))),
+            "{seen:?}"
+        );
+    }
+
+    /// The production route: `DataHandle::text_file` through the request
+    /// loop to the file worker, answered as one `DataEvent::TextFile`.
+    #[test]
+    fn a_text_file_read_is_served_by_the_file_worker_and_answered() {
+        let (dir, h, rx) = probed(|_| {});
+        let path = dir.path().join("in.csv");
+        std::fs::write(&path, "name\nx\n").unwrap();
+        h.text_file(TextFileParams {
+            key: QueryKey(3),
+            tag: 2,
+            path: path.clone(),
+            op: TextFileOp::Read { max_bytes: 1024 },
+        })
+        .unwrap();
+        let outcome = loop {
+            match rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the read is answered")
+            {
+                DataEvent::TextFile(o) => break o,
+                DataEvent::ThreadStopped { thread, reason } => {
+                    panic!("{thread} stopped: {reason}")
+                }
+                _ => continue,
+            }
+        };
+        assert_eq!(
+            outcome,
+            TextFileOutcome {
+                key: QueryKey(3),
+                tag: 2,
+                path,
+                result: TextFileResult::Read(Ok("name\nx\n".into())),
+            }
         );
     }
 

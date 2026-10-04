@@ -28,6 +28,28 @@ replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
+`value_colors` replaces whole at depth 2. A dimension's values merge per value,
+so a user entry for one value keeps the lower layers' other values. One value's
+entry (a name, `"none"`, or an inline table) is replaced whole, so a user
+`{ hue = 30 }` over a desk `{ token = "warning" }` is that hue and never a
+table with both keys. An entry of `"none"` clears a lower layer's color.
+
+```toml
+[underlying_ref]
+SPX  = "blue"                       # a named color from colors.toml
+NDX  = { hue = 210 }                # inline, theme-relative
+RUT  = { hue = 30, tone = "light" }
+DAX  = { token = "warning" }        # inline semantic token
+FTSE = "none"                       # clears a lower layer
+```
+
+An inline table follows the `colors.toml` definition rules exactly: `hue`
+0–360 (360 reads as 0) with an optional `tone` (`normal` | `light`), or
+`token`, never both and never neither. `tint_sign` is refused because a value
+has no sign. Every refusal is an error at the entry's path
+(`value_colors.{dimension}.{value}`, plus `.hue` or `.token` for a field
+error) and drops the entry; an invalid `tone` warns and falls back to normal.
+
 Disk loading reads immediate `*.toml` children in sorted path order. Missing
 or unreadable directories and failed directory entries are silently skipped.
 An individual file read or TOML parse failure produces an error diagnostic
@@ -67,11 +89,12 @@ The main configuration documents have distinct owners:
 | `positions.toml` | The one position service: the adapter that takes position commands such as Move LHU |
 | `panels.toml` | Market-data panels: the dataset, document kind, layout, formats, and kind actions of each panel tile kind |
 | `pricer_templates.toml` | Named option-package templates used by the pricer's shorthand |
-| `dimensions.toml` | Derived dimensions used for grouping and scope |
+| `dimensions.toml` | Derived dimensions used for grouping and scope; each entry is what the interface calls a classification |
 | `groupings.toml` | The nine shared grouping slots |
 | `scopes.toml` | Named scopes |
 | `expressions.toml` | Named scope expressions, referenced by name from a saved scope or the frame |
 | `colors.toml` | Named semantic data colors |
+| `value_colors.toml` | A color per value of a text dimension: a colors.toml name or an inline { hue } / { token } table |
 | `dataset_presentation.toml` | Desk-level column presentation between schema and view overrides |
 | `view_presentation.toml` | Per-view column order, visibility, widths, and formatting overrides |
 | `keymap.toml` | User bindings layered over builtin and module bindings |
@@ -562,6 +585,19 @@ then persist to the user layer. Memory acceptance and disk success are
 separate outcomes. See [configuration dialogs](configuration-dialogs.md) for
 inherited objects, presentation routing, reload interaction, and write failures.
 
+Modules write configuration only through the shell's config door
+(`FrameRef::queue_config_edits`, see [the config
+door](shell.md#the-config-door)), which joins the object dialogs' pending
+batch. `dimensions` has a runtime writer this way, the Classifications tile
+(see [features](features.md#classifications)): a classification edited in a
+tile is written as its whole `dimensions.toml` object, never as one changed
+key, because the document replaces whole named objects across layers. Editing
+a desk or builtin classification therefore forks it: the user layer receives
+the complete object, which shadows the lower layer's from then on, including
+later desk changes to it. Removing the object removes only the user layer's
+copy, which reveals the lower layer's again; it cannot delete a desk
+classification.
+
 An inherited object can be edited by creating a user override. Deleting that
 override reveals the lower-layer value again. `overrides.toml` records accepted
 schema or source drift where a dialog must distinguish a deliberate exception
@@ -607,7 +643,7 @@ Accepted candidates update runtime state according to their inputs:
 | `scopes`, `datasets`, or `dimensions` | Rebuild saved scopes |
 | `expressions`, `datasets`, or `dimensions` | Rebuild named expressions; a changed or redefined entry bumps the frame's config version so a tile whose scope references it requeries |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
-| Views, either presentation document, dimensions, or colors | Emit `ConfigReloaded` for the app bridge |
+| Views, either presentation document, dimensions, colors, or value colors | Emit `ConfigReloaded` for the app bridge |
 | `app` | Emit `AppSettingsReloaded`; the bridge hands `blotter.stale_after` to the blotter and panel factories |
 | Sources, datasets, egress, positions, panels, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
@@ -629,19 +665,26 @@ data service, so a full request queue cannot permanently lose a configuration
 reload.
 
 The bridge's `ConfigReloaded` handler runs for changes to views, view/dataset
-presentation, dimensions, or colors. It uses the same presentation-aware
-view loader as startup, updates module factories, and offers views/dimensions
-to the service. This is not an atomic update across factories and workers;
-the handle acknowledges retention, not application. See
+presentation, dimensions, colors, or value colors. It uses the same
+presentation-aware view loader as startup, updates module factories, and
+offers views/dimensions to the service. The colors it hands the blotter and
+timeseries factories carry the `value_colors` mapping, checked against those
+definitions and the declared dimensions, as startup's do. This is not an
+atomic update across factories and workers; the handle acknowledges
+retention, not application. See
 [view replacement](request-delivery.md#view-replacement-and-shutdown).
 
 That handler also rereads the factory validation schema. Dataset edits
 require restart, so a later eligible reload can update the factory schema
 before the running service is rebuilt. The stale threshold lives in `app` and
 reaches the blotter and panel factories through `AppSettingsReloaded`, on its
-own; the pricer reads it in its own revision observer. Presentation and color-reader
-diagnostics append to the retained data-diagnostics lane; the shell remains
-responsible for replacing the current config-diagnostics batch.
+own; the pricer reads it in its own revision observer. That observer's key
+also covers `colors` and `value_colors`, so an edit to either alone re-runs
+the pricer's reload and hands its factory colors carrying the mapping; their
+diagnostics are the `ConfigReloaded` handler's to report. Presentation and
+color-reader (including value-color) diagnostics append to the retained
+data-diagnostics lane; the shell remains responsible for replacing the
+current config-diagnostics batch.
 
 ## Keymaps and actions
 
@@ -666,6 +709,12 @@ mode toggle. Named data colors resolve from theme anchors in OKLCH and seek
 a 3:1 contrast ratio. Custom themes can prevent the available lightness range
 from reaching that target; untinted semantic tokens retain their exact color.
 See [color resolution](typed-documents.md#colors-and-numeric-formatting).
+
+The bundled choices include Kanagawa Wave, Dragon, and Lotus; Rosé Pine,
+Rosé Pine Moon, and Rosé Pine Dawn; and GitHub Light and GitHub Dark Dimmed.
+Use the complete displayed name in `[theme] name`, Settings, or the command
+palette. Lotus, Dawn, and GitHub Light are light themes. Theme assets and
+upstream attribution are documented in [the theme catalogue](../../assets/themes/README.md).
 
 Default chart series use an explicit five-color palette chosen for each named
 variant. Bundled palettes are checked for at least 3:1 background contrast

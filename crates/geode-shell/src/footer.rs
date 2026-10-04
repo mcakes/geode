@@ -10,6 +10,8 @@
 
 use std::borrow::Cow;
 
+use crate::keymap::Keystroke;
+
 /// Which footer row a hint belongs to, in the order the rows paint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HintRow {
@@ -59,6 +61,10 @@ pub struct Hint {
     /// A `debug_selector` for the first chip, so a window test can ask
     /// whether this hint was painted at all.
     pub selector: Option<&'static str>,
+    /// A chip built from a keystroke rather than a spec, painted before
+    /// `keys`: for a chord on the user's `mod` alias, which no spec can
+    /// name (specs parse with no alias).
+    pub keystroke: Option<Keystroke>,
 }
 
 impl Hint {
@@ -70,7 +76,19 @@ impl Hint {
             between: None,
             word: word.into(),
             selector: None,
+            keystroke: None,
         }
+    }
+
+    /// A hint whose one chip is `keystroke`, as the user's alias spells it.
+    pub fn keystroke(
+        row: HintRow,
+        keystroke: Keystroke,
+        word: impl Into<Cow<'static, str>>,
+    ) -> Self {
+        let mut hint = Hint::new(row, &[], word);
+        hint.keystroke = Some(keystroke);
+        hint
     }
 
     /// A prose-only hint — no chips, just the words.

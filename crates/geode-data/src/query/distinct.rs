@@ -1192,6 +1192,76 @@ role = "attribute"
         );
     }
 
+    /// Distinct over a derived dimension reads `book` where the fixture
+    /// stores it: `risk` at position grain (no rows) and `ref` at
+    /// instrument grain. BK001 there is unmapped and one book is NULL; both
+    /// probe to NULL and must not surface as pickable values, and the mapped
+    /// labels keep exact counts. The quoted source and label pin the literal
+    /// escaping inside MAP([...]).
+    #[test]
+    fn compile_distinct_drops_unmapped_and_null_sources_and_counts_mapped_labels() {
+        let mut f = two_dataset_fixture();
+        f.conn()
+            .execute_batch(
+                "insert into ref_instrument_live values
+                   ('O''Neil','L','P20','C','J20', 10.0, 'USD', 'b', 1, 1, now()),
+                   (NULL,'L','P21','C','J21', 10.0, 'USD', 'b', 1, 1, now());",
+            )
+            .unwrap();
+        let doc = merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin(
+                "dimensions",
+                "[desk]\nfrom = \"book\"\n[desk.values]\n\
+                 NORTH = [\"BK000\"]\n\"Desk 'Q'\" = [\"O'Neil\"]\n",
+            )
+            .unwrap()],
+        );
+        f.dims = DerivedDimensions::from_doc(&doc).0;
+
+        let book = f.run(
+            &compile_distinct(
+                f.conn(),
+                &f.schema,
+                &f.dims,
+                &DistinctParams {
+                    column: "book".into(),
+                    ..base_params()
+                },
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            book,
+            vec![
+                ("BK000".to_string(), 4),
+                ("BK001".to_string(), 1),
+                ("O'Neil".to_string(), 1)
+            ],
+            "sanity: the source values as stored, NULL book already dropped: {book:?}"
+        );
+
+        let desk = compile_distinct(
+            f.conn(),
+            &f.schema,
+            &f.dims,
+            &DistinctParams {
+                column: "desk".into(),
+                ..base_params()
+            },
+        )
+        .unwrap();
+        let mut rows = f.run(&desk);
+        rows.sort();
+        // BK000's 4 rows and O'Neil's 1, each once: BK001 and the NULL book
+        // are gone, and no row was multiplied on the way.
+        assert_eq!(
+            rows,
+            vec![("Desk 'Q'".to_string(), 1), ("NORTH".to_string(), 4)],
+            "only mapped labels are offered, with exact counts"
+        );
+    }
+
     /// A derived dimension returns mapped labels with counts summed across
     /// the source values each label covers. Compare against a query for the
     /// source book column so both requests use the same per-dataset grains:

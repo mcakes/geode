@@ -1990,6 +1990,37 @@ fn closing_a_tile_and_reusing_nothing_leaves_no_membership_in_the_session(
     assert!(!text.contains("follow"), "{text}");
 }
 
+/// A closed tile never takes its config-door notices: closing it drops
+/// them even when it was in no group, so they neither pile up nor reach a
+/// later occupant under the same id. Its neighbour's stay.
+#[gpui::test]
+fn closing_an_unlinked_tile_drops_its_pending_notices(cx: &mut gpui::TestAppContext) {
+    use crate::frame::TileNotice;
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, test_services());
+    let tile = shell.read_with(&vcx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    let other = if tile == TileId(1) {
+        TileId(2)
+    } else {
+        TileId(1)
+    };
+    frame.update(&mut vcx, |f, _| {
+        f.post_tile_notice(tile, TileNotice::Refused("closing".into()));
+        f.post_tile_notice(other, TileNotice::Refused("staying".into()));
+    });
+
+    vcx.simulate_keystrokes("ctrl-w");
+    draw(&mut vcx);
+    vcx.run_until_parked();
+
+    let (gone, kept) = frame.update(&mut vcx, |f, _| {
+        (f.take_tile_notices(tile), f.take_tile_notices(other))
+    });
+    assert_eq!(gone, vec![]);
+    assert_eq!(kept, vec![TileNotice::Refused("staying".into())]);
+}
+
 // --- The chooser ----------------------------------------------------
 
 /// A shell over `services` with one recorder tile, focused.
@@ -2791,6 +2822,17 @@ fn a_click_on_the_segment_opens_the_chooser(cx: &mut gpui::TestAppContext) {
     vcx.simulate_click(seg.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
     assert_eq!(chooser_tile(&shell, &vcx), Some(tile));
+    // The segment does not occlude, so the opening mouse-down bubbles on to
+    // the shell root's focus tracking; the chooser's field must keep focus.
+    let field_focused = vcx.update(|window, cx| {
+        shell
+            .read(cx)
+            .dialog_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+    });
+    assert!(field_focused, "the chooser's field keeps the keys");
 }
 
 /// The tooltip names the chooser's key, so the segment teaches the

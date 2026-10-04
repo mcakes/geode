@@ -89,6 +89,30 @@ enum ColourKind {
     Named,
 }
 
+/// Which paint an additive, unmuted cell's text takes. A value's color
+/// (the cell shows a mapped dimension value) wins over the column's own
+/// `color`; the muted states are decided before this is asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextPaint {
+    Value,
+    Bearish,
+    Bullish,
+    Named(Option<Sign>),
+    Plain,
+}
+
+fn text_paint(value: bool, colour: Option<ColourKind>, sign: Option<Sign>) -> TextPaint {
+    if value {
+        return TextPaint::Value;
+    }
+    match (colour, sign) {
+        (Some(ColourKind::Sign), Some(Sign::Negative)) => TextPaint::Bearish,
+        (Some(ColourKind::Sign), Some(Sign::Positive)) => TextPaint::Bullish,
+        (Some(ColourKind::Named), sign) => TextPaint::Named(sign),
+        _ => TextPaint::Plain,
+    }
+}
+
 const INDENT: f32 = 14.0;
 /// The tree cell's chevron slot (`render_td`'s `w(px(14.))`).
 const CHEVRON_PX: f32 = 14.0;
@@ -262,6 +286,9 @@ fn named_colour_of(plan: Option<&ColumnPlan>, col_ix: usize) -> Option<&str> {
 pub(crate) struct FindCells {
     prepared: Option<Arc<crate::search::Prepared>>,
     cols: usize,
+    /// The definitions and value-color mapping the held cells were
+    /// prepared under.
+    colours: Arc<NamedColours>,
     cells: RowCache<CachedCell>,
     /// Cells formatted since the session opened.
     #[cfg(test)]
@@ -276,6 +303,7 @@ impl FindCells {
         FindCells {
             prepared: None,
             cols: 0,
+            colours: Arc::new(NamedColours::default()),
             cells: RowCache::default(),
             #[cfg(test)]
             fills: 0,
@@ -285,11 +313,18 @@ impl FindCells {
     }
 
     /// Point at a new prepared display. A display over the same snapshot,
-    /// plan and rows (the search index arriving for the display `/` opened
-    /// on) keeps its cells; any other drops every held cell, so none of the
-    /// old display paints under the new rows.
-    pub(crate) fn install(&mut self, prepared: Arc<crate::search::Prepared>, cols: usize) {
+    /// plan, rows and value-color mapping (the search index arriving for
+    /// the display `/` opened on) keeps its cells; any other drops every
+    /// held cell, so none of the old display — nor a color looked up in an
+    /// old mapping — paints under the new rows.
+    pub(crate) fn install(
+        &mut self,
+        prepared: Arc<crate::search::Prepared>,
+        cols: usize,
+        colours: Arc<NamedColours>,
+    ) {
         let same = self.cols == cols
+            && Arc::ptr_eq(&self.colours, &colours)
             && self.prepared.as_ref().is_some_and(|old| {
                 Arc::ptr_eq(&old.snapshot, &prepared.snapshot)
                     && Arc::ptr_eq(&old.rows, &prepared.rows)
@@ -297,6 +332,7 @@ impl FindCells {
             });
         self.prepared = Some(prepared);
         self.cols = cols;
+        self.colours = colours;
         if !same {
             self.cells.clear();
         }
@@ -308,6 +344,7 @@ impl FindCells {
         let FindCells {
             prepared,
             cols,
+            colours,
             cells,
             #[cfg(test)]
             fills,
@@ -322,7 +359,7 @@ impl FindCells {
                 *fills += 1;
             }
             let row = *p.rows.get(r)? as usize;
-            cell(&p.snapshot, &p.plan, row, c)
+            cell(&p.snapshot, &p.plan, colours.values(), row, c)
         });
     }
 
@@ -406,10 +443,20 @@ impl BlotterDelegate {
         {
             theme.muted_foreground
         } else {
-            match (self.colour_kind(col), cell.sign) {
-                (Some(ColourKind::Sign), Some(Sign::Negative)) => theme.chart_bearish,
-                (Some(ColourKind::Sign), Some(Sign::Positive)) => theme.chart_bullish,
-                (Some(ColourKind::Named), sign) => self
+            // `cell` borrows the find table's own cache, not `self`.
+            let value = cell
+                .value_color
+                .as_deref()
+                .and_then(|name| self.themed_value_colour(name, theme));
+            match (
+                value,
+                text_paint(value.is_some(), self.colour_kind(col), cell.sign),
+            ) {
+                // A value has no sign: a `tint_sign` color paints its base.
+                (Some(c), TextPaint::Value) => c.base,
+                (_, TextPaint::Bearish) => theme.chart_bearish,
+                (_, TextPaint::Bullish) => theme.chart_bullish,
+                (_, TextPaint::Named(sign)) => self
                     .themed_cell_colour(col, theme)
                     .map_or(theme.foreground, |c| c.for_sign(sign)),
                 _ => theme.foreground,
@@ -501,6 +548,9 @@ impl BlotterDelegate {
             // The footer's memoized group colors came from the old
             // definitions too.
             self.summary_paint_stamp = None;
+            // The prepared cells hold color names looked up in the old
+            // mapping.
+            self.invalidate_cells();
         }
     }
 
@@ -540,6 +590,15 @@ impl BlotterDelegate {
         let (_, memo_anchors, memo_tokens) = self.theme_inputs.as_ref().expect("set just above");
         self.colour_cache
             .get(&self.colours, name, memo_anchors, memo_tokens)
+    }
+
+    /// A named color resolved by name rather than by column: a value's
+    /// color. Shares `themed_cell_colour`'s memo and invalidation.
+    fn themed_value_colour(&mut self, name: &str, theme: &Theme) -> Option<ColourResolved> {
+        self.ensure_theme_inputs(theme);
+        let (_, value_anchors, value_tokens) = self.theme_inputs.as_ref().expect("set just above");
+        self.colour_cache
+            .get(&self.colours, name, value_anchors, value_tokens)
     }
 
     /// Re-derive `theme_inputs` if and only if one of the twenty-eight
@@ -731,6 +790,13 @@ impl BlotterDelegate {
             values: crate::core::context::values_at(snapshot, plan, row),
             selection,
             anchor: self.cursor_anchor.get(),
+            // The row's label is a value of the grouping column at its depth.
+            own: snapshot
+                .tree()
+                .depth(row)
+                .checked_sub(1)
+                .and_then(|level| plan.grouping.get(level))
+                .cloned(),
             ..Default::default()
         })
     }
@@ -1153,10 +1219,11 @@ impl BlotterDelegate {
         };
         let cols = plan.columns.len();
         let shown = &self.shown;
+        let values = self.colours.values();
         self.cache
             .set_window(window.clone(), cols, |shown_row, col| {
                 let row = *shown.get(shown_row)? as usize;
-                cell(snapshot, plan, row, col)
+                cell(snapshot, plan, values, row, col)
             });
         // Scanned over the *whole* current window, not just the rows
         // this call's `fill` closure actually ran for: `set_window`
@@ -1770,31 +1837,37 @@ impl TableDelegate for BlotterDelegate {
             return el; // blank: NULL, NonAttributable, or not yet cached
         };
         let text: SharedString = SharedString::from(Arc::clone(&cell.text));
+        // Copied out of the borrowed cell: resolving a value's color takes
+        // `&mut self`. The name is a refcount bump, not a string copy.
+        let value_color = cell.value_color.clone();
+        let (sign, attribution) = (cell.sign, cell.attribution);
         // The unanimity marker is not a value: muted like the other
         // not-a-plain-value text in the grid, and never colored as one.
         if cell.mixed {
             return el.text_color(theme.muted_foreground).child(text);
         }
-        match cell.attribution {
+        match attribution {
             Attribution::NonAttributable => el, // never a number here
             Attribution::DeterminedNonAdditive => el
                 .text_color(theme.muted_foreground)
                 .child(text)
                 .child(div().pl_1().child(DETERMINED_MARK)),
             Attribution::Additive => {
-                let el = match (colour, cell.sign) {
-                    (Some(ColourKind::Sign), Some(Sign::Negative)) => {
-                        el.text_color(theme.chart_bearish)
-                    }
-                    (Some(ColourKind::Sign), Some(Sign::Positive)) => {
-                        el.text_color(theme.chart_bullish)
-                    }
+                let value = value_color
+                    .as_deref()
+                    .and_then(|name| self.themed_value_colour(name, theme));
+                let el = match (value, text_paint(value.is_some(), colour, sign)) {
+                    // A value has no sign: a `tint_sign` color paints its
+                    // base.
+                    (Some(c), TextPaint::Value) => el.text_color(c.base),
+                    (_, TextPaint::Bearish) => el.text_color(theme.chart_bearish),
+                    (_, TextPaint::Bullish) => el.text_color(theme.chart_bullish),
                     // Named colours supply their own sign variants; `sign` colouring is a
                     // separate setting. Zero and nonnumeric cells use the named base, and an
                     // undefined name falls back to the foreground. Theme conversion is lazy
                     // and memoized behind the full signature, so repeated cells only look
                     // up the prepared colour.
-                    (Some(ColourKind::Named), sign) => el.text_color(
+                    (_, TextPaint::Named(sign)) => el.text_color(
                         self.themed_cell_colour(col_ix, theme)
                             .map_or(theme.foreground, |c| c.for_sign(sign)),
                     ),
@@ -1972,6 +2045,29 @@ mod tests {
         d.cursor.row = at(&d, 1);
         let context = d.dimension_context().unwrap();
         assert_eq!(context.selection.len(), 0, "the cursor left the selection");
+    }
+
+    /// A row's own column is the grouping column at its depth: the row
+    /// menu's `Color…` is for that value. The grand total stands for none.
+    #[test]
+    fn the_rows_context_names_the_grouping_column_at_its_depth() {
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        d.expansion
+            .toggle(path_of(&snapshot(), d.plan.as_ref().unwrap(), 1));
+        d.reflatten();
+        let at = |d: &BlotterDelegate, snap_row: u32| {
+            d.shown.iter().position(|r| *r == snap_row).unwrap()
+        };
+        let own =
+            |d: &BlotterDelegate, snap_row: u32| d.context_at_row(at(d, snap_row)).unwrap().own;
+        assert_eq!(own(&d, 0), None, "the grand total");
+        assert_eq!(own(&d, 1).as_deref(), Some(grouping()[0].as_str()), "L1");
+        assert_eq!(
+            own(&d, 3).as_deref(),
+            Some(grouping()[1].as_str()),
+            "L1/SPX"
+        );
     }
 
     /// The pinned table does not record visible ranges of length zero or
@@ -3016,6 +3112,140 @@ mod tests {
                 .iter()
                 .all(|c| c.name != "delta01"),
             "a hidden column leaves the plan on redelivery"
+        );
+    }
+
+    #[test]
+    fn a_values_color_wins_over_the_columns_color_and_nothing_else_changes() {
+        let neg = Some(Sign::Negative);
+        let pos = Some(Sign::Positive);
+        let kinds = [
+            None,
+            Some(ColourKind::Plain),
+            Some(ColourKind::Sign),
+            Some(ColourKind::Named),
+        ];
+        // With a value color, every column setting yields it.
+        for kind in kinds {
+            assert_eq!(text_paint(true, kind, neg), TextPaint::Value, "{kind:?}");
+        }
+        // Without one, the column's setting is what it was.
+        assert_eq!(
+            text_paint(false, Some(ColourKind::Sign), neg),
+            TextPaint::Bearish
+        );
+        assert_eq!(
+            text_paint(false, Some(ColourKind::Sign), pos),
+            TextPaint::Bullish
+        );
+        assert_eq!(
+            text_paint(false, Some(ColourKind::Sign), Some(Sign::Zero)),
+            TextPaint::Plain
+        );
+        assert_eq!(
+            text_paint(false, Some(ColourKind::Named), neg),
+            TextPaint::Named(neg)
+        );
+        assert_eq!(
+            text_paint(false, Some(ColourKind::Named), None),
+            TextPaint::Named(None)
+        );
+        assert_eq!(
+            text_paint(false, Some(ColourKind::Plain), neg),
+            TextPaint::Plain
+        );
+        assert_eq!(text_paint(false, None, neg), TextPaint::Plain);
+    }
+
+    #[test]
+    fn a_reloaded_mapping_reaches_the_prepared_window() {
+        // No new snapshot arrives: the reload alone must re-read the cells.
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        d.refill_window(0..3);
+        let label = d
+            .cache
+            .get(1, 0)
+            .expect("row 1 has a label")
+            .text
+            .to_string();
+        assert_eq!(d.cache.get(1, 0).unwrap().value_color, None);
+        let mut values = geode_core::colour::ValueColors::default();
+        values.insert(&grouping()[0], &label, "blue");
+        d.set_colours(Arc::new(NamedColours::default().with_values(values)));
+        assert_eq!(
+            d.cache.get(1, 0).unwrap().value_color.as_deref(),
+            Some("blue"),
+            "the window was prepared under the old mapping"
+        );
+    }
+
+    /// An inline value color travels as its internal key on the prepared
+    /// cell, and paint resolves that key through `NamedColours::get`.
+    #[test]
+    fn an_inline_value_color_reaches_the_prepared_window() {
+        use geode_core::colour::Tone;
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        d.refill_window(0..3);
+        let label = d
+            .cache
+            .get(1, 0)
+            .expect("row 1 has a label")
+            .text
+            .to_string();
+        let mut values = geode_core::colour::ValueColors::default();
+        values.insert_inline(&grouping()[0], &label, Definition::hue(210.0, Tone::Normal));
+        let colours = Arc::new(NamedColours::default().with_values(values));
+        d.set_colours(colours.clone());
+        let key = d
+            .cache
+            .get(1, 0)
+            .unwrap()
+            .value_color
+            .clone()
+            .expect("the label carries its inline key");
+        assert_eq!(
+            colours.get(&key),
+            Some(&Definition::hue(210.0, Tone::Normal))
+        );
+    }
+
+    /// The `/` table's held cells carry color names too: a display
+    /// installed under a different mapping re-reads them, the same mapping
+    /// keeps them.
+    #[test]
+    fn a_find_display_under_a_new_mapping_drops_its_held_cells() {
+        let snap = snapshot();
+        let plan = ColumnPlan::build(&view(), &grouping(), &snap);
+        let prepared = Arc::new(crate::search::display(snap, plan, None, &[], true));
+        let label_row = (0..prepared.rows.len())
+            .find(|&r| prepared.snapshot.tree().depth(prepared.rows[r] as usize) == 1)
+            .expect("a depth-1 row");
+        let mut cells = FindCells::new();
+        let old = Arc::new(NamedColours::default());
+        cells.install(prepared.clone(), 2, old.clone());
+        cells.show(&[label_row]);
+        let label = cells.cell(label_row, 0).expect("a label").text.to_string();
+        assert_eq!(cells.cell(label_row, 0).unwrap().value_color, None);
+
+        cells.install(prepared.clone(), 2, old);
+        assert!(
+            cells.cell(label_row, 0).is_some(),
+            "same mapping keeps cells"
+        );
+
+        let mut values = geode_core::colour::ValueColors::default();
+        values.insert(&grouping()[0], &label, "blue");
+        cells.install(
+            prepared,
+            2,
+            Arc::new(NamedColours::default().with_values(values)),
+        );
+        cells.show(&[label_row]);
+        assert_eq!(
+            cells.cell(label_row, 0).unwrap().value_color.as_deref(),
+            Some("blue")
         );
     }
 }

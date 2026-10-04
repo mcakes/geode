@@ -1,6 +1,7 @@
-//! Stroke geometry for marks that are not a plain polyline: the dashes of a
-//! dashed line, and the bar and diamond of a point with a range. Pure:
-//! pixel points in, stroke segments out.
+//! Geometry for marks that are not a plain polyline: the dashes of a
+//! dashed line, the bar and diamond of a point with a range, and the
+//! outline that fills under a line. Pure: pixel points in, stroke
+//! segments or fill outlines out.
 
 use super::Point;
 
@@ -237,9 +238,99 @@ pub fn strided(start: usize, end: usize, stride: usize) -> impl Iterator<Item = 
     (start..end).step_by(stride).chain(last)
 }
 
+/// The pixel y a line fills to: its axis's zero, `zero_y`, held to the
+/// plot's top and bottom `(top, bottom)`. A zero above or below the plot
+/// fills to the nearer edge, so a line wholly above zero still fills down
+/// to the plot's bottom rather than to a point off screen; a zero that is
+/// not a number fills to the bottom.
+pub fn fill_base(zero_y: f32, top: f32, bottom: f32) -> f32 {
+    if zero_y.is_nan() {
+        bottom
+    } else {
+        zero_y.clamp(top, bottom)
+    }
+}
+
+/// The outlines that fill between the polyline `points` and the
+/// horizontal line at `base`, into `out` (cleared first): one per finite
+/// run of `points`, each the run's first x at `base`, the run, then its
+/// last x at `base`, the outlines parted by [`Point::BREAK`]. A break in
+/// `points` ends a run, so a gap in the line is a gap in the fill. A run
+/// of one point has no area and gives no outline.
+///
+/// A run that crosses `base` gives one outline whose loops above and
+/// below it are each enclosed once, so either fill rule shades both: a
+/// negative lobe fills up to zero from beneath.
+pub fn fill_outlines(points: &[Point], base: f32, out: &mut Vec<Point>) {
+    out.clear();
+    for run in points.split(|p| p.is_break()) {
+        if run.len() < 2 {
+            continue;
+        }
+        let (first, last) = (run[0], run[run.len() - 1]);
+        if !out.is_empty() {
+            out.push(Point::BREAK);
+        }
+        out.push(Point::new(first.x, base));
+        out.extend_from_slice(run);
+        out.push(Point::new(last.x, base));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fill_outline_drops_each_finite_run_to_the_base_and_a_break_parts_them() {
+        let p = Point::new;
+        let pts = [
+            p(0.0, 10.0),
+            p(1.0, 5.0),
+            Point::BREAK,
+            p(2.0, 8.0),
+            Point::BREAK,
+            p(3.0, 4.0),
+            p(4.0, 30.0),
+            p(5.0, 6.0),
+        ];
+        let mut out = vec![p(99.0, 99.0)];
+        fill_outlines(&pts, 20.0, &mut out);
+        // The lone point at x = 2 has no area; the run past it crosses the
+        // base (y = 30 is below it in pixels, a negative value) and stays
+        // one outline.
+        let want = [
+            p(0.0, 20.0),
+            p(0.0, 10.0),
+            p(1.0, 5.0),
+            p(1.0, 20.0),
+            Point::BREAK,
+            p(3.0, 20.0),
+            p(3.0, 4.0),
+            p(4.0, 30.0),
+            p(5.0, 6.0),
+            p(5.0, 20.0),
+        ];
+        assert_eq!(out.len(), want.len(), "{out:?}");
+        for (got, want) in out.iter().zip(want) {
+            assert!(
+                (got.is_break() && want.is_break()) || got == &want,
+                "{out:?}"
+            );
+        }
+        fill_outlines(&[p(0.0, 1.0)], 20.0, &mut out);
+        assert!(out.is_empty(), "one point fills nothing");
+        fill_outlines(&[Point::BREAK, p(0.0, 1.0), p(1.0, 2.0)], 20.0, &mut out);
+        assert_eq!(out.len(), 4, "a leading break opens no empty outline");
+    }
+
+    #[test]
+    fn a_fill_base_is_zero_held_to_the_plot() {
+        assert_eq!(fill_base(50.0, 10.0, 210.0), 50.0);
+        assert_eq!(fill_base(400.0, 10.0, 210.0), 210.0, "zero below the plot");
+        assert_eq!(fill_base(-80.0, 10.0, 210.0), 10.0, "zero above the plot");
+        assert_eq!(fill_base(f32::NAN, 10.0, 210.0), 210.0);
+    }
 
     /// A clip that holds every fixture it is used with.
     const ALL: Clip = Clip {

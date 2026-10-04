@@ -430,10 +430,10 @@ fn an_older_vol_tag_is_dropped(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// An active expiry past the last CVI term: the curve job fails, the
-/// chain still paints, and the failure is the footer notice.
+/// An active expiry past the last CVI term: the model extrapolates, so
+/// the cvi curve paints beside the chain with no notice.
 #[gpui::test]
-fn a_refused_expiry_paints_chain_only_with_the_notice(cx: &mut gpui::TestAppContext) {
+fn an_expiry_past_the_last_term_paints_its_cvi_curve(cx: &mut gpui::TestAppContext) {
     let mut t = launched_on("SPX.Z");
     t.insert(
         "expiries".into(),
@@ -445,15 +445,11 @@ fn a_refused_expiry_paints_chain_only_with_the_notice(cx: &mut gpui::TestAppCont
     let reqs = h.answer_documents(&mut vcx, &doc, &chains);
     let params = vols(&reqs)[0].clone();
     h.answer_vol(&mut vcx, &params);
-    assert_eq!(h.labels(&vcx), vec!["chain 2027-06-18".to_string()]);
-    let notices = h.notices(&vcx);
-    assert_eq!(notices.len(), 1, "{notices:?}");
-    assert!(
-        notices[0].starts_with(
-            "no cvi curve at 2027-06-18: expiry 2027-06-18 is outside the document's terms"
-        ),
-        "{notices:?}"
-    );
+    let labels = h.labels(&vcx);
+    for want in ["cvi 2027-06-18", "chain 2027-06-18"] {
+        assert!(labels.iter().any(|l| l == want), "{want}: {labels:?}");
+    }
+    assert!(h.notices(&vcx).is_empty(), "{:?}", h.notices(&vcx));
 }
 
 /// A draft posted on the followed group's board goes into the next batch
@@ -520,6 +516,19 @@ fn following_a_group_with_no_single_underlying_paints_the_notice_and_refuses_u(
         h.notices(&vcx)
     );
     assert!(h.requests().is_empty(), "nothing asked, and no picker");
+    // The refusal leads the footer, beside the standing empty state, until
+    // the next verb clears it; the data-side notice stays.
+    let footer = |vcx: &gpui::VisualTestContext| {
+        h.tile
+            .read_with(vcx, |t, _| t.footer_notice().map(|n| n.to_string()))
+    };
+    assert_eq!(
+        footer(&vcx).as_deref(),
+        Some("following A \u{2014} set the underlying there (+1 more)")
+    );
+    vcx.simulate_keystrokes("x");
+    assert_eq!(h.notices(&vcx), vec!["no underlying in A".to_string()]);
+    assert_eq!(footer(&vcx).as_deref(), Some("no underlying in A"));
 }
 
 /// A group's scope change moves the follower's own scope generation, so

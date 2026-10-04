@@ -149,6 +149,9 @@ pub struct FrameRecord {
     /// Whether the ad hoc chain is the lane's choice. When set, `ad_hoc` is
     /// `Some` and `active_slot` is `None`.
     pub ad_hoc_active: bool,
+    /// The saved scope the lane's scope was last loaded from or saved as.
+    /// Restored only when a saved scope of that name still exists.
+    pub loaded_from: Option<String>,
     pub as_of: AsOf,
 }
 
@@ -344,6 +347,9 @@ impl FrameRecord {
                 t.insert("grouping".into(), toml::Value::String("ad_hoc".into()));
             }
         }
+        if let Some(name) = &self.loaded_from {
+            t.insert("loaded_from".into(), toml::Value::String(name.clone()));
+        }
         if let AsOf::At(at) = &self.as_of {
             t.insert("as_of".into(), toml::Value::String(at.to_rfc3339()));
         }
@@ -355,7 +361,8 @@ impl FrameRecord {
     /// warn; other wrong-type fields and non-string dimension values are ignored.
     /// Unknown column names remain, and `Scope::impossible` resets to false.
     /// A malformed `ad_hoc` warns and is ignored; `grouping = "ad_hoc"`
-    /// without a usable chain warns and falls back to the slot.
+    /// without a usable chain warns and falls back to the slot. A
+    /// `loaded_from` that is not a non-blank string warns and is ignored.
     pub fn from_toml(t: &toml::Table, warnings: &mut Vec<String>) -> FrameRecord {
         let scope = scope_from_toml(t, "frame", warnings);
         let active_slot = match t.get("slot") {
@@ -420,6 +427,18 @@ impl FrameRecord {
         };
         // The record's invariant: an active ad hoc chain has no slot beside it.
         let active_slot = if ad_hoc_active { None } else { active_slot };
+        let loaded_from = match t.get("loaded_from") {
+            None => None,
+            Some(value) => match value.as_str() {
+                Some(name) if !name.trim().is_empty() => Some(name.to_string()),
+                _ => {
+                    warnings.push(format!(
+                        "frame: loaded_from {value} is not a scope name; ignored"
+                    ));
+                    None
+                }
+            },
+        };
         let as_of = match t.get("as_of").and_then(|v| v.as_str()) {
             None => AsOf::Live,
             Some(s) => match chrono::DateTime::parse_from_rfc3339(s) {
@@ -435,6 +454,7 @@ impl FrameRecord {
             active_slot,
             ad_hoc,
             ad_hoc_active,
+            loaded_from,
             as_of,
         }
     }
@@ -1646,6 +1666,7 @@ mod tests {
             active_slot: None,
             ad_hoc: None,
             ad_hoc_active: false,
+            loaded_from: None,
             as_of: AsOf::Live,
         }
         .to_toml();
@@ -3130,6 +3151,7 @@ members = [1, -4]
             active_slot: Some(3),
             ad_hoc: None,
             ad_hoc_active: false,
+            loaded_from: None,
             as_of: AsOf::At(
                 chrono::DateTime::parse_from_rfc3339("2026-09-05T14:05:00Z")
                     .unwrap()
@@ -3177,6 +3199,36 @@ members = [1, -4]
         assert_eq!(restored.active_slot, Some(2));
         assert_eq!(restored.ad_hoc, None);
         assert!(!restored.ad_hoc_active);
+    }
+
+    #[test]
+    fn provenance_round_trips() {
+        let mut record = sample_frame_record();
+        record.loaded_from = Some("eu".into());
+        let table = record.to_toml();
+        assert_eq!(table["loaded_from"].as_str(), Some("eu"));
+        let mut warnings = Vec::new();
+        let restored = FrameRecord::from_toml(&table, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(restored, record);
+    }
+
+    #[test]
+    fn a_record_without_provenance_writes_no_key() {
+        let table = sample_frame_record().to_toml();
+        assert!(!table.contains_key("loaded_from"), "{table:?}");
+    }
+
+    #[test]
+    fn a_malformed_provenance_warns_and_is_ignored() {
+        for body in ["loaded_from = 3", "loaded_from = \"  \""] {
+            let table: toml::Table = toml::from_str(body).unwrap();
+            let mut warnings = Vec::new();
+            let restored = FrameRecord::from_toml(&table, &mut warnings);
+            assert_eq!(restored.loaded_from, None, "{body}");
+            assert_eq!(warnings.len(), 1, "{body}: {warnings:?}");
+            assert!(warnings[0].contains("loaded_from"), "{warnings:?}");
+        }
     }
 
     #[test]
@@ -3356,6 +3408,7 @@ members = [1, -4]
             active_slot: None,
             ad_hoc: None,
             ad_hoc_active: false,
+            loaded_from: None,
             as_of: AsOf::Live,
         };
         let table = record.to_toml();

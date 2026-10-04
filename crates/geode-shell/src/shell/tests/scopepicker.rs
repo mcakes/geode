@@ -1,7 +1,7 @@
-//! Scope-picker integration: `frame::scope` (`mod+o`), the toolbar's load
-//! glyph, typeahead, row clicks, undo, live saved scopes, a name vanishing
-//! under the open picker, and the empty state. The fixture's default
-//! modifier is Alt, so the chord is dispatched as `alt-o`.
+//! The toolbar's load glyph as the door to the Scope dialog's Saved screen
+//! on its own: filter and load, undo, live saved scopes, a row
+//! double-click, the empty state and the glyph's tip. The screen itself is
+//! covered from `o` in `scope_saved.rs`.
 
 use super::scopebar::services_with_builtin_docs;
 use super::*;
@@ -42,31 +42,64 @@ fn text_scope(text: &str) -> Scope {
     }
 }
 
-/// `mod+o` opens the picker; typing narrows it and `enter` loads that
-/// saved scope and closes; `mod+z` then restores the scope before it —
-/// the pick went through the undoable `load_scope` path.
+/// Open the Saved screen through the toolbar's load glyph.
+fn open_saved(vcx: &mut gpui::VisualTestContext) {
+    let glyph = vcx
+        .debug_bounds("scope-load-chip")
+        .expect("the load glyph paints");
+    vcx.simulate_click(glyph.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+}
+
+fn saved_open(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> bool {
+    shell.read_with(vcx, |s, _| {
+        s.scope_dialog
+            .as_ref()
+            .is_some_and(crate::shell::scopedialog::saved_view::in_saved)
+    })
+}
+
+fn visible_names(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Vec<String> {
+    shell.read_with(vcx, |s, _| {
+        let saved = &s.scope_dialog.as_ref().expect("dialog open").saved;
+        saved
+            .visible
+            .iter()
+            .map(|&i| saved.rows[i].name.clone())
+            .collect()
+    })
+}
+
+/// The load glyph opens Saved; the filter narrows it, `enter` keeps the
+/// filter, a second `enter` loads that saved scope and closes; `mod+z`
+/// then restores the scope before it — the load went through the undoable
+/// `load_saved_scope` path.
 #[gpui::test]
-fn mod_o_then_typing_and_enter_loads_the_scope_undoably(cx: &mut gpui::TestAppContext) {
+fn the_load_glyph_then_filter_and_enter_loads_the_scope_undoably(cx: &mut gpui::TestAppContext) {
     let (mut vcx, shell, frame) = open_with_scopes(cx);
     assert_eq!(scope_text(&frame, &vcx), None);
 
-    vcx.simulate_keystrokes("alt-o");
-    vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
-    assert!(vcx.debug_bounds("scope-choice-list").is_some());
-    assert!(vcx.debug_bounds("scope-choice-asia").is_some());
-    assert!(vcx.debug_bounds("scope-choice-eu").is_some());
-    assert!(vcx.debug_bounds("scope-hints").is_some());
+    open_saved(&mut vcx);
+    assert!(saved_open(&shell, &vcx));
+    assert_eq!(visible_names(&shell, &vcx), ["asia", "eu"]);
 
+    vcx.simulate_keystrokes("/");
     vcx.simulate_input("e");
+    vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert!(vcx.debug_bounds("scope-choice-asia").is_none());
+    assert_eq!(visible_names(&shell, &vcx), ["eu"]);
+    assert!(
+        saved_open(&shell, &vcx),
+        "enter in the filter only keeps it"
+    );
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
 
     assert_eq!(scope_text(&frame, &vcx).as_deref(), Some("eu"));
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
-    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()));
 
     vcx.simulate_keystrokes("alt-z");
     vcx.run_until_parked();
@@ -77,38 +110,9 @@ fn mod_o_then_typing_and_enter_loads_the_scope_undoably(cx: &mut gpui::TestAppCo
     );
 }
 
-/// The picker opens on the saved scope equal to the frame's current one,
-/// and a bare `enter` there changes nothing.
-#[gpui::test]
-fn the_picker_opens_on_the_current_scope_and_enter_keeps_it(cx: &mut gpui::TestAppContext) {
-    let (mut vcx, shell, frame) = open_with_scopes(cx);
-    dispatch_action(&shell, "scope::eu", &mut vcx);
-    vcx.run_until_parked();
-    let before = frame.read_with(&vcx, |f, _| f.shared().versions().scope);
-
-    vcx.simulate_keystrokes("alt-o");
-    vcx.run_until_parked();
-    assert_eq!(
-        shell.read_with(&vcx, |s, _| s
-            .choice_dialog
-            .as_ref()
-            .and_then(|p| p.highlighted_pick())),
-        Some(crate::shell::choicedialog::Pick::Scope("eu".into()))
-    );
-    vcx.simulate_keystrokes("enter");
-    vcx.run_until_parked();
-    assert_eq!(scope_text(&frame, &vcx).as_deref(), Some("eu"));
-    assert_eq!(
-        frame.read_with(&vcx, |f, _| f.shared().versions().scope),
-        before,
-        "re-picking the current scope bumps nothing"
-    );
-    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
-}
-
 /// A scope saved after startup (here through the reload door) is a row:
-/// the picker reads the frame's live saved scopes at open, not the
-/// startup action registry.
+/// the screen reads the frame's live saved scopes, not the startup action
+/// registry.
 #[gpui::test]
 fn a_scope_saved_after_startup_is_listed_and_loads(cx: &mut gpui::TestAppContext) {
     let (mut vcx, shell, frame) = open_with_scopes(cx);
@@ -120,115 +124,50 @@ fn a_scope_saved_after_startup_is_listed_and_loads(cx: &mut gpui::TestAppContext
     });
     vcx.run_until_parked();
 
-    vcx.simulate_keystrokes("alt-o");
-    vcx.run_until_parked();
-    assert!(vcx.debug_bounds("scope-choice-later").is_some());
+    open_saved(&mut vcx);
+    assert_eq!(visible_names(&shell, &vcx), ["asia", "eu", "later"]);
+    vcx.simulate_keystrokes("/");
     vcx.simulate_input("later");
-    vcx.simulate_keystrokes("enter");
+    vcx.simulate_keystrokes("enter enter");
     vcx.run_until_parked();
     assert_eq!(scope_text(&frame, &vcx).as_deref(), Some("later"));
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
-/// Clicking the toolbar's load glyph opens the picker with the field
-/// focused — typing after the click filters — and the glyph reads pressed
-/// while the picker is up, back at rest once it closes.
+/// A row's double-click loads that row's scope and closes.
 #[gpui::test]
-fn clicking_the_load_glyph_opens_a_typeable_picker(cx: &mut gpui::TestAppContext) {
+fn a_row_double_click_loads_that_scope(cx: &mut gpui::TestAppContext) {
     let (mut vcx, shell, frame) = open_with_scopes(cx);
-    assert!(vcx.debug_bounds("scope-load-chip-open").is_none());
-    let glyph = vcx
-        .debug_bounds("scope-load-chip")
-        .expect("the load glyph paints on an empty scope");
-    vcx.simulate_click(glyph.center(), gpui::Modifiers::default());
-    vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
-    assert!(
-        vcx.debug_bounds("scope-load-chip-open").is_some(),
-        "the glyph reads pressed while its picker is up"
-    );
-
-    vcx.simulate_input("as");
-    vcx.run_until_parked();
-    let query = shell.read_with(&vcx, |s, _| {
-        s.choice_dialog.as_ref().map(|p| p.list.query().to_string())
-    });
-    assert_eq!(
-        query.as_deref(),
-        Some("as"),
-        "typing after the click reaches the filter"
-    );
-    assert!(vcx.debug_bounds("scope-choice-eu").is_none());
-
-    vcx.simulate_keystrokes("enter");
-    vcx.run_until_parked();
-    assert_eq!(scope_text(&frame, &vcx).as_deref(), Some("asia"));
-    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()));
-    assert!(vcx.debug_bounds("scope-load-chip-open").is_none());
-}
-
-/// A row click loads that row's scope and closes.
-#[gpui::test]
-fn a_row_click_loads_that_scope(cx: &mut gpui::TestAppContext) {
-    let (mut vcx, shell, frame) = open_with_scopes(cx);
-    vcx.simulate_keystrokes("alt-o");
-    vcx.run_until_parked();
-    let row = vcx.debug_bounds("scope-choice-eu").expect("the eu row");
-    vcx.simulate_click(row.center(), gpui::Modifiers::default());
+    open_saved(&mut vcx);
+    let row = vcx.debug_bounds("scope-saved-row-1").expect("the eu row");
+    double_click(&mut vcx, row.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
     assert_eq!(scope_text(&frame, &vcx).as_deref(), Some("eu"));
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
-/// A saved scope removed under the open picker (a `scopes.toml` reload)
-/// loads nothing, closes, and says so on the status bar.
+/// With no saved scope the screen still opens and says how to save one;
+/// `enter` there loads nothing and the screen stays up for `escape`.
 #[gpui::test]
-fn picking_a_scope_removed_under_the_picker_says_so(cx: &mut gpui::TestAppContext) {
-    let (mut vcx, shell, frame) = open_with_scopes(cx);
-    vcx.simulate_keystrokes("alt-o");
-    vcx.run_until_parked();
-    frame.update(&mut vcx, |f, cx| {
-        let mut saved: SavedScopes = f.saved_scopes().clone();
-        saved.remove("eu");
-        assert!(f.replace_saved_scopes(saved));
-        cx.notify();
-    });
-    vcx.run_until_parked();
-    vcx.simulate_input("eu");
-    vcx.simulate_keystrokes("enter");
-    vcx.run_until_parked();
-    assert_eq!(scope_text(&frame, &vcx), None);
-    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
-    assert_eq!(
-        shell.read_with(&vcx, |s, _| s.notice.clone()).as_deref(),
-        Some(crate::shell::choicedialog::SCOPE_GONE)
-    );
-}
-
-/// With no saved scope the picker still opens and says how to save one;
-/// `enter` there picks nothing and the picker stays up for `escape`.
-#[gpui::test]
-fn with_no_saved_scopes_the_picker_says_how_to_save_one(cx: &mut gpui::TestAppContext) {
+fn with_no_saved_scopes_the_saved_screen_says_how_to_save_one(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
-    vcx.simulate_keystrokes("alt-o");
-    vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
-    assert!(vcx.debug_bounds("scope-empty-hint").is_some());
-    // Enter is inert here, so the footer does not offer it.
-    assert!(vcx.debug_bounds("scope-empty-hints").is_some());
-    assert!(vcx.debug_bounds("scope-hints").is_none());
+    open_saved(&mut vcx);
+    assert!(saved_open(&shell, &vcx));
+    assert!(vcx.debug_bounds("scope-saved-empty-scopes").is_some());
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_some()));
+    assert!(saved_open(&shell, &vcx));
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
-/// Hovering the load glyph names the action and its chord.
+/// Hovering the load glyph names the Saved screen; `frame::scope_saved`
+/// has no default binding, so the tip names no chord (`mod+o` is
+/// `frame::scope`, the Current screen).
 #[gpui::test]
-fn hovering_the_load_glyph_names_the_chord(cx: &mut gpui::TestAppContext) {
+fn hovering_the_load_glyph_names_no_chord(cx: &mut gpui::TestAppContext) {
     let (mut vcx, _shell, _frame) = open_with_scopes(cx);
     let glyph = vcx.debug_bounds("scope-load-chip").expect("glyph painted");
     vcx.simulate_mouse_move(
@@ -242,9 +181,28 @@ fn hovering_the_load_glyph_names_the_chord(cx: &mut gpui::TestAppContext) {
     assert!(vcx.debug_bounds("tip-scope-load-chip").is_some());
     assert!(
         vcx.debug_bounds("tip-scope-load-chip-chord-mod+o")
-            .is_some()
-            || vcx
+            .is_none()
+            && vcx
                 .debug_bounds("tip-scope-load-chip-chord-alt+o")
-                .is_some()
+                .is_none(),
+        "the load glyph's tip names no chord"
     );
+}
+
+/// A filter that matches nothing leaves no row: `enter` loads nothing and
+/// keeps the screen open; `escape` closes it.
+#[gpui::test]
+fn enter_with_no_match_does_nothing_and_escape_closes(cx: &mut gpui::TestAppContext) {
+    let (mut vcx, shell, frame) = open_with_scopes(cx);
+    open_saved(&mut vcx);
+    vcx.simulate_keystrokes("/");
+    vcx.simulate_input("zzz");
+    vcx.simulate_keystrokes("enter enter");
+    vcx.run_until_parked();
+    assert!(visible_names(&shell, &vcx).is_empty());
+    assert!(saved_open(&shell, &vcx));
+    assert_eq!(scope_text(&frame, &vcx), None);
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }

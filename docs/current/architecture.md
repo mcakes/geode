@@ -32,13 +32,22 @@ contract, key chips, the rem scale) as well as through `geode-tile`, and may
 also name `geode-widgets`, `geode-chart` and `geode-core` directly.
 `geode-diagnostics` is a page rather than a tile. It uses `geode-tile::motion`
 for row navigation and does not participate in tile flip barriers.
+`geode-guide` is an offline tile over the bundled user guide. It depends on
+the shell and shared tile mechanisms, owns no data handle, and acknowledges
+frame flips immediately.
 
 `geode-core` is shared vocabulary without window, database, or network
 ownership. Typed interpretation and merging are I/O-free; its configuration
 loader reads disk documents through `Config::read_docs` and `Config::load`.
 Types shared across a forbidden dependency boundary live there: scopes,
 link groups, schema, query outcomes, snapshots, health, document rows, series
-requests, pricing requests, and vol-slice requests.
+requests, pricing requests, vol-slice requests, and text file requests and
+outcomes (`textfile`). `geode_core::classification` is the pure editing model
+for a classification (a derived dimension a person edits): grid rows, edits
+that return the whole next object with an undo entry, CSV import and export
+planning, and the rules for naming one and choosing its source. It reads and
+writes nothing; the bytes come and go through the data service, and the
+object is written through the shell's config door.
 
 `geode-shell` owns the window and interaction model. It does not depend on the
 data service or on feature modules. `geode-data` owns sources, DuckDB, and
@@ -56,7 +65,7 @@ lives there. The menu and popover implementations live in `geode-shell`,
 which also uses them for its row menu; `geode-tile` re-exports them for tiles.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
-`geode-timeseries`, `geode-volslice`, and
+`geode-timeseries`, `geode-volslice`, `geode-classifications`, and
 `geode-pricer` implement the shell's module contract and may ask the data
 service through `DataHandle`. They do not depend on sibling features. `geode-app` constructs shared
 services, registers module factories (one market-data factory per accepted
@@ -89,8 +98,13 @@ fetch, pricing, egress, and logging workers communicate through bounded
 channels or explicit sinks. Egress hands each document's rows to a
 per-target worker, which encodes and sends them off the service thread. Every
 long-lived data-service thread is supervised: one that dies is declared once
-to the UI and never restarted. Transport threads standing in for a vendor
-client (the channel adapter's dispatcher, the demo bus) are not.
+to the UI and never restarted. The text file worker (`geode-files`) is the
+one piece of file I/O `geode-data` performs that is not a source: modules
+never touch the filesystem, so a tile's import or export is a request
+answered by tile key and tag, and a slow path stalls neither the UI nor the
+request loop (see [text files](data-path.md#text-files)). Transport threads
+standing in for a vendor client (the channel adapter's dispatcher, the demo
+bus) are not.
 
 Submission reports admission or refusal without waiting for queue space; a
 refusal says whether the queue was busy (a retry can succeed) or the service
@@ -150,8 +164,12 @@ Documents merge recursively with whole-object exceptions and retain
 provenance. Reload retains the active configuration for errors collected
 before its acceptance decision; later typed-reader failures do not roll back
 the whole candidate. Runtime edits write the user layer through an ordered,
-atomic write path. The session file holds layout, occupants, frame state,
-and palette usage, with separate save ordering and recovery rules. See
+atomic write path. A module never writes configuration itself: it queues
+whole-object edits through its frame handle (`FrameRef::queue_config_edits`), and the
+shell folds them into the same debounced, user-layer batch the configuration
+dialogs use (see [the config door](shell.md#the-config-door)). The session
+file holds layout, occupants, frame state, and palette usage, with separate
+save ordering and recovery rules. See
 [configuration](configuration.md) and [session persistence](shell.md#session-format)
 for those boundaries.
 

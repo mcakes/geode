@@ -14,7 +14,7 @@
 //! writes the grouping definition. The final dimension cannot be unticked because an
 //! empty grouping definition cannot express an active empty slot.
 
-use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
+use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, merge_docs};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
 use geode_core::schema::SchemaSpec;
@@ -67,11 +67,17 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
                 .collect()
         })
         .unwrap_or_default();
+    chain_fields(config, Some(object.unwrap_or("")), current)
+}
 
-    // The slot's own chain first, in chain order, ticked; then every
-    // other pickable column, in schema order, unticked — all of them the
-    // object's OWN items, because ticking is the whole of membership
-    // here (this module's own doc comment).
+/// The fields for a chain: `current` ticked and first, in chain order, then
+/// every other groupable column unticked. `slot` is the read-only identity
+/// row; the ad hoc chain has none, since it is not a numbered object.
+pub fn chain_fields(config: &Config, slot: Option<&str>, current: Vec<String>) -> Vec<Field> {
+    // The chain first, in chain order, ticked; then every other pickable
+    // column, in schema order, unticked — all of them the object's OWN
+    // items, because ticking is the whole of membership here (this
+    // module's own doc comment).
     let mut items: Vec<ListItem> = current
         .iter()
         .map(|name| ListItem {
@@ -99,26 +105,44 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         });
     }
 
-    vec![
-        Field {
-            key: "slot".to_string(),
-            label: "Slot".to_string(),
-            kind: FieldKind::Text(object.unwrap_or("").to_string()),
-            dest: Destination::Doc,
-            layer: None,
+    let dimensions = Field {
+        key: DIMENSIONS.to_string(),
+        label: "Dimensions".to_string(),
+        kind: FieldKind::OrderedList {
+            items,
+            // No catalogue, not an empty one — see this module's doc.
+            available: None,
         },
-        Field {
-            key: "dimensions".to_string(),
-            label: "Dimensions".to_string(),
-            kind: FieldKind::OrderedList {
-                items,
-                // No catalogue, not an empty one — see this module's doc.
-                available: None,
+        dest: Destination::Doc,
+        layer: None,
+    };
+    match slot {
+        Some(slot) => vec![
+            Field {
+                key: "slot".to_string(),
+                label: "Slot".to_string(),
+                kind: FieldKind::Text(slot.to_string()),
+                dest: Destination::Doc,
+                layer: None,
             },
-            dest: Destination::Doc,
-            layer: None,
-        },
-    ]
+            dimensions,
+        ],
+        None => vec![dimensions],
+    }
+}
+
+/// The draft for the lane's ad hoc chain. It is not a configuration object:
+/// its fields come from `chain`, and `render::commit_change` sends its edits
+/// to the frame instead of the config writer.
+pub fn ad_hoc_draft(config: &Config, chain: &[String]) -> Draft {
+    let mut draft = super::Domain::Groupings.draft(config, super::grouping_list::AD_HOC);
+    let fields = chain_fields(config, None, chain.to_vec());
+    draft.baseline = fields.clone();
+    draft.fields = fields;
+    // `Domain::draft` validated the slot-shaped fields it built; the stage
+    // must open showing what is wrong with these.
+    draft.diagnostics = validate(&draft, config);
+    draft
 }
 
 /// The `dimensions` field's key — the one list the chain field edits.
@@ -138,6 +162,17 @@ pub fn parse_chain(text: &str) -> Vec<String> {
     text.split(is_separator)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+        .collect()
+}
+
+/// The draft's chain: its ticked dimensions, in list order.
+pub fn ticked(draft: &Draft) -> Vec<String> {
+    draft
+        .list_items(DIMENSIONS)
+        .unwrap_or_default()
+        .iter()
+        .filter(|item| item.included)
+        .map(|item| item.name.clone())
         .collect()
 }
 
@@ -320,7 +355,15 @@ pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
 /// `views::validate` gives for doing the same: validating the whole merged doc would
 /// report every other slot's problems against this one object.
 pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
-    let table = rendered_doc_table(draft);
+    // The reader validates slots. The ad hoc chain is checked as if it were
+    // one: the same existence rules apply, and its own name is not a slot.
+    let table = if draft.name == super::grouping_list::AD_HOC {
+        super::object_text("1", to_table(draft, Destination::Doc))
+            .parse::<toml::Table>()
+            .unwrap_or_default()
+    } else {
+        rendered_doc_table(draft)
+    };
     let doc = merge_docs(
         DOC,
         &[LayerDoc {
@@ -339,7 +382,46 @@ pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
         .map(DerivedDimensions::from_doc)
         .unwrap_or_default();
     let (_slots, diags) = GroupingSlots::from_doc(&doc, &schema, &dims);
+    if draft.name == super::grouping_list::AD_HOC {
+        return ad_hoc_diagnostics(draft, diags);
+    }
     diags
+}
+
+/// The reader's diagnostics on the ad hoc chain, reworded for it. The reader
+/// checked the chain as slot 1, so its messages name "slot 1": a real slot
+/// that has nothing to do with the chain. The reader stays the authority on
+/// whether and how severely the chain is refused; only the words change.
+fn ad_hoc_diagnostics(draft: &Draft, diags: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    let chain = ticked(draft);
+    let path = Some(format!("{DOC}.{}", super::grouping_list::AD_HOC));
+    diags
+        .into_iter()
+        .map(|d| {
+            let message = if chain.is_empty() {
+                "the ad hoc chain is empty".to_string()
+            } else if d.severity == Severity::Error {
+                // The reader quotes the first column it does not know as
+                // `names '<column>'`.
+                match chain
+                    .iter()
+                    .find(|name| d.message.contains(&format!("names '{name}'")))
+                {
+                    Some(name) => {
+                        format!("the ad hoc chain names '{name}', which is not a groupable column")
+                    }
+                    None => "the ad hoc chain names a column that is not groupable".to_string(),
+                }
+            } else {
+                "the ad hoc chain is not a list of column names".to_string()
+            };
+            Diagnostic {
+                message,
+                path: path.clone(),
+                ..d
+            }
+        })
+        .collect()
 }
 
 /// The draft's `groupings.toml` entry, rendered and parsed back the way
@@ -414,6 +496,46 @@ mod tests {
             desk: None,
             user: None,
         })
+    }
+
+    #[test]
+    fn the_ad_hoc_draft_ticks_its_chain_and_validates_clean() {
+        let config = config_with_slot("3 = [\"book\"]\n");
+        let draft = ad_hoc_draft(&config, &["lhu".to_string(), "book".to_string()]);
+        assert_eq!(draft.name, "*");
+        assert_eq!(super::ticked(&draft), ["lhu", "book"]);
+        assert!(
+            draft.fields.iter().all(|f| f.key != "slot"),
+            "the ad hoc chain is not a numbered object"
+        );
+        assert!(!draft.is_dirty());
+        assert!(
+            validate(&draft, &config).is_empty(),
+            "{:?}",
+            validate(&draft, &config)
+        );
+        assert!(draft.diagnostics.is_empty(), "{:?}", draft.diagnostics);
+    }
+
+    /// The ad hoc chain is checked by the slot reader as if it were slot 1,
+    /// but its diagnostics must name the ad hoc chain: "slot 1" is a real,
+    /// unrelated slot.
+    #[test]
+    fn the_ad_hoc_drafts_diagnostics_name_the_ad_hoc_chain() {
+        let config = config_with_slot("3 = [\"book\"]\n");
+        for chain in [vec!["nope".to_string()], vec![]] {
+            let draft = ad_hoc_draft(&config, &chain);
+            assert!(!draft.diagnostics.is_empty(), "{chain:?}");
+            for d in &draft.diagnostics {
+                assert!(d.message.contains("ad hoc chain"), "{}", d.message);
+                assert!(!d.message.contains("slot"), "{}", d.message);
+            }
+        }
+        let draft = ad_hoc_draft(&config, &["nope".to_string()]);
+        assert_eq!(
+            draft.diagnostics[0].message,
+            "the ad hoc chain names 'nope', which is not a groupable column"
+        );
     }
 
     /// `dimensions` offers the dataset's groupable columns: the slot's own

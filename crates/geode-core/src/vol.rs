@@ -55,16 +55,28 @@ impl Coordinate {
     }
 }
 
-/// Where a slice is evaluated. `Dense(n)` is `n` strikes spanning the
-/// document's own strike range for that expiry; `At` is absolute strikes,
-/// in any order, echoed back in the same order. `Job(j)` is the strikes
-/// the batch's earlier `Slice` job `j` evaluated at: the vol worker
-/// resolves it to `At` before the model sees the request, so two curves
-/// can be compared at equal strikes in one batch. Density over an `At`
-/// grid is meaningful only for ascending strikes.
+/// Where a slice is evaluated. `Dense` is `n` strictly ascending strikes
+/// from end to end of the union of the document's own strike range for
+/// that expiry and `cover`, the model choosing the spacing (the demo model
+/// packs them toward the forward so a short-dated density stays smooth); `At` is absolute strikes, in any order, echoed
+/// back in the same order. `Job(j)` is the strikes the batch's earlier
+/// `Slice` job `j` evaluated at: the vol worker resolves it to `At` before
+/// the model sees the request, so two curves can be compared at equal
+/// strikes in one batch. Density over an `At` grid is meaningful only for
+/// ascending strikes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Grid {
-    Dense(usize),
+    /// `cover` is an absolute strike span `(lo, hi)` the grid must reach,
+    /// such as a listed chain's lowest and highest strike, so a curve is
+    /// drawn at least as wide as the quotes beside it. It only widens: a
+    /// cover inside the document's own range leaves the grid as it was.
+    /// Naming strikes is not evaluating them; how a model reads a strike
+    /// past its own range is the model's to say. A cover that is not an
+    /// ascending pair of positive, finite strikes fails the job.
+    Dense {
+        n: usize,
+        cover: Option<(f64, f64)>,
+    },
     At(Vec<f64>),
     Job(usize),
 }
@@ -116,7 +128,8 @@ pub struct MapRequest {
 pub struct VolError(pub String);
 
 /// An evaluator of one document kind. `slice` evaluates a document at
-/// any expiry inside its term range and `coordinates` places given
+/// any expiry, interpolating between its terms and extrapolating past
+/// them as the model defines, and `coordinates` places given
 /// points; both are calculation and neither is a module's to do.
 pub trait VolModel: Send + Sync {
     fn name(&self) -> &str;

@@ -40,6 +40,7 @@ fn record(slot: Option<u8>, ad_hoc: &[&str], active: bool) -> crate::session::Fr
         active_slot: slot,
         ad_hoc: (!ad_hoc.is_empty()).then(|| ad_hoc.iter().map(|c| c.to_string()).collect()),
         ad_hoc_active: active,
+        loaded_from: None,
         as_of: geode_core::query::AsOf::Live,
     }
 }
@@ -181,6 +182,24 @@ fn a_reload_that_removes_a_column_drops_the_chain_naming_it(cx: &mut gpui::TestA
         before.grouping,
         "tiles following the dropped chain must requery"
     );
+}
+
+/// The row menu's `Color…` names come from the current datasets: built at
+/// construction, rebuilt when a reload changes them.
+#[gpui::test]
+fn a_reload_that_removes_a_column_rebuilds_the_text_dimensions(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services());
+    let shell = shell_of(&window, &mut vcx);
+    let names = |shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext| {
+        shell.read_with(vcx, |s, _| s.text_dims.iter().cloned().collect::<Vec<_>>())
+    };
+    assert_eq!(names(&shell, &vcx), chain(&["book", "lhu", "position_ref"]));
+
+    let (config, _) = ShellServices::config_and_builtin(sources(DATASETS_WITHOUT_LHU));
+    shell.update(&mut vcx, |s, cx| s.apply_reload(config, cx));
+    vcx.run_until_parked();
+
+    assert_eq!(names(&shell, &vcx), chain(&["book", "position_ref"]));
 }
 
 #[gpui::test]

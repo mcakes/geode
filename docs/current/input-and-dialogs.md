@@ -78,7 +78,7 @@ outside the panel only closes the dialog; it never also reaches a scope-bar
 chip or tile beneath.
 
 Object dialogs are the exception to one-per-kind: they stack per domain.
-Over a Views dialog, Colors, Scopes, or any other domain pushes, so a trader
+Over a Views dialog, Colors, Sources, or any other domain pushes, so a trader
 editing a column can open Colors from the palette, add the color the column
 needs, and Escape back. The covered dialog's whole state and scroll offset are
 parked in its own stack entry (`ShellModal::parked_object`) and restored when
@@ -111,16 +111,15 @@ cannot depend on such an event to keep text synchronized.
 
 Each entry records the workspace active when it was pushed
 (`ShellModal::workspace`). Frame dialogs — the dimension picker, as-of,
-grouping, the scope picker, the frame expression dialog, and the Scopes
-dialog's frame actions — read and commit the lane of the workspace recorded on the stack's
-base entry, through `ShellView::target_frame`, so a dialog opened in a pinned
+the Grouping dialog, the Scope dialog, and the frame expression dialog —
+read and commit the lane of the workspace recorded on the stack's base entry, through `ShellView::target_frame`, so a dialog opened in a pinned
 workspace changes only that workspace's lane (see
 [workspace lanes](shell.md#workspace-lanes)).
 
 Known limitation: apart from object dialogs, the stack holds one instance per
 `DialogKind`, so a second request for a live kind cannot open beside the first
-even from a different call site. The `choicedialog` pickers (grouping, scope,
-tile kind, column, log level) share one kind and one state field, so none of them can
+even from a different call site. The `choicedialog` pickers (tile kind,
+column, log level, link group, value color) share one kind and one state field, so none of them can
 open while another is anywhere in the stack.
 
 A multi-screen dialog registers its back step with `dialog::set_back`: a
@@ -135,6 +134,10 @@ step. Browse, Columns, the log-level targets, and one-step dialogs paint none.
 In the object dialog one click cancels an open value field with its typed
 text, reverts filtering, and clears a kept query before leaving; while a y/n
 confirmation is pending the button stays painted and its click does nothing.
+A Colors dialog the value-color list's `New named color…` pushed is the one
+exception at Naming: Escape or Back there pops the dialog and reveals the
+list intact, rather than stepping to a browse list nobody opened; the Colors
+dialog's own `n` still steps back to browse.
 The as-of dialog's Custom field and timeseries popups have no Back button.
 
 Normal/Filter dialogs use the [shared filter contract](shell.md#dialog-filtering):
@@ -283,6 +286,20 @@ dispatch targets. A registered saved-scope action and a live saved-scope row are
 items with distinct usage keys. Live rows allow a newly reloaded scope to be
 selected even if no corresponding action was registered at startup.
 
+A module registers its tile's actions under its own category, and a title
+names the tile it acts on, since the palette lists every kind's actions
+together. The Classifications tile's field verbs read `Classification:
+Confirm field` and `Classification: Cancel field` (`enter`/`escape` in its
+label editor, prompt and menus), not a bare `Commit`. Its configuration
+verbs, `Classification: New…`, `Rename…`, `Delete` and `Revert…`, and its
+file verbs, `Export CSV…`, `Export CSV with unclassified…` and `Import
+CSV…`, have no default chord: the palette and the tile's `⋯` menu reach
+them, and the menu also opens on a right press over a grid row, at the
+pointer, with the cursor moved to that row. The file verbs open the
+platform's save or open dialog, which is modeless and keyboard-driven by
+the platform; the tile awaits its answer without blocking and binds it to
+the classification shown when the verb ran.
+
 Binding badges are indicative: the palette takes the first compiled binding
 for an action without resolving current contexts or later shadows. They are
 not a guarantee that pressing the displayed key currently dispatches that row.
@@ -388,6 +405,261 @@ drag retains the geometry already applied and stops tracking, marking the
 session dirty. These paths run after modal and palette handling, so an overlay
 retains priority for its own Escape behavior.
 
+## Scope dialog
+
+[`shell/scopedialog`](../../crates/geode-shell/src/shell/scopedialog/)
+shows the lane's scope by ingredient and is where every ingredient is added,
+edited and removed. It is also where saved scopes and saved expressions are
+loaded, saved, edited, copied, deleted and reverted (its [Saved](#saved)
+screen). `frame::scope` ("Scope…", `mod+o`) and the scope bar's `+` open it
+on its Current screen; the `+` holds its pressed fill while the dialog is
+up. Its other doors are listed under [doors](#doors). It edits the dialog's lane (`target_frame`), so in a pinned
+workspace it edits that workspace's copy. Opening it while it is already on
+top does nothing; opening it while it sits lower in the dialog stack is
+refused with a status notice.
+
+Current paints three sections in fixed order, each under its header:
+`Dimensions` (one row per dimension selection: the column, its values, then
+how many values are selected), `Expressions` (one row per top-level `and`
+term of the expression, marked `unnamed`, then one row per named reference,
+its name with its definition's text), and `Text` (the text filter in quotes,
+`textual columns`). Every row leads with its kind's glyph in a fixed-width
+muted column: `▦` dimension, `ƒ` term, `≡` reference, `⌕` text. An empty
+section paints one muted row naming the key that fills it:
+`no dimensions · p`, `no expressions · x`, `no text · t`.
+
+Each section header carries an `add` control at its right, the pointer route
+to the key that fills it (its tooltip names the key): Dimensions opens the
+picker's Columns list as `p` does, Expressions the expression dialog's Add
+mode as `x` does, Text the text step as `t` does. A single press on an empty
+section's muted row opens the same step, since that row has no cursor to
+move. While the text step is open, both ignore the pointer. A reference the
+frame cannot resolve paints in the danger tone with its reason, or with
+`'<name>' is not defined` for a missing name. When the scope records a
+contradiction (`Scope::impossible`), the line `nothing can match —
+selections don't overlap` paints above the sections in the danger tone; the
+scope does not record which column contradicted, so the line names none.
+
+The title reads `Scope`, followed by where the scope came from, judged
+against the lane's `loaded_from` (see
+[workspace lanes](shell.md#workspace-lanes)): `from <name>` when the scope
+equals the saved scope it was loaded from, `from <name>, changed` when it has
+been edited since, `unsaved` when it came from no saved scope or that saved
+scope no longer exists, and nothing for an empty scope.
+
+The rows are prepared when the frame generation or the configuration version
+changes, never during paint, so an edit made elsewhere while the dialog is
+open (a chip's `×`, an undo, a reload that redefines a name) shows at once.
+The cursor follows its row by identity across a refresh; when that row is
+gone it keeps its index, clamped to the last row.
+
+| Key | Effect |
+|---|---|
+| `j` / `k`, `up` / `down` | Move the cursor, wrapping |
+| `enter`, `e`, a row double-click | Edit the cursor's row: a dimension in the picker on its column, a term in the expression dialog's Term mode, a reference in the [definition step](#definition-step), the text in the text step. A reference whose name nothing defines refuses with `that expression no longer exists` |
+| `d` | Remove the cursor's row in one undoable edit |
+| `shift+d` | Clear the whole scope in one undoable edit |
+| `u` / `ctrl+r` | Undo / redo the lane's scope |
+| `p` | Add a dimension: the picker's Columns list |
+| `x` | Add an expression: the expression dialog's Add mode |
+| `t` | The text step |
+| `i` | On a `≡` row, replace the reference with its definition in one undoable edit |
+| `mod+s` | On a term row, open that term's name entry in the expression dialog |
+| `o` | The [Saved](#saved) screen |
+| `s` | The [save prompt](#save-prompt); an empty scope refuses with `nothing to save — the scope is empty` |
+| `escape` | Close the dialog |
+
+A single row press moves the cursor; the second press of a double-click acts
+as `enter` (a third press does not open a second step). The footer offers
+`i` only on a `≡` row and `mod+s` only on a term row.
+
+Steps that exist as their own modals (the dimension picker and the
+expression dialog) are pushed over Current. When the step closes, by its
+commit or its own escape, Current is on top again with its rows re-derived.
+The same steps opened on their own (`mod+p`, `mod+x`, a term chip) close on
+commit. The Saved screen, the save prompt and the definition step are drawn
+inside the dialog and follow the same rule: pushed over a screen, their
+commit or escape returns to it; opened by their own door, they close the
+dialog.
+
+The text step is drawn inside the dialog, as a field above the sections,
+seeded with the lane's text. Every non-chord key types, Current's verbs
+included, and the rows under it ignore the pointer. `enter` sets the trimmed
+text, or clears the filter when it is empty, in one undoable edit and returns
+to Current; `escape` returns with nothing changed. `t` while the step is open
+types a `t`.
+
+Refusals paint as one danger line under the sections and change nothing.
+The next key the dialog claims drops it.
+
+- `only an unnamed term can be named` — `mod+s` off a term row.
+- `only a named reference can be inlined` — `i` off a `≡` row; a reference
+  that does not resolve refuses with its own reason.
+- `This term is no longer in the scope expression` — `d`, `enter`, `e` or
+  `mod+s` on a term row whose index no longer holds the term it was derived
+  from (the expression changed under the dialog). The rows re-derive, so the
+  next key acts on the scope as it now is, rather than on whichever term
+  took the old index.
+
+Opened while the scope text field held focus, the dialog returns focus to the
+field when it closes.
+
+### Saved
+
+The Saved screen lists the saved scopes, then the saved expressions, each
+section under its header and in name order. Each header carries what `enter`
+does in its section, `enter replaces the current scope` beside `Scopes` and
+`enter adds to the current scope` beside `Expressions`, because the same key
+means different things in the two. A scope row is its name and a one-line
+summary; an expression row leads with `≡` and is its name and its text in
+monospace, with an `applied` tag when the lane's scope refers to it. An
+expression whose definition does not parse paints its name and its reason in
+the danger tone. A section with no definitions paints one muted row:
+`no saved scopes · s saves the current one`, or
+`no saved expressions · n names a new one`.
+
+The rows derive with Current's, under the frame generation and the
+configuration version, so a save, a copy, a reload or an edit elsewhere shows
+at once; the cursor follows its row by identity, as on Current. While no
+filter is typed, an empty section's row is a cursor stop, so `n` and `enter`
+reach a first expression from the keyboard. Under a filter it is not a stop:
+a filter that matches nothing leaves `enter` nothing to act on.
+
+| Key | Effect |
+|---|---|
+| `j` / `k`, `up` / `down` | Move the cursor, wrapping |
+| `enter`, a row double-click | On a scope, replace the lane's scope with it (`ShellView::load_saved_scope`, one undoable step). On an expression, add the reference to the lane's scope or remove it, in one undoable edit. Either commit leaves Saved |
+| `enter` on an empty row | The empty Expressions row opens a new [definition](#definition-step); the empty Scopes row refuses with `narrow the current scope, then save it (s)` |
+| `e` | On an expression, its [definition](#definition-step); on a scope, refuses with `load it, change it, then save over it (s)` |
+| `n` | A new expression's definition, from anywhere off a scope row; on a scope row or the empty Scopes row, refuses with `narrow the current scope, then save it (s)` |
+| `s` | The [save prompt](#save-prompt), pushed over Saved; its commit or `escape` returns to Saved. An empty scope refuses with `nothing to save — the scope is empty` |
+| `c` | Copy the row's definition under a new name |
+| `d` | Delete the user's own definition, after a question |
+| `r` | Revert the user's copy to the lower layer's, after a question |
+| `/` | Filter |
+| `escape` | Back to Current when Saved was pushed from there, else close |
+
+`/`, or a press on the filter row, filters the rows by name and by summary
+or text. The filter decides membership only: the sections and their name
+order hold. In the filter, `escape` restores the query held when the filter
+was entered and bare `enter` keeps the typed one; neither loads nor toggles
+a row. Arrows move the cursor.
+
+A single row press moves the cursor; the second press of a double-click
+commits the row. A single press on the empty Expressions row opens a new
+definition, as `n` does there. Pushed over Current, Saved paints the title
+row's Back button, which leaves Saved in one click (reverting an open
+filter); opened alone it has none. A scope or expression removed since the
+rows derived refuses with `that saved scope no longer exists` or
+`that expression no longer exists`, and the rows re-derive. Refusals paint as
+one danger line under the rows, as on Current.
+
+`c` opens a name prompt labelled `Copy '<name>' as`, previewing the source's
+summary or text. The copy is written from the definition as the
+configuration holds it at `enter`, pending writes included. A name any layer
+already holds refuses with `'<name>' already exists`, since a copy never
+forks. The copy lands in the user layer, and the cursor on it.
+
+`d` asks `Delete '<name>' from your config?` with a `Delete` button; for an
+expression, the line under the question names its users (for example
+`Used by EQ liquid and the current scope.`, as the object dialog's
+[delete of a named expression](configuration-dialogs.md#creation-removal-and-drift)
+did). A delete never rewrites the scopes that name the expression: they show
+it as missing. `r` asks `Throw away your changes to '<name>'?` with a
+`Revert` button; yes removes the user's copy and the lower layer's is in
+force again. Each refuses when the user holds nothing to remove: `d` on an
+inherited row with
+`'<name>' comes from the <layer> layer — there is nothing of yours to delete`,
+and `r` without a user copy over a lower one with
+`'<name>' has no changes of yours to revert`. The answer re-checks
+ownership: if the definition was removed, or a revert's lower copy went,
+while the question was up, it refuses with
+`the list changed under the question — nothing was removed` rather than
+delete the user's only copy. After a delete the cursor moves to the next
+row; after a revert it stays.
+
+A question takes the footer's place and every key until it is answered:
+`y` or `enter` carries it out, `n` or `escape` drops it, and every other key
+is claimed and dropped. Rows, the filter row and Back ignore the pointer
+while it is up. The shared input loses focus under a question, because its
+own bindings (backspace, delete, paste) run before the dialog's key handler
+and would otherwise edit a prompt's draft behind the question; the answer
+gives focus back.
+
+### Save prompt
+
+`s` on Current or Saved, the scope bar's save glyph and
+`scope::save_current` open the save prompt: a field labelled `Save scope as` above Current's rows, which
+preview what is saved and ignore the pointer. It is seeded with the saved
+scope the lane's scope was loaded from (`loaded_from`), so saving a loaded
+scope back over itself is `s` then `enter`. An empty scope refuses at the
+door, and again at the write if it was cleared under the prompt.
+
+`enter` checks the name (`check_object_name`, then the reserved names, which
+refuse with `'<name>' is reserved`). A name the user layer holds asks
+`Replace '<name>' with the current scope?` with a `Replace` button; `n`
+returns to the prompt with its draft. A name only an inherited layer holds is
+written without a question, as a fork, and the status bar announces
+`copied '<name>' to your config — r restores the <layer> copy`. A new name is
+written at once. A name whose saved scope is exactly the lane's scope is not
+written and asks nothing, whichever layer holds it: a no-op write would fork
+an inherited scope and freeze it against the lower layer's later updates.
+The lane still records the name, so the title reads `from <name>`. Every
+other save goes through the pending write batch, resolves in
+the frame at once (so the next `s` sees the name as the user's), and records
+the name as the lane's `loaded_from`, so the title reads `from <name>`.
+`escape` leaves the prompt and writes nothing.
+
+The same field names a copy (above) and a new expression (below). Those
+prompts paint alone, the field over a monospace preview of what they name,
+since Current's rows are not what they write.
+
+### Definition step
+
+The definition step edits one saved expression's text in place. `enter`,
+`e` or a double-click on a `≡` row of Current, `e` on an expression in
+Saved, and a `≡` chip's body open it, seeded with the definition's text; an
+invalid definition opens too, since this is where it gets fixed. Under the
+field, the expression dialog's column and value suggestions show (`tab`
+inserts one), without named-expression rows: one definition never refers to
+another. A note under the suggestions names the expression's users, or reads
+`not used`.
+
+`enter` refuses an empty text with
+`an empty named expression would match everything`, then a parse error or an
+unknown column, each inline under the field. A valid text is written through
+the pending batch, keeping the definition's other keys, and resolved in the
+frame at once, so every scope naming it, the lane's included, reads the new
+text before the flush. Editing an inherited expression forks it without a
+question, announced on the status bar; references follow the edit, so there
+is nothing to confirm. A text unchanged from the definition (both trimmed)
+leaves the step and writes nothing, so an inherited expression stays
+inherited. An expression deleted while the step was open refuses with
+`that expression no longer exists` rather than be written back. `escape`
+leaves the step and writes nothing.
+
+`n` in Saved opens the step empty, labelled `New expression`. Its `enter`
+checks the text the same way, then turns the step into a name prompt
+(`Name this expression`) in its place. A name any layer holds refuses with
+`'<name>' already exists`. The new expression is written and resolved but
+not applied to the lane's scope, and the prompt returns to Saved. `escape`
+from the name prompt also returns to Saved, and discards the typed
+definition: the step it replaced is gone, so the text must be typed again.
+
+### Doors
+
+| Door | Opens |
+|---|---|
+| `frame::scope` (`mod+o`), the scope bar's `+` | Current |
+| `frame::scope_saved` (unbound), the toolbar's load glyph, `config::scopes`, `config::expressions` | Saved alone; with the dialog on top on Current, Saved is pushed over it, as `o` does |
+| The scope bar's save glyph, `scope::save_current` | The save prompt alone; with the dialog on top on Current or Saved, pushed over that screen, as `s` does there. An empty scope refuses on the status bar and opens nothing |
+| A `≡` chip's body | That expression's definition alone; with the dialog on top on Current or Saved, pushed over it. A name nothing defines refuses on the status bar and opens nothing |
+
+A door that opens a screen or step alone makes it the bottom layer, so its
+commit or `escape` closes the dialog. The load glyph holds its pressed fill
+while Saved is the top layer. With the dialog on top on any other layer (a
+step, or under a question) the Saved, save and definition doors do nothing.
+
 ## Dimension picker
 
 [`shell/picker.rs`](../../crates/geode-shell/src/shell/picker.rs) is a
@@ -447,22 +719,26 @@ needed to adopt a changed clock configuration. Commits update the frame's as-of
 and close the dialog. As-of undo swaps with the previous value rather than
 walking a history stack.
 
-## Grouping, scope, tile, log, and column choices
+## Tile, log, and column choices
 
 [`shell/choicedialog.rs`](../../crates/geode-shell/src/shell/choicedialog.rs)
 uses a filter-only `ChoiceList` with a target-specific commit. Tab completes,
 Enter or a row click commits, and Escape closes, except for the nested log
 level stage.
 
+Choosing a grouping is not a choice dialog: `frame::grouping` (`mod+g`) and
+the toolbar's grouping readout open the Grouping dialog, the Groupings
+object dialog (see
+[configuration dialogs](configuration-dialogs.md#the-grouping-dialog)).
+
 | Target | Rows and commit |
 |---|---|
-| Grouping | View default, then filled slots 1–9; opens on the active choice. Empty-query digits commit directly, with zero choosing the default. Unfilled digits are consumed. Commit rechecks slot existence, reports removal if needed, then closes. |
-| Scope (`frame::scope`, `mod+o`, and the toolbar's load glyph) | One row per saved scope, named, in the saved set's name order, read from the target frame's live saved scopes at open, so a scope saved or reloaded since startup is listed (the palette's `scope::<name>` rows are registered once at startup). Opens on the first saved scope equal to the frame's current scope, else the first row, so Enter on an untouched picker changes nothing. Commit loads through `ShellView::load_saved_scope`, the `scope::<name>` actions' own path: one undoable `set_scope` step in the target lane. A name removed by a reload while the picker was open loads nothing, closes, and reports "that saved scope no longer exists". With no saved scope the list is replaced by a hint to narrow the scope and save it with the save glyph (painted once the scope is non-empty) or `scope::save_current` (its chord when bound, else its palette title); Enter there does nothing and the footer offers only Escape. |
 | Tile kind | Roster order excluding the placeholder. Closes before adding to the tile focused at commit time: fills a placeholder or splits a real tile using the configured placement. |
 | Tile kind with context (`tile::open_with`) | The same rows, pre-filtered to kinds whose factory accepts a column of the focused tile's captured dimension context, titled `Open {subject} in…` (the first context value of an accepted column). Commit always splits, passing the factory's translated `launch_state` as the new tile's restored record. |
 | Column (`config::view_column`, `config::schema_column`) | The focused tile's presented columns from `TileContent::tile_columns`, captured at open; a row reads the header label, then ` · name` when they differ. Schema omits columns no dataset of the view declares in current configuration (derived view columns, and derived dimensions a view lists as plain dimension columns). Opens on the cursor's column, else the first row. Before the list opens, a tile with no columns refuses with "this tile has no dataset columns", a Schema list with nothing left with "no schema columns in this tile's view", and a target dialog already in the stack with the stack's own refusal. Commit closes the list, then opens the dialog on that column's Column stage (see [configuration dialogs](configuration-dialogs.md#stages-and-ownership)). Palette-only, no default binding. |
 | Log level | Choose a logging target, then its level. Escape or the Back button from levels returns to a rebuilt target list and clears the filter; a level choice submits `Diagnostics::request_level`. |
 | Link group (`tile::link_group`, `mod+u`, and the status bar's `following` segment) | The [link groups](shell.md#link-groups) of the focused tile, which is captured at open with its membership, so a pick lands on that tile even if focus has moved. A tile whose module follows (`TileContent::follows`) gets `follow · workspace`, then `follow · A` to `follow · D`; a tile whose module emits gets `emit · none` and `emit · A` to `emit · D`; a tile whose module does both gets the follow rows, then the emit rows. A row stands for its change by position, not by its text. The title is `Link group`, with ` · following A` and ` · emitting B` appended for the groups the tile is in. Opens on the row for what the tile follows (for a tile with no follow row, on the row for what it emits into), so Enter on an untouched chooser changes nothing; a typed query places the highlight by the chooser's own rule (see [filtering, choice, and movement](#filtering-choice-and-movement)). Digits type into the filter. Commit closes the chooser, then follows or emits through the shell's link doors; one pick changes one of the two. With no focused tile, or a placeholder focused, nothing opens and the status bar reads `no tile to link`; on a tile whose module neither follows nor emits nothing opens and it reads `this tile has no link group to join`. A tile closed under the open chooser (the palette still reaches `Close tile`) is linked to nothing, and the pick reports `that tile is no longer open`. Refused while a page is open. |
+| Value color (the row menu's `Color…`) | Titled `Color · {column} {value}`: each named color, alphabetical, with its swatch, then the twelve presets (`preset · red` … `preset · rose`), then `Custom…`, then `New named color…`, then `None`, then `Follow desk ({name})` when the user layer overrides a different, colored lower entry. Rows stand for their pick by position, so a color named `None` or `Custom…` is still that color. Opens on the named color in force, on its preset for an inline entry equal to one, on `Custom…` for any other inline entry, else on `None`, so Enter on an untouched list changes nothing; a query cleared back to blank lights that opening row again. While the query is a whole number 0–360 a pinned `Hue {n}` row with its swatch sits on top, lit, with `New named color…` pinned beneath it (the digits would filter it out by text), the other rows filtering beneath them; Enter on `Hue {n}` writes that hue, and an unchanged query at Enter keeps a highlight moved off it. With no named color the list begins with the presets. `New named color…` pushes the Colors dialog at its naming stage over the list, the value's name prefilled (lowercased; whitespace, `.` and `"` become `_`) and the draft seeded from the typed hue, else the color in force, else hue 240; Enter creates the color, removes the list, and sets the value's color once the color's write succeeds; Escape or `‹` at naming returns to the list intact. `Custom…` opens the hue stage in the same modal: `h`/`l` and `←`/`→` step 15°, with `shift` 1°, wrapping; digits and `backspace` edit the hue field, the first digit after opening or a step replacing it; `t` toggles the tone; `enter` applies (refused while the field is out of range; on the hue and tone of the color in force, named or inline, it closes writing nothing); `escape` or `‹` returns to the list without writing. Every other non-chord key is consumed; a chord keeps the modal route (the palette, a dialog opener), and keys return to the stage when the palette closes. Commit closes the list, then writes the value's entry in the user layer's `value_colors.toml` off the UI thread, with a status notice (see [Color…](shell.md#color)). |
 
 Closing and reopening creates fresh dialog state. These pickers apply on
 Enter; they do not use Normal/Filter mode's keep-query Enter.
@@ -471,16 +747,17 @@ Enter; they do not use Normal/Filter mode's keep-query Enter.
 
 [`shell/scope_expr_view.rs`](../../crates/geode-shell/src/shell/scope_expr_view.rs)
 edits the frame's expression and the frame's named-expression references
-(Whole and Add through staged names, Term by naming the term), in one of three modes chosen by the door that
-opens it. Bare Enter trims and parses the draft in every mode.
+(Add through staged names, Term by naming the term), in one of two modes
+chosen by the door that opens it. Bare Enter trims and parses the draft in
+both. There is no whole-text mode: the [Scope dialog](#scope-dialog) lists
+each term as its own row, and a term row's edit replaces whole-text editing.
 
 | Mode | Opened by | Seed | Enter | Empty Enter, nothing staged |
 |---|---|---|---|---|
-| Scope expression (whole) | `frame::scope_expression` | The whole expression; the frame's names staged | Sets the names to the staged list and replaces the expression | Clears the expression and the names |
-| Edit scope term | A click on a toolbar term chip | That top-level `and` term | Replaces that term; the other terms keep their order | Removes that term |
-| Add scope expression | `frame::add_expression` (the `+` menu's "Expression…" row) | Empty, nothing staged | Appends the staged names the frame lacks and joins the text to the current expression with `and`, or sets it when there is none | Closes without a change |
+| Edit scope term | A click on a toolbar term chip; `enter`, `e` or a double-click on a term row of the Scope dialog | That top-level `and` term | Replaces that term; the other terms keep their order | Removes that term |
+| Add scope expression | `frame::add_expression` (`mod+x`); `x` in the Scope dialog | Empty, nothing staged | Appends the staged names the frame lacks and joins the text to the current expression with `and`, or sets it when there is none | Closes without a change |
 
-Whole and Add stage named expressions beside the text. Each staged name
+Add stages named expressions beside the text. Each staged name
 paints as a `≡ name` chip above the field, in staged order, with a `×` that
 unstages it; a name the frame cannot resolve (missing or invalid) takes the
 danger tone, as its scope-bar chip does. Backspace with the caret at the
@@ -488,13 +765,14 @@ field's start and no selection removes the last staged chip; anywhere else
 backspace edits the text. A name is staged by accepting its suggestion row
 (see [Suggestions](#suggestions)). Enter applies the staged names and the
 text in one `set_scope`, so one undo takes back both. An empty field with
-names staged applies the names alone: Whole sets them and clears the
-expression, Add appends them. Term mode stages nothing.
+names staged applies the names alone, appending them. Term mode stages
+nothing.
 
 The term and add modes show a muted note under the field saying what the
 commit touches. A successful commit changes only the expression and, in
-Whole and Add, the named references in the frame scope, through undoable
-`set_scope`, then closes. Parse errors remain inline
+Add, the named references in the frame scope, through undoable
+`set_scope`, then closes; pushed from the Scope dialog, the close returns
+there. Parse errors remain inline
 in every mode and typing clears the error. The term dialog remembers the term
 it was seeded with; if the scope changed while it was open so that its index
 no longer holds that term (gone, or a different term in its place), an edit
@@ -503,11 +781,11 @@ now has that index. Escape discards the scope draft; definitions already
 saved with `mod+s` remain.
 `frame::clear_expression` drops the whole expression layer without a dialog;
 with no expression it does nothing. `frame::add_expression` is bound to
-`mod+x` by default, as `frame::pick` is to `mod+p`; neither
-`frame::scope_expression` nor `frame::clear_expression` has a default chord.
-All three are in the palette. Named expressions have no entry of their own: the Add
-dialog offers them beside typed text, and any expression is named at
-creation or later with `mod+s`.
+`mod+x` by default, as `frame::pick` is to `mod+p`;
+`frame::clear_expression` has no default chord. Both are in the palette.
+Named expressions have no entry of their own: the Add dialog offers them
+beside typed text, and any expression is named at creation or later with
+`mod+s`.
 
 In every mode, `mod+s` (the configured `mod` key, Alt by default, with
 `s`; the footer's chip shows the user's own alias) saves the typed text as a
@@ -529,7 +807,7 @@ A save writes `[name] expression = "<text>"` to the user layer of
 `expressions.toml` through the object dialog's write path, rebuilds the
 frame's named expressions from the pending configuration at once (so the new
 name resolves before the write reaches disk), empties the field, and stages
-the name. In Whole and Add nothing reaches the frame scope until Enter;
+the name. In Add nothing reaches the frame scope until Enter;
 Escape cancels that draft without removing the saved definition.
 
 In Term mode the save names the term (the entry reads `Name this term ·
@@ -543,20 +821,6 @@ writes nothing. A write that fails later rolls the configuration back but not
 the swap: the tile then refuses to query with a missing-name error rather
 than drop the filter, and one undo restores the term, as with a staged name
 in Add.
-
-The toolbar's `+` opens a two-row menu, "Dimension…" (`frame::pick`) and
-"Expression…" (`frame::add_expression`), each row showing its action's live binding
-through `kbd::menu_binding`. It owns the keyboard while open: `j`/`k`
-or the arrows move with wrap, Enter commits the highlighted row, Escape
-closes, and other bare keys are consumed. A chord passes to the matcher, and
-any dispatch closes the menu. A row click commits; a press of any button
-anywhere else closes the menu and reaches nothing beneath it, and while the
-menu is open the wheel does not reach the tiles beneath it either. Escape and
-an outside press cancel any chord prefix typed while the menu was open. A
-commit is a dispatch of the row's action, so the menu opens exactly what the
-palette row would. Opening the menu takes the shell root's focus; if the
-scope text field held focus, the menu's own close returns it there, and so
-does closing the dialog or picker one of its rows opened.
 
 ### Suggestions
 
@@ -575,7 +839,7 @@ The rows depend on the caret's position in the grammar:
 
 | Caret is after | Rows offered |
 |---|---|
-| Nothing, `(`, `and`, `or`, `not` | In the frame dialog's Whole and Add modes, the unstaged named expressions; then every column, then `not` and `(` |
+| Nothing, `(`, `and`, `or`, `not` | In the frame dialog's Add mode, the unstaged named expressions; then every column, then `not` and `(` |
 | A column | The operators valid for that column's type |
 | An operator, or inside an open `in (` list | Values for that column, when there are any to list |
 | A complete term | `and`, `or`, plus `)` when a paren is open (or `,` / `)` inside an `in` list) |
@@ -583,8 +847,8 @@ The rows depend on the caret's position in the grammar:
 Right after typing `in` and before its `(`, the only row offered is `(` itself.
 
 Named rows appear only at that column position, only in the frame dialog's
-Whole and Add modes: never in Term mode, never in the name entry, and never
-in the Scopes or Expressions object dialogs' `expression` field. They rank
+Add mode: never in Term mode, never in the name entry, and never
+in the Scope dialog's [definition step](#definition-step). They rank
 with the other rows by their name. A row paints as `≡ name` under its own
 selector (`scope-expr-named-row-{name}`), so a name equal to a column's name
 is a separate row. Its detail is an elided preview of the definition's text;
@@ -618,7 +882,6 @@ make the typed prefix an unsound filter):
 
 | Mode | Values narrowed by |
 |---|---|
-| Whole | The frame's dimension selections, text filter and as-of, with the staged names in place of the frame's. Its own expression is excluded, since the dialog replaces it. |
 | Add | The frame's full current scope, including its expression, plus the staged names. |
 | Term | The frame's scope with the edited term removed. |
 

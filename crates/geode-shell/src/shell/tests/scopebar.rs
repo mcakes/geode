@@ -2,7 +2,6 @@
 //! restoration.
 
 use super::*;
-use crate::shell::objectdialog;
 use geode_core::config::ConfigSources;
 use geode_core::scope::{DimensionSelection, Scope};
 
@@ -243,10 +242,12 @@ fn a_text_set_elsewhere_shows_in_the_field_and_a_chip_close_drops_the_dimension(
     assert!(vcx.debug_bounds("scope-chip-close-book").is_none());
 }
 
-/// The save chip appears only for a nonempty frame scope. Clicking it opens naming
-/// seeded from the frame, matching `scope::save_current`.
+/// The save chip appears only for a nonempty frame scope. Clicking it opens the
+/// Scope dialog's save prompt, matching `scope::save_current`.
 #[gpui::test]
-fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui::TestAppContext) {
+fn the_save_chip_only_paints_with_a_savable_scope_and_opens_the_save_prompt(
+    cx: &mut gpui::TestAppContext,
+) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
@@ -268,41 +269,46 @@ fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui
     vcx.simulate_click(save.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
 
-    assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s
-            .object_dialog
-            .as_ref()
-            .map(|d| d.stage.clone())),
-        Some(objectdialog::Stage::Naming)
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
     );
     assert_eq!(
         shell.read_with(&vcx, |s, _| s
-            .object_dialog
+            .scope_dialog
             .as_ref()
-            .map(|d| d.naming_seed.clone())),
-        Some(objectdialog::NameSeed::FromFrame)
+            .map(|d| d.layers.top().clone())),
+        Some(crate::shell::scopedialog::state::Layer::Step(
+            crate::shell::scopedialog::state::Step::SaveScope
+        ))
     );
-    // The naming field retains focus through the opening mouse-down because the dialog
+    // The name field retains focus through the opening mouse-down because the dialog
     // helper prevents the default focus transfer.
     vcx.simulate_input("eu");
     vcx.run_until_parked();
     assert_eq!(
         shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string()),
         "eu",
-        "typing after the click reaches the naming field"
+        "typing after the click reaches the name field"
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s
+            .scope_dialog
+            .as_ref()
+            .and_then(|d| d.prompt.as_ref().map(|p| p.draft.clone()))),
+        Some("eu".to_string()),
+        "the field is the prompt's draft"
     );
 }
 
 /// The `+` chip paints regardless of the scope's own state — adding a
-/// filter is how a scope starts — and its menu's "Dimension…" row opens
-/// the same picker `mod+p`/`frame::pick` does, with the filter field
-/// HOLDING the focus the open gave it, so typing after the click lands
-/// (the mouse-opened-dialog rule; the row stops its press's propagation,
-/// and `open_shell_dialog_with_key`'s `prevent_default` covers every
-/// other mouse-opened dialog).
+/// filter is how a scope starts — and opens the Scope dialog, the same
+/// door as `frame::scope`. The dialog keeps the focus the open gave it
+/// through the rest of the mouse-down, so a key typed after the click
+/// reaches it: `p` pushes the dimension picker over it (the
+/// mouse-opened-dialog rule).
 #[gpui::test]
-fn the_pick_chip_is_always_present_and_its_menu_opens_the_picker(cx: &mut gpui::TestAppContext) {
+fn the_plus_chip_is_always_present_and_opens_the_scope_dialog(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
     assert!(shell.read_with(&vcx, |s, cx| s.frame().read(cx).shared().scope().is_empty()));
@@ -312,36 +318,16 @@ fn the_pick_chip_is_always_present_and_its_menu_opens_the_picker(cx: &mut gpui::
         .expect("the pick chip should paint even with an empty scope");
     vcx.simulate_click(pick.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.add_filter_menu.is_some()));
-    assert!(
-        shell.read_with(&vcx, |s, _| s.picker.is_none()),
-        "the + opens its menu, not the picker"
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
     );
-    let row = vcx
-        .debug_bounds("scope-add-menu-row-dimension")
-        .expect("the menu's Dimension row paints");
-    vcx.simulate_click(row.center(), gpui::Modifiers::default());
-    vcx.run_until_parked();
-
-    assert!(shell.read_with(&vcx, |s, _| s.picker.is_some()));
-    assert!(
-        shell.read_with(&vcx, |s, _| s.add_filter_menu.is_none()),
-        "a commit closes the menu"
-    );
-    let focused = vcx.update(|window, cx| {
-        let input = shell.read(cx).dialog_input.clone();
-        input.read(cx).focus_handle(cx).is_focused(window)
-    });
-    assert!(
-        focused,
-        "the picker's field must keep focus through the rest of the mouse-down"
-    );
-    vcx.simulate_input("bo");
+    vcx.simulate_keystrokes("p");
     vcx.run_until_parked();
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.picker.as_ref().map(|p| p.query.clone())),
-        Some("bo".to_string()),
-        "typing after the click reaches the filter"
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Picker),
+        "the key typed after the click reaches the dialog"
     );
 }
 
@@ -966,73 +952,74 @@ fn a_missing_name_paints_the_broken_chip(cx: &mut gpui::TestAppContext) {
     assert!(vcx.debug_bounds("scope-named-chip-close-gone").is_some());
 }
 
-/// The object dialog's state, read through the shell.
-fn object_dialog_state<T>(
+/// The Scope dialog's top layer and the shared input's text.
+fn definition_state(
     shell: &Entity<ShellView>,
     vcx: &gpui::VisualTestContext,
-    f: impl FnOnce(&objectdialog::ObjectDialogState) -> T,
-) -> T {
-    shell.read_with(vcx, |s, _| {
-        f(s.object_dialog
-            .as_ref()
-            .expect("the object dialog should be open"))
+) -> (Option<crate::shell::scopedialog::state::Layer>, String) {
+    shell.read_with(vcx, |s, cx| {
+        (
+            s.scope_dialog.as_ref().map(|d| d.layers.top().clone()),
+            s.dialog_input.read(cx).value().to_string(),
+        )
     })
 }
 
-/// A click on a named chip's body opens the Expressions dialog on that
-/// object, in its edit stage; the dialog then owns the keyboard, so
-/// `escape` steps back to its browse list.
+fn definition_of(name: &str) -> Option<crate::shell::scopedialog::state::Layer> {
+    Some(crate::shell::scopedialog::state::Layer::Step(
+        crate::shell::scopedialog::state::Step::Definition {
+            name: Some(name.to_string()),
+        },
+    ))
+}
+
+/// A click on a named chip's body opens that expression's definition in
+/// the Scope dialog, alone; the dialog then owns the keyboard, so `escape`
+/// closes it.
 #[gpui::test]
-fn a_named_chips_body_opens_its_expression(cx: &mut gpui::TestAppContext) {
+fn a_named_chips_body_opens_its_definition(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services_with_a_named_scope("liq"));
     let shell = shell_of(&window, &mut vcx);
     dispatch_action(&shell, "scope::mine", &mut vcx);
     vcx.run_until_parked();
     click_selector(&mut vcx, "scope-named-chip-liq");
-    let (domain, stage) = object_dialog_state(&shell, &vcx, |s| (s.domain, s.stage.clone()));
-    assert_eq!(domain, objectdialog::Domain::Expressions);
     assert_eq!(
-        stage,
-        objectdialog::Stage::Edit {
-            object: "liq".to_string()
-        }
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+    assert_eq!(
+        definition_state(&shell, &vcx),
+        (definition_of("liq"), "npv > 0".to_string())
     );
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
     assert_eq!(
-        object_dialog_state(&shell, &vcx, |s| s.stage.clone()),
-        objectdialog::Stage::Browse,
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        None,
         "the keyboard reaches the dialog the click opened"
     );
 }
 
-/// A missing name has no object to edit: the click opens the browse list
-/// with a notice rather than an edit stage over a phantom empty draft.
+/// A missing name has no definition to edit: the click refuses on the
+/// status bar and opens nothing.
 #[gpui::test]
-fn a_missing_named_chips_body_opens_browse_with_a_notice(cx: &mut gpui::TestAppContext) {
+fn a_missing_named_chips_body_refuses_with_a_notice(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services_with_a_named_scope("gone"));
     let shell = shell_of(&window, &mut vcx);
     dispatch_action(&shell, "scope::mine", &mut vcx);
     vcx.run_until_parked();
     click_selector(&mut vcx, "scope-named-chip-gone");
-    let (domain, stage, notice, has_draft) = object_dialog_state(&shell, &vcx, |s| {
-        (
-            s.domain,
-            s.stage.clone(),
-            s.notice.clone(),
-            s.draft.is_some(),
-        )
-    });
-    assert_eq!(domain, objectdialog::Domain::Expressions);
-    assert_eq!(stage, objectdialog::Stage::Browse);
-    assert_eq!(notice.as_deref(), Some("'gone' is not defined"));
-    assert!(!has_draft, "no edit draft was built");
+    assert_eq!(shell.read_with(&vcx, |s, _| s.top_kind()), None);
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.notice.as_ref().map(|n| n.to_string())),
+        Some("that expression no longer exists".to_string())
+    );
 }
 
-/// An invalid name is still defined: its chip opens the edit stage, which
-/// is where the broken text gets fixed.
+/// An invalid name is still defined: its chip opens its definition seeded
+/// with the broken text, which is where it gets fixed.
 #[gpui::test]
-fn an_invalid_named_chips_body_opens_its_edit_stage(cx: &mut gpui::TestAppContext) {
+fn an_invalid_named_chips_body_opens_its_definition(cx: &mut gpui::TestAppContext) {
     let services = services_with_builtin_docs(vec![
         LayerDoc::builtin("scopes", "[mine]\nnamed = [\"bad\"]\n").unwrap(),
         LayerDoc::builtin("expressions", "[bad]\nexpression = \"npv >\"\n").unwrap(),
@@ -1047,10 +1034,8 @@ fn an_invalid_named_chips_body_opens_its_edit_stage(cx: &mut gpui::TestAppContex
     );
     click_selector(&mut vcx, "scope-named-chip-bad");
     assert_eq!(
-        object_dialog_state(&shell, &vcx, |s| s.stage.clone()),
-        objectdialog::Stage::Edit {
-            object: "bad".to_string()
-        }
+        definition_state(&shell, &vcx),
+        (definition_of("bad"), "npv >".to_string())
     );
 }
 
