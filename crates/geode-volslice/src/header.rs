@@ -1,7 +1,8 @@
 //! The tile's header and footer: what it reads (the underlying, the
-//! coordinate), one chip per loaded kind, the difference chip, the link
-//! chips and the datasets' health; below the chart, the first notice and
-//! the key hints.
+//! coordinate), one chip per loaded kind, the difference chip, the fixed
+//! differences y-axis chip while one is set, the link chips, the datasets'
+//! health and the action menu's `\u{22ef}`; below the chart, the first
+//! notice and the key hints.
 //!
 //! [`HeaderModel::prepare`] and [`footer_notice`] format their text when
 //! the tile's state changes and [`footer_hints`] when the chords do; paint
@@ -9,6 +10,8 @@
 //! same action its key does, so the pointer and the keyboard cannot
 //! disagree.
 
+use geode_chart::core::scale::unsigned_zero;
+use geode_chart::xy::YFormat;
 use geode_core::link::{DraftMark, Group};
 use geode_shell::actions::ActionId;
 use geode_shell::keymap::{Keystroke, Modifiers, parse_binding};
@@ -18,12 +21,14 @@ use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::{kbd, scale};
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
-use geode_tile::header::{Cluster, HealthChip, Mode, TileLinks};
+use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks};
 use geode_tile::notice::{Notice, Tone as NoticeTone};
 use gpui::prelude::*;
 use gpui::{App, Div, ElementId, Entity, MouseButton, MouseDownEvent, SharedString, div};
 use gpui_component::{Theme, h_flex, v_flex};
 
+use crate::core::build::{DIFF_AXIS, Y_FORMAT};
+use crate::core::menu::FIX_DIFF_Y;
 use crate::core::model::{Kind, Loaded, Pair, State};
 use crate::tile::VolsliceTile;
 
@@ -73,6 +78,69 @@ pub(crate) struct HeaderModel {
     /// so the chip stays short; `diff` with none shown.
     pub diff: SharedString,
     pub diff_set: bool,
+    /// `y \u{2212}2%\u{2026}2%` while the differences axis is fixed, in
+    /// the axis's own format; `None` while it autoscales.
+    pub ylim: Option<SharedString>,
+}
+
+/// The `\u{22ef}` button's per-tile selector, formatted once, and whether
+/// its menu is up.
+pub(crate) struct MenuButton {
+    pub selector: SharedString,
+    pub open: bool,
+}
+
+/// A number to at most four significant digits, trailing zeros dropped,
+/// in scientific form past the range a plain one reads in. Never a signed
+/// zero.
+fn significant(v: f64) -> String {
+    if v == 0.0 || !v.is_finite() {
+        return if v.is_finite() {
+            "0".into()
+        } else {
+            v.to_string()
+        };
+    }
+    let magnitude = v.abs().log10().floor() as i32;
+    let text = if (-4..6).contains(&magnitude) {
+        let decimals = (3 - magnitude).max(0) as usize;
+        let t = format!("{v:.decimals$}");
+        if t.contains('.') {
+            t.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            t
+        }
+    } else {
+        let t = format!("{v:.3e}");
+        let (mantissa, exp) = t.split_once('e').unwrap_or((&t, "0"));
+        let mantissa = if mantissa.contains('.') {
+            mantissa.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            mantissa
+        };
+        format!("{mantissa}e{exp}")
+    };
+    unsigned_zero(text)
+}
+
+/// The fixed differences domain as the chip names it: the stored ends as
+/// they are, in the axis's unit (a percent axis reads a hundredth), to at
+/// most four significant digits, never rounded to a coarser step, with the
+/// labels' minus. Fixed from the menu, the ends are tick values already.
+pub(crate) fn ylim_text((lo, hi): (f64, f64)) -> String {
+    let (unit, suffix) = match Y_FORMAT[DIFF_AXIS.index()] {
+        YFormat::Percent => (100.0, "%"),
+        YFormat::Plain => (1.0, ""),
+    };
+    // Only a leading sign takes the labels' minus; an exponent's stays.
+    let end = |v: f64| {
+        let text = significant(v * unit);
+        match text.strip_prefix('-') {
+            Some(rest) => format!("\u{2212}{rest}{suffix}"),
+            None => format!("{text}{suffix}"),
+        }
+    };
+    format!("y {}\u{2026}{}", end(lo), end(hi))
 }
 
 const KIND_ACTIONS: [&str; 3] = ["volslice::kind_1", "volslice::kind_2", "volslice::kind_3"];
@@ -118,6 +186,7 @@ impl HeaderModel {
             (diff_text(&state.diffs).into(), true)
         };
         HeaderModel {
+            ylim: state.diff_ylim.map(|r| ylim_text(r).into()),
             underlying: underlying
                 .map(|u| SharedString::from(u.to_string()))
                 .unwrap_or(SharedString::new_static(NO_UNDERLYING)),
@@ -253,6 +322,7 @@ pub(crate) fn render_header(
     health: Option<&HealthChip>,
     mode: Mode,
     links: TileLinks,
+    menu: MenuButton,
 ) -> Div {
     let bare = control::paint(
         theme,
@@ -334,11 +404,46 @@ pub(crate) fn render_header(
         ))
         .child(h.diff.clone()),
     );
+    // The fixed differences axis: a set chip whose click frees it, as the
+    // action menu's `Fix diff y-axis` row and `:ylim off` do.
+    if let Some(ylim) = &h.ylim {
+        let label = ylim.clone();
+        left = left.child(
+            chip_control(
+                ElementId::Name(SharedString::new_static("volslice-ylim-chip")),
+                theme,
+                control::for_chip(theme, &diff_paint, theme.background),
+                tile,
+                FIX_DIFF_Y,
+            )
+            .debug_selector(move || format!("volslice-ylim-chip-{tile_id}-{label}"))
+            .text_color(diff_paint.text)
+            .when_some(diff_paint.fill, |d, fill| d.bg(fill))
+            .tooltip(tips::tip(
+                "tip-volslice-ylim",
+                "Free the difference y-axis",
+                Some(FIX_DIFF_Y),
+                None,
+            ))
+            .child(ylim.clone()),
+        );
+    }
     let mut cluster = Cluster::new(TileId(tile_id));
     cluster.close = close.cloned();
     cluster.mode = mode;
     cluster.links = links;
     cluster.health = health;
+    cluster.menu = Some(MenuTrigger {
+        id: ElementId::Name(SharedString::new_static("volslice-menu-button")),
+        selector: menu.selector,
+        tip_selector: SharedString::new_static("tip-volslice-menu"),
+        action: "volslice::menu",
+        open: menu.open,
+        on_press: std::rc::Rc::new({
+            let tile = tile.clone();
+            move |window, cx| tile.update(cx, |t, cx| t.toggle_menu(window, cx))
+        }),
+    });
     geode_tile::header::frame(
         stack.and_then(|s| s.marker(theme, TileId(tile_id))),
         left,
@@ -427,11 +532,44 @@ mod tests {
             ("diff \u{00b7} 3 pairs", true),
             "past two pairs, a count"
         );
+        assert_eq!(h3.ylim, None, "autoscaled: no chip");
+        state.diff_ylim = Some((-0.02, 0.02));
+        let h = HeaderModel::prepare(Some("SPX.Z"), &state, &fixture());
+        assert_eq!(
+            h.ylim.as_ref().map(|s| s.as_ref()),
+            Some("y \u{2212}2%\u{2026}2%")
+        );
         loaded.draft = None;
         let h = HeaderModel::prepare(None, &State::default(), &loaded);
         assert_eq!(h.underlying.as_ref(), NO_UNDERLYING);
         assert_eq!(h.chips.len(), 2, "only loaded kinds");
         assert_eq!((h.diff.as_ref(), h.diff_set), ("diff", false));
+    }
+
+    /// The chip reads at the step its range needs, with the labels' minus
+    /// and no signed zero.
+    #[test]
+    fn the_ylim_chip_reads_in_the_axis_format() {
+        let m = "\u{2212}";
+        assert_eq!(ylim_text((-0.02, 0.02)), format!("y {m}2%\u{2026}2%"));
+        assert_eq!(
+            ylim_text((-0.0275, 0.0275)),
+            format!("y {m}2.75%\u{2026}2.75%"),
+            "never rounded to a coarser step"
+        );
+        assert_eq!(
+            ylim_text((-0.0123, 0.02)),
+            format!("y {m}1.23%\u{2026}2%"),
+            "each end as typed"
+        );
+        assert_eq!(ylim_text((0.0, 1e-40)), "y 0%\u{2026}1e-38%");
+        assert_eq!(
+            ylim_text((-0.0123456, 0.0234567)),
+            format!("y {m}1.235%\u{2026}2.346%"),
+            "four significant digits at most"
+        );
+        assert_eq!(ylim_text((-0.015, 0.03)), format!("y {m}1.5%\u{2026}3%"));
+        assert_eq!(ylim_text((-0.0, 0.5)), "y 0%\u{2026}50%");
     }
 
     #[test]

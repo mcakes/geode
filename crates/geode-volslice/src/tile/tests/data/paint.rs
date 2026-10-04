@@ -499,12 +499,13 @@ fn the_footer_paints_the_first_notice_and_counts_the_rest(cx: &mut gpui::TestApp
     h2.draw(&mut vcx2);
     assert_eq!(
         h2.tile.read_with(&vcx2, |t, _| t.footer_notice()),
-        Some("no underlying in A (+1 more)".into())
+        Some("following A \u{2014} set the underlying there (+1 more)".into()),
+        "the refusal leads, the empty state behind it"
     );
     assert_eq!(
         h2.tile.read_with(&vcx2, |t, _| t.footer_tone()),
         Some(geode_tile::notice::Tone::Danger),
-        "a refusal stands behind it"
+        "a refusal is danger"
     );
 }
 
@@ -681,3 +682,5 @@ fn the_done_state_in_one_frame(cx: &mut gpui::TestAppContext) {
     );
     assert!(h.notices(&vcx).is_empty(), "{:?}", h.notices(&vcx));
 }
+
+mod menu;

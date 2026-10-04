@@ -138,6 +138,15 @@ cargo run -p geode-chart --example xy
 - `XySlot::nearest_in` is the nearest point within a window of a slot's
   points, the lower of two as near; `nearest` is the same over the whole
   slot. The tooltip reads through it with the slot's view window.
+- Each y axis autoscales to the padded extent of what the view shows of its
+  visible slots, so a pan or zoom rescales it, unless the model fixes its
+  domain: `XyModel::with_y_limit(axis, Some((lo, hi)))` (a pair that is not
+  finite and ascending is no limit; `None` autoscales again). The limit is
+  part of the model, so a caller fixing one on a painted model gives the
+  result a new version, as for any change. `XyModel::side_domain(axis,
+  view)` is the domain the element scales over, fixed or autoscaled, so a
+  host can freeze the domain it shows. Values past a fixed domain are
+  clipped by the pane's content mask and still read in the tooltip.
 - `XyModel::full()` is the x range of the slots visible at construction, and
   `(0, 0)` when there are none. A range of one x gives a view with no span,
   which paints every point at the plot's left edge and has no x ticks; a

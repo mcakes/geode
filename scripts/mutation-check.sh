@@ -21348,7 +21348,7 @@ run_mutation "chart xy: a reversed line is fed backwards" \
 # A y axis scales over what the view shows. Scaled over the whole slot,
 # a zoom into the money leaves the smile flat against the wings' range.
 run_mutation "chart xy: the domain reads the view only" \
-  crates/geode-chart/src/xy/element.rs \
+  crates/geode-chart/src/xy/model.rs \
   '                .flat_map(|s| s.values_in(s.window(view))),' \
   '                .flat_map(|s| s.values_in((0, s.len()))),' \
   geode-chart \
@@ -34300,14 +34300,14 @@ run_mutation "volslice: the key context takes no counts" \
 # shared steps would claim the `j` and `k` its field must type.
 run_mutation "volslice: the picker publishes no tilelist" \
   crates/geode-volslice/src/tile/mod.rs \
-  '        if matches!(self.popup, Some(Popup::Diff(_))) {' \
-  '        if self.popup.is_some() {' \
+  '            Some(p @ (Popup::Diff(_) | Popup::Actions(_))) => {' \
+  '            Some(p) => {' \
   geode-volslice the_picker_types_j_and_steps_with_the_arrows
 
 run_mutation "volslice: the diff chooser publishes tilelist" \
   crates/geode-volslice/src/tile/mod.rs \
-  '        if matches!(self.popup, Some(Popup::Diff(_))) {' \
-  '        if false {' \
+  '            Some(p @ (Popup::Diff(_) | Popup::Actions(_))) => {' \
+  '            Some(p @ Popup::Actions(_)) => {' \
   geode-volslice d_chooses_a_pair_and_the_batch_carries_its_diff_jobs
 
 # The tile's `shift+d` beats the workspace's duplicate inside the tile.
@@ -34363,8 +34363,8 @@ run_mutation "volslice: keyboard zoom anchors at the centre" \
 run_mutation "volslice: a split step is a new model version" \
   crates/geode-volslice/src/tile/mod.rs \
   '        self.version += 1;
-        self.model = with_split(&self.model, split, self.version);' \
-  '        self.model = with_split(&self.model, split, self.version);' \
+        self.model = restyled(&self.model, split, self.state.diff_ylim, self.version);' \
+  '        self.model = restyled(&self.model, split, self.state.diff_ylim, self.version);' \
   geode-volslice split_keys_step_the_split_as_a_new_model_version
 
 # Wheel and drag go through the x axis's scale, so a reversed delta axis
@@ -34388,11 +34388,11 @@ run_mutation "volslice: a strip press is gated on focus" \
   '        if !self.focused {
             return;
         }
-        let right' \
+        // A press that acts' \
   '        if false {
             return;
         }
-        let right' \
+        // A press that acts' \
   geode-volslice a_click_on_a_strip_row_solos_and_ctrl_or_shift_click_adds_when_focused
 
 run_mutation "volslice: a kind chip dispatches its own digit's action" \
@@ -34950,6 +34950,147 @@ run_mutation "volslice: close cancels by key" \
   '        self.data.cancel(key);' \
   '        let _ = &self.data;' \
   geode-volslice hide_keeps_the_query_and_close_cancels
+
+# A fixed y domain is what the axis scales over at every view; ignored,
+# the difference pane rescales on every pan.
+run_mutation "volslice ylim: a fixed domain survives a pan" \
+  crates/geode-chart/src/xy/model.rs \
+  '        if let Some(limit) = self.y_limit(axis) {' \
+  '        if let Some(limit) = None::<(f64, f64)> {' \
+  geode-volslice the_menu_fixes_the_diff_axis_at_the_shown_domain_and_a_pan_keeps_it
+
+run_mutation "volslice ylim: the chart model honours a fixed domain" \
+  crates/geode-chart/src/xy/model.rs \
+  '        if let Some(limit) = self.y_limit(axis) {' \
+  '        if let Some(limit) = None::<(f64, f64)> {' \
+  geode-chart a_fixed_domain_survives_a_view_change_and_none_autoscales
+
+# The saved ylim restores, and a built model takes it.
+run_mutation "volslice ylim: the session restores ylim" \
+  crates/geode-volslice/src/core/session.rs \
+  '    state.diff_ylim = read(table, "ylim", &mut notices, read_range);' \
+  '    let _ = read(table, "ylim", &mut notices, read_range);' \
+  geode-volslice a_state_round_trips_through_its_table
+
+run_mutation "volslice ylim: a built model takes the fixed domain" \
+  crates/geode-volslice/src/tile/data.rs \
+  '            .with_y_limit(crate::core::build::DIFF_AXIS, self.state.diff_ylim);' \
+  '            .with_y_limit(crate::core::build::DIFF_AXIS, None);' \
+  geode-volslice a_saved_ylim_restores_into_the_model
+
+# A range whose lower end is not below its upper is refused, not set.
+run_mutation "volslice ylim: :ylim refuses lo >= hi" \
+  crates/geode-volslice/src/commands.rs \
+  '    if lo >= hi {' \
+  '    if false {' \
+  geode-volslice ylim_refuses_a_range_that_is_not_one
+
+# A menu pick dispatches the row's action through the key's path.
+run_mutation "volslice menu: a pick dispatches its action" \
+  crates/geode-volslice/src/tile/menu.rs \
+  '                self.dispatch(&id, None, window, cx);' \
+  '                let _ = id;' \
+  geode-volslice the_menu_fixes_the_diff_axis_at_the_shown_domain_and_a_pan_keeps_it
+
+run_mutation "volslice menu: fix_diff_y reaches the tile" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '            "fix_diff_y" => self.fix_diff_y(window, cx),' \
+  '            "fix_diff_y" => {}' \
+  geode-volslice ylim_sets_the_domain_and_the_header_chip_frees_it
+
+# An outside press closes only the popup it was painted for: the button's
+# capture-phase press has already swapped the action menu in.
+run_mutation "volslice menu: an outside press closes only its own popup" \
+  crates/geode-volslice/src/tile/picker.rs \
+  '        if self.popup.as_ref().map(Popup::kind) == Some(painted) {' \
+  '        if self.popup.is_some() {' \
+  geode-volslice the_menu_opens_from_dot_the_button_and_a_chart_right_press
+
+# The right press that focuses a tile opens nothing.
+run_mutation "volslice menu: a chart right press opens only on a focused tile" \
+  crates/geode-volslice/src/tile/menu.rs \
+  '        if event.button != MouseButton::Right || !self.focused {' \
+  '        if event.button != MouseButton::Right {' \
+  geode-volslice the_menu_opens_from_dot_the_button_and_a_chart_right_press
+
+# `.` and `escape` close the action menu: its own bindings, since the
+# normal layer's keys do not reach a `menu`-mode tile.
+run_mutation "volslice menu: dot closes the action menu" \
+  crates/geode-volslice/src/content.rs \
+  '"." = "volslice::cancel"' \
+  '# dot unbound' \
+  geode-volslice the_menu_opens_from_dot_the_button_and_a_chart_right_press
+
+run_mutation "volslice menu: escape closes the action menu" \
+  crates/geode-volslice/src/content.rs \
+  '"enter" = "volslice::menu_pick"
+"escape" = "volslice::cancel"' \
+  '"enter" = "volslice::menu_pick"' \
+  geode-volslice fixing_with_no_differences_refuses
+
+# `.` in the diff chooser swaps the action menu in.
+run_mutation "volslice menu: dot in the chooser opens the menu" \
+  crates/geode-volslice/src/content.rs \
+  '# `.` swaps the chooser for the action menu, as `⋯` does.
+"." = "volslice::menu"' \
+  '# `.` swaps the chooser for the action menu, as `⋯` does.' \
+  geode-volslice dot_in_the_chooser_opens_the_action_menu
+
+# An open menu's rows follow the tile (a `:ylim` ticks the fix row).
+run_mutation "volslice menu: an open menu's rows stay current" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '        self.refresh_menu(cx);' \
+  '        let _ = &self.popup;' \
+  geode-volslice an_open_menus_rows_follow_the_tile
+
+# The header rebuilds when the fixed domain changes, so the chip appears.
+run_mutation "volslice ylim: the header key carries the fixed domain" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '                || k.diff_ylim != self.state.diff_ylim' \
+  '                || false' \
+  geode-volslice ylim_sets_the_domain_and_the_header_chip_frees_it
+
+# With nothing on the differences axis, the fix refuses and says why.
+run_mutation "volslice ylim: a fix with no differences refuses" \
+  crates/geode-volslice/src/tile/menu.rs \
+  '                    self.refuse(NO_DIFF_DOMAIN.to_string(), cx);' \
+  '                    let _ = NO_DIFF_DOMAIN;' \
+  geode-volslice fixing_with_no_differences_refuses
+
+# A refusal holds one slot that the next verb clears: by key, by `:` line.
+run_mutation "volslice refusal: the next key clears it" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '        self.clear_refusal(cx);
+        if !matches!(' \
+  '        if !matches!(' \
+  geode-volslice following_a_group_with_no_single_underlying_paints_the_notice_and_refuses_u
+
+run_mutation "volslice refusal: the next command clears it" \
+  crates/geode-volslice/src/tile/mod.rs \
+  '        self.clear_refusal(cx);
+        match commands::parse(line)? {' \
+  '        match commands::parse(line)? {' \
+  geode-volslice fixing_with_no_differences_refuses
+
+# A frozen domain is the shown one widened outward to tick values.
+run_mutation "volslice ylim: a fix rounds the shown domain outward" \
+  crates/geode-volslice/src/tile/menu.rs \
+  '                Some(domain) => Some(nice_outward(domain, self.diff_tick_hint(window))),' \
+  '                Some(domain) => Some(domain),' \
+  geode-volslice the_menu_fixes_the_diff_axis_at_the_shown_domain_and_a_pan_keeps_it
+
+run_mutation "chart scale: nice_outward never narrows" \
+  crates/geode-chart/src/core/scale.rs \
+  '        (lo / step).floor() * step + 0.0,' \
+  '        (lo / step).round() * step + 0.0,' \
+  geode-chart nice_outward_widens_to_tick_values_and_never_narrows
+
+# The chip prints the stored ends, never rounded to a coarser step.
+run_mutation "volslice ylim: the chip keeps four significant digits" \
+  crates/geode-volslice/src/header.rs \
+  '        let decimals = (3 - magnitude).max(0) as usize;' \
+  '        let decimals = (1 - magnitude).max(0) as usize;' \
+  geode-volslice the_ylim_chip_reads_in_the_axis_format
 
 # ---- the diagnostics page: keyboard routes through the real keymap
 
