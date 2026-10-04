@@ -354,6 +354,20 @@ run_mutation "guide: startup registers the guide tile" \
   geode-app \
   the_bundled_guide_launches_navigates_and_saves_through_the_shell
 
+run_mutation "compose: the app composes the same data layer as the collector (demo)" \
+  crates/geode-app/src/main.rs \
+  '    builtin.extend(geode_compose::builtin_data_layer(demo_root));' \
+  '    builtin.extend(geode_compose::builtin_data_layer(None));' \
+  geode-app \
+  the_app_and_the_collector_build_the_same_schema_and_sources
+
+run_mutation "compose: the data layer's dataset order is the collector's" \
+  crates/geode-app/src/main.rs \
+  '    builtin.extend(geode_compose::builtin_data_layer(demo_root));' \
+  '    builtin.extend(geode_compose::builtin_data_layer(demo_root).into_iter().rev());' \
+  geode-app \
+  the_app_and_the_collector_build_the_same_schema_and_sources
+
 run_mutation "guide: search paints the matching text" \
   crates/geode-guide/src/search.rs \
   '            block.render(&ranges, color, &mut marked.source);' \

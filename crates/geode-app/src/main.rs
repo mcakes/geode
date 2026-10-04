@@ -842,6 +842,94 @@ label = "skew"
         );
     }
 
+    /// The collector and the app must agree on what the store holds, or the
+    /// collector writes tables the app reads as drifted. Built from the same
+    /// desk and user directories, the app's configuration (its whole builtin
+    /// layer, through `data_setup`) and the collector's (`builtin_data_layer`
+    /// alone, through `engine_setup`) have equal schemas and sources, with
+    /// and without the demo layer.
+    #[test]
+    fn the_app_and_the_collector_build_the_same_schema_and_sources() {
+        let desk = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            desk.path().join("datasets.toml"),
+            "config_version = 1\n\n[desk_marks.columns.underlying]\ntype = \"utf8\"\n\
+             role = \"dimension\"\n\n[desk_marks.columns.mark]\ntype = \"f64\"\nrole = \"measure\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            desk.path().join("sources.toml"),
+            "config_version = 1\n\n[desk_marks]\ndataset = \"desk_marks\"\n\
+             paths = [\"/nonexistent/*.csv\"]\n",
+        )
+        .unwrap();
+        // A user redeclaration of the app's sheets dataset: both sides must
+        // pin it back the same way.
+        std::fs::write(
+            user.path().join("datasets.toml"),
+            "config_version = 1\n\n[pricer_sheets]\nfamily = \"document\"\nlocal = true\n\
+             key = [\"sheet\"]\n\n[pricer_sheets.columns.sheet]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+        )
+        .unwrap();
+        // The demo layer only rewrites paths onto this directory; nothing
+        // here reads it, so it needs no emitted files.
+        let demo = tempfile::tempdir().unwrap();
+        for demo_root in [None, Some(demo.path())] {
+            let sources = |builtin| ConfigSources {
+                builtin,
+                desk: Some(desk.path().to_path_buf()),
+                user: Some(user.path().to_path_buf()),
+            };
+            let app_config = Config::load(&sources(builtin_layer(demo_root)));
+            let collector_config =
+                Config::load(&sources(geode_compose::builtin_data_layer(demo_root)));
+            let db = demo.path().join("unused.duckdb");
+            let app = bridge::data_setup(
+                &app_config,
+                db.clone(),
+                geode_compose::adapters(demo_root).0,
+                Default::default(),
+                Default::default(),
+            )
+            .expect("the app's builtin layer supplies datasets and views");
+            let collector = geode_compose::engine_setup(
+                &collector_config,
+                db,
+                geode_compose::adapters(demo_root).0,
+            );
+            let case = if demo_root.is_some() {
+                "demo"
+            } else {
+                "non-demo"
+            };
+            assert!(
+                app.config.schema.dataset("desk_marks").is_some(),
+                "{case}: the desk dataset loaded"
+            );
+            assert_eq!(app.config.schema, collector.config.schema, "{case}: schema");
+            assert_eq!(
+                app.config.sources, collector.config.sources,
+                "{case}: sources"
+            );
+            assert!(!app.config.sources.is_empty(), "{case}: sources loaded");
+            // Both sides refuse the user redeclaration with the same error.
+            let pin = |diagnostics: &[Diagnostic]| -> Vec<Diagnostic> {
+                diagnostics
+                    .iter()
+                    .filter(|d| d.path.as_deref() == Some("datasets.pricer_sheets"))
+                    .cloned()
+                    .collect()
+            };
+            let app_pin = pin(&app.diagnostics);
+            assert!(
+                app_pin.len() == 1 && app_pin[0].severity == Severity::Error,
+                "{case}: the app pins pricer_sheets: {app_pin:?}"
+            );
+            assert_eq!(app_pin, pin(&collector.diagnostics), "{case}: pin error");
+        }
+    }
+
     #[test]
     fn the_roster_lists_the_pricer_and_registers_its_add_action() {
         use geode_data::DataHandle;
