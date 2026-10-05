@@ -2106,7 +2106,15 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
             shell.close_modal(window, cx);
         }
         Pick::Link { tile, change } => {
-            // Closed first, like a tile-kind pick: the chooser is gone
+            // A row that would close a loop of groups is refused with the
+            // chooser still open, so the list is there for another pick;
+            // closed first, the refusal would cost the user the list.
+            if let Some((from, to)) = shell.link_cycle(tile, change, cx) {
+                shell.notice = Some(super::link::cycle_refusal(from, to).into());
+                cx.notify();
+                return;
+            }
+            // Otherwise closed first, like a tile-kind pick: the chooser is gone
             // before the doors notify the frame and the tile. The doors
             // are the shell's own, never the frame's: `set_emit` reads the
             // tile and writes the frame, which is sound here because a

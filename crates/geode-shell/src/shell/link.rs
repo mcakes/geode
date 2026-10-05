@@ -12,9 +12,15 @@ use gpui::{App, Context};
 use geode_core::link::Group;
 use geode_core::query::QueryKey;
 
+use super::choicedialog::LinkChange;
 use super::{ShellView, status};
 use crate::module::placeholder::PLACEHOLDER_KIND;
 use crate::tiling::TileId;
+
+/// What the status bar says when a pick would close a loop of groups.
+pub(crate) fn cycle_refusal(from: Group, to: Group) -> String {
+    format!("would link {} back into {}", from.letter(), to.letter())
+}
 
 /// What the status bar's `following` label was built from: the focused
 /// tile, the group it follows and that group's scope generation.
@@ -69,7 +75,9 @@ impl ShellView {
     /// offer it, and a membership that reached the frame some other way (a
     /// session written when the module did) is cleared instead of left
     /// showing a group's chip over content the group does not select. A
-    /// tile no module occupies is refused and the frame is not touched.
+    /// tile no module occupies is refused and the frame is not touched, and
+    /// so is a follow that would close a loop of groups with what the tile
+    /// emits into: the status bar says which link it refused.
     ///
     /// Writes the frame: call this from the shell's own handlers, never
     /// from inside an update of the frame.
@@ -95,6 +103,11 @@ impl ShellView {
             );
         }
         let group = group.filter(|_| follows);
+        if let Some((from, to)) = self.link_cycle(tile, LinkChange::Follow(group), cx) {
+            self.notice = Some(cycle_refusal(from, to).into());
+            cx.notify();
+            return;
+        }
         // The tile's own workspace, the one its frame handle was bound to
         // at creation: that lane supplies the rest of its identity.
         let ws = self
@@ -126,7 +139,9 @@ impl ShellView {
     /// set emitting: the chooser does not offer it, and a membership that
     /// reached the frame some other way (a session written when the module
     /// could) is cleared instead of left subscribing to nothing. A tile no
-    /// module occupies is refused and the frame is not touched.
+    /// module occupies is refused and the frame is not touched, and so is
+    /// an emit that would close a loop of groups with the group the tile
+    /// follows: the status bar says which link it refused.
     ///
     /// Joining pulls the tile's emission at once, which reads the tile and
     /// writes the frame: call this from the shell's own handlers, never
@@ -150,6 +165,11 @@ impl ShellView {
             );
         }
         let group = group.filter(|_| can);
+        if let Some((from, to)) = self.link_cycle(tile, LinkChange::Emit(group), cx) {
+            self.notice = Some(cycle_refusal(from, to).into());
+            cx.notify();
+            return;
+        }
         let changed = self.frame.update(cx, |f, cx| {
             let changed = f.emit(tile, group);
             if changed {
@@ -162,6 +182,26 @@ impl ShellView {
             self.repaint_tile(tile, cx);
             cx.notify();
         }
+    }
+
+    /// The loop of groups `change` would close for `tile`, taken with the
+    /// tile's other current membership: the follow change keeps its emit,
+    /// the emit change keeps its follow. The doors and the chooser both
+    /// ask this one question, so a row the chooser lets through is never
+    /// one a door then refuses after the list has closed.
+    pub(super) fn link_cycle(
+        &self,
+        tile: TileId,
+        change: LinkChange,
+        cx: &App,
+    ) -> Option<(Group, Group)> {
+        let frame = self.frame.read(cx);
+        let m = frame.membership(tile);
+        let (follow, emit) = match change {
+            LinkChange::Follow(group) => (group, m.emit),
+            LinkChange::Emit(group) => (m.follow, group),
+        };
+        frame.closing_cycle(tile, follow, emit)
     }
 
     /// Hold a subscription exactly while `tile` emits, and pull once when
@@ -200,19 +240,58 @@ impl ShellView {
         self.pull_emission(tile, cx);
     }
 
-    /// Read what `tile` emits now and post it. An emission equal to the
-    /// tile's last writes nothing and notifies nobody, so a pull is safe
-    /// on every notification of an emitting tile.
+    /// Read what `tile` emits now, compose it over the tile's base and post
+    /// it. A posting equal to the tile's last writes nothing and notifies
+    /// nobody, so a pull is safe on every notification of an emitting tile
+    /// and on every frame move.
     fn pull_emission(&mut self, tile: TileId, cx: &mut Context<Self>) {
         let Some(o) = self.occupants.get(&tile) else {
             return;
         };
         let emission = o.content.emission(cx);
+        let ws = self
+            .services
+            .workspaces
+            .workspace_of(tile)
+            .unwrap_or_else(|| self.active_ix());
+        let include_layer = self.link_include_tile_filter;
         self.frame.update(cx, |f, cx| {
-            if f.post_emission(tile, emission) {
+            let base = f.emit_base(ws, tile);
+            let (posting, refused) = geode_core::link::compose(emission, &base, include_layer);
+            let refusal_changed = f.set_link_refusal(tile, refused);
+            if f.post_emission(tile, posting) | refusal_changed {
                 cx.notify();
             }
         });
+    }
+
+    /// Pull every emitter again when the frame has moved since the last
+    /// re-pull. An emitter's base is its lane's or its followed group's
+    /// scope, which move without the tile announcing anything; the frame's
+    /// generation advances on every such write (and on membership and pin
+    /// changes). Equal postings write nothing, and a loop of groups is
+    /// refused at the doors and on restore, so a chain settles after one
+    /// extra pass. Emitters are re-pulled oldest posting first, so a group
+    /// two tiles emit into stays on the one that moved last.
+    pub(super) fn repull_emitters(&mut self, cx: &mut Context<Self>) {
+        let generation = self.frame.read(cx).generation();
+        if generation == self.last_emit_generation {
+            return;
+        }
+        self.last_emit_generation = generation;
+        for tile in self.frame.read(cx).emitters() {
+            self.pull_emission(tile, cx);
+        }
+    }
+
+    /// Re-pull every emitter now, whatever the frame's generation: a change
+    /// of the composition rule moves no frame number, so the generation
+    /// gate in [`Self::repull_emitters`] would leave every group on the old
+    /// rule. Same oldest-posting-first order as that gate's pass.
+    pub(super) fn force_repull_emitters(&mut self, cx: &mut Context<Self>) {
+        for tile in self.frame.read(cx).emitters() {
+            self.pull_emission(tile, cx);
+        }
     }
 
     /// Notify a tile's own view when its membership changes: its header

@@ -377,13 +377,23 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   only when all its legs share one; a mixed-underlying package gives an empty
   context and an empty sheet (no cursor row) gives none, so both open the
   plain tile picker.
-- Emitting into a link group (`TileContent::emission`), the tile posts that
-  same underlying (`cursor_underlying`, which `g m` also reads, so the two
-  cannot name different underlyings for one row) as a one-value
-  `underlying_ref` scope, and no board. A package across underlyings, a
-  grouping row and an empty sheet post no scope, which leaves the group's
-  scope as it was. It is read from the sheet on each pull: one row, nothing
-  to keep in step. `emits` is true before a sheet has loaded: the shell
+- Emitting into a link group (`TileContent::emission`, `PricerTile::emission`),
+  the tile posts its cursor path and no board. A grouping row posts one
+  value per kept level of its own path; a line, leg or package posts its
+  enclosing group row's path (a leg's parent is the group, not its
+  package) plus its sole underlying as `underlying_ref` (`underlying_at`,
+  which `g m` also reads, so the two cannot name different underlyings for
+  one row). A package across underlyings posts the group path alone — on
+  a flat sheet an empty path, which the shell composes to the base scope.
+  A NULL or empty group value refuses (`CursorScope::NullIn`) rather than
+  widening followers; an empty sheet posts nothing, which leaves the
+  group's scope as it was. The emission carries `:unscoped` and no filter
+  layer (the pricer has none). A kept level on a non-text column
+  (`strike`, `qty`, `barrier`, a shift) is emitted like any other; a
+  following pricer then refuses the group's scope (`'strike' is not a text
+  column`), while a following blotter's SQL honours it. It is read from the
+  model on each pull:
+  nothing to keep in step. `emits` is true before a sheet has loaded: the shell
   drops a restored membership for a tile that answers false right after
   create. `watch_emission` observes the tile entity, which every cursor
   move, edit and load notifies. The tile stores no group; its header reads

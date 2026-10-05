@@ -599,6 +599,7 @@ fn bench_chrome_rows(c: &mut Criterion) {
                     AddDirection::Auto,
                     None,
                     black_box(&sources),
+                    true,
                 );
                 let texts: Vec<String> = rows.iter().map(settings_view::searchable_text).collect();
                 black_box(rank_all(&texts, black_box(query)))

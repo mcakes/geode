@@ -6,7 +6,8 @@
 //! appear in the table header.
 //!
 //! Requests follow as-of and publication versions for this dataset and key. Scope,
-//! grouping, and flip changes do not trigger document queries. The tile still answers
+//! grouping, and flip changes do not trigger document queries, except that a panel
+//! following a link group takes the group scope's one underlying as its key. The tile still answers
 //! flip barriers: deliveries can wait for a coordinated promotion, while changes
 //! requiring no query are acknowledged directly. Promotion checks the followed
 //! versions, so an unrelated barrier replacement cannot discard the only staged answer
@@ -38,7 +39,7 @@ use crate::popup::{ChoicePopup, PickerRows, PickerState, Popup, render_picker};
 use geode_core::colour::{Rgb, contrast_ratio, readable_on};
 use geode_core::document::{DocumentRows, Value, split_key};
 use geode_core::grid::selection::{Resolved, SelectKind, Selection};
-use geode_core::link::{BoardEntry, DraftMark, Emission, underlying_scope};
+use geode_core::link::{BoardEntry, CursorScope, DraftMark, Emission, Group, underlying_scope};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
@@ -686,6 +687,12 @@ pub struct MarketDataTile {
     assembles: StdCell<usize>,
 }
 
+/// The refusal a following panel's own underlying controls give: the group
+/// sets the underlying, so the trader is sent there.
+fn following_refusal(g: Group) -> String {
+    format!("following {} \u{2014} set the underlying there", g.letter())
+}
+
 impl MarketDataTile {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -700,7 +707,7 @@ impl MarketDataTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let key = restored
+        let saved_key = restored
             .and_then(|t| t.get("underlying").or_else(|| t.get("key")))
             .and_then(|v| v.as_array())
             .map(|a| {
@@ -709,9 +716,26 @@ impl MarketDataTile {
                     .collect::<Vec<_>>()
             })
             .filter(|k| !k.is_empty());
+        // A restored follower takes the group's underlying now, not its
+        // saved one: session restore records the follow and the group's
+        // scope before the panel exists and notifies nothing, so waiting for
+        // a frame notification would show the saved underlying under a
+        // group that names another. The saved key's draft stays parked.
+        let key = {
+            let f = frame.read(cx);
+            if f.following().is_some() {
+                geode_core::link::underlying_of(f.scope()).map(|u| vec![u.to_owned()])
+            } else {
+                saved_key.clone()
+            }
+        };
         // Restore per-key drafts from [drafts.<display key>]. Install the current key's
-        // entry and leave the others parked. The legacy draft field supplies the
-        // current draft only when the per-key table has no entry for it.
+        // entry and leave the others parked. The legacy bare draft field is the SAVED
+        // key's draft, used only when the per-key table has no entry for that key: a
+        // restored follower opens on its group's underlying, and attaching the legacy
+        // draft to that document would put one underlying's edits on another's. A
+        // legacy draft saved with no key belongs to no document and is installed only
+        // on a panel that opens on none.
         let mut parked: BTreeMap<Vec<String>, toml::Table> = restored
             .and_then(|t| t.get("drafts"))
             .and_then(|v| v.as_table())
@@ -728,15 +752,22 @@ impl MarketDataTile {
                     .collect()
             })
             .unwrap_or_default();
+        let legacy = restored
+            .and_then(|t| t.get("draft"))
+            .and_then(|v| v.as_table())
+            .cloned();
+        let legacy = match (legacy, saved_key) {
+            (Some(t), Some(saved)) => {
+                parked.entry(saved).or_insert(t);
+                None
+            }
+            (legacy, None) => legacy.filter(|_| key.is_none()),
+            (None, Some(_)) => None,
+        };
         let draft = key
             .as_ref()
             .and_then(|k| parked.remove(k))
-            .or_else(|| {
-                restored
-                    .and_then(|t| t.get("draft"))
-                    .and_then(|v| v.as_table())
-                    .cloned()
-            })
+            .or(legacy)
             .map(|t| Draft::from_toml(&t))
             .unwrap_or_default();
         // An unknown or missing `auto` is the default, never a refusal:
@@ -842,7 +873,13 @@ impl MarketDataTile {
             |this, _, event: &CellPointer, window, cx| this.pointer(*event, window, cx),
         )
         .detach();
-        cx.observe(frame.entity(), |this, _frame, cx| {
+        cx.observe_in(frame.entity(), window, |this, _frame, window, cx| {
+            // A followed group's move switches the document first; the
+            // switch's requery answers the barrier on delivery, so nothing
+            // below applies.
+            if this.sync_followed_underlying(window, cx) {
+                return;
+            }
             // Promote before the visibility check, so a panel hidden after
             // staging still lands its answer. A flip releases prepared
             // results; it never triggers a document query.
@@ -1824,16 +1861,26 @@ impl MarketDataTile {
     }
 
     /// What the panel posts into the link group it emits into: where it is
-    /// (its underlying, as a one-value scope) and, while its draft is not
+    /// (its underlying, as a one-value path) and, while its draft is not
     /// clean (`Editing`, `Behind` or `Sent`) and the upload builder can
     /// assemble it, that whole document, marked with the draft's state so
     /// a follower can tell a live edit from a held or sent one. The same
     /// answer whether or not the panel is emitting. With no underlying it
     /// posts nothing, which leaves the group's scope as it is.
-    pub(crate) fn emission(&self) -> Emission {
+    ///
+    /// While the panel follows the group it emits into, its underlying is
+    /// the group's own and it posts no cursor, only its board: its scope
+    /// would compose over its lane alone, so posting it would replace a
+    /// co-emitter's narrower path (a blotter's book and grouping levels)
+    /// with `lane ∧ underlying` and widen every follower of the group.
+    pub(crate) fn emission(&self, cx: &App) -> Emission {
         let Some(key) = self.key.as_deref() else {
             return Emission::default();
         };
+        let echoes_its_group = self.frame.tile().is_some_and(|tile| {
+            let m = self.frame.read(cx).membership(tile);
+            m.follow.is_some() && m.follow == m.emit
+        });
         let board = self
             .draft_rows(key)
             .map(|rows| BoardEntry {
@@ -1855,8 +1902,12 @@ impl MarketDataTile {
             // assume the same. A panel over a dataset keyed first on
             // another column would post that key's value under the wrong
             // column.
-            scope: key.first().map(|u| underlying_scope(u)),
+            cursor: match key.first() {
+                Some(u) if !echoes_its_group => CursorScope::Path(underlying_scope(u)),
+                _ => CursorScope::Nothing,
+            },
             board,
+            ..Emission::default()
         }
     }
 
@@ -2623,8 +2674,14 @@ impl MarketDataTile {
                 true
             }
             "load_underlying" => {
-                self.open_picker(window, cx);
-                false
+                if let Some(g) = self.frame.read(cx).following() {
+                    // The group sets the underlying: the header says where.
+                    self.notice = Some(following_refusal(g).into());
+                    true
+                } else {
+                    self.open_picker(window, cx);
+                    false
+                }
             }
             // Step a choice cell forward or backward without opening its popup.
             "step" | "step_back" => {
@@ -3615,6 +3672,7 @@ impl MarketDataTile {
                 policy: self.policy,
                 kind_title: &self.spec.title,
                 kind_actions: &self.spec.actions,
+                following: self.frame.read(cx).following(),
             },
             self.clock,
         );
@@ -3662,7 +3720,7 @@ impl MarketDataTile {
     /// launched panel that already has a key (a context launch, a
     /// duplicate) does nothing. Escape leaves the empty panel, as `u` does.
     pub(crate) fn launched(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.key.is_none() && self.popup.is_none() {
+        if self.key.is_none() && self.popup.is_none() && self.frame.read(cx).following().is_none() {
             self.open_picker(window, cx);
         }
     }
@@ -3738,7 +3796,14 @@ impl MarketDataTile {
         };
         let key = p.rows.all()[i].clone();
         self.close_popup_with_window(window, cx);
-        self.set_key(parse_display_key(&key), window, cx);
+        // A picker opened before the panel joined a group must not set the
+        // underlying the group now owns.
+        if let Some(g) = self.frame.read(cx).following() {
+            self.notice = Some(following_refusal(g).into());
+            self.changed(cx);
+            return;
+        }
+        self.set_key(Some(parse_display_key(&key)), window, cx);
     }
 
     // Choice-cell typeahead and stepping.
@@ -4425,7 +4490,10 @@ impl MarketDataTile {
         }
         match command {
             Command::Key(key) => {
-                self.set_key(key, window, cx);
+                if let Some(g) = self.frame.read(cx).following() {
+                    return Err(following_refusal(g));
+                }
+                self.set_key(Some(key), window, cx);
                 Ok(())
             }
             Command::Revert => self.revert(cx),
@@ -4563,9 +4631,10 @@ impl MarketDataTile {
     ///
     /// Cancel uncommitted editor text before parking. Otherwise a same-label target
     /// could commit that text into the next key's draft. Drafts without an outgoing key
-    /// remain available for the first named key to claim.
-    fn set_key(&mut self, key: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.key.as_deref() == Some(key.as_slice()) {
+    /// remain available for the first named key to claim. `None` leaves the panel on
+    /// no underlying (a followed group naming none), its draft parked.
+    fn set_key(&mut self, key: Option<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.key == key {
             return;
         }
         if self.editor.is_some() {
@@ -4593,11 +4662,13 @@ impl MarketDataTile {
             self.capture_groups_if_base(&mut draft);
             self.parked.insert(outgoing, draft.to_toml());
         }
-        if let Some(table) = self.parked.remove(&key) {
+        if let Some(k) = &key
+            && let Some(table) = self.parked.remove(k)
+        {
             self.draft = Draft::from_toml(&table);
         }
         self.unresolved_restore = !self.draft.is_empty();
-        self.key = Some(key);
+        self.key = key;
         self.title = Self::compute_title(&self.spec, self.key.as_deref());
         // What an echo said belongs to the outgoing underlying's upload.
         self.echo = None;
@@ -4613,11 +4684,32 @@ impl MarketDataTile {
         self.cursor = Cursor::Cell { row: 0, col: 0 };
         self.last_grid_col = 0;
         self.rebuild_model(cx);
-        if self.visible {
+        if self.visible && self.key.is_some() {
             self.requery(cx);
         } else {
             self.changed(cx);
         }
+    }
+
+    /// While following, the panel's underlying is the group scope's one
+    /// `underlying_ref`, or none when it names zero or several. A change goes
+    /// through `set_key`, so a dirty draft is parked as on any switch. `true`
+    /// when it issued a requery, which answers the flip barrier on delivery;
+    /// otherwise the caller must still answer it.
+    fn sync_followed_underlying(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let target = {
+            let frame = self.frame.read(cx);
+            if frame.following().is_none() {
+                return false;
+            }
+            geode_core::link::underlying_of(frame.scope()).map(str::to_owned)
+        };
+        let current = self.key.as_ref().and_then(|k| k.first());
+        if target.as_ref() == current {
+            return false;
+        }
+        self.set_key(target.map(|u| vec![u]), window, cx);
+        self.visible && self.key.is_some()
     }
 
     /// Prepare picker marks from parked draft count phrases once per open. The current
@@ -5645,17 +5737,39 @@ mod tests {
         restored: Option<toml::Table>,
         egress: Vec<(String, Vec<String>)>,
     ) -> (Harness, gpui::VisualTestContext) {
-        open_framed(cx, spec, restored, egress, |frame| {
-            FrameRef::new(frame, WorkspaceIx::FIRST)
-        })
+        open_framed(
+            cx,
+            spec,
+            restored,
+            egress,
+            |frame| FrameRef::new(frame, WorkspaceIx::FIRST),
+            |_| {},
+        )
     }
 
     /// [`open`] with the frame handle the shell hands an occupant: bound
     /// to the tile's own id, so the tile reads its link-group membership.
     fn open_bound(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
-        open_framed(cx, &CVI, None, Vec::new(), |frame| {
-            FrameRef::for_tile(frame, WorkspaceIx::FIRST, TileId(TILE))
-        })
+        open_restored_bound(cx, None, |_| {})
+    }
+
+    /// [`open_bound`] over a session record, with the frame seeded by
+    /// `seed` BEFORE the factory builds the panel: what session restore
+    /// does, writing memberships and postings into the frame and
+    /// notifying nothing.
+    fn open_restored_bound(
+        cx: &mut gpui::TestAppContext,
+        restored: Option<toml::Table>,
+        seed: fn(&mut Frame),
+    ) -> (Harness, gpui::VisualTestContext) {
+        open_framed(
+            cx,
+            &CVI,
+            restored,
+            Vec::new(),
+            |frame| FrameRef::for_tile(frame, WorkspaceIx::FIRST, TileId(TILE)),
+            seed,
+        )
     }
 
     /// [`open_spec_with_egress`] with the tile's frame handle built by
@@ -5666,6 +5780,7 @@ mod tests {
         restored: Option<toml::Table>,
         egress: Vec<(String, Vec<String>)>,
         bind: fn(Entity<Frame>) -> FrameRef,
+        seed: fn(&mut Frame),
     ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
         // The shell's own reclaims ride along, exactly as `main.rs`
@@ -5693,8 +5808,11 @@ mod tests {
                     // is its lane and tests address it as `f.shared()` /
                     // `f.shared_mut()`. A test that pins must reach the tile's
                     // lane through its `FrameRef` instead.
-                    let frame =
-                        cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
+                    let frame = cx.new(|_| {
+                        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
+                        seed(&mut f);
+                        f
+                    });
                     let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
                     let occupant = factory.create(
                         TileId(TILE),
@@ -17043,8 +17161,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         (calls, subscription)
     }
 
-    fn on(underlying: &str) -> Option<Scope> {
-        Some(Scope::one("underlying_ref", underlying))
+    fn on(underlying: &str) -> CursorScope {
+        CursorScope::Path(Scope::one("underlying_ref", underlying))
     }
 
     /// A panel with nothing unsent posts where it is and no document: a
@@ -17056,7 +17174,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(h.content.emits());
         assert!(assembled(&h, &vcx).is_ok(), "sanity: there is a document");
         let emission = emission_of(&h, &mut vcx);
-        assert_eq!(emission.scope, on("SPX.Z"));
+        assert_eq!(emission.cursor, on("SPX.Z"));
         assert!(
             emission.board.is_empty(),
             "a clean draft is not a document on the board"
@@ -17080,7 +17198,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         commit_cell(&h, &mut vcx, "0.25");
 
         let emission = emission_of(&h, &mut vcx);
-        assert_eq!(emission.scope, on("SPX.Z"));
+        assert_eq!(emission.cursor, on("SPX.Z"));
         assert_eq!(emission.board.len(), 1, "one document: this panel's");
         let entry = &emission.board[0];
         assert_eq!(entry.dataset, "cvi_params");
@@ -17159,7 +17277,7 @@ edits = [["2026-11-20", "-1", 9.5]]
 
         h.command(&mut vcx, "revert").unwrap();
         let emission = emission_of(&h, &mut vcx);
-        assert_eq!(emission.scope, on("SPX.Z"));
+        assert_eq!(emission.cursor, on("SPX.Z"));
         assert!(emission.board.is_empty());
     }
 
@@ -17207,7 +17325,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
             |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.assembles.get());
         let before = assembles(&vcx);
         let emission = emission_of(&h, &mut vcx);
-        assert_eq!(emission.scope, on("SPX.Z"));
+        assert_eq!(emission.cursor, on("SPX.Z"));
         assert!(emission.board.is_empty());
         assert_eq!(assembles(&vcx), before + 1, "the builder was asked once");
 
@@ -17281,14 +17399,13 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         assert_eq!(mark(&h, &mut vcx), DraftMark::Sent);
     }
 
-    /// A panel shows the document its own underlying names and never reads
-    /// the frame's scope, so it cannot follow a link group; it emits its
-    /// underlying and its draft. The chooser offers each row on these
-    /// answers.
+    /// A panel can follow a link group (its underlying is then the
+    /// group's) and emits its underlying and its draft. The chooser offers
+    /// each row on these answers.
     #[gpui::test]
-    fn a_panel_emits_and_does_not_follow(cx: &mut gpui::TestAppContext) {
+    fn a_panel_emits_and_follows(cx: &mut gpui::TestAppContext) {
         let (h, _vcx) = open(cx);
-        assert!(!h.content.follows());
+        assert!(h.content.follows());
         assert!(h.content.emits());
     }
 
@@ -17380,7 +17497,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         h.motion(&mut vcx, "right", None);
         commit_cell(&h, &mut vcx, "0.25");
         let spx = emission_of(&h, &mut vcx);
-        assert_eq!(spx.scope, on("SPX.Z"));
+        assert_eq!(spx.cursor, on("SPX.Z"));
         assert_eq!(spx.board[0].key, vec!["SPX.Z".to_string()]);
         let spx_draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
 
@@ -17396,7 +17513,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         );
 
         let ndx = emission_of(&h, &mut vcx);
-        assert_eq!(ndx.scope, on("NDX"));
+        assert_eq!(ndx.cursor, on("NDX"));
         assert_eq!(ndx.board.len(), 1);
         assert_eq!(ndx.board[0].key, vec!["NDX".to_string()]);
         assert!(
@@ -17410,8 +17527,460 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         let tag = h.document_request().unwrap().tag;
         h.deliver(&mut vcx, tag, Arc::clone(&document));
         let nky = emission_of(&h, &mut vcx);
-        assert_eq!(nky.scope, on("NKY.Z"));
+        assert_eq!(nky.cursor, on("NKY.Z"));
         assert!(nky.board.is_empty());
+    }
+
+    // ---- Following a link group --------------------------------------
+
+    /// The tile that emits into group A in these tests: another tile, as a
+    /// blotter would be.
+    const EMITTER: TileId = TileId(9);
+
+    fn path(pairs: &[(&str, &str)]) -> geode_core::scope::Scope {
+        geode_core::link::path_scope(
+            &pairs
+                .iter()
+                .map(|(c, v)| (c.to_string(), v.to_string()))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Group A's scope moves to `scope`, posted by the emitter, and the
+    /// shell enrols the panel in the flip under its own reading (the
+    /// group's scope generation), as `extend_flip` does, then notifies:
+    /// the delivery route a follower sees.
+    fn move_group_a(
+        h: &Harness,
+        vcx: &mut gpui::VisualTestContext,
+        scope: geode_core::scope::Scope,
+    ) {
+        let bound = FrameRef::for_tile(h.frame.clone(), WorkspaceIx::FIRST, TileId(TILE));
+        bound.update(vcx, |f, cx| {
+            f.post_for_test(
+                EMITTER,
+                geode_core::link::Posting {
+                    scope: Some(scope),
+                    board: Vec::new(),
+                },
+            );
+            f.open_flip([QueryKey(TILE)], Instant::now());
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+
+    /// The emitter emits into A, A names `scope`, then the panel follows A.
+    fn follow_a(h: &Harness, vcx: &mut gpui::VisualTestContext, scope: geode_core::scope::Scope) {
+        use geode_core::link::{Group, Membership};
+        h.frame.update(vcx, |f, cx| {
+            f.link_for_test(
+                EMITTER,
+                Membership {
+                    follow: None,
+                    emit: Some(Group::A),
+                },
+            );
+            f.post_for_test(
+                EMITTER,
+                geode_core::link::Posting {
+                    scope: Some(scope),
+                    board: Vec::new(),
+                },
+            );
+            f.link_for_test(
+                TileId(TILE),
+                Membership {
+                    follow: Some(Group::A),
+                    emit: None,
+                },
+            );
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+
+    fn key_of(h: &Harness, vcx: &gpui::VisualTestContext) -> Option<Vec<String>> {
+        h.tile.read_with(vcx, |t, _| t.key.clone())
+    }
+
+    /// A following panel's underlying is the group scope's one
+    /// `underlying_ref`, whatever else the scope selects; the switch asks
+    /// for that document and its delivery answers the flip.
+    #[gpui::test]
+    fn a_following_panel_takes_the_groups_underlying(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_bound(cx);
+        assert!(h.content.follows(), "the chooser offers follow rows");
+        h.with_document(&mut vcx);
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+        assert!(h.document_request().is_none(), "already on SPX.Z");
+
+        move_group_a(
+            &h,
+            &mut vcx,
+            path(&[("book", "X"), ("underlying_ref", "NDX")]),
+        );
+        assert_eq!(key_of(&h, &vcx), Some(vec!["NDX".to_string()]));
+        let req = h.document_request().expect("the switch asks for NDX");
+        assert_eq!(req.document_key, vec!["NDX".to_string()]);
+        assert!(
+            h.barrier_open(&vcx),
+            "the panel has asked and has nothing to paint yet"
+        );
+        h.deliver(&mut vcx, req.tag, Arc::new(cvi(BASE)));
+        assert!(!h.barrier_open(&vcx), "the delivery is the arrival");
+    }
+
+    /// Session restore writes the follow and the group's scope into the
+    /// frame before the panel exists and notifies nothing, so a restored
+    /// follower takes the group's underlying when it is built, not its
+    /// saved one: otherwise it would show the saved underlying under a
+    /// group that names another until something else notified the frame.
+    #[gpui::test]
+    fn a_restored_follower_opens_on_the_groups_underlying(cx: &mut gpui::TestAppContext) {
+        let mut restored = toml::Table::new();
+        restored.insert(
+            "underlying".into(),
+            toml::Value::Array(vec![toml::Value::String("SPX.Z".into())]),
+        );
+        let (h, mut vcx) = open_restored_bound(cx, Some(restored), |f| {
+            use geode_core::link::{Group, Membership, Posting};
+            f.link_for_test(
+                EMITTER,
+                Membership {
+                    follow: None,
+                    emit: Some(Group::A),
+                },
+            );
+            f.post_for_test(
+                EMITTER,
+                Posting {
+                    scope: Some(geode_core::link::path_scope(&[(
+                        "underlying_ref".to_string(),
+                        "NDX".to_string(),
+                    )])),
+                    board: Vec::new(),
+                },
+            );
+            f.link_for_test(
+                TileId(TILE),
+                Membership {
+                    follow: Some(Group::A),
+                    emit: None,
+                },
+            );
+        });
+        assert_eq!(key_of(&h, &vcx), Some(vec!["NDX".to_string()]));
+        h.visible(&mut vcx, true);
+        let req = h.document_request().expect("the first question");
+        assert_eq!(req.document_key, vec!["NDX".to_string()]);
+    }
+
+    /// A session's legacy bare `draft` belongs to the underlying saved
+    /// beside it. A restored follower opens on its group's underlying, so
+    /// that draft is parked under the saved key, not attached to the
+    /// group's document, and still written back under its own key; a group
+    /// naming no underlying parks it the same way rather than dropping its
+    /// key.
+    #[gpui::test]
+    fn a_restored_followers_legacy_draft_stays_with_its_saved_underlying(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        fn seed(f: &mut Frame, scope: geode_core::scope::Scope) {
+            use geode_core::link::{Group, Membership, Posting};
+            f.link_for_test(
+                EMITTER,
+                Membership {
+                    follow: None,
+                    emit: Some(Group::A),
+                },
+            );
+            f.post_for_test(
+                EMITTER,
+                Posting {
+                    scope: Some(scope),
+                    board: Vec::new(),
+                },
+            );
+            f.link_for_test(
+                TileId(TILE),
+                Membership {
+                    follow: Some(Group::A),
+                    emit: None,
+                },
+            );
+        }
+        let legacy: toml::Table = format!(
+            r#"
+underlying = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = [["2026-11-20", "-1", 9.5]]
+"#
+        )
+        .parse()
+        .unwrap();
+
+        let (h, vcx) = open_restored_bound(cx, Some(legacy.clone()), |f| {
+            seed(f, path(&[("underlying_ref", "NDX")]))
+        });
+        assert_eq!(key_of(&h, &vcx), Some(vec!["NDX".to_string()]));
+        let (len, written) = h
+            .tile
+            .read_with(&vcx, |t, cx| (t.draft().len(), t.serialize(cx)));
+        assert_eq!(len, 0, "NDX's document carries no SPX.Z edit");
+        assert_eq!(
+            written["drafts"]["SPX.Z"], legacy["draft"],
+            "parked under SPX.Z"
+        );
+
+        let (h, vcx) = open_restored_bound(cx, Some(legacy.clone()), |f| {
+            seed(f, path(&[("book", "X")]))
+        });
+        assert_eq!(key_of(&h, &vcx), None);
+        let (len, written) = h
+            .tile
+            .read_with(&vcx, |t, cx| (t.draft().len(), t.serialize(cx)));
+        assert_eq!(len, 0, "a panel on no underlying holds no draft");
+        assert_eq!(
+            written["drafts"]["SPX.Z"], legacy["draft"],
+            "parked under SPX.Z"
+        );
+    }
+
+    /// A group scope that names no single underlying leaves the panel on
+    /// none: the empty state, not the last underlying under a group that
+    /// no longer selects it. It asks nothing, so it answers the flip at
+    /// once.
+    #[gpui::test]
+    fn a_following_panel_shows_nothing_when_the_group_names_no_single_underlying(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_bound(cx);
+        h.with_document(&mut vcx);
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+        assert!(h.rows(&vcx) > 0, "sanity: SPX.Z is painted");
+        assert!(
+            h.header_texts(&vcx).iter().any(|t| t.contains("SPX.Z")),
+            "sanity: the header names SPX.Z"
+        );
+
+        move_group_a(&h, &mut vcx, path(&[("book", "X")]));
+        assert_eq!(key_of(&h, &vcx), None);
+        assert_eq!(h.rows(&vcx), 0, "the empty state");
+        assert!(h.document_request().is_none(), "nothing to ask for");
+        assert!(!h.barrier_open(&vcx), "the panel answered the flip itself");
+        let header = h.header_texts(&vcx);
+        assert!(
+            !header.iter().any(|t| t.contains("SPX.Z")),
+            "the header no longer names SPX.Z: {header:?}"
+        );
+    }
+
+    /// A panel that follows the group it emits into posts no cursor: its
+    /// underlying is the group's own, and a posting composed over its lane
+    /// would replace a co-emitter's narrower path with `lane ∧ underlying`.
+    /// Its board still posts. Following one group and emitting into another
+    /// carries its underlying on as a path.
+    #[gpui::test]
+    fn a_panel_following_the_group_it_emits_into_posts_no_cursor(cx: &mut gpui::TestAppContext) {
+        use geode_core::link::{Group, Membership};
+        let (h, mut vcx) = open_bound(cx);
+        h.with_document(&mut vcx);
+        follow_a(
+            &h,
+            &mut vcx,
+            path(&[("book", "X"), ("underlying_ref", "SPX.Z")]),
+        );
+        h.motion(&mut vcx, "right", None);
+        commit_cell(&h, &mut vcx, "0.25");
+        let link = |vcx: &mut gpui::VisualTestContext, follow, emit| {
+            h.frame.update(vcx, |f, cx| {
+                f.link_for_test(TileId(TILE), Membership { follow, emit });
+                cx.notify();
+            });
+            vcx.run_until_parked();
+        };
+
+        link(&mut vcx, Some(Group::A), Some(Group::A));
+        let both = emission_of(&h, &mut vcx);
+        assert_eq!(both.cursor, CursorScope::Nothing);
+        assert_eq!(both.board.len(), 1, "the draft still reaches the board");
+
+        link(&mut vcx, Some(Group::A), Some(Group::B));
+        assert_eq!(
+            emission_of(&h, &mut vcx).cursor,
+            on("SPX.Z"),
+            "emitting into another group carries the underlying on"
+        );
+        link(&mut vcx, None, Some(Group::A));
+        assert_eq!(
+            emission_of(&h, &mut vcx).cursor,
+            on("SPX.Z"),
+            "an emitter that follows nothing posts where it is"
+        );
+    }
+
+    /// A group move that keeps the underlying asks nothing: the document
+    /// depends only on the underlying and the as-of. The panel answers the
+    /// flip itself instead of holding every other tile to the deadline.
+    #[gpui::test]
+    fn a_following_panel_answers_a_flip_that_keeps_its_underlying(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_bound(cx);
+        h.with_document(&mut vcx);
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+        let _ = h.document_request();
+
+        move_group_a(
+            &h,
+            &mut vcx,
+            path(&[("book", "X"), ("underlying_ref", "SPX.Z")]),
+        );
+        assert_eq!(key_of(&h, &vcx), Some(vec!["SPX.Z".to_string()]));
+        assert!(h.document_request().is_none(), "nothing asked");
+        assert!(!h.barrier_open(&vcx), "the follower answered the flip");
+    }
+
+    /// The group's move is a key switch like any other: the outgoing
+    /// underlying's edits are parked, and coming back restores them as
+    /// Editing.
+    #[gpui::test]
+    fn a_following_panel_parks_its_draft_when_the_group_moves(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_bound(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.9");
+        h.dispatch(&mut vcx, "commit", None);
+        h.command(&mut vcx, "set spot_ref 4520").unwrap();
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 2);
+        // An editor open when the group moves is cancelled by the switch,
+        // inside the frame observer: its text reaches no draft.
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "1.1");
+
+        move_group_a(&h, &mut vcx, path(&[("underlying_ref", "NDX")]));
+        assert_eq!(h.editor_value(&vcx), None, "the switch closed the editor");
+        assert_eq!(h.mode(&vcx), "normal");
+        let (len, parked) = h.tile.read_with(&vcx, |t, _| (t.draft().len(), t.parked()));
+        assert_eq!(len, 0, "NDX starts clean");
+        assert_eq!(
+            parked,
+            vec![("SPX.Z".to_string(), "1 cell, spot_ref".to_string())],
+            "SPX.Z's edits are parked under SPX.Z"
+        );
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+
+        move_group_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+        assert!(h.tile.read_with(&vcx, |t, _| t.parked()).is_empty());
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        let (text, edited) = h.cell(&vcx, 0, 0);
+        assert_eq!(text, "9.90");
+        assert!(edited, "the cell edit is back on its cell");
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().state.clone()),
+            DraftState::Editing
+        );
+    }
+
+    /// While following, the panel's own underlying controls refuse: `u`
+    /// says where the underlying is set, `:underlying` returns the same
+    /// refusal, the menu row is greyed, and a launched keyless panel opens
+    /// no picker.
+    #[gpui::test]
+    fn the_underlying_controls_refuse_while_following(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_bound(cx);
+        h.with_document(&mut vcx);
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+        let refusal = "following A \u{2014} set the underlying there";
+        let picker_open = |vcx: &gpui::VisualTestContext| {
+            h.tile
+                .read_with(vcx, |t, _| matches!(t.popup, Some(Popup::Picker(_))))
+        };
+
+        h.dispatch(&mut vcx, "load_underlying", None);
+        assert!(!picker_open(&vcx), "no picker");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(refusal.to_string())
+        );
+
+        assert_eq!(
+            h.command(&mut vcx, "underlying NDX"),
+            Err(refusal.to_string())
+        );
+        assert_eq!(key_of(&h, &vcx), Some(vec!["SPX.Z".to_string()]));
+
+        h.dispatch(&mut vcx, "menu", None);
+        let reason = h.tile.read_with(&vcx, |t, _| match &t.popup {
+            Some(Popup::Menu(m)) => m
+                .rows()
+                .iter()
+                .find_map(|r| {
+                    r.action()
+                        .filter(|a| a.title().as_ref() == "Load underlying…")
+                })
+                .and_then(|a| a.reason().map(|r| r.to_string())),
+            _ => panic!("the menu is open"),
+        });
+        assert_eq!(reason.as_deref(), Some("following A"));
+        h.dispatch(&mut vcx, "menu_close", None);
+
+        move_group_a(&h, &mut vcx, path(&[("book", "X")]));
+        assert_eq!(key_of(&h, &vcx), None);
+        h.launched(&mut vcx);
+        assert!(
+            !picker_open(&vcx),
+            "a keyless follower is not asked for one"
+        );
+    }
+
+    /// A picker opened before the panel joined a group cannot set the
+    /// underlying the group now owns: the pick closes it with the refusal.
+    #[gpui::test]
+    fn a_picker_opened_before_following_refuses_its_pick(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_bound(cx);
+        h.with_document(&mut vcx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.catalog = Some(catalog(&["NKY.Z", "SPX.Z"]));
+            cx.notify();
+        });
+        h.dispatch(&mut vcx, "load_underlying", None);
+        h.set_picker_text(&mut vcx, "NKY");
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "SPX.Z")]));
+
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(key_of(&h, &vcx), Some(vec!["SPX.Z".to_string()]));
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("following A \u{2014} set the underlying there".to_string())
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.popup.is_none()),
+            "the picker closed"
+        );
+        assert!(h.document_request().is_none(), "nothing asked for NKY.Z");
+    }
+
+    /// Leaving the group keeps the underlying it last gave, and the
+    /// panel's own controls work again.
+    #[gpui::test]
+    fn unfollowing_keeps_the_groups_last_underlying(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_bound(cx);
+        h.with_document(&mut vcx);
+        follow_a(&h, &mut vcx, path(&[("underlying_ref", "NDX")]));
+        let _ = h.document_request();
+        h.frame.update(&mut vcx, |f, cx| {
+            f.link_for_test(TileId(TILE), geode_core::link::Membership::default());
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(key_of(&h, &vcx), Some(vec!["NDX".to_string()]));
+        assert_eq!(h.command(&mut vcx, "underlying NKY.Z"), Ok(()));
     }
 
     mod selection;

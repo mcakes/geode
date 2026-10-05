@@ -672,6 +672,16 @@ pub struct ShellView {
     /// frame-wide, so a switch changes none of them, and re-seeding there
     /// would swallow a group change whose notification is still pending.
     last_flip_groups: [u64; 4],
+    /// The frame generation emitters were last re-pulled at. An emitter
+    /// composes over its lane or followed group, which move without the
+    /// tile announcing anything, so the frame observer re-pulls every
+    /// emitter once the generation passes this.
+    last_emit_generation: u64,
+    /// Whether a posting composes the emitter's own `:filter` layer in:
+    /// `[links] include_tile_filter`, seeded from config, written by
+    /// `set_link_filter` and hot reload, each of which re-pulls every
+    /// emitter on a change.
+    link_include_tile_filter: bool,
     /// Who lives in each tile. Created lazily in `ensure_occupants` and
     /// dropped when the tile is gone from every workspace.
     occupants: HashMap<TileId, TileOccupant>,
@@ -1256,6 +1266,7 @@ impl ShellView {
         let add_direction = crate::tileadd::AddDirection::from_config(&services.config);
         let line_numbers = crate::linenumbers::LineNumbers::from_config(&services.config);
         cx.set_global(crate::linenumbers::UiSettings { line_numbers });
+        let link_include_tile_filter = crate::linkfilter::from_config(&services.config);
 
         // `[timeseries] default_source` plus the fetch sources it names,
         // one of the workspace's five globals (see `series`'s module doc). Set
@@ -1471,7 +1482,21 @@ impl ShellView {
                         && services.workspaces.workspace_of(tile).is_some()
                     {
                         f.follow(tile, record.link.follow);
-                        f.emit(tile, record.link.emit);
+                        // A loop of groups would narrow every group on it
+                        // on each pass; tiles restore in id order, so the
+                        // later tile's emit is the one dropped.
+                        if let Some((from, to)) =
+                            f.closing_cycle(tile, record.link.follow, record.link.emit)
+                        {
+                            tracing::warn!(
+                                target: "geode::session",
+                                "tile {id}: emit into {} dropped: {}",
+                                to.letter(),
+                                crate::shell::link::cycle_refusal(from, to)
+                            );
+                        } else {
+                            f.emit(tile, record.link.emit);
+                        }
                     }
                 }
             });
@@ -1485,6 +1510,7 @@ impl ShellView {
             .view(services.workspaces.active_ix())
             .versions();
         let last_flip_groups = frame.read(cx).group_scope_gens();
+        let last_emit_generation = frame.read(cx).generation();
 
         // The docs the data engine actually starts with — see
         // `sources_baseline`'s field doc.
@@ -1564,6 +1590,8 @@ impl ShellView {
             default_source,
             last_flip_versions,
             last_flip_groups,
+            last_emit_generation,
+            link_include_tile_filter,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
             emit_subs: HashMap::new(),
@@ -1862,6 +1890,13 @@ impl ShellView {
                 });
             }
         }
+        // Emitters compose over their lane or followed group, which move
+        // without the tile hearing it. After this observer: the pull reads
+        // tiles and writes the frame.
+        let weak = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let _ = weak.update(cx, |view, cx| view.repull_emitters(cx));
+        });
         // A pressed header link chip opens the chooser on its own tile.
         if let Some(tile) = frame.update(cx, |f, _| f.take_pending_link_chooser()) {
             self.open_link_chooser_on(tile, window, cx);

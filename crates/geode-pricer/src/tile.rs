@@ -799,6 +799,23 @@ fn read_scope(frame: &FrameRef, unscoped: bool, cx: &App) -> Result<Scope, Strin
         .map_err(|e| format!("scope refused: {e}"))
 }
 
+/// A group row's path as `(level, value)` pairs, one per kept level, root
+/// first: `Err` names the first level whose value is NULL or empty. A
+/// scope cannot select NULL, and dropping the level would widen every
+/// follower to all its values, so the whole path refuses. Structural
+/// levels (`position_ref`, `instrument_ref`) close the chain and never
+/// appear in a group row's path, so `kept` and `path` align by position.
+fn group_path_pairs(kept: &[String], path: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut pairs = Vec::with_capacity(path.len());
+    for (name, value) in kept.iter().zip(path) {
+        match value.as_deref().filter(|v| !v.is_empty()) {
+            Some(v) => pairs.push((name.clone(), v.to_string())),
+            None => return Err(name.clone()),
+        }
+    }
+    Ok(pairs)
+}
+
 fn app_clock(cx: &App) -> Clock {
     cx.try_global::<geode_shell::clock::AppClock>()
         .map(|c| c.0)
@@ -5792,18 +5809,53 @@ impl PricerTile {
         }
     }
 
-    /// The one underlying the cursor row names, or `None` with no cursor
-    /// row. This is what the tile posts as a link group's scope. Read from
-    /// the sheet on each call: one row, nothing to keep in step.
-    pub(crate) fn cursor_underlying(&self) -> Option<String> {
-        self.underlying_at(self.cursor_row()?)
+    /// What this tile answers when the shell pulls it for a link group. A
+    /// grouping row posts its path, one value per kept level; a line, leg
+    /// or package posts the path of the group row enclosing it plus its
+    /// sole underlying (a package across underlyings carries none, so it
+    /// posts the group path alone). A NULL or empty group value refuses.
+    /// The pricer has no `:filter` layer. Read from the model on each call:
+    /// nothing to keep in step.
+    pub(crate) fn emission(&self) -> geode_core::link::Emission {
+        use geode_core::link::{CursorScope, Emission, UNDERLYING, path_scope};
+        let cursor = match self.cursor_row() {
+            None => CursorScope::Nothing,
+            Some(g) => {
+                let is_group = matches!(self.model.kind(g), Some(GridRowKind::Group { .. }));
+                // A row's parent is always a group row (a leg's too, not
+                // its package), so this is the enclosing group's path.
+                let group_row = if is_group {
+                    Some(g)
+                } else {
+                    self.model.parent(g)
+                };
+                let path = group_row.and_then(|r| self.model.path(r));
+                match path.map_or(Ok(Vec::new()), |p| group_path_pairs(&self.chain.kept, p)) {
+                    Err(column) => CursorScope::NullIn(column),
+                    Ok(mut pairs) => {
+                        if !is_group
+                            && let Some(u) = self.underlying_at(g)
+                            && !pairs.iter().any(|(n, _)| n == UNDERLYING)
+                        {
+                            pairs.push((UNDERLYING.to_string(), u));
+                        }
+                        CursorScope::Path(path_scope(&pairs))
+                    }
+                }
+            }
+        };
+        Emission {
+            cursor,
+            unscoped: self.unscoped,
+            ..Emission::default()
+        }
     }
 
     /// The one underlying grid row `g` names: a line's or a leg's own, a
     /// package's when its legs share one. `None` on a package across
     /// underlyings and on a grouping row. `g m` and the link emission both
-    /// read the cursor row through this, so the two cannot name different
-    /// underlyings for one row.
+    /// read a row's underlying through this, so the two cannot name
+    /// different underlyings for one row.
     fn underlying_at(&self, g: usize) -> Option<String> {
         self.model
             .sheet_row(g)
@@ -7329,26 +7381,39 @@ pub(crate) mod tests {
     fn the_emission_is_the_cursor_lines_underlying(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 20000 C"]);
         assert!(h.content.emits());
-        let on = |u: &str| Some(Scope::one("underlying_ref", u));
+        let on = |u: &str| geode_core::link::CursorScope::Path(Scope::one("underlying_ref", u));
 
         let first = emission_of(&h, &mut vcx);
-        assert_eq!(first.scope, on("SPX"));
+        assert_eq!(first.cursor, on("SPX"));
         assert!(first.board.is_empty());
 
         assert!(h.motion(&mut vcx, "down", None));
         let second = emission_of(&h, &mut vcx);
-        assert_eq!(second.scope, on("NDX"), "the emission follows the cursor");
+        assert_eq!(second.cursor, on("NDX"), "the emission follows the cursor");
         assert!(second.board.is_empty());
     }
 
-    /// A package across two underlyings names no single one: no scope,
-    /// which leaves the group's scope as it is rather than clearing it.
+    /// The scope a path of `(column, value)` pairs selects, as a cursor
+    /// emission.
+    fn path_of(pairs: &[(&str, &str)]) -> geode_core::link::CursorScope {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(c, v)| (c.to_string(), v.to_string()))
+            .collect();
+        geode_core::link::CursorScope::Path(geode_core::link::path_scope(&pairs))
+    }
+
+    /// A package across two underlyings names no single one: on a flat
+    /// sheet it posts an empty path (the base scope, no underlying), not a
+    /// refusal and not its first leg's underlying.
     #[gpui::test]
-    fn a_package_across_two_underlyings_emits_no_scope(cx: &mut gpui::TestAppContext) {
+    fn a_pricer_package_across_underlyings_emits_its_path_without_an_underlying(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 20000 C"]);
         assert_eq!(
-            emission_of(&h, &mut vcx).scope,
-            Some(Scope::one("underlying_ref", "SPX")),
+            emission_of(&h, &mut vcx).cursor,
+            path_of(&[("underlying_ref", "SPX")]),
             "a line, before it is packaged"
         );
         h.dispatch(&mut vcx, "group", Some(2));
@@ -7358,10 +7423,153 @@ pub(crate) mod tests {
             top.starts_with("CUSTOM SPX/NDX"),
             "the package, on top: {top}"
         );
-        assert_eq!(
-            emission_of(&h, &mut vcx),
-            geode_core::link::Emission::default()
+        let e = emission_of(&h, &mut vcx);
+        assert_eq!(e.cursor, path_of(&[]));
+        assert!(
+            e.layer.is_empty() && !e.unscoped && e.board.is_empty(),
+            "{e:?}"
         );
+    }
+
+    /// A grouping row posts its own path, one value per level, and nothing
+    /// else: a follower sees the whole group.
+    #[gpui::test]
+    fn a_pricer_group_row_emits_its_path(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 20000 C"]);
+        h.command(&mut vcx, "group underlying_ref").unwrap();
+        h.motion(&mut vcx, "top", None);
+        assert_eq!(h.tree(&vcx)[0], "NDX", "{:?}", h.tree(&vcx));
+        let e = emission_of(&h, &mut vcx);
+        assert_eq!(e.cursor, path_of(&[("underlying_ref", "NDX")]));
+        assert!(e.layer.is_empty(), "the pricer has no filter layer");
+        assert!(!e.unscoped);
+
+        h.command(&mut vcx, "unscoped").unwrap();
+        let e = emission_of(&h, &mut vcx);
+        assert!(e.unscoped, "the flag tracks :unscoped");
+        assert_eq!(e.cursor, path_of(&[("underlying_ref", "NDX")]));
+
+        // A line under an `underlying_ref` group: the level already names
+        // its underlying, which is posted once.
+        h.dispatch(&mut vcx, "toggle", None);
+        assert!(h.motion(&mut vcx, "down", None));
+        assert_eq!(h.tree(&vcx)[1], "NDX Z26 20000 C");
+        assert_eq!(
+            emission_of(&h, &mut vcx).cursor,
+            path_of(&[("underlying_ref", "NDX")])
+        );
+    }
+
+    /// A line posts the path of the group enclosing it, then its own sole
+    /// underlying.
+    #[gpui::test]
+    fn a_pricer_line_emits_its_group_path_and_its_underlying(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 20000 C"]);
+        h.command(&mut vcx, "group currency").unwrap();
+        h.motion(&mut vcx, "top", None);
+        assert_eq!(
+            emission_of(&h, &mut vcx).cursor,
+            path_of(&[("currency", "USD")]),
+            "the group row itself: {:?}",
+            h.tree(&vcx)
+        );
+        h.dispatch(&mut vcx, "toggle", None);
+        assert!(h.motion(&mut vcx, "down", None));
+        assert_eq!(
+            h.tree(&vcx)[1],
+            "SPX Z26 5000 C",
+            "sheet order within the group"
+        );
+        assert_eq!(
+            emission_of(&h, &mut vcx).cursor,
+            path_of(&[("currency", "USD"), ("underlying_ref", "SPX")])
+        );
+        assert!(h.motion(&mut vcx, "down", None));
+        assert_eq!(
+            emission_of(&h, &mut vcx).cursor,
+            path_of(&[("currency", "USD"), ("underlying_ref", "NDX")]),
+            "the emission follows the cursor within the group"
+        );
+    }
+
+    /// A leg's enclosing row is its group, not its package: it posts the
+    /// group's path and its own underlying.
+    #[gpui::test]
+    fn a_pricer_leg_emits_its_enclosing_groups_path(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["-5 SPX Z26 4800/5200 CS"]);
+        h.command(&mut vcx, "group currency").unwrap();
+        h.motion(&mut vcx, "top", None);
+        h.dispatch(&mut vcx, "toggle", None);
+        assert!(h.motion(&mut vcx, "down", None));
+        h.dispatch(&mut vcx, "toggle", None);
+        assert_eq!(h.tree(&vcx).len(), 4, "group, package, two legs");
+        assert!(h.motion(&mut vcx, "down", None));
+        let at_leg = h.tile.read_with(&vcx, |t, _| {
+            t.cursor_row()
+                .and_then(|g| t.model.kind(g))
+                .is_some_and(|k| matches!(k, GridRowKind::Leg { .. }))
+        });
+        assert!(at_leg, "{:?}", h.tree(&vcx));
+        assert_eq!(
+            emission_of(&h, &mut vcx).cursor,
+            path_of(&[("currency", "USD"), ("underlying_ref", "SPX")])
+        );
+    }
+
+    /// A NULL group value refuses, on the group row and on a line under
+    /// it: a scope cannot select NULL, and dropping the level would widen
+    /// every follower.
+    #[gpui::test]
+    fn a_pricer_null_group_value_refuses(cx: &mut gpui::TestAppContext) {
+        // AAPL maps to no payout currency: its currency is NULL.
+        let (h, mut vcx) = open_seeded(cx, &["AAPL Z26 200 C"]);
+        h.command(&mut vcx, "group currency").unwrap();
+        h.motion(&mut vcx, "top", None);
+        let null = geode_core::link::CursorScope::NullIn("currency".into());
+        assert_eq!(emission_of(&h, &mut vcx).cursor, null, "{:?}", h.tree(&vcx));
+        h.dispatch(&mut vcx, "toggle", None);
+        assert!(h.motion(&mut vcx, "down", None));
+        assert_eq!(emission_of(&h, &mut vcx).cursor, null);
+    }
+
+    /// An empty group value refuses as NULL does, and the refusal names
+    /// the first level that holds one; values above it are not posted.
+    #[test]
+    fn an_empty_or_null_group_value_refuses_at_its_level() {
+        let kept = vec!["currency".to_string(), "underlying_ref".to_string()];
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(
+            group_path_pairs(&kept, &vec![s("USD"), s("SPX")]),
+            Ok(vec![
+                ("currency".to_string(), "USD".to_string()),
+                ("underlying_ref".to_string(), "SPX".to_string()),
+            ])
+        );
+        assert_eq!(
+            group_path_pairs(&kept, &vec![s("USD"), s("")]),
+            Err("underlying_ref".to_string())
+        );
+        assert_eq!(
+            group_path_pairs(&kept, &vec![None, s("SPX")]),
+            Err("currency".to_string())
+        );
+        assert_eq!(
+            group_path_pairs(&kept, &vec![s("")]),
+            Err("currency".to_string())
+        );
+    }
+
+    /// With no cursor row a pricer posts nothing; the flags still answer.
+    #[gpui::test]
+    fn a_pricer_with_no_cursor_row_emits_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let e = emission_of(&h, &mut vcx);
+        assert_eq!(e.cursor, geode_core::link::CursorScope::Nothing);
+        assert!(e.layer.is_empty() && !e.unscoped);
+        h.command(&mut vcx, "unscoped").unwrap();
+        let e = emission_of(&h, &mut vcx);
+        assert_eq!(e.cursor, geode_core::link::CursorScope::Nothing);
+        assert!(e.unscoped, "the flag tracks :unscoped");
     }
 
     /// A pricer hides the lines the frame's scope does not select and

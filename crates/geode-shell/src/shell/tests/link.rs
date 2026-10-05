@@ -10,7 +10,7 @@ use crate::module::recording::{Recorded, RecordingFactory};
 use crate::shell::choicedialog::{NO_GROUP_TO_JOIN, NO_TILE_TO_LINK, TILE_GONE, Target};
 use crate::tiling::WorkspaceIx;
 use geode_core::document::DocumentRows;
-use geode_core::link::{BoardEntry, DraftMark, Emission, Group};
+use geode_core::link::{BoardEntry, CursorScope, DraftMark, Emission, Group};
 use geode_core::query::{AsOf, QueryKey};
 use geode_core::scope::Scope;
 use std::cell::{Cell, RefCell};
@@ -352,8 +352,9 @@ fn a_follower_in_a_pinned_workspace_reads_its_group_and_its_own_lane(
     let mut rec = RecordingFactory::new("rec");
     rec.emits = true;
     *rec.emission.borrow_mut() = Emission {
-        scope: Some(underlying("SPX.Z")),
+        cursor: CursorScope::Path(underlying("SPX.Z")),
         board: Vec::new(),
+        ..Emission::default()
     };
     let (emission, handles) = (rec.emission.clone(), rec.frame_handles.clone());
     let (window, mut vcx) = open_shell(cx, services_with_recorders(vec![rec]));
@@ -404,11 +405,17 @@ fn a_follower_in_a_pinned_workspace_reads_its_group_and_its_own_lane(
             )
         })
     };
+    // The group's scope is the emitter's composed over the emitter's own
+    // lane (the shared one), never the follower's pinned lane.
+    let on_shared = |u: &str| Scope {
+        text: Some("shared".into()),
+        ..underlying(u)
+    };
     assert_eq!(
         reads(&vcx),
         (
             Some(Group::A),
-            underlying("SPX.Z"),
+            on_shared("SPX.Z"),
             Some(vec!["book".to_string()]),
             pinned_as_of.clone(),
         ),
@@ -435,7 +442,7 @@ fn a_follower_in_a_pinned_workspace_reads_its_group_and_its_own_lane(
 
     // Hidden: the group moves and nothing is flipped.
     super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_1");
-    emission.borrow_mut().scope = Some(underlying("NDX"));
+    emission.borrow_mut().cursor = CursorScope::Path(underlying("NDX"));
     tile_changed(&shell, &mut vcx, emitter);
     assert_eq!(
         group_underlying(&frame, &vcx, Group::A).as_deref(),
@@ -452,7 +459,7 @@ fn a_follower_in_a_pinned_workspace_reads_its_group_and_its_own_lane(
         reads(&vcx),
         (
             Some(Group::A),
-            underlying("NDX"),
+            on_shared("NDX"),
             Some(vec!["book".to_string()]),
             pinned_as_of,
         )
@@ -567,6 +574,8 @@ struct Emitter {
     emission: Rc<RefCell<Emission>>,
     /// How many times the shell pulled.
     pulls: Rc<Cell<usize>>,
+    /// Per-tile answers, overriding `emission` for the tiles listed.
+    by_tile: Rc<RefCell<std::collections::HashMap<TileId, Emission>>>,
 }
 
 /// Services whose "rec" tiles can emit, answering `emission`.
@@ -577,6 +586,7 @@ fn emitting_services(emission: Emission) -> (ShellServices, Emitter) {
     let emitter = Emitter {
         emission: rec.emission.clone(),
         pulls: rec.pulls.clone(),
+        by_tile: rec.emission_by_tile.clone(),
     };
     (services_with_recorders(vec![rec]), emitter)
 }
@@ -595,13 +605,14 @@ const DRAFTS: &str = "cvi_params";
 /// A cursor on `u` holding one draft for it.
 fn emission_for(u: &str, rows: &Arc<DocumentRows>) -> Emission {
     Emission {
-        scope: Some(underlying(u)),
+        cursor: CursorScope::Path(underlying(u)),
         board: vec![BoardEntry {
             dataset: DRAFTS.into(),
             key: vec![u.into()],
             rows: Arc::clone(rows),
             mark: DraftMark::Editing,
         }],
+        ..Emission::default()
     }
 }
 
@@ -670,8 +681,9 @@ fn set_follow(
 #[gpui::test]
 fn an_emitting_tile_posts_at_once_and_again_when_it_says_it_changed(cx: &mut gpui::TestAppContext) {
     let (services, emitter) = emitting_services(Emission {
-        scope: Some(underlying("SPX.Z")),
+        cursor: CursorScope::Path(underlying("SPX.Z")),
         board: Vec::new(),
+        ..Emission::default()
     });
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
 
@@ -691,7 +703,7 @@ fn an_emitting_tile_posts_at_once_and_again_when_it_says_it_changed(cx: &mut gpu
     );
     vcx.run_until_parked();
 
-    emitter.emission.borrow_mut().scope = Some(underlying("NDX"));
+    emitter.emission.borrow_mut().cursor = CursorScope::Path(underlying("NDX"));
     tile_changed(&shell, &mut vcx, TileId(1));
     assert_eq!(
         group_underlying(&frame, &vcx, Group::A).as_deref(),
@@ -711,8 +723,9 @@ fn an_emitters_change_flips_the_groups_followers_and_not_the_emitter(
     cx: &mut gpui::TestAppContext,
 ) {
     let (services, emitter) = emitting_services(Emission {
-        scope: Some(underlying("SPX.Z")),
+        cursor: CursorScope::Path(underlying("SPX.Z")),
         board: Vec::new(),
+        ..Emission::default()
     });
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
     set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
@@ -720,7 +733,7 @@ fn an_emitters_change_flips_the_groups_followers_and_not_the_emitter(
     settle(&frame, &mut vcx);
     let before = frame.read_with(&vcx, |f, _| f.view_for(WS1, TileId(2)).versions());
 
-    emitter.emission.borrow_mut().scope = Some(underlying("NDX"));
+    emitter.emission.borrow_mut().cursor = CursorScope::Path(underlying("NDX"));
     tile_changed(&shell, &mut vcx, TileId(1));
 
     assert_eq!(
@@ -766,8 +779,9 @@ fn a_change_announced_inside_the_tiles_update_is_pulled_after_it(cx: &mut gpui::
     rec.emits = true;
     rec.announces_inside_update = true;
     *rec.emission.borrow_mut() = Emission {
-        scope: Some(underlying("SPX.Z")),
+        cursor: CursorScope::Path(underlying("SPX.Z")),
         board: Vec::new(),
+        ..Emission::default()
     };
     let (emission, pulls, announce) = (
         rec.emission.clone(),
@@ -783,7 +797,7 @@ fn a_change_announced_inside_the_tiles_update_is_pulled_after_it(cx: &mut gpui::
     );
     let joined = pulls.get();
 
-    emission.borrow_mut().scope = Some(underlying("NDX"));
+    emission.borrow_mut().cursor = CursorScope::Path(underlying("NDX"));
     let announce_inside_update = announce
         .borrow()
         .clone()
@@ -794,7 +808,14 @@ fn a_change_announced_inside_the_tiles_update_is_pulled_after_it(cx: &mut gpui::
     });
     vcx.run_until_parked();
 
-    assert_eq!(pulls.get(), joined + 1, "one pull, once the update is over");
+    // The announced pull, once the update is over; its write moves the
+    // frame, and the re-pull every frame move makes reads an equal posting
+    // and stops there.
+    assert_eq!(
+        pulls.get(),
+        joined + 2,
+        "one pull after the update, one settling re-pull"
+    );
     assert_eq!(
         group_underlying(&frame, &vcx, Group::A).as_deref(),
         Some("NDX"),
@@ -1001,8 +1022,9 @@ fn closing_an_emitting_tile_removes_its_membership_and_entries(cx: &mut gpui::Te
 #[gpui::test]
 fn a_tile_that_follows_and_emits_one_group_does_not_loop(cx: &mut gpui::TestAppContext) {
     let (services, emitter) = emitting_services(Emission {
-        scope: Some(underlying("SPX.Z")),
+        cursor: CursorScope::Path(underlying("SPX.Z")),
         board: Vec::new(),
+        ..Emission::default()
     });
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
     let tile = TileId(1);
@@ -1032,7 +1054,7 @@ fn a_tile_that_follows_and_emits_one_group_does_not_loop(cx: &mut gpui::TestAppC
         Some("SPX.Z")
     );
 
-    emitter.emission.borrow_mut().scope = Some(underlying("NDX"));
+    emitter.emission.borrow_mut().cursor = CursorScope::Path(underlying("NDX"));
     tile_changed(&shell, &mut vcx, tile);
     assert_eq!(
         group_underlying(&frame, &vcx, Group::A).as_deref(),
@@ -1252,8 +1274,9 @@ fn a_restored_follow_on_a_tile_that_does_not_follow_is_dropped(cx: &mut gpui::Te
 #[gpui::test]
 fn a_duplicated_tile_is_in_no_group(cx: &mut gpui::TestAppContext) {
     let (services, _emitter) = emitting_services(Emission {
-        scope: Some(underlying("SPX.Z")),
+        cursor: CursorScope::Path(underlying("SPX.Z")),
         board: Vec::new(),
+        ..Emission::default()
     });
     let (_window, mut vcx, shell, tile) = one_tile_in(cx, services);
     let frame = frame_of(&shell, &vcx);
@@ -1580,8 +1603,9 @@ fn a_restored_membership_is_not_a_group_scope_change_and_opens_no_barrier(
 #[gpui::test]
 fn a_restored_emitter_subscribes_and_posts_without_a_key_press(cx: &mut gpui::TestAppContext) {
     let (services, emitter) = emitting_services(Emission {
-        scope: Some(underlying("SPX.Z")),
+        cursor: CursorScope::Path(underlying("SPX.Z")),
         board: Vec::new(),
+        ..Emission::default()
     });
     let services = restored(services, "module = \"rec\"\nemit = \"a\"");
     let (window, mut vcx) = open_shell(cx, services);
@@ -1603,7 +1627,7 @@ fn a_restored_emitter_subscribes_and_posts_without_a_key_press(cx: &mut gpui::Te
     });
     assert_eq!(seen, now, "the shell heard the group's scope move");
 
-    emitter.emission.borrow_mut().scope = Some(underlying("NDX"));
+    emitter.emission.borrow_mut().cursor = CursorScope::Path(underlying("NDX"));
     tile_changed(&shell, &mut vcx, TileId(1));
     assert_eq!(
         group_underlying(&frame, &vcx, Group::A).as_deref(),
@@ -1795,8 +1819,9 @@ fn a_restored_emitter_posts_after_every_occupant_exists(cx: &mut gpui::TestAppCo
     let mut rec = RecordingFactory::new("rec");
     rec.emits = true;
     *rec.emission.borrow_mut() = Emission {
-        scope: Some(underlying("SPX.Z")),
+        cursor: CursorScope::Path(underlying("SPX.Z")),
         board: Vec::new(),
+        ..Emission::default()
     };
     let at_create = rec.generation_at_create.clone();
     let services = two_restored(
@@ -2317,8 +2342,9 @@ fn the_chooser_offers_only_what_the_tile_can_do(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn picking_an_emit_row_subscribes_and_posts(cx: &mut gpui::TestAppContext) {
     let (services, emitter) = emitting_services(Emission {
-        scope: Some(underlying("SPX.Z")),
+        cursor: CursorScope::Path(underlying("SPX.Z")),
         board: Vec::new(),
+        ..Emission::default()
     });
     let (_window, mut vcx, shell, tile) = one_tile_in(cx, services);
     let frame = frame_of(&shell, &vcx);
@@ -2345,7 +2371,7 @@ fn picking_an_emit_row_subscribes_and_posts(cx: &mut gpui::TestAppContext) {
         Some("SPX.Z")
     );
     assert_eq!(shell.read_with(&vcx, |s, _| s.emit_subs.len()), 1);
-    emitter.emission.borrow_mut().scope = Some(underlying("NDX"));
+    emitter.emission.borrow_mut().cursor = CursorScope::Path(underlying("NDX"));
     tile_changed(&shell, &mut vcx, tile);
     assert_eq!(
         group_underlying(&frame, &vcx, Group::A).as_deref(),
@@ -2539,8 +2565,9 @@ fn mod_u_over_a_page_is_refused_with_the_page_notice(cx: &mut gpui::TestAppConte
 #[gpui::test]
 fn a_click_on_an_emit_row_emits(cx: &mut gpui::TestAppContext) {
     let (services, _emitter) = emitting_services(Emission {
-        scope: Some(underlying("SPX.Z")),
+        cursor: CursorScope::Path(underlying("SPX.Z")),
         board: Vec::new(),
+        ..Emission::default()
     });
     let (_window, mut vcx, shell, tile) = one_tile_in(cx, services);
     let frame = frame_of(&shell, &vcx);
@@ -2714,8 +2741,9 @@ fn emitting_alone_shows_no_following_segment(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn the_following_segment_tracks_the_groups_scope(cx: &mut gpui::TestAppContext) {
     let (services, emitter) = emitting_services(Emission {
-        scope: Some(underlying("SPX.Z")),
+        cursor: CursorScope::Path(underlying("SPX.Z")),
         board: Vec::new(),
+        ..Emission::default()
     });
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
     let (focused, other) = focused_and_other(&shell, &vcx);
@@ -2737,7 +2765,7 @@ fn the_following_segment_tracks_the_groups_scope(cx: &mut gpui::TestAppContext) 
         Some("following A \u{00b7} SPX.Z")
     );
 
-    emitter.emission.borrow_mut().scope = Some(underlying("NDX"));
+    emitter.emission.borrow_mut().cursor = CursorScope::Path(underlying("NDX"));
     tile_changed(&shell, &mut vcx, other);
     assert_eq!(
         following(&shell, &vcx).as_deref(),
@@ -2751,7 +2779,7 @@ fn the_following_segment_tracks_the_groups_scope(cx: &mut gpui::TestAppContext) 
         Some("NDX"),
         "fixture: the emitter now moves B"
     );
-    emitter.emission.borrow_mut().scope = Some(underlying("RTY"));
+    emitter.emission.borrow_mut().cursor = CursorScope::Path(underlying("RTY"));
     tile_changed(&shell, &mut vcx, other);
     assert_eq!(
         following(&shell, &vcx).as_deref(),
@@ -2769,8 +2797,9 @@ fn the_following_segment_tracks_the_groups_scope(cx: &mut gpui::TestAppContext) 
 #[gpui::test]
 fn an_unchanged_frame_rebuilds_no_label(cx: &mut gpui::TestAppContext) {
     let (services, _emitter) = emitting_services(Emission {
-        scope: Some(underlying("STOXX50E.EUREX")),
+        cursor: CursorScope::Path(underlying("STOXX50E.EUREX")),
         board: Vec::new(),
+        ..Emission::default()
     });
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
     let (focused, other) = focused_and_other(&shell, &vcx);
@@ -2796,16 +2825,25 @@ fn an_unchanged_frame_rebuilds_no_label(cx: &mut gpui::TestAppContext) {
         "a repaint formats nothing"
     );
 
+    // The emitter composes over its lane's scope, so a lane scope change
+    // moves the group; the lane's as-of is not part of it. The move
+    // re-pulls the emitter, whose equal posting writes nothing.
+    let before = frame.read_with(&vcx, |f, _| f.group_scope_gens());
     frame.update(&mut vcx, |f, cx| {
-        assert!(f.shared_mut().set_text(Some("ndx".into())));
+        assert!(f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now())));
         cx.notify();
     });
     vcx.run_until_parked();
     draw(&mut vcx);
     assert_eq!(
+        frame.read_with(&vcx, |f, _| f.group_scope_gens()),
+        before,
+        "fixture: the group's scope did not move"
+    );
+    assert_eq!(
         label(&vcx).as_ptr(),
         first.as_ptr(),
-        "the workspace's own scope is not the group's"
+        "the workspace's as-of is not the group's scope"
     );
 }
 
@@ -2881,4 +2919,405 @@ fn a_page_hides_the_following_segment(cx: &mut gpui::TestAppContext) {
     vcx.run_until_parked();
     assert!(shell.read_with(&vcx, |s, _| !s.page_open()), "fixture");
     assert!(vcx.debug_bounds("status-following").is_some());
+}
+
+// --- Composition over the emitter's base ----------------------------
+
+fn path(pairs: &[(&str, &str)]) -> CursorScope {
+    CursorScope::Path(geode_core::link::path_scope(
+        &pairs
+            .iter()
+            .map(|(c, v)| (c.to_string(), v.to_string()))
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// The lane's scope is composed under the path: a follower sees the rows
+/// under the emitter's cursor, not the path across the whole book.
+#[gpui::test]
+fn an_emission_is_composed_over_the_emitters_lane(cx: &mut gpui::TestAppContext) {
+    let (services, _emitter) = emitting_services(Emission {
+        cursor: path(&[("model_code", "ABC")]),
+        ..Emission::default()
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+    let scope = frame.read_with(&vcx, |f, _| f.group_scope(Group::A).clone());
+    assert_eq!(scope.sole("model_code"), Some("ABC"));
+    assert_eq!(
+        scope.text.as_deref(),
+        Some("spx"),
+        "the lane's scope rides along"
+    );
+}
+
+/// A lane scope change moves the emitter's base without the tile saying
+/// anything: the frame move re-pulls it.
+#[gpui::test]
+fn a_lane_scope_change_repulls_the_emitter(cx: &mut gpui::TestAppContext) {
+    let (services, _emitter) = emitting_services(Emission {
+        cursor: path(&[("model_code", "ABC")]),
+        ..Emission::default()
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+    frame.update(&mut vcx, |f, cx| {
+        assert!(f.shared_mut().set_text(Some("ndx".into())));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let scope = frame.read_with(&vcx, |f, _| f.group_scope(Group::A).clone());
+    assert_eq!(
+        scope.text.as_deref(),
+        Some("ndx"),
+        "no cursor move was needed"
+    );
+    assert_eq!(scope.sole("model_code"), Some("ABC"));
+}
+
+/// A tile following and emitting into one group composes over its lane:
+/// over the group, each pass would narrow it further and the total row
+/// could never widen it back.
+#[gpui::test]
+fn a_self_linked_tile_widens_the_group_from_its_total_row(cx: &mut gpui::TestAppContext) {
+    let (services, emitter) = emitting_services(Emission {
+        cursor: path(&[("model_code", "ABC")]),
+        ..Emission::default()
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    set_follow(&shell, &mut vcx, TileId(1), Some(Group::A));
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+    // A deeper cursor composes over the lane, not over the narrowed group.
+    emitter.emission.borrow_mut().cursor =
+        path(&[("model_code", "ABC"), ("underlying_ref", "SPX")]);
+    tile_changed(&shell, &mut vcx, TileId(1));
+    // The total row widens back to the lane.
+    emitter.emission.borrow_mut().cursor = CursorScope::Path(Scope::default());
+    tile_changed(&shell, &mut vcx, TileId(1));
+    let scope = frame.read_with(&vcx, |f, _| f.group_scope(Group::A).clone());
+    assert_eq!(scope.sole("model_code"), None, "the group widened back");
+    assert_eq!(scope.text.as_deref(), Some("spx"));
+}
+
+/// A tile following one group and emitting into another carries the
+/// followed group's scope down the chain.
+#[gpui::test]
+fn a_chained_emitter_composes_over_the_group_it_follows(cx: &mut gpui::TestAppContext) {
+    let (services, _emitter) = emitting_services(Emission {
+        cursor: path(&[("underlying_ref", "SPX")]),
+        ..Emission::default()
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    frame.update(&mut vcx, |f, _| {
+        assert!(f.restore_group_scope(Group::A, Scope::one("book", "A")));
+    });
+    set_follow(&shell, &mut vcx, TileId(1), Some(Group::A));
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::B));
+    let scope = frame.read_with(&vcx, |f, _| f.group_scope(Group::B).clone());
+    assert_eq!(
+        scope.sole("book"),
+        Some("A"),
+        "A's scope carries down the chain"
+    );
+    assert_eq!(scope.sole("underlying_ref"), Some("SPX"));
+}
+
+/// A path through NULL cannot be said as a scope: the group keeps what it
+/// held and the tile records which column stopped it, until a posting
+/// goes through or the tile leaves the group.
+#[gpui::test]
+fn a_null_path_keeps_the_group_and_records_the_refusal(cx: &mut gpui::TestAppContext) {
+    let (services, emitter) = emitting_services(Emission {
+        cursor: path(&[("book", "A")]),
+        ..Emission::default()
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+    emitter.emission.borrow_mut().cursor = CursorScope::NullIn("book".into());
+    tile_changed(&shell, &mut vcx, TileId(1));
+    frame.read_with(&vcx, |f, _| {
+        assert_eq!(f.group_scope(Group::A).sole("book"), Some("A"), "kept");
+        assert_eq!(f.link_refusal(TileId(1)), Some("book"));
+    });
+    emitter.emission.borrow_mut().cursor = path(&[("book", "B")]);
+    tile_changed(&shell, &mut vcx, TileId(1));
+    frame.read_with(&vcx, |f, _| {
+        assert_eq!(f.link_refusal(TileId(1)), None, "cleared")
+    });
+    emitter.emission.borrow_mut().cursor = CursorScope::NullIn("book".into());
+    tile_changed(&shell, &mut vcx, TileId(1));
+    frame.read_with(&vcx, |f, _| {
+        assert_eq!(f.link_refusal(TileId(1)), Some("book"))
+    });
+    set_emit(&shell, &mut vcx, TileId(1), None);
+    frame.read_with(&vcx, |f, _| {
+        assert_eq!(f.link_refusal(TileId(1)), None, "leaving clears")
+    });
+}
+
+/// Two tiles emitting into one group: a lane move re-pulls both, and the
+/// one that posted last re-posts last, so the group stays on the latest
+/// mover's cursor. Re-pulled in tile order, the higher tile id would take
+/// the group from whoever moved most recently.
+#[gpui::test]
+fn a_lane_move_keeps_the_group_on_the_latest_mover(cx: &mut gpui::TestAppContext) {
+    let (services, emitter) = emitting_services(Emission::default());
+    let model = |code: &str| Emission {
+        cursor: path(&[("model_code", code)]),
+        ..Emission::default()
+    };
+    emitter.by_tile.borrow_mut().insert(TileId(1), model("ONE"));
+    emitter.by_tile.borrow_mut().insert(TileId(2), model("TWO"));
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    let a_model = |vcx: &gpui::VisualTestContext| {
+        frame.read_with(vcx, |f, _| {
+            let scope = f.group_scope(Group::A);
+            (
+                scope.sole("model_code").map(str::to_owned),
+                scope.text.clone(),
+            )
+        })
+    };
+    let lane_text = |vcx: &mut gpui::VisualTestContext, text: &str| {
+        frame.update(vcx, |f, cx| {
+            assert!(f.shared_mut().set_text(Some(text.into())));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    };
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+    set_emit(&shell, &mut vcx, TileId(2), Some(Group::A));
+    assert_eq!(a_model(&vcx).0.as_deref(), Some("TWO"));
+
+    // Tile 1 moves after tile 2 posted: it is the latest mover.
+    emitter
+        .by_tile
+        .borrow_mut()
+        .insert(TileId(1), model("ONE_B"));
+    tile_changed(&shell, &mut vcx, TileId(1));
+    assert_eq!(a_model(&vcx).0.as_deref(), Some("ONE_B"));
+    lane_text(&mut vcx, "ndx");
+    assert_eq!(
+        a_model(&vcx),
+        (Some("ONE_B".into()), Some("ndx".into())),
+        "the latest mover keeps the group across a lane move"
+    );
+
+    // Now tile 2 moves last.
+    emitter
+        .by_tile
+        .borrow_mut()
+        .insert(TileId(2), model("TWO_B"));
+    tile_changed(&shell, &mut vcx, TileId(2));
+    assert_eq!(a_model(&vcx).0.as_deref(), Some("TWO_B"));
+    lane_text(&mut vcx, "rut");
+    assert_eq!(a_model(&vcx), (Some("TWO_B".into()), Some("rut".into())));
+}
+
+// --- Loops of groups -------------------------------------------------
+
+/// A pick that would close a loop of groups is refused at the door and
+/// says why: on a loop, each group would narrow the next on every pass.
+#[gpui::test]
+fn a_pick_that_closes_a_loop_is_refused_with_a_notice(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services_that(true, true));
+    set_follow(&shell, &mut vcx, TileId(1), Some(Group::A));
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::B));
+    set_follow(&shell, &mut vcx, TileId(2), Some(Group::B));
+    set_emit(&shell, &mut vcx, TileId(2), Some(Group::A));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(2)).emit),
+        None
+    );
+    assert_eq!(
+        notice(&shell, &vcx).as_deref(),
+        Some("would link B back into A")
+    );
+}
+
+/// The follow door refuses the same loop from the other side: tile 2
+/// emits into A first, then asks to follow B.
+#[gpui::test]
+fn a_follow_that_closes_a_loop_is_refused_with_a_notice(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services_that(true, true));
+    set_follow(&shell, &mut vcx, TileId(1), Some(Group::A));
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::B));
+    set_emit(&shell, &mut vcx, TileId(2), Some(Group::A));
+    set_follow(&shell, &mut vcx, TileId(2), Some(Group::B));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(2)).follow),
+        None
+    );
+    assert_eq!(
+        notice(&shell, &vcx).as_deref(),
+        Some("would link B back into A")
+    );
+}
+
+/// A session holding a loop (written before the doors refused one, or by
+/// hand) restores without it: the later tile's emit is dropped and its
+/// follow kept.
+#[gpui::test]
+fn a_restored_cycle_drops_the_later_emit(cx: &mut gpui::TestAppContext) {
+    let services = two_restored(
+        services_that(true, true),
+        "module = \"rec\"\nfollow = \"a\"\nemit = \"b\"",
+        "module = \"rec\"\nfollow = \"b\"\nemit = \"a\"",
+    );
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = frame_of(&shell, &vcx);
+    frame.read_with(&vcx, |f, _| {
+        assert_eq!(f.membership(TileId(1)).follow, Some(Group::A));
+        assert_eq!(f.membership(TileId(1)).emit, Some(Group::B));
+        assert_eq!(f.membership(TileId(2)).follow, Some(Group::B));
+        assert_eq!(
+            f.membership(TileId(2)).emit,
+            None,
+            "the later emit is dropped"
+        );
+    });
+}
+
+/// The production chooser route refuses a row that would close a loop:
+/// the list stays open on the same tile for another pick, the status bar
+/// says which link it refused, and the membership is unchanged.
+#[gpui::test]
+fn the_chooser_refuses_a_loop_and_stays_open(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services_that(true, true));
+    set_follow(&shell, &mut vcx, TileId(1), Some(Group::A));
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::B));
+    set_follow(&shell, &mut vcx, TileId(2), Some(Group::B));
+    let (focused, _) = focused_and_other(&shell, &vcx);
+    assert_eq!(focused, TileId(2), "the chooser opens on tile 2");
+    press_mod_u(&mut vcx);
+    assert_eq!(chooser_tile(&shell, &vcx), Some(TileId(2)));
+
+    vcx.simulate_input("emit a");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    draw(&mut vcx);
+
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.membership(TileId(2))),
+        geode_core::link::Membership {
+            follow: Some(Group::B),
+            emit: None,
+        }
+    );
+    assert_eq!(
+        chooser_tile(&shell, &vcx),
+        Some(TileId(2)),
+        "the chooser is still open"
+    );
+    assert_eq!(
+        notice(&shell, &vcx).as_deref(),
+        Some("would link B back into A")
+    );
+}
+
+/// The region under the emitter's own `:filter` layer, as group A sees it.
+fn group_region(frame: &Entity<Frame>, vcx: &gpui::VisualTestContext) -> Option<String> {
+    frame.read_with(vcx, |f, _| {
+        f.group_scope(Group::A).sole("region").map(str::to_owned)
+    })
+}
+
+/// Turning `[links] include_tile_filter` off re-pulls every emitter at
+/// once: the rule changed, the frame did not, so a re-pull keyed on the
+/// frame's generation alone would leave the group on the old composition.
+#[gpui::test]
+fn turning_the_filter_setting_off_repulls_without_the_layer(cx: &mut gpui::TestAppContext) {
+    let (services, _emitter) = emitting_services(Emission {
+        cursor: CursorScope::Path(Scope::default()),
+        layer: Scope::one("region", "EU"),
+        ..Emission::default()
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+    assert_eq!(group_region(&frame, &vcx).as_deref(), Some("EU"));
+    shell.update(&mut vcx, |s, cx| s.set_link_filter(false, cx));
+    vcx.run_until_parked();
+    assert_eq!(group_region(&frame, &vcx), None);
+    shell.update(&mut vcx, |s, cx| s.set_link_filter(true, cx));
+    vcx.run_until_parked();
+    assert_eq!(
+        group_region(&frame, &vcx).as_deref(),
+        Some("EU"),
+        "and back on, the layer returns"
+    );
+}
+
+/// A hot reload that changes the setting re-pulls the same way; one that
+/// leaves it alone keeps the composition.
+#[gpui::test]
+fn a_reload_that_turns_the_filter_off_repulls_without_the_layer(cx: &mut gpui::TestAppContext) {
+    let (services, _emitter) = emitting_services(Emission {
+        cursor: CursorScope::Path(Scope::default()),
+        layer: Scope::one("region", "EU"),
+        ..Emission::default()
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+    assert_eq!(group_region(&frame, &vcx).as_deref(), Some("EU"));
+    let reload_with = |app: &str| {
+        Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+                LayerDoc::builtin("app", app).unwrap(),
+            ],
+            desk: None,
+            user: None,
+        })
+    };
+    let unchanged = reload_with("[links]\ninclude_tile_filter = true\n");
+    shell.update(&mut vcx, |s, cx| s.apply_reload(unchanged, cx));
+    vcx.run_until_parked();
+    assert_eq!(group_region(&frame, &vcx).as_deref(), Some("EU"));
+    let off = reload_with("[links]\ninclude_tile_filter = false\n");
+    shell.update(&mut vcx, |s, cx| s.apply_reload(off, cx));
+    vcx.run_until_parked();
+    assert!(!shell.read_with(&vcx, |s, _| s.link_include_tile_filter));
+    assert_eq!(group_region(&frame, &vcx), None);
+}
+
+/// The setter persists `[links] include_tile_filter` to the user
+/// `app.toml` off the UI thread, so the choice survives a restart.
+#[gpui::test]
+fn setting_the_filter_off_persists_it_to_the_user_layer(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    shell.update(&mut vcx, |s, cx| s.set_link_filter(false, cx));
+    vcx.run_until_parked();
+    let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
+    assert!(
+        text.contains("[links]") && text.contains("include_tile_filter = false"),
+        "{text}"
+    );
+}
+
+/// A configured `[links] include_tile_filter = false` holds from the
+/// first posting: the emitter's own layer never reaches its group.
+#[gpui::test]
+fn a_configured_filter_setting_off_holds_from_startup(cx: &mut gpui::TestAppContext) {
+    let (mut services, _emitter) = emitting_services(Emission {
+        cursor: CursorScope::Path(underlying("SPX.Z")),
+        layer: Scope::one("region", "EU"),
+        ..Emission::default()
+    });
+    services.config = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("app", "[links]\ninclude_tile_filter = false\n").unwrap()],
+        desk: None,
+        user: None,
+    });
+    let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
+    assert!(!shell.read_with(&vcx, |s, _| s.link_include_tile_filter));
+    set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
+    assert_eq!(
+        group_underlying(&frame, &vcx, Group::A).as_deref(),
+        Some("SPX.Z"),
+        "sanity: the emitter posted"
+    );
+    assert_eq!(group_region(&frame, &vcx), None);
 }

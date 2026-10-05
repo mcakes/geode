@@ -3,7 +3,7 @@
 //! The frame owns one `Links` and draws every scope generation from its
 //! own counter, so a number names one scope in any lane or group.
 //!
-//! A board holds draft documents. It is derived from the last emission of
+//! A board holds draft documents. It is derived from the last posting of
 //! every tile emitting into the group, so a draft leaves the moment its
 //! emitter stops listing it, leaves the group or closes. Board changes move
 //! their own revisions ([`BoardWatch`]) and never the frame's publish
@@ -18,12 +18,22 @@ use std::rc::{Rc, Weak};
 
 use geode_core::colour::{Definition, Tone, resolve};
 use geode_core::document::{is_key_prefix, join_key};
-use geode_core::link::{BoardEntry, Emission, Group, Membership};
+use geode_core::link::{BoardEntry, Group, Membership, Posting};
 use geode_core::scope::Scope;
 use gpui::Hsla;
 use gpui_component::Theme;
 
 use crate::shell::colours::{anchors_from_theme, to_hsla, tokens_from_theme};
+
+/// The warning an emitter's header shows while a NULL in its cursor path
+/// keeps its group's scope where it was. The frame formats it once, when
+/// it records the refusal.
+pub fn refusal_text(group: Group, column: &str) -> String {
+    format!(
+        "group {} not updated \u{b7} {column} is NULL",
+        group.letter()
+    )
+}
 use crate::tiling::TileId;
 
 /// Each group's hue in degrees on the theme's own wheel, in `Group::ALL`
@@ -60,7 +70,7 @@ type BoardKey = (String, Vec<String>);
 struct Posted {
     /// The entry as posted: its rows by allocation and its mark.
     entry: BoardEntry,
-    /// The tile whose emission put it there. Recorded for diagnostics;
+    /// The tile whose posting put it there. Recorded for diagnostics;
     /// nothing reads it.
     #[allow(dead_code)]
     emitter: TileId,
@@ -73,7 +83,7 @@ pub(crate) struct GroupLane {
     pub(crate) scope: Scope,
     pub(crate) scope_gen: u64,
     board: BTreeMap<BoardKey, Posted>,
-    /// Counts this board's changes; a repeated emission leaves it alone.
+    /// Counts this board's changes; a repeated posting leaves it alone.
     board_gen: u64,
 }
 
@@ -82,10 +92,10 @@ pub(crate) struct Links {
     groups: [GroupLane; 4],
     following: BTreeMap<TileId, Group>,
     emitting: BTreeMap<TileId, Group>,
-    /// Each emitter's last emission and the order it was posted in. A
+    /// Each emitter's last posting and the order it was posted in. A
     /// group's board is derived from these, so an emitter that leaves
     /// uncovers a key another emitter still lists.
-    last: HashMap<TileId, (u64, Emission)>,
+    last: HashMap<TileId, (u64, Posting)>,
     seq: u64,
     /// Board watches, held weakly: a closed tile drops its watch and the
     /// next registration reaps the entry.
@@ -156,7 +166,7 @@ impl Links {
         assign(&mut self.following, tile, to)
     }
 
-    /// Point `tile`'s emissions at `to`. A tile that leaves or switches
+    /// Point `tile`'s postings at `to`. A tile that leaves or switches
     /// group takes what it posted with it: its drafts leave the old board
     /// at once and nothing reaches the new one until its next post. The
     /// old group's scope stays as last written.
@@ -170,6 +180,53 @@ impl Links {
             self.rebuild_board(g);
         }
         true
+    }
+
+    /// The edge `from → to` that giving `tile` this membership would add,
+    /// when it closes a loop through two or more groups. An edge runs from
+    /// the group a tile follows to the group it emits into; a tile emitting
+    /// into the group it follows is no edge (it composes over its lane).
+    /// The tile's own current edge is left out: the new membership replaces
+    /// it. A loop would narrow every group on it a little more on each
+    /// pass, with no row able to widen them back.
+    pub(crate) fn closing_cycle(
+        &self,
+        tile: TileId,
+        follow: Option<Group>,
+        emit: Option<Group>,
+    ) -> Option<(Group, Group)> {
+        let (from, to) = (follow?, emit?);
+        if from == to {
+            return None;
+        }
+        let mut edges = [[false; 4]; 4];
+        for (t, &f) in &self.following {
+            if *t == tile {
+                continue;
+            }
+            if let Some(&e) = self.emitting.get(t)
+                && e != f
+            {
+                edges[f.index()][e.index()] = true;
+            }
+        }
+        // Can `to` reach `from`? Four nodes: a plain search.
+        let mut seen = [false; 4];
+        let mut stack = vec![to];
+        while let Some(g) = stack.pop() {
+            if g == from {
+                return Some((from, to));
+            }
+            if std::mem::replace(&mut seen[g.index()], true) {
+                continue;
+            }
+            stack.extend(
+                Group::ALL
+                    .into_iter()
+                    .filter(|n| edges[g.index()][n.index()]),
+            );
+        }
+        None
     }
 
     /// Drop a closed tile's membership and what it posted. `true` when it
@@ -198,34 +255,46 @@ impl Links {
         [0, 1, 2, 3].map(|i| self.groups[i].scope_gen)
     }
 
-    /// Record `tile`'s emission. `true` when the group's scope or board
-    /// changed. An emission equal to the tile's last is not a write: the
-    /// shell re-pulls on every notify of an emitting tile.
-    pub(crate) fn post(&mut self, tile: TileId, emission: Emission, generation: &mut u64) -> bool {
+    /// Record `tile`'s posting. `true` when the group's scope or board
+    /// changed. A posting equal to the tile's last is not a write: the
+    /// shell re-pulls on every notify of an emitting tile and on every
+    /// frame move.
+    pub(crate) fn post(&mut self, tile: TileId, posting: Posting, generation: &mut u64) -> bool {
         let Some(&g) = self.emitting.get(&tile) else {
             return false;
         };
-        if self.last.get(&tile).is_some_and(|(_, e)| *e == emission) {
+        if self.last.get(&tile).is_some_and(|(_, p)| *p == posting) {
             return false;
         }
         // Compared before it is cloned: a draft edited at typing speed posts
         // a changed board under the scope the group already holds.
-        let changed = match &emission.scope {
+        let changed = match &posting.scope {
             Some(scope) if self.groups[g.index()].scope != *scope => {
                 self.set_scope(g, scope.clone(), generation)
             }
             _ => false,
         };
         self.seq += 1;
-        self.last.insert(tile, (self.seq, emission));
+        self.last.insert(tile, (self.seq, posting));
         changed | self.rebuild_board(g)
     }
 
-    /// Derive `g`'s board from its emitters' last emissions, later posts
+    /// Every tile emitting into a group, oldest posting first: tiles that
+    /// have not posted since joining lead (in tile order), then the rest by
+    /// the order of their last posts. Re-pulled in this order, the most
+    /// recent mover re-posts last and keeps the group it shares; in tile
+    /// order, a lane move would hand the group to the higher tile id.
+    pub(crate) fn emitters(&self) -> Vec<TileId> {
+        let mut tiles: Vec<TileId> = self.emitting.keys().copied().collect();
+        tiles.sort_by_key(|t| self.last.get(t).map(|(seq, _)| *seq));
+        tiles
+    }
+
+    /// Derive `g`'s board from its emitters' last postings, later posts
     /// winning a key, and bump the watches of every key that changed.
     /// `true` when the board changed.
     fn rebuild_board(&mut self, g: Group) -> bool {
-        let mut posts: Vec<(u64, TileId, &Emission)> = self
+        let mut posts: Vec<(u64, TileId, &Posting)> = self
             .last
             .iter()
             .filter(|(tile, _)| self.emitting.get(tile) == Some(&g))
@@ -233,8 +302,8 @@ impl Links {
             .collect();
         posts.sort_by_key(|p| p.0);
         let mut next: BTreeMap<BoardKey, Posted> = BTreeMap::new();
-        for (_, emitter, emission) in posts {
-            for entry in &emission.board {
+        for (_, emitter, posting) in posts {
+            for entry in &posting.board {
                 next.insert(
                     (entry.dataset.clone(), entry.key.clone()),
                     Posted {
@@ -344,8 +413,8 @@ mod tests {
         })
     }
 
-    fn posting(dataset: &str, key: &[&str]) -> Emission {
-        Emission {
+    fn posting(dataset: &str, key: &[&str]) -> Posting {
+        Posting {
             scope: None,
             board: vec![BoardEntry {
                 dataset: dataset.into(),
@@ -354,6 +423,56 @@ mod tests {
                 mark: DraftMark::Editing,
             }],
         }
+    }
+
+    fn linked(pairs: &[(u64, Option<Group>, Option<Group>)]) -> Links {
+        let mut l = Links::default();
+        for &(t, f, e) in pairs {
+            l.follow(TileId(t), f);
+            l.emit(TileId(t), e);
+        }
+        l
+    }
+
+    /// A tile following B and emitting into A beside one following A and
+    /// emitting into B would narrow both groups on every pass. Emitting
+    /// into the followed group is no edge: it composes over the lane.
+    #[test]
+    fn a_two_group_loop_is_a_cycle_and_a_self_link_is_not() {
+        let l = linked(&[(1, Some(Group::A), Some(Group::B))]);
+        assert_eq!(
+            l.closing_cycle(TileId(2), Some(Group::B), Some(Group::A)),
+            Some((Group::B, Group::A))
+        );
+        assert_eq!(
+            l.closing_cycle(TileId(2), Some(Group::A), Some(Group::A)),
+            None
+        );
+        assert_eq!(
+            l.closing_cycle(TileId(2), Some(Group::B), Some(Group::C)),
+            None
+        );
+    }
+
+    /// A loop through every group is found, and the tile being re-pointed
+    /// does not count its own old edge: that edge goes when the new one
+    /// arrives.
+    #[test]
+    fn a_longer_loop_is_found_and_the_tiles_own_old_edge_is_ignored() {
+        let l = linked(&[
+            (1, Some(Group::A), Some(Group::B)),
+            (2, Some(Group::B), Some(Group::C)),
+            (3, Some(Group::C), Some(Group::D)),
+        ]);
+        assert_eq!(
+            l.closing_cycle(TileId(4), Some(Group::D), Some(Group::A)),
+            Some((Group::D, Group::A))
+        );
+        // Tile 1 re-pointing its own edge removes A→B first: no loop.
+        assert_eq!(
+            l.closing_cycle(TileId(1), Some(Group::D), Some(Group::A)),
+            None
+        );
     }
 
     /// Two tiles watching the same key share one revision cell, and a

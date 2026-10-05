@@ -230,9 +230,23 @@ joined on the unique source value, if the idle figure stays over budget.
   until the shell pulls. The assembly itself walks the whole document and is
   unmeasured.
 - An emitting blotter or pricer recomputes one row per pull: the cursor
-  row's underlying, with no selection walk. The shell pulls on every
+  row's grouping path (one value per level) plus, on a leaf row, its own
+  single-valued columns, with no selection walk. The shell pulls on every
   notification of an emitting tile; an emission equal to the tile's last
   writes nothing and notifies nobody.
+- The shell also re-pulls every emitter whenever the frame generation has
+  moved since its last re-pull (`repull_emitters`), because an emitter's
+  base (its lane's or its followed group's scope) moves without the tile
+  announcing anything. Every frame write therefore costs one pull and one
+  composition per emitter, O(emitters), unmeasured; equal postings write
+  nothing.
+- A generation-triggered re-pull composes the new base over the emitter's
+  current path, which is still the one from its last snapshot: the emitter
+  has not requeried under the new base yet. Until its snapshot arrives the
+  group can briefly hold a narrower or empty subset (the old path inside
+  the new base), and a follower of a chained group sees two queries per
+  upstream move: one for that transient posting and one when the
+  emitter's new snapshot re-posts.
 - A draft edit on an emitting panel bumps the board watches of the keys it
   changed, never the frame's `data` version, so it requeries no tile that
   watches published data, and it is not staged behind a flip barrier.

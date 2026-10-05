@@ -5305,12 +5305,15 @@ grain = "underlying"
     /// frame handle it gives a tile reads the group that tile follows.
     ///
     /// The blotter (tile 1) emits into A; the pricer (tile 2) follows A and
-    /// emits into B; a second blotter (tile 3) follows A. Moving the first
-    /// blotter's cursor moves A's scope: the second blotter queries under
-    /// it, the pricer hides the line A no longer selects, and the pricer's
-    /// own cursor line names B's scope.
+    /// emits into B; a second blotter (tile 3) follows A. The workspace's
+    /// lane is scoped to one book. Moving the first blotter's cursor moves
+    /// A's scope to the lane's scope composed with the cursor row's path:
+    /// the second blotter queries under it, the pricer hides the line A no
+    /// longer selects, and the pricer's own cursor line names B's scope. A
+    /// row whose grouping value is NULL refuses: A keeps its scope and the
+    /// blotter's header says why, until the next posting clears it.
     #[gpui::test]
-    fn the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows(
+    fn the_production_blotter_emits_its_cursor_path_into_a_group_a_pricer_follows(
         cx: &mut gpui::TestAppContext,
     ) {
         use geode_core::link::{Group, Membership, underlying_of};
@@ -5394,10 +5397,17 @@ grain = "underlying"
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         }
+        // The lane's own scope: one book. The pricer has no `book`, so it
+        // hides no line for it.
+        table.insert(
+            "frame".to_string(),
+            toml::Value::Table(r#"dimensions = { book = ["BK001"] }"#.parse().unwrap()),
+        );
         let restored = geode_shell::session::from_toml(&table).unwrap();
         assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
         services.workspaces = restored.workspaces;
         services.restored_tiles = restored.tiles;
+        services.restored_frame = restored.frame;
 
         cx.update(gpui_component::init);
         cx.update(geode_blotter::init);
@@ -5448,19 +5458,32 @@ grain = "underlying"
         };
 
         // Each blotter's first query, answered through the drain: the root,
-        // then L1 on SPX and L2 on NDX.
-        let dict = |a: &str, b: &str| TestColumn::Dict(vec![None, Some(a.into()), Some(b.into())]);
+        // then L1 on SPX, L2 on NDX and a NULL `lhu` on DAX.
+        let dict = |a: Option<&str>, b: Option<&str>, c: Option<&str>| {
+            TestColumn::Dict(vec![
+                None,
+                a.map(str::to_string),
+                b.map(str::to_string),
+                c.map(str::to_string),
+            ])
+        };
         let snapshot = Arc::new(geode_core::snapshot::Snapshot::for_tests(
             vec![
-                (shell_blotter_meta("lhu"), dict("L1", "L2")),
-                (shell_blotter_meta("underlying_ref"), dict("SPX", "NDX")),
+                (
+                    shell_blotter_meta("lhu"),
+                    dict(Some("L1"), Some("L2"), None),
+                ),
+                (
+                    shell_blotter_meta("underlying_ref"),
+                    dict(Some("SPX"), Some("NDX"), Some("DAX")),
+                ),
                 (
                     shell_blotter_meta("row_depth"),
-                    TestColumn::I32(vec![0, 1, 1]),
+                    TestColumn::I32(vec![0, 1, 1, 1]),
                 ),
                 (
                     shell_blotter_meta("delta01"),
-                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0), Some(0.5)]),
                 ),
             ],
             1,
@@ -5475,11 +5498,13 @@ grain = "underlying"
             .unwrap();
             draw(vcx);
         };
+        let book = |p: &geode_data::QueryParams| p.scope.sole("book").map(str::to_owned);
         answer(&mut vcx, &next_query(blotter));
         let unlinked = next_query(follower);
-        assert!(
-            unlinked.scope.is_empty(),
-            "fixture: in no group, the second blotter queries the whole book"
+        assert_eq!(
+            book(&unlinked).as_deref(),
+            Some("BK001"),
+            "fixture: in no group, the second blotter queries under the lane's scope"
         );
         answer(&mut vcx, &unlinked);
 
@@ -5493,7 +5518,7 @@ grain = "underlying"
         draw(&mut vcx);
         assert!(
             vcx.debug_bounds("pricer-hidden").is_none(),
-            "fixture: the workspace's empty scope hides no line"
+            "fixture: the lane's book, a column the pricer lacks, hides no line"
         );
 
         // The chooser, by its key, on each tile in turn.
@@ -5510,6 +5535,9 @@ grain = "underlying"
             frame.read_with(vcx, |f, _| {
                 f.group_scope(g).sole("underlying_ref").map(str::to_owned)
             })
+        };
+        let group_sole = |vcx: &gpui::VisualTestContext, g, column: &str| {
+            frame.read_with(vcx, |f, _| f.group_scope(g).sole(column).map(str::to_owned))
         };
         link(&mut vcx, "follow a");
         link(&mut vcx, "emit b");
@@ -5537,6 +5565,11 @@ grain = "underlying"
             },
             "the blotter's content answers `follows`, or it is offered no follow row"
         );
+        // Following A, which nothing has written yet: the lane's book is
+        // gone from its query.
+        let following = next_query(follower);
+        assert_eq!(book(&following), None, "{:?}", following.scope);
+        answer(&mut vcx, &following);
         vcx.simulate_keystrokes("alt-h alt-h");
         draw(&mut vcx);
         link(&mut vcx, "emit a");
@@ -5551,8 +5584,16 @@ grain = "underlying"
         assert_eq!(
             group_underlying(&vcx, Group::A),
             None,
-            "the cursor is on the root row, which names no underlying"
+            "the cursor is on the root row, whose path is empty"
         );
+        assert_eq!(
+            group_sole(&vcx, Group::A, "book").as_deref(),
+            Some("BK001"),
+            "the total row posts the lane's scope: what the emitter shows"
+        );
+        let on_total = next_query(follower);
+        assert_eq!(book(&on_total).as_deref(), Some("BK001"));
+        answer(&mut vcx, &on_total);
 
         // Each module's header reads its chips through the frame handle
         // the shell gave its tile: a handle bound to the workspace alone
@@ -5567,18 +5608,28 @@ grain = "underlying"
         }
 
         // The first blotter's cursor moves to L1: the shell pulls its
-        // emission and A's scope names SPX. The second blotter, reading A
-        // through its own handle, sends a query scoped to SPX; answering it
-        // releases the flip the group's change opened over A's followers.
+        // emission and A's scope is the lane's book, then the row's path:
+        // its `lhu` and the `underlying_ref` the leaf carries. The second
+        // blotter, reading A through its own handle, sends a query scoped
+        // to all three; answering it releases the flip the group's change
+        // opened over A's followers.
         vcx.simulate_keystrokes("j");
         draw(&mut vcx);
         assert_eq!(group_underlying(&vcx, Group::A).as_deref(), Some("SPX"));
+        assert_eq!(group_sole(&vcx, Group::A, "lhu").as_deref(), Some("L1"));
+        assert_eq!(
+            group_sole(&vcx, Group::A, "book").as_deref(),
+            Some("BK001"),
+            "the lane's scope is A's base"
+        );
         let on_spx = next_query(follower);
         assert_eq!(
             underlying_of(&on_spx.scope),
             Some("SPX"),
             "the production follower queries under its group's scope"
         );
+        assert_eq!(on_spx.scope.sole("lhu"), Some("L1"));
+        assert_eq!(book(&on_spx).as_deref(), Some("BK001"));
         answer(&mut vcx, &on_spx);
         // The pricer hides its NDX line. Its cursor rested there and can
         // rest only on a shown line, so it moves to the SPX line, which is
@@ -5606,9 +5657,300 @@ grain = "underlying"
             Some("NDX"),
             "the SPX line is the hidden one now"
         );
-        assert!(
-            frame.read_with(&vcx, |f, _| f.view(WorkspaceIx::FIRST).scope().is_empty()),
+        assert_eq!(
+            frame.read_with(&vcx, |f, _| f.view(WorkspaceIx::FIRST).scope().clone()),
+            geode_core::scope::Scope::one("book", "BK001"),
             "the workspace's own scope is untouched"
+        );
+
+        // On to the row whose `lhu` is NULL: no scope can select it, so A
+        // keeps L2's, the follower asks nothing, and the blotter's header
+        // names the column.
+        assert!(vcx.debug_bounds("tile-link-refusal-1").is_none());
+        vcx.simulate_keystrokes("j");
+        draw(&mut vcx);
+        assert_eq!(
+            frame.read_with(&vcx, |f, _| f.link_refusal(blotter).map(str::to_owned)),
+            Some("lhu".to_string())
+        );
+        assert!(
+            vcx.debug_bounds("tile-link-refusal-1").is_some(),
+            "the refusal is painted on the emitter's header"
+        );
+        assert_eq!(group_underlying(&vcx, Group::A).as_deref(), Some("NDX"));
+        assert_eq!(group_sole(&vcx, Group::A, "lhu").as_deref(), Some("L2"));
+        assert!(
+            kept.borrow().iter().all(|p| p.key != QueryKey(follower.0))
+                && rx.try_iter().all(|r| !matches!(
+                    r,
+                    geode_data::Request::Query(p) if p.key == QueryKey(follower.0)
+                )),
+            "an unchanged group sends its follower no query"
+        );
+
+        // Back on L2: the posting clears the refusal.
+        vcx.simulate_keystrokes("k");
+        draw(&mut vcx);
+        assert!(frame.read_with(&vcx, |f, _| f.link_refusal(blotter).is_none()));
+        assert!(vcx.debug_bounds("tile-link-refusal-1").is_none());
+    }
+
+    /// A market-data panel that follows and emits into the group a blotter
+    /// emits into never widens it. The blotter (tile 1) emits into A; the
+    /// production cvi panel (tile 2) follows A and emits into A; a second
+    /// blotter (tile 3) follows A. Each blotter cursor move switches the
+    /// panel to A's underlying, which announces a new emission; A keeps the
+    /// blotter's whole path (lane book, `lhu`, underlying) and the follower
+    /// queries under it, rather than under the panel's `lane ∧ underlying`.
+    #[gpui::test]
+    fn a_market_data_panel_following_its_emit_group_keeps_the_blotters_path(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_core::link::{Group, Membership, underlying_of};
+        use geode_core::snapshot::TestColumn;
+        use geode_marketdata::core::builtin_panel;
+
+        let (handle, rx) = DataHandle::for_tests();
+        let (mut bridge, tx) = test_bridge_with_pricer(handle.clone(), test_pricer(&handle));
+        let views = geode_core::view::ViewSpec::from_doc(&geode_core::config::merge_docs(
+            "views",
+            &[LayerDoc::builtin("views", FLAT_VIEW).unwrap()],
+        ))
+        .0;
+        bridge.factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            views,
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        bridge.panels = vec![Rc::new(MarketDataFactory::new(
+            handle,
+            builtin_panel("cvi"),
+            Duration::from_secs(900),
+        ))];
+
+        let mut services = test_shell_services();
+        let mut roster = ModuleRoster::new();
+        crate::add_bridge_modules(&mut roster, &bridge);
+        roster.register_actions(&mut services.registry);
+        let (fragments, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        let layered = geode_shell::keymap::fragments::splice(
+            &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+            &fragments,
+        );
+        let (keymap, diags) = build_keymap(&layered, services.mod_alias, &services.registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        services.keymap = keymap;
+        services.roster = roster;
+
+        let mut table = geode_shell::session::to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &geode_shell::session::PinnedRecords::new(),
+            &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
+        );
+        let ws1: toml::Table = r#"
+            focused = 1
+            [node]
+            kind = "split"
+            orientation = "horizontal"
+            ratios = [0.34, 0.33, 0.33]
+            [[node.children]]
+            kind = "leaf"
+            id = 1
+            [[node.children]]
+            kind = "leaf"
+            id = 2
+            [[node.children]]
+            kind = "leaf"
+            id = 3
+            [tiles.1]
+            module = "blotter"
+            [tiles.1.state]
+            view = "flat"
+            [tiles.2]
+            module = "cvi"
+            [tiles.3]
+            module = "blotter"
+            [tiles.3.state]
+            view = "flat"
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        table.insert(
+            "frame".to_string(),
+            toml::Value::Table(r#"dimensions = { book = ["BK001"] }"#.parse().unwrap()),
+        );
+        let restored = geode_shell::session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+        services.restored_frame = restored.frame;
+
+        init_grid_modules(cx);
+        let window = open_shell_window(cx, services);
+        cx.update(|cx| attach(&bridge, window, cx));
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+        };
+        draw(&mut vcx);
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let (blotter, panel, follower) = (TileId(1), TileId(2), TileId(3));
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| (
+                s.occupant_kind(blotter),
+                s.occupant_kind(panel),
+                s.occupant_kind(follower)
+            )),
+            (Some("blotter"), Some("cvi"), Some("blotter"))
+        );
+        let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+
+        // Every query `tile` sent so far, in order; another tile's are
+        // dropped.
+        let queries = |tile: TileId| -> Vec<geode_data::QueryParams> {
+            rx.try_iter()
+                .filter_map(|r| match r {
+                    geode_data::Request::Query(p) if p.key == QueryKey(tile.0) => Some(p),
+                    _ => None,
+                })
+                .collect()
+        };
+        let next_query = |tile: TileId| -> geode_data::QueryParams {
+            loop {
+                match rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the tile asks for its rows")
+                {
+                    geode_data::Request::Query(p) if p.key == QueryKey(tile.0) => return p,
+                    _ => continue,
+                }
+            }
+        };
+        // The root, then L1 on SPX and L2 on NDX.
+        let dict = |a: &str, b: &str| {
+            TestColumn::Dict(vec![None, Some(a.to_string()), Some(b.to_string())])
+        };
+        let snapshot = Arc::new(geode_core::snapshot::Snapshot::for_tests(
+            vec![
+                (shell_blotter_meta("lhu"), dict("L1", "L2")),
+                (shell_blotter_meta("underlying_ref"), dict("SPX", "NDX")),
+                (
+                    shell_blotter_meta("row_depth"),
+                    TestColumn::I32(vec![0, 1, 1]),
+                ),
+                (
+                    shell_blotter_meta("delta01"),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                ),
+            ],
+            1,
+        ));
+        let answer = |vcx: &mut gpui::VisualTestContext, query: &geode_data::QueryParams| {
+            tx.try_send(DataEvent::Query(geode_core::query::QueryOutcome {
+                key: query.key,
+                tag: query.tag,
+                snapshot: Ok(snapshot.clone()),
+                submitted: std::time::Instant::now(),
+            }))
+            .unwrap();
+            draw(vcx);
+        };
+        answer(&mut vcx, &next_query(blotter));
+
+        let link = |vcx: &mut gpui::VisualTestContext, row: &str| {
+            vcx.simulate_keystrokes("alt-u");
+            draw(vcx);
+            vcx.simulate_input(row);
+            vcx.simulate_keystrokes("enter");
+            draw(vcx);
+        };
+        let membership =
+            |vcx: &gpui::VisualTestContext, tile| frame.read_with(vcx, |f, _| f.membership(tile));
+        let group_sole = |vcx: &gpui::VisualTestContext, column: &str| {
+            frame.read_with(vcx, |f, _| {
+                f.group_scope(Group::A).sole(column).map(str::to_owned)
+            })
+        };
+
+        // The blotter emits into A and its cursor moves to L1.
+        link(&mut vcx, "emit a");
+        vcx.simulate_keystrokes("j");
+        draw(&mut vcx);
+        assert_eq!(group_sole(&vcx, "lhu").as_deref(), Some("L1"));
+        assert_eq!(group_sole(&vcx, "underlying_ref").as_deref(), Some("SPX"));
+
+        // The panel follows A, which switches it to SPX, then emits into A.
+        vcx.simulate_keystrokes("alt-l");
+        draw(&mut vcx);
+        link(&mut vcx, "follow a");
+        link(&mut vcx, "emit a");
+        assert_eq!(
+            membership(&vcx, panel),
+            Membership {
+                follow: Some(Group::A),
+                emit: Some(Group::A),
+            },
+            "the panel's content answers `follows` and `emits`"
+        );
+        assert_eq!(
+            group_sole(&vcx, "lhu").as_deref(),
+            Some("L1"),
+            "the panel's emission leaves the blotter's path in A"
+        );
+        assert_eq!(group_sole(&vcx, "book").as_deref(), Some("BK001"));
+
+        // The second blotter follows A: it queries under the whole path.
+        vcx.simulate_keystrokes("alt-l");
+        draw(&mut vcx);
+        link(&mut vcx, "follow a");
+        let following = queries(follower).pop().expect("following asks again");
+        assert_eq!(
+            following.scope.sole("lhu"),
+            Some("L1"),
+            "{:?}",
+            following.scope
+        );
+        answer(&mut vcx, &following);
+
+        // The blotter's cursor moves on to L2: the panel switches to NDX and
+        // announces it, and A keeps the blotter's path.
+        vcx.simulate_keystrokes("alt-h alt-h");
+        draw(&mut vcx);
+        vcx.simulate_keystrokes("j");
+        draw(&mut vcx);
+        assert_eq!(group_sole(&vcx, "underlying_ref").as_deref(), Some("NDX"));
+        assert_eq!(
+            group_sole(&vcx, "lhu").as_deref(),
+            Some("L2"),
+            "the switched panel did not overwrite the blotter's path"
+        );
+        assert_eq!(group_sole(&vcx, "book").as_deref(), Some("BK001"));
+        let last = queries(follower)
+            .pop()
+            .expect("the move requeries the follower");
+        assert_eq!(underlying_of(&last.scope), Some("NDX"));
+        assert_eq!(
+            last.scope.sole("lhu"),
+            Some("L2"),
+            "the follower's last query is the blotter's path: {:?}",
+            last.scope
         );
     }
 
@@ -9896,6 +10238,34 @@ grain = "underlying"
                 vec![3],
                 "{kind}: n twice and down move, j is silenced\n{text}"
             );
+        }
+    }
+
+    /// The production market-data panel follows: its link chooser, opened
+    /// by the shell's own chord, lists the follow rows beside the emit
+    /// rows, because the shell reads the panel content's `follows`.
+    #[gpui::test]
+    fn the_link_chooser_offers_a_market_data_panel_follow_rows(cx: &mut gpui::TestAppContext) {
+        init_grid_modules(cx);
+        let (services, _) = shell_with_one_grid_tile("cvi", None);
+        let window = open_shell_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+        };
+        draw(&mut vcx);
+        vcx.simulate_keystrokes("alt-u");
+        draw(&mut vcx);
+        for row in [
+            "link-choice-follow \u{00b7} workspace",
+            "link-choice-follow \u{00b7} A",
+            "link-choice-emit \u{00b7} A",
+        ] {
+            assert!(vcx.debug_bounds(row).is_some(), "{row} is listed");
         }
     }
 

@@ -204,24 +204,18 @@ impl TileContent for BlotterContent {
     fn emits(&self) -> bool {
         true
     }
-    /// The cursor row's one underlying as a one-value scope; no scope
-    /// where the row names none, which leaves the group's scope as it is.
-    /// A blotter posts no documents.
+    /// The cursor row's path, the tile's `:filter` layer and `:unscoped`;
+    /// the shell composes them over the tile's base. A blotter posts no
+    /// documents.
     fn emission(&self, cx: &App) -> geode_core::link::Emission {
-        geode_core::link::Emission {
-            scope: self
-                .tile
-                .read(cx)
-                .cursor_underlying(cx)
-                .map(|u| geode_core::link::underlying_scope(&u)),
-            board: Vec::new(),
-        }
+        self.tile.read(cx).emission(cx)
     }
     /// The shell hears only what notifies the tile entity. The routes that
-    /// can change the cursor row's underlying each do: a delivery
-    /// (`deliver`), the cursor sync every motion, press, sort and tree
-    /// change ends in (`sync_cursor`), and the promotion of a result held
-    /// behind a flip (`on_frame_changed`), which no delivery paints.
+    /// can change the emission each do: a delivery (`deliver`), the cursor
+    /// sync every motion, press, sort and tree change ends in
+    /// (`sync_cursor`), the promotion of a result held behind a flip
+    /// (`on_frame_changed`), which no delivery paints, and the `:filter`
+    /// and `:unscoped` commands.
     fn watch_emission(
         &self,
         changed: Rc<dyn Fn(&mut App)>,

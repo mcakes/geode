@@ -6,6 +6,7 @@
 //! shell's registry. A NULL, empty or mixed value is absent.
 
 use geode_core::grid::selection::{Resolved, top_most};
+use geode_core::link::{CursorScope, path_scope};
 use geode_core::snapshot::Snapshot;
 
 use super::expansion::path_of;
@@ -35,6 +36,31 @@ pub fn values_at(snapshot: &Snapshot, plan: &ColumnPlan, row: usize) -> Vec<(Str
         }
     }
     out
+}
+
+/// What the cursor row posts into a link group: its grouping path, one
+/// value per level, and on a leaf row (the deepest grouping level) its own
+/// single-valued columns too, as `values_at` reads them, after the path.
+/// A NULL or empty value on the path refuses: a scope cannot select NULL,
+/// and leaving the level out would widen every follower to all its values.
+/// A group row adds nothing beyond its path, so a follower sees the whole
+/// group, never a value merely unanimous today. The total row has an empty
+/// path.
+pub fn cursor_scope(snapshot: &Snapshot, plan: &ColumnPlan, row: usize) -> CursorScope {
+    let path = path_of(snapshot, plan, row);
+    let mut pairs: Vec<(String, String)> = Vec::with_capacity(path.len());
+    for (name, value) in plan.grouping.iter().zip(&path) {
+        match value.as_deref().filter(|v| !v.is_empty()) {
+            Some(v) => pairs.push((name.clone(), v.to_string())),
+            None => return CursorScope::NullIn(name.clone()),
+        }
+    }
+    if !path.is_empty() && path.len() == plan.grouping.len() {
+        for (name, value) in values_at(snapshot, plan, row) {
+            push(&mut pairs, &name, value);
+        }
+    }
+    CursorScope::Path(path_scope(&pairs))
 }
 
 /// The values of each selected top-most row (a group row already stands
@@ -149,6 +175,45 @@ mod tests {
             .collect()
     }
 
+    /// [`fixture`] with `lhu` NULL on row 1 and its two leaves: rows 3
+    /// (SPX) and 4 (NDX) sit under a group whose grouping value is NULL.
+    fn null_lhu_fixture() -> (Snapshot, ColumnPlan) {
+        missing_lhu_fixture(None)
+    }
+
+    /// `null_lhu_fixture` with `missing` standing for each absent `lhu`
+    /// value: `None` for NULL, `Some("")` for an empty string.
+    fn missing_lhu_fixture(missing: Option<String>) -> (Snapshot, ColumnPlan) {
+        let m = || missing.clone();
+        let snap = Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu", None),
+                    TestColumn::Dict(vec![None, m(), s("L2"), m(), m()]),
+                ),
+                (
+                    meta("underlying_ref", None),
+                    TestColumn::Dict(vec![None, None, None, s("SPX"), s("NDX")]),
+                ),
+                (
+                    meta("row_depth", None),
+                    TestColumn::I32(vec![0, 1, 1, 2, 2]),
+                ),
+                (
+                    meta("delta01", None),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0), Some(2.0), Some(3.0)]),
+                ),
+            ],
+            2,
+        );
+        let view = view(
+            "[t]\ndataset = \"d\"\ngrouping = [\"lhu\", \"underlying_ref\"]\n[[t.columns]]\nname = \"delta01\"\n",
+        );
+        let grouping = vec!["lhu".to_string(), "underlying_ref".to_string()];
+        let plan = ColumnPlan::build(&view, &grouping, &snap);
+        (snap, plan)
+    }
+
     #[test]
     fn a_leaf_row_names_its_path_then_its_hidden_key() {
         let (snap, plan) = fixture();
@@ -231,6 +296,129 @@ mod tests {
         assert!(
             values_at(&snap, &plan, 1).is_empty(),
             "never an empty value"
+        );
+    }
+
+    fn path_of_scope(c: CursorScope) -> Vec<(String, String)> {
+        match c {
+            CursorScope::Path(s) => s
+                .dimensions
+                .into_iter()
+                .map(|d| (d.column, d.values.join(",")))
+                .collect(),
+            other => panic!("expected a path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_total_row_has_an_empty_path() {
+        let (snap, plan) = fixture();
+        assert_eq!(path_of_scope(cursor_scope(&snap, &plan, 0)), pairs(&[]));
+    }
+
+    /// A group row posts its levels only, even where a hidden context
+    /// column is unanimous below it today: a follower must see the whole
+    /// group, not the one position it happens to hold.
+    #[test]
+    fn a_group_row_emits_its_path_and_nothing_unanimous() {
+        let (snap, plan) = fixture();
+        assert_eq!(
+            path_of_scope(cursor_scope(&snap, &plan, 1)),
+            pairs(&[("lhu", "L1")])
+        );
+
+        // Root; L1 (unanimous on P7); L1/SPX (P7).
+        let snap = Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu", None),
+                    TestColumn::Dict(vec![None, s("L1"), s("L1")]),
+                ),
+                (
+                    meta("underlying_ref", None),
+                    TestColumn::Dict(vec![None, None, s("SPX")]),
+                ),
+                (meta("row_depth", None), TestColumn::I32(vec![0, 1, 2])),
+                (
+                    meta("position_ref", Some(4)),
+                    TestColumn::Str(vec![None, Some("P7"), Some("P7")]),
+                ),
+                (
+                    meta("position_ref#mixed", None),
+                    TestColumn::Bool(vec![Some(true), Some(false), Some(false)]),
+                ),
+            ],
+            2,
+        );
+        let view = view("[t]\ndataset = \"d\"\ngrouping = [\"lhu\", \"underlying_ref\"]\n");
+        let grouping = vec!["lhu".to_string(), "underlying_ref".to_string()];
+        let plan = ColumnPlan::build(&view, &grouping, &snap);
+        assert_eq!(
+            values_at(&snap, &plan, 1),
+            pairs(&[("lhu", "L1"), ("position_ref", "P7")]),
+            "sanity: the context reads P7 as unanimous on L1"
+        );
+        assert_eq!(
+            path_of_scope(cursor_scope(&snap, &plan, 1)),
+            pairs(&[("lhu", "L1")])
+        );
+    }
+
+    #[test]
+    fn a_leaf_row_adds_its_own_single_values() {
+        let (snap, plan) = fixture();
+        assert_eq!(
+            path_of_scope(cursor_scope(&snap, &plan, 3)),
+            pairs(&[
+                ("lhu", "L1"),
+                ("underlying_ref", "SPX"),
+                ("position_ref", "P7")
+            ])
+        );
+        assert_eq!(
+            path_of_scope(cursor_scope(&snap, &plan, 4)),
+            pairs(&[
+                ("lhu", "L1"),
+                ("underlying_ref", "NDX"),
+                ("position_ref", "P9")
+            ])
+        );
+    }
+
+    #[test]
+    fn a_null_on_the_path_refuses_and_names_the_column() {
+        let (snap, plan) = null_lhu_fixture();
+        assert_eq!(
+            cursor_scope(&snap, &plan, 1),
+            CursorScope::NullIn("lhu".into())
+        );
+        assert_eq!(
+            cursor_scope(&snap, &plan, 3),
+            CursorScope::NullIn("lhu".into())
+        );
+        assert_eq!(
+            path_of_scope(cursor_scope(&snap, &plan, 2)),
+            pairs(&[("lhu", "L2")]),
+            "a sibling under a real value still posts"
+        );
+    }
+
+    /// An empty value refuses as NULL does: a scope selecting `lhu = ""`
+    /// would narrow every follower to nothing they could name.
+    #[test]
+    fn an_empty_value_on_the_path_refuses_as_null_does() {
+        let (snap, plan) = missing_lhu_fixture(s(""));
+        assert_eq!(
+            cursor_scope(&snap, &plan, 1),
+            CursorScope::NullIn("lhu".into())
+        );
+        assert_eq!(
+            cursor_scope(&snap, &plan, 3),
+            CursorScope::NullIn("lhu".into())
+        );
+        assert_eq!(
+            path_of_scope(cursor_scope(&snap, &plan, 2)),
+            pairs(&[("lhu", "L2")])
         );
     }
 

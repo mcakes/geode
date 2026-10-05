@@ -122,21 +122,31 @@ cargo bench -p geode-blotter   # the pure core
   composed with the tile's own `:filter`, in place of the workspace's. An
   `:unscoped` tile ignores a followed group's scope as it ignores the
   workspace's, while its header still shows the chip.
-- Emitting into a link group (`TileContent::emission`), the tile posts the
-  cursor row's one `underlying_ref` as a one-value scope and no board.
-  `cursor_underlying` reads that one row's single-valued columns and skips
-  the selection walk `dimension_context` does: the shell pulls on every
-  notification while the tile emits, and a selection never changes which
-  underlying the cursor is on. It posts no scope before the first snapshot
-  and on a row naming no single underlying (above the column's grouping
-  level, mixed or NULL), which leaves the group's scope as it was. `emits`
-  is true before any snapshot: the shell drops a restored membership for a
-  tile that answers false right after create. `watch_emission` observes the
-  tile entity, so each route that can change the cursor row's underlying
-  must notify it: a delivery, the cursor sync every motion, press, sort and
-  tree change ends in, and the frame observer's promotion of a result held
-  behind a flip, which no delivery paints. The row read is the shown row at
-  the cursor, so the emission follows a sort. The tile stores no group; its header reads `link_chips` from its frame
+- Emitting into a link group (`TileContent::emission`), the tile reports
+  the cursor row's path, its `:filter` layer and its `:unscoped` flag; the
+  shell composes them over the tile's base (see `docs/current/shell.md`). It
+  posts no board. `core::context::cursor_scope` builds the path: one value
+  per grouping level, and on a leaf row (the deepest grouping level) the
+  rest of `values_at` after it, so a NULL or mixed leaf value is omitted. A
+  group row adds nothing beyond its levels; the total row's path is empty.
+  A NULL or empty grouping value on the path refuses
+  (`CursorScope::NullIn(column)`): a scope cannot select NULL, and dropping
+  the level would widen every follower to all its values. The shared tile
+  header shows the refusal from frame state (an empty value too reads `…
+  is NULL`); the blotter posts no notice of its own. The tile reads
+  the one shown row at the cursor and skips the selection walk
+  `dimension_context` does: the shell pulls on every notification while the
+  tile emits, and a selection never changes the cursor's path. Before the
+  first snapshot it answers `CursorScope::Nothing`, which leaves the
+  group's scope as it was. `emits` is true before any snapshot: the shell
+  drops a restored membership for a tile that answers false right after
+  create. `watch_emission` observes the tile entity, so each route that can
+  change the emission must notify it: a delivery, the cursor sync every
+  motion, press, sort and tree change ends in, the frame observer's
+  promotion of a result held behind a flip, which no delivery paints, and
+  the `:filter`/`:unscoped` commands. Reading the shown row, the emission
+  follows a sort. `g m` reads `underlying_ref` from the dimension context,
+  not from the emission. The tile stores no group; its header reads `link_chips` from its frame
   handle at paint.
 - `g .` opens the shell's row menu on that context. A right press on a cell,
   or on a row beside its cells, records the cell in the delegate's

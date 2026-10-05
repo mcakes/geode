@@ -463,13 +463,15 @@ pub trait TileContent {
     fn emits(&self) -> bool {
         false
     }
-    /// What this tile posts into the link group it emits into: the scope its
-    /// cursor names and the draft documents it holds. Pulled by the shell
-    /// when the tile joins a group and after `watch_emission`'s callback
-    /// fires, never from inside an update of this tile. Read-only, and cheap
-    /// when nothing changed: return the same `Arc` for an unchanged draft,
-    /// since the frame compares drafts by allocation and an equal emission
-    /// is not a write.
+    /// What this tile answers for the link group it emits into: where its
+    /// cursor stands, its own `:filter` layer and `:unscoped` flag, and the
+    /// draft documents it holds. The shell composes these over the tile's
+    /// base into what the group receives. Pulled by the shell when the
+    /// tile joins a group, after `watch_emission`'s callback fires and
+    /// when the frame moves, never from inside an update of this tile.
+    /// Read-only, and cheap when nothing changed: return the same `Arc` for
+    /// an unchanged draft, since the frame compares drafts by allocation
+    /// and an equal posting is not a write.
     fn emission(&self, _cx: &App) -> geode_core::link::Emission {
         geode_core::link::Emission::default()
     }
@@ -1219,6 +1221,10 @@ pub mod recording {
         /// does: a test changes this, notifies that view, and the shell
         /// pulls.
         pub emission: Rc<RefCell<Emission>>,
+        /// Per-tile answers from `emission`: an occupant whose tile has an
+        /// entry answers it instead of the shared `emission`, so a test can
+        /// hold two emitters at different cursors.
+        pub emission_by_tile: Rc<RefCell<HashMap<TileId, Emission>>>,
         /// How many times `emission` was pulled, across every occupant: a
         /// test's proof that a pull did, or did not, happen.
         pub pulls: Rc<Cell<usize>>,
@@ -1293,6 +1299,7 @@ pub mod recording {
                 follows: true,
                 emits: false,
                 emission: Rc::new(RefCell::new(Emission::default())),
+                emission_by_tile: Rc::new(RefCell::new(HashMap::new())),
                 pulls: Rc::new(Cell::new(0)),
                 announces_inside_update: false,
                 announce: Rc::new(RefCell::new(None)),
@@ -1410,6 +1417,8 @@ pub mod recording {
         emits: bool,
         /// Shared with [`RecordingFactory::emission`].
         emission: Rc<RefCell<Emission>>,
+        /// Shared with [`RecordingFactory::emission_by_tile`].
+        emission_by_tile: Rc<RefCell<HashMap<TileId, Emission>>>,
         /// Shared with [`RecordingFactory::pulls`].
         pulls: Rc<Cell<usize>>,
         /// Shared with [`RecordingFactory::announces_inside_update`].
@@ -1643,6 +1652,12 @@ pub mod recording {
                 // A module's emission reads its own tile entity.
                 let _ = self.view.read(cx).tile;
             }
+            let by_tile = self.emission_by_tile.borrow();
+            if !by_tile.is_empty()
+                && let Some(own) = by_tile.get(&self.view.read(cx).tile)
+            {
+                return own.clone();
+            }
             self.emission.borrow().clone()
         }
         /// Observes the view entity, the way a module observes its own
@@ -1853,6 +1868,7 @@ pub mod recording {
                     follows: self.follows,
                     emits: self.emits,
                     emission: self.emission.clone(),
+                    emission_by_tile: self.emission_by_tile.clone(),
                     pulls: self.pulls.clone(),
                     announces_inside_update: self.announces_inside_update,
                     announce: self.announce.clone(),

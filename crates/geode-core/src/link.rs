@@ -1,7 +1,8 @@
 //! Link groups: the vocabulary a tile and the shell share. A group carries a
 //! scope and a board of draft documents; a tile may follow one group and
 //! emit into one. Pure: the frame holds the state, modules only answer
-//! [`Emission`]s.
+//! [`Emission`]s, which the shell composes with [`compose`] into a
+//! [`Posting`].
 
 use std::sync::Arc;
 
@@ -120,12 +121,86 @@ impl PartialEq for BoardEntry {
     }
 }
 
-/// What a tile posts into the group it emits into. `scope: None` leaves the
-/// group's scope as it is (the cursor names no single value).
+/// Where an emitter's cursor stands, as the shell composes it into a
+/// group's scope.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum CursorScope {
+    /// No snapshot, or no cursor row: the group's scope is left as it is.
+    #[default]
+    Nothing,
+    /// The cursor row's grouping path, one value per level, plus a leaf
+    /// row's own single-valued dimensions. Empty on a total row, which
+    /// posts the emitter's base alone.
+    Path(Scope),
+    /// The path passes through NULL (or an empty value) in this column. A
+    /// scope cannot say IS NULL, and leaving the column out would widen
+    /// every follower to all its values, so nothing is posted.
+    NullIn(String),
+}
+
+/// What a tile answers when the shell pulls it: the parts the shell
+/// composes into a group's scope, and its board. The tile's own layer and
+/// `:unscoped` flag live in the module, so the module reports them; the
+/// shell, which knows the tile's lane and groups, picks the base.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Emission {
+    pub cursor: CursorScope,
+    /// The tile's own `:filter` layer; empty for a tile with none.
+    pub layer: Scope,
+    /// The tile ignores its frame scope: its base is empty.
+    pub unscoped: bool,
+    pub board: Vec<BoardEntry>,
+}
+
+/// What the shell posts into a group for one emitter. `scope: None`
+/// leaves the group's scope as it is.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Posting {
     pub scope: Option<Scope>,
     pub board: Vec<BoardEntry>,
+}
+
+/// A scope selecting exactly these values, one column each, in order: the
+/// form a cursor path takes.
+pub fn path_scope(pairs: &[(String, String)]) -> Scope {
+    Scope {
+        dimensions: pairs
+            .iter()
+            .map(|(column, value)| crate::scope::DimensionSelection {
+                column: column.clone(),
+                values: vec![value.clone()],
+            })
+            .collect(),
+        ..Scope::default()
+    }
+}
+
+/// Compose an emitter's parts over `base` (the scope the shell chose for
+/// it): base, then its layer when `include_layer`, then its cursor path.
+/// An `unscoped` emitter's base is empty, matching what it shows. The
+/// second value names the NULL column of a refused path.
+pub fn compose(emission: Emission, base: &Scope, include_layer: bool) -> (Posting, Option<String>) {
+    let Emission {
+        cursor,
+        layer,
+        unscoped,
+        board,
+    } = emission;
+    let (scope, refused) = match cursor {
+        CursorScope::Nothing => (None, None),
+        CursorScope::NullIn(column) => (None, Some(column)),
+        CursorScope::Path(path) => {
+            let empty = Scope::default();
+            let base = if unscoped { &empty } else { base };
+            let layered = if include_layer {
+                base.and_then(&layer)
+            } else {
+                base.clone()
+            };
+            (Some(layered.and_then(&path)), None)
+        }
+    };
+    (Posting { scope, board }, refused)
 }
 
 #[cfg(test)]
@@ -227,9 +302,9 @@ mod tests {
     }
 
     #[test]
-    fn an_emission_compares_scope_and_board() {
+    fn a_posting_compares_scope_and_board() {
         let r = rows("SPX.Z");
-        let e = |u: Option<&str>, board: bool| Emission {
+        let e = |u: Option<&str>, board: bool| Posting {
             scope: u.map(|u| Scope::one("underlying_ref", u)),
             board: if board {
                 vec![BoardEntry {
@@ -245,6 +320,103 @@ mod tests {
         assert_eq!(e(Some("SPX.Z"), true), e(Some("SPX.Z"), true));
         assert_ne!(e(Some("SPX.Z"), true), e(Some("NDX"), true));
         assert_ne!(e(Some("SPX.Z"), true), e(Some("SPX.Z"), false));
-        assert_eq!(Emission::default(), e(None, false));
+        assert_eq!(Posting::default(), e(None, false));
+    }
+
+    fn pairs(p: &[(&str, &str)]) -> Vec<(String, String)> {
+        p.iter()
+            .map(|(c, v)| (c.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_path_scope_selects_one_value_per_column_in_order() {
+        let s = path_scope(&pairs(&[("book", "A"), ("model_code", "ABC")]));
+        assert_eq!(s.sole("book"), Some("A"));
+        assert_eq!(s.sole("model_code"), Some("ABC"));
+        assert_eq!(s.dimensions.len(), 2);
+        assert!(path_scope(&[]).is_empty());
+    }
+
+    #[test]
+    fn compose_puts_base_then_layer_then_path() {
+        let base = Scope::one("book", "A");
+        let layer = Scope::one("region", "EU");
+        let path = path_scope(&pairs(&[("model_code", "ABC")]));
+        let e = Emission {
+            cursor: CursorScope::Path(path),
+            layer,
+            ..Default::default()
+        };
+        let (posting, refused) = compose(e, &base, true);
+        let s = posting.scope.expect("a path posts a scope");
+        assert_eq!(s.sole("book"), Some("A"));
+        assert_eq!(s.sole("region"), Some("EU"));
+        assert_eq!(s.sole("model_code"), Some("ABC"));
+        assert_eq!(refused, None);
+    }
+
+    #[test]
+    fn compose_leaves_the_layer_out_when_the_setting_is_off() {
+        let e = Emission {
+            cursor: CursorScope::Path(Scope::default()),
+            layer: Scope::one("region", "EU"),
+            ..Default::default()
+        };
+        let (posting, _) = compose(e, &Scope::one("book", "A"), false);
+        let s = posting.scope.unwrap();
+        assert_eq!(s.sole("book"), Some("A"));
+        assert_eq!(s.sole("region"), None);
+    }
+
+    #[test]
+    fn an_unscoped_emitter_composes_on_an_empty_base() {
+        let e = Emission {
+            cursor: CursorScope::Path(Scope::one("model_code", "ABC")),
+            unscoped: true,
+            ..Default::default()
+        };
+        let (posting, _) = compose(e, &Scope::one("book", "A"), true);
+        let s = posting.scope.unwrap();
+        assert_eq!(s.sole("book"), None);
+        assert_eq!(s.sole("model_code"), Some("ABC"));
+    }
+
+    #[test]
+    fn a_total_row_posts_the_base() {
+        let e = Emission {
+            cursor: CursorScope::Path(Scope::default()),
+            ..Default::default()
+        };
+        let (posting, _) = compose(e, &Scope::one("book", "A"), true);
+        assert_eq!(posting.scope, Some(Scope::one("book", "A")));
+    }
+
+    #[test]
+    fn nothing_and_a_null_path_post_no_scope_but_keep_the_board() {
+        let entry = BoardEntry {
+            dataset: "d".into(),
+            key: vec!["SPX".into()],
+            rows: rows("SPX"),
+            mark: DraftMark::Editing,
+        };
+        let e = Emission {
+            board: vec![entry.clone()],
+            ..Default::default()
+        };
+        let (posting, refused) = compose(e, &Scope::one("book", "A"), true);
+        assert_eq!(posting.scope, None);
+        assert_eq!(posting.board, vec![entry.clone()]);
+        assert_eq!(refused, None);
+
+        let e = Emission {
+            cursor: CursorScope::NullIn("book".into()),
+            board: vec![entry.clone()],
+            ..Default::default()
+        };
+        let (posting, refused) = compose(e, &Scope::default(), true);
+        assert_eq!(posting.scope, None);
+        assert_eq!(posting.board, vec![entry]);
+        assert_eq!(refused.as_deref(), Some("book"));
     }
 }

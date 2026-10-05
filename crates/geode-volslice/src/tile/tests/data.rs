@@ -11,7 +11,9 @@ use crate::core::model::tests::{TERMS, TODAY, chain, cvi, d};
 use crate::core::model::{Loaded, State, strip};
 use geode_core::attribution::{Attribution, ScopeSemantics};
 use geode_core::document::{Column, DocumentRows, Value};
-use geode_core::link::{BoardEntry, DraftMark, Emission, Group, Membership, underlying_scope};
+use geode_core::link::{
+    BoardEntry, DraftMark, Emission, Group, Membership, Posting, underlying_scope,
+};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::scope::{DimensionSelection, Scope};
 use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
@@ -165,15 +167,15 @@ fn vols(reqs: &[Request]) -> Vec<&VolSliceParams> {
         .collect()
 }
 
-fn scope_of(u: &str) -> Emission {
-    Emission {
+fn scope_of(u: &str) -> Posting {
+    Posting {
         scope: Some(underlying_scope(u)),
         board: Vec::new(),
     }
 }
 
-fn draft_of(u: &str, rows: &Arc<DocumentRows>, mark: DraftMark) -> Emission {
-    Emission {
+fn draft_of(u: &str, rows: &Arc<DocumentRows>, mark: DraftMark) -> Posting {
+    Posting {
         scope: Some(underlying_scope(u)),
         board: vec![BoardEntry {
             dataset: CVI.into(),
@@ -265,9 +267,9 @@ impl Harness {
         });
         vcx.run_until_parked();
     }
-    fn post(&self, vcx: &mut gpui::VisualTestContext, emission: Emission) {
+    fn post(&self, vcx: &mut gpui::VisualTestContext, posting: Posting) {
         self.frame.update(vcx, |f, cx| {
-            f.post_for_test(EMITTER, emission);
+            f.post_for_test(EMITTER, posting);
             cx.notify();
         });
         vcx.run_until_parked();
@@ -502,7 +504,7 @@ fn following_a_group_with_no_single_underlying_paints_the_notice_and_refuses_u(
     };
     h.post(
         &mut vcx,
-        Emission {
+        Posting {
             scope: Some(two),
             board: Vec::new(),
         },
@@ -612,7 +614,7 @@ impl Harness {
         bound.update(vcx, |f, cx| {
             f.post_for_test(
                 EMITTER,
-                Emission {
+                Posting {
                     scope: Some(wider),
                     board: Vec::new(),
                 },

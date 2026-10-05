@@ -132,6 +132,8 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 
 ### Display checks
 
+- Settings dialog: the Links row's title "Linked scope includes tile filter" fits
+  the title column beside its category and On/Off value, unclipped.
 - Object dialog against the "Geode Config Dialogs" mockup: crumb and pill in the
   title row, badges, grip/tick, section headers, outlined buttons.
 - Object dialog rows: diagnostic glyph + label block, dimmed dataset prefix on
@@ -553,6 +555,15 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - Link groups: a group's scope is saved in the session (reversible ruling);
   duplicating a tile does not copy its membership; a mistyped `follow` (e.g. `fow`
   + Enter) unfollows.
+- Decision: a blotter or pricer that follows and emits into one group re-posts
+  when its cursor row vanishes after a requery, so with a co-emitter in the
+  group (a linked pair) a delivery-driven cursor move overwrites the other
+  emitter's selection. Fixing it needs a rule telling a trader's cursor move
+  from one a delivery forced.
+- Decision: while an emitter's NULL refusal stands, its group keeps the base the
+  emitter had when it last posted; a lane scope edit or a pin/unpin since then
+  is not reflected. Only the emitter's header warns. Consider a follower-side
+  stale cue.
 - Decision: rulings not yet confirmed by the owner: density fill opacity 0.3, the
   demo's switch to a Hart double-precision normal CDF, the floor kink in the wide
   call wing. Expiry hues 21 positions apart sit about 8° apart.
@@ -562,6 +573,11 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - Link chooser rows; solid group chips including on Alduin and Solarized Light,
   letter polarity differing between chips on 15 themes; the `following A · SPX.Z`
   status segment; a restart restoring membership.
+- Link path emission: the `group A not updated · book is NULL` warning in an
+  emitting tile's header (blotter and pricer, wide and narrow tiles, alone and
+  beside module notices); a market-data panel's follow and both-ways chips; its
+  `⋯` menu's disabled `Load underlying…` row with the reason `following A`; the
+  `would link B back into A` notice with the chooser still open.
 - Density fill contrast on light and dark themes; negative lobes after a long demo
   walk; curve x extent against the chain; expiry colors on light and dark.
 - The `⋯` button, action menu placement, `y −2.75%…2.75%` ylim chip, out-of-domain
@@ -707,6 +723,11 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - As-of: presets are fixed (configurable presets are a follow-up); `Clock::zone()`
   is unused; the `[time] sod`/`eod` bad-time arm is unpinned.
 - A theme-contrast floor test could become permanent if a floor is agreed.
+- `linkfilter::persist_to_user_config` panics on an inline `links = {…}` table in
+  the user `app.toml` (`is_table_like` passes, `as_table_mut` is `None`), on the
+  background write path. The same pattern is in `linenumbers`, `fontsize`,
+  `tileadd`, `series`, `theme`, `vimfind` and `log_persist` (`ui = {…}`,
+  `log = {…}`).
 
 ## Performance
 

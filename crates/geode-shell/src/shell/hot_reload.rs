@@ -281,6 +281,13 @@ impl ShellView {
                 self.line_numbers = line_numbers;
                 cx.set_global(crate::linenumbers::UiSettings { line_numbers });
             }
+            // A changed composition rule moves no frame generation, so the
+            // emitters are re-pulled here or the groups keep the old rule.
+            let link_filter = crate::linkfilter::from_config(&self.services.config);
+            if link_filter != self.link_include_tile_filter {
+                self.link_include_tile_filter = link_filter;
+                self.force_repull_emitters(cx);
+            }
             // `[timeseries] default_source` and the fetch sources beside
             // it, re-derived and republished only on a change — a
             // `set_global` on every reload poll would wake every

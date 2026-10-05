@@ -13755,9 +13755,9 @@ run_mutation "mdpark: a key change parks the current draft instead of refusing" 
 run_mutation "mdpark: returning to an underlying restores its parked draft" \
   crates/geode-marketdata/src/tile.rs \
   '        self.unresolved_restore = !self.draft.is_empty();
-        self.key = Some(key);' \
+        self.key = key;' \
   '        self.unresolved_restore = false;
-        self.key = Some(key);' \
+        self.key = key;' \
   geode-marketdata \
   returning_to_an_underlying_restores_its_parked_draft
 
@@ -15252,10 +15252,11 @@ run_mutation "mdmenu: a command line closes the popup" \
 # preserves unsent work.
 run_mutation "mdpark: the menu's load row stays live on a dirty draft" \
   crates/geode-marketdata/src/core/menu.rs \
-  '            Hint::chord("marketdata::load_underlying"),
-            Ok(()),' \
-  '            Hint::chord("marketdata::load_underlying"),
-            if dirty { Err("revert or upload first") } else { Ok(()) },' \
+  '                None => Ok(()),
+            }),' \
+  '                None if dirty => Err("revert or upload first".into()),
+                None => Ok(()),
+            }),' \
   geode-marketdata a_dirty_draft_leaves_load_live_and_a_built_upload_is_live
 
 # Blur, THEN drop (`close_editor`'s own order, here for the picker):
@@ -26902,8 +26903,8 @@ run_mutation "launch: a pick reads the context at commit" \
 
 run_mutation "launch: a panel with a key is prompted anyway" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.key.is_none() && self.popup.is_none() {' \
-  '        if self.popup.is_none() {' \
+  '        if self.key.is_none() && self.popup.is_none() && self.frame.read(cx).following().is_none() {' \
+  '        if self.popup.is_none() && self.frame.read(cx).following().is_none() {' \
   geode-marketdata a_launched_panel_on_an_underlying_opens_no_picker
 
 run_mutation "launch: a mixed package names its first leg's underlying" \
@@ -32670,13 +32671,13 @@ run_mutation "link: forgetting a tile advances the generation" \
 # since, and pull the group back to a scope another writer has replaced.
 run_mutation "link: a repeated emission does not retake a key" \
   crates/geode-shell/src/link.rs \
-  '        if self.last.get(&tile).is_some_and(|(_, e)| *e == emission) {' \
+  '        if self.last.get(&tile).is_some_and(|(_, p)| *p == posting) {' \
   '        if false {' \
   geode-shell a_repeated_emission_does_not_retake_a_key_from_a_later_post
 
 run_mutation "link: a repeated emission does not restore a scope" \
   crates/geode-shell/src/link.rs \
-  '        if self.last.get(&tile).is_some_and(|(_, e)| *e == emission) {' \
+  '        if self.last.get(&tile).is_some_and(|(_, p)| *p == posting) {' \
   '        if false {' \
   geode-shell a_repeated_emission_does_not_restore_a_scope_another_writer_moved
 
@@ -32924,13 +32925,17 @@ run_mutation "link: a restored emit on a non-emitter is dropped" \
   geode-shell a_restored_emit_on_a_tile_that_cannot_emit_is_dropped
 
 # The doors link only a tile a module occupies: a membership written for
-# an id with no occupant, or a placeholder, has nothing to end it.
+# an id with no occupant, or a placeholder, has nothing to end it. As with
+# the emit door below, the `follows()` filter behind the guard already keeps
+# the frame untouched, so the guard's return is observable only in the log:
+# without it the door goes on to log a second refusal (the module does not
+# follow).
 run_mutation "link: the follow door refuses a tile with no occupant" \
   crates/geode-shell/src/shell/link.rs \
   '"follow refused for tile {}: {why}", tile.0);
             return;' \
   '"follow refused for tile {}: {why}", tile.0);' \
-  geode-shell the_doors_refuse_a_tile_with_no_occupant
+  geode-shell a_refused_door_logs_the_tile_and_the_reason
 
 # A refused door changes nothing a trader sees; the log line is where it
 # says so. The emit door's own guard is observable only there: the
@@ -33420,24 +33425,84 @@ run_mutation "link: the timeseries header shows the chip" \
   '                Default::default(),' \
   geode-timeseries the_header_shows_the_link_group_the_tile_follows
 
-# A blotter posts its cursor row's one underlying, can emit before it has
-# rows (the shell drops a restored membership for a tile that answers
-# false right after create), and tells the shell on every cursor move.
-run_mutation "link: the blotter emits the cursor's underlying" \
+# A blotter answers the shell's pull with its cursor row's path, its
+# `:filter` layer and its `:unscoped` flag; it can emit before it has rows
+# (the shell drops a restored membership for a tile that answers false
+# right after create), and tells the shell on every cursor move.
+run_mutation "link: the blotter emits its cursor path" \
   crates/geode-blotter/src/content.rs \
-  '                .cursor_underlying(cx)
-                .map(|u| geode_core::link::underlying_scope(&u)),' \
-  '                .cursor_underlying(cx)
-                .and_then(|_| None),' \
-  geode-blotter the_emission_is_the_cursor_rows_underlying
+  '        self.tile.read(cx).emission(cx)' \
+  '        geode_core::link::Emission::default()' \
+  geode-blotter the_blotter_emits_the_cursor_path_its_filter_and_unscoped
 
 run_mutation "link: the blotter emission follows the cursor row" \
   crates/geode-blotter/src/tile.rs \
-  '        let row = *d.shown.get(d.cursor.row)? as usize;
-        crate::core::context::values_at(snapshot, plan, row)' \
-  '        let row = *d.shown.first()? as usize;
-        crate::core::context::values_at(snapshot, plan, row)' \
-  geode-blotter the_emission_is_the_cursor_rows_underlying
+  '            d.shown.get(d.cursor.row),
+        ) {' \
+  '            d.shown.first(),
+        ) {' \
+  geode-blotter the_blotter_emits_the_cursor_path_its_filter_and_unscoped
+
+run_mutation "link: the blotter reports its filter layer" \
+  crates/geode-blotter/src/tile.rs \
+  '            layer: self.tile_scope.clone(),' \
+  '            layer: Scope::default(),' \
+  geode-blotter the_blotter_emits_the_cursor_path_its_filter_and_unscoped
+
+run_mutation "link: the blotter reports its unscoped flag" \
+  crates/geode-blotter/src/tile.rs \
+  '            unscoped: self.unscoped,
+            board: Vec::new(),' \
+  '            unscoped: false,
+            board: Vec::new(),' \
+  geode-blotter the_blotter_emits_the_cursor_path_its_filter_and_unscoped
+
+# The blotter's cursor path: a NULL grouping value refuses (a scope cannot
+# select NULL, and dropping the level widens every follower); a group row
+# posts its levels only; a leaf adds its own single values.
+run_mutation "link: a NULL on the blotter path refuses" \
+  crates/geode-blotter/src/core/context.rs \
+  '            None => return CursorScope::NullIn(name.clone()),' \
+  '            None => continue,' \
+  geode-blotter a_null_on_the_path_refuses_and_names_the_column
+
+run_mutation "link: a NULL blotter row refuses through the tile" \
+  crates/geode-blotter/src/core/context.rs \
+  '            None => return CursorScope::NullIn(name.clone()),' \
+  '            None => continue,' \
+  geode-blotter a_cursor_on_a_null_group_refuses
+
+run_mutation "link: a NULL blotter row refuses in production" \
+  crates/geode-blotter/src/core/context.rs \
+  '            None => return CursorScope::NullIn(name.clone()),' \
+  '            None => continue,' \
+  geode-app the_production_blotter_emits_its_cursor_path_into_a_group_a_pricer_follows
+
+# An empty grouping value refuses as NULL does; posting `lhu = ""` would
+# narrow every follower to rows none of them holds.
+run_mutation "link: an empty blotter path value refuses" \
+  crates/geode-blotter/src/core/context.rs \
+  '        match value.as_deref().filter(|v| !v.is_empty()) {' \
+  '        match value.as_deref() {' \
+  geode-blotter an_empty_value_on_the_path_refuses_as_null_does
+
+run_mutation "link: only a blotter leaf adds its own values" \
+  crates/geode-blotter/src/core/context.rs \
+  '    if !path.is_empty() && path.len() == plan.grouping.len() {' \
+  '    if true {' \
+  geode-blotter a_group_row_emits_its_path_and_nothing_unanimous
+
+run_mutation "link: a blotter leaf adds its own values" \
+  crates/geode-blotter/src/core/context.rs \
+  '    if !path.is_empty() && path.len() == plan.grouping.len() {' \
+  '    if false {' \
+  geode-blotter a_leaf_row_adds_its_own_single_values
+
+run_mutation "link: a blotter group row posts its levels only" \
+  crates/geode-blotter/src/core/context.rs \
+  '    if !path.is_empty() && path.len() == plan.grouping.len() {' \
+  '    if !path.is_empty() {' \
+  geode-blotter a_group_row_emits_its_path_and_nothing_unanimous
 
 run_mutation "link: the blotter can emit before it has rows" \
   crates/geode-blotter/src/content.rs \
@@ -33467,14 +33532,82 @@ run_mutation "link: a promoted snapshot tells the shell the emission changed" \
   '            // underlying, and a link group keeps the old scope.' \
   geode-blotter a_snapshot_promoted_by_a_flip_tells_the_shell_the_emission_changed
 
-# A pricer posts its cursor line's underlying, the one `g m` opens on.
+# A pricer posts its cursor path: a group row its own levels, a line its
+# enclosing group's path plus its underlying (the one `g m` opens on). A
+# NULL or empty level refuses rather than widening every follower.
 run_mutation "link: the pricer emits the cursor line's underlying" \
   crates/geode-pricer/src/content.rs \
-  '                .cursor_underlying()
-                .map(|u| geode_core::link::underlying_scope(&u)),' \
-  '                .cursor_underlying()
-                .and_then(|_| None),' \
+  '        self.tile.read(cx).emission()' \
+  '        { let _ = &self.tile; let _ = cx; geode_core::link::Emission::default() }' \
   geode-pricer the_emission_is_the_cursor_lines_underlying
+
+run_mutation "link: a pricer group row posts its path" \
+  crates/geode-pricer/src/tile.rs \
+  '                let group_row = if is_group {
+                    Some(g)
+                } else {' \
+  '                let group_row = if is_group {
+                    None
+                } else {' \
+  geode-pricer a_pricer_group_row_emits_its_path
+
+run_mutation "link: a pricer line posts its enclosing group path" \
+  crates/geode-pricer/src/tile.rs \
+  '                } else {
+                    self.model.parent(g)
+                };' \
+  '                } else {
+                    None
+                };' \
+  geode-pricer a_pricer_line_emits_its_group_path_and_its_underlying
+
+run_mutation "link: a pricer leg posts its enclosing group path" \
+  crates/geode-pricer/src/tile.rs \
+  '                } else {
+                    self.model.parent(g)
+                };' \
+  '                } else {
+                    None
+                };' \
+  geode-pricer a_pricer_leg_emits_its_enclosing_groups_path
+
+run_mutation "link: a pricer line adds its underlying" \
+  crates/geode-pricer/src/tile.rs \
+  '                        if !is_group
+                            && let Some(u) = self.underlying_at(g)' \
+  '                        if false
+                            && let Some(u) = self.underlying_at(g)' \
+  geode-pricer a_pricer_line_emits_its_group_path_and_its_underlying
+
+run_mutation "link: a pricer line under an underlying group posts it once" \
+  crates/geode-pricer/src/tile.rs \
+  '                            && !pairs.iter().any(|(n, _)| n == UNDERLYING)' \
+  '                            && true' \
+  geode-pricer a_pricer_group_row_emits_its_path
+
+run_mutation "link: a NULL pricer group value refuses" \
+  crates/geode-pricer/src/tile.rs \
+  '            None => return Err(name.clone()),' \
+  '            None => continue,' \
+  geode-pricer a_pricer_null_group_value_refuses
+
+run_mutation "link: an empty pricer group value refuses" \
+  crates/geode-pricer/src/tile.rs \
+  '        match value.as_deref().filter(|v| !v.is_empty()) {
+            Some(v) => pairs.push((name.clone(), v.to_string())),
+            None => return Err(name.clone()),' \
+  '        match value.as_deref() {
+            Some(v) => pairs.push((name.clone(), v.to_string())),
+            None => return Err(name.clone()),' \
+  geode-pricer an_empty_or_null_group_value_refuses_at_its_level
+
+run_mutation "link: the pricer reports its unscoped flag" \
+  crates/geode-pricer/src/tile.rs \
+  '            cursor,
+            unscoped: self.unscoped,' \
+  '            cursor,
+            unscoped: false,' \
+  geode-pricer a_pricer_with_no_cursor_row_emits_nothing
 
 run_mutation "link: the pricer can emit before it holds a line" \
   crates/geode-pricer/src/content.rs \
@@ -33494,13 +33627,13 @@ run_mutation "link: a pricer cursor move tells the shell" \
         }))' \
   geode-pricer a_cursor_move_tells_the_shell_the_emission_changed
 
-# A package across underlyings names no single one: it posts no scope,
-# which leaves the group's scope as it was instead of naming its first leg.
-run_mutation "link: a package across underlyings emits no scope" \
+# A package across underlyings names no single one: it posts its group
+# path without an underlying instead of naming its first leg.
+run_mutation "link: a package across underlyings emits no underlying" \
   crates/geode-pricer/src/core/sheet.rs \
   '                Some(_) => return None,' \
   '                Some(_) => {}' \
-  geode-pricer a_package_across_two_underlyings_emits_no_scope
+  geode-pricer a_pricer_package_across_underlyings_emits_its_path_without_an_underlying
 
 # A market-data panel posts its underlying and, while its draft is not
 # clean and the upload builder assembles it, that whole document. The rows
@@ -33508,8 +33641,8 @@ run_mutation "link: a package across underlyings emits no scope" \
 # pull hands back the same allocation, which the frame reads as no change.
 run_mutation "link: a panel posts its underlying as the scope" \
   crates/geode-marketdata/src/tile.rs \
-  '            scope: key.first().map(|u| underlying_scope(u)),' \
-  '            scope: None,' \
+  '                Some(u) if !echoes_its_group => CursorScope::Path(underlying_scope(u)),' \
+  '                Some(u) if !echoes_its_group => { let _ = u; CursorScope::Nothing }' \
   geode-marketdata a_clean_panel_emits_its_underlying_and_no_board
 
 run_mutation "link: a clean panel posts no board" \
@@ -33603,21 +33736,19 @@ run_mutation "link: the production roster emits" \
   '    fn emits(&self) -> bool {
         false
     }' \
-  geode-app the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows
+  geode-app the_production_blotter_emits_its_cursor_path_into_a_group_a_pricer_follows
 
 run_mutation "link: the production pricer emits its cursor line" \
   crates/geode-pricer/src/content.rs \
-  '                .cursor_underlying()
-                .map(|u| geode_core::link::underlying_scope(&u)),' \
-  '                .cursor_underlying()
-                .and_then(|_| None),' \
-  geode-app the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows
+  '        self.tile.read(cx).emission()' \
+  '        { let _ = &self.tile; let _ = cx; geode_core::link::Emission::default() }' \
+  geode-app the_production_blotter_emits_its_cursor_path_into_a_group_a_pricer_follows
 
 run_mutation "link: the production follower reads its group through its own handle" \
   crates/geode-shell/src/shell/occupants.rs \
   '            let frame = FrameRef::for_tile(self.frame.clone(), ws, *id);' \
   '            let frame = FrameRef::new(self.frame.clone(), ws);' \
-  geode-app the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows
+  geode-app the_production_blotter_emits_its_cursor_path_into_a_group_a_pricer_follows
 
 # A tile whose queries ignore the frame's scope cannot follow: it is offered
 # no follow row, the follow door refuses it, and a follow restored for it is
@@ -33759,10 +33890,10 @@ run_mutation "link: the emitted column is underlying_ref" \
 # opens the barrier over the followers.
 run_mutation "link: a post that changed something notifies the frame" \
   crates/geode-shell/src/shell/link.rs \
-  '            if f.post_emission(tile, emission) {
+  '            if f.post_emission(tile, posting) | refusal_changed {
                 cx.notify();
             }' \
-  '            if f.post_emission(tile, emission) {
+  '            if f.post_emission(tile, posting) | refusal_changed {
                 let _ = &cx;
             }' \
   geode-shell an_emitters_change_flips_the_groups_followers_and_not_the_emitter
@@ -33790,7 +33921,7 @@ run_mutation "link: the production follower queries under its group's scope" \
   crates/geode-shell/src/frame.rs \
   '        self.scope().and_then(tile).resolve(&self.frame.named)' \
   '        self.lane.scope.and_then(tile).resolve(&self.frame.named)' \
-  geode-app the_production_blotter_emits_its_cursor_underlying_into_a_group_a_pricer_follows
+  geode-app the_production_blotter_emits_its_cursor_path_into_a_group_a_pricer_follows
 
 # A follower in a pinned workspace keeps that workspace's grouping and as-of:
 # the group replaces the scope alone.
@@ -33912,11 +34043,11 @@ run_mutation "link: the panel's popup close notifies the tile" \
 # order and the snapshot's part ways.
 run_mutation "link: the blotter emission maps the cursor through the shown rows" \
   crates/geode-blotter/src/tile.rs \
-  '        let row = *d.shown.get(d.cursor.row)? as usize;
-        crate::core::context::values_at(snapshot, plan, row)' \
-  '        let row = d.cursor.row;
-        crate::core::context::values_at(snapshot, plan, row)' \
-  geode-blotter the_emission_is_the_shown_rows_underlying_under_a_sort
+  '            (Some(snapshot), Some(plan), Some(&row)) => {
+                crate::core::context::cursor_scope(snapshot, plan, row as usize)' \
+  '            (Some(snapshot), Some(plan), Some(&_row)) => {
+                crate::core::context::cursor_scope(snapshot, plan, d.cursor.row)' \
+  geode-blotter the_emission_is_the_shown_rows_path_under_a_sort
 
 # A draft the builder refuses is remembered like a result, so it is walked
 # once and not once per pull; a draft held `Behind` posts its own retained
@@ -34995,6 +35126,344 @@ run_mutation "link: a mark change alone moves the board" \
   '            if !next.get(key).is_some_and(|new| new.entry == old.entry) {' \
   '            if !next.get(key).is_some_and(|new| std::sync::Arc::ptr_eq(&new.entry.rows, &old.entry.rows)) {' \
   geode-shell a_mark_change_alone_is_a_board_change
+
+# An emitter composes over its lane when it emits into the group it
+# follows: over the group it would ratchet narrower on every pass.
+run_mutation "link: a self-linked emitter composes over its lane" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(g) if m.emit != Some(g) => self.links.group(g).scope.clone(),' \
+  '            Some(g) => self.links.group(g).scope.clone(),' \
+  geode-shell a_self_linked_tile_widens_the_group_from_its_total_row
+
+# A tile following one group and emitting into another carries the
+# followed group's scope down the chain, not its own lane's.
+run_mutation "link: a chained emitter carries its followed group's scope" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(g) if m.emit != Some(g) => self.links.group(g).scope.clone(),' \
+  '            Some(g) if m.emit != Some(g) => self.view(ws).scope().clone(),' \
+  geode-shell a_chained_emitter_composes_over_the_group_it_follows
+
+# An emitter's base moves without the tile announcing anything; the frame
+# observer re-pulls every emitter once the frame's generation moves.
+run_mutation "link: the lane moving re-pulls emitters" \
+  crates/geode-shell/src/shell/link.rs \
+  '        if generation == self.last_emit_generation {' \
+  '        if true {' \
+  geode-shell a_lane_scope_change_repulls_the_emitter
+
+# The shell records the column that stopped a posting; dropped, the header
+# could never say why the group did not move.
+run_mutation "link: a refused posting is recorded on the tile" \
+  crates/geode-shell/src/shell/link.rs \
+  '            let refusal_changed = f.set_link_refusal(tile, refused);' \
+  '            let refusal_changed = f.set_link_refusal(tile, None); let _ = refused;' \
+  geode-shell a_null_path_keeps_the_group_and_records_the_refusal
+
+# A refusal names the group it failed to update: a switch or leave drops it.
+run_mutation "link: changing the emit group clears the refusal" \
+  crates/geode-shell/src/frame.rs \
+  '            self.link_refusals.remove(&tile);
+            fresh(&mut self.generation);' \
+  '            fresh(&mut self.generation);' \
+  geode-shell a_link_refusal_ends_with_the_emit_membership_it_names
+
+# A late pull for a tile that left its group must not record a refusal
+# that names no group and that nothing would clear.
+run_mutation "link: a tile emitting nowhere records no refusal" \
+  crates/geode-shell/src/frame.rs \
+  '            (Some(_), None) => false,' \
+  '            (Some(c), None) => self.link_refusals.insert(tile, LinkRefusal { column: c, text: SharedString::default() }).is_none(),' \
+  geode-shell a_link_refusal_ends_with_the_emit_membership_it_names
+
+# The header paints a standing refusal on every frame, so the frame formats
+# its text once, when it records it, naming the group the tile emits into;
+# a new column is a new text.
+run_mutation "link: a refusal's text names the group it emits into" \
+  crates/geode-shell/src/frame.rs \
+  '                let text = crate::link::refusal_text(group, &c).into();' \
+  '                let text = crate::link::refusal_text(Group::A, &c).into();' \
+  geode-shell a_link_refusal_is_recorded_with_its_painted_text
+
+run_mutation "link: a new refusal column records a new text" \
+  crates/geode-shell/src/frame.rs \
+  '                if self.link_refusals.get(&tile).is_some_and(|r| r.column == c) {' \
+  '                if self.link_refusals.get(&tile).is_some() {' \
+  geode-shell a_link_refusal_is_recorded_with_its_painted_text
+
+# Composition: base, then layer, then the cursor path, which is last.
+run_mutation "link: compose puts the path last" \
+  crates/geode-core/src/link.rs \
+  '            (Some(layered.and_then(&path)), None)' \
+  '            (Some(path), None)' \
+  geode-core compose_puts_base_then_layer_then_path
+
+run_mutation "link: compose includes the layer when the setting is on" \
+  crates/geode-core/src/link.rs \
+  '                base.and_then(&layer)' \
+  '                base.clone()' \
+  geode-core compose_puts_base_then_layer_then_path
+
+run_mutation "link: compose leaves the layer out when the setting is off" \
+  crates/geode-core/src/link.rs \
+  '            let layered = if include_layer {' \
+  '            let layered = if true {' \
+  geode-core compose_leaves_the_layer_out_when_the_setting_is_off
+
+run_mutation "link: an unscoped emitter composes on an empty base" \
+  crates/geode-core/src/link.rs \
+  '            let base = if unscoped { &empty } else { base };' \
+  '            let base = if false { &empty } else { base };' \
+  geode-core an_unscoped_emitter_composes_on_an_empty_base
+
+run_mutation "link: a NULL path names its column" \
+  crates/geode-core/src/link.rs \
+  '        CursorScope::NullIn(column) => (None, Some(column)),' \
+  '        CursorScope::NullIn(_) => (None, None),' \
+  geode-core nothing_and_a_null_path_post_no_scope_but_keep_the_board
+
+# Closing a tile drops its refusal with its membership: `Links::forget`
+# leaves the group without passing the frame's emit door that clears it.
+run_mutation "link: closing a tile clears its refusal" \
+  crates/geode-shell/src/frame.rs \
+  '        self.tile_notices.retain(|(t, _)| *t != tile);
+        self.link_refusals.remove(&tile);' \
+  '        self.tile_notices.retain(|(t, _)| *t != tile);' \
+  geode-shell a_link_refusal_ends_with_the_emit_membership_it_names
+
+# A re-pull runs oldest posting first, so the latest mover re-posts last
+# and keeps a group two tiles emit into; in tile order the higher id wins.
+run_mutation "link: a re-pull leaves the group on the latest mover" \
+  crates/geode-shell/src/link.rs \
+  '        tiles.sort_by_key(|t| self.last.get(t).map(|(seq, _)| *seq));' \
+  '        let _ = &self.last;' \
+  geode-shell a_lane_move_keeps_the_group_on_the_latest_mover
+
+# A loop of groups would narrow every group on it on each pass.
+run_mutation "link: a two-group loop is refused" \
+  crates/geode-shell/src/link.rs \
+  '            if g == from {
+                return Some((from, to));
+            }' \
+  '            if g == from && false {
+                return Some((from, to));
+            }' \
+  geode-shell a_two_group_loop_is_a_cycle_and_a_self_link_is_not
+
+# The tile's own current edge is replaced by the new membership; counted,
+# re-pointing a chain's first tile would read as a loop.
+run_mutation "link: a tile's own old edge does not count" \
+  crates/geode-shell/src/link.rs \
+  '            if *t == tile {
+                continue;
+            }' \
+  '            let _ = tile;' \
+  geode-shell a_longer_loop_is_found_and_the_tiles_own_old_edge_is_ignored
+
+run_mutation "link: the emit door refuses a loop" \
+  crates/geode-shell/src/shell/link.rs \
+  '        if let Some((from, to)) = self.link_cycle(tile, LinkChange::Emit(group), cx) {' \
+  '        if let Some((from, to)) = None::<(Group, Group)> {' \
+  geode-shell a_pick_that_closes_a_loop_is_refused_with_a_notice
+
+run_mutation "link: the follow door refuses a loop" \
+  crates/geode-shell/src/shell/link.rs \
+  '        if let Some((from, to)) = self.link_cycle(tile, LinkChange::Follow(group), cx) {' \
+  '        if let Some((from, to)) = None::<(Group, Group)> {' \
+  geode-shell a_follow_that_closes_a_loop_is_refused_with_a_notice
+
+# A session holding a loop restores without the later tile's emit.
+run_mutation "link: a restored loop drops the later emit" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                            f.closing_cycle(tile, record.link.follow, record.link.emit)' \
+  '                            None::<(geode_core::link::Group, geode_core::link::Group)>' \
+  geode-shell a_restored_cycle_drops_the_later_emit
+
+# The chooser refuses a loop before it closes, so the list stays open for
+# another pick; without the pre-check the door refuses after it closed.
+run_mutation "link: the chooser refuses a loop and stays open" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '            if let Some((from, to)) = shell.link_cycle(tile, change, cx) {' \
+  '            if let Some((from, to)) = None::<(Group, Group)> {' \
+  geode-shell the_chooser_refuses_a_loop_and_stays_open
+
+# The shared header paints an emitter's NULL refusal, so every emitting
+# module shows why its group kept its scope.
+run_mutation "link: the header shows a NULL refusal" \
+  crates/geode-tile/src/header.rs \
+  '    let refused = frame.entity().read(cx).link_refusal_text(tile).cloned();' \
+  '    let refused = None::<SharedString>;' \
+  geode-tile an_emitter_header_shows_its_null_refusal
+
+# A refusal alone is text enough for the cluster: an emitter with no status
+# and no notice still lays out the text part and paints the refusal in it.
+run_mutation "link: a refusal alone opens the cluster text" \
+  crates/geode-tile/src/header.rs \
+  '    let text = (!c.status.is_empty() || !c.notices.is_empty() || refusal.is_some()).then(|| {' \
+  '    let text = (!c.status.is_empty() || !c.notices.is_empty()).then(|| {' \
+  geode-tile a_quiet_emitter_header_shows_its_null_refusal
+
+run_mutation "link: the cluster text paints the refusal" \
+  crates/geode-tile/src/header.rs \
+  '            .children(refusal.as_ref().map(|n| {' \
+  '            .children(None::<&notice::Notice>.map(|n| {' \
+  geode-tile a_quiet_emitter_header_shows_its_null_refusal
+
+# `[links] include_tile_filter`: on by default, and every change of it
+# (settings row, hot reload) re-pulls the emitters at once, since the rule
+# moves no frame generation.
+run_mutation "link: the filter setting defaults on" \
+  crates/geode-shell/src/linkfilter.rs \
+  '        .unwrap_or(true)' \
+  '        .unwrap_or(false)' \
+  geode-shell the_setting_defaults_on_and_reads_off
+
+run_mutation "link: changing the filter setting re-pulls" \
+  crates/geode-shell/src/shell/input.rs \
+  '        self.force_repull_emitters(cx);
+        cx.notify();' \
+  '        cx.notify();' \
+  geode-shell turning_the_filter_setting_off_repulls_without_the_layer
+
+run_mutation "link: the filter setting persists to the user layer" \
+  crates/geode-shell/src/shell/input.rs \
+  '                if let Err(e) = crate::linkfilter::persist_to_user_config(&dir, on) {' \
+  '                if let Err(e) = Ok::<(), String>(()) {' \
+  geode-shell setting_the_filter_off_persists_it_to_the_user_layer
+
+run_mutation "link: the filter setting is seeded from config" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        let link_include_tile_filter = crate::linkfilter::from_config(&services.config);' \
+  '        let link_include_tile_filter = true;' \
+  geode-shell a_configured_filter_setting_off_holds_from_startup
+
+run_mutation "link: a reload that changes the filter setting re-pulls" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                self.force_repull_emitters(cx);' \
+  '                let _ = ();' \
+  geode-shell a_reload_that_turns_the_filter_off_repulls_without_the_layer
+
+run_mutation "link: the settings row sets the filter" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '                shell.set_link_filter(on, cx);' \
+  '                let _ = on;' \
+  geode-shell tab_steps_the_link_filter_row
+
+# ---- Market data follows a link group ----
+#
+# A panel following a group takes the group scope's one `underlying_ref` as
+# its key, switching through `set_key` (draft parked); its own underlying
+# controls refuse while it follows.
+
+run_mutation "link: market data follows" \
+  crates/geode-marketdata/src/content.rs \
+  '    fn follows(&self) -> bool {
+        true
+    }' \
+  '    fn follows(&self) -> bool {
+        false
+    }' \
+  geode-app the_link_chooser_offers_a_market_data_panel_follow_rows
+
+run_mutation "link: a following panel switches on the group's move" \
+  crates/geode-marketdata/src/tile.rs \
+  '            if this.sync_followed_underlying(window, cx) {' \
+  '            if false {' \
+  geode-marketdata a_following_panel_takes_the_groups_underlying
+
+run_mutation "link: a group naming no underlying empties the panel" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let current = self.key.as_ref().and_then(|k| k.first());
+        if target.as_ref() == current {' \
+  '        let current = self.key.as_ref().and_then(|k| k.first());
+        if target.is_none() || target.as_ref() == current {' \
+  geode-marketdata a_following_panel_shows_nothing_when_the_group_names_no_single_underlying
+
+run_mutation "link: a keyless switch self-arrives" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.visible && self.key.is_some() {
+            self.requery(cx);' \
+  '        if self.visible {
+            self.requery(cx);' \
+  geode-marketdata a_following_panel_shows_nothing_when_the_group_names_no_single_underlying
+
+run_mutation "link: a following panel refuses u" \
+  crates/geode-marketdata/src/tile.rs \
+  '            "load_underlying" => {
+                if let Some(g) = self.frame.read(cx).following() {' \
+  '            "load_underlying" => {
+                if let Some(g) = None::<Group> {' \
+  geode-marketdata the_underlying_controls_refuse_while_following
+
+run_mutation "link: a following panel refuses :underlying" \
+  crates/geode-marketdata/src/tile.rs \
+  '            Command::Key(key) => {
+                if let Some(g) = self.frame.read(cx).following() {' \
+  '            Command::Key(key) => {
+                if let Some(g) = None::<Group> {' \
+  geode-marketdata the_underlying_controls_refuse_while_following
+
+run_mutation "link: a keyless following panel is not prompted" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.key.is_none() && self.popup.is_none() && self.frame.read(cx).following().is_none() {' \
+  '        if self.key.is_none() && self.popup.is_none() {' \
+  geode-marketdata the_underlying_controls_refuse_while_following
+
+run_mutation "link: a picker opened before following refuses its pick" \
+  crates/geode-marketdata/src/tile.rs \
+  '        // underlying the group now owns.
+        if let Some(g) = self.frame.read(cx).following() {' \
+  '        // underlying the group now owns.
+        if let Some(g) = None::<Group> {' \
+  geode-marketdata a_picker_opened_before_following_refuses_its_pick
+
+run_mutation "link: the menu greys load while following" \
+  crates/geode-marketdata/src/tile.rs \
+  '                following: self.frame.read(cx).following(),' \
+  '                following: None,' \
+  geode-marketdata the_underlying_controls_refuse_while_following
+
+run_mutation "link: the load row names the followed group" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '                Some(g) => Err(format!("following {}", g.letter()).into()),' \
+  '                Some(_) => Ok(()),' \
+  geode-marketdata load_underlying_is_disabled_while_following
+
+# Session restore records the follow before the panel exists and notifies
+# nothing: a restored follower reads the group's underlying when built, or
+# it shows its saved one under a group that names another.
+run_mutation "link: a restored follower opens on the group's underlying" \
+  crates/geode-marketdata/src/tile.rs \
+  '            if f.following().is_some() {
+                geode_core::link::underlying_of(f.scope()).map(|u| vec![u.to_owned()])' \
+  '            if false {
+                geode_core::link::underlying_of(f.scope()).map(|u| vec![u.to_owned()])' \
+  geode-marketdata a_restored_follower_opens_on_the_groups_underlying
+
+# A panel following the group it emits into posts no cursor: composed over
+# its lane, `lane ∧ underlying` would overwrite a co-emitter's narrower path
+# and widen every follower of the group.
+run_mutation "link: a panel echoing its own group posts no cursor" \
+  crates/geode-marketdata/src/tile.rs \
+  '                Some(u) if !echoes_its_group => CursorScope::Path(underlying_scope(u)),' \
+  '                Some(u) => CursorScope::Path(underlying_scope(u)),' \
+  geode-marketdata a_panel_following_the_group_it_emits_into_posts_no_cursor
+
+run_mutation "link: a panel following its emit group keeps a blotter's path" \
+  crates/geode-marketdata/src/tile.rs \
+  '                Some(u) if !echoes_its_group => CursorScope::Path(underlying_scope(u)),' \
+  '                Some(u) => CursorScope::Path(underlying_scope(u)),' \
+  geode-app a_market_data_panel_following_its_emit_group_keeps_the_blotters_path
+
+# The legacy bare `draft` is the saved key's: a restored follower opening on
+# its group's underlying parks it there instead of putting it on another
+# underlying's document.
+run_mutation "link: a restored follower's legacy draft stays with its saved key" \
+  crates/geode-marketdata/src/tile.rs \
+  '                parked.entry(saved).or_insert(t);
+                None' \
+  '                let _ = saved;
+                Some(t)' \
+  geode-marketdata a_restored_followers_legacy_draft_stays_with_its_saved_underlying
 
 # ---- Vol slice viewer ----
 #

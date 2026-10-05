@@ -165,10 +165,13 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   moved`, any other draft change closes silently. Every commit that keeps its
   value takes the `Bulk` out before `close_editor`, which would otherwise
   undo it, and every verb that reads the draft closes the editor first.
-- Emitting into a link group (`TileContent::emission`), a panel posts its
-  underlying (the first part of its document key) as a one-value
-  `underlying_ref` scope; with no underlying it posts nothing, which leaves
-  the group's scope as it was. The column is `geode_core::link::UNDERLYING`,
+- Emitting into a link group (`TileContent::emission`), a panel reports
+  its underlying (the first part of its document key) as a one-value
+  `underlying_ref` path (`CursorScope::Path`), no filter layer and no
+  `:unscoped` flag; the shell composes it over the panel's base, so a panel
+  following nothing posts its lane's scope ∧ its underlying. With no
+  underlying it reports `CursorScope::Nothing`, which leaves the group's
+  scope as it was. The column is `geode_core::link::UNDERLYING`,
   not read from the dataset: every built-in
   document dataset keys first on `underlying_ref`, as `accepts()` and the
   launch path also assume, and a panel over a dataset keyed first on another
@@ -198,11 +201,29 @@ cargo bench -p geode-marketdata    # matrix index, window fill and draft
   that moves the underlying, the draft or the painted document must notify
   it: a one-cell commit, which refills its cell through the table entity,
   notifies the tile as well.
-- A panel emits only. `follows` keeps its default, false: the panel does
-  not read the frame's scope and does not take its underlying from a group,
-  so the shell offers it no follow row and refuses to set it following. The
-  tile stores no group; its header reads `link_chips` from its frame handle
-  at paint.
+- A panel follows as well as emits (`follows` is true). While it follows a
+  group, its underlying is the group scope's one `underlying_ref`
+  (`geode_core::link::underlying_of`), or none (the empty state) when the
+  scope names zero or several. The frame observer compares it on every
+  notification (`sync_followed_underlying`) and switches through `set_key`,
+  so a dirty draft is parked as on any switch; the switch's requery answers
+  the flip barrier on delivery, and a move that keeps the underlying, or
+  leaves none, self-arrives. Only the first key part is compared, and a
+  switch sets a one-part key. While following, `u`, `:underlying`/`:key`
+  and a picker opened earlier refuse with `following A — set the
+  underlying there`, the add-time auto-prompt does not open, and the
+  menu's `Load underlying…` row is greyed `following A`. While the panel
+  follows the group it emits into, `emission` posts `CursorScope::Nothing`
+  and its board alone: composed over its lane, `lane ∧ underlying` would
+  replace a co-emitter's narrower path and widen every follower; it reads
+  both memberships from its frame handle. Unfollowing keeps the
+  underlying the group last gave. The session saves the underlying as
+  always; session restore records the follow in the frame before the panel
+  is built and notifies nothing, so `MarketDataTile::new` reads the followed
+  group's underlying itself and opens on it, leaving the saved underlying's
+  draft parked (a legacy bare `draft` field is resolved against the saved
+  underlying, not the group's, and parked with it). The tile stores no group; its header reads `link_chips` from its
+  frame handle at paint.
 
 ## Input and popup contracts
 
