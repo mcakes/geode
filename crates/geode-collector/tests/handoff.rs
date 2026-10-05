@@ -50,6 +50,10 @@ use tempfile::TempDir;
 const BIN: &str = env!("CARGO_BIN_EXE_geode-collector");
 /// The longest any test waits for anything.
 const WAIT: Duration = Duration::from_secs(10);
+/// The first launch of a freshly copied binary, which macOS scans before
+/// it runs.
+#[cfg(target_os = "macos")]
+const FIRST_LAUNCH_WAIT: Duration = Duration::from_secs(30);
 /// The app's open deadline, as the app passes it.
 const APP_DEADLINE: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(25);
@@ -705,7 +709,9 @@ fn a_rebuilt_binary_restarts_an_idle_collector() {
             .spawn()
             .expect("spawn the copied geode-collector"),
     );
-    world.wait_log(&mut collector, "collecting into", WAIT);
+    // A freshly copied binary's first launch is slow on macOS (the copy is
+    // scanned before it runs), so this one wait gets a longer bound.
+    world.wait_log(&mut collector, "collecting into", FIRST_LAUNCH_WAIT);
     world.wait_log(
         &mut collector,
         &format!(
