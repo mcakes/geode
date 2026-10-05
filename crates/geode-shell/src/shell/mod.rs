@@ -1080,6 +1080,7 @@ impl ShellView {
 
         // Seed the config snapshot on the background executor. Directory scans
         // perform filesystem I/O and must not run during UI construction.
+        let poll_window = window.window_handle();
         cx.spawn(async move |this, cx| {
             let mut is_first_poll = true;
             let mut memory = crate::memory::MemoryTracker::new();
@@ -1087,6 +1088,15 @@ impl ShellView {
                 cx.background_executor()
                     .timer(hot_reload::RELOAD_POLL_INTERVAL)
                     .await;
+
+                // The loop ends with its window, not only with this entity: a
+                // host may hold the shell past the window's closure (the app's
+                // bridge observers do), and a tick then would still copy memory
+                // into diagnostics, write the session and reload config for a
+                // window nobody sees, its notifies waking data submissions.
+                if cx.update_window(poll_window, |_, _, _| ()).is_err() {
+                    return;
+                }
 
                 // Sweep the flip barrier on the shared poll loop. An expired barrier
                 // releases on the next iteration, so delay includes the timer, session

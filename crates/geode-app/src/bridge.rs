@@ -900,8 +900,9 @@ impl ReferenceCache {
 
     /// Read `dataset`'s live table under a new tag, superseding any read in
     /// flight. `Busy` arms a retry; `Stopped` drops the demand, since nothing
-    /// would ever serve it.
-    fn refresh(self: &Rc<Self>, dataset: &str, cx: &mut App) {
+    /// would ever serve it. `window` is the window the cache serves; its
+    /// closure ends a retry.
+    fn refresh(self: &Rc<Self>, dataset: &str, window: WindowHandle<Root>, cx: &mut App) {
         // The tag becomes the latest only once submitted: a refused read
         // sends nothing, and advancing the tag anyway would drop the answer
         // to the read still in flight.
@@ -915,15 +916,17 @@ impl ReferenceCache {
             Ok(()) => {
                 self.tags.borrow_mut().insert(dataset.to_string(), tag);
             }
-            Err(Refusal::Busy) => self.retry(dataset, cx),
+            Err(Refusal::Busy) => self.retry(dataset, window, cx),
             Err(Refusal::Stopped) => {}
         }
     }
 
     /// Reread after the delay. A dataset already waiting keeps its one timer,
     /// so a burst of refused publishes cannot pile up reads. The timer holds
-    /// the cache weakly: a closed window ends the lane.
-    fn retry(self: &Rc<Self>, dataset: &str, cx: &mut App) {
+    /// the cache weakly and checks the window: the drain keeps the cache
+    /// alive until its next event, so only the window's closure reliably
+    /// ends the lane.
+    fn retry(self: &Rc<Self>, dataset: &str, window: WindowHandle<Root>, cx: &mut App) {
         if !self.retry.borrow_mut().insert(dataset.to_string()) {
             return;
         }
@@ -934,7 +937,9 @@ impl ReferenceCache {
             cx.update(|cx| {
                 if let Some(cache) = cache.upgrade() {
                     cache.retry.borrow_mut().remove(&dataset);
-                    cache.refresh(&dataset, cx);
+                    if window.read(cx).is_ok() {
+                        cache.refresh(&dataset, window, cx);
+                    }
                 }
             });
         })
@@ -1056,6 +1061,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let shell = shell.clone();
         let refresh = catalog_refresh.clone();
         move |_entity, cx| {
+            // This observer and the drain keep the diagnostics entity alive
+            // past the window, and a late notify must not turn queued demand
+            // into a read for a window nobody sees.
+            if window.read(cx).is_err() {
+                return;
+            }
             if refresh.in_flight.get().is_some() || refresh.retry_pending.get() {
                 return;
             }
@@ -1095,6 +1106,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let shell = shell.clone();
         let refresh = reference_refresh.clone();
         move |_entity, cx| {
+            // As the catalog lane: no submission for a closed window.
+            if window.read(cx).is_err() {
+                return;
+            }
             if let Some(dataset) = diagnostics.update(cx, |d, _| d.take_reference_request()) {
                 let tag = refresh.tag.get() + 1;
                 refresh.tag.set(tag);
@@ -1147,7 +1162,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         &bridge.reference_datasets,
     ));
     for (dataset, _) in &bridge.reference_datasets {
-        reference_cache.refresh(dataset, cx);
+        reference_cache.refresh(dataset, window, cx);
     }
 
     // Reloads: new views to the data thread and to the factory.
@@ -1388,7 +1403,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let diagnostics = diagnostics_for_drain;
         let catalog_refresh = catalog_refresh_for_drain;
         let reference_refresh = reference_refresh_for_drain;
-        let catalog_window = window;
+        // The handle, for the retry lanes: inside `window.update` the name is the `&mut Window`.
+        let retry_window = window;
         let mut last_dropped = 0u64;
         let mut last_refused = 0u64;
         while let Ok(event) = rx.recv().await {
@@ -1461,7 +1477,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         ..
                     } => {
                         if reference_cache.is_reference(&dataset) {
-                            reference_cache.refresh(&dataset, cx);
+                            reference_cache.refresh(&dataset, retry_window, cx);
                         }
                         // Record publication in diagnostics and request catalog refresh when watched.
                         // The service owns the detailed publication log; do not duplicate it here.
@@ -1564,7 +1580,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             }
                             Err(e) => {
                                 tracing::warn!(target: "geode::query", "catalog request failed: {e}");
-                                catalog_refresh.retry(&diagnostics, request, catalog_window, cx);
+                                catalog_refresh.retry(&diagnostics, request, retry_window, cx);
                             }
                         }
                     }
@@ -8669,6 +8685,35 @@ grain = "underlying"
         );
     }
 
+    /// The diagnostics entity outlives its window, so demand queued after the
+    /// window closed must not reach the handle: neither a poll-now nor a
+    /// page's reference read.
+    #[gpui::test]
+    fn a_closed_window_submits_no_poll_or_reference_read(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let (_, diagnostics) = fixture_diagnostics(&f, &mut vcx);
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        while f.requests.try_recv().is_ok() {}
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.request_poll("underlyings");
+            d.request_reference("underlyings");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let late = f.requests.try_recv();
+        assert!(
+            late.is_err(),
+            "nothing may be submitted for a closed window: {late:?}"
+        );
+    }
+
     /// Poll-now is explicit: it reaches the handle with no page watching.
     #[gpui::test]
     fn a_poll_request_reaches_the_handle(cx: &mut gpui::TestAppContext) {
@@ -8907,6 +8952,29 @@ grain = "underlying"
             .unwrap();
         vcx.run_until_parked();
         assert_eq!(live_currency(&mut vcx).as_deref(), Some("USD"));
+    }
+
+    /// A refused reread's timer must not submit once its window has closed:
+    /// the drain still holds the cache until its next event, so the weak
+    /// handle alone does not end the lane.
+    #[gpui::test]
+    fn a_refused_reread_does_not_retry_after_window_closure(cx: &mut gpui::TestAppContext) {
+        let f = fixture_with_reference(cx, vec!["underlyings".into()]);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        assert!(next_live_reference(&f).is_some());
+        f.bridge.handle.fill_for_tests();
+        f.events.try_send(published("underlyings")).unwrap();
+        vcx.run_until_parked();
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        while f.requests.try_recv().is_ok() {}
+        vcx.executor().advance_clock(REFERENCE_RETRY_DELAY);
+        vcx.run_until_parked();
+        let late = f.requests.try_recv();
+        assert!(
+            late.is_err(),
+            "a reference retry must not submit after window closure: {late:?}"
+        );
     }
 
     #[gpui::test]
@@ -9420,9 +9488,20 @@ grain = "underlying"
         vcx.run_until_parked();
         vcx.executor().advance_clock(CATALOG_RETRY_DELAY);
         vcx.run_until_parked();
+        let late = f.requests.try_recv();
         assert!(
-            f.requests.try_recv().is_err(),
-            "a retry must not submit after window closure"
+            late.is_err(),
+            "a retry must not submit after window closure: {late:?}"
+        );
+        // The demand the retry kept is still queued, and the entity outlives
+        // the window: any later notify (a module, a stray tick) must not turn
+        // it into a submission either.
+        diagnostics.update(&mut vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        let late = f.requests.try_recv();
+        assert!(
+            late.is_err(),
+            "a notify after window closure must not submit: {late:?}"
         );
     }
     #[gpui::test]

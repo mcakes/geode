@@ -4828,7 +4828,8 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
         let diagnostics = diagnostics_for_drain;
         let catalog_refresh = catalog_refresh_for_drain;
         let reference_refresh = reference_refresh_for_drain;
-        let catalog_window = window;
+        // The handle, for the retry lanes: inside `window.update` the name is the `&mut Window`.
+        let retry_window = window;
         let mut last_dropped = 0u64;
         let mut last_refused = 0u64;
         while let Ok(event) = rx.recv().await {
@@ -4839,7 +4840,8 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
         let diagnostics = diagnostics_for_drain;
         let catalog_refresh = catalog_refresh_for_drain;
         let reference_refresh = reference_refresh_for_drain;
-        let catalog_window = window;
+        // The handle, for the retry lanes: inside `window.update` the name is the `&mut Window`.
+        let retry_window = window;
         let mut last_dropped = 0u64;
         let mut last_refused = 0u64;
         while let Ok(event) = rx.recv().await {
@@ -4865,7 +4867,7 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
 # stays empty until the dataset's next publish.
 run_mutation "reference global: attach reads each reference dataset" \
   crates/geode-app/src/bridge.rs \
-  '        reference_cache.refresh(dataset, cx);' \
+  '        reference_cache.refresh(dataset, window, cx);' \
   '        let _ = dataset;' \
   geode-app attach_reads_each_reference_dataset_live
 
@@ -4928,9 +4930,19 @@ run_mutation "reference global: a failed read keeps the last table" \
 
 run_mutation "reference global: a busy refusal arms a retry" \
   crates/geode-app/src/bridge.rs \
-  '            Err(Refusal::Busy) => self.retry(dataset, cx),' \
+  '            Err(Refusal::Busy) => self.retry(dataset, window, cx),' \
   '            Err(Refusal::Busy) => {}' \
   geode-app a_busy_refusal_retries_and_keeps_the_cache
+
+# The drain holds the cache until its next event, so the weak handle alone
+# does not end the retry lane when the window closes.
+run_mutation "reference global: a retry ends with its window" \
+  crates/geode-app/src/bridge.rs \
+  '                    if window.read(cx).is_ok() {
+                        cache.refresh(&dataset, window, cx);' \
+  '                    if true {
+                        cache.refresh(&dataset, window, cx);' \
+  geode-app a_refused_reread_does_not_retry_after_window_closure
 
 run_mutation "reference global: one retry timer per dataset" \
   crates/geode-app/src/bridge.rs \
@@ -7125,6 +7137,15 @@ run_mutation "shell: the reload poll logs process memory only while watched" \
   '                        crate::memory::emit(log, &reading);' \
   '                        if watched { crate::memory::emit(log, &reading); }' \
   geode-shell the_reload_poll_copies_process_memory_only_while_watched
+
+# The bridge holds the shell entity past its window, so only the window
+# check ends the poll: a surviving poll copied real (nondeterministic)
+# memory readings into diagnostics after the window closed.
+run_mutation "shell: the reload poll ends when its window closes" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                if cx.update_window(poll_window, |_, _, _| ()).is_err() {' \
+  '                if false && cx.update_window(poll_window, |_, _, _| ()).is_err() {' \
+  geode-shell the_reload_poll_ends_when_its_window_closes
 
 run_mutation "catalog: a GiB memory limit reads as GB" \
   crates/geode-data/src/query/catalog.rs \
@@ -23295,7 +23316,7 @@ run_mutation "catalog refresh: refused submissions retry" \
 
 run_mutation "catalog refresh: failed reads retry" \
   crates/geode-app/src/bridge.rs \
-  'catalog_refresh.retry(&diagnostics, request, catalog_window, cx);' \
+  'catalog_refresh.retry(&diagnostics, request, retry_window, cx);' \
   '// Failed read leaves no retry.' \
   geode-app catalog_refusal_and_failure_retry_without_new_events
 
@@ -23322,6 +23343,25 @@ run_mutation "catalog refresh: retry ends with its window" \
   'let _ = window.update(cx, |_, _, cx| {' \
   'let _ = cx.update(|cx| {' \
   geode-app catalog_refusal_and_failure_retry_without_new_events
+
+# The bridge's observers keep the shell and diagnostics entities alive past
+# the window, so a late notify (the shell's poll did this while it outlived
+# the window) must not turn queued demand into a submission.
+run_mutation "catalog refresh: a closed window submits nothing" \
+  crates/geode-app/src/bridge.rs \
+  '            // into a read for a window nobody sees.
+            if window.read(cx).is_err() {' \
+  '            // into a read for a window nobody sees.
+            if false && window.read(cx).is_err() {' \
+  geode-app catalog_refusal_and_failure_retry_without_new_events
+
+run_mutation "diagnostics reads: a closed window submits no poll or reference read" \
+  crates/geode-app/src/bridge.rs \
+  '            // As the catalog lane: no submission for a closed window.
+            if window.read(cx).is_err() {' \
+  '            // As the catalog lane: no submission for a closed window.
+            if false && window.read(cx).is_err() {' \
+  geode-app a_closed_window_submits_no_poll_or_reference_read
 
 run_mutation "catalog refresh: explicit demand survives the last watcher" \
   crates/geode-shell/src/diagnostics.rs \

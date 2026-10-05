@@ -615,6 +615,9 @@ and modification times, so additions and removals trigger reload but an edit
 with an unchanged mtime does not. Scan failures are silently skipped and may
 look like removals. Scanning and loading run in the background; validation
 and runtime application run on the UI thread. Work adds to the poll interval.
+The poll ends when its window closes, even while a host still holds the shell
+entity: no tick (config scan, session write, memory sample, date refresh)
+runs for a closed window.
 
 The first poll establishes a baseline without loading; an edit between startup
 loading and that poll can therefore go unnoticed until another file change.

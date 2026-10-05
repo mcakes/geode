@@ -1760,6 +1760,35 @@ fn the_reload_poll_tick_refreshes_today(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// The reload poll ends with its window even while a host still holds the
+/// shell entity, as the app's bridge observers do. A poll outliving the
+/// window kept sampling memory into diagnostics, writing the session and
+/// scanning config, and its notifies drove the bridge to submit data
+/// requests for a window nobody could see. `today` stands for every step of
+/// the tick: a stale date that stays stale proves no tick ran.
+#[gpui::test]
+fn the_reload_poll_ends_when_its_window_closes(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut vcx) = open_shell(cx, services);
+    // Held past the window's removal, as the bridge's observers hold it.
+    let shell = shell_of(&window, &mut vcx);
+    vcx.run_until_parked();
+    let real_today = shell.read_with(&vcx, |s, cx| s.clock(cx).today(chrono::Utc::now()));
+    let stale = real_today - chrono::Duration::days(1);
+    shell.update(&mut vcx, |s, _cx| s.today = stale);
+    vcx.update(|window, _| window.remove_window());
+    vcx.run_until_parked();
+    vcx.executor().advance_clock(
+        crate::shell::hot_reload::RELOAD_POLL_INTERVAL * 3 + std::time::Duration::from_millis(1),
+    );
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.today),
+        stale,
+        "no reload-poll tick may run after the window closed"
+    );
+}
+
 /// Hot reload splices module fragments back into the rebuilt keymap. The loaded files
 /// alone do not contain them; module bindings must survive any config reload.
 #[gpui::test]

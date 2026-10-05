@@ -156,6 +156,12 @@ every event through `window.update`. A closed window ends the drain on its
 next event; while idle, the task can remain awaiting the mailbox. This is
 arrival-driven delivery with no fixed frame-latency guarantee.
 
+The bridge's observers hold the shell and diagnostics entities, so both
+outlive their window. Every submitting lane therefore checks the window
+itself: the catalog, reference-read and poll-now observers submit nothing,
+and the catalog and live-reference retry timers end, once the window has
+closed. Demand queued at closure stays unserved.
+
 Keyed query, series, pricing, vol-slice, upload, and text file results go to
 the matching shell occupant;
 absent occupants are ignored. Fetch completion broadcasts to visible
