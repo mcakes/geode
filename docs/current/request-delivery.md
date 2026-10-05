@@ -157,10 +157,15 @@ next event; while idle, the task can remain awaiting the mailbox. This is
 arrival-driven delivery with no fixed frame-latency guarantee.
 
 The bridge's observers hold the shell and diagnostics entities, so both
-outlive their window. Every submitting lane therefore checks the window
-itself: the catalog, reference-read and poll-now observers submit nothing,
-and the catalog and live-reference retry timers end, once the window has
-closed. Demand queued at closure stays unserved.
+outlive their window, and the shell keeps its tiles alive with them. The
+bridge's own lanes check the window: the catalog, reference-read and
+poll-now observers submit nothing, and the catalog and live-reference retry
+timers end, once the window has closed; demand queued at closure stays
+unserved. Module-owned timers and the `ShellEvent` lanes do not check. A
+pricer tile's periodic refresh and its refusal retry keep submitting price
+requests after closure, and the diagnostics page's ages tick and tile stale
+timers keep waking. On macOS the process outlives its window, so this lasts
+until quit.
 
 Keyed query, series, pricing, vol-slice, upload, and text file results go to
 the matching shell occupant;

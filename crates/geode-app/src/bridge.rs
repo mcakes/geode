@@ -1403,7 +1403,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let diagnostics = diagnostics_for_drain;
         let catalog_refresh = catalog_refresh_for_drain;
         let reference_refresh = reference_refresh_for_drain;
-        // The handle, for the retry lanes: inside `window.update` the name is the `&mut Window`.
+        // The handle for the retry lanes (`window` below is the `&mut Window`).
         let retry_window = window;
         let mut last_dropped = 0u64;
         let mut last_refused = 0u64;
@@ -9486,8 +9486,21 @@ grain = "underlying"
         vcx.run_until_parked();
         vcx.update(|window, _| window.remove_window());
         vcx.run_until_parked();
+        // Count wakes of the surviving entity: the retry timer itself must
+        // not wake diagnostics for a closed window, apart from the
+        // observer gate that keeps such a wake from submitting.
+        let wakes = Rc::new(Cell::new(0u32));
+        let _counter = cx.update({
+            let wakes = wakes.clone();
+            |cx| cx.observe(&diagnostics, move |_, _| wakes.set(wakes.get() + 1))
+        });
         vcx.executor().advance_clock(CATALOG_RETRY_DELAY);
         vcx.run_until_parked();
+        assert_eq!(
+            wakes.get(),
+            0,
+            "the retry timer must not wake a closed window's diagnostics"
+        );
         let late = f.requests.try_recv();
         assert!(
             late.is_err(),

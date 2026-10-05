@@ -4828,7 +4828,7 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
         let diagnostics = diagnostics_for_drain;
         let catalog_refresh = catalog_refresh_for_drain;
         let reference_refresh = reference_refresh_for_drain;
-        // The handle, for the retry lanes: inside `window.update` the name is the `&mut Window`.
+        // The handle for the retry lanes (`window` below is the `&mut Window`).
         let retry_window = window;
         let mut last_dropped = 0u64;
         let mut last_refused = 0u64;
@@ -4840,7 +4840,7 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
         let diagnostics = diagnostics_for_drain;
         let catalog_refresh = catalog_refresh_for_drain;
         let reference_refresh = reference_refresh_for_drain;
-        // The handle, for the retry lanes: inside `window.update` the name is the `&mut Window`.
+        // The handle for the retry lanes (`window` below is the `&mut Window`).
         let retry_window = window;
         let mut last_dropped = 0u64;
         let mut last_refused = 0u64;
@@ -23338,6 +23338,8 @@ run_mutation "catalog refresh: retry wakes the observer" \
                     }' \
   geode-app catalog_explicit_requests_survive_without_diagnostics_watchers
 
+# The observer gate already stops a submission, so the test counts the
+# timer's wake of the surviving diagnostics entity instead.
 run_mutation "catalog refresh: retry ends with its window" \
   crates/geode-app/src/bridge.rs \
   'let _ = window.update(cx, |_, _, cx| {' \

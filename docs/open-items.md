@@ -571,6 +571,15 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 
 ### Open work
 
+- Work continues for a closed window until quit (macOS keeps the process
+  alive). The bridge's attach observers hold the shell and diagnostics
+  entities strongly, and the shell holds its tiles, so module timers outlive
+  the window: a pricer tile's periodic refresh and refusal retry keep
+  submitting `price` requests, and the diagnostics ages tick and tile stale
+  timers keep waking. Only the bridge's own lanes and the shell's reload poll
+  check the window. Fix by breaking the bridge's retain cycles with weak
+  handles, or by ending module timers on window closure (an
+  `on_window_closed` hook, or quit on the last window).
 - DuckDB `memory_limit` is never set (default 80% of RAM). The leading suspect for
   large footprints; the owner deferred it as a separate change. Use the
   `geode::memory` log lines and the Performance page Memory block to confirm.
