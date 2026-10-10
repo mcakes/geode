@@ -169,6 +169,29 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
             })?
     };
 
+    // An axis is a key: a NULL axis value would merge buckets under one
+    // row and every later sum would be plausible and wrong. Refuse the
+    // whole file, before any id is spent, and name the column and count so
+    // the producer can fix the drop.
+    for a in &req.dataset.axes {
+        let sql = format!("select count(*) from {RAW_TABLE} where \"{a}\" is null");
+        let nulls: i64 =
+            conn.query_row(&sql, [], |r| r.get(0))
+                .map_err(|source| StoreError::Sql {
+                    statement: sql.clone(),
+                    source,
+                })?;
+        if nulls > 0 {
+            return Err(LoadError::Store(StoreError::Sql {
+                statement: format!("load {}", req.csv_path.display()),
+                source: duckdb::Error::InvalidParameterName(format!(
+                    "axis '{a}' is NULL in {nulls} rows; an axis is a key, so the file is \
+                     refused rather than merged into one bucket"
+                )),
+            }));
+        }
+    }
+
     // Split by grain, deduplicating coarse measures and canonicalizing
     // pairs; collect any disagreements.
     let catalog = Catalog::new(conn);
@@ -820,6 +843,82 @@ source_name = "NPV"
             "{:?}",
             out.health
         );
+    }
+
+    #[test]
+    fn a_file_without_its_axis_column_is_refused_before_a_generation_is_reserved() {
+        let ds = crate::store::ddl::tests_support::axis_dataset();
+        let db_dir = tempfile::tempdir().unwrap();
+        let store = Store::open(db_dir.path().join("geode.duckdb")).unwrap();
+        store.apply_schema(&ds).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+
+        // The CSV lacks the tenor column, so the projection fills it with NULL.
+        let src_dir = tempfile::tempdir().unwrap();
+        let csv_path = src_dir.path().join("vega_buckets_2026-08-24_BK0.csv");
+        let header = [
+            "book",
+            "lhu",
+            "position_ref",
+            "counterparty",
+            "instrument_ref",
+            "underlying_ref",
+            "business_date",
+            "currency",
+            "moneyness",
+            "vega",
+        ];
+        std::fs::write(
+            &csv_path,
+            format!(
+                "{}\n\
+                 BK0,L0,P1,C,I1,SPX,2026-08-24,USD,100,10\n\
+                 BK0,L0,P1,C,I1,SPX,2026-08-24,USD,105,20\n",
+                header.join(",")
+            ),
+        )
+        .unwrap();
+        let sentinel = crate::source::Sentinel {
+            as_of: Utc::now(),
+            columns: header.iter().map(|s| s.to_string()).collect(),
+            books: vec!["BK0".to_string()],
+            row_count: None,
+            dataset: None,
+            business_date: None,
+        };
+
+        // A reserved id is spent, so the id handed out after the refused load
+        // must be the very next one.
+        let before = Catalog::new(store.writer()).reserve_gen_id().unwrap();
+        let err = load_file(
+            &store,
+            &LoadRequest {
+                dataset: &ds,
+                dataset_name: "vega_buckets",
+                csv_path: &csv_path,
+                sentinel: &sentinel,
+                batch: "BK0",
+            },
+        )
+        .expect_err("a NULL axis must refuse the file");
+        let text = err.to_string();
+        assert!(text.contains("axis 'tenor' is NULL in 2 rows"), "{text}");
+        assert!(text.contains("an axis is a key"), "{text}");
+        let after = Catalog::new(store.writer()).reserve_gen_id().unwrap();
+        assert_eq!(
+            after,
+            before + 1,
+            "no generation was spent on a refused file"
+        );
+        let n: i64 = store
+            .writer()
+            .query_row(
+                "select count(*) from vega_buckets_underlying_live",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     /// Rewrite every value of one CSV column, leaving the rest intact.
