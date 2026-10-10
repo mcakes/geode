@@ -1139,8 +1139,9 @@ signature, result shape and one-line meaning (`sma(series, n) · series · mean
 of the last n points, blank until n points`), a series row its name and
 `series`. Otherwise it describes the innermost call the caret is inside, with
 the argument the caret is in marked (`sma(series, n)` with `n` marked after
-`sma(VIX, `), or `A[k]` inside index brackets; at top level, or inside a bare
-parenthesis, it is blank. The error line takes the slot while it stands, and
+`sma(VIX, `), or `A[k]` inside index brackets; a bare parenthesis inside an
+argument is transparent (`sma((A + B), 3)` still shows `sma`), and at top
+level the line is blank. The error line takes the slot while it stands, and
 typing, which clears the error, gives the line back. The line follows typing,
 arrow keys and a click that moves the caret; the signature spells a series
 argument `series`, a count `n`, a pointwise argument `x`, and `min`/`max`

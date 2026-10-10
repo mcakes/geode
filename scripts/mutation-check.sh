@@ -39418,8 +39418,8 @@ run_mutation "shell: the watchlist key range's upper edge is exclusive" \
 # `diff`'s argument.
 run_mutation "expr help: the outermost call wins" \
   crates/geode-timeseries/src/core/complete.rs \
-  '    match frames.last()? {' \
-  '    match frames.first()? {' \
+  '    let innermost = frames.iter().rev().find(|f| !matches!(f, Frame::Plain));' \
+  '    let innermost = frames.iter().find(|f| !matches!(f, Frame::Plain));' \
   geode-timeseries \
   the_enclosing_call_is_the_innermost_open_frame_at_the_caret
 

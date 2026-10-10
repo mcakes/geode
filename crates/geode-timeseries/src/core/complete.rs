@@ -292,13 +292,16 @@ enum Frame {
 }
 
 /// Scan `line` to `caret` with the tokenizer's character classes: a word
-/// immediately followed by `(` opens a call frame, a bare `(` a plain
-/// frame, `[` an index frame; `,` at the top of a call frame advances its
-/// argument; `)`/`]` close. The innermost open frame at the caret answers;
-/// a word that is not a known function opens a plain frame, which answers
-/// nothing. Nothing when the caret is at top level or the frames are all
-/// closed. A caret past the end or inside a multi-byte character clamps
-/// back like [`name_at`].
+/// immediately followed by `(` opens a call frame, a bare `(` (or one
+/// after a word that is not a function) a plain frame, `[` an index
+/// frame; `,` at the top of a call frame advances its argument; `)`/`]`
+/// close. The innermost open call or index frame at the caret answers: a
+/// plain frame nests for `)` matching but is transparent, so
+/// `sma((A + B|), 3)` is still `sma`'s first argument. A comma inside a
+/// plain frame advances nothing (the grammar never puts one there).
+/// Nothing when the caret is at top level or the frames are all closed. A
+/// caret past the end or inside a multi-byte character clamps back like
+/// [`name_at`].
 pub fn enclosing_at(line: &str, caret: usize) -> Option<Enclosing> {
     let mut caret = caret.min(line.len());
     while !line.is_char_boundary(caret) {
@@ -342,13 +345,14 @@ pub fn enclosing_at(line: &str, caret: usize) -> Option<Enclosing> {
         }
         i += 1;
     }
-    match frames.last()? {
+    let innermost = frames.iter().rev().find(|f| !matches!(f, Frame::Plain));
+    match innermost? {
         Frame::Call { function, argument } => Some(Enclosing::Call {
             function: *function,
             argument: *argument,
         }),
         Frame::Index => Some(Enclosing::Index),
-        Frame::Plain => None,
+        Frame::Plain => unreachable!("plain frames are filtered above"),
     }
 }
 
@@ -746,7 +750,27 @@ mod tests {
         );
         assert_eq!(at("(A + sma(B, |2))"), call(Function::Sma, 1));
         assert_eq!(at("foo(A|"), None, "an unknown word opens a plain frame");
-        assert_eq!(at("sma((A|), 3)"), None, "a bare paren is a plain frame");
+        assert_eq!(
+            at("sma((A + B|), 3)"),
+            call(Function::Sma, 0),
+            "a bare paren is transparent: still sma's first argument"
+        );
+        assert_eq!(
+            at("sma((A, B|), 3)"),
+            call(Function::Sma, 0),
+            "a comma inside a plain frame does not advance the call's argument"
+        );
+        assert_eq!(
+            at("sma((A + B), |3)"),
+            call(Function::Sma, 1),
+            "the plain frame closed; the comma at sma's top advances"
+        );
+        assert_eq!(at("foo(sma(A|))"), call(Function::Sma, 0));
+        assert_eq!(
+            at("sma(foo(A|), 3)"),
+            call(Function::Sma, 0),
+            "an unknown call is transparent too"
+        );
         assert_eq!(at("A[|"), Some(Enclosing::Index));
         assert_eq!(at("A[-1]|"), None);
         assert_eq!(at("max(A, B, |"), call(Function::Max, 2));

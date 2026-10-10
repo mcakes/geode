@@ -165,8 +165,9 @@ are kept, so a notify that moved neither rebuilds nothing. `help_for` reads
 the lit row only while a non-empty name at the caret is the one the list was
 ranked over (`Completion::ranked_at`); with nothing typed the list offers
 every name and says nothing about the caret's place, so the enclosing call
-(`enclosing_at`, the innermost open frame; a bare or unknown-word paren is a
-plain frame that answers nothing) or the index note answers instead. The
+(`enclosing_at`, the innermost open call or index frame; a bare or
+unknown-word paren nests for `)` matching but is transparent, and a comma
+inside one advances nothing) or the index note answers instead. The
 slot under the Input is one structural line pinned to a line's height and
 shared with the inline error, error first. The copy (`Function::signature`,
 `result`, `describe` and `INDEX_HELP` in `geode_core::series::expr`) is a
