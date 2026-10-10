@@ -173,6 +173,7 @@ the measurement log for fixture and hardware details.
 | Classifications rows rebuild | the same grid, rows and grid only (a values answer or a reload) | 1.21 ms |
 | In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
+| Watchlist resolution, publish-triggered | `--demo 1000`: `europe_risk`, one rule over `risk_snapshot` with a classification scope (`region = 'Europe'`), from the cache's submission to the applied answer, after a 120,062-row publish of that dataset; one sample, dev profile, load 41 to 65 (the startup resolution, queued behind the service's startup burst, measured 245 ms over a warm store and 838 ms while the store loaded) | 44.8 ms |
 | Keybinding rows | builtin + 400 synthetic module actions, 200 user overrides: derive and rank, per input change | 667 µs |
 | Keybinding filter keystroke | the same, prepared re-rank | 113 µs |
 | Object browse rows | 500 views: derive and rank, per input change | 188 µs |

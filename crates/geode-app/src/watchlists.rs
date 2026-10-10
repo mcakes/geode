@@ -28,7 +28,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Each object's winning layer, and the objects whose user copy shadows a
 /// definition in a lower layer, with that layer: the ones a revert would
@@ -153,6 +153,10 @@ pub struct WatchlistCache {
     retry: RefCell<HashSet<String>>,
     /// Lists whose last answer was an error, so a run of failures warns once.
     failing: RefCell<HashSet<String>>,
+    /// When each list's latest tag was submitted: the answer applied is
+    /// always that tag's, so the elapsed time at application is one
+    /// resolution's round trip, logged at debug.
+    submitted: RefCell<HashMap<String, Instant>>,
 }
 
 pub(crate) const WATCHLIST_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -169,6 +173,7 @@ impl WatchlistCache {
             unkeyed: RefCell::default(),
             retry: RefCell::default(),
             failing: RefCell::default(),
+            submitted: RefCell::default(),
         }
     }
 
@@ -301,6 +306,9 @@ impl WatchlistCache {
         match self.handle.watchlist(params) {
             Ok(()) => {
                 self.tags.borrow_mut().insert(name.to_string(), tag);
+                self.submitted
+                    .borrow_mut()
+                    .insert(name.to_string(), Instant::now());
             }
             Err(Refusal::Busy) => self.retry(name, window, cx),
             Err(Refusal::Stopped) => {}
@@ -359,9 +367,14 @@ impl WatchlistCache {
         match outcome.result {
             Ok(res) => {
                 self.failing.borrow_mut().remove(&outcome.name);
+                let elapsed = self
+                    .submitted
+                    .borrow()
+                    .get(&outcome.name)
+                    .map_or(0.0, |at| at.elapsed().as_secs_f64() * 1e3);
                 tracing::debug!(
                     target: "geode::watchlist",
-                    "watchlist '{}' resolved: {} live members, {} rules failed",
+                    "watchlist '{}' resolved in {elapsed:.1} ms: {} live members, {} rules failed",
                     outcome.name,
                     res.members.iter().filter(|m| !m.is_excluded()).count(),
                     res.rules_failed.len()

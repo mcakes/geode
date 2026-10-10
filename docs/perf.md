@@ -2799,6 +2799,40 @@ previous quarter hour).
 Both sit well inside the 8 ms UI budget: the edit itself (history, the TOML
 object) adds about 0.3 ms to the rows rebuild a values answer or reload pays.
 
+## Watchlist resolution (2026-10-10)
+
+```text
+GEODE_DESK_CONFIG=<dir with app.toml: [log] default = "debug"> \
+    target/debug/geode --demo 1000
+```
+
+The cache (`geode-app/src/watchlists.rs`) stamps each list's latest
+submission and logs the elapsed time on `geode::watchlist` when that tag's
+answer is applied: the round trip from `DataHandle::watchlist` through the
+request queue, the query pool (one scoped distinct per rule, each in its own
+read transaction), the event drain and the global's replacement, as the
+tile will see it. It excludes the fold and the global's observers. Two
+runs, each one sample per figure; the app was killed after 40 s and 60 s.
+
+Conditions: Apple M5 Pro (18 cores, 48 GB), rustc 1.96.0, dev profile (the
+only binary built), load average 41 to 110 across the runs (another build
+running on the machine), the demo's `europe_risk` (one rule, `risk_snapshot`
+where `region = 'Europe'`, plus `SMI` by hand, minus `UKX`) and `us_core`
+(three names, no rule).
+
+| case | `europe_risk` | `us_core` |
+| --- | ---: | ---: |
+| startup, warm store (risk already loaded, no publish follows) | 245 ms | 220 ms |
+| startup, store deleted first (risk files loading during the resolution) | 838 ms | 843 ms |
+| publish of `risk_snapshot/BK001_BK002` (2 books, 120,062 rows), 31 s after launch | 44.8 ms | not resolved (no rule) |
+
+The startup figures are queue wait, not query time: a rule-less list costs
+the same as the one with a rule, and both sit behind the service's startup
+burst (catalog, recovery, the document bus's first documents). The
+publish-triggered figure is the one a running desk sees; it is one sample
+in the dev profile on a loaded machine, so a release-profile median is still
+owed before the number is a reference value.
+
 ## Collector to app store handoff (2026-10-04)
 
 ```text
