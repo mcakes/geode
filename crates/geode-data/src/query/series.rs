@@ -16,7 +16,7 @@ use crate::store::series::{coverage_table, from_micros, micros, series_table};
 use duckdb::types::Value;
 use geode_core::query::AsOf;
 use geode_core::schema::SchemaSpec;
-use geode_core::series::expr::{Ast, Expr, Op};
+use geode_core::series::expr::{Ast, Expr, Function, Op};
 use geode_core::series::{
     BucketRule, MAX_BINS, MIN_BINS, SeriesParams, SeriesResult, SlotKind, SlotProvenance,
     SlotResult,
@@ -65,32 +65,183 @@ fn aggregate(rule: BucketRule) -> &'static str {
     }
 }
 
-/// One expression node as SQL. Every binary node is wrapped in exactly
-/// one pair of parentheses, so the tree's shape — not SQL's precedence —
-/// decides what binds to what; a division carries its own zero guard
-/// inside that pair, because a NULL is the only honest answer for a
-/// bucket whose denominator is zero.
-fn lower(e: &Expr) -> Result<String, StoreError> {
-    Ok(match e {
-        Ast::Ref(n) => format!("s{n}.v"),
-        Ast::Num(x) => {
-            if !x.is_finite() {
-                return Err(refuse(format!("literal {x} is not a finite number")));
+/// One expression slot's CTEs: its grid stages `s{n}_0`, `s{n}_1`, …
+/// then the final `s{n}`. A stage is added where SQL cannot nest: a
+/// window over a window, or a fold over anything but a plain source.
+/// Every stage name derives from the slot number, so two slots never
+/// collide.
+struct Lowering {
+    slot: u8,
+    ctes: Vec<String>,
+    stages: usize,
+}
+
+/// The stage chain a series-shaped subtree is lowered on. `name` is
+/// its latest stage; a hoist advances it.
+struct Grid {
+    name: String,
+}
+
+/// `(select … )` reading the k-th non-null value of `rel` by bucket
+/// order, from the start for `k >= 0` and from the end otherwise; past
+/// either end the subquery is NULL.
+fn index_sql(rel: &str, k: i64) -> String {
+    let (order, offset) = if k >= 0 { ("", k) } else { (" desc", -k - 1) };
+    format!("(select v from {rel} where v is not null order by b{order} offset {offset} limit 1)")
+}
+
+/// Lower one expression slot. `validate` has already run the shape
+/// check and refused an expression with no slot.
+fn lower_slot(slot: u8, e: &Expr) -> Result<Vec<String>, StoreError> {
+    if e.slots().is_empty() {
+        return Err(refuse(format!(
+            "slot {slot}: an expression must reference at least one slot"
+        )));
+    }
+    let mut l = Lowering {
+        slot,
+        ctes: Vec::new(),
+        stages: 0,
+    };
+    let mut g = l.open_grid(e);
+    let (sql, _) = l.lower(e, &mut g)?;
+    l.ctes.push(format!(
+        "s{slot} as (\n  select b, {sql} as v\n  from {}\n)",
+        g.name
+    ));
+    Ok(l.ctes)
+}
+
+impl Lowering {
+    fn stage_name(&mut self) -> String {
+        let name = format!("s{}_{}", self.slot, self.stages);
+        self.stages += 1;
+        name
+    }
+
+    /// Stage 0 of a grid for `e`: the inner join of the slots `e` reads
+    /// as series, each as a `v{m}` column; or, for a scalar-shaped `e`,
+    /// the union of the buckets of every slot it folds, so the flat line
+    /// spans them all. A fold's operand never narrows the join.
+    fn open_grid(&mut self, e: &Expr) -> Grid {
+        let name = self.stage_name();
+        let series = e.series_slots();
+        let sql = match series.split_first() {
+            Some((anchor, rest)) => {
+                let cols = series
+                    .iter()
+                    .map(|m| format!("s{m}.v as v{m}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let joins: String = rest
+                    .iter()
+                    .map(|d| format!(" join s{d} on s{d}.b = s{anchor}.b"))
+                    .collect();
+                format!(
+                    "{name} as (\n  select s{anchor}.b as b, {cols}\n  from s{anchor}{joins}\n)"
+                )
             }
-            format!("{x:?}")
+            None => {
+                let union = e
+                    .slots()
+                    .iter()
+                    .map(|m| format!("select b from s{m}"))
+                    .collect::<Vec<_>>()
+                    .join(" union ");
+                format!("{name} as (\n  select b from ({union})\n)")
+            }
+        };
+        self.ctes.push(sql);
+        Grid { name }
+    }
+
+    /// Move `sql`, a value over `g`'s latest stage, into a column of a
+    /// new stage and answer the column, so a window can read it: SQL
+    /// forbids a window inside a window.
+    // The rolling and along-window lowerings are the callers; until
+    // they land, this expectation keeps Clippy clean and fails the build
+    // the moment the first caller makes it stale.
+    #[expect(dead_code, reason = "called by the window lowerings")]
+    fn hoist(&mut self, sql: String, g: &mut Grid) -> String {
+        let k = self.stages;
+        let name = self.stage_name();
+        let col = format!("c{k}");
+        self.ctes.push(format!(
+            "{name} as (\n  select *, {sql} as {col}\n  from {}\n)",
+            g.name
+        ));
+        g.name = name;
+        col
+    }
+
+    /// The relation a fold or an index reads, with the value as `v`: the
+    /// source CTE itself for a plain reference, else a stage holding `x`
+    /// lowered on a grid of its own.
+    fn fold_rel(&mut self, x: &Expr) -> Result<String, StoreError> {
+        if let Ast::Ref(m) = x {
+            return Ok(format!("s{m}"));
         }
-        Ast::Neg(inner) => format!("(-({}))", lower(inner)?),
-        Ast::Bin(op, l, r) => {
-            let (l, r) = (lower(l)?, lower(r)?);
-            let inner = match op {
-                Op::Add => format!("({l}) + ({r})"),
-                Op::Sub => format!("({l}) - ({r})"),
-                Op::Mul => format!("({l}) * ({r})"),
-                Op::Div => format!("(case when ({r}) = 0 then null else ({l}) / ({r}) end)"),
-            };
-            format!("({inner})")
-        }
-    })
+        let mut g = self.open_grid(x);
+        let (sql, _) = self.lower(x, &mut g)?;
+        let name = self.stage_name();
+        self.ctes.push(format!(
+            "{name} as (\n  select b, {sql} as v\n  from {}\n)",
+            g.name
+        ));
+        Ok(name)
+    }
+
+    /// `(sql, windowed)`: the SQL for `e` over `g`'s latest stage, and
+    /// whether it holds a window function, which a window over it must
+    /// hoist. Every binary node is wrapped in exactly one pair of
+    /// parentheses, so the tree's shape — not SQL's precedence — decides
+    /// what binds to what; a division carries its own zero guard inside
+    /// that pair, because a NULL is the only honest answer for a bucket
+    /// whose denominator is zero.
+    fn lower(&mut self, e: &Expr, g: &mut Grid) -> Result<(String, bool), StoreError> {
+        Ok(match e {
+            Ast::Ref(m) => (format!("v{m}"), false),
+            Ast::Num(x) => {
+                if !x.is_finite() {
+                    return Err(refuse(format!("literal {x} is not a finite number")));
+                }
+                (format!("{x:?}"), false)
+            }
+            Ast::Neg(inner) => {
+                let (s, w) = self.lower(inner, g)?;
+                (format!("(-({s}))"), w)
+            }
+            Ast::Bin(op, l, r) => {
+                let (l, wl) = self.lower(l, g)?;
+                let (r, wr) = self.lower(r, g)?;
+                let inner = match op {
+                    Op::Add => format!("({l}) + ({r})"),
+                    Op::Sub => format!("({l}) - ({r})"),
+                    Op::Mul => format!("({l}) * ({r})"),
+                    Op::Div => format!("(case when ({r}) = 0 then null else ({l}) / ({r}) end)"),
+                };
+                (format!("({inner})"), wl || wr)
+            }
+            Ast::Index(x, k) => {
+                let rel = self.fold_rel(x)?;
+                (index_sql(&rel, *k), false)
+            }
+            Ast::Call(f, args) => self.call(*f, args, g)?,
+        })
+    }
+
+    fn call(
+        &mut self,
+        f: Function,
+        _args: &[Expr],
+        _g: &mut Grid,
+    ) -> Result<(String, bool), StoreError> {
+        Err(refuse(format!(
+            "slot {}: {} is not lowered yet",
+            self.slot,
+            f.name()
+        )))
+    }
 }
 
 /// Every refusal the request can earn, in one place and in one order, so
@@ -140,6 +291,8 @@ fn validate(schema: &SchemaSpec, params: &SeriesParams) -> Result<Vec<u8>, Store
     }
     for s in &params.series {
         if let SlotKind::Expr(e) = &s.kind {
+            e.shape()
+                .map_err(|m| refuse(format!("slot {}: {m}", s.slot)))?;
             let refs = e.slots();
             if refs.is_empty() {
                 return Err(refuse(format!(
@@ -238,24 +391,7 @@ fn ctes(params: &SeriesParams, order: &[u8]) -> Result<(String, Vec<Value>), Sto
         let SlotKind::Expr(e) = &spec.kind else {
             unreachable!("order lists expressions only")
         };
-        let deps = e.slots();
-        // `validate` already refuses a slot-less expression; this is the
-        // second line of defence, with the same message rather than a
-        // panic on an empty `deps`.
-        let Some(&anchor) = deps.first() else {
-            return Err(refuse(format!(
-                "slot {slot}: an expression must reference at least one slot"
-            )));
-        };
-        let joins: String = deps[1..]
-            .iter()
-            .map(|d| format!(" join s{d} on s{d}.b = s{anchor}.b"))
-            .collect();
-        parts.push(format!(
-            "s{n} as (\n  select s{anchor}.b as b, {v} as v\n  from s{anchor}{joins}\n)",
-            n = slot,
-            v = lower(e)?,
-        ));
+        parts.extend(lower_slot(*slot, e)?);
     }
     Ok((format!("with {}", parts.join(",\n")), bound))
 }
@@ -686,7 +822,13 @@ mod tests {
         let sql = &plan.points.sql;
         assert!(
             sql.contains(
-                "s3 as (\n  select s1.b as b, ((case when (s2.v) = 0 then null else (s1.v) / (s2.v) end)) as v\n  from s1 join s2 on s2.b = s1.b\n)"
+                "s3_0 as (\n  select s1.b as b, s1.v as v1, s2.v as v2\n  from s1 join s2 on s2.b = s1.b\n)"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "s3 as (\n  select b, ((case when (v2) = 0 then null else (v1) / (v2) end)) as v\n  from s3_0\n)"
             ),
             "{sql}"
         );
@@ -728,13 +870,14 @@ mod tests {
         );
         assert!(s1 < s4 && s2 < s4 && s1 < s3 && s2 < s3, "{sql}");
         assert!(
-            sql.contains("s3 as (\n  select s1.b as b, ((s1.v) * (2.0)) as v\n  from s1\n)"),
+            sql.contains("s3_0 as (\n  select s1.b as b, s1.v as v1\n  from s1\n)")
+                && sql.contains("s3 as (\n  select b, ((v1) * (2.0)) as v\n  from s3_0\n)"),
             "{sql}"
         );
         assert!(
             sql.contains(
-                "s4 as (\n  select s1.b as b, ((s2.v) - (s1.v)) as v\n  from s1 join s2 on s2.b = s1.b\n)"
-            ),
+                "s4_0 as (\n  select s1.b as b, s1.v as v1, s2.v as v2\n  from s1 join s2 on s2.b = s1.b\n)"
+            ) && sql.contains("s4 as (\n  select b, ((v2) - (v1)) as v\n  from s4_0\n)"),
             "{sql}"
         );
         assert!(
@@ -757,7 +900,7 @@ mod tests {
         assert!(
             plan.points
                 .sql
-                .contains("(((-(((s1.v) + (1.5))))) * (s1.v)) as v"),
+                .contains("(((-(((v1) + (1.5))))) * (v1)) as v"),
             "{}",
             plan.points.sql
         );
@@ -849,6 +992,14 @@ mod tests {
         ]));
         assert!(e.contains("slot 2") && e.contains("slot 9"), "{e}");
         assert!(refuse(params(vec![expr(2, "2 + 3")])).contains("reference"));
+        let e = refuse(params(vec![
+            source(1, "A", BucketRule::Last),
+            expr(2, "mean(2) + s1"),
+        ]));
+        assert!(
+            e.contains("slot 2") && e.contains("mean needs a series"),
+            "{e}"
+        );
     }
 
     /// An expression names source series only; an operand that is
