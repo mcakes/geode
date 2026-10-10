@@ -142,8 +142,10 @@ desk-layer `sources.toml` entry per dataset and a `datasets.toml`
 declaration with `axes`.
 
 **Lag:** a position move rewrites the risk files only; scenario rows keep
-the old LHU until the next scenario run, and the dataset time in a tile's
-header says how old the run is. The demo shows the same lag (see
+the old LHU until the next scenario run, and the scenario data's source
+time says how old the run is. The demo never re-drops its scenario files,
+so after a demo move the scenario datasets keep the old LHU until the demo
+directory is deleted (see
 [the demo position system](data-path.md#the-demo-position-system)).
 
 **Guessed — check against the real drop:**

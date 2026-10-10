@@ -37486,6 +37486,20 @@ run_mutation "axis: tenor order puts 18M between 1Y and 2Y" \
   '            (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.cmp(b)),' \
   '            (Some(_), Some(_)) => a.cmp(b),' \
   geode-core tenor_order_ignores_case_and_puts_unparsable_values_last
+# A repeated axis name emits the column twice; the failed CREATE TABLE would
+# close the whole data service.
+run_mutation "axis: axes may not name a column twice" \
+  crates/geode-core/src/schema/mod.rs \
+  '        if ds.axes[..i].contains(a) {' \
+  '        if false {' \
+  geode-core axes_may_not_name_a_column_twice
+# The instrument-grain NPV ladder must read instrument-level inputs; a
+# per-underlying delta makes the instrument's repeats disagree in the split.
+run_mutation "demo scenario: the npv ladder is per instrument" \
+  crates/geode-demo-data/src/scenario.rs \
+  '            let npv = batch.npv[i] + sum_delta * s + 0.5 * sum_gamma * s * s;' \
+  '            let npv = batch.npv[i] + batch.delta01[i] * s + 0.5 * batch.gamma01[i] * s * s + 0.0 * (sum_delta + sum_gamma);' \
+  geode-demo-data instrument_grain_measures_agree_across_an_instruments_underlyings
 # Coverage, not the risk batch size, bounds the scenario store.
 run_mutation "demo scenario: coverage bounds the rows" \
   crates/geode-demo-data/src/scenario.rs \

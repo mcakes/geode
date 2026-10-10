@@ -1110,11 +1110,12 @@ old book. Moves persist: the demo reuses its `$TMPDIR/geode-demo/<rows>-42`
 directory across `--demo` launches, so delete it to restore the generated
 LHUs.
 
-A move rewrites the risk files only. The scenario files under `scenario/`
-keep the old LHU until the next scenario drop, because scenario data is a
-run made at a point in time, not a view of the positions; the dataset time
-in a scenario tile's header says how old that run is. A real deployment has
-the same lag between a position move and the next scenario run.
+A move rewrites the risk files only. Scenario data is a run made at a point
+in time, not a view of the positions, and the scenario data's source time
+says how old that run is. The demo never re-drops its scenario files, so
+after a demo move the scenario datasets keep the old LHU until the demo
+directory is deleted. A real deployment has the same lag, which ends at its
+next scenario run.
 
 ## Text files
 

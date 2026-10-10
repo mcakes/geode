@@ -164,8 +164,7 @@ may still use separately configured `CC`/`CXX` wrappers.
   Uninstall a demo collector for those rows first
   (`geode-collector uninstall --demo <rows>`); a running one holds the store.
 - Axis columns on a measures dataset extend the key of its measure grains;
-  a grouping that omits a scenario axis is non-attributable. Delete
-  `$TMPDIR/geode-demo/<rows>-42/` after this change: `STORE_FORMAT` is 2.
+  a grouping that omits a scenario axis is non-attributable.
 - Any change to the store's DDL — its own tables (catalog, generations
   summary, provenance, `subscription_topics`, `geode_meta`) or the payload
   table builders in `store/ddl.rs` and `store/series.rs` (series payload and

@@ -40,8 +40,9 @@ risk CSV in the source directory, then its sentinel with a strictly later
 `as_of`, after refusing any unknown position before writing. A move persists
 across `--demo` launches until the directory is deleted. A move to another
 book's LHU leaves the position's `Book` unchanged. A move does not touch
-the scenario files: they keep the old LHU until the next scenario drop, as a
-real scenario run lags a position move.
+the scenario files, and the demo never re-drops them: they keep the old LHU
+until the demo directory is deleted, as a real scenario run lags a position
+move until its next run.
 
 The demo bus's startup burst publishes each key `startup_repeats` times, so
 the chain producer, which rotates through one expiry per publish, sends every
