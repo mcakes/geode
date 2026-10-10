@@ -9,6 +9,7 @@ mod crash;
 #[cfg(test)]
 mod demo_tests;
 mod events;
+mod watchlists;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;

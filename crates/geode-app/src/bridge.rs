@@ -3,6 +3,7 @@
 //! the window, and forward view reloads to the service. Shell and data remain
 //! independent crates. See `docs/current/request-delivery.md`.
 
+use crate::watchlists::{WatchlistCache, fold_watchlists, object_provenance};
 use geode_blotter::BlotterFactory;
 use geode_core::colour::NamedColours;
 use geode_core::config::{Config, DIMENSIONS_DOC, Diagnostic, Layer, Severity, load_views};
@@ -30,8 +31,9 @@ use geode_shell::diagnostics::{CatalogRequest, Diagnostics, ReferenceLane, Sourc
 use geode_shell::module::placeholder::PLACEHOLDER_KIND;
 use geode_shell::module::{Delivery, UploadDelivery};
 use geode_shell::reference::ReferenceGlobal;
-use geode_shell::shell::objectdialog::shadow_of;
-use geode_shell::shell::{DIAGNOSTICS_KEY, REFERENCE_KEY, ShellEvent, ShellView, is_shell_key};
+use geode_shell::shell::{
+    DIAGNOSTICS_KEY, REFERENCE_KEY, ShellEvent, ShellView, is_shell_key, is_watchlist_key,
+};
 use geode_shell::vimfind::FindStyle;
 use gpui::{App, AsyncApp, Entity, WindowHandle};
 use gpui_component::Root;
@@ -277,28 +279,13 @@ pub fn data_setup(
 
 /// Each classification's winning layer, and the classifications whose user
 /// copy shadows a definition in a lower layer, with that layer: the ones a
-/// revert would restore, and what it restores. Read from the layered `dimensions` documents, the same
-/// provenance the object dialog badges.
+/// revert would restore, and what it restores. `object_provenance` over the
+/// layered `dimensions` documents.
 fn classification_provenance(
     config: &Config,
     dims: &DerivedDimensions,
 ) -> (BTreeMap<String, Layer>, BTreeMap<String, Layer>) {
-    let layers: BTreeMap<String, Layer> = dims
-        .all()
-        .filter_map(|d| {
-            config
-                .explain(DIMENSIONS_DOC, &d.name)
-                .map(|l| (d.name.clone(), l))
-        })
-        .collect();
-    let shadowed = layers
-        .iter()
-        .filter(|(_, layer)| **layer == Layer::User)
-        .filter_map(|(name, _)| {
-            shadow_of(config, DIMENSIONS_DOC, name).map(|(lower, _)| (name.clone(), lower))
-        })
-        .collect();
-    (layers, shadowed)
+    object_provenance(config, DIMENSIONS_DOC, dims.all().map(|d| d.name.as_str()))
 }
 
 /// Read blotter.stale_after from app.toml using the shared duration parser.
@@ -1200,6 +1187,33 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         reference_cache.refresh(dataset, window, cx);
     }
 
+    // Resolved watchlists for `WatchlistGlobal`: fold every list now against
+    // the schema the service serves, resolve each, then again on publishes
+    // of a rule's dataset and on reloads. The dimensions are the startup
+    // doc's, as the service read them.
+    let watchlist_cache = Rc::new(WatchlistCache::new(handle.clone()));
+    let (folded, watchlist_diags) = {
+        let config = shell.read(cx).config();
+        let (dims, _) = config
+            .doc(DIMENSIONS_DOC)
+            .map(DerivedDimensions::from_doc)
+            .unwrap_or_default();
+        fold_watchlists(config, &bridge.schema, &dims)
+    };
+    for d in &watchlist_diags {
+        tracing::warn!(target: "geode::config", "{d}");
+    }
+    if !watchlist_diags.is_empty() {
+        diagnostics.update(cx, |dg, cx| {
+            let before = dg.version();
+            dg.note_data_diagnostics(watchlist_diags, SystemTime::now());
+            if dg.version() != before {
+                cx.notify();
+            }
+        });
+    }
+    watchlist_cache.set_definitions(folded, window, cx);
+
     // Reloads: new views to the data thread and to the factory.
     cx.subscribe(&shell, {
         let handle = handle.clone();
@@ -1207,6 +1221,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let panels = panels.clone();
         let timeseries = timeseries.clone();
         let classifications = bridge.classifications.clone();
+        let watchlist_cache = watchlist_cache.clone();
         let startup_schema = bridge.schema.clone();
         let diagnostics = diagnostics.clone();
         move |shell, event: &ShellEvent, cx| match event {
@@ -1254,6 +1269,9 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     factory.set_schema(schema);
                 }
                 factory.set_dims(dims.clone());
+                // Watchlist rules fold against the schema the service
+                // serves, not an edited `datasets` doc awaiting restart.
+                let (folded, watchlist_diags) = fold_watchlists(config, &startup_schema, &dims);
                 // The classifications snapshot, from the same dims, pinned
                 // schema (the startup one when no datasets doc loaded) and
                 // views; pushed once the config borrow has ended.
@@ -1285,10 +1303,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // The config borrow has ended; the factory's tiles and the
                 // diagnostics can now be updated through cx.
                 classifications.set_config(classification_config, cx);
+                watchlist_cache.set_definitions(folded, window, cx);
                 let reload_diags: Vec<Diagnostic> = presentation_diags
                     .into_iter()
                     .chain(colour_diags)
                     .chain(pin_diags)
+                    .chain(watchlist_diags)
                     .chain(handoff)
                     .collect();
                 if !reload_diags.is_empty() {
@@ -1524,6 +1544,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             // Local autosave updates diagnostics without advancing frame revisions or
                             // recent-publication history.
                         } else {
+                            // A local publish never re-resolves a watchlist.
+                            watchlist_cache.on_published(&dataset, retry_window, cx);
                             let frame = shell.read(cx).frame().clone();
                             // Recent-publication history uses arrival time; this event has no source
                             // timestamp and cannot establish source freshness.
@@ -1729,7 +1751,11 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::VolSlices(outcome), window, cx)
                         });
                     }
-                    // The watchlist bridge cache consumes this in a later change.
+                    // Each list's lane keeps `WatchlistGlobal`; see `WatchlistCache`.
+                    DataEvent::Watchlist(outcome) if is_watchlist_key(outcome.key) => {
+                        watchlist_cache.answer(outcome, cx);
+                    }
+                    // No other requester submits a watchlist resolution yet.
                     DataEvent::Watchlist(_) => {}
                     // The live lane keeps `ReferenceGlobal`; see `ReferenceCache`.
                     DataEvent::Reference(outcome) if outcome.key == REFERENCE_KEY => {
@@ -10675,5 +10701,519 @@ grain = "underlying"
             vec![1, 1]
         );
         assert_reaches_no_other_grid_tile(cx, "diagnostics", user);
+    }
+
+    // ---- The watchlist cache (`crate::watchlists::WatchlistCache`) ----
+
+    mod watchlist_cache {
+        use super::*;
+        use crate::watchlists::{WATCHLIST_RETRY_DELAY, WatchlistCache};
+        use geode_core::config::{WATCHLISTS_DOC, merge_docs};
+        use geode_core::query::{ResolvedRule, WatchlistOutcome, WatchlistParams, WatchlistResult};
+        use geode_core::scope::Scope;
+        use geode_core::watchlist::members::{Member, Origin};
+        use geode_core::watchlist::state::{Folded, Status};
+        use geode_data::{REQUEST_BOUND, Request};
+        use geode_shell::shell::is_watchlist_key;
+        use geode_shell::watchlist::WatchlistGlobal;
+
+        fn folded(name: &str, dataset: &str, map: &mut BTreeMap<String, Folded>) {
+            map.insert(
+                name.to_string(),
+                Folded {
+                    list: geode_core::watchlist::Watchlist {
+                        include: vec!["SPX".into()],
+                        ..Default::default()
+                    },
+                    rules: vec![ResolvedRule {
+                        index: 0,
+                        dataset: dataset.into(),
+                        scope: Scope::default(),
+                    }],
+                    errors: vec![],
+                    layer: Some(Layer::User),
+                    shadowed: None,
+                },
+            );
+        }
+
+        fn folded_over(dataset: &str) -> BTreeMap<String, Folded> {
+            let mut map = BTreeMap::new();
+            folded("a", dataset, &mut map);
+            map
+        }
+
+        fn manual(name: &str) -> Member {
+            Member {
+                name: name.into(),
+                origin: Origin::Manual,
+            }
+        }
+
+        fn watchlist_request(rx: &std::sync::mpsc::Receiver<Request>) -> WatchlistParams {
+            match rx.try_recv().expect("a watchlist request was submitted") {
+                Request::Watchlist(p) => {
+                    assert!(is_watchlist_key(p.key), "{:?}", p.key);
+                    p
+                }
+                other => panic!("expected a watchlist request, got {other:?}"),
+            }
+        }
+
+        fn watchlist_tag(rx: &std::sync::mpsc::Receiver<Request>) -> u64 {
+            watchlist_request(rx).tag
+        }
+
+        fn ok(key: QueryKey, tag: u64, name: &str, member: &str) -> WatchlistOutcome {
+            WatchlistOutcome {
+                key,
+                tag,
+                name: name.into(),
+                result: Ok(WatchlistResult {
+                    members: vec![manual(member)],
+                    rules_failed: vec![],
+                }),
+            }
+        }
+
+        #[gpui::test]
+        fn an_answer_for_a_removed_list_is_dropped(cx: &mut gpui::TestAppContext) {
+            let window = open_test_window(cx, test_shell_services());
+            let (handle, rx) = DataHandle::for_tests();
+            let cache = Rc::new(WatchlistCache::new(handle));
+            cx.update(|cx| cache.set_definitions(folded_over("risk"), window, cx));
+            let tag = watchlist_tag(&rx);
+            cx.read(|cx| {
+                let state = &cx.global::<WatchlistGlobal>().0.lists["a"];
+                assert_eq!(state.status, Status::Resolving);
+                assert_eq!(state.definition.include, vec!["SPX"]);
+                assert_eq!(state.layer, Some(Layer::User));
+            });
+            cx.update(|cx| cache.set_definitions(BTreeMap::new(), window, cx));
+            cx.read(|cx| {
+                assert!(
+                    cx.global::<WatchlistGlobal>().0.lists.is_empty(),
+                    "a removed list leaves the snapshot"
+                );
+            });
+            let key = cache.key_of("a").unwrap();
+            cx.update(|cx| cache.answer(ok(key, tag, "a", "SPX"), cx));
+            cx.read(|cx| {
+                assert!(
+                    !cx.global::<WatchlistGlobal>().0.lists.contains_key("a"),
+                    "a late answer must not resurrect a removed list"
+                )
+            });
+        }
+
+        #[gpui::test]
+        fn only_the_latest_tag_is_applied(cx: &mut gpui::TestAppContext) {
+            let window = open_test_window(cx, test_shell_services());
+            let (handle, rx) = DataHandle::for_tests();
+            let cache = Rc::new(WatchlistCache::new(handle));
+            cx.update(|cx| cache.set_definitions(folded_over("risk"), window, cx));
+            let first = watchlist_tag(&rx);
+            cx.update(|cx| cache.on_published("risk", window, cx));
+            let second = watchlist_tag(&rx);
+            assert!(second > first);
+            let key = cache.key_of("a").unwrap();
+            cx.update(|cx| cache.answer(ok(key, first, "a", "OLD"), cx));
+            cx.read(|cx| {
+                assert_eq!(
+                    cx.global::<WatchlistGlobal>().0.lists["a"].status,
+                    Status::Resolving,
+                    "a superseded answer is dropped"
+                )
+            });
+            cx.update(|cx| cache.answer(ok(key, second, "a", "NEW"), cx));
+            cx.read(|cx| {
+                let state = &cx.global::<WatchlistGlobal>().0.lists["a"];
+                assert_eq!(state.status, Status::Current);
+                assert_eq!(state.members, vec![manual("NEW")]);
+                assert!(state.resolved_at.is_some());
+            });
+            cx.update(|cx| cache.answer(ok(key, first, "a", "OLD"), cx));
+            cx.read(|cx| {
+                assert_eq!(
+                    cx.global::<WatchlistGlobal>().0.lists["a"].members,
+                    vec![manual("NEW")]
+                )
+            });
+            // Under another key the same name and tag is not this list's answer.
+            cx.update(|cx| cache.answer(ok(QueryKey(1), second, "a", "FOREIGN"), cx));
+            cx.read(|cx| {
+                assert_eq!(
+                    cx.global::<WatchlistGlobal>().0.lists["a"].members,
+                    vec![manual("NEW")]
+                )
+            });
+        }
+
+        #[gpui::test]
+        fn a_failed_resolution_keeps_the_last_members(cx: &mut gpui::TestAppContext) {
+            let window = open_test_window(cx, test_shell_services());
+            let (handle, rx) = DataHandle::for_tests();
+            let cache = Rc::new(WatchlistCache::new(handle));
+            cx.update(|cx| cache.set_definitions(folded_over("risk"), window, cx));
+            let first = watchlist_tag(&rx);
+            let key = cache.key_of("a").unwrap();
+            cx.update(|cx| cache.answer(ok(key, first, "a", "SPX"), cx));
+            cx.update(|cx| cache.on_published("risk", window, cx));
+            let second = watchlist_tag(&rx);
+            cx.update(|cx| {
+                cache.answer(
+                    WatchlistOutcome {
+                        key,
+                        tag: second,
+                        name: "a".into(),
+                        result: Err("pool closed".into()),
+                    },
+                    cx,
+                )
+            });
+            cx.read(|cx| {
+                let state = &cx.global::<WatchlistGlobal>().0.lists["a"];
+                assert_eq!(state.status, Status::Failed("pool closed".into()));
+                assert_eq!(state.members, vec![manual("SPX")], "the last members stay");
+            });
+            // A rule the data layer could not run joins the list's rule errors.
+            cx.update(|cx| cache.on_published("risk", window, cx));
+            let third = watchlist_tag(&rx);
+            cx.update(|cx| {
+                cache.answer(
+                    WatchlistOutcome {
+                        key,
+                        tag: third,
+                        name: "a".into(),
+                        result: Ok(WatchlistResult {
+                            members: vec![manual("SPX")],
+                            rules_failed: vec![(0, "no such column".into())],
+                        }),
+                    },
+                    cx,
+                )
+            });
+            cx.read(|cx| {
+                let state = &cx.global::<WatchlistGlobal>().0.lists["a"];
+                assert_eq!(state.status, Status::Current);
+                assert_eq!(state.rule_errors.len(), 1);
+                assert_eq!(state.rule_errors[0].index, 0);
+                assert_eq!(state.rule_errors[0].reason, "no such column");
+            });
+        }
+
+        #[gpui::test]
+        fn a_busy_refusal_arms_one_retry_per_list(cx: &mut gpui::TestAppContext) {
+            let window = open_test_window(cx, test_shell_services());
+            let (handle, rx) = DataHandle::for_tests();
+            let cache = Rc::new(WatchlistCache::new(handle.clone()));
+            // Fill the queue so every submission is refused Busy.
+            for _ in 0..REQUEST_BOUND {
+                assert!(handle.cancel(QueryKey(1)));
+            }
+            cx.update(|cx| cache.set_definitions(folded_over("risk"), window, cx));
+            for _ in 0..10 {
+                cx.update(|cx| cache.on_published("risk", window, cx));
+            }
+            assert_eq!(
+                cache.retry_count(),
+                1,
+                "one timer per list, however many publishes"
+            );
+            while rx.try_recv().is_ok() {}
+            cx.executor()
+                .advance_clock(WATCHLIST_RETRY_DELAY + std::time::Duration::from_millis(10));
+            cx.run_until_parked();
+            assert_eq!(watchlist_tag(&rx), 1, "the retry submitted once");
+            assert!(rx.try_recv().is_err(), "and only once");
+            assert_eq!(cache.retry_count(), 0);
+        }
+
+        #[gpui::test]
+        fn two_lists_get_two_keys_and_a_refresh_of_one_does_not_touch_the_other(
+            cx: &mut gpui::TestAppContext,
+        ) {
+            let window = open_test_window(cx, test_shell_services());
+            let (handle, rx) = DataHandle::for_tests();
+            let cache = Rc::new(WatchlistCache::new(handle));
+            let mut map = BTreeMap::new();
+            folded("a", "risk", &mut map);
+            folded("b", "cvi", &mut map);
+            cx.update(|cx| cache.set_definitions(map.clone(), window, cx));
+            let first = watchlist_request(&rx);
+            let second = watchlist_request(&rx);
+            assert!(rx.try_recv().is_err(), "one request per list");
+            let (a, b) = if first.name == "a" {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            assert_eq!((a.name.as_str(), b.name.as_str()), ("a", "b"));
+            assert_ne!(a.key, b.key, "each list has its own key");
+            assert_eq!(cache.key_of("a"), Some(a.key));
+            assert_eq!(cache.key_of("b"), Some(b.key));
+            assert_eq!(a.rules[0].dataset, "risk");
+            assert_eq!(a.include, vec!["SPX"]);
+
+            cx.update(|cx| cache.on_published("cvi", window, cx));
+            let again = watchlist_request(&rx);
+            assert_eq!(again.name, "b");
+            assert_eq!(again.key, b.key, "the key is the list's for the run");
+            assert_eq!(again.tag, b.tag + 1);
+            assert!(rx.try_recv().is_err(), "a publish of cvi leaves a alone");
+
+            // A reload that changes only provenance resolves nothing again;
+            // one that changes a rule resolves that list only.
+            cx.update(|cx| cache.set_definitions(map.clone(), window, cx));
+            assert!(
+                rx.try_recv().is_err(),
+                "unchanged definitions submit nothing"
+            );
+            map.get_mut("b").unwrap().layer = Some(Layer::Builtin);
+            cx.update(|cx| cache.set_definitions(map.clone(), window, cx));
+            assert!(rx.try_recv().is_err(), "provenance alone submits nothing");
+            cx.read(|cx| {
+                assert_eq!(
+                    cx.global::<WatchlistGlobal>().0.lists["b"].layer,
+                    Some(Layer::Builtin),
+                    "but the snapshot carries it"
+                )
+            });
+            map.get_mut("b").unwrap().rules[0].dataset = "risk".into();
+            cx.update(|cx| cache.set_definitions(map, window, cx));
+            let changed = watchlist_request(&rx);
+            assert_eq!((changed.name.as_str(), changed.key), ("b", b.key));
+            assert!(rx.try_recv().is_err());
+        }
+
+        // ---- Through the bridge ----
+
+        /// `risk` is eligible for a rule; `sheets` is a local document the
+        /// app writes itself, so a publish of it is local.
+        const DATASETS: &str = "[risk]\n\
+            [risk.columns.underlying_ref]\nrole = \"dimension\"\ntype = \"utf8\"\ngrain = \"position\"\n\
+            [risk.columns.npv]\nrole = \"measure\"\ntype = \"f64\"\ngrain = \"position\"\n\
+            [sheets]\nfamily = \"document\"\nlocal = true\nkey = [\"underlying_ref\"]\naxes = [\"line\"]\n\
+            [sheets.columns.underlying_ref]\nrole = \"dimension\"\ntype = \"utf8\"\n\
+            [sheets.columns.line]\nrole = \"axis\"\ntype = \"utf8\"\n\
+            [sheets.columns.notional]\nrole = \"value\"\ntype = \"f64\"\n";
+
+        const WATCHLISTS: &str = "[a]\ninclude = [\"SPX\"]\n[[a.rules]]\ndataset = \"risk\"\n\
+            [b]\n[[b.rules]]\ndataset = \"risk\"\nexpression = \"npv > 1\"\n";
+
+        fn sources(watchlists: &str) -> ConfigSources {
+            ConfigSources {
+                builtin: vec![
+                    LayerDoc::builtin("views", SLIM_VIEW).unwrap(),
+                    LayerDoc::builtin("datasets", DATASETS).unwrap(),
+                    LayerDoc::builtin(WATCHLISTS_DOC, watchlists).unwrap(),
+                ],
+                desk: None,
+                user: None,
+            }
+        }
+
+        /// A window over `sources`, attached to a bridge serving the
+        /// `datasets` doc's schema: the requests the bridge submits and the
+        /// events it drains are the test's.
+        fn attached(
+            cx: &mut gpui::TestAppContext,
+            sources: ConfigSources,
+        ) -> (CatalogFixture, Entity<ShellView>) {
+            let schema = SchemaSpec::from_doc(&merge_docs(
+                "datasets",
+                &[LayerDoc::builtin("datasets", DATASETS).unwrap()],
+            ))
+            .0;
+            let window = open_test_window(cx, test_shell_services_with_sources(sources));
+            let (handle, requests) = DataHandle::for_tests();
+            let (tx, rx) = crate::events::channel();
+            let bridge = Bridge {
+                events: rx,
+                schema: Rc::new(schema),
+                local_datasets: Rc::new(["sheets".to_string()].into_iter().collect()),
+                ..test_bridge(handle)
+            };
+            cx.update(|cx| attach(&bridge, window, cx));
+            let shell = cx.update(|cx| {
+                window
+                    .read(cx)
+                    .unwrap()
+                    .view()
+                    .clone()
+                    .downcast::<ShellView>()
+                    .unwrap()
+            });
+            (
+                CatalogFixture {
+                    window,
+                    bridge,
+                    requests,
+                    events: tx,
+                },
+                shell,
+            )
+        }
+
+        fn next_watchlist(f: &CatalogFixture) -> Option<WatchlistParams> {
+            while let Ok(request) = f.requests.try_recv() {
+                match request {
+                    Request::Watchlist(params) => {
+                        assert!(is_watchlist_key(params.key));
+                        return Some(params);
+                    }
+                    Request::Catalog(_) | Request::Reference(_) | Request::ReplaceViews => {
+                        continue;
+                    }
+                    other => panic!("expected a watchlist resolution, got {other:?}"),
+                }
+            }
+            None
+        }
+
+        /// Both lists in order, the drain then the two watchlist
+        /// submissions, each with its own key.
+        fn both(f: &CatalogFixture) -> (WatchlistParams, WatchlistParams) {
+            let first = next_watchlist(f).expect("the first list");
+            let second = next_watchlist(f).expect("the second list");
+            assert!(next_watchlist(f).is_none(), "one request per list");
+            if first.name == "a" {
+                (first, second)
+            } else {
+                (second, first)
+            }
+        }
+
+        #[gpui::test]
+        fn attach_folds_every_list_and_resolves_each_under_its_own_key(
+            cx: &mut gpui::TestAppContext,
+        ) {
+            let (f, _shell) = attached(cx, sources(WATCHLISTS));
+            let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+            let (a, b) = both(&f);
+            assert_eq!((a.name.as_str(), b.name.as_str()), ("a", "b"));
+            assert_ne!(a.key, b.key);
+            assert_eq!(a.include, vec!["SPX"]);
+            assert_eq!(a.rules[0].dataset, "risk");
+            assert!(
+                b.rules[0].scope.expression.is_some(),
+                "the rule's expression folded"
+            );
+            vcx.update(|_, cx| {
+                let lists = &cx.global::<WatchlistGlobal>().0.lists;
+                assert_eq!(lists.len(), 2);
+                assert_eq!(lists["a"].status, Status::Resolving);
+                assert_eq!(lists["a"].layer, Some(Layer::Builtin));
+            });
+            f.events
+                .try_send(DataEvent::Watchlist(ok(a.key, a.tag, "a", "SPX")))
+                .unwrap();
+            vcx.run_until_parked();
+            vcx.update(|_, cx| {
+                let state = &cx.global::<WatchlistGlobal>().0.lists["a"];
+                assert_eq!(state.status, Status::Current, "the drain routes the answer");
+                assert_eq!(state.members, vec![manual("SPX")]);
+            });
+        }
+
+        #[gpui::test]
+        fn a_publish_of_a_rules_dataset_re_resolves_unless_local(cx: &mut gpui::TestAppContext) {
+            let (f, _shell) = attached(
+                cx,
+                sources(
+                    "[a]\n[[a.rules]]\ndataset = \"risk\"\n[b]\n[[b.rules]]\ndataset = \"sheets\"\n",
+                ),
+            );
+            let vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+            let (a, _b) = both(&f);
+            f.events.try_send(published("risk")).unwrap();
+            vcx.run_until_parked();
+            let again = next_watchlist(&f).expect("a publish of the rule's dataset");
+            assert_eq!(
+                (again.name.as_str(), again.key, again.tag),
+                ("a", a.key, a.tag + 1)
+            );
+            assert!(next_watchlist(&f).is_none(), "b names another dataset");
+            f.events.try_send(published("sheets")).unwrap();
+            vcx.run_until_parked();
+            assert!(
+                next_watchlist(&f).is_none(),
+                "a local publish never triggers"
+            );
+            f.events.try_send(published("other")).unwrap();
+            vcx.run_until_parked();
+            assert!(next_watchlist(&f).is_none());
+        }
+
+        #[gpui::test]
+        fn a_reload_removes_resolves_and_keeps_lists_as_their_definitions_changed(
+            cx: &mut gpui::TestAppContext,
+        ) {
+            let (f, shell) = attached(cx, sources(WATCHLISTS));
+            let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+            let (a, b) = both(&f);
+            f.events
+                .try_send(DataEvent::Watchlist(ok(a.key, a.tag, "a", "SPX")))
+                .unwrap();
+            vcx.run_until_parked();
+            // `a` keeps its definition, `b`'s rule changes, `c` is new.
+            let reloaded = Config::load(&sources(
+                "[a]\ninclude = [\"SPX\"]\n[[a.rules]]\ndataset = \"risk\"\n\
+                 [b]\n[[b.rules]]\ndataset = \"risk\"\nexpression = \"npv > 2\"\n\
+                 [c]\ninclude = [\"NDX\"]\n",
+            ));
+            vcx.update(|_, cx| {
+                shell.update(cx, |s, cx| s.apply_reload_for_test(reloaded, cx));
+            });
+            vcx.run_until_parked();
+            let first = next_watchlist(&f).expect("a changed list");
+            let second = next_watchlist(&f).expect("a new list");
+            assert!(
+                next_watchlist(&f).is_none(),
+                "an unchanged list is left alone"
+            );
+            let (b2, c) = if first.name == "b" {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            assert_eq!((b2.name.as_str(), b2.key, b2.tag), ("b", b.key, b.tag + 1));
+            assert_eq!(c.name, "c");
+            assert!(is_watchlist_key(c.key) && c.key != a.key && c.key != b.key);
+            vcx.update(|_, cx| {
+                let lists = &cx.global::<WatchlistGlobal>().0.lists;
+                assert_eq!(lists["a"].status, Status::Current, "kept with its members");
+                assert_eq!(lists["a"].members, vec![manual("SPX")]);
+                assert_eq!(lists["b"].status, Status::Resolving);
+                assert_eq!(lists["c"].status, Status::Resolving);
+                assert_eq!(lists["c"].definition.include, vec!["NDX"]);
+            });
+            // A reload that drops `a` and `c`: they leave the snapshot, and
+            // a late answer for `b`'s old tag is not applied.
+            let reloaded = Config::load(&sources(
+                "[b]\n[[b.rules]]\ndataset = \"risk\"\nexpression = \"npv > 2\"\n",
+            ));
+            vcx.update(|_, cx| {
+                shell.update(cx, |s, cx| s.apply_reload_for_test(reloaded, cx));
+            });
+            vcx.run_until_parked();
+            assert!(next_watchlist(&f).is_none(), "b did not change");
+            f.events
+                .try_send(DataEvent::Watchlist(ok(c.key, c.tag, "c", "NDX")))
+                .unwrap();
+            f.events
+                .try_send(DataEvent::Watchlist(ok(b.key, b.tag, "b", "OLD")))
+                .unwrap();
+            vcx.run_until_parked();
+            vcx.update(|_, cx| {
+                let lists = &cx.global::<WatchlistGlobal>().0.lists;
+                assert_eq!(lists.keys().collect::<Vec<_>>(), vec!["b"]);
+                assert_eq!(
+                    lists["b"].status,
+                    Status::Resolving,
+                    "the old tag's answer is dropped"
+                );
+            });
+        }
     }
 }
