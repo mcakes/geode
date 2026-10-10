@@ -4378,6 +4378,71 @@ mod tests {
         service.shutdown();
     }
 
+    /// A watchlist with a rule on a drifted dataset is refused whole, with
+    /// the drift; a list whose rules name no drifted dataset still rides
+    /// the pool. Tested at `DataService::watchlist` as the distinct and
+    /// view refusals are: `dispatch` only forwards an `Err` here onto the
+    /// request's key, tag and name.
+    #[test]
+    fn a_watchlist_rule_on_a_drifted_dataset_refuses_the_list_with_the_drift() {
+        let (_db, _src, service, rx) = service_with(|store| {
+            store
+                .writer()
+                .execute_batch(
+                    "alter table risk_snapshot_position_archive add column surprise VARCHAR;",
+                )
+                .unwrap();
+        });
+        let list = |rules: Vec<geode_core::query::ResolvedRule>| WatchlistParams {
+            key: QueryKey(5),
+            tag: 1,
+            name: "eu".into(),
+            rules,
+            include: vec!["SPX".into()],
+            exclude: vec![],
+        };
+        let refused = service
+            .watchlist(&list(vec![geode_core::query::ResolvedRule {
+                index: 0,
+                dataset: "risk_snapshot".into(),
+                scope: Scope::default(),
+            }]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.starts_with(
+                "schema drift in 'risk_snapshot': 'risk_snapshot_position_archive' column"
+            ),
+            "{refused}"
+        );
+        assert!(
+            until_within(&rx, Duration::from_millis(300), |e| match e {
+                DataEvent::Watchlist(o) => Some(o.key),
+                _ => None,
+            })
+            .is_none(),
+            "nothing was submitted to the pool"
+        );
+        service.watchlist(&list(vec![])).unwrap();
+        let answered = until_within(&rx, Duration::from_secs(10), |e| match e {
+            DataEvent::Watchlist(o) if o.key == QueryKey(5) && o.name == "eu" => {
+                Some(o.result.clone())
+            }
+            _ => None,
+        })
+        .expect("a list naming no drifted dataset answers");
+        assert_eq!(
+            answered
+                .unwrap()
+                .members
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["SPX"]
+        );
+        service.shutdown();
+    }
+
     /// A drifted series dataset: its fetch source reports `Failed`, a series
     /// read is refused before compiling, and a fetch is answered with the
     /// drift reason without asking the adapter.

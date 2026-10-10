@@ -66,8 +66,10 @@ pub enum Work {
     Series(Box<SeriesPlan>),
     /// Database-dependent compilation and execution share one read transaction.
     Read(Box<super::read::ReadQuery>),
-    /// One list resolved, each rule in its own transaction; coalescing and
-    /// cancellation apply as to any key.
+    /// One list resolved, each rule in its own transaction. The pool
+    /// coalesces and cancels per key, so a caller resolving several lists
+    /// submits each under its own key: a shared key would let one list's
+    /// refresh cancel another's resolution in flight.
     Watchlist(Box<WatchlistQuery>),
 }
 

@@ -36,7 +36,7 @@ cancellation can suppress query outcomes, and UI delivery may coalesce them.
 | Distinct values | `Distinct`, with key, tag, and requested column. The key is the picker's, another shell consumer's, or the asking tile's. |
 | Catalog | `Catalog`, read on the service thread and addressed by key/tag. |
 | Reference table | `Reference`, read on the service thread and addressed by key/tag, with the dataset and as-of. |
-| Watchlist | `Watchlist`, addressed by key/tag with the list's name, including a drift refusal. A rule that fails to compile or run is named by index inside a successful answer; the other rules still answer. |
+| Watchlist | `Watchlist`, addressed by key/tag with the list's name, including a drift refusal. Each list resolves under its own key, since the pool coalesces and cancels per key and the mailbox keys these answers per key too. A rule that fails to compile or run is named by index inside a successful answer; the other rules still answer. |
 | Snapshot poll-now | No dedicated reply. The source reports ordinary poll, health, and publication events; an unchanged snapshot has no publication. |
 | Pricing | `Price`, addressed by key/tag; downstream queue refusal produces per-line errors. |
 | Vol slices | `VolSlices`, addressed by key/tag, one result per job in job order; a full vol queue answers every job `the vol queue is full; resubmit`. |

@@ -43,6 +43,8 @@ impl WatchlistQuery {
         let mut rule_names: Vec<(usize, Vec<String>)> = Vec::new();
         let mut rules_failed: Vec<(usize, String)> = Vec::new();
         for rule in &self.params.rules {
+            // Compilation never reads the key or tag; the result rides the
+            // watchlist's own.
             let params = DistinctParams {
                 key: self.params.key,
                 tag: self.params.tag,
@@ -164,8 +166,8 @@ mod tests {
         assert_eq!(names, vec!["MANUAL", "NDX.Z", "RTY.Z", "SPX.Z"]);
     }
 
-    /// The rule after a failed one still answers, and the run still
-    /// commits: a failure is the rule's, not the list's.
+    /// A rule the compiler refuses (an unknown column) is that rule's
+    /// failure alone: the rule after it still answers.
     #[test]
     fn a_rule_failing_before_another_leaves_the_other_answering() {
         let f = document_fixture();
@@ -192,6 +194,72 @@ mod tests {
         assert_eq!(result.members.len(), 3);
         // The connection is usable afterwards: nothing was left aborted.
         f.conn().execute_batch("select 1").unwrap();
+    }
+
+    /// A statement the compiler accepts but DuckDB rejects inside the
+    /// rule's transaction (a text column compared with a number fails when
+    /// the statement binds) is that rule's failure alone: the rule after it
+    /// still answers, and the connection is clean afterwards.
+    #[test]
+    fn a_rule_failing_at_execution_leaves_the_next_rule_and_connection_clean() {
+        use geode_core::scope::{CompareOp, Expr, Literal};
+        let f = document_fixture();
+        let config = Arc::new(ReadConfig {
+            schema: Arc::new(f.schema.clone()),
+            dimensions: f.dims.clone(),
+        });
+        let runtime_failure = ResolvedRule {
+            index: 0,
+            dataset: "risk".into(),
+            scope: Scope {
+                expression: Some(Expr::Compare {
+                    column: UNDERLYING.into(),
+                    op: CompareOp::Gt,
+                    value: Literal::Num(1.0),
+                }),
+                ..Scope::default()
+            },
+        };
+        let rules = vec![runtime_failure, rule(1, "book", "BK001")];
+        let q = WatchlistQuery::new(config, params(rules, &[], &[]));
+        let result = q.run(f.conn()).unwrap();
+        assert_eq!(result.rules_failed.len(), 1, "{:?}", result.rules_failed);
+        let (index, reason) = &result.rules_failed[0];
+        assert_eq!(*index, 0);
+        // DuckDB's refusal of the bound statement, not the compiler's.
+        assert!(reason.contains("Binder Error"), "{reason}");
+        let rty = result.members.iter().find(|m| m.name == "RTY.Z").unwrap();
+        assert_eq!(rty.origin, Origin::Rules(vec![1]));
+        assert_eq!(result.members.len(), 1);
+        f.conn().execute_batch("select 1").unwrap();
+    }
+
+    #[test]
+    fn a_rule_naming_an_unknown_dataset_fails_alone() {
+        let f = document_fixture();
+        let config = Arc::new(ReadConfig {
+            schema: Arc::new(f.schema.clone()),
+            dimensions: f.dims.clone(),
+        });
+        let rules = vec![
+            ResolvedRule {
+                index: 0,
+                dataset: "nope".into(),
+                scope: Scope::default(),
+            },
+            rule(1, "book", "BK001"),
+        ];
+        let q = WatchlistQuery::new(config, params(rules, &[], &[]));
+        let result = q.run(f.conn()).unwrap();
+        assert_eq!(result.rules_failed.len(), 1);
+        assert_eq!(result.rules_failed[0].0, 0);
+        assert!(
+            result.rules_failed[0].1.contains("no dataset 'nope'"),
+            "{}",
+            result.rules_failed[0].1
+        );
+        let names: Vec<&str> = result.members.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["RTY.Z"]);
     }
 
     #[test]
