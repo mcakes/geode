@@ -16,7 +16,7 @@ use crate::store::series::{coverage_table, from_micros, micros, series_table};
 use duckdb::types::Value;
 use geode_core::query::AsOf;
 use geode_core::schema::SchemaSpec;
-use geode_core::series::expr::{Ast, Expr, Function, Kind, Op};
+use geode_core::series::expr::{Ast, Expr, Function, Kind, Op, count_arg};
 use geode_core::series::{
     BucketRule, MAX_BINS, MIN_BINS, SeriesParams, SeriesResult, SlotKind, SlotProvenance,
     SlotResult,
@@ -176,10 +176,6 @@ impl Lowering {
     /// Move `sql`, a value over `g`'s latest stage, into a column of a
     /// new stage and answer the column, so a window can read it: SQL
     /// forbids a window inside a window.
-    // The rolling and along-window lowerings are the callers; until
-    // they land, this expectation keeps Clippy clean and fails the build
-    // the moment the first caller makes it stale.
-    #[expect(dead_code, reason = "called by the window lowerings")]
     fn hoist(&mut self, sql: String, g: &mut Grid) -> String {
         let k = self.stages;
         let name = self.stage_name();
@@ -308,12 +304,55 @@ impl Lowering {
                     windowed,
                 ))
             }
-            Kind::Along { .. } | Kind::Rolling => Err(refuse(format!(
-                "slot {}: {} is not lowered yet",
-                self.slot,
-                f.name()
-            ))),
+            Kind::Along { .. } | Kind::Rolling => {
+                let (a, windowed) = self.lower(first, g)?;
+                // SQL forbids a window inside a window: the inner value
+                // becomes a stage column first.
+                let a = if windowed { self.hoist(a, g) } else { a };
+                Ok((self.window(f, &a, count_arg(args), g)?, true))
+            }
         }
+    }
+
+    /// `f` over `a`, a value with no window in it, ordered by bucket.
+    /// "Previous" is the previous point: a bucket with no point is not a
+    /// row of the grid.
+    fn window(
+        &mut self,
+        f: Function,
+        a: &str,
+        n: Option<u32>,
+        g: &mut Grid,
+    ) -> Result<String, StoreError> {
+        let need = |n: Option<u32>| {
+            n.ok_or_else(|| refuse(format!("slot {}: {} needs a count", self.slot, f.name())))
+        };
+        let ord = "over (order by b)";
+        Ok(match f {
+            Function::Diff => format!("(({a}) - lag({a}) {ord})"),
+            Function::Pct => format!(
+                "(case when lag({a}) {ord} = 0 then null else (({a}) - lag({a}) {ord}) / lag({a}) {ord} end)"
+            ),
+            Function::Cum => format!("sum({a}) over (order by b rows unbounded preceding)"),
+            Function::Lag => {
+                let n = need(n)?;
+                format!("lag({a}, {n}) {ord}")
+            }
+            Function::Sma
+            | Function::Ema
+            | Function::Rmin
+            | Function::Rmax
+            | Function::Rstd
+            | Function::Z => {
+                let _ = (need(n)?, g);
+                return Err(refuse(format!(
+                    "slot {}: {} is not lowered yet",
+                    self.slot,
+                    f.name()
+                )));
+            }
+            _ => unreachable!("window is called for along and rolling functions only"),
+        })
     }
 }
 
@@ -1389,6 +1428,83 @@ mod tests {
             vec![None, None, None, None, None],
             "beyond the double range is a gap, not an inf the chart draws"
         );
+    }
+
+    #[test]
+    fn along_functions_follow_point_order_across_gaps_and_nest_by_hoisting() {
+        let (_d, store) = store();
+        // Points on Jan 5, 6, 8, 9: "previous" skips the Jan 7 gap.
+        daily(&store, "A", &[1.0, 3.0, f64::NAN, 6.0, 2.0]);
+        let p = params(vec![
+            source(1, "A", BucketRule::Last),
+            expr(2, "diff(s1)"),
+            expr(3, "pct(s1)"),
+            expr(4, "cum(s1)"),
+            expr(5, "lag(s1, 2)"),
+            expr(6, "diff(diff(s1))"),
+            expr(7, "mean(diff(s1))"),
+            expr(8, "diff(s1)[0]"),
+            expr(9, "s1 - lag(s1, 1)"),
+        ]);
+        let plan = compile_series(&schema(), &p).unwrap();
+        let sql = &plan.points.sql;
+        assert!(
+            sql.contains(
+                "s6_1 as (\n  select *, ((v1) - lag(v1) over (order by b)) as c1\n  from s6_0\n)"
+            ) && sql.contains(
+                "s6 as (\n  select b, ((c1) - lag(c1) over (order by b)) as v\n  from s6_1\n)"
+            ),
+            "a window over a window is hoisted into a stage: {sql}"
+        );
+        assert!(
+            sql.contains("s7_0 as (\n  select b from (select b from s1)\n)")
+                && sql.contains(
+                    "s7_2 as (\n  select b, ((v1) - lag(v1) over (order by b)) as v\n  from s7_1\n)"
+                )
+                && sql.contains(
+                    "s7 as (\n  select b, (select avg(v) from s7_2) as v\n  from s7_0\n)"
+                ),
+            "a fold of a derived series reads a stage of its own: {sql}"
+        );
+        let r = run(&store, &p);
+        assert_eq!(r.buckets.len(), 4);
+        assert_eq!(vals(&r, 1), vec![None, Some(2.0), Some(3.0), Some(-4.0)]);
+        assert!(
+            close(
+                &vals(&r, 2),
+                &[None, Some(2.0), Some(1.0), Some(-2.0 / 3.0)]
+            ),
+            "{:?}",
+            vals(&r, 2)
+        );
+        assert_eq!(
+            vals(&r, 3),
+            vec![Some(1.0), Some(4.0), Some(10.0), Some(12.0)]
+        );
+        assert_eq!(vals(&r, 4), vec![None, None, Some(1.0), Some(3.0)]);
+        assert_eq!(vals(&r, 5), vec![None, None, Some(1.0), Some(-7.0)]);
+        assert!(
+            close(&vals(&r, 6), &[Some(1.0 / 3.0); 4]),
+            "mean of 2, 3, -4: {:?}",
+            vals(&r, 6)
+        );
+        assert!(
+            close(&vals(&r, 7), &[Some(2.0); 4]),
+            "[0] is the first NON-NULL point: {:?}",
+            vals(&r, 7)
+        );
+        assert_eq!(vals(&r, 8), vec![None, Some(2.0), Some(3.0), Some(-4.0)]);
+    }
+
+    #[test]
+    fn a_zero_previous_value_is_a_gap_in_pct() {
+        let (_d, store) = store();
+        daily(&store, "A", &[0.0, 5.0]);
+        let r = run(
+            &store,
+            &params(vec![source(1, "A", BucketRule::Last), expr(2, "pct(s1)")]),
+        );
+        assert_eq!(vals(&r, 1), vec![None, None]);
     }
 
     #[test]
