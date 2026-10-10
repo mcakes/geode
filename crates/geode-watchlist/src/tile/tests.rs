@@ -3,10 +3,12 @@ use crate::content::{WatchlistConfig, WatchlistFactory};
 use geode_core::config::Layer;
 use geode_core::groupings::GroupingSlots;
 use geode_core::log::LogLevels;
+use geode_core::query::ReferenceTable;
+use geode_core::reference::ReferenceData;
 use geode_core::scopes::SavedScopes;
-use geode_core::watchlist::Watchlist;
 use geode_core::watchlist::members::{Member, Origin};
 use geode_core::watchlist::state::{Status, WatchlistState};
+use geode_core::watchlist::{Rule, Watchlist};
 use geode_shell::actions::ActionRegistry;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameRef};
@@ -57,6 +59,73 @@ fn two() -> WatchlistSnapshot {
 
 fn publish(cx: &mut gpui::App, snap: WatchlistSnapshot) {
     cx.set_global(WatchlistGlobal(Arc::new(snap)));
+}
+
+/// `europe`: two rules, rule 1 supplying DAX and SPX, rule 2 SPX and UKX;
+/// NDX included by hand, UKX excluded by hand.
+fn resolved() -> WatchlistState {
+    let member = |name: &str, origin: Origin| Member {
+        name: name.into(),
+        origin,
+    };
+    WatchlistState {
+        definition: Watchlist {
+            include: vec!["NDX".into()],
+            exclude: vec!["UKX".into()],
+            rules: vec![Rule::default(), Rule::default()],
+        },
+        layer: Some(Layer::Desk),
+        shadowed: None,
+        rule_errors: vec![],
+        members: vec![
+            member("DAX", Origin::Rules(vec![0])),
+            member("NDX", Origin::Manual),
+            member("SPX", Origin::Both(vec![0, 1])),
+            member(
+                "UKX",
+                Origin::Excluded {
+                    rules: vec![1],
+                    manual: false,
+                },
+            ),
+        ],
+        resolved_at: None,
+        status: Status::Current,
+    }
+}
+
+fn europe() -> WatchlistSnapshot {
+    let mut snap = WatchlistSnapshot::default();
+    snap.lists.insert("europe".into(), resolved());
+    snap
+}
+
+/// `underlyings` with a `name` column: SPX and DAX named, NDX with a NULL
+/// name, UKX absent.
+fn reference() -> ReferenceData {
+    let table = ReferenceTable {
+        columns: vec!["underlying_ref".into(), "name".into()],
+        rows: vec![
+            vec![Some("SPX".into()), Some("S&P 500".into())],
+            vec![Some("DAX".into()), Some("DAX 40".into())],
+            vec![Some("NDX".into()), None],
+        ],
+        gen_id: 1,
+        source_time: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+    };
+    ReferenceData::default()
+        .with_table(crate::core::rows::REFERENCE_DATASET, &table, 1)
+        .unwrap()
+}
+
+fn publish_reference(cx: &mut gpui::App, data: ReferenceData) {
+    cx.set_global(ReferenceGlobal(Arc::new(data)));
+}
+
+/// A tile on `europe` with the reference table published.
+fn europe_shown(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+    cx.update(|cx| publish_reference(cx, reference()));
+    open_with(cx, europe(), restored("europe"))
 }
 
 /// What the shell root is to a tile, for focus and for keys: a
@@ -260,6 +329,31 @@ impl Harness {
             let _ = window.draw(cx);
         });
     }
+    fn shown(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
+        self.tile.read_with(vcx, |t, _| t.shown_names())
+    }
+    fn targets(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
+        self.tile.read_with(vcx, |t, _| t.targets())
+    }
+    fn cursor(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+        self.tile
+            .read_with(vcx, |t, _| t.grid.cursor_name().map(str::to_string))
+    }
+    fn reasons(&self, vcx: &gpui::VisualTestContext) -> Option<Vec<(String, Option<String>)>> {
+        self.tile.read_with(vcx, |t, _| t.action_reasons())
+    }
+    /// The painted rows as the delegate holds them.
+    fn prepared(&self, vcx: &gpui::VisualTestContext) -> Vec<table::PreparedRow> {
+        self.tile.read_with(vcx, |t, cx| {
+            t.table.read(cx).delegate().prepared().rows.clone()
+        })
+    }
+    fn find(&self, vcx: &mut gpui::VisualTestContext, event: FindEvent) {
+        vcx.update(|window, cx| self.content.find(event, window, cx));
+    }
+    fn command(&self, vcx: &mut gpui::VisualTestContext, line: &str) -> Result<(), String> {
+        vcx.update(|window, cx| self.content.command(line, window, cx))
+    }
 }
 
 fn rows(names: &[&str]) -> Option<Vec<(String, bool)>> {
@@ -407,26 +501,30 @@ fn a_snapshot_change_refreshes_the_header(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.header(&vcx), header);
 }
 
-/// `.` opens the `⋯` menu with the switcher and the list's own verbs; a
-/// verb not built yet says so as a status notice.
+/// `.` opens the `⋯` menu with the member verbs, the switcher and the
+/// list's own verbs; a verb not built yet says so as a status notice.
 #[gpui::test]
 fn the_actions_menu_lists_the_verbs_and_a_pick_says_not_yet(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_with(cx, two(), restored("a"));
     vcx.simulate_keystrokes(".");
+    let none = |t: &str| (t.to_string(), None);
+    let off = |t: &str, why: &str| (t.to_string(), Some(why.to_string()));
     assert_eq!(
-        h.actions(&vcx),
-        Some(
-            [
-                "Switch\u{2026}",
-                "New\u{2026}",
-                "Clone\u{2026}",
-                "Rename\u{2026}",
-                "Delete\u{2026}",
-                "Revert\u{2026}"
-            ]
-            .map(str::to_string)
-            .to_vec()
-        )
+        h.reasons(&vcx),
+        Some(vec![
+            none("Add name"),
+            none("Remove name"),
+            none("Rules\u{2026}"),
+            none("Resolve now"),
+            off("Undo", NOTHING_TO_UNDO),
+            off("Redo", NOTHING_TO_REDO),
+            none("Switch\u{2026}"),
+            none("New\u{2026}"),
+            none("Clone\u{2026}"),
+            none("Rename\u{2026}"),
+            none("Delete\u{2026}"),
+            none("Revert\u{2026}"),
+        ])
     );
     assert_eq!(h.mode(&vcx).as_deref(), Some("menu"));
     // `.` again closes it; `escape` too.
@@ -434,16 +532,37 @@ fn the_actions_menu_lists_the_verbs_and_a_pick_says_not_yet(cx: &mut gpui::TestA
     assert_eq!(h.actions(&vcx), None);
     vcx.simulate_keystrokes(". escape");
     assert_eq!(h.actions(&vcx), None);
-    // New… picked from the menu.
-    vcx.simulate_keystrokes(". j enter");
+    // Add name picked from the menu: not built yet.
+    vcx.simulate_keystrokes(". enter");
     assert_eq!(h.actions(&vcx), None);
     assert_eq!(h.notices(&vcx), vec![NOT_YET.to_string()]);
-    // The Switch row opens the switcher.
-    vcx.simulate_keystrokes(". enter");
+    // The disabled Undo and Redo rows are stepped over: four steps reach
+    // Switch…, which opens the switcher.
+    vcx.simulate_keystrokes(". j j j j enter");
     assert_eq!(
         h.switcher(&vcx),
         Some(vec![("a".into(), true), ("b".into(), false)])
     );
+    vcx.simulate_keystrokes("escape");
+    // New… picked from the menu.
+    vcx.simulate_keystrokes(". j j j j j enter");
+    assert_eq!(h.actions(&vcx), None);
+    assert_eq!(h.notices(&vcx), vec![NOT_YET.to_string()]);
+    // With nothing shown the member verbs say so; Remove with no row too.
+    vcx.update(|_, cx| publish(cx, WatchlistSnapshot::default()));
+    vcx.simulate_keystrokes("escape .");
+    let reasons = h.reasons(&vcx).unwrap();
+    assert_eq!(reasons[0], off("Add name", NOTHING_SHOWN));
+    assert_eq!(reasons[1], off("Remove name", NOTHING_SHOWN));
+    assert_eq!(reasons[3], off("Resolve now", NOTHING_SHOWN));
+    vcx.simulate_keystrokes("escape");
+    let mut empty = two();
+    empty.lists.insert("a".into(), list(&[]));
+    vcx.update(|_, cx| publish(cx, empty));
+    vcx.simulate_keystrokes(".");
+    let reasons = h.reasons(&vcx).unwrap();
+    assert_eq!(reasons[0], none("Add name"));
+    assert_eq!(reasons[1], off("Remove name", NO_ROW));
 }
 
 /// The session restore's notices last until the trader's first key.
@@ -461,4 +580,466 @@ fn an_unreadable_session_key_is_noticed_until_the_first_key(cx: &mut gpui::TestA
     assert_eq!(h.title(&mut vcx), "Watchlist: a", "the rest is kept");
     vcx.simulate_keystrokes("g w");
     assert!(h.notices(&vcx).is_empty());
+}
+
+#[gpui::test]
+fn the_grid_lists_members_by_name_with_excluded_last(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    assert_eq!(h.shown(&vcx), ["DAX", "NDX", "SPX", "UKX"]);
+    // The header counts the live rows from the grid.
+    assert_eq!(
+        h.header(&vcx),
+        "Watchlist: europe \u{00b7} 3 names \u{00b7} 2 rules \u{00b7} desk"
+    );
+    assert_eq!(
+        h.cursor(&vcx).as_deref(),
+        Some("DAX"),
+        "resting on the top row"
+    );
+    // What each row paints: the reference name, the mark and the origin.
+    let rows = h.prepared(&vcx);
+    let paint: Vec<(&str, Option<&str>, bool, &str, bool)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.name.as_ref(),
+                r.reference.as_deref(),
+                r.in_reference,
+                r.origin.as_ref(),
+                r.excluded,
+            )
+        })
+        .collect();
+    assert_eq!(
+        paint,
+        [
+            ("DAX", Some("DAX 40"), true, "rule 1", false),
+            ("NDX", None, true, "manual", false),
+            ("SPX", Some("S&P 500"), true, "manual + rules 1, 2", false),
+            ("UKX", None, false, "excluded (rule 2)", true),
+        ]
+    );
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("watchlist-table-7").is_some());
+    assert!(vcx.debug_bounds("watchlist-row-UKX").is_some());
+    assert!(vcx.debug_bounds("watchlist-empty-7").is_none());
+    // A reference change re-reads the names.
+    vcx.update(|_, cx| publish_reference(cx, ReferenceData::default()));
+    let rows = h.prepared(&vcx);
+    assert!(
+        rows.iter()
+            .all(|r| r.reference.is_none() && !r.in_reference)
+    );
+    // A snapshot change keeps the cursor on its row.
+    vcx.simulate_keystrokes("j j");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SPX"));
+    let mut wider = europe();
+    wider.lists.get_mut("europe").unwrap().members.insert(
+        0,
+        Member {
+            name: "CAC".into(),
+            origin: Origin::Rules(vec![0]),
+        },
+    );
+    vcx.update(|_, cx| publish(cx, wider));
+    assert_eq!(h.shown(&vcx), ["CAC", "DAX", "NDX", "SPX", "UKX"]);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SPX"));
+    assert!(h.header(&vcx).contains("4 names"), "{}", h.header(&vcx));
+    // A list with no members paints the grid's empty state.
+    vcx.update(|_, cx| {
+        let mut snap = europe();
+        snap.lists.insert("europe".into(), list(&[]));
+        publish(cx, snap)
+    });
+    assert!(h.shown(&vcx).is_empty());
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("watchlist-grid-empty").is_some());
+}
+
+/// `:sort` through the shell's command door, bare `:sort` back to the
+/// default, then the header's sort control cycling desc → asc → default.
+/// The sort icon carries no debug selector to press headless, so the press
+/// is driven through the delegate's `perform_sort` hook, which the icon's
+/// click calls.
+#[gpui::test]
+fn sort_by_origin_and_back_to_default_via_colon_sort_and_header_click(
+    cx: &mut gpui::TestAppContext,
+) {
+    use gpui_component::table::{ColumnSort, TableDelegate as _};
+    let (h, mut vcx) = europe_shown(cx);
+    h.command(&mut vcx, "sort origin desc").unwrap();
+    assert_eq!(h.shown(&vcx), ["DAX", "SPX", "NDX", "UKX"]);
+    h.command(&mut vcx, "sort origin").unwrap();
+    assert_eq!(
+        h.shown(&vcx),
+        ["UKX", "NDX", "SPX", "DAX"],
+        "a bare column is asc"
+    );
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    let (state, _) = crate::core::session::from_table(&saved);
+    assert_eq!(
+        state.sort,
+        Some((SortCol::Origin, false)),
+        "the session saves it"
+    );
+    h.command(&mut vcx, "sort reference").unwrap();
+    assert_eq!(h.shown(&vcx), ["DAX", "SPX", "NDX", "UKX"], "no name last");
+    h.command(&mut vcx, "sort name desc").unwrap();
+    assert_eq!(h.shown(&vcx), ["UKX", "SPX", "NDX", "DAX"]);
+    h.command(&mut vcx, "sort").unwrap();
+    assert_eq!(
+        h.shown(&vcx),
+        ["DAX", "NDX", "SPX", "UKX"],
+        "the default order"
+    );
+    for bad in [
+        "sort rows",
+        "sort name up",
+        "sort name asc extra",
+        "grep x",
+        "",
+    ] {
+        assert!(h.command(&mut vcx, bad).is_err(), "{bad}");
+    }
+    let complete = |line: &str, vcx: &mut gpui::VisualTestContext| {
+        vcx.update(|_, cx| h.content.completions(line, line.len(), cx))
+    };
+    assert_eq!(complete("so", &mut vcx), ["sort"]);
+    assert_eq!(complete("sort ", &mut vcx), ["name", "origin", "reference"]);
+    assert_eq!(complete("sort origin d", &mut vcx), ["asc", "desc"]);
+    assert!(complete("sort origin desc ", &mut vcx).is_empty());
+    // The header's control: the pricer's cycle, desc → asc → default.
+    let table = h.tile.read_with(&vcx, |t, _| t.table.clone());
+    let click = |col: usize, vcx: &mut gpui::VisualTestContext| {
+        vcx.update(|window, cx| {
+            table.update(cx, |t, cx| {
+                t.delegate_mut()
+                    .perform_sort(col, ColumnSort::Default, window, cx)
+            })
+        });
+    };
+    let sort = |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.state.sort);
+    click(2, &mut vcx);
+    assert_eq!(sort(&vcx), Some((SortCol::Origin, true)));
+    assert_eq!(h.shown(&vcx), ["DAX", "SPX", "NDX", "UKX"]);
+    click(2, &mut vcx);
+    assert_eq!(sort(&vcx), Some((SortCol::Origin, false)));
+    assert_eq!(h.shown(&vcx), ["UKX", "NDX", "SPX", "DAX"]);
+    click(2, &mut vcx);
+    assert_eq!(sort(&vcx), None);
+    assert_eq!(h.shown(&vcx), ["DAX", "NDX", "SPX", "UKX"]);
+    // Another column starts its own cycle at desc.
+    click(2, &mut vcx);
+    click(0, &mut vcx);
+    assert_eq!(sort(&vcx), Some((SortCol::Name, true)));
+    assert_eq!(h.shown(&vcx), ["UKX", "SPX", "NDX", "DAX"]);
+    // The header marks the column in force.
+    let marked = vcx.update(|_, cx| {
+        let d = table.read(cx).delegate();
+        (0..3).map(|c| d.column(c, cx).sort).collect::<Vec<_>>()
+    });
+    assert_eq!(
+        marked,
+        [
+            Some(ColumnSort::Descending),
+            Some(ColumnSort::Default),
+            Some(ColumnSort::Default)
+        ]
+    );
+}
+
+#[gpui::test]
+fn slash_narrows_over_name_and_reference_and_escape_restores(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    h.find(&mut vcx, FindEvent::Changed("500".into()));
+    assert_eq!(h.shown(&vcx), ["SPX"], "the reference name is searched");
+    h.find(&mut vcx, FindEvent::Cancelled);
+    assert_eq!(
+        h.shown(&vcx),
+        ["DAX", "NDX", "SPX", "UKX"],
+        "escape restores"
+    );
+    // Fuzzy over the name: `dx` is a subsequence of DAX and NDX.
+    h.find(&mut vcx, FindEvent::Changed("dx".into()));
+    assert_eq!(h.shown(&vcx), ["DAX", "NDX"], "in the default order");
+    h.find(&mut vcx, FindEvent::Committed("dx".into()));
+    assert_eq!(h.shown(&vcx), ["DAX", "NDX"], "enter keeps it");
+    // A later cancelled search restores the committed filter, not none.
+    h.find(&mut vcx, FindEvent::Changed("ndx".into()));
+    assert_eq!(h.shown(&vcx), ["NDX"]);
+    h.find(&mut vcx, FindEvent::Cancelled);
+    assert_eq!(h.shown(&vcx), ["DAX", "NDX"]);
+    // Painted highlights follow the filter: each word marks the column it
+    // matched, the name and the reference name.
+    h.find(&mut vcx, FindEvent::Changed("dax 4".into()));
+    let rows = h.prepared(&vcx);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name_marks, [std::ops::Range { start: 0, end: 3 }]);
+    assert_eq!(
+        rows[0].reference_marks,
+        [std::ops::Range { start: 4, end: 5 }]
+    );
+    // The counts ignore the filter.
+    assert!(h.header(&vcx).contains("3 names"), "{}", h.header(&vcx));
+    h.find(&mut vcx, FindEvent::Changed("zzz".into()));
+    assert!(h.shown(&vcx).is_empty());
+    assert!(h.targets(&vcx).is_empty(), "no row under the cursor");
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.grid.cursor()),
+        None,
+        "nothing painted as the cursor row"
+    );
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("watchlist-grid-empty").is_some());
+}
+
+#[gpui::test]
+fn v_starts_a_row_selection_and_escape_ends_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    vcx.simulate_keystrokes("j");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NDX"));
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    vcx.simulate_keystrokes("v j");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("visual"));
+    assert_eq!(h.targets(&vcx), ["NDX", "SPX"]);
+    // A live selection clamps a bare step rather than wrap past the anchor.
+    vcx.simulate_keystrokes("j j");
+    assert_eq!(h.targets(&vcx), ["NDX", "SPX", "UKX"]);
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert_eq!(h.targets(&vcx), ["UKX"]);
+    // `shift+v` too.
+    vcx.simulate_keystrokes("shift-v k");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("visual"));
+    assert_eq!(h.targets(&vcx), ["SPX", "UKX"]);
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert_eq!(h.targets(&vcx), ["SPX"]);
+    // Counted keys: `2 k` steps two rows, `5 j` clamps at the foot rather
+    // than wrap; `g g` and `shift+g` reach the ends.
+    vcx.simulate_keystrokes("2 k");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    vcx.simulate_keystrokes("5 j");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("UKX"));
+    vcx.simulate_keystrokes("g g");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    vcx.simulate_keystrokes("shift-g");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("UKX"));
+    vcx.simulate_keystrokes("j");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"), "a bare step wraps");
+    // The cursor is what the session saves, and the table paints it.
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert_eq!(saved["cursor"].as_str(), Some("DAX"));
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, cx| t.table.read(cx).selected_row()),
+        Some(0)
+    );
+    // A rebuild removing the cursor's row ends a live selection.
+    vcx.simulate_keystrokes("j v j");
+    assert_eq!(h.targets(&vcx), ["NDX", "SPX"]);
+    let mut without = europe();
+    without
+        .lists
+        .get_mut("europe")
+        .unwrap()
+        .members
+        .retain(|m| m.name != "SPX");
+    vcx.update(|_, cx| publish(cx, without));
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert_eq!(h.targets(&vcx), ["UKX"]);
+}
+
+/// A restored cursor waits for the snapshot that holds its row.
+#[gpui::test]
+fn a_restored_cursor_lands_on_its_name_when_the_snapshot_arrives(cx: &mut gpui::TestAppContext) {
+    let table = crate::core::session::to_table(&crate::core::session::State {
+        name: Some("europe".into()),
+        sort: Some((SortCol::Name, true)),
+        cursor: Some("NDX".into()),
+    });
+    let (h, mut vcx) = open_with(cx, WatchlistSnapshot::default(), Some(table));
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert_eq!(saved["cursor"].as_str(), Some("NDX"), "still waiting");
+    vcx.update(|_, cx| publish(cx, europe()));
+    assert_eq!(
+        h.shown(&vcx),
+        ["UKX", "SPX", "NDX", "DAX"],
+        "the restored sort"
+    );
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NDX"));
+}
+
+#[gpui::test]
+fn a_row_press_moves_the_cursor_and_a_double_click_does_nothing_more(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = europe_shown(cx);
+    h.draw(&mut vcx);
+    let spx = vcx
+        .debug_bounds("watchlist-row-SPX")
+        .expect("the row is painted");
+    vcx.simulate_click(spx.center(), gpui::Modifiers::none());
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SPX"));
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, cx| t.table.read(cx).selected_row()),
+        Some(2),
+        "the table paints the cursor row"
+    );
+    // Shift-click extends a row selection from the cursor.
+    h.draw(&mut vcx);
+    let dax = vcx.debug_bounds("watchlist-row-DAX").unwrap();
+    vcx.simulate_click(dax.center(), gpui::Modifiers::shift());
+    assert_eq!(h.targets(&vcx), ["DAX", "NDX", "SPX"]);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("visual"));
+    // A plain click ends it; a double-click is two of them and no verb.
+    h.draw(&mut vcx);
+    let ndx = vcx.debug_bounds("watchlist-row-NDX").unwrap();
+    vcx.simulate_click(ndx.center(), gpui::Modifiers::none());
+    assert_eq!(h.targets(&vcx), ["NDX"]);
+    vcx.simulate_click(ndx.center(), gpui::Modifiers::none());
+    assert_eq!(h.targets(&vcx), ["NDX"]);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert!(h.notices(&vcx).is_empty(), "{:?}", h.notices(&vcx));
+    assert_eq!(h.actions(&vcx), None);
+}
+
+#[gpui::test]
+fn a_right_press_moves_the_cursor_and_opens_the_menu_at_the_pointer(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    h.draw(&mut vcx);
+    let spx = vcx.debug_bounds("watchlist-row-SPX").unwrap();
+    vcx.simulate_mouse_down(
+        spx.center(),
+        gpui::MouseButton::Right,
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SPX"));
+    assert_eq!(h.mode(&vcx).as_deref(), Some("menu"));
+    assert_eq!(
+        h.actions(&vcx).map(|a| a[1].clone()),
+        Some("Remove name".to_string())
+    );
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.menu_at),
+        Some(spx.center()),
+        "hung from the pointer"
+    );
+    h.draw(&mut vcx);
+    let menu = vcx
+        .debug_bounds("watchlist-menu")
+        .expect("the menu is painted");
+    // The anchor snaps to whole pixels.
+    let at = spx.center();
+    assert!(
+        (menu.origin.x - at.x).abs() <= gpui::px(1.0)
+            && (menu.origin.y - at.y).abs() <= gpui::px(1.0),
+        "{:?} is at the pointer {at:?}",
+        menu.origin
+    );
+    // `escape` closes it; the menu's closer releases the pointer anchor.
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(h.actions(&vcx), None);
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.menu_at), None);
+    // A right press inside a live selection keeps the selection, which the
+    // menu acts on; `escape` closes the menu first, then ends it.
+    vcx.simulate_keystrokes("g g v j");
+    assert_eq!(h.targets(&vcx), ["DAX", "NDX"]);
+    h.draw(&mut vcx);
+    let dax = vcx.debug_bounds("watchlist-row-DAX").unwrap();
+    vcx.simulate_mouse_down(
+        dax.center(),
+        gpui::MouseButton::Right,
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(h.targets(&vcx), ["DAX", "NDX"]);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NDX"));
+    assert_eq!(h.mode(&vcx).as_deref(), Some("menu"));
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("visual"));
+    assert_eq!(h.targets(&vcx), ["DAX", "NDX"]);
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    // Outside the selection the press moves the cursor and ends it.
+    vcx.simulate_keystrokes("v j");
+    h.draw(&mut vcx);
+    let ukx = vcx.debug_bounds("watchlist-row-UKX").unwrap();
+    vcx.simulate_mouse_down(
+        ukx.center(),
+        gpui::MouseButton::Right,
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(h.targets(&vcx), ["UKX"]);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("menu"));
+    // The header's `⋯` from the key opens the same menu hung from the
+    // control instead.
+    vcx.simulate_keystrokes("escape .");
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.menu_at), None);
+    assert!(h.actions(&vcx).is_some());
+    vcx.simulate_keystrokes("escape");
+    release_the_table_menu(&mut vcx, ukx.center());
+}
+
+/// gpui-component's table builds its (empty) context menu on every right
+/// press, and that menu's dismiss subscription holds it in a cycle only
+/// the table's next right press breaks, so a test ending after a right
+/// press leaks it (the classifications and pricer tests have the same
+/// helper). One more right press, whose deferred rebuild never runs
+/// because the window closes in the same update, breaks it.
+fn release_the_table_menu(vcx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+    vcx.update(|window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Right,
+                position: at,
+                modifiers: gpui::Modifiers::default(),
+                click_count: 1,
+                first_mouse: false,
+            }),
+            cx,
+        );
+        window.remove_window();
+    });
+    vcx.run_until_parked();
+}
+
+/// A filter hiding a put cursor's row rests the cursor on the nearest
+/// shown row; escape restoring the filter returns it to its row.
+#[gpui::test]
+fn a_filter_hiding_the_cursor_rests_it_on_the_nearest_shown_row(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    vcx.simulate_keystrokes("shift-g");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("UKX"));
+    h.find(&mut vcx, FindEvent::Changed("d".into()));
+    assert_eq!(h.shown(&vcx), ["DAX", "NDX"]);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NDX"), "the nearest shown");
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, cx| t.table.read(cx).selected_row()),
+        Some(1),
+        "the table paints the resting row"
+    );
+    // The session still names the trader's row.
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert_eq!(saved["cursor"].as_str(), Some("UKX"));
+    h.find(&mut vcx, FindEvent::Cancelled);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("UKX"), "back on its row");
+    // A move while hidden is the trader's new choice.
+    h.find(&mut vcx, FindEvent::Changed("d".into()));
+    vcx.simulate_keystrokes("k");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    h.find(&mut vcx, FindEvent::Cancelled);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    // Switching lists drops the filter and the cursor with it.
+    let mut both = europe();
+    both.lists.insert("a".into(), list(&["SPX", "NDX"]));
+    vcx.update(|_, cx| publish(cx, both));
+    h.find(&mut vcx, FindEvent::Committed("d".into()));
+    // The switcher opens on `europe`; `k` is `a`.
+    vcx.simulate_keystrokes("g w k enter");
+    assert_eq!(h.title(&mut vcx), "Watchlist: a");
+    assert_eq!(h.shown(&vcx), ["NDX", "SPX"]);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NDX"));
 }

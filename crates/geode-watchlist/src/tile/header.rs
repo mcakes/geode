@@ -60,16 +60,19 @@ pub(crate) struct HeaderModel {
 
 impl HeaderModel {
     /// `name` is the list shown; `state` its snapshot entry, `None` while
-    /// the snapshot no longer holds it.
+    /// the snapshot no longer holds it; `live` the grid's live count (the
+    /// rows as shown, a pending edit included, not what the snapshot last
+    /// resolved).
     pub(crate) fn prepare(
         name: Option<&str>,
         state: Option<&WatchlistState>,
+        live: usize,
         clock: &Clock,
     ) -> Self {
         let (Some(name), Some(state)) = (name, state) else {
             return HeaderModel::default();
         };
-        let n = state.members.iter().filter(|m| !m.is_excluded()).count();
+        let n = live;
         let k = state.definition.rules.len();
         let as_of = state
             .resolved_at
@@ -354,7 +357,7 @@ mod tests {
     #[test]
     fn the_header_shows_counts_state_and_layer() {
         let utc = Clock::utc();
-        let h = HeaderModel::prepare(Some("europe_risk"), Some(&state()), &utc);
+        let h = HeaderModel::prepare(Some("europe_risk"), Some(&state()), 3, &utc);
         assert_eq!(
             h.text(),
             "Watchlist: europe_risk \u{00b7} 3 names \u{00b7} 2 rules \u{00b7} as of 14:03:12 \u{00b7} desk"
@@ -367,12 +370,12 @@ mod tests {
         assert!(!h.failed);
         // The time is the display clock's, not UTC's.
         let tokyo = Clock::in_zone_named("Asia/Tokyo");
-        let h = HeaderModel::prepare(Some("europe_risk"), Some(&state()), &tokyo);
+        let h = HeaderModel::prepare(Some("europe_risk"), Some(&state()), 3, &tokyo);
         assert_eq!(h.as_of.as_deref(), Some("as of 23:03:12"));
         // Nothing shown, or a list the snapshot no longer holds.
-        assert_eq!(HeaderModel::prepare(None, None, &utc).text(), NONE_SHOWN);
+        assert_eq!(HeaderModel::prepare(None, None, 0, &utc).text(), NONE_SHOWN);
         assert_eq!(
-            HeaderModel::prepare(Some("gone"), None, &utc).text(),
+            HeaderModel::prepare(Some("gone"), None, 0, &utc).text(),
             NONE_SHOWN
         );
     }
@@ -382,12 +385,12 @@ mod tests {
         let utc = Clock::utc();
         let mut s = state();
         s.status = Status::Resolving;
-        let h = HeaderModel::prepare(Some("a"), Some(&s), &utc);
+        let h = HeaderModel::prepare(Some("a"), Some(&s), 3, &utc);
         assert_eq!(h.resolution.as_deref(), Some(RESOLVING));
         assert_eq!(h.as_of, None, "the time is the old answer's");
         assert!(!h.failed);
         s.status = Status::Failed("timed out".into());
-        let h = HeaderModel::prepare(Some("a"), Some(&s), &utc);
+        let h = HeaderModel::prepare(Some("a"), Some(&s), 3, &utc);
         assert_eq!(
             h.text(),
             "Watchlist: a \u{00b7} 3 names \u{00b7} 2 rules \u{00b7} failed \u{00b7} as of 14:03:12 \u{00b7} desk"
@@ -406,7 +409,7 @@ mod tests {
             resolved_at: None,
             status: Status::Current,
         };
-        let h = HeaderModel::prepare(Some("one"), Some(&s), &utc);
+        let h = HeaderModel::prepare(Some("one"), Some(&s), 1, &utc);
         assert_eq!(h.text(), "Watchlist: one \u{00b7} 1 name \u{00b7} 0 rules");
         assert_eq!(h.rules.as_ref().map(|(_, bad)| *bad), Some(false));
     }

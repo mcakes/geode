@@ -27,3 +27,8 @@ geode-shell = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 # Fixtures build a resolved list with its `resolved_at` instant.
 chrono = "0.4.42"
+criterion = "0.8.2"
+
+[[bench]]
+name = "grid"
+harness = false

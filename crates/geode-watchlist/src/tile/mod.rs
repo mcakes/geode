@@ -1,24 +1,30 @@
 //! The shell-hosted watchlist entity. It shows one list from the resolved
 //! snapshot in `WatchlistGlobal`, answers the shell's door
 //! (`crate::content::WatchlistContent`) and paints the tile: the header
-//! (`header`), the switcher hung beneath its name, the `⋯` menu, and an
-//! empty state while there is nothing to show.
+//! (`header`), the members grid (`table`), the switcher hung beneath the
+//! name, the `⋯` menu, and an empty state while there is nothing to show.
 //!
 //! The tile issues no data request: the bridge's cache resolves every list
 //! and replaces the global, which wakes the tile. The factory's
 //! configuration snapshot (schema, dimensions, saved scopes, named
 //! expressions) is what a rule is validated against.
 //!
-//! What paint reads is prepared in `Chrome` whenever the snapshot, the
-//! clock or the shown list changes, never in render.
+//! What paint reads is prepared whenever the snapshot, the reference
+//! tables, the clock, the shown list, the sort or the filter changes
+//! (`Chrome` for the header and the empty state, the grid's `Prepared`
+//! rows for the table), never in render.
 
 mod header;
+mod table;
 #[cfg(test)]
 mod tests;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use geode_core::clock::Clock;
+use geode_core::reference::ReferenceData;
+use geode_core::sort::SortOrder;
 use geode_core::watchlist::state::WatchlistSnapshot;
 use geode_shell::actions::ActionId;
 use geode_shell::clock::AppClock;
@@ -35,17 +41,22 @@ use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, MenuPick,
 use geode_tile::notice::{self, Dismissals, Notice};
 use gpui::prelude::*;
 use gpui::{
-    AnchoredPositionMode, App, Context, Pixels, Point, SharedString, Window, anchored, div,
+    AnchoredPositionMode, App, Context, Entity, Pixels, Point, SharedString, Window, anchored, div,
 };
+use gpui_component::table::{TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, v_flex};
 
 use crate::content::action_title;
-use crate::core::session::{self, State};
+use crate::core::grid::GridModel;
+use crate::core::rows;
+use crate::core::session::{self, SortCol, State};
 use header::HeaderModel;
+use table::{GridDelegate, Prepared, RowContext, RowPressed, SortClicked};
 
 /// Which menu is up: the switcher, hung under the header's name, or the
-/// `⋯` action menu, hung from the header's right edge. Both share menu
-/// mode, its keys and its pick door; opening one replaces the other.
+/// `⋯` action menu, hung from the header's right edge or from the pointer
+/// of the right press that opened it. Both share menu mode, its keys and
+/// its pick door; opening one replaces the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MenuKind {
     Switch,
@@ -70,10 +81,17 @@ impl MenuPick for Pick {
     }
 }
 
+const ADD_ACTION: &str = "watchlist::add";
+const REMOVE_ACTION: &str = "watchlist::remove";
+const UNDO_ACTION: &str = "watchlist::undo";
+const REDO_ACTION: &str = "watchlist::redo";
+const REFRESH_ACTION: &str = "watchlist::refresh";
+const RULES_ACTION: &str = "watchlist::rules";
 const SWITCH_ACTION: &str = "watchlist::switch";
 const MENU_ACTION: &str = "watchlist::menu";
 const COMMIT_ACTION: &str = "watchlist::commit";
 const CANCEL_ACTION: &str = "watchlist::cancel";
+const VISUAL_ACTION: &str = "watchlist::visual_rows";
 const NEW_ACTION: &str = "watchlist::new";
 const CLONE_ACTION: &str = "watchlist::clone";
 const RENAME_ACTION: &str = "watchlist::rename";
@@ -82,6 +100,17 @@ const REVERT_ACTION: &str = "watchlist::revert";
 
 /// The switcher's refusal while there is nothing to list.
 const NOTHING_TO_SWITCH: &str = "no watchlists to switch to";
+
+/// Why a member verb's `⋯` row is disabled while no list is shown.
+const NOTHING_SHOWN: &str = "no watchlist shown";
+
+/// Why the Remove row is disabled with no row under the cursor.
+const NO_ROW: &str = "no row";
+
+/// Why Undo and Redo are disabled: the history lands in a later task, and
+/// an empty one says the same.
+const NOTHING_TO_UNDO: &str = "nothing to undo";
+const NOTHING_TO_REDO: &str = "nothing to redo";
 
 /// What a `⋯` row says while its verb is not built yet.
 pub(crate) const NOT_YET: &str = "not yet available";
@@ -127,6 +156,13 @@ fn snapshot(cx: &App) -> Arc<WatchlistSnapshot> {
         .unwrap_or_default()
 }
 
+/// The live reference tables; empty for a tile hosted without the global.
+fn reference(cx: &App) -> Arc<ReferenceData> {
+    cx.try_global::<ReferenceGlobal>()
+        .map(|g| g.0.clone())
+        .unwrap_or_default()
+}
+
 /// A chord in the keymap's own spelling (`g w`, `ctrl+r`): what names a
 /// key inside a sentence, as `shell::kbd` documents.
 fn spell(keystrokes: &[Keystroke]) -> String {
@@ -165,6 +201,13 @@ pub struct WatchlistTile {
     id: TileId,
     frame: FrameRef,
     state: State,
+    grid: GridModel,
+    table: Entity<TableState<GridDelegate>>,
+    /// The filter in force when a `/` search began, which a cancelled
+    /// search restores; `None` while no search is open.
+    find_entry: Option<String>,
+    /// The rem the table's column widths were last scaled to.
+    last_rem: f32,
     /// The live keymap the menus' hints are resolved against.
     chords: Arc<Vec<Binding>>,
     stack: Option<StackHandle>,
@@ -199,10 +242,49 @@ impl WatchlistTile {
         id: TileId,
         restored: Option<&toml::Table>,
         frame: FrameRef,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> WatchlistTile {
         let (state, restore) = restored.map(session::from_table).unwrap_or_default();
+        let mut grid = GridModel::new();
+        grid.set_sort(state.sort);
+        // A restored cursor lands on its name once the snapshot holds it.
+        if let Some(name) = &state.cursor {
+            grid.seed_cursor(name.clone());
+        }
+        let table = cx.new(|cx| {
+            TableState::new(GridDelegate::new(), window, cx)
+                .row_selectable(true)
+                .col_selectable(false)
+                .cell_selectable(false)
+                .col_resizable(true)
+                .col_movable(false)
+                .sortable(true)
+                .loop_selection(false)
+        });
+        cx.subscribe_in(&table, window, |this, _, e: &RowPressed, window, cx| {
+            this.row_pressed(*e, window, cx)
+        })
+        .detach();
+        cx.subscribe_in(&table, window, |this, _, e: &RowContext, window, cx| {
+            this.row_context(*e, window, cx)
+        })
+        .detach();
+        cx.subscribe(&table, |this, _, e: &SortClicked, cx| {
+            this.sort_clicked(e.0, cx)
+        })
+        .detach();
+        // A header drag's widths are recorded in the delegate, so the next
+        // refresh (a sort, the rem) keeps them. The table's other events
+        // are its own: the cursor and selection come through `RowPressed`,
+        // and the tile sets the table's selected row itself.
+        cx.subscribe(&table, |this, _, e: &TableEvent, cx| {
+            if let TableEvent::ColumnWidthsChanged(widths) = e {
+                this.table
+                    .update(cx, |t, _| t.delegate_mut().record_widths(widths));
+            }
+        })
+        .detach();
         // The bridge replaces the global on every change to a list's
         // definition, members or state.
         cx.observe_global::<WatchlistGlobal>(|this, cx| this.snapshot_changed(cx))
@@ -231,6 +313,10 @@ impl WatchlistTile {
             id,
             frame,
             state,
+            grid,
+            table,
+            find_entry: None,
+            last_rem: 0.0,
             chords: menu::live_bindings(cx),
             stack: None,
             close: None,
@@ -267,9 +353,10 @@ impl WatchlistTile {
         cx.notify();
     }
 
-    /// The reference table changed. The grid's reference names come from
-    /// it; nothing here reads it yet, so a change only repaints.
+    /// The reference tables changed: the grid's reference names come from
+    /// them.
     fn reference_changed(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_rows(false, cx);
         cx.notify();
     }
 
@@ -282,7 +369,7 @@ impl WatchlistTile {
     /// first snapshot with lists when nothing is shown, and again when the
     /// shown list goes away, never on a change that leaves a nothing-shown
     /// tile as it was (the trader closed the switcher). An open switcher
-    /// takes the new names.
+    /// takes the new names; the grid takes the new members.
     fn settle(&mut self, cx: &mut Context<Self>) {
         let snapshot = snapshot(cx);
         let shown = self.shown_in(&snapshot);
@@ -290,7 +377,7 @@ impl WatchlistTile {
         if self.notices.nothing_to_switch && !snapshot.lists.is_empty() {
             self.notices.nothing_to_switch = false;
         }
-        self.rebuild_chrome(cx);
+        self.rebuild_rows(false, cx);
     }
 
     fn settle_menu(&mut self, shown: bool, snapshot: &WatchlistSnapshot) {
@@ -364,12 +451,82 @@ impl WatchlistTile {
         self.dismissed.dismiss(n)
     }
 
+    /// Rebuild the grid's rows from the shown list's snapshot entry and the
+    /// reference tables, then everything painted from them. `after_verb`
+    /// after a member verb: the cursor keeps its shown index. The pending
+    /// definition (an edit awaiting its reload) lands with the history;
+    /// until then the rows are the snapshot's.
+    fn rebuild_rows(&mut self, after_verb: bool, cx: &mut Context<Self>) {
+        let rows = {
+            let snapshot = snapshot(cx);
+            let reference = reference(cx);
+            self.state
+                .name
+                .as_deref()
+                .and_then(|n| snapshot.lists.get(n))
+                .map(|s| rows::rows(s, None, &reference))
+                .unwrap_or_default()
+        };
+        if after_verb {
+            self.grid.after_verb(rows);
+        } else {
+            self.grid.set_rows(rows);
+        }
+        self.rebuild_chrome(cx);
+        self.sync_table(true, cx);
+    }
+
+    /// Hand the table what it paints. `rows` re-prepares the shown rows
+    /// (and the columns' sort marks); a cursor or selection change alone
+    /// moves only the painted cursor and tint.
+    fn sync_table(&mut self, rows: bool, cx: &mut Context<Self>) {
+        let prepared = rows.then(|| Rc::new(Prepared::build(&self.grid)));
+        let (title, help) = if self.grid.query().is_empty() {
+            (
+                "No names",
+                "The list has no members: add a name or a rule from the \u{22ef} menu.",
+            )
+        } else {
+            (
+                "No matching names",
+                "Escape restores the filter in force before the search.",
+            )
+        };
+        let selected = self.grid.selected();
+        let sort = self.grid.sort();
+        let cursor = self.grid.cursor();
+        self.table.update(cx, |t, cx| {
+            let d = t.delegate_mut();
+            d.set_selected(selected);
+            // The table reads sort marks only on a refresh, which also
+            // re-lays every column: refresh only when the sort changed,
+            // never for a filter keystroke or a new snapshot.
+            let refresh = d.set_sort(sort);
+            if let Some(prepared) = prepared {
+                d.set(prepared);
+                d.set_empty(title.into(), help.into());
+            }
+            if refresh {
+                t.refresh(cx);
+            }
+            match cursor {
+                Some(c) if t.selected_row() != Some(c) => t.set_selected_row(c, cx),
+                Some(_) => {}
+                None => t.clear_selection(cx),
+            }
+            cx.notify();
+        });
+    }
+
     fn rebuild_chrome(&mut self, cx: &App) {
         let snapshot = snapshot(cx);
         let clock = clock(cx);
         let name = self.state.name.as_deref();
         let state = name.and_then(|n| snapshot.lists.get(n));
-        self.chrome.header = HeaderModel::prepare(name, state, &clock);
+        // The live count is the grid's: with a pending edit it is what the
+        // rows show, not what the snapshot last resolved.
+        let (live, _) = self.grid.counts();
+        self.chrome.header = HeaderModel::prepare(name, state, live, &clock);
         let none_defined = snapshot.lists.is_empty();
         let new = action_title(NEW_ACTION);
         // The switch chord as the keymap binds it now; the palette's title
@@ -427,26 +584,49 @@ impl WatchlistTile {
             .collect()
     }
 
-    /// The `⋯` menu: the switcher, then the watchlist's own verbs, each
-    /// running the palette's action, with its live chord. The switcher's
-    /// row reads `Switch…`: like `New…`, it opens a further pick.
+    /// The `⋯` menu: the member verbs, the switcher, then the watchlist's
+    /// own verbs, each running the palette's action, with its live chord.
+    /// A row that cannot act says why in its lane, and in full when
+    /// picked. The switcher's row reads `Switch…`: like `New…`, it opens a
+    /// further pick.
     fn action_rows(&self) -> Vec<Row<Pick>> {
-        let row = |id: &'static str, title: &str| {
+        let row = |id: &'static str, title: &str, enabled: Result<(), &'static str>| {
             let title = title.strip_prefix("Watchlist: ").unwrap_or(title);
-            Row::Action(ActionRow::new(Pick::Action(id), title.to_string()).hint(Hint::chord(id)))
+            let row = ActionRow::new(Pick::Action(id), title.to_string()).hint(Hint::chord(id));
+            Row::Action(match enabled {
+                Ok(()) => row,
+                Err(why) => row.enabled(Err(why.into())).short_reason(why),
+            })
         };
-        let verb = |id: &'static str| row(id, action_title(id));
+        let verb = |id: &'static str, enabled: Result<(), &'static str>| {
+            row(id, action_title(id), enabled)
+        };
+        let shown = self.chrome.empty.is_none();
+        let listed = if shown { Ok(()) } else { Err(NOTHING_SHOWN) };
+        let targeted = match (shown, self.grid.targets().is_empty()) {
+            (false, _) => Err(NOTHING_SHOWN),
+            (true, true) => Err(NO_ROW),
+            (true, false) => Ok(()),
+        };
         vec![
+            verb(ADD_ACTION, listed),
+            verb(REMOVE_ACTION, targeted),
+            verb(RULES_ACTION, listed),
+            verb(REFRESH_ACTION, listed),
+            verb(UNDO_ACTION, Err(NOTHING_TO_UNDO)),
+            verb(REDO_ACTION, Err(NOTHING_TO_REDO)),
+            Row::Separator,
             row(
                 SWITCH_ACTION,
                 &format!("{}\u{2026}", action_title(SWITCH_ACTION)),
+                Ok(()),
             ),
             Row::Separator,
-            verb(NEW_ACTION),
-            verb(CLONE_ACTION),
-            verb(RENAME_ACTION),
-            verb(DELETE_ACTION),
-            verb(REVERT_ACTION),
+            verb(NEW_ACTION, Ok(())),
+            verb(CLONE_ACTION, Ok(())),
+            verb(RENAME_ACTION, Ok(())),
+            verb(DELETE_ACTION, Ok(())),
+            verb(REVERT_ACTION, Ok(())),
         ]
     }
 
@@ -481,16 +661,20 @@ impl WatchlistTile {
         }
     }
 
-    /// Show `name`. The cursor and the last verb's notices belonged to the
-    /// previous list, so they are dropped; the sort is the tile's and stays.
+    /// Show `name`. The cursor, the filter, a selection and the last
+    /// verb's notices belonged to the previous list, so they are dropped;
+    /// the sort is the tile's and stays.
     fn show(&mut self, name: &str, cx: &mut Context<Self>) {
         if self.state.name.as_deref() != Some(name) {
             self.state.name = Some(name.to_string());
             self.state.cursor = None;
+            self.grid = GridModel::new();
+            self.grid.set_sort(self.state.sort);
+            self.find_entry = None;
             self.notices.outcome.clear();
         }
         self.was_shown = self.shown_in(&snapshot(cx));
-        self.rebuild_chrome(cx);
+        self.rebuild_rows(false, cx);
         cx.notify();
     }
 
@@ -503,24 +687,143 @@ impl WatchlistTile {
         cx.notify();
     }
 
-    /// No `:` command yet: the sort lands with the grid.
-    pub fn command(&mut self, line: &str, _cx: &mut Context<Self>) -> Result<(), String> {
-        match line.split_whitespace().next() {
-            Some(verb) => Err(format!("not a watchlist command: {verb}")),
-            None => Err("not a watchlist command".into()),
+    /// A press on shown row `row`: shift extends a row selection to it, a
+    /// plain press moves the cursor there and ends a selection. A
+    /// double-click is two presses and nothing more: a members row has no
+    /// field to open.
+    fn row_pressed(&mut self, e: RowPressed, _window: &mut Window, cx: &mut Context<Self>) {
+        self.user_acted(cx);
+        self.grid.click(e.row, e.shift);
+        self.sync_table(false, cx);
+        cx.notify();
+    }
+
+    /// A right press on shown row `row`: the cursor moves there (a row of a
+    /// live selection keeps the selection, which the menu then acts on),
+    /// and the `⋯` menu opens hung from the pointer, as `.` opens it from
+    /// the header.
+    fn row_context(&mut self, e: RowContext, _window: &mut Window, cx: &mut Context<Self>) {
+        self.user_acted(cx);
+        let in_selection = self.grid.selected().is_some_and(|s| s.contains(&e.row));
+        if !in_selection {
+            self.grid.click(e.row, false);
+        }
+        // The table's own right-press row outline: the tile paints the
+        // cursor and the selection itself.
+        self.table
+            .update(cx, |t, cx| t.set_right_clicked_row(None, cx));
+        self.sync_table(false, cx);
+        self.menu = Some((
+            MenuKind::Actions,
+            Menu::new(self.action_rows(), &self.chords).open_at(None),
+        ));
+        self.menu_at = Some(e.position);
+        cx.notify();
+    }
+
+    /// A header press cycles its column the way every grid tile's header
+    /// does (`SortOrder::click_cycle`): desc → asc → the default order;
+    /// another column starts at desc. No column here has a signed
+    /// magnitude, so the absolute orders are skipped.
+    fn sort_clicked(&mut self, col: SortCol, cx: &mut Context<Self>) {
+        let current = self
+            .grid
+            .sort()
+            .filter(|(c, _)| *c == col)
+            .map(|(_, desc)| {
+                if desc {
+                    SortOrder::Desc
+                } else {
+                    SortOrder::Asc
+                }
+            });
+        let next = SortOrder::click_cycle(current, false).map(|o| (col, o.descending()));
+        self.set_sort(next, cx);
+    }
+
+    /// The one door every sort change takes; the session saves it.
+    fn set_sort(&mut self, sort: Option<(SortCol, bool)>, cx: &mut Context<Self>) {
+        self.state.sort = sort;
+        self.grid.set_sort(sort);
+        self.sync_table(true, cx);
+        cx.notify();
+    }
+
+    /// `:sort <name|origin|reference> [asc|desc]`, tile-local; a bare
+    /// `:sort` restores the default order (by name, excluded rows last).
+    pub fn command(&mut self, line: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let mut words = line.split_whitespace();
+        match words.next() {
+            Some("sort") => {}
+            Some(verb) => return Err(format!("not a watchlist command: {verb}")),
+            None => return Err("not a watchlist command".into()),
+        }
+        const USAGE: &str = "sort takes name, origin or reference, then optionally asc or desc";
+        let sort = match (words.next(), words.next(), words.next()) {
+            (None, _, _) => None,
+            (Some(col), dir, None) => {
+                let col = SortCol::parse(col).ok_or(USAGE)?;
+                match dir {
+                    None | Some("asc") => Some((col, false)),
+                    Some("desc") => Some((col, true)),
+                    Some(_) => return Err(USAGE.into()),
+                }
+            }
+            _ => return Err(USAGE.into()),
+        };
+        self.set_sort(sort, cx);
+        Ok(())
+    }
+
+    /// The `:` vocabulary: `sort`, its three columns, then a direction.
+    pub fn completions(&self, line: &str, cursor: usize) -> Vec<String> {
+        let mut end = cursor.min(line.len());
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut words: Vec<&str> = line[..end].split(char::is_whitespace).collect();
+        words.pop(); // the word under the cursor
+        words.retain(|w| !w.is_empty());
+        let strs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect();
+        match words.as_slice() {
+            [] => strs(&["sort"]),
+            ["sort"] => strs(&["name", "origin", "reference"]),
+            ["sort", _] => strs(&["asc", "desc"]),
+            _ => Vec::new(),
         }
     }
 
-    pub fn completions(&self, _line: &str, _cursor: usize) -> Vec<String> {
-        Vec::new()
+    /// `/` narrows the rows as the query is typed; committing keeps it,
+    /// cancelling restores the filter in force when the search began.
+    pub fn find(&mut self, event: FindEvent, cx: &mut Context<Self>) {
+        let query = match event {
+            FindEvent::Changed(q) => {
+                if self.find_entry.is_none() {
+                    self.find_entry = Some(self.grid.query().to_string());
+                }
+                q
+            }
+            FindEvent::Committed(q) => {
+                self.find_entry = None;
+                q
+            }
+            FindEvent::Cancelled => match self.find_entry.take() {
+                Some(entry) => entry,
+                None => return,
+            },
+        };
+        self.grid.set_filter(&query);
+        self.sync_table(true, cx);
+        cx.notify();
     }
 
-    /// `/` has no rows to narrow yet.
-    pub fn find(&mut self, _event: FindEvent, _cx: &mut Context<Self>) {}
-
+    /// `menu` while a menu is up, `visual` while a row selection is live,
+    /// `normal` otherwise.
     fn mode(&self) -> &'static str {
         if self.menu.is_some() {
             "menu"
+        } else if self.grid.selecting() {
+            "visual"
         } else {
             "normal"
         }
@@ -547,11 +850,23 @@ impl WatchlistTile {
     pub fn dispatch(
         &mut self,
         action: &ActionId,
-        _count: Option<u32>,
+        count: Option<u32>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         self.user_acted(cx);
+        // The grid's motions, while no menu holds the keys. A column
+        // motion has no column to move in this rows-only grid.
+        if self.menu.is_none()
+            && let Some(m) = geode_tile::motion::parse(action, count)
+        {
+            if m.moves_rows() {
+                self.grid.move_cursor(m, false);
+                self.sync_table(false, cx);
+                cx.notify();
+            }
+            return true;
+        }
         match action.0.as_str() {
             geode_tile::motion::MENU_DOWN | geode_tile::motion::MENU_UP if self.menu.is_some() => {
                 let delta = if action.0 == geode_tile::motion::MENU_DOWN {
@@ -572,7 +887,15 @@ impl WatchlistTile {
                 };
                 self.menu_pick(at, window, cx);
             }
+            // `escape` peels one layer at a time: the menu (the surface on
+            // top, which may be acting on the selection), then a live
+            // selection, then the notices.
             CANCEL_ACTION if self.menu.is_some() => self.close_menu(cx),
+            CANCEL_ACTION if self.grid.selecting() => {
+                self.grid.clear_selection();
+                self.sync_table(false, cx);
+                cx.notify();
+            }
             // Last in line: nothing above had anything to cancel, so
             // `escape` dismisses every warning and danger notice showing,
             // each as a click on it would. Nothing to dismiss: unhandled.
@@ -587,11 +910,20 @@ impl WatchlistTile {
                 }
                 cx.notify();
             }
-            // The watchlist's own verbs, from the palette or the menu: not
-            // built yet.
-            NEW_ACTION | CLONE_ACTION | RENAME_ACTION | DELETE_ACTION | REVERT_ACTION => {
-                self.not_yet(cx)
+            VISUAL_ACTION if self.menu.is_none() => {
+                if self.grid.selecting() {
+                    self.grid.clear_selection();
+                } else {
+                    self.grid.start_selection();
+                }
+                self.sync_table(false, cx);
+                cx.notify();
             }
+            // The member verbs and the watchlist's own verbs, from a key,
+            // the palette or the menu: not built yet.
+            ADD_ACTION | REMOVE_ACTION | RULES_ACTION | REFRESH_ACTION | UNDO_ACTION
+            | REDO_ACTION | NEW_ACTION | CLONE_ACTION | RENAME_ACTION | DELETE_ACTION
+            | REVERT_ACTION => self.not_yet(cx),
             _ => return false,
         }
         true
@@ -642,8 +974,29 @@ impl WatchlistTile {
         }
     }
 
+    /// The cursor is saved by name: a restored one still waiting for its
+    /// row, else the grid's.
     pub fn serialize(&self) -> toml::Table {
-        session::to_table(&self.state)
+        session::to_table(&State {
+            cursor: self.grid.saved_cursor().map(str::to_string),
+            ..self.state.clone()
+        })
+    }
+
+    /// The names a member verb acts on.
+    #[cfg(test)]
+    fn targets(&self) -> Vec<String> {
+        self.grid.targets()
+    }
+
+    /// The shown rows' names, in painted order.
+    #[cfg(test)]
+    fn shown_names(&self) -> Vec<String> {
+        self.grid
+            .visible()
+            .iter()
+            .map(|&i| self.grid.row(i).name.clone())
+            .collect()
     }
 
     #[cfg(test)]
@@ -686,6 +1039,21 @@ impl WatchlistTile {
                 .iter()
                 .filter_map(Row::action)
                 .map(|a| a.title().to_string())
+                .collect(),
+        )
+    }
+
+    /// The open `⋯` menu's rows with each disabled row's reason.
+    #[cfg(test)]
+    fn action_reasons(&self) -> Option<Vec<(String, Option<String>)>> {
+        let (MenuKind::Actions, m) = self.menu.as_ref()? else {
+            return None;
+        };
+        Some(
+            m.rows()
+                .iter()
+                .filter_map(Row::action)
+                .map(|a| (a.title().to_string(), a.reason().map(|r| r.to_string())))
                 .collect(),
         )
     }
@@ -736,8 +1104,18 @@ impl MenuHost for WatchlistTile {
 }
 
 impl Render for WatchlistTile {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id.0;
+        // Column widths follow the window's rem, which the delegate cannot
+        // read itself; only a changed rem re-lays the columns.
+        let rem = f32::from(window.rem_size());
+        if rem != self.last_rem {
+            self.last_rem = rem;
+            self.table.update(cx, |t, cx| {
+                t.delegate_mut().set_rem(rem);
+                t.refresh(cx);
+            });
+        }
         let tile = cx.entity();
         let ids = MenuIds::new("watchlist-menu", "watchlist-menu-row");
         // Each menu's outside press closes only that menu: a press on the
@@ -815,22 +1193,24 @@ impl Render for WatchlistTile {
             },
             theme,
         );
-        // The grid lands with the rows; until then a shown list paints an
-        // empty body under its header.
-        let body = v_flex()
-            .flex_1()
-            .min_h_0()
-            .items_center()
-            .justify_center()
-            .px_4()
-            .text_color(theme.muted_foreground)
-            .when_some(self.chrome.empty.clone(), |el, text| {
-                el.child(
+        let body = match &self.chrome.empty {
+            Some(text) => v_flex()
+                .flex_1()
+                .min_h_0()
+                .items_center()
+                .justify_center()
+                .px_4()
+                .text_color(theme.muted_foreground)
+                .child(
                     div()
                         .debug_selector(move || format!("watchlist-empty-{id}"))
-                        .child(text),
-                )
-            });
+                        .child(text.clone()),
+                ),
+            None => v_flex()
+                .flex_1()
+                .min_h_0()
+                .child(table::table_el(&self.table, id)),
+        };
         v_flex()
             .size_full()
             .bg(theme.background)
