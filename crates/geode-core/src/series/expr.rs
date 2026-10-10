@@ -181,6 +181,114 @@ impl RefName {
 /// numbers only.
 pub type Expr = Ast<u8>;
 
+/// What a node evaluates to: one value per bucket, or one number over
+/// the queried range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    Series,
+    Scalar,
+}
+
+/// The largest count a rolling function or `lag` accepts.
+pub const MAX_COUNT: u32 = 10_000;
+
+/// The count argument of an along or rolling call: `args[1]` when it is
+/// a whole-number literal in `1..=MAX_COUNT`. `None` for a call without
+/// one, or one the shape check refuses.
+pub fn count_arg<R>(args: &[Ast<R>]) -> Option<u32> {
+    match args.get(1) {
+        Some(Ast::Num(n)) if n.fract() == 0.0 && (1.0..=MAX_COUNT as f64).contains(n) => {
+            Some(*n as u32)
+        }
+        _ => None,
+    }
+}
+
+fn join(a: Shape, b: Shape) -> Shape {
+    if a == Shape::Series || b == Shape::Series {
+        Shape::Series
+    } else {
+        Shape::Scalar
+    }
+}
+
+impl<R> Ast<R> {
+    /// The node's shape, or the first violation in reading order as the
+    /// message a trader reads: a fold, an index, an along or a rolling
+    /// function of a scalar, a wrong argument count, or a count outside
+    /// `1..=MAX_COUNT`. The tile runs this at Enter; the compiler runs it
+    /// again and refuses the request on disagreement.
+    pub fn shape(&self) -> Result<Shape, String> {
+        Ok(match self {
+            Ast::Ref(_) => Shape::Series,
+            Ast::Num(_) => Shape::Scalar,
+            Ast::Neg(x) => x.shape()?,
+            Ast::Bin(_, l, r) => join(l.shape()?, r.shape()?),
+            Ast::Index(x, _) => match x.shape()? {
+                Shape::Series => Shape::Scalar,
+                Shape::Scalar => return Err("[k] needs a series".into()),
+            },
+            Ast::Call(f, args) => f.check(args)?,
+        })
+    }
+}
+
+impl Function {
+    /// The shape of a call to `self` with `args`, or the refusal.
+    fn check<R>(self, args: &[Ast<R>]) -> Result<Shape, String> {
+        let name = self.name();
+        let one = |args: &[Ast<R>]| -> Result<Shape, String> {
+            match args {
+                [x] => x.shape(),
+                _ => Err(format!("{name} takes one argument")),
+            }
+        };
+        let series = |shape: Shape| -> Result<(), String> {
+            match shape {
+                Shape::Series => Ok(()),
+                Shape::Scalar => Err(format!("{name} needs a series")),
+            }
+        };
+        match self.kind() {
+            Kind::Fold => {
+                series(one(args)?)?;
+                Ok(Shape::Scalar)
+            }
+            Kind::Pointwise => one(args),
+            Kind::MinMax => match args {
+                [] => Err(format!("{name} takes one or more arguments")),
+                [x] => {
+                    series(x.shape()?)?;
+                    Ok(Shape::Scalar)
+                }
+                many => {
+                    let mut shape = Shape::Scalar;
+                    for x in many {
+                        shape = join(shape, x.shape()?);
+                    }
+                    Ok(shape)
+                }
+            },
+            Kind::Along { count: false } => {
+                series(one(args)?)?;
+                Ok(Shape::Series)
+            }
+            Kind::Along { count: true } | Kind::Rolling => {
+                let [x, _] = args else {
+                    return Err(format!("{name} takes a series and a count"));
+                };
+                series(x.shape()?)?;
+                if count_arg(args).is_none() {
+                    return Err(format!(
+                        "{name}'s count must be a whole number from 1 to {MAX_COUNT}"
+                    ));
+                }
+                Ok(Shape::Series)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     /// Byte offset into the text where the parser stopped.
@@ -616,6 +724,43 @@ impl Expr {
             Ast::Index(x, _) => x.collect_slots(out),
         }
     }
+
+    /// The slots this expression reads as series: every reference
+    /// outside a fold and an index, ascending, deduplicated. What the
+    /// compiler joins; a slot read only inside a fold does not narrow
+    /// the expression's buckets.
+    pub fn series_slots(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.collect_series_slots(&mut out);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    fn collect_series_slots(&self, out: &mut Vec<u8>) {
+        match self {
+            Ast::Ref(s) => out.push(*s),
+            Ast::Num(_) => {}
+            Ast::Neg(inner) => inner.collect_series_slots(out),
+            Ast::Bin(_, l, r) => {
+                l.collect_series_slots(out);
+                r.collect_series_slots(out);
+            }
+            Ast::Index(_, _) => {}
+            Ast::Call(f, args) => {
+                let folds = match f.kind() {
+                    Kind::Fold => true,
+                    Kind::MinMax => args.len() == 1,
+                    _ => false,
+                };
+                if !folds {
+                    for a in args {
+                        a.collect_series_slots(out);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Every reference in `text`, in text order, with its byte span. What a
@@ -955,5 +1100,90 @@ mod tests {
                 ("B", "B".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn shapes_follow_the_table() {
+        let s = |t: &str| parse(t).unwrap().shape();
+        assert_eq!(s("A"), Ok(Shape::Series));
+        assert_eq!(s("2"), Ok(Shape::Scalar));
+        assert_eq!(s("-2 * 3"), Ok(Shape::Scalar));
+        assert_eq!(s("A * 2"), Ok(Shape::Series));
+        assert_eq!(s("mean(A)"), Ok(Shape::Scalar));
+        assert_eq!(s("A / mean(A)"), Ok(Shape::Series));
+        assert_eq!(s("A[0]"), Ok(Shape::Scalar));
+        assert_eq!(s("(A / B)[-1]"), Ok(Shape::Scalar));
+        assert_eq!(s("log(A)"), Ok(Shape::Series));
+        assert_eq!(s("log(mean(A))"), Ok(Shape::Scalar));
+        assert_eq!(s("min(A)"), Ok(Shape::Scalar));
+        assert_eq!(s("min(A, B)"), Ok(Shape::Series));
+        assert_eq!(s("max(A, 2)"), Ok(Shape::Series));
+        assert_eq!(s("max(mean(A), 2)"), Ok(Shape::Scalar));
+        assert_eq!(s("diff(A)"), Ok(Shape::Series));
+        assert_eq!(s("sma(A, 20)"), Ok(Shape::Series));
+        assert_eq!(s("lag(A, 1)"), Ok(Shape::Series));
+        assert_eq!(s("z(log(A), 5)"), Ok(Shape::Series));
+        assert_eq!(s("mean(diff(A))"), Ok(Shape::Scalar));
+        assert_eq!(s("mean(A) - mean(B)"), Ok(Shape::Scalar));
+        assert_eq!(
+            s("sma(A, 10000)"),
+            Ok(Shape::Series),
+            "the top of the count range"
+        );
+    }
+
+    #[test]
+    fn shape_refusals_name_the_function_and_what_it_takes() {
+        let e = |t: &str| parse(t).unwrap().shape().unwrap_err();
+        assert_eq!(e("mean(2)"), "mean needs a series");
+        assert_eq!(e("mean(A[0])"), "mean needs a series");
+        assert_eq!(e("min(2)"), "min needs a series");
+        assert_eq!(e("2[0]"), "[k] needs a series");
+        assert_eq!(e("A[0][0]"), "[k] needs a series");
+        assert_eq!(e("diff(mean(A))"), "diff needs a series");
+        assert_eq!(e("sma(2, 3)"), "sma needs a series");
+        assert_eq!(e("mean(A, B)"), "mean takes one argument");
+        assert_eq!(e("abs(A, B)"), "abs takes one argument");
+        assert_eq!(e("diff(A, 1)"), "diff takes one argument");
+        assert_eq!(e("sma(A)"), "sma takes a series and a count");
+        assert_eq!(e("lag(A)"), "lag takes a series and a count");
+        assert_eq!(e("lag(A, 1, 2)"), "lag takes a series and a count");
+        let count = |f: &str| format!("{f}'s count must be a whole number from 1 to {MAX_COUNT}");
+        assert_eq!(e("sma(A, 0)"), count("sma"));
+        assert_eq!(e("sma(A, 2.5)"), count("sma"));
+        assert_eq!(e("sma(A, 10001)"), count("sma"));
+        assert_eq!(e("sma(A, -3)"), count("sma"));
+        assert_eq!(e("lag(A, B)"), count("lag"));
+        assert_eq!(e("ema(A, mean(A))"), count("ema"));
+        assert_eq!(
+            e("mean(2) + 3[0]"),
+            "mean needs a series",
+            "the first violation in reading order is the one named"
+        );
+    }
+
+    #[test]
+    fn series_slots_leave_out_what_a_fold_or_index_reads() {
+        let e = |t: &str| parse(t).unwrap().resolve(&mut by_s_number).unwrap();
+        assert_eq!(e("s1 / mean(s2)").series_slots(), vec![1]);
+        assert_eq!(e("s1 / mean(s2)").slots(), vec![1, 2]);
+        assert_eq!(e("mean(s1) - s2[0]").series_slots(), Vec::<u8>::new());
+        assert_eq!(e("min(s1, s2)").series_slots(), vec![1, 2]);
+        assert_eq!(e("min(s2)").series_slots(), Vec::<u8>::new());
+        assert_eq!(e("sma(diff(s3), 5) + s1").series_slots(), vec![1, 3]);
+        assert_eq!(e("mean(s1 * s2) * s1").series_slots(), vec![1]);
+        assert_eq!(e("log(s2) + s2").series_slots(), vec![2]);
+    }
+
+    #[test]
+    fn count_arg_reads_a_validated_count_and_nothing_else() {
+        let args = |t: &str| match parse(t).unwrap() {
+            Ast::Call(_, args) => args,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(count_arg(&args("sma(A, 20)")), Some(20));
+        assert_eq!(count_arg(&args("diff(A)")), None);
+        assert_eq!(count_arg(&args("sma(A, 0)")), None);
+        assert_eq!(count_arg(&args("sma(A, B)")), None);
     }
 }
