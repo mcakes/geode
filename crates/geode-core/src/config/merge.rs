@@ -42,6 +42,9 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         // One complete definition per market-data panel name: a partial
         // override must not inherit a lower layer's columns and formats.
         "panels" => Some(1),
+        // One complete shape per scenario tile kind: a partial override
+        // must not inherit a lower layer's columns, value or diff.
+        "scenarios" => Some(1),
         _ => None,
     }
 }
