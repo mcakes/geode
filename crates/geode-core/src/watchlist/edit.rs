@@ -95,12 +95,15 @@ pub fn add(
             Some(Origin::Rules(rules)) => {
                 return Err(format!("{name} is already here from {}", rule_label(rules)));
             }
-            Some(Origin::Excluded { .. }) => change(
+            // Restore when a rule will supply the name again; an orphan
+            // exclusion (no rule, not manual) is included by hand instead,
+            // or clearing it would leave the name nowhere.
+            Some(Origin::Excluded { rules, manual }) => change(
                 &mut next,
                 &mut entry,
                 name,
                 Manual {
-                    included: manual_of(list, name).included,
+                    included: *manual || rules.is_empty(),
                     excluded: false,
                 },
             ),
@@ -243,6 +246,27 @@ mod tests {
         assert_eq!(next.include, vec!["NDX"]);
         assert!(next.exclude.is_empty());
         assert_eq!(entry.changes.len(), 2);
+    }
+
+    #[test]
+    fn add_of_an_orphan_exclusion_includes_it_by_hand() {
+        // No rule supplies HSI, so clearing the exclusion alone would leave
+        // the name nowhere; it is included by hand instead.
+        let list = Watchlist {
+            exclude: s(&["HSI"]),
+            ..Default::default()
+        };
+        let members = vec![member(
+            "HSI",
+            Origin::Excluded {
+                rules: vec![],
+                manual: false,
+            },
+        )];
+        let (next, entry) = add(&list, &members, &s(&["HSI"])).unwrap();
+        assert_eq!(next.include, vec!["HSI"]);
+        assert!(next.exclude.is_empty());
+        assert_eq!(entry.changes.len(), 1);
     }
 
     #[test]
