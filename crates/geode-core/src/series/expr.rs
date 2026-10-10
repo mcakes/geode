@@ -1,9 +1,12 @@
-//! The expression language: arithmetic
-//! over named series, nothing else. A hand-written recursive-descent
+//! The expression language: arithmetic over named series, functions
+//! that fold a series to a number or map it to another series, and
+//! `[k]` reading one value of a series. A hand-written recursive-descent
 //! parser, pure; the resolved tree names slots only, so an identity
 //! never reaches the compiler as text. A reference is a series name —
 //! there is no slot handle — so an expression can name only a source
-//! series, never another expression.
+//! series, never another expression. A word followed immediately by
+//! `(` is a call and must name a [`Function`]; any other word is a
+//! series name, so a series called `max` still resolves.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -11,6 +14,133 @@ pub enum Op {
     Sub,
     Mul,
     Div,
+}
+
+/// The functions the language knows. The set is closed: the tokenizer
+/// refuses any other word before a `(` by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Function {
+    First,
+    Last,
+    Min,
+    Max,
+    Mean,
+    Median,
+    Std,
+    Sum,
+    Count,
+    Abs,
+    Log,
+    Exp,
+    Sqrt,
+    Diff,
+    Pct,
+    Cum,
+    Lag,
+    Sma,
+    Ema,
+    Rmin,
+    Rmax,
+    Rstd,
+    Z,
+}
+
+/// How a function treats its arguments: what the shape check and the
+/// compiler both read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// One series in, one number out, over the queried range.
+    Fold,
+    /// Bucket by bucket; a scalar in gives a scalar out.
+    Pointwise,
+    /// `min`/`max`: a fold with one argument, pointwise with two or more.
+    MinMax,
+    /// Series to series along the bucket order, with or without a count.
+    Along { count: bool },
+    /// Series to series over the last `n` points.
+    Rolling,
+}
+
+impl Function {
+    pub const ALL: [Function; 23] = [
+        Function::First,
+        Function::Last,
+        Function::Min,
+        Function::Max,
+        Function::Mean,
+        Function::Median,
+        Function::Std,
+        Function::Sum,
+        Function::Count,
+        Function::Abs,
+        Function::Log,
+        Function::Exp,
+        Function::Sqrt,
+        Function::Diff,
+        Function::Pct,
+        Function::Cum,
+        Function::Lag,
+        Function::Sma,
+        Function::Ema,
+        Function::Rmin,
+        Function::Rmax,
+        Function::Rstd,
+        Function::Z,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Function::First => "first",
+            Function::Last => "last",
+            Function::Min => "min",
+            Function::Max => "max",
+            Function::Mean => "mean",
+            Function::Median => "median",
+            Function::Std => "std",
+            Function::Sum => "sum",
+            Function::Count => "count",
+            Function::Abs => "abs",
+            Function::Log => "log",
+            Function::Exp => "exp",
+            Function::Sqrt => "sqrt",
+            Function::Diff => "diff",
+            Function::Pct => "pct",
+            Function::Cum => "cum",
+            Function::Lag => "lag",
+            Function::Sma => "sma",
+            Function::Ema => "ema",
+            Function::Rmin => "rmin",
+            Function::Rmax => "rmax",
+            Function::Rstd => "rstd",
+            Function::Z => "z",
+        }
+    }
+
+    pub fn parse(word: &str) -> Option<Function> {
+        Function::ALL.iter().copied().find(|f| f.name() == word)
+    }
+
+    pub fn kind(self) -> Kind {
+        match self {
+            Function::First
+            | Function::Last
+            | Function::Mean
+            | Function::Median
+            | Function::Std
+            | Function::Sum
+            | Function::Count => Kind::Fold,
+            Function::Min | Function::Max => Kind::MinMax,
+            Function::Abs | Function::Log | Function::Exp | Function::Sqrt => Kind::Pointwise,
+            Function::Diff | Function::Pct | Function::Cum => Kind::Along { count: false },
+            Function::Lag => Kind::Along { count: true },
+            Function::Sma
+            | Function::Ema
+            | Function::Rmin
+            | Function::Rmax
+            | Function::Rstd
+            | Function::Z => Kind::Rolling,
+        }
+    }
 }
 
 /// The tree, generic over how a reference is spelled: `RefName` as
@@ -21,6 +151,12 @@ pub enum Ast<R> {
     Num(f64),
     Neg(Box<Ast<R>>),
     Bin(Op, Box<Ast<R>>, Box<Ast<R>>),
+    /// A call with its arguments as written; a count argument is a
+    /// `Num` the shape check validates.
+    Call(Function, Vec<Ast<R>>),
+    /// `x[k]`: the k-th non-null value from the start (`k >= 0`) or
+    /// from the end (`k < 0`).
+    Index(Box<Ast<R>>, i64),
 }
 
 /// A reference as typed: an identity with an optional `@source`. Its
@@ -52,19 +188,24 @@ pub struct ParseError {
     pub message: String,
 }
 
-/// Error text describing the supported arithmetic grammar.
-pub const ARITHMETIC_ONLY: &str = "arithmetic only: + - * / and parentheses";
+/// Error text for a character the grammar has no use for.
+pub const NOT_IN_GRAMMAR: &str = "only + - * /, parentheses, [k] and functions are allowed";
 
-/// The deepest a unary-minus/parenthesis nest may go before `parse`
-/// refuses it. Bounds the recursion in `Parser::factor` (a pasted wall
-/// of parentheses would otherwise overflow the stack — an abort, not a
-/// panic, nothing can contain). It does NOT bound the tree on its own:
-/// `expr`/`term` fold left-deep iteratively, so `1+1+…` builds a tree
-/// as deep as it is long while nesting nothing. `MAX_TOKENS` is what
-/// bounds the node count, and with it every recursion OVER the tree —
-/// `Ast::resolve`, `Expr::collect_slots`, the compiler's `lower` and
-/// the `Box` drop glue. The two bounds together are the guarantee;
-/// this one is kept because it gives the better message for nesting.
+/// The largest `k` an index may name, either sign. Past the series it
+/// reads NULL; the bound only keeps the literal sane.
+pub const MAX_INDEX: i64 = 1_000_000;
+
+/// The deepest a unary-minus/parenthesis/call/index nest may go before
+/// `parse` refuses it. Bounds the recursion in `Parser::factor` (a
+/// pasted wall of parentheses would otherwise overflow the stack — an
+/// abort, not a panic, nothing can contain). It does NOT bound the tree
+/// on its own: `expr`/`term` fold left-deep iteratively, so `1+1+…`
+/// builds a tree as deep as it is long while nesting nothing.
+/// `MAX_TOKENS` is what bounds the node count, and with it every
+/// recursion OVER the tree — `Ast::resolve`, `Expr::collect_slots`, the
+/// compiler's lowering and the `Box` drop glue. The two bounds together
+/// are the guarantee; this one is kept because it gives the better
+/// message for nesting.
 pub const MAX_DEPTH: usize = 64;
 
 /// The most tokens an expression may carry. The tree has at most one
@@ -76,12 +217,18 @@ pub const MAX_TOKENS: usize = 256;
 enum Token {
     Num(f64),
     Ref(RefName),
+    /// A function name with `(` right behind it; the `(` is its own
+    /// token.
+    Call(Function),
     Plus,
     Minus,
     Star,
     Slash,
     LParen,
     RParen,
+    LBracket,
+    RBracket,
+    Comma,
 }
 
 /// A character that can open a reference's identity. Public so a name
@@ -137,6 +284,18 @@ fn tokenize(text: &str) -> Result<Vec<(usize, Token)>, ParseError> {
                 i += 1;
                 Token::RParen
             }
+            '[' => {
+                i += 1;
+                Token::LBracket
+            }
+            ']' => {
+                i += 1;
+                Token::RBracket
+            }
+            ',' => {
+                i += 1;
+                Token::Comma
+            }
             c if c.is_ascii_digit() => {
                 while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
                     i += 1;
@@ -165,39 +324,47 @@ fn tokenize(text: &str) -> Result<Vec<(usize, Token)>, ParseError> {
                     i += 1;
                 }
                 let word = &text[start..i];
-                // A `(` right after a word is a function call, which is
-                // not arithmetic.
+                // A `(` right after a word makes it a call, and only a
+                // known function may be called; the `(` is left for the
+                // parser. Any other word, `(` or not behind a space, is a
+                // series name.
                 if i < bytes.len() && bytes[i] == b'(' {
-                    return Err(ParseError {
-                        position: i,
-                        message: ARITHMETIC_ONLY.into(),
-                    });
-                }
-                let source = if i < bytes.len() && bytes[i] == b'@' {
-                    i += 1;
-                    let s = i;
-                    while i < bytes.len() && is_source_char(bytes[i] as char) {
-                        i += 1;
+                    match Function::parse(word) {
+                        Some(f) => Token::Call(f),
+                        None => {
+                            return Err(ParseError {
+                                position: start,
+                                message: format!("unknown function '{word}'"),
+                            });
+                        }
                     }
-                    if i == s {
-                        return Err(ParseError {
-                            position: i,
-                            message: "a source name must follow '@'".into(),
-                        });
-                    }
-                    Some(text[s..i].to_string())
                 } else {
-                    None
-                };
-                Token::Ref(RefName {
-                    identity: word.to_string(),
-                    source,
-                })
+                    let source = if i < bytes.len() && bytes[i] == b'@' {
+                        i += 1;
+                        let s = i;
+                        while i < bytes.len() && is_source_char(bytes[i] as char) {
+                            i += 1;
+                        }
+                        if i == s {
+                            return Err(ParseError {
+                                position: i,
+                                message: "a source name must follow '@'".into(),
+                            });
+                        }
+                        Some(text[s..i].to_string())
+                    } else {
+                        None
+                    };
+                    Token::Ref(RefName {
+                        identity: word.to_string(),
+                        source,
+                    })
+                }
             }
             _ => {
                 return Err(ParseError {
                     position: start,
-                    message: ARITHMETIC_ONLY.into(),
+                    message: NOT_IN_GRAMMAR.into(),
                 });
             }
         };
@@ -256,15 +423,58 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Unary minus over a postfix chain: a primary and its `[k]`s, left
+    /// to right. `-A[0]` is the negation of the index.
     fn factor(&mut self) -> Result<Ast<RefName>, ParseError> {
         let at = self.here();
-        match self.bump() {
-            Some(Token::Minus) => {
-                self.enter_nest(at)?;
-                let inner = self.factor()?;
-                self.depth -= 1;
-                Ok(Ast::Neg(Box::new(inner)))
+        if let Some(Token::Minus) = self.peek() {
+            self.bump();
+            self.enter_nest(at)?;
+            let inner = self.factor()?;
+            self.depth -= 1;
+            return Ok(Ast::Neg(Box::new(inner)));
+        }
+        let mut node = self.primary()?;
+        while let Some(Token::LBracket) = self.peek() {
+            let at = self.here();
+            self.bump();
+            self.enter_nest(at)?;
+            let k = self.index()?;
+            self.depth -= 1;
+            node = Ast::Index(Box::new(node), k);
+        }
+        Ok(node)
+    }
+
+    /// The `k` and `]` after a `[`: a whole number, optionally negative,
+    /// within `MAX_INDEX`.
+    fn index(&mut self) -> Result<i64, ParseError> {
+        let at = self.here();
+        let negative = matches!(self.peek(), Some(Token::Minus));
+        if negative {
+            self.bump();
+        }
+        let k = match self.bump() {
+            Some(Token::Num(n)) if n.fract() == 0.0 && *n <= MAX_INDEX as f64 => *n as i64,
+            _ => {
+                return Err(ParseError {
+                    position: at,
+                    message: format!("[k] takes a whole number up to {MAX_INDEX}"),
+                });
             }
+        };
+        match self.bump() {
+            Some(Token::RBracket) => Ok(if negative { -k } else { k }),
+            _ => Err(ParseError {
+                position: self.here(),
+                message: "expected ']'".into(),
+            }),
+        }
+    }
+
+    fn primary(&mut self) -> Result<Ast<RefName>, ParseError> {
+        let at = self.here();
+        match self.bump() {
             Some(Token::LParen) => {
                 self.enter_nest(at)?;
                 let inner = self.expr()?;
@@ -279,18 +489,43 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Num(n)) => Ok(Ast::Num(*n)),
             Some(Token::Ref(r)) => Ok(Ast::Ref(r.clone())),
-            Some(_) => Err(ParseError {
-                position: at,
-                message: "expected a value".into(),
-            }),
-            None => Err(ParseError {
+            Some(Token::Call(f)) => {
+                // The tokenizer makes a call only of a word with `(`
+                // right behind it, so the paren is the next token.
+                let open = self.here();
+                match self.bump() {
+                    Some(Token::LParen) => {}
+                    _ => {
+                        return Err(ParseError {
+                            position: open,
+                            message: "expected '('".into(),
+                        });
+                    }
+                }
+                self.enter_nest(open)?;
+                let mut args = vec![self.expr()?];
+                while let Some(Token::Comma) = self.peek() {
+                    self.bump();
+                    args.push(self.expr()?);
+                }
+                self.depth -= 1;
+                match self.bump() {
+                    Some(Token::RParen) => Ok(Ast::Call(*f, args)),
+                    _ => Err(ParseError {
+                        position: self.here(),
+                        message: "expected ')'".into(),
+                    }),
+                }
+            }
+            Some(_) | None => Err(ParseError {
                 position: at,
                 message: "expected a value".into(),
             }),
         }
     }
 
-    /// Enters one level of `-`/`(` nesting, refusing past `MAX_DEPTH`.
+    /// Enters one level of `-`/`(`/call/`[` nesting, refusing past
+    /// `MAX_DEPTH`.
     fn enter_nest(&mut self, at: usize) -> Result<(), ParseError> {
         if self.depth >= MAX_DEPTH {
             return Err(ParseError {
@@ -328,17 +563,28 @@ pub fn parse(text: &str) -> Result<Ast<RefName>, ParseError> {
 }
 
 impl<R> Ast<R> {
-    /// Map every reference through `f`; the first `None` is the error,
-    /// naming the reference as typed.
-    pub fn resolve(self, f: &mut impl FnMut(&R) -> Option<u8>) -> Result<Expr, R> {
+    /// Map every reference through `lookup`; the first `None` is the
+    /// error, naming the reference as typed.
+    pub fn resolve(self, lookup: &mut impl FnMut(&R) -> Option<u8>) -> Result<Expr, R> {
         Ok(match self {
-            Ast::Ref(r) => match f(&r) {
+            Ast::Ref(r) => match lookup(&r) {
                 Some(slot) => Ast::Ref(slot),
                 None => return Err(r),
             },
             Ast::Num(n) => Ast::Num(n),
-            Ast::Neg(inner) => Ast::Neg(Box::new(inner.resolve(f)?)),
-            Ast::Bin(op, l, r) => Ast::Bin(op, Box::new(l.resolve(f)?), Box::new(r.resolve(f)?)),
+            Ast::Neg(inner) => Ast::Neg(Box::new(inner.resolve(lookup)?)),
+            Ast::Bin(op, l, r) => Ast::Bin(
+                op,
+                Box::new(l.resolve(lookup)?),
+                Box::new(r.resolve(lookup)?),
+            ),
+            Ast::Call(f, args) => Ast::Call(
+                f,
+                args.into_iter()
+                    .map(|a| a.resolve(lookup))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            Ast::Index(x, k) => Ast::Index(Box::new(x.resolve(lookup)?), k),
         })
     }
 }
@@ -362,6 +608,12 @@ impl Expr {
                 l.collect_slots(out);
                 r.collect_slots(out);
             }
+            Ast::Call(_, args) => {
+                for a in args {
+                    a.collect_slots(out);
+                }
+            }
+            Ast::Index(x, _) => x.collect_slots(out),
         }
     }
 }
@@ -369,7 +621,8 @@ impl Expr {
 /// Every reference in `text`, in text order, with its byte span. What a
 /// caller that rewrites names inside an expression walks, so it follows
 /// the tokenizer's word boundaries (`s1.x` is one name, `2s1` is a
-/// number then a name) rather than a guess at them.
+/// number then a name) rather than a guess at them. A call is not a
+/// reference.
 pub fn references(text: &str) -> Result<Vec<(std::ops::Range<usize>, RefName)>, ParseError> {
     Ok(tokenize(text)?
         .into_iter()
@@ -494,16 +747,16 @@ mod tests {
     }
 
     #[test]
-    fn foreign_tokens_are_refused_with_the_arithmetic_only_message() {
-        for text in ["A ^ 2", "A % 2", "log(A)", "A, B", "A & B", "max(A, B)"] {
+    fn foreign_tokens_are_refused_with_the_grammar_message() {
+        for text in ["A ^ 2", "A % 2", "A & B", "A ! B"] {
             let err = parse(text).unwrap_err();
-            assert_eq!(err.message, ARITHMETIC_ONLY, "{text}");
+            assert_eq!(err.message, NOT_IN_GRAMMAR, "{text}");
         }
         for text in ["", "A +", "(A", "A B", "1.", "+ A", "* 2"] {
             assert!(parse(text).is_err(), "{text:?} must not parse");
         }
         assert_eq!(parse("A ^ 2").unwrap_err().position, 2);
-        assert_eq!(parse("a@b@c").unwrap_err().message, ARITHMETIC_ONLY);
+        assert_eq!(parse("a@b@c").unwrap_err().message, NOT_IN_GRAMMAR);
         assert_eq!(parse("a@b@c").unwrap_err().position, 3);
     }
 
@@ -520,6 +773,20 @@ mod tests {
         );
         let text = "(".repeat(60) + "A" + &")".repeat(60);
         assert!(parse(&text).is_ok(), "60 levels must still parse");
+        // A call is three tokens per level (`abs`, `(`, `)`) and an
+        // index three per link, so 80 levels keep both inside
+        // `MAX_TOKENS` while still past `MAX_DEPTH`.
+        let text = "abs(".repeat(80) + "A" + &")".repeat(80);
+        let err = parse(&text).unwrap_err();
+        assert_eq!(
+            err.message,
+            format!("expression nests too deeply (more than {MAX_DEPTH} levels)"),
+            "a call nests like a parenthesis"
+        );
+        let text = "abs(".repeat(60) + "A" + &")".repeat(60);
+        assert!(parse(&text).is_ok());
+        let text = "A".to_string() + &"[0]".repeat(80);
+        assert!(parse(&text).is_ok(), "indexes chain without nesting");
     }
 
     #[test]
@@ -572,6 +839,121 @@ mod tests {
             }
             .display(),
             "SPX.close@kdb_hist"
+        );
+    }
+
+    #[test]
+    fn calls_and_indexes_parse_into_call_and_index_nodes() {
+        let a = || Ast::Ref(id("A"));
+        assert_eq!(
+            parse("mean(A)").unwrap(),
+            Ast::Call(Function::Mean, vec![a()])
+        );
+        assert_eq!(
+            parse("sma(A, 20)").unwrap(),
+            Ast::Call(Function::Sma, vec![a(), Ast::Num(20.0)])
+        );
+        assert_eq!(
+            parse("min(A, B, 3)").unwrap(),
+            Ast::Call(Function::Min, vec![a(), Ast::Ref(id("B")), Ast::Num(3.0)])
+        );
+        assert_eq!(parse("A[0]").unwrap(), Ast::Index(Box::new(a()), 0));
+        assert_eq!(parse("A[-1]").unwrap(), Ast::Index(Box::new(a()), -1));
+        assert_eq!(
+            parse("(A / B)[2]").unwrap(),
+            Ast::Index(
+                Box::new(Ast::Bin(
+                    Op::Div,
+                    Box::new(a()),
+                    Box::new(Ast::Ref(id("B")))
+                )),
+                2
+            )
+        );
+        assert_eq!(
+            parse("-A[0]").unwrap(),
+            Ast::Neg(Box::new(Ast::Index(Box::new(a()), 0))),
+            "an index binds tighter than unary minus"
+        );
+        assert_eq!(
+            parse("A / A[0]").unwrap(),
+            Ast::Bin(
+                Op::Div,
+                Box::new(a()),
+                Box::new(Ast::Index(Box::new(a()), 0))
+            ),
+            "and tighter than division"
+        );
+        assert_eq!(
+            parse("sma(diff(A), 3)").unwrap(),
+            Ast::Call(
+                Function::Sma,
+                vec![Ast::Call(Function::Diff, vec![a()]), Ast::Num(3.0)]
+            )
+        );
+        assert_eq!(
+            parse("A[0][1]").unwrap(),
+            Ast::Index(Box::new(Ast::Index(Box::new(a()), 0)), 1),
+            "indexes chain left to right (the shape check refuses this later)"
+        );
+    }
+
+    #[test]
+    fn a_word_before_a_paren_is_a_call_and_anywhere_else_a_name() {
+        assert_eq!(parse("max").unwrap(), Ast::Ref(id("max")));
+        assert_eq!(
+            parse("max@kdb").unwrap(),
+            Ast::Ref(RefName {
+                identity: "max".into(),
+                source: Some("kdb".into())
+            })
+        );
+        assert_eq!(
+            parse("max (A)").unwrap_err().message,
+            "unexpected token",
+            "a space before the paren makes a name, not a call"
+        );
+        let err = parse("foo(A)").unwrap_err();
+        assert_eq!(err.message, "unknown function 'foo'");
+        assert_eq!(err.position, 0);
+        let err = parse("A + spx.close(2)").unwrap_err();
+        assert_eq!(err.message, "unknown function 'spx.close'");
+        assert_eq!(err.position, 4);
+    }
+
+    #[test]
+    fn malformed_calls_and_indexes_are_refused() {
+        for text in [
+            "mean(", "mean(A", "mean(A,)", "mean(,A)", "min()", "A[", "A[1", "A[1.5]", "A[]",
+            "A[B]", "A[--1]", "sma(A 3)", "A, B", "[0]",
+        ] {
+            assert!(parse(text).is_err(), "{text:?} must not parse");
+        }
+        let whole = format!("[k] takes a whole number up to {MAX_INDEX}");
+        assert_eq!(parse("A[1.5]").unwrap_err().message, whole);
+        assert_eq!(parse("A[]").unwrap_err().message, whole);
+        assert_eq!(parse("A[1000001]").unwrap_err().message, whole);
+        assert!(parse("A[1000000]").is_ok());
+        assert_eq!(parse("mean(A").unwrap_err().message, "expected ')'");
+        assert_eq!(parse("A[1").unwrap_err().message, "expected ']'");
+        assert_eq!(parse("A, B").unwrap_err().message, "unexpected token");
+    }
+
+    #[test]
+    fn references_skip_calls_and_indexes_but_keep_their_operands() {
+        let text = "sma(A@kdb, 20) / A[0] + mean(B)";
+        let refs = references(text).unwrap();
+        let spans: Vec<(&str, String)> = refs
+            .iter()
+            .map(|(span, r)| (&text[span.clone()], r.display()))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                ("A@kdb", "A@kdb".to_string()),
+                ("A", "A".to_string()),
+                ("B", "B".to_string()),
+            ]
         );
     }
 }
