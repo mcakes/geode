@@ -297,7 +297,7 @@ grain = "instrument"
             required: false,
             textual: false,
             categorical: false,
-            role: ColumnRole::Axis,
+            role: ColumnRole::document_axis(),
         });
         ds.columns.push(ColumnSpec {
             name: "param".into(),

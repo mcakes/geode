@@ -86,7 +86,7 @@ pub fn describe_column(column: &ColumnSpec) -> String {
         // and an axis or a value has no grain to name at all — a document dataset
         // declares none.
         ColumnRole::Attribute { grain: None } => out.push_str("attribute"),
-        ColumnRole::Axis => out.push_str("axis"),
+        ColumnRole::Axis { .. } => out.push_str("axis"),
         ColumnRole::Value => out.push_str("value"),
     }
     if column.required {

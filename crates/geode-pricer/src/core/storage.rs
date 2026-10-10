@@ -614,7 +614,7 @@ pub fn rows_from_snapshot(name: &str, snapshot: &Snapshot) -> Result<Option<Docu
                 spec.name.clone(),
                 decode_attribute(snapshot, &spec.name, spec.ty)?,
             )),
-            ColumnRole::Axis => out.axes.push((
+            ColumnRole::Axis { .. } => out.axes.push((
                 spec.name.clone(),
                 decode_column(snapshot, &spec.name, spec.ty)?,
             )),

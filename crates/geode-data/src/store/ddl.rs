@@ -207,7 +207,7 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
             ColumnRole::Attribute { grain: None }
             | ColumnRole::Key
             | ColumnRole::Dimension { .. }
-            | ColumnRole::Axis
+            | ColumnRole::Axis { .. }
             | ColumnRole::Value => false,
         };
         if keep {
@@ -1097,7 +1097,7 @@ mod tests {
             required: false,
             textual: false,
             categorical: false,
-            role: ColumnRole::Axis,
+            role: ColumnRole::document_axis(),
         });
         ds.columns.push(ColumnSpec {
             name: "param".into(),

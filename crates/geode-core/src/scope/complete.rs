@@ -365,7 +365,7 @@ impl ExprVocab {
                     ColumnRole::Dimension { .. } => "dimension",
                     ColumnRole::Measure { .. } => "measure",
                     ColumnRole::Attribute { .. } => "attribute",
-                    ColumnRole::Axis => "axis",
+                    ColumnRole::Axis { .. } => "axis",
                     ColumnRole::Value => "value",
                 };
                 let kind = match c.ty {

@@ -292,7 +292,7 @@ pub(super) fn schema_role_kind(role: &ColumnRole) -> Option<&'static str> {
         ColumnRole::Measure { .. } => Some("measure"),
         ColumnRole::Key | ColumnRole::Attribute { .. } => None,
         // Document family only; a measure-family view never sees these.
-        ColumnRole::Axis | ColumnRole::Value => None,
+        ColumnRole::Axis { .. } | ColumnRole::Value => None,
     }
 }
 

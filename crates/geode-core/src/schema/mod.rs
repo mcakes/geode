@@ -3,9 +3,11 @@
 //! failed rule, they drop a column or dataset, clear a flag, or retain the
 //! value with a warning; parsing is not an all-or-nothing validation gate.
 
+pub mod axis;
 mod column;
 mod grain;
 
+pub use axis::{AxisKind, AxisOrder, sort_axis_text, tenor_days};
 pub use column::{Aggregate, ColumnRole, ColumnSpec, ColumnType};
 pub use grain::Grain;
 
@@ -532,7 +534,7 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
         .filter(|c| {
             matches!(
                 c.role,
-                ColumnRole::Axis | ColumnRole::Value | ColumnRole::Attribute { grain: None }
+                ColumnRole::Axis { .. } | ColumnRole::Value | ColumnRole::Attribute { grain: None }
             )
         })
         .map(|c| c.name.clone())
@@ -867,7 +869,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
         .filter(|c| {
             matches!(
                 c.role,
-                ColumnRole::Axis | ColumnRole::Attribute { grain: None } | ColumnRole::Value
+                ColumnRole::Axis { .. } | ColumnRole::Attribute { grain: None } | ColumnRole::Value
             ) && !matches!(
                 c.ty,
                 ColumnType::F64 | ColumnType::I64 | ColumnType::Utf8 | ColumnType::Date
@@ -998,7 +1000,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                 ));
                 keep = false;
             }
-            Some(c) if c.role != ColumnRole::Axis => {
+            Some(c) if !matches!(c.role, ColumnRole::Axis { .. }) => {
                 diags.push(err(
                     format!(
                         "dataset '{name}': axis '{a}' must have role = \"axis\"; dataset dropped"
@@ -1013,7 +1015,7 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     for c in ds
         .columns
         .iter()
-        .filter(|c| c.role == ColumnRole::Axis && !ds.axes.contains(&c.name))
+        .filter(|c| matches!(c.role, ColumnRole::Axis { .. }) && !ds.axes.contains(&c.name))
     {
         diags.push(err(
             format!(
@@ -1174,7 +1176,7 @@ fn parse_column(
                 Family::Document | Family::Series | Family::Reference => None,
             },
         },
-        "axis" => ColumnRole::Axis,
+        "axis" => ColumnRole::document_axis(),
         "value" => ColumnRole::Value,
         "measure" => {
             let agg_str = table
@@ -1863,7 +1865,7 @@ role = "attribute"
         assert!(ds.is_document());
         assert_eq!(ds.key, vec!["underlying_ref".to_string()]);
         assert_eq!(ds.axes, vec!["term".to_string(), "node".to_string()]);
-        assert_eq!(ds.column("term").unwrap().role, ColumnRole::Axis);
+        assert_eq!(ds.column("term").unwrap().role, ColumnRole::document_axis());
         assert_eq!(ds.column("param").unwrap().role, ColumnRole::Value);
         // A document-level attribute carries no grain.
         assert_eq!(
