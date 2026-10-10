@@ -4,6 +4,7 @@
 //! adjustment are shared by cells, swatches, and charts.
 
 pub mod oklab;
+pub mod scale;
 pub mod values;
 
 pub use values::{
