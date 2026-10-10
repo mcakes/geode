@@ -278,7 +278,8 @@ mean(SPX.close)                 the mean itself, drawn as a flat line
 
 Folds (`first last min max mean median std sum count`) give one number
 over the whole queried range. `abs log exp sqrt` apply per point, and
-`min(A, B)`/`max(A, B)` take the lesser or greater of two series per point.
+`min(A, B)`/`max(A, B)` take the lesser or greater of two or more series or
+numbers per point.
 `diff`, `pct`, `cum` and `lag(A, n)` follow the point order, and `sma`,
 `rmin`, `rmax`, `rstd`, `z` and `ema` take `(A, n)` for a window of the last
 `n` points. A rolling value is blank until each of the last `n` points has

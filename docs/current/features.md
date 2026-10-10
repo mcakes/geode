@@ -1078,13 +1078,14 @@ arithmetic with any series operand is a series, a fold of a series is a
 scalar, and `x[k]` of a series is a scalar (`A[0]` is its first value,
 `A[-1]` its last, past either end NULL). A fold or an index of a scalar is
 refused by name (`mean needs a series`, `[k] needs a series`), as is a wrong
-argument count or a count outside 1..=10,000. A word followed immediately
-by `(` is a call and must name a function; any other word is a series name.
+argument count or a count outside 1..=10,000; a `k` beyond 1,000,000 either
+way is refused as the literal is parsed. A word followed immediately by `(`
+is a call and must name a function; any other word is a series name.
 
 | Functions | Kind | Meaning |
 |---|---|---|
 | `first last min max mean median std sum count` | fold | one number over the queried range, NULL skipped; `std` is the sample deviation |
-| `abs log exp sqrt` | pointwise | per bucket; `log` of a non-positive, `sqrt` of a negative and `exp` past the double range are NULL |
+| `abs log exp sqrt` | pointwise | per bucket; `log` of a non-positive, `sqrt` of a negative and `exp` of an argument above 709 are NULL |
 | `min(x, y, …)`, `max(x, y, …)` | pointwise | least and greatest per bucket; NULL where any operand is |
 | `diff pct cum lag(A, n)` | along | change from the previous point, that change over the previous value (NULL when it is zero), running sum, the value n points back |
 | `sma rmin rmax rstd z ema`, each `(A, n)` | rolling | over the last n points; NULL until the last n points are non-null, never a partial-window figure. `z` is `(A - sma) / rstd`; `ema` is the adjusted span-n exponentially weighted mean over the last 5n points, under the same last-n guard, and a NULL earlier in the 5n span is skipped |
@@ -1092,14 +1093,20 @@ by `(` is a call and must name a function; any other word is a series name.
 Scalars fold over the queried range, not the visible window, so a pan never
 reshapes a series and `A / A[0]` is "rebased at the range start". A series is
 its bucketed points: a bucket with no point is not a row, so "previous" skips
-gaps and a daily series' Monday `lag(A, 1)` is Friday. A series-shaped
-expression paints on the inner join of the buckets of the series it reads as
-series; a folded operand does not narrow it (`A / mean(B)` keeps every
-bucket of A). A scalar-shaped expression (`mean(A)`, `A[-1] - A[0]`) paints
-as a flat line over the union of the buckets of the series it folds. Every
-function lowers to SQL inside the one read transaction; a window over a
-window and a fold over a derived series each take an intermediate CTE of the
-slot's own, so the statistics statements repeat the expression unchanged.
+gaps and a daily series' Monday `lag(A, 1)` is Friday. An along or rolling
+function runs over the points of the series its argument reads, so
+`sma(A, 5) / B` is a five-point mean of A even where B is sparser; only the
+final expression is narrowed to the join. A series-shaped expression paints
+on the inner join of the buckets of the series it reads as series; a folded
+operand does not narrow it (`A / mean(B)` keeps every bucket of A). A
+scalar-shaped expression (`mean(A)`, `A[-1] - A[0]`) paints as a flat line
+over the union of the buckets of the series it folds. Every function lowers
+to SQL inside the one read transaction; a window over a window and a fold
+over a derived series each take an intermediate CTE of the slot's own, so
+the statistics statements repeat the expression unchanged. An expression
+whose lowered SQL would exceed 64 KiB (deep nests of guarded operators
+repeat their operand text) is refused as too large to compile rather than
+built.
 
 The expression field (`x`, or `e` on an expression) completes loaded series
 names and the function names, each written with its `(` so the caret lands

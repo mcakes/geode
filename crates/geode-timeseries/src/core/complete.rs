@@ -226,10 +226,13 @@ impl Completion {
         if !fits(line, &token) {
             return None;
         }
-        let write = Write {
-            range: token,
-            name: self.names[self.candidates[i].row].clone(),
-        };
+        let mut name = self.names[self.candidates[i].row].clone();
+        // A function completed before its own `(` keeps that one: the
+        // caret lands before it rather than between two.
+        if name.ends_with('(') && line.as_bytes().get(token.end) == Some(&b'(') {
+            name.pop();
+        }
+        let write = Write { range: token, name };
         self.token = Some(write.range.start..write.caret());
         self.caret = Some(write.caret());
         self.written = Some(i);
@@ -487,6 +490,23 @@ mod tests {
             None,
             "Enter's expansion is over series names only"
         );
+    }
+
+    /// Completing a function name whose `(` is already typed writes the
+    /// name alone, so the caret lands before the existing paren rather
+    /// than doubling it.
+    #[test]
+    fn a_function_before_its_own_paren_completes_without_a_second_one() {
+        let mut c = Completion::default();
+        c.refresh("sma(A, 3)", 2, names(&["A"]));
+        let w = c.cycle("sma(A, 3)", true).unwrap();
+        assert_eq!(w.range, 0..3);
+        assert_eq!(w.name, "sma");
+        assert_eq!(w.apply("sma(A, 3)"), ("sma(A, 3)".to_string(), 3));
+        let mut c = Completion::default();
+        c.refresh("VIX / sm", 8, names(&["VIX"]));
+        let w = c.cycle("VIX / sm", true).unwrap();
+        assert_eq!(w.name, "sma(", "no paren follows: written with its own");
     }
 
     #[test]

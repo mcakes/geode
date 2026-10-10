@@ -66,10 +66,11 @@ fn aggregate(rule: BucketRule) -> &'static str {
 }
 
 /// One expression slot's CTEs: its grid stages `s{n}_0`, `s{n}_1`, …
-/// then the final `s{n}`. A stage is added where SQL cannot nest: a
-/// window over a window, or a fold over anything but a plain source.
-/// Every stage name derives from the slot number, so two slots never
-/// collide.
+/// then the final `s{n}`. A stage is added where SQL cannot nest (a
+/// window over a window, or a fold over anything but a plain source)
+/// and where the join grid would be wrong (a window whose operand reads
+/// fewer series than the slot joins). Every stage name derives from the
+/// slot number, so two slots never collide.
 struct Lowering {
     slot: u8,
     ctes: Vec<String>,
@@ -77,10 +78,22 @@ struct Lowering {
 }
 
 /// The stage chain a series-shaped subtree is lowered on. `name` is
-/// its latest stage; a hoist advances it.
+/// its latest stage; a hoist advances it. `slots` are the series slots
+/// stage 0 joined (empty for a union grid): a window whose operand reads
+/// fewer of them must not run here, where the join has already dropped
+/// the operand's points the other series lack.
 struct Grid {
     name: String,
+    slots: Vec<u8>,
 }
+
+/// The longest lowered SQL a node may produce. Guards, division and
+/// min/max repeat their operand text, so each lowering level multiplies
+/// the text by a small constant; checking after every node reaches the
+/// cap before the next multiplication, and the largest string ever
+/// built is a few multiples of this. Without it a pasted nest thirty
+/// levels deep builds gigabytes on the UI thread.
+pub const MAX_LOWERED_SQL: usize = 64 * 1024;
 
 /// `(select … )` reading the k-th non-null value of `rel` by bucket
 /// order, from the start for `k >= 0` and from the end otherwise; past
@@ -170,7 +183,10 @@ impl Lowering {
             }
         };
         self.ctes.push(sql);
-        Grid { name }
+        Grid {
+            name,
+            slots: series,
+        }
     }
 
     /// Move `sql`, a value over `g`'s latest stage, into a column of a
@@ -213,7 +229,7 @@ impl Lowering {
     /// that pair, because a NULL is the only honest answer for a bucket
     /// whose denominator is zero.
     fn lower(&mut self, e: &Expr, g: &mut Grid) -> Result<(String, bool), StoreError> {
-        Ok(match e {
+        let (sql, windowed) = match e {
             Ast::Ref(m) => (format!("v{m}"), false),
             Ast::Num(x) => {
                 if !x.is_finite() {
@@ -240,12 +256,23 @@ impl Lowering {
                 let rel = self.fold_rel(x)?;
                 (index_sql(&rel, *k), false)
             }
-            Ast::Call(f, args) => self.call(*f, args, g)?,
-        })
+            Ast::Call(f, args) => self.call(e, *f, args, g)?,
+        };
+        if sql.len() > MAX_LOWERED_SQL {
+            return Err(refuse(format!(
+                "slot {}: expression is too large to compile",
+                self.slot
+            )));
+        }
+        Ok((sql, windowed))
     }
 
+    /// `e` is the call node itself, `f` and `args` its parts: a window
+    /// whose operand reads fewer series than `g` joined is lowered on a
+    /// grid of its own from `e`.
     fn call(
         &mut self,
+        e: &Expr,
         f: Function,
         args: &[Expr],
         g: &mut Grid,
@@ -305,6 +332,27 @@ impl Lowering {
                 ))
             }
             Kind::Along { .. } | Kind::Rolling => {
+                // A window runs over the points of the series its operand
+                // reads. On a grid that joined more series than that, the
+                // join has already dropped the operand's points the others
+                // lack, so `sma(A, 2) / B` would average two of B's dates
+                // rather than A's last two points: the call is lowered on
+                // a grid of its own and joined back as a column. The
+                // operand's grid holds every bucket this one does, so the
+                // inner join loses no row.
+                let own = first.series_slots();
+                if !own.is_empty() && own != g.slots {
+                    let rel = self.fold_rel(e)?;
+                    let k = self.stages;
+                    let name = self.stage_name();
+                    let col = format!("c{k}");
+                    self.ctes.push(format!(
+                        "{name} as (\n  select g.*, t.v as {col}\n  from {} g join {rel} t on t.b = g.b\n)",
+                        g.name
+                    ));
+                    g.name = name;
+                    return Ok((col, false));
+                }
                 let (a, windowed) = self.lower(first, g)?;
                 // SQL forbids a window inside a window: the inner value
                 // becomes a stage column first.
@@ -1542,6 +1590,92 @@ mod tests {
         assert_eq!(vals(&r, 1), vec![None, None]);
     }
 
+    /// A window runs over its operand's own points: `sma(A, 2) / B` is a
+    /// two-point mean of A even where B is sparser, and `diff(A) + B`
+    /// reads A's previous point, not the previous bucket both share.
+    #[test]
+    fn a_window_reads_its_operands_own_points_not_the_join_grid() {
+        let (_d, store) = store();
+        daily(&store, "A", &[1.0, 2.0, 3.0, 4.0, 5.0]);
+        daily(&store, "B", &[f64::NAN, 1.0, f64::NAN, 1.0, f64::NAN]);
+        let p = params(vec![
+            source(1, "A", BucketRule::Last),
+            source(2, "B", BucketRule::Last),
+            expr(3, "sma(s1, 2) / s2"),
+            expr(4, "diff(s1) + s2"),
+            expr(5, "sma(s1, 2) - sma(s2, 1)"),
+            expr(6, "sma(s1 + s2, 2)"),
+        ]);
+        let plan = compile_series(&schema(), &p).unwrap();
+        let sql = &plan.points.sql;
+        assert!(
+            sql.contains("s3_1 as (\n  select s1.b as b, s1.v as v1\n  from s1\n)")
+                && sql.contains(" g join s3_2 t on t.b = g.b\n)"),
+            "the window is staged on A's own grid and joined back: {sql}"
+        );
+        let r = run(&store, &p);
+        assert_eq!(r.buckets.len(), 5);
+        assert!(
+            close(&vals(&r, 2), &[None, Some(1.5), None, Some(3.5), None]),
+            "{:?}",
+            vals(&r, 2)
+        );
+        assert!(
+            close(&vals(&r, 3), &[None, Some(2.0), None, Some(2.0), None]),
+            "{:?}",
+            vals(&r, 3)
+        );
+        assert!(
+            close(&vals(&r, 4), &[None, Some(0.5), None, Some(2.5), None]),
+            "each side over its own points: {:?}",
+            vals(&r, 4)
+        );
+        assert!(
+            close(&vals(&r, 5), &[None, None, None, Some(4.0), None]),
+            "an argument reading both series windows over the join: {:?}",
+            vals(&r, 5)
+        );
+    }
+
+    /// A pasted nest of guards would otherwise lower to a string that
+    /// doubles per level, on the UI thread; the cap turns it into a
+    /// refusal before the next doubling. Twenty-four levels (about
+    /// 700 MiB unchecked) keep the harness's proof of this test bounded.
+    #[test]
+    fn a_nest_that_would_blow_up_the_sql_is_refused_by_size() {
+        let text = "sqrt(".repeat(24) + "s1" + &")".repeat(24);
+        let e = parse(&text).unwrap().resolve(&mut by_s_number).unwrap();
+        let err = compile_series(
+            &schema(),
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                SeriesSpec {
+                    slot: 2,
+                    kind: SlotKind::Expr(e),
+                },
+            ]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("too large"), "{err}");
+        let text = "sqrt(".repeat(8) + "s1" + &")".repeat(8);
+        let e = parse(&text).unwrap().resolve(&mut by_s_number).unwrap();
+        assert!(
+            compile_series(
+                &schema(),
+                &params(vec![
+                    source(1, "A", BucketRule::Last),
+                    SeriesSpec {
+                        slot: 2,
+                        kind: SlotKind::Expr(e),
+                    },
+                ])
+            )
+            .is_ok(),
+            "eight levels are inside the cap"
+        );
+    }
+
     #[test]
     fn rolling_functions_are_null_until_their_window_is_full_of_points() {
         let (_d, store) = store();
@@ -1560,6 +1694,7 @@ mod tests {
                 expr(8, "z(s1, 1)"),
                 expr(9, "sma(s1 * 0 + 5, 2)"),
                 expr(10, "sma(s1, 10000)"),
+                expr(11, "z(s1 * 0 + 5, 2)"),
             ]),
         );
         assert_eq!(r.buckets.len(), 4);
@@ -1601,13 +1736,18 @@ mod tests {
         );
         assert!(
             close(&vals(&r, 8), &[None, Some(5.0), Some(5.0), Some(5.0)]),
-            "a constant has a mean and no z: {:?}",
+            "a constant has a mean: {:?}",
             vals(&r, 8)
         );
         assert_eq!(
             vals(&r, 9),
             vec![None; 4],
             "a window longer than the series is all gaps, not an error"
+        );
+        assert_eq!(
+            vals(&r, 10),
+            vec![None; 4],
+            "a zero deviation is a gap, so a constant has no z"
         );
     }
 

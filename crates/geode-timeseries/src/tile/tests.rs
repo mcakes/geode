@@ -2267,8 +2267,11 @@ fn enter_refuses_a_shape_error_inline_and_commits_a_function_expression(
     assert!(!h.dispatch_handled(&mut vcx, "commit", None));
     assert!(h.popup_is_expr(&vcx));
     assert_eq!(h.expr_error(&vcx).as_deref(), Some("mean needs a series"));
+    // Typed, not set: `[`, `]`, `(`, `)` and `,` travel the key route.
     let text = "SPX.close / SPX.close[0] + sma(VIX, 20)";
-    h.set_input_text(&mut vcx, text);
+    h.set_input_text(&mut vcx, "");
+    vcx.simulate_input(text);
+    assert_eq!(h.input_text(&vcx), text);
     h.dispatch(&mut vcx, "commit", None);
     assert!(h.popup_is_none(&vcx));
     assert_eq!(h.model(&vcx).slots()[2].text.as_deref(), Some(text));

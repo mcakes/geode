@@ -21530,6 +21530,27 @@ run_mutation "series query: pct divides by a zero previous value" \
   geode-data \
   a_zero_previous_value_is_a_gap_in_pct
 
+# A window runs over the points of the series its operand reads, not
+# over the slot's join grid. Lower it on the join and `sma(A, 2) / B`
+# averages the two JOINED rows of A (two of B's dates) where B is
+# sparser: a plausible wrong number, which the test reads back.
+run_mutation "series query: a window runs over the join grid" \
+  crates/geode-data/src/query/series.rs \
+  '                if !own.is_empty() && own != g.slots {' \
+  '                if false {' \
+  geode-data \
+  a_window_reads_its_operands_own_points_not_the_join_grid
+
+# Guards and division repeat their operand text, so a deep nest lowers
+# to a string that doubles per level, on the UI thread. Drop the cap
+# and the compile builds it instead of refusing.
+run_mutation "series query: the lowered SQL is unbounded" \
+  crates/geode-data/src/query/series.rs \
+  '        if sql.len() > MAX_LOWERED_SQL {' \
+  '        if false {' \
+  geode-data \
+  a_nest_that_would_blow_up_the_sql_is_refused_by_size
+
 # The shape check runs before any name is looked up, so `mean(2)` is
 # refused by the function's name. Drop its result and the expression
 # resolves (it holds no name to miss) and is sent to the data tier.
