@@ -338,17 +338,32 @@ impl Lowering {
                 let n = need(n)?;
                 format!("lag({a}, {n}) {ord}")
             }
-            Function::Sma
-            | Function::Ema
-            | Function::Rmin
-            | Function::Rmax
-            | Function::Rstd
-            | Function::Z => {
+            Function::Sma | Function::Rmin | Function::Rmax | Function::Rstd | Function::Z => {
+                let n = need(n)?;
+                let w = format!(
+                    "over (order by b rows between {} preceding and current row)",
+                    n - 1
+                );
+                // NULL until the window holds n non-null points: never a
+                // partial-window figure that reads as a full one.
+                let full = format!("count({a}) {w} = {n}");
+                match f {
+                    Function::Sma => format!("(case when {full} then avg({a}) {w} end)"),
+                    Function::Rmin => format!("(case when {full} then min({a}) {w} end)"),
+                    Function::Rmax => format!("(case when {full} then max({a}) {w} end)"),
+                    Function::Rstd => {
+                        format!("(case when {full} then stddev_samp({a}) {w} end)")
+                    }
+                    _ => format!(
+                        "(case when {full} and stddev_samp({a}) {w} > 0 then (({a}) - avg({a}) {w}) / stddev_samp({a}) {w} end)"
+                    ),
+                }
+            }
+            Function::Ema => {
                 let _ = (need(n)?, g);
                 return Err(refuse(format!(
-                    "slot {}: {} is not lowered yet",
-                    self.slot,
-                    f.name()
+                    "slot {}: ema is not lowered yet",
+                    self.slot
                 )));
             }
             _ => unreachable!("window is called for along and rolling functions only"),
@@ -1505,6 +1520,103 @@ mod tests {
             &params(vec![source(1, "A", BucketRule::Last), expr(2, "pct(s1)")]),
         );
         assert_eq!(vals(&r, 1), vec![None, None]);
+    }
+
+    #[test]
+    fn rolling_functions_are_null_until_their_window_is_full_of_points() {
+        let (_d, store) = store();
+        // Points on Jan 5, 6, 8, 9.
+        daily(&store, "A", &[1.0, 2.0, f64::NAN, 4.0, 8.0]);
+        let r = run(
+            &store,
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                expr(2, "sma(s1, 2)"),
+                expr(3, "rmin(s1, 3)"),
+                expr(4, "rmax(s1, 3)"),
+                expr(5, "rstd(s1, 2)"),
+                expr(6, "z(s1, 2)"),
+                expr(7, "sma(diff(s1), 2)"),
+                expr(8, "z(s1, 1)"),
+                expr(9, "sma(s1 * 0 + 5, 2)"),
+                expr(10, "sma(s1, 10000)"),
+            ]),
+        );
+        assert_eq!(r.buckets.len(), 4);
+        assert!(
+            close(&vals(&r, 1), &[None, Some(1.5), Some(3.0), Some(6.0)]),
+            "the Jan 8 window is Jan 6 and Jan 8: {:?}",
+            vals(&r, 1)
+        );
+        assert_eq!(vals(&r, 2), vec![None, None, Some(1.0), Some(2.0)]);
+        assert_eq!(vals(&r, 3), vec![None, None, Some(4.0), Some(8.0)]);
+        assert!(
+            close(
+                &vals(&r, 4),
+                &[
+                    None,
+                    Some(0.5f64.sqrt()),
+                    Some(2f64.sqrt()),
+                    Some(8f64.sqrt())
+                ]
+            ),
+            "{:?}",
+            vals(&r, 4)
+        );
+        let z = 0.5 / 0.5f64.sqrt();
+        assert!(
+            close(&vals(&r, 5), &[None, Some(z), Some(z), Some(z)]),
+            "{:?}",
+            vals(&r, 5)
+        );
+        assert!(
+            close(&vals(&r, 6), &[None, None, Some(1.5), Some(3.0)]),
+            "a NULL inside the window is not a point: {:?}",
+            vals(&r, 6)
+        );
+        assert_eq!(
+            vals(&r, 7),
+            vec![None; 4],
+            "a deviation over one point is NULL, so z is"
+        );
+        assert!(
+            close(&vals(&r, 8), &[None, Some(5.0), Some(5.0), Some(5.0)]),
+            "a constant has a mean and no z: {:?}",
+            vals(&r, 8)
+        );
+        assert_eq!(
+            vals(&r, 9),
+            vec![None; 4],
+            "a window longer than the series is all gaps, not an error"
+        );
+    }
+
+    #[test]
+    fn statistics_run_over_a_rolling_slot_and_an_all_null_window_has_none() {
+        let (_d, store) = store();
+        daily(&store, "A", &[1.0, 2.0, f64::NAN, 4.0, 8.0]);
+        let mut p = params(vec![
+            source(1, "A", BucketRule::Last),
+            expr(2, "sma(s1, 2)"),
+            expr(3, "lag(s1, 3)"),
+        ]);
+        p.percentiles = vec![0.5];
+        p.bins = Some(4);
+        let r = run(&store, &p);
+        // The window is Jan 6..Jan 9 (half-open): sma is 1.5 on Jan 6 and
+        // 3 on Jan 8; lag(3) has no value before Jan 9.
+        assert_eq!(r.slots[1].percentiles, vec![(0.5, 2.25)]);
+        assert_eq!(r.slots[1].bins.len(), 4);
+        assert_eq!(
+            r.slots[1].bins.iter().map(|b| b.2).collect::<Vec<_>>(),
+            vec![1, 0, 0, 1]
+        );
+        assert_eq!(
+            r.slots[2].percentiles,
+            vec![],
+            "a window of NULLs has no percentile"
+        );
+        assert_eq!(r.slots[2].bins, vec![], "and no bins");
     }
 
     #[test]
