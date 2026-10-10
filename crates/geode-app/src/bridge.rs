@@ -10930,6 +10930,47 @@ grain = "underlying"
         }
 
         #[gpui::test]
+        fn a_definition_change_followed_by_busy_drops_the_old_answer(
+            cx: &mut gpui::TestAppContext,
+        ) {
+            let window = open_test_window(cx, test_shell_services());
+            let (handle, rx) = DataHandle::for_tests();
+            let cache = Rc::new(WatchlistCache::new(handle.clone()));
+            cx.update(|cx| cache.set_definitions(folded_over("risk"), window, cx));
+            let t = watchlist_tag(&rx);
+            let key = cache.key_of("a").unwrap();
+            // The queue is full when the changed definition is refreshed.
+            for _ in 0..REQUEST_BOUND {
+                assert!(handle.cancel(QueryKey(1)));
+            }
+            cx.update(|cx| cache.set_definitions(folded_over("cvi"), window, cx));
+            assert_eq!(cache.retry_count(), 1, "the refused refresh waits");
+            cx.update(|cx| cache.answer(ok(key, t, "a", "OLD"), cx));
+            cx.read(|cx| {
+                let state = &cx.global::<WatchlistGlobal>().0.lists["a"];
+                assert_eq!(
+                    state.status,
+                    Status::Resolving,
+                    "the old definition's answer is not the new one's"
+                );
+                assert!(state.members.is_empty());
+                assert_eq!(state.definition.include, vec!["SPX"]);
+            });
+            while rx.try_recv().is_ok() {}
+            cx.executor()
+                .advance_clock(WATCHLIST_RETRY_DELAY + std::time::Duration::from_millis(10));
+            cx.run_until_parked();
+            let u = watchlist_tag(&rx);
+            assert!(u > t);
+            cx.update(|cx| cache.answer(ok(key, u, "a", "NEW"), cx));
+            cx.read(|cx| {
+                let state = &cx.global::<WatchlistGlobal>().0.lists["a"];
+                assert_eq!(state.status, Status::Current);
+                assert_eq!(state.members, vec![manual("NEW")]);
+            });
+        }
+
+        #[gpui::test]
         fn two_lists_get_two_keys_and_a_refresh_of_one_does_not_touch_the_other(
             cx: &mut gpui::TestAppContext,
         ) {

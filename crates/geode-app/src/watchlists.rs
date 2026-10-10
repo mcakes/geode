@@ -66,6 +66,7 @@ pub fn fold_watchlists(
         return (BTreeMap::new(), Vec::new());
     };
     let (lists, mut diags) = geode_core::watchlist::from_doc(doc);
+    // `geode_core::config` exports no constant for the scopes doc.
     let saved = config
         .doc("scopes")
         .map(|d| geode_core::scopes::saved_scopes_from_doc(d, schema, dims).0)
@@ -117,9 +118,16 @@ pub struct WatchlistCache {
     /// list defined again under the same name continues its tags and the
     /// answer to its old definition, if still on its way, is dropped.
     tags: RefCell<HashMap<String, u64>>,
+    /// Per list, the last tag submitted for a definition since replaced or
+    /// removed: an answer at or below it belongs to that old definition and
+    /// is dropped, even while it is still the latest tag because the new
+    /// definition's refresh was refused and waits on its retry.
+    floor: RefCell<HashMap<String, u64>>,
     /// Each list's own key, allocated monotonically from the range.
     keys: RefCell<HashMap<String, QueryKey>>,
     next_key: Cell<u64>,
+    /// Lists refused a key, so the exhausted range is logged once each.
+    unkeyed: RefCell<HashSet<String>>,
     /// Lists with a retry timer armed: at most one each. The timer owns its
     /// entry: it clears it when it fires, whether or not the list still
     /// exists, so a list removed and re-added keeps the one timer.
@@ -128,7 +136,7 @@ pub struct WatchlistCache {
     failing: RefCell<HashSet<String>>,
 }
 
-pub const WATCHLIST_RETRY_DELAY: Duration = Duration::from_secs(1);
+pub(crate) const WATCHLIST_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 impl WatchlistCache {
     pub fn new(handle: DataHandle) -> WatchlistCache {
@@ -136,8 +144,10 @@ impl WatchlistCache {
             handle,
             folded: RefCell::default(),
             tags: RefCell::default(),
+            floor: RefCell::default(),
             keys: RefCell::default(),
             next_key: Cell::new(0),
+            unkeyed: RefCell::default(),
             retry: RefCell::default(),
             failing: RefCell::default(),
         }
@@ -154,6 +164,16 @@ impl WatchlistCache {
     ) {
         let diff = diff_definitions(&self.folded.borrow(), &folded);
         *self.folded.borrow_mut() = folded;
+        {
+            // Whatever was submitted for a replaced or removed definition
+            // is now beneath the floor, whether or not its refresh is
+            // accepted before that answer arrives.
+            let tags = self.tags.borrow();
+            let mut floor = self.floor.borrow_mut();
+            for name in diff.resolve.iter().chain(&diff.removed) {
+                floor.insert(name.clone(), tags.get(name).copied().unwrap_or(0));
+            }
+        }
         for name in &diff.removed {
             // A list defined again fails afresh: its first failure warns.
             self.failing.borrow_mut().remove(name);
@@ -167,6 +187,8 @@ impl WatchlistCache {
             let folded = self.folded.borrow();
             for (name, f) in folded.iter() {
                 let resolving = diff.resolve.contains(name);
+                // A new list is always in `diff.resolve`, which fills its
+                // `rule_errors` below.
                 let state = next
                     .lists
                     .entry(name.clone())
@@ -174,7 +196,7 @@ impl WatchlistCache {
                         definition: f.list.clone(),
                         layer: f.layer,
                         shadowed: f.shadowed,
-                        rule_errors: f.errors.clone(),
+                        rule_errors: Vec::new(),
                         members: Vec::new(),
                         resolved_at: None,
                         status: Status::Resolving,
@@ -218,11 +240,13 @@ impl WatchlistCache {
         }
         let n = self.next_key.get();
         if n >= WATCHLIST_KEY_COUNT {
-            tracing::error!(
-                target: "geode::watchlist",
-                "watchlist '{name}' is not resolved: all {WATCHLIST_KEY_COUNT} query keys \
-                 of the run are allocated"
-            );
+            if self.unkeyed.borrow_mut().insert(name.to_string()) {
+                tracing::error!(
+                    target: "geode::watchlist",
+                    "watchlist '{name}' is not resolved: all {WATCHLIST_KEY_COUNT} query keys \
+                     of the run are allocated"
+                );
+            }
             return None;
         }
         self.next_key.set(n + 1);
@@ -291,10 +315,12 @@ impl WatchlistCache {
 
     /// Apply an answer: members and `Current`, or `Failed` over the last
     /// members. Answers under another key than the list's, a superseded
-    /// tag, or for a list since removed are dropped.
+    /// tag, a tag of a definition since replaced, or for a list since
+    /// removed are dropped.
     pub fn answer(&self, outcome: WatchlistOutcome, cx: &mut App) {
         if self.keys.borrow().get(&outcome.name) != Some(&outcome.key)
             || self.tags.borrow().get(&outcome.name) != Some(&outcome.tag)
+            || outcome.tag <= self.floor.borrow().get(&outcome.name).copied().unwrap_or(0)
         {
             return;
         }
