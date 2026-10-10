@@ -20,7 +20,9 @@ use duckdb::{AccessMode, Connection, OptionalExt};
 use super::StoreError;
 
 /// The on-disk layout version this build reads and writes.
-pub const STORE_FORMAT: u32 = 1;
+///
+/// 2: axis columns after the grain key on measures datasets with axes (2026-10).
+pub const STORE_FORMAT: u32 = 2;
 
 /// The build that last stamped the store, `<version>+<GEODE_GIT_HASH>` or
 /// `<version>+dev` when the build sets no hash. For diagnosis only; never

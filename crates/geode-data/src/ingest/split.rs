@@ -44,10 +44,11 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
     }
 }
 
-/// Key expressions for a grain. The pair grain canonicalizes its two
-/// underlyings so both source orderings collapse to one row.
-fn key_exprs(grain: Grain) -> Vec<(String, String)> {
-    grain
+/// Key expressions for a grain: its key columns, then the axes that extend
+/// the key where the grain holds measures. The pair grain canonicalizes its
+/// two underlyings so both source orderings collapse to one row.
+fn key_exprs(ds: &DatasetSpec, grain: Grain) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = grain
         .key_columns()
         .iter()
         .map(|&col| match (grain, col) {
@@ -61,7 +62,13 @@ fn key_exprs(grain: Grain) -> Vec<(String, String)> {
             ),
             _ => (col.to_string(), format!("\"{col}\"")),
         })
-        .collect()
+        .collect();
+    out.extend(
+        ds.axes_at(grain)
+            .iter()
+            .map(|a| (a.clone(), format!("\"{a}\""))),
+    );
+    out
 }
 
 /// Measures and attributes declared at this grain, plus the carried
@@ -92,7 +99,7 @@ pub fn split_by_grain(conn: &Connection, req: &SplitRequest) -> Result<SplitResu
     let mut out = SplitResult::default();
 
     for grain in req.dataset.grains() {
-        let keys = key_exprs(grain);
+        let keys = key_exprs(req.dataset, grain);
         let payload = payload_columns(req.dataset, grain);
         let table = staging_table(grain);
 
@@ -523,5 +530,58 @@ grain = "instrument"
             "{:?}",
             out.conflicts
         );
+    }
+
+    #[test]
+    fn the_split_groups_by_key_and_axes_and_dedups_attributes_once() {
+        let ds = crate::store::ddl::tests_support::axis_dataset();
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table raw as select * from (values
+               ('BK0','L0','P1','C','I1','SPX','2026-08-24','USD','1M', 100.0, 10.0),
+               ('BK0','L0','P1','C','I1','SPX','2026-08-24','USD','1M', 105.0, 20.0),
+               ('BK0','L0','P1','C','I1','SPX','2026-08-24','USD','3M', 100.0, 30.0),
+               ('BK0','L0','P1','C','I1','RUT','2026-08-24','USD','1M', 100.0, 40.0))
+             t(book, lhu, position_ref, counterparty, instrument_ref, underlying_ref,
+               business_date, currency, tenor, moneyness, vega)",
+        )
+        .unwrap();
+        let out = split_by_grain(
+            &conn,
+            &SplitRequest {
+                dataset: &ds,
+                raw_table: "raw",
+                batch: "b",
+                file_id: 1,
+            },
+        )
+        .unwrap();
+        assert!(out.conflicts.is_empty(), "{:?}", out.conflicts);
+        let under: i64 = conn
+            .query_row(
+                "select count(*) from staging_measures_underlying",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(under, 4, "one row per (key, tenor, moneyness)");
+        let pos: i64 = conn
+            .query_row("select count(*) from staging_measures_position", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            pos, 1,
+            "the attribute grain is not multiplied by the buckets"
+        );
+        let v: f64 = conn
+            .query_row(
+                "select vega from staging_measures_underlying
+                 where tenor = '1M' and moneyness = 105.0 and underlying_ref = 'SPX'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, 20.0);
     }
 }
