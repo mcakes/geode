@@ -1323,13 +1323,14 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     layers,
                     shadowed,
                 };
-                // The watchlist snapshot: the same schema and dims, and the
-                // saved scopes and named expressions read as the fold above
-                // reads them, so a rule the tile accepts is one the fold
-                // accepts.
+                // The watchlist snapshot: the schema the service serves
+                // (never the pinned one: a rule over a dataset awaiting
+                // restart is refused in the tile exactly as the cache
+                // refuses it), the same dims, and the saved scopes and
+                // named expressions read as the fold above reads them.
                 let (saved, named) = scopes_and_named(config, &startup_schema, &dims);
                 let watchlist_config = WatchlistConfig {
-                    schema: classification_config.schema.clone(),
+                    schema: startup_schema.clone(),
                     dims: dims.clone(),
                     saved,
                     named,
@@ -2945,12 +2946,22 @@ role = "attribute"
 
     /// The `ConfigReloaded` observer hands the watchlist factory the saved
     /// scopes and named expressions a rule may name, read from the
-    /// reloaded config against the service's schema.
+    /// reloaded config against the schema the service serves: a user
+    /// `datasets` doc adding a dataset (restart-required) never reaches
+    /// the factory's schema, so a rule over it is refused in the tile as
+    /// the cache refuses it.
     #[gpui::test]
     fn a_config_reload_hands_the_watchlist_factory_the_saved_scopes(cx: &mut gpui::TestAppContext) {
         const DATASETS: &str = "[risk]\n\
             [risk.columns.book]\nrole = \"dimension\"\ntype = \"utf8\"\ngrain = \"position\"\n\
             [risk.columns.npv]\nrole = \"measure\"\ntype = \"f64\"\ngrain = \"position\"\n";
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("datasets.toml"),
+            "config_version = 1\n[later]\n[later.columns.underlying_ref]\n\
+             role = \"dimension\"\ntype = \"utf8\"\ngrain = \"position\"\n",
+        )
+        .unwrap();
         let services = test_shell_services_with_sources(ConfigSources {
             // The observer refreshes factories only when a `views` doc exists.
             builtin: vec![
@@ -2968,8 +2979,16 @@ role = "attribute"
                 .unwrap(),
             ],
             desk: None,
-            user: None,
+            user: Some(user.path().to_path_buf()),
         });
+        assert_eq!(
+            services
+                .config
+                .doc("datasets")
+                .map(|d| SchemaSpec::from_doc(d).0.datasets.len()),
+            Some(2),
+            "fixture: the config's datasets doc carries the user layer's dataset"
+        );
         let window = open_test_window(cx, services);
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         vcx.update(|window, cx| {
@@ -3011,7 +3030,8 @@ role = "attribute"
                 .iter()
                 .map(|d| d.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["risk"]
+            vec!["risk"],
+            "the schema the service serves, not the reloaded doc's"
         );
     }
 

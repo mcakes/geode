@@ -29,8 +29,9 @@ request and never depends on `geode-data`.
   `ReferenceGlobal` (reference names), `AppClock` (the `as of` time), the
   frame (the shell's word on its config writes) and `Chords` (menu hints).
   `tile/header.rs` paints the header: the switch control
-  (`Watchlist: <name> ▾`, also `g w`), `<n> names` (live members), `<k>
-  rules` (warning tone while any rule is bad), the resolution state
+  (`Watchlist: <name> ▾`, also the switch chord, `g w` by default),
+  `<n> names` (live members), `<k> rules` (warning tone while any rule is
+  bad), the resolution state
   (`resolving…`; `as of <time>` on the display clock; `failed` in the
   warning tone after a failed resolution, with the last good time), the
   winning layer's badge, then the shared cluster with `⋯` and ×. The
@@ -41,15 +42,17 @@ request and never depends on `geode-data`.
 
 A tile showing nothing (new, or its list removed by a snapshot change)
 opens the switcher at once and says why in its empty state (`no watchlist
-shown — g w switches`, or `<name> no longer exists — g w switches`); with
-no list defined the empty state names `Watchlist: New…` instead and the
-switcher refuses with `no watchlists to switch to`. The switcher opens by
+shown — <chord> switches`, or `<name> no longer exists — <chord> switches`,
+naming the switch chord as the keymap binds it, `g w` by default, or the
+palette title `Watchlist: Switch` when it binds none); with no list defined
+the empty state names `Watchlist: New…` instead and the switcher refuses
+with `no watchlists to switch to`. The switcher opens by
 itself only on the first snapshot that holds lists (a restored tile is
 built before the bridge publishes them) and when the shown list goes away;
 a snapshot change that leaves a nothing-shown tile as it was keeps a
 closed switcher closed.
 
-The `⋯` menu (`.`) lists Switch, then New…, Clone…, Rename…, Delete… and
+The `⋯` menu (`.`) lists Switch…, then New…, Clone…, Rename…, Delete… and
 Revert…, each with its live chord. The object verbs are not built yet: a
 pick shows `not yet available` as a status notice.
 

@@ -138,6 +138,9 @@ struct Harness {
     /// title read arrive through.
     content: Rc<dyn TileContent>,
     factory: Rc<WatchlistFactory>,
+    /// The keymap the stand-in resolves keys through and the `Chords`
+    /// global is published from.
+    keymap: Rc<Keymap>,
 }
 
 /// A tile built by the factory after `snap` was published and a default
@@ -154,6 +157,13 @@ fn open_with(
     let factory = Rc::new(WatchlistFactory::new());
     cx.update(|cx| factory.set_config(WatchlistConfig::default(), cx));
     let keymap = Rc::new(app_keymap(&factory));
+    // The shell publishes the keymap the menus' hints and the empty
+    // state's chord resolve against.
+    cx.update(|cx| {
+        cx.set_global(geode_shell::tips::Chords(Arc::new(
+            keymap.bindings().to_vec(),
+        )))
+    });
     let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
     let window = cx
         .update(|cx| {
@@ -178,7 +188,7 @@ fn open_with(
                 let host = cx.new(|_| ShellStandIn {
                     focus: shell_focus.clone(),
                     tile: tile.clone(),
-                    keymap,
+                    keymap: keymap.clone(),
                     matcher: Matcher::default(),
                 });
                 *slot.borrow_mut() = Some(Built {
@@ -204,6 +214,7 @@ fn open_with(
             tile: built.tile,
             content: built.content,
             factory,
+            keymap,
         },
         vcx,
     )
@@ -328,6 +339,19 @@ fn a_snapshot_change_removing_the_shown_list_shows_the_empty_state_and_opens_the
     assert_eq!(empty, "b no longer exists \u{2014} g w switches");
     assert_eq!(h.switcher(&vcx), rows(&["a"]));
     assert_eq!(h.title(&mut vcx), "Watchlists");
+    // The chord is the keymap's, live: unbound, the palette title names
+    // the route.
+    vcx.update(|_, cx| cx.set_global(geode_shell::tips::Chords(Arc::new(Vec::new()))));
+    assert_eq!(
+        h.empty(&vcx).as_deref(),
+        Some("b no longer exists \u{2014} Watchlist: Switch switches")
+    );
+    vcx.update(|_, cx| {
+        cx.set_global(geode_shell::tips::Chords(Arc::new(
+            h.keymap.bindings().to_vec(),
+        )))
+    });
+    assert_eq!(h.empty(&vcx).as_deref(), Some(&*empty));
     // Every list gone: the empty state names the verb that makes one, and
     // there is no switcher to open.
     vcx.update(|_, cx| publish(cx, WatchlistSnapshot::default()));
@@ -393,7 +417,7 @@ fn the_actions_menu_lists_the_verbs_and_a_pick_says_not_yet(cx: &mut gpui::TestA
         h.actions(&vcx),
         Some(
             [
-                "Switch",
+                "Switch\u{2026}",
                 "New\u{2026}",
                 "Clone\u{2026}",
                 "Rename\u{2026}",

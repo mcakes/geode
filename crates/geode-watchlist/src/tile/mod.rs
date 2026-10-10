@@ -23,11 +23,12 @@ use geode_core::watchlist::state::WatchlistSnapshot;
 use geode_shell::actions::ActionId;
 use geode_shell::clock::AppClock;
 use geode_shell::frame::{FrameRef, TileNotice};
-use geode_shell::keymap::{Binding, KeyContext};
+use geode_shell::keymap::{Binding, KeyContext, Keystroke};
 use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
 use geode_shell::reference::ReferenceGlobal;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
+use geode_shell::tips;
 use geode_shell::watchlist::WatchlistGlobal;
 use geode_tile::header::{HEADER_HEIGHT, Mode, link_chips};
 use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, MenuPick, Row};
@@ -126,6 +127,32 @@ fn snapshot(cx: &App) -> Arc<WatchlistSnapshot> {
         .unwrap_or_default()
 }
 
+/// A chord in the keymap's own spelling (`g w`, `ctrl+r`): what names a
+/// key inside a sentence, as `shell::kbd` documents.
+fn spell(keystrokes: &[Keystroke]) -> String {
+    keystrokes
+        .iter()
+        .map(|k| {
+            let mut parts = Vec::new();
+            if k.mods.ctrl {
+                parts.push("ctrl");
+            }
+            if k.mods.alt {
+                parts.push("alt");
+            }
+            if k.mods.shift {
+                parts.push("shift");
+            }
+            if k.mods.cmd {
+                parts.push("cmd");
+            }
+            parts.push(k.key.as_str());
+            parts.join("+")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The installed display clock, or the machine's for a tile hosted
 /// without `AppClock`.
 fn clock(cx: &App) -> Clock {
@@ -185,13 +212,15 @@ impl WatchlistTile {
         // `as of` is on the display clock: a zone change re-prepares it.
         cx.observe_global::<AppClock>(|this, cx| this.clock_changed(cx))
             .detach();
-        // A keymap reload re-resolves an open menu's hints at once.
-        cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
+        // A keymap reload re-resolves an open menu's hints and the empty
+        // state's switch chord at once.
+        cx.observe_global::<tips::Chords>(|this, cx| {
             this.chords = menu::live_bindings(cx);
             if let Some((_, m)) = this.menu.as_mut() {
                 m.rehint(&this.chords);
-                cx.notify();
             }
+            this.rebuild_chrome(cx);
+            cx.notify();
         })
         .detach();
         // The shell tells the tile about its config writes (a fork, a
@@ -343,20 +372,23 @@ impl WatchlistTile {
         self.chrome.header = HeaderModel::prepare(name, state, &clock);
         let none_defined = snapshot.lists.is_empty();
         let new = action_title(NEW_ACTION);
+        // The switch chord as the keymap binds it now; the palette's title
+        // names the route when it binds none.
+        let switch = tips::chord_for(&self.chords, SWITCH_ACTION)
+            .map(|ks| spell(&ks))
+            .unwrap_or_else(|| action_title(SWITCH_ACTION).to_string());
         self.chrome.empty = match (name, state.is_some()) {
             (_, true) => None,
             (Some(gone), false) if none_defined => {
                 Some(format!("{gone} no longer exists \u{2014} {new} creates one").into())
             }
             (Some(gone), false) => {
-                Some(format!("{gone} no longer exists \u{2014} g w switches").into())
+                Some(format!("{gone} no longer exists \u{2014} {switch} switches").into())
             }
             (None, false) if none_defined => {
                 Some(format!("no watchlists defined \u{2014} {new} creates one").into())
             }
-            (None, false) => Some(SharedString::new_static(
-                "no watchlist shown \u{2014} g w switches",
-            )),
+            (None, false) => Some(format!("no watchlist shown \u{2014} {switch} switches").into()),
         };
         let n = &self.notices;
         self.chrome.notices = n
@@ -396,21 +428,25 @@ impl WatchlistTile {
     }
 
     /// The `⋯` menu: the switcher, then the watchlist's own verbs, each
-    /// running the palette's action, with its live chord.
+    /// running the palette's action, with its live chord. The switcher's
+    /// row reads `Switch…`: like `New…`, it opens a further pick.
     fn action_rows(&self) -> Vec<Row<Pick>> {
-        let row = |id: &'static str| {
-            let title = action_title(id);
+        let row = |id: &'static str, title: &str| {
             let title = title.strip_prefix("Watchlist: ").unwrap_or(title);
-            Row::Action(ActionRow::new(Pick::Action(id), title).hint(Hint::chord(id)))
+            Row::Action(ActionRow::new(Pick::Action(id), title.to_string()).hint(Hint::chord(id)))
         };
+        let verb = |id: &'static str| row(id, action_title(id));
         vec![
-            row(SWITCH_ACTION),
+            row(
+                SWITCH_ACTION,
+                &format!("{}\u{2026}", action_title(SWITCH_ACTION)),
+            ),
             Row::Separator,
-            row(NEW_ACTION),
-            row(CLONE_ACTION),
-            row(RENAME_ACTION),
-            row(DELETE_ACTION),
-            row(REVERT_ACTION),
+            verb(NEW_ACTION),
+            verb(CLONE_ACTION),
+            verb(RENAME_ACTION),
+            verb(DELETE_ACTION),
+            verb(REVERT_ACTION),
         ]
     }
 

@@ -94,6 +94,7 @@ fn read_sort(v: &Value) -> Result<(SortCol, bool), String> {
 
 fn read_cursor(v: &Value) -> Result<String, String> {
     v.as_str()
+        .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
         .ok_or_else(|| "not a member name".into())
 }
@@ -192,6 +193,7 @@ mod tests {
             ("sort", "sort = [\"label\", \"asc\"]"),
             ("sort", "sort = [\"name\", \"up\"]"),
             ("cursor", "cursor = true"),
+            ("cursor", "cursor = \"  \""),
         ] {
             let (s, notices) = from_table(&format!("{text}\nversion = 1").parse().unwrap());
             assert_eq!(s, State::default(), "{text}");
