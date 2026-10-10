@@ -1,0 +1,25 @@
+[package]
+name = "geode-scenario"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+# The pure half of the scenario tiles: the builtin shapes document and the
+# pivot. Shared vocabulary (shapes, snapshots, axes, the heat scale) lives in
+# geode-core. The tile, with its geode-shell and geode-tile dependencies,
+# arrives with the module; nothing here needs gpui.
+[dependencies]
+geode-core.workspace = true
+toml = "1.1.4"
+
+[dev-dependencies]
+geode-core = { workspace = true, features = ["test-support"] }
+criterion = "0.8.2"
+
+[[bench]]
+name = "pivot"
+harness = false

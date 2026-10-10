@@ -1,0 +1,67 @@
+# Scenario tile shapes compiled into every build, below desk and user
+# layers. A higher layer replaces a shape of the same name whole.
+#
+# Each shape names an axis dataset, the axis down the side, what runs across
+# (axes, or measures), and for a matrix the one measure it paints. Measures
+# with a `_usd` twin in the dataset start in USD; `c` toggles. `paint` is
+# the fill a tile starts with; `p` cycles it.
+
+# Vega by tenor bucket and strike bucket (moneyness %).
+[vega_kt]
+title = "Vega K/T"
+dataset = "vega_buckets"
+rows = "tenor"
+columns = { axis = "moneyness" }
+value = "vega"
+paint = "heat"
+
+# Vega by tenor bucket under each spot shift. No Σ across shifts: a shift
+# is an alternative state, not a slice of a total.
+[vega_spot]
+title = "Vega by maturity"
+dataset = "vega_spot_ladder"
+rows = "tenor"
+columns = { axis = "spot_shift" }
+value = "vega"
+paint = "heat"
+
+# Spot shifts down the side, greeks across. npv paints as P&L against the
+# unshifted row, which stays absolute and highlighted; `m` flips to all
+# absolute.
+[spot_ladder]
+title = "Spot ladder"
+dataset = "spot_ladder"
+rows = "spot_shift"
+columns = { measures = [
+  { column = "npv", label = "P&L vs base" },
+  { column = "delta", label = "Δ01" },
+  { column = "gamma", label = "Γ01" },
+  { column = "vega", label = "vega01" },
+  { column = "theta", label = "Θ" },
+] }
+diff = { base = 0, measures = ["npv"] }
+paint = "heat"
+
+# Term sensitivities by tenor bucket, each in its own unit.
+[by_maturity]
+title = "By maturity"
+dataset = "term_sensitivities"
+rows = "tenor"
+columns = { measures = [
+  { column = "repo", unit = "bp" },
+  { column = "atm_vol", label = "atm vol", unit = "per vol pt" },
+  { column = "skew", unit = "per skew pt" },
+  { column = "curvature", unit = "per curv pt" },
+] }
+paint = "plain"
+
+# Rho by tenor bucket under a two-level header: curve currency, then curve
+# type.
+[rho]
+title = "Rho"
+dataset = "rho_curves"
+rows = "tenor"
+columns = { axis = ["curve_ccy", "curve_type"] }
+value = "rho"
+unit = "per 10 bp"
+paint = "heat"
