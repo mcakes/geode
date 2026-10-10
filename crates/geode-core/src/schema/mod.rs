@@ -116,6 +116,44 @@ impl DatasetSpec {
         out
     }
 
+    /// Measures family with a non-empty `axes`. Document axes are row
+    /// identity within a document, so a document dataset answers false.
+    pub fn has_axes(&self) -> bool {
+        self.family == Family::Measures && !self.axes.is_empty()
+    }
+
+    /// True when a measure is declared at `grain`.
+    pub fn holds_measures_at(&self, grain: Grain) -> bool {
+        self.measures_at(grain).next().is_some()
+    }
+
+    /// The axes that extend `grain`'s storage key. A grain holding only
+    /// attributes keeps the plain key, so its rows are not multiplied by
+    /// the bucket count. Document datasets answer empty: their axes are
+    /// row identity within a document, not a grain key.
+    pub fn axes_at(&self, grain: Grain) -> &[String] {
+        if self.has_axes() && self.holds_measures_at(grain) {
+            &self.axes
+        } else {
+            &[]
+        }
+    }
+
+    /// Axis names declared `axis = "scenario"`, in `axes` order.
+    pub fn scenario_axes(&self) -> Vec<&str> {
+        self.axes
+            .iter()
+            .filter(|a| self.axis_kind(a) == Some(AxisKind::Scenario))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// The declared kind of a measures-family axis; `None` for a document
+    /// axis, any other role, or an undeclared column.
+    pub fn axis_kind(&self, column: &str) -> Option<AxisKind> {
+        self.column(column).and_then(|c| c.axis_kind())
+    }
+
     pub fn measures_at(&self, grain: Grain) -> impl Iterator<Item = &ColumnSpec> {
         self.columns.iter().filter(move |c| {
             matches!(c.role, ColumnRole::Measure { .. }) && c.grain() == Some(grain)
@@ -133,11 +171,15 @@ impl DatasetSpec {
     }
 
     /// Whether `grain` carries a dimension: its dimension key names the
-    /// column, or contains the entire key of the column's declared carried
-    /// grain. The pair grain carries instrument dimensions, but not ordinary
-    /// underlying dimensions.
+    /// column, the column is an axis extending this grain's key (the grain
+    /// holds a measure), or the dimension key contains the entire key of the
+    /// column's declared carried grain. The pair grain carries instrument
+    /// dimensions, but not ordinary underlying dimensions.
     pub fn carries(&self, grain: Grain, column: &str) -> bool {
         if grain.dimension_key_columns().contains(&column) {
+            return true;
+        }
+        if self.axes_at(grain).iter().any(|a| a == column) {
             return true;
         }
         self.column(column)
@@ -151,7 +193,8 @@ impl DatasetSpec {
     }
 
     /// The columns a view may group or scope by at `grain`: the dimension
-    /// keys first, then every carried dimension, in schema order.
+    /// keys first, then every carried dimension in schema order, then the
+    /// axes extending this grain's key in `axes` order.
     pub fn dimensions_at(&self, grain: Grain) -> Vec<&str> {
         let mut out: Vec<&str> = grain.dimension_key_columns().to_vec();
         out.extend(
@@ -159,6 +202,7 @@ impl DatasetSpec {
                 .into_iter()
                 .map(|c| c.name.as_str()),
         );
+        out.extend(self.axes_at(grain).iter().map(String::as_str));
         out
     }
 
@@ -329,27 +373,24 @@ impl SchemaSpec {
                             }),
                     }
                 };
-            let (Ok(mut key), Ok(mut axes)) = (
+            let (Ok(mut key), Ok(axes)) = (
                 string_list("key", &mut diags),
                 string_list("axes", &mut diags),
             ) else {
                 continue;
             };
-            if family == Family::Measures {
-                for (field, list) in [("key", &mut key), ("axes", &mut axes)] {
-                    if !list.is_empty() {
-                        diags.push(Diagnostic {
-                            severity: Severity::Warning,
-                            layer: None,
-                            file: None,
-                            message: format!(
-                                "dataset '{ds_name}': '{field}' is ignored on the measure family"
-                            ),
-                            path: Some(format!("datasets.{ds_name}.{field}")),
-                        });
-                        list.clear();
-                    }
-                }
+            // A measures dataset keeps `axes`: they extend the storage key of
+            // every grain holding a measure. Its identity is the grain key, so
+            // a declared `key` has nothing to name.
+            if family == Family::Measures && !key.is_empty() {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    layer: None,
+                    file: None,
+                    message: format!("dataset '{ds_name}': 'key' is ignored on the measure family"),
+                    path: Some(format!("datasets.{ds_name}.key")),
+                });
+                key.clear();
             }
             let mut dataset = DatasetSpec {
                 name: ds_name.clone(),
@@ -420,6 +461,7 @@ impl SchemaSpec {
                     }
                 }
             }
+            let mut drop_dataset = false;
             // Always run family validation, including when the columns table is absent.
             // A document without columns cannot supply its required identity and values.
             match ds_value.get("columns").and_then(|v| v.as_table()) {
@@ -436,16 +478,44 @@ impl SchemaSpec {
                                 dataset.columns.push(spec);
                                 diags.extend(warning);
                             }
+                            // A refused measures-family axis drops the dataset, not only
+                            // the column: every table would then lack that axis in its
+                            // key, and rows differing only by it would sum together
+                            // silently. Other refusals drop just the column.
+                            Err(mut d)
+                                if family == Family::Measures
+                                    && col_value.get("role").and_then(|v| v.as_str())
+                                        == Some("axis") =>
+                            {
+                                d.severity = Severity::Error;
+                                d.message.push_str("; dataset dropped");
+                                diags.push(d);
+                                drop_dataset = true;
+                            }
                             Err(d) => diags.push(d),
                         }
                     }
                 }
             }
+            if drop_dataset {
+                continue;
+            }
+            // An axis column without an `axes` list is refused too, so either
+            // side marks the dataset as one the axis rules may clear.
+            let declared_axes = family == Family::Measures
+                && (!dataset.axes.is_empty()
+                    || dataset
+                        .columns
+                        .iter()
+                        .any(|c| matches!(c.role, ColumnRole::Axis { .. })));
             diags.extend(validate_dataset(&mut dataset));
-            if (dataset.is_document() || dataset.is_reference()) && dataset.columns.is_empty() {
+            if (dataset.is_document() || dataset.is_reference() || declared_axes)
+                && dataset.columns.is_empty()
+            {
                 // Rejected or columnless documents and references cannot be stored or
-                // queried. Empty measure datasets remain inert because they declare no
-                // storage grain.
+                // queried, and a measures dataset whose axes failed validation comes
+                // back cleared. Other empty measure datasets remain inert because they
+                // declare no storage grain.
                 continue;
             }
             out.datasets.push(dataset);
@@ -534,7 +604,9 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
         .filter(|c| {
             matches!(
                 c.role,
-                ColumnRole::Axis { .. } | ColumnRole::Value | ColumnRole::Attribute { grain: None }
+                ColumnRole::Axis { kind: None, .. }
+                    | ColumnRole::Value
+                    | ColumnRole::Attribute { grain: None }
             )
         })
         .map(|c| c.name.clone())
@@ -553,6 +625,110 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
         });
     }
     ds.columns.retain(|c| !foreign.contains(&c.name));
+
+    // Axes: `axes` and the axis columns mirror each other, no axis reuses a
+    // grain key name (it would shadow the key in every table), and there is
+    // a measure for them to index. Any failure drops the dataset: an axis
+    // missing from a table merges buckets silently.
+    let err = |message: String, path: String| Diagnostic {
+        severity: Severity::Error,
+        layer: None,
+        file: None,
+        message,
+        path: Some(path),
+    };
+    let is_grain_key = |name: &str| Grain::ALL.iter().any(|g| g.key_columns().contains(&name));
+    let mut keep = true;
+    let axis_columns: Vec<String> = ds
+        .columns
+        .iter()
+        .filter(|c| matches!(c.role, ColumnRole::Axis { .. }))
+        .map(|c| c.name.clone())
+        .collect();
+    for a in &ds.axes {
+        // A grain key named in `axes` is refused as such, whatever its role:
+        // that is the mistake to name, not the role mismatch it implies.
+        if is_grain_key(a) {
+            diags.push(err(
+                format!(
+                    "dataset '{}' column '{a}': is a grain key column and cannot be an axis; \
+                     dataset dropped",
+                    ds.name
+                ),
+                format!("datasets.{}.columns.{a}.role", ds.name),
+            ));
+            keep = false;
+            continue;
+        }
+        match ds.column(a) {
+            None => {
+                diags.push(err(
+                    format!(
+                        "dataset '{}': axes names undeclared column '{a}'; dataset dropped",
+                        ds.name
+                    ),
+                    format!("datasets.{}.axes", ds.name),
+                ));
+                keep = false;
+            }
+            Some(c) if !matches!(c.role, ColumnRole::Axis { .. }) => {
+                diags.push(err(
+                    format!(
+                        "dataset '{}': axis '{a}' must have role = \"axis\"; dataset dropped",
+                        ds.name
+                    ),
+                    format!("datasets.{}.columns.{a}.role", ds.name),
+                ));
+                keep = false;
+            }
+            Some(_) => {}
+        }
+    }
+    for name in &axis_columns {
+        if ds.axes.contains(name) {
+            // Reported by the loop over `axes` above.
+            continue;
+        }
+        diags.push(err(
+            format!(
+                "dataset '{}' column '{name}': role = \"axis\" but not listed in axes; \
+                 dataset dropped",
+                ds.name
+            ),
+            format!("datasets.{}.columns.{name}.role", ds.name),
+        ));
+        keep = false;
+        if is_grain_key(name) {
+            diags.push(err(
+                format!(
+                    "dataset '{}' column '{name}': is a grain key column and cannot be an axis; \
+                     dataset dropped",
+                    ds.name
+                ),
+                format!("datasets.{}.columns.{name}.role", ds.name),
+            ));
+        }
+    }
+    if !ds.axes.is_empty()
+        && !ds
+            .columns
+            .iter()
+            .any(|c| matches!(c.role, ColumnRole::Measure { .. }))
+    {
+        diags.push(err(
+            format!(
+                "dataset '{}': axes index measures, and none is declared; dataset dropped",
+                ds.name
+            ),
+            format!("datasets.{}.axes", ds.name),
+        ));
+        keep = false;
+    }
+    if !keep {
+        ds.columns.clear();
+        ds.axes.clear();
+        return diags;
+    }
 
     // Every grain in use groups by its key columns, so each must be
     // declared. Undeclared, the generated SQL references a column the
@@ -1176,7 +1352,44 @@ fn parse_column(
                 Family::Document | Family::Series | Family::Reference => None,
             },
         },
-        "axis" => ColumnRole::document_axis(),
+        "axis" => match family {
+            Family::Measures => {
+                let kind = match table.get("axis").and_then(|v| v.as_str()) {
+                    None => {
+                        return Err(bad(
+                            Some("axis"),
+                            "a measures-family axis needs axis = \"bucket\" or \"scenario\": \
+                             bucket partitions a total and sums, scenario enumerates states and never does"
+                                .into(),
+                        ));
+                    }
+                    Some(k) => AxisKind::parse(k)
+                        .ok_or_else(|| bad(Some("axis"), format!("unknown axis kind '{k}'")))?,
+                };
+                if !matches!(ty, ColumnType::Utf8 | ColumnType::F64) {
+                    return Err(bad(
+                        Some("type"),
+                        format!("an axis is utf8 or f64 (got '{ty_str}')"),
+                    ));
+                }
+                let order = match table.get("order").and_then(|v| v.as_str()) {
+                    None => AxisOrder::Lexical,
+                    Some(_) if ty == ColumnType::F64 => {
+                        return Err(bad(
+                            Some("order"),
+                            "a numeric axis sorts numerically; 'order' is for utf8 axes".into(),
+                        ));
+                    }
+                    Some(o) => AxisOrder::parse(o)
+                        .ok_or_else(|| bad(Some("order"), format!("unknown order '{o}'")))?,
+                };
+                ColumnRole::Axis {
+                    kind: Some(kind),
+                    order,
+                }
+            }
+            Family::Document | Family::Series | Family::Reference => ColumnRole::document_axis(),
+        },
         "value" => ColumnRole::Value,
         "measure" => {
             let agg_str = table
@@ -1897,28 +2110,34 @@ role = "attribute"
     }
 
     #[test]
-    fn a_measure_family_key_and_axes_are_cleared_with_a_warning() {
+    fn a_measure_family_key_is_cleared_with_a_warning_and_axes_are_kept() {
         // `[risk_snapshot]` must precede the dotted `risk_snapshot.columns.*`
         // headers SAMPLE opens with — TOML lets a `[table]` header appear
         // before its own subtables, never after.
-        let text = format!("[risk_snapshot]\nkey = [\"book\"]\naxes = [\"lhu\"]\n{SAMPLE}");
+        let text = format!("[risk_snapshot]\nkey = [\"book\"]\n{VEGA_BUCKETS}")
+            .replace("[vega_buckets]\n", "")
+            .replace("vega_buckets", "risk_snapshot");
         let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
         let ds = schema.dataset("risk_snapshot").unwrap();
         assert!(
             ds.key.is_empty(),
             "key must be cleared, not merely warned about"
         );
-        assert!(ds.axes.is_empty());
-        for field in ["key", "axes"] {
-            let d = diags
+        assert_eq!(ds.axes, ["tenor", "moneyness"], "axes are kept on measures");
+        let d = diags
+            .iter()
+            .find(|d| {
+                d.path.as_deref() == Some("datasets.risk_snapshot.key")
+                    && d.message.contains("is ignored on the measure family")
+            })
+            .unwrap_or_else(|| panic!("no warning for 'key': {diags:?}"));
+        assert_eq!(d.severity, Severity::Warning);
+        assert!(
+            !diags
                 .iter()
-                .find(|d| {
-                    d.path.as_deref() == Some(&format!("datasets.risk_snapshot.{field}"))
-                        && d.message.contains("is ignored on the measure family")
-                })
-                .unwrap_or_else(|| panic!("no warning for '{field}': {diags:?}"));
-            assert_eq!(d.severity, Severity::Warning);
-        }
+                .any(|d| d.path.as_deref() == Some("datasets.risk_snapshot.axes")),
+            "{diags:?}"
+        );
     }
 
     #[test]
@@ -1955,6 +2174,242 @@ role = "attribute"
             ds.column("underlying2_ref").is_some(),
             "the key column itself stays"
         );
+    }
+
+    const VEGA_BUCKETS: &str = r#"
+[vega_buckets]
+axes = ["tenor", "moneyness"]
+
+[vega_buckets.columns.book]
+type = "utf8"
+role = "dimension"
+[vega_buckets.columns.lhu]
+type = "utf8"
+role = "dimension"
+[vega_buckets.columns.position_ref]
+type = "utf8"
+role = "key"
+[vega_buckets.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[vega_buckets.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[vega_buckets.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[vega_buckets.columns.business_date]
+type = "utf8"
+role = "attribute"
+grain = "position"
+[vega_buckets.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[vega_buckets.columns.tenor]
+type = "utf8"
+role = "axis"
+axis = "bucket"
+order = "tenor"
+[vega_buckets.columns.moneyness]
+type = "f64"
+role = "axis"
+axis = "bucket"
+[vega_buckets.columns.vega]
+type = "f64"
+role = "measure"
+grain = "underlying"
+[vega_buckets.columns.vega_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+
+    fn vega_with(from: &str, to: &str) -> (SchemaSpec, Vec<Diagnostic>) {
+        let text = VEGA_BUCKETS.replace(from, to);
+        assert_ne!(text, VEGA_BUCKETS, "replacement must change the fixture");
+        SchemaSpec::from_doc(&doc(&text))
+    }
+
+    #[test]
+    fn a_measures_dataset_keeps_its_axes_with_kind_and_order() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(VEGA_BUCKETS));
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("vega_buckets").unwrap();
+        assert_eq!(ds.axes, ["tenor", "moneyness"]);
+        assert!(ds.has_axes());
+        assert_eq!(ds.axis_kind("tenor"), Some(AxisKind::Bucket));
+        assert_eq!(ds.column("tenor").unwrap().axis_order(), AxisOrder::Tenor);
+        assert_eq!(
+            ds.column("moneyness").unwrap().axis_order(),
+            AxisOrder::Lexical
+        );
+        assert!(ds.scenario_axes().is_empty());
+    }
+
+    #[test]
+    fn axes_extend_the_key_of_measure_grains_only() {
+        let (schema, _) = SchemaSpec::from_doc(&doc(VEGA_BUCKETS));
+        let ds = schema.dataset("vega_buckets").unwrap();
+        assert_eq!(ds.axes_at(Grain::Underlying), ["tenor", "moneyness"]);
+        assert!(
+            ds.axes_at(Grain::Position).is_empty(),
+            "attributes only: one row per key"
+        );
+        assert!(ds.carries(Grain::Underlying, "tenor"));
+        assert!(!ds.carries(Grain::Position, "tenor"));
+        let dims = ds.dimensions_at(Grain::Underlying);
+        assert!(dims.ends_with(&["tenor", "moneyness"]), "{dims:?}");
+        assert!(ds.groupable_columns().contains(&"moneyness"));
+    }
+
+    #[test]
+    fn a_measures_dataset_still_drops_key_with_a_warning() {
+        let (_, diags) = vega_with(
+            "axes = [\"tenor\", \"moneyness\"]",
+            "axes = [\"tenor\", \"moneyness\"]\nkey = [\"position_ref\"]",
+        );
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Warning
+                && d.message.contains("'key' is ignored on the measure family")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn an_axis_needs_a_kind() {
+        let (schema, diags) =
+            vega_with("axis = \"bucket\"\norder = \"tenor\"", "order = \"tenor\"");
+        let d = error_with_path(&diags, "datasets.vega_buckets.columns.tenor.axis");
+        assert!(
+            d.message
+                .contains("needs axis = \"bucket\" or \"scenario\""),
+            "{}",
+            d.message
+        );
+        assert!(
+            schema.dataset("vega_buckets").is_none(),
+            "an axis without a kind would sum silently; dataset dropped"
+        );
+    }
+
+    #[test]
+    fn an_axis_kind_is_one_of_two_words() {
+        let (_, diags) = vega_with(
+            "axis = \"bucket\"\norder = \"tenor\"",
+            "axis = \"ladder\"\norder = \"tenor\"",
+        );
+        let d = error_with_path(&diags, "datasets.vega_buckets.columns.tenor.axis");
+        assert!(
+            d.message.contains("unknown axis kind 'ladder'"),
+            "{}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn axes_and_axis_roles_mirror_each_other() {
+        let (_, diags) = vega_with("axes = [\"tenor\", \"moneyness\"]", "axes = [\"tenor\"]");
+        error_with_path(&diags, "datasets.vega_buckets.columns.moneyness.role");
+        let (_, diags) = vega_with(
+            "axes = [\"tenor\", \"moneyness\"]",
+            "axes = [\"tenor\", \"moneyness\", \"spot\"]",
+        );
+        let d = error_with_path(&diags, "datasets.vega_buckets.axes");
+        assert!(
+            d.message.contains("axes names undeclared column 'spot'"),
+            "{}",
+            d.message
+        );
+        let (schema, diags) = vega_with("axes = [\"tenor\", \"moneyness\"]\n", "");
+        error_with_path(&diags, "datasets.vega_buckets.columns.tenor.role");
+        assert!(
+            schema.dataset("vega_buckets").is_none(),
+            "axis columns without an axes list drop the dataset, not leave it empty"
+        );
+    }
+
+    #[test]
+    fn an_axis_is_utf8_or_f64() {
+        let (_, diags) = vega_with(
+            "[vega_buckets.columns.moneyness]\ntype = \"f64\"",
+            "[vega_buckets.columns.moneyness]\ntype = \"date\"",
+        );
+        let d = error_with_path(&diags, "datasets.vega_buckets.columns.moneyness.type");
+        assert!(
+            d.message.contains("an axis is utf8 or f64"),
+            "{}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn order_is_for_text_axes_only() {
+        let (_, diags) = vega_with(
+            "[vega_buckets.columns.moneyness]\ntype = \"f64\"\nrole = \"axis\"\naxis = \"bucket\"",
+            "[vega_buckets.columns.moneyness]\ntype = \"f64\"\nrole = \"axis\"\naxis = \"bucket\"\norder = \"tenor\"",
+        );
+        let d = error_with_path(&diags, "datasets.vega_buckets.columns.moneyness.order");
+        assert!(
+            d.message.contains("a numeric axis sorts numerically"),
+            "{}",
+            d.message
+        );
+        let (_, diags) = vega_with("order = \"tenor\"", "order = \"alphabetical\"");
+        let d = error_with_path(&diags, "datasets.vega_buckets.columns.tenor.order");
+        assert!(
+            d.message.contains("unknown order 'alphabetical'"),
+            "{}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn axes_need_a_measure_to_index() {
+        let (schema, diags) = vega_with(
+            "role = \"measure\"\ngrain = \"underlying\"",
+            "role = \"attribute\"\ngrain = \"underlying\"",
+        );
+        let d = error_with_path(&diags, "datasets.vega_buckets.axes");
+        assert!(
+            d.message
+                .contains("axes index measures, and none is declared"),
+            "{}",
+            d.message
+        );
+        assert!(schema.dataset("vega_buckets").is_none());
+    }
+
+    #[test]
+    fn an_axis_may_not_reuse_a_grain_key_name() {
+        let (_, diags) = vega_with(
+            "[vega_buckets.columns.tenor]",
+            "[vega_buckets.columns.book_axis]\ntype = \"utf8\"\nrole = \"axis\"\naxis = \"bucket\"\n[vega_buckets.columns.tenor]",
+        );
+        // The extra column is not in `axes`, so it is refused by the mirror
+        // rule; the key-name rule is exercised by naming an axis `lhu`:
+        let (_, diags2) = vega_with(
+            "axes = [\"tenor\", \"moneyness\"]",
+            "axes = [\"lhu\", \"moneyness\"]",
+        );
+        assert!(!diags.is_empty());
+        let d = error_with_path(&diags2, "datasets.vega_buckets.columns.lhu.role");
+        assert!(
+            d.message
+                .contains("is a grain key column and cannot be an axis"),
+            "{}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn a_document_dataset_is_unchanged_by_the_measures_axis_rules() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(CVI));
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("cvi_params").unwrap();
+        assert!(!ds.has_axes(), "has_axes is the measures-family question");
+        assert_eq!(ds.column("term").unwrap().axis_kind(), None);
+        assert!(ds.axes_at(Grain::Underlying).is_empty());
     }
 
     fn cvi_with(from: &str, to: &str) -> (SchemaSpec, Vec<Diagnostic>) {
@@ -2122,19 +2577,16 @@ role = "attribute"
 
     #[test]
     fn document_vocabulary_on_a_measure_dataset_is_the_mirror_error() {
+        // A kindless axis on a measure dataset is refused at parse and drops
+        // the whole dataset (`an_axis_needs_a_kind`); a value drops only its
+        // column.
         let text = SAMPLE.to_string()
-            + "\n[risk_snapshot.columns.tenor]\ntype = \"f64\"\nrole = \"axis\"\n"
             + "\n[risk_snapshot.columns.cell]\ntype = \"f64\"\nrole = \"value\"\n";
         let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
         let ds = schema.dataset("risk_snapshot").unwrap();
-        assert!(ds.column("tenor").is_none() && ds.column("cell").is_none());
-        for name in ["tenor", "cell"] {
-            let d = error_with_path(
-                &diags,
-                &format!("datasets.risk_snapshot.columns.{name}.role"),
-            );
-            assert!(d.message.contains("measure family"), "{}", d.message);
-        }
+        assert!(ds.column("cell").is_none());
+        let d = error_with_path(&diags, "datasets.risk_snapshot.columns.cell.role");
+        assert!(d.message.contains("measure family"), "{}", d.message);
     }
 
     #[test]
