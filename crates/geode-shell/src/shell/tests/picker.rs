@@ -468,8 +468,8 @@ fn watchlist_keys_are_the_reserved_range_and_nothing_else() {
         WATCHLIST_KEY_BASE.0 + WATCHLIST_KEY_COUNT
     )));
     assert!(!is_watchlist_key(QueryKey(WATCHLIST_KEY_BASE.0 - 1)));
-    // The range ends below the shell's single reserved keys.
-    assert!(WATCHLIST_KEY_BASE.0 + WATCHLIST_KEY_COUNT <= REFERENCE_KEY.0);
+    // That the range ends below the shell's single reserved keys is a
+    // compile-time check beside `WATCHLIST_KEY_COUNT`.
     assert!(!is_watchlist_key(REFERENCE_KEY));
     assert!(!is_watchlist_key(PICKER_KEY));
     assert!(!is_watchlist_key(QueryKey(1)));

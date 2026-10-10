@@ -60,7 +60,7 @@ definition, members or status changes, and on every accepted answer, since
 the members it holds. The cache folds every list against the schema the
 service started with and resolves each through `DataHandle::watchlist`
 under its own key from the `WATCHLIST_KEY_BASE` range (`WATCHLIST_KEY_COUNT`
-keys, recognised by `is_watchlist_key`), handed out on first sight of a name
+keys, recognized by `is_watchlist_key`), handed out on first sight of a name
 and never reused within the run: the query pool and the app's mailbox
 coalesce per key, so a shared key would let one list's refresh cancel
 another's resolution in flight. Answers never reach a tile. Resolution runs

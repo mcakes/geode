@@ -275,6 +275,9 @@ pub const WATCHLIST_KEY_BASE: QueryKey = QueryKey(u64::MAX - 0x1_0000);
 /// How many keys the range holds; the top 16 values stay free for the
 /// shell's single keys.
 pub const WATCHLIST_KEY_COUNT: u64 = 0x1_0000 - 16;
+// The range must end below the lowest single reserved key, or a list's
+// answer would be routed as the shell's.
+const _: () = assert!(WATCHLIST_KEY_BASE.0 + WATCHLIST_KEY_COUNT <= REFERENCE_KEY.0);
 
 /// Whether `key` is a watchlist lane's key.
 pub fn is_watchlist_key(key: QueryKey) -> bool {
