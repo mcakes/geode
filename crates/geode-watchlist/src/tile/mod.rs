@@ -55,7 +55,7 @@ use gpui_component::{ActiveTheme as _, v_flex};
 
 use crate::content::{Shared, action_title};
 use crate::core::grid::GridModel;
-use crate::core::history::History;
+use crate::core::history::{History, Way};
 use crate::core::prompt::{self, Prompt, Step};
 use crate::core::rows;
 use crate::core::session::{self, SortCol, State};
@@ -1061,8 +1061,8 @@ impl WatchlistTile {
             // The member verbs, from a key, the palette or the menu.
             ADD_ACTION => self.open_add(window, cx),
             REMOVE_ACTION => self.remove(cx),
-            UNDO_ACTION => self.replay(false, cx),
-            REDO_ACTION => self.replay(true, cx),
+            UNDO_ACTION => self.replay(Way::Undo, cx),
+            REDO_ACTION => self.replay(Way::Redo, cx),
             REFRESH_ACTION => self.refresh(cx),
             // The rules popup and the watchlist's own verbs: not built yet.
             RULES_ACTION | NEW_ACTION | CLONE_ACTION | RENAME_ACTION | DELETE_ACTION
@@ -1313,7 +1313,7 @@ impl WatchlistTile {
     /// and write the result. A change another surface made since is
     /// skipped and said so; one the tile's own refused write left is said
     /// as not saved, not blamed on another surface.
-    fn replay(&mut self, redo: bool, cx: &mut Context<Self>) {
+    fn replay(&mut self, way: Way, cx: &mut Context<Self>) {
         let snapshot = snapshot(cx);
         let Some((name, state)) = self.shown(&snapshot) else {
             self.refuse(NOTHING_SHOWN, cx);
@@ -1325,17 +1325,10 @@ impl WatchlistTile {
         }
         self.close_menu(cx);
         let config = state.definition.clone();
-        let before = self.history.current(&config).clone();
-        let done = if redo {
-            self.history.redo(&config)
-        } else {
-            self.history.undo(&config)
-        };
-        let Some(replay) = done else {
-            let why = if redo {
-                NOTHING_TO_REDO
-            } else {
-                NOTHING_TO_UNDO
+        let Some(replay) = self.history.peek(&config, way) else {
+            let why = match way {
+                Way::Undo => NOTHING_TO_UNDO,
+                Way::Redo => NOTHING_TO_REDO,
             };
             self.say(Notice::status(why), cx);
             return;
@@ -1343,7 +1336,10 @@ impl WatchlistTile {
         let unsaved = self.history.unsaved(&replay.skipped.names)
             + usize::from(replay.skipped.rules && self.history.rules_unsaved());
         let elsewhere = replay.skipped.count() - unsaved;
-        let verb = if redo { "redid" } else { "undid" };
+        let verb = match way {
+            Way::Undo => "undid",
+            Way::Redo => "redid",
+        };
         let mut text = format!("{verb} {}", header::plural(replay.applied, "change"));
         let mut tails = Vec::new();
         if elsewhere > 0 {
@@ -1358,16 +1354,26 @@ impl WatchlistTile {
             text = format!("{text} \u{2014} {}", tails.join(", "));
             Notice::warning(text)
         };
-        // A replay that skipped every change has nothing to write.
-        if replay.next == before {
+        // Nothing applied: the entry is spent (the history drops it) and
+        // there is nothing to write.
+        if replay.applied == 0 {
+            self.history.step(&config, way);
             self.say(notice, cx);
             return;
         }
-        self.notices.outcome.clear();
+        // The gate before the stacks move: a refused write leaves the
+        // history as it was.
         if let Err(why) = self.queue_write(&name, &replay.next, cx) {
-            self.history.refused();
-            self.notices.outcome(Notice::danger(why));
+            self.say(Notice::danger(why), cx);
+            return;
         }
+        let stepped = self.history.step(&config, way);
+        debug_assert_eq!(
+            stepped.as_ref(),
+            Some(&replay),
+            "the step is what was peeked"
+        );
+        self.notices.outcome.clear();
         self.notices.outcome(notice);
         self.rebuild_rows(true, cx);
         cx.notify();
@@ -1601,6 +1607,13 @@ impl WatchlistTile {
                 .map(|r| list.options()[r.row].clone())
                 .collect(),
         ))
+    }
+
+    /// The open field's highlighted option.
+    #[cfg(test)]
+    fn prompt_highlight(&self) -> Option<String> {
+        let field::Rows::Choice(list) = &self.prompt.as_ref()?.rows;
+        list.highlighted_text().map(str::to_string)
     }
 
     /// The origin column of the shown row `name`, as painted.

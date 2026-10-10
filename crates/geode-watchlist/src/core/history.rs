@@ -69,6 +69,13 @@ pub struct Replay {
     pub skipped: Skipped,
 }
 
+/// Which way the history steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Way {
+    Undo,
+    Redo,
+}
+
 impl History {
     /// The object the tile shows and edits: the optimistic pending one if
     /// any, else the configuration's.
@@ -102,32 +109,55 @@ impl History {
         self.hold(config, next);
     }
 
-    /// Revert the last entry over the current object: the next object,
-    /// what was replayed, and what was skipped because it changed
-    /// elsewhere since.
-    pub fn undo(&mut self, config: &Watchlist) -> Option<Replay> {
-        let entry = self.undo.pop()?;
-        let (replay, redo) = self.replay(config, &entry);
-        self.redo.push(redo);
+    /// What stepping `way` would do over the current object, without
+    /// doing it: the tile gates the write on it before the stacks move.
+    /// `None` with nothing that way.
+    pub fn peek(&self, config: &Watchlist, way: Way) -> Option<Replay> {
+        let entry = match way {
+            Way::Undo => self.undo.last()?,
+            Way::Redo => self.redo.last()?,
+        };
+        Some(Self::replay_over(self.current(config), entry).0)
+    }
+
+    /// Step `way`: the top entry replayed over the current object, the
+    /// entry that reverses it pushed on the other stack, and the next
+    /// object held pending. A replay nothing of which applies (every
+    /// change was made elsewhere since, or never saved) is dropped from
+    /// its stack and holds nothing: nothing of it can ever apply again,
+    /// and crossing as an empty reverse entry would make the other verb
+    /// say it did nothing. What [`History::peek`] said.
+    pub fn step(&mut self, config: &Watchlist, way: Way) -> Option<Replay> {
+        let (from, to) = match way {
+            Way::Undo => (&mut self.undo, &mut self.redo),
+            Way::Redo => (&mut self.redo, &mut self.undo),
+        };
+        let entry = from.pop()?;
+        let current = self.pending.as_ref().unwrap_or(config);
+        let (replay, reverse) = Self::replay_over(current, &entry);
+        if replay.applied == 0 {
+            return Some(replay);
+        }
+        to.push(reverse);
         self.hold(config, replay.next.clone());
         Some(replay)
     }
 
-    /// Re-apply the last undone entry over the current object.
+    /// Revert the last entry: [`History::step`] the undo way.
+    pub fn undo(&mut self, config: &Watchlist) -> Option<Replay> {
+        self.step(config, Way::Undo)
+    }
+
+    /// Re-apply the last undone entry: [`History::step`] the redo way.
     pub fn redo(&mut self, config: &Watchlist) -> Option<Replay> {
-        let entry = self.redo.pop()?;
-        let (replay, undo) = self.replay(config, &entry);
-        self.undo.push(undo);
-        self.hold(config, replay.next.clone());
-        Some(replay)
+        self.step(config, Way::Redo)
     }
 
     /// `edit::undo` over the current object, with the skipped changes
     /// named: a name whose manual state is no longer the entry's `after`,
     /// or rules no longer the entry's `after`, were changed elsewhere.
     /// Also the entry that reverses what was replayed.
-    fn replay(&self, config: &Watchlist, entry: &UndoEntry) -> (Replay, UndoEntry) {
-        let current = self.current(config);
+    fn replay_over(current: &Watchlist, entry: &UndoEntry) -> (Replay, UndoEntry) {
         let mut skipped = Skipped::default();
         // Backwards, as `edit::undo` replays.
         for c in entry.changes.iter().rev() {
@@ -440,6 +470,42 @@ mod tests {
         );
         assert_eq!(r.skipped.count(), 1);
         assert_eq!(r.applied, 0);
+    }
+
+    /// A step nothing of which applies is dropped from its stack and holds
+    /// nothing: the other verb never sees an empty entry, and no pending
+    /// copy of an unchanged object is held. `peek` says the same as the
+    /// step, without moving anything.
+    #[test]
+    fn a_step_that_applies_nothing_is_dropped_and_holds_nothing() {
+        let cfg = list(&[], &[]);
+        let mut h = History::default();
+        add(&mut h, &cfg, "SPX");
+        h.refused();
+        // Another surface excluded SPX since: the add cannot be undone.
+        let cfg = list(&[], &["SPX"]);
+        let peeked = h.peek(&cfg, Way::Undo).unwrap();
+        assert_eq!(peeked.applied, 0);
+        assert!(h.can_undo(), "peeking moves nothing");
+        let r = h.undo(&cfg).unwrap();
+        assert_eq!(r, peeked);
+        assert!(!h.can_undo() && !h.can_redo(), "dropped, not crossed");
+        assert!(h.pending().is_none(), "nothing held");
+        assert_eq!(h.current(&cfg), &cfg);
+        assert_eq!(h.peek(&cfg, Way::Undo), None);
+        // The redo way too: an undone add, then the name re-added elsewhere.
+        let cfg = list(&[], &[]);
+        add(&mut h, &cfg, "SPX");
+        let cfg = list(&["SPX"], &[]);
+        h.reloaded(&cfg);
+        assert_eq!(h.undo(&cfg).unwrap().applied, 1);
+        // A foreign write (NDX added, SPX put back) is the truth now.
+        let cfg = list(&["SPX", "NDX"], &[]);
+        h.reloaded(&cfg);
+        assert_eq!(h.peek(&cfg, Way::Redo).unwrap().applied, 0);
+        assert_eq!(h.redo(&cfg).unwrap().applied, 0);
+        assert!(!h.can_redo() && !h.can_undo());
+        assert!(h.pending().is_none());
     }
 
     #[test]

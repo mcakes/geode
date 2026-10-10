@@ -104,13 +104,25 @@ fn europe() -> WatchlistSnapshot {
 /// `underlyings` with a `name` column: SPX and DAX named, NDX with a NULL
 /// name, UKX absent.
 fn reference() -> ReferenceData {
+    reference_with(&[])
+}
+
+/// [`reference`] with `extra` keys beyond the three, each named after
+/// itself: names the typeahead offers that no list holds.
+fn reference_with(extra: &[&str]) -> ReferenceData {
+    let mut rows = vec![
+        vec![Some("SPX".into()), Some("S&P 500".into())],
+        vec![Some("DAX".into()), Some("DAX 40".into())],
+        vec![Some("NDX".into()), None],
+    ];
+    rows.extend(
+        extra
+            .iter()
+            .map(|k| vec![Some(k.to_string()), Some(format!("{k} index"))]),
+    );
     let table = ReferenceTable {
         columns: vec!["underlying_ref".into(), "name".into()],
-        rows: vec![
-            vec![Some("SPX".into()), Some("S&P 500".into())],
-            vec![Some("DAX".into()), Some("DAX 40".into())],
-            vec![Some("NDX".into()), None],
-        ],
+        rows,
         gen_id: 1,
         source_time: chrono::DateTime::from_timestamp(0, 0).unwrap(),
     };
@@ -1600,7 +1612,7 @@ fn shift_r_calls_the_factory_hook_with_the_shown_name(cx: &mut gpui::TestAppCont
 }
 
 #[gpui::test]
-fn escape_peels_selection_then_field_then_notices(cx: &mut gpui::TestAppContext) {
+fn escape_peels_field_then_selection_then_notices(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = europe_shown(cx);
     // A failed resolution and a bad rule stand in the header.
     let mut snap = europe();
@@ -1648,4 +1660,66 @@ fn escape_peels_selection_then_field_then_notices(cx: &mut gpui::TestAppContext)
     // A current resolution clears it.
     vcx.update(|_, cx| publish(cx, europe()));
     assert_eq!(h.visible_notices(&vcx), [NOTHING_TO_UNDO]);
+}
+
+impl Harness {
+    /// The open field's highlighted option.
+    fn highlight(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+        self.tile.read_with(vcx, |t, _| t.prompt_highlight())
+    }
+}
+
+/// A highlight the trader moved (`up`/`down` through the insert bindings)
+/// is a choice: enter adds the listed name, not the typed text; a press on
+/// a listed row adds it at once.
+#[gpui::test]
+fn a_moved_highlight_or_a_row_press_adds_the_listed_name(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| publish_reference(cx, reference_with(&["CAC", "HSI"])));
+    let (h, mut vcx) = open_with(cx, europe(), restored("europe"));
+    h.press(&mut vcx, "o");
+    let (_, _, options) = h.prompt(&vcx).unwrap();
+    assert_eq!(options, ["CAC", "DAX", "HSI", "NDX", "SPX", "UKX"]);
+    assert_eq!(h.highlight(&vcx).as_deref(), Some("CAC"));
+    h.press(&mut vcx, "down");
+    assert_eq!(h.highlight(&vcx).as_deref(), Some("DAX"));
+    h.press(&mut vcx, "down up");
+    assert_eq!(h.highlight(&vcx).as_deref(), Some("DAX"));
+    h.press(&mut vcx, "up");
+    assert_eq!(h.highlight(&vcx).as_deref(), Some("CAC"));
+    // Typed `h` ranks HSI alone. As a guess, enter would add `h` as typed;
+    // moved to, the highlight is the answer.
+    vcx.simulate_input("h");
+    assert_eq!(h.highlight(&vcx).as_deref(), Some("HSI"));
+    h.press(&mut vcx, "down");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.prompt(&vcx), None);
+    let mut next = europe_def();
+    next.include.push("HSI".into());
+    assert_eq!(
+        h.edits(&mut vcx),
+        [edit_of(&next)],
+        "the listed name, not `h`"
+    );
+    assert_eq!(h.notices(&vcx), ["added HSI"]);
+    // A press on a listed row picks it at once.
+    h.press(&mut vcx, "o");
+    h.draw(&mut vcx);
+    let row = vcx
+        .debug_bounds("watchlist-prompt-row-CAC")
+        .expect("the list is painted");
+    vcx.simulate_mouse_down(
+        row.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(h.prompt(&vcx), None);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    next.include.push("CAC".into());
+    assert_eq!(h.edits(&mut vcx), [edit_of(&next)]);
+    assert_eq!(h.notices(&vcx), ["added CAC"]);
+    assert_eq!(
+        h.origin(&vcx, "CAC").as_deref(),
+        Some("manual \u{b7} pending")
+    );
+    assert!(!vcx.update(|window, cx| h.content.holds_focus(window, cx)));
 }

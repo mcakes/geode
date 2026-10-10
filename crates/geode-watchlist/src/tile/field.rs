@@ -46,7 +46,10 @@ pub(crate) struct PromptField {
     /// The trader moved the highlight (a key or a row click): it is a
     /// choice, not a guess, and enter takes it whatever is typed.
     pub moved: bool,
-    /// The rows as painted, prepared when they change.
+    /// The rows as painted: derived from `rows`, never read back into it,
+    /// and repainted (`repaint`) after every `step`, `typed` and `hover`,
+    /// so render ranks nothing. Any later shape of `rows` keeps the same
+    /// discipline.
     pub choice: Rc<ChoicePaint>,
 }
 
