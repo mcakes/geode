@@ -1071,15 +1071,47 @@ series, including a pair loaded twice under two rules, is refused rather than
 resolved to either. A long expression's chip label is cut to 24 characters
 ending in `…`.
 
+Beyond `+ - * /` and parentheses, an expression may call functions and read
+one value of a series with `[k]`. Every node has a shape, series or scalar,
+checked before anything is sent: a number is a scalar, a name is a series,
+arithmetic with any series operand is a series, a fold of a series is a
+scalar, and `x[k]` of a series is a scalar (`A[0]` is its first value,
+`A[-1]` its last, past either end NULL). A fold or an index of a scalar is
+refused by name (`mean needs a series`, `[k] needs a series`), as is a wrong
+argument count or a count outside 1..=10,000. A word followed immediately
+by `(` is a call and must name a function; any other word is a series name.
+
+| Functions | Kind | Meaning |
+|---|---|---|
+| `first last min max mean median std sum count` | fold | one number over the queried range, NULL skipped; `std` is the sample deviation |
+| `abs log exp sqrt` | pointwise | per bucket; `log` of a non-positive, `sqrt` of a negative and `exp` past the double range are NULL |
+| `min(x, y, …)`, `max(x, y, …)` | pointwise | least and greatest per bucket; NULL where any operand is |
+| `diff pct cum lag(A, n)` | along | change from the previous point, that change over the previous value (NULL when it is zero), running sum, the value n points back |
+| `sma rmin rmax rstd z ema`, each `(A, n)` | rolling | over the last n points; NULL until the last n points are non-null, never a partial-window figure. `z` is `(A - sma) / rstd`; `ema` is the adjusted span-n exponentially weighted mean over the last 5n points, under the same last-n guard, and a NULL earlier in the 5n span is skipped |
+
+Scalars fold over the queried range, not the visible window, so a pan never
+reshapes a series and `A / A[0]` is "rebased at the range start". A series is
+its bucketed points: a bucket with no point is not a row, so "previous" skips
+gaps and a daily series' Monday `lag(A, 1)` is Friday. A series-shaped
+expression paints on the inner join of the buckets of the series it reads as
+series; a folded operand does not narrow it (`A / mean(B)` keeps every
+bucket of A). A scalar-shaped expression (`mean(A)`, `A[-1] - A[0]`) paints
+as a flat line over the union of the buckets of the series it folds. Every
+function lowers to SQL inside the one read transaction; a window over a
+window and a fold over a derived series each take an intermediate CTE of the
+slot's own, so the statistics statements repeat the expression unchanged.
+
 The expression field (`x`, or `e` on an expression) completes loaded series
-names, the only names an expression may reference. The name at the caret is
-the run the expression tokenizer reads as one reference (an identity with an
-optional `@source`), so `SPX.close/VI` completes `VI`; a caret just before a
-name's first character is in that name, and a caret in a number offers
-nothing. Loaded names that name exactly one series are ranked against
-it with the `:` line's matcher; an empty name (an empty field, or after an
-operator, a parenthesis or a space) offers every one. The list hangs under the
-field over the chart, showing at most eight rows that scroll with the lit row.
+names and the function names, each written with its `(` so the caret lands
+inside the call; a series is the only thing an expression may reference. The
+name at the caret is the run the expression tokenizer reads as one reference
+(an identity with an optional `@source`), so `SPX.close/VI` completes `VI`; a
+caret just before a name's first character is in that name, and a caret in a
+number offers nothing. Loaded names that name exactly one series are ranked
+against it with the `:` line's matcher; an empty name (an empty field, or
+after an operator, a parenthesis or a space) offers every one. The list hangs
+under the field over the chart, showing at most eight rows that scroll with
+the lit row.
 When no unambiguous source names are available, it shows the add-series hint;
 this also happens when duplicate loaded pairs leave no usable name.
 Tab writes the lit name over the

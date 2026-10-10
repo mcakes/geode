@@ -262,6 +262,30 @@ add an SPX series to a chart. Demo history is synthetic and uses fixed weekday
 sessions, so it is useful for learning the controls rather than interpreting
 market moves.
 
+### Transform a series
+
+With a series loaded, `x` opens the expression field. Besides `+ - * /`,
+an expression can call functions and read one value of a series:
+
+```text
+SPX.close / SPX.close[0]        rebased to 1 at the start of the range
+SPX.close / SPX.close[-1]       rebased to its last value
+sma(SPX.close, 20)              20-point moving average
+z(log(SPX.close), 60)           rolling z-score of the log price
+SPX.close - mean(SPX.close)     distance from the range mean
+mean(SPX.close)                 the mean itself, drawn as a flat line
+```
+
+Folds (`first last min max mean median std sum count`) give one number
+over the whole queried range. `abs log exp sqrt` apply per point, and
+`min(A, B)`/`max(A, B)` take the lesser or greater of two series per point.
+`diff`, `pct`, `cum` and `lag(A, n)` follow the point order, and `sma`,
+`rmin`, `rmax`, `rstd`, `z` and `ema` take `(A, n)` for a window of the last
+`n` points. A rolling value is blank until each of the last `n` points has
+a value, and a value that has no honest answer (a log of a negative, a
+division by zero) is a gap rather than a number. Tab completes series and
+function names in the field.
+
 ### Build a pricing sheet
 
 Add a **Pricer** tile. Press `o` to open its entry bar and enter:

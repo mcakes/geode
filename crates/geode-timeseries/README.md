@@ -58,6 +58,9 @@ cargo bench -p geode-timeseries
   else the default source's identity, else a unique identity. A name that
   fits several series is refused with their labels, never resolved to the
   first. Expressions reference source series only.
+- Enter runs parse, then the shape check (`Ast::shape`), then name
+  resolution; the first refusal is the inline error, so `mean(2)` is refused
+  as a shape before any name in it is looked up.
 - `core::session` rewrites a pre-`version = 2` table's `sN` handles to names
   on restore: a source as its full `identity@source` (`resolve::name_for`,
   never the default-aware label), an expression operand as `(text)`. A text
@@ -128,7 +131,9 @@ calendar arithmetic and remain relative in sessions. Absolute ranges store
 inclusive UTC dates; reopening them retains their stored dates despite as-of
 clipping of queries.
 
-The expression field completes loaded series names (`Model::series_names`).
+The expression field completes loaded series names (`Model::series_names`)
+and the function names, each with its `(` (`core::complete::function_names`);
+Enter's expansion is over series names only.
 `core::complete::name_at` finds the name at the caret with the expression
 tokenizer's own character classes (`geode_core::series::expr`), so the word
 boundary cannot drift from what the parser reads; a caret at a name's start

@@ -21406,21 +21406,24 @@ run_mutation "expr: a reference span stops before its source" \
   geode-core \
   references_answer_each_name_with_its_byte_span_in_order
 
-# `max(s1, s2)` is not arithmetic, and the `(` right after a word is the
-# only place the tokenizer can say so in the trader's own words. Without
-# it the word becomes an identity and the parse fails later with
-# "unexpected token", pointing at a paren rather than at the boundary.
-run_mutation "expr: a function call is accepted" \
+# A word right before `(` is a call, and an unknown one is refused by
+# name in the trader's own text. Let it fall through as a reference and
+# the parse fails later with "unexpected token", pointing at the paren
+# rather than at the word that is wrong.
+run_mutation "expr: an unknown function is a name" \
   crates/geode-core/src/series/expr.rs \
-  '                if i < bytes.len() && bytes[i] == b'"'"'('"'"' {
-                    return Err(ParseError {
-                        position: i,
-                        message: ARITHMETIC_ONLY.into(),
-                    });
-                }' \
-  '                let _ = ();' \
+  '                        None => {
+                            return Err(ParseError {
+                                position: start,
+                                message: format!("unknown function '"'"'{word}'"'"'"),
+                            });
+                        }' \
+  '                        None => Token::Ref(RefName {
+                            identity: word.to_string(),
+                            source: None,
+                        }),' \
   geode-core \
-  foreign_tokens_are_refused_with_the_arithmetic_only_message
+  a_word_before_a_paren_is_a_call_and_anywhere_else_a_name
 
 # MAX_DEPTH bounds syntactic nesting, but a flat arithmetic chain still
 # builds a deep tree. The token bound limits recursive resolution, lowering,
@@ -21432,6 +21435,110 @@ run_mutation "expr: the token bound is off" \
   '    if false {' \
   geode-core \
   a_long_chain_is_refused_by_the_token_bound
+
+# A fold needs a series to fold. Accept a scalar and `mean(2)` is no
+# longer refused as a shape by name: it reaches the lowering as a fold
+# over a literal and the trader reads a number for nonsense.
+run_mutation "expr: a fold of a scalar is accepted" \
+  crates/geode-core/src/series/expr.rs \
+  '                Shape::Scalar => Err(format!("{name} needs a series")),' \
+  '                Shape::Scalar => Ok(()),' \
+  geode-core \
+  shape_refusals_name_the_function_and_what_it_takes
+
+# `series_slots` is what the bucket join reads. A fold reads its operand
+# as one number, not as a series, so that operand must stay out of the
+# join: count it and `A / mean(B)` loses every bucket of A that B lacks.
+run_mutation "expr: a fold's operand counts as a series operand" \
+  crates/geode-core/src/series/expr.rs \
+  '                    Kind::Fold => true,' \
+  '                    Kind::Fold => false,' \
+  geode-core \
+  series_slots_leave_out_what_a_fold_or_index_reads
+
+# The grid opens on the join of the SERIES operands alone; `slots` also
+# holds the folded and indexed ones. Join on those too and a fold
+# narrows the buckets it was meant to leave alone, and a scalar line
+# shrinks to the intersection instead of spanning the union.
+run_mutation "series query: a scalar operand narrows the buckets" \
+  crates/geode-data/src/query/series.rs \
+  '        let series = e.series_slots();' \
+  '        let series = e.slots();' \
+  geode-data \
+  a_scalar_line_spans_the_union_of_the_series_it_folds_and_a_fold_never_narrows
+
+# A rolling figure is NULL until the last n points are non-null, never
+# a partial-window figure that reads as a full one. Relax the guard to
+# any point at all and the first n - 1 rows carry an average of fewer
+# points under the name of an n-point one.
+run_mutation "series query: a rolling window answers before it is full" \
+  crates/geode-data/src/query/series.rs \
+  '                let full = format!("count({a}) {w} = {n}");' \
+  '                let full = format!("count({a}) {w} >= 1");' \
+  geode-data \
+  rolling_functions_are_null_until_their_window_is_full_of_points
+
+# `A[k]` counts points, and a NULL value is not a point. Count it and
+# `A[0]` over a series whose first value is NULL answers NULL where the
+# trader asked for its first value.
+run_mutation "series query: an index counts NULL points" \
+  crates/geode-data/src/query/series.rs \
+  '    format!("(select v from {rel} where v is not null order by b{order} offset {offset} limit 1)")' \
+  '    format!("(select v from {rel} order by b{order} offset {offset} limit 1)")' \
+  geode-data \
+  along_functions_follow_point_order_across_gaps_and_nest_by_hoisting
+
+# A negative index counts from the END: `A[-1]` is the last value, the
+# one `A / A[-1]` rebases to. Count from the start and it is the second,
+# which is still a number on the chart.
+run_mutation "series query: a negative index counts from the start" \
+  crates/geode-data/src/query/series.rs \
+  '    let (order, offset) = if k >= 0 { ("", k) } else { (" desc", -k - 1) };' \
+  '    let (order, offset) = ("", k.abs());' \
+  geode-data \
+  folds_and_indexes_read_the_whole_range_and_skip_gaps
+
+# `log` of a non-positive is a gap, not DuckDB's answer: `ln` of zero
+# or of a negative is an engine error, so one bad point fails the whole
+# query and the chart shows a refusal instead of a line.
+run_mutation "series query: log of a non-positive is not guarded" \
+  crates/geode-data/src/query/series.rs \
+  '                    Function::Log => format!("(case when ({a}) > 0 then ln({a}) else null end)"),' \
+  '                    Function::Log => format!("ln({a})"),' \
+  geode-data \
+  pointwise_functions_guard_their_domains_and_join_their_series
+
+# SQL forbids a window inside a window, so `diff(diff(A))` stages the
+# inner value as a column first. Skip the hoist and the statement nests
+# one window in another, which DuckDB refuses; the test reads the stage
+# out of the compiled SQL.
+run_mutation "series query: a window over a window is not hoisted" \
+  crates/geode-data/src/query/series.rs \
+  '                let a = if windowed { self.hoist(a, g) } else { a };' \
+  '                let a = { let _ = windowed; a };' \
+  geode-data \
+  along_functions_follow_point_order_across_gaps_and_nest_by_hoisting
+
+# `pct` over a zero previous value is a gap. Drop the guard and DOUBLE
+# division answers infinity, which the chart draws as a point.
+run_mutation "series query: pct divides by a zero previous value" \
+  crates/geode-data/src/query/series.rs \
+  '            Function::Pct => format!(
+                "(case when lag({a}) {ord} = 0 then null else (({a}) - lag({a}) {ord}) / lag({a}) {ord} end)"
+            ),' \
+  '            Function::Pct => format!("((({a}) - lag({a}) {ord}) / lag({a}) {ord})"),' \
+  geode-data \
+  a_zero_previous_value_is_a_gap_in_pct
+
+# The shape check runs before any name is looked up, so `mean(2)` is
+# refused by the function's name. Drop its result and the expression
+# resolves (it holds no name to miss) and is sent to the data tier.
+run_mutation "timeseries: a shape error reaches resolution" \
+  crates/geode-timeseries/src/core/resolve.rs \
+  '    ast.shape()?;' \
+  '    let _ = ast.shape();' \
+  geode-timeseries \
+  a_shape_error_is_refused_before_resolution
 
 # Expressions accept source-series operands only. Accepting an expression
 # operand without dependency ordering can emit its CTE before its inputs,
