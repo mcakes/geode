@@ -1,7 +1,9 @@
 //! Distinct values and scoped row counts for the dimension picker.
 //!
 //! Contributions from each dataset carrying the column are combined under
-//! the same live or as-of routing used by other queries.
+//! the same live or as-of routing used by other queries. A `dataset` filter
+//! reads that one dataset alone, refusing by name when it is unknown,
+//! computed, or does not carry the column.
 
 use crate::query::as_of::{generation_predicate, resolve_generations};
 use crate::query::compile::{CompiledColumn, CompiledQuery, era_for};
@@ -44,12 +46,38 @@ pub(crate) fn compile_distinct_with_cache(
             "scope carries unresolved named expressions".into(),
         ));
     }
+    // A filter naming a dataset the loop below would never read is refused
+    // by name here, so the error says what is wrong with the dataset rather
+    // than claiming the column is absent from it.
+    if let Some(only) = params.dataset.as_deref() {
+        let reason = match schema.dataset(only) {
+            None => Some(format!("no dataset '{only}'")),
+            Some(ds) if ds.computed => Some(format!(
+                "dataset '{only}' is computed by a module and has no tables"
+            )),
+            Some(_) => None,
+        };
+        if let Some(reason) = reason {
+            return Err(StoreError::Sql {
+                statement: format!("distinct '{}'", params.column),
+                source: duckdb::Error::InvalidParameterName(reason),
+            });
+        }
+    }
     let base = dims.base_column(&params.column);
     let mut selects: Vec<String> = Vec::new();
     let mut all_params: Vec<Value> = Vec::new();
     // One cache covers this statement's compilation. ENUM type names are
     // dataset-qualified, so entries from different datasets cannot collide.
     for ds in &schema.datasets {
+        // A rule reads one dataset: the others contribute nothing.
+        if params
+            .dataset
+            .as_deref()
+            .is_some_and(|only| only != ds.name)
+        {
+            continue;
+        }
         // computed: no relation to read values from.
         if ds.computed {
             continue;
@@ -95,12 +123,13 @@ pub(crate) fn compile_distinct_with_cache(
         all_params.extend(scope.params);
     }
     if selects.is_empty() {
+        let reason = match params.dataset.as_deref() {
+            Some(only) => format!("dataset '{only}' does not carry '{}'", params.column),
+            None => format!("no dataset carries '{}'", params.column),
+        };
         return Err(StoreError::Sql {
             statement: format!("distinct '{}'", params.column),
-            source: duckdb::Error::InvalidParameterName(format!(
-                "no dataset carries '{}'",
-                params.column
-            )),
+            source: duckdb::Error::InvalidParameterName(reason),
         });
     }
     let sql = format!(
@@ -617,6 +646,127 @@ grain = "instrument"
         };
         let all = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &unscoped).unwrap());
         assert!(all.iter().map(|(_, n)| n).sum::<u64>() > 8);
+    }
+
+    /// A rule reads one dataset: with the filter set, only that dataset's
+    /// rows are counted, and the union is exactly the two contributions.
+    #[test]
+    fn a_dataset_filter_reads_that_dataset_alone() {
+        let f = two_dataset_fixture();
+        let all = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &base_params()).unwrap());
+        let risk_only = DistinctParams {
+            dataset: Some("risk".into()),
+            ..base_params()
+        };
+        let risk = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &risk_only).unwrap());
+        let ref_only = DistinctParams {
+            dataset: Some("ref".into()),
+            ..base_params()
+        };
+        let reference = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &ref_only).unwrap());
+        // The union's counts are the two contributions summed.
+        for (value, n) in &all {
+            let r = risk
+                .iter()
+                .find(|(v, _)| v == value)
+                .map(|(_, n)| *n)
+                .unwrap_or(0);
+            let q = reference
+                .iter()
+                .find(|(v, _)| v == value)
+                .map(|(_, n)| *n)
+                .unwrap_or(0);
+            assert_eq!(*n, r + q, "{value}");
+        }
+        // The fixture: risk has JPY and ref has GBP, so neither side is the
+        // union and the two differ from each other.
+        assert!(risk.len() < all.len() && reference.len() < all.len() && risk != reference);
+        assert_eq!(
+            risk,
+            vec![
+                ("EUR".to_string(), 2),
+                ("JPY".to_string(), 1),
+                ("USD".to_string(), 3)
+            ]
+        );
+        assert_eq!(
+            reference,
+            vec![
+                ("EUR".to_string(), 1),
+                ("GBP".to_string(), 1),
+                ("USD".to_string(), 3)
+            ]
+        );
+    }
+
+    /// Both fixture datasets carry `book` and `currency`; `npv` is `risk`'s
+    /// alone, so `ref` is the dataset without the column.
+    #[test]
+    fn a_dataset_filter_naming_a_dataset_without_the_column_or_unknown_is_refused() {
+        let f = two_dataset_fixture();
+        let params = DistinctParams {
+            dataset: Some("ref".into()),
+            column: "npv".into(),
+            ..base_params()
+        };
+        let e = compile_distinct(f.conn(), &f.schema, &f.dims, &params)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("'ref'") && e.contains("'npv'"), "{e}");
+        let params = DistinctParams {
+            dataset: Some("nope".into()),
+            ..base_params()
+        };
+        let e = compile_distinct(f.conn(), &f.schema, &f.dims, &params)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("no dataset 'nope'"), "{e}");
+    }
+
+    /// A computed dataset has no tables to read, even when it declares the
+    /// column: the refusal says so rather than claiming the column is absent.
+    #[test]
+    fn a_dataset_filter_naming_a_computed_dataset_is_refused_as_computed() {
+        let mut f = two_dataset_fixture();
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin(
+                "datasets",
+                r#"
+[pricer]
+computed = true
+[pricer.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[pricer.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[pricer.columns.npv]
+type = "f64"
+role = "measure"
+grain = "instrument"
+"#,
+            )
+            .unwrap()],
+        );
+        let (computed, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        f.schema.datasets.extend(computed.datasets);
+        let params = DistinctParams {
+            dataset: Some("pricer".into()),
+            ..base_params()
+        };
+        let e = compile_distinct(f.conn(), &f.schema, &f.dims, &params)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("dataset 'pricer' is computed by a module and has no tables"),
+            "{e}"
+        );
+        // The union path is untouched by a computed dataset's presence.
+        let all = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &base_params()).unwrap());
+        assert_eq!(all.iter().map(|(_, n)| n).sum::<u64>(), 11);
     }
 
     /// A scope term on another grain correlates its membership probe with

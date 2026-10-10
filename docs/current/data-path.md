@@ -1148,7 +1148,10 @@ the grouping cardinality. The result is an immutable columnar `Snapshot`:
 expanding a tree node works on the prepared result rather than issuing another
 database query. User supplied scope values are bound as parameters. A computed
 dataset has no relation: the compiler refuses a view or join over it, and
-distinct-value requests skip it.
+distinct-value requests skip it. A distinct request naming one dataset reads
+that dataset alone and is refused by name when the dataset is unknown,
+computed, or does not carry the column; without a name it unions every
+dataset carrying the column, which is what the dimension picker asks for.
 
 A distinct-value answer carries the key it was asked under, and the app
 routes it by that key. The shell's reserved keys (the picker, expression
