@@ -88,7 +88,9 @@ empty state (`No names`); a filter that keeps nothing says
 `No matching names`.
 
 Order: by name, excluded rows last. `:sort <name|origin|reference>
-[asc|desc]` (a bare column is `asc`); a bare `:sort` restores the default;
+[asc|desc]` (a bare column is `asc`); `origin` sorts by its text as shown
+(`rule 10` before `rule 2`; the ` · pending` suffix participates); a bare
+`:sort` restores the default;
 the header's sort control cycles desc → asc → default as every grid
 tile's does (`SortOrder::click_cycle`), another column starting at desc.
 The sort is the tile's and survives a switch; the session saves it.

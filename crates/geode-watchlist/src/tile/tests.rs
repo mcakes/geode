@@ -869,6 +869,54 @@ fn a_restored_cursor_lands_on_its_name_when_the_snapshot_arrives(cx: &mut gpui::
         "the restored sort"
     );
     assert_eq!(h.cursor(&vcx).as_deref(), Some("NDX"));
+    // A snapshot still resolving is not the answer the seed waits for: a
+    // current one without the name is, and the seed is forgotten, so the
+    // session saves the row the cursor rests on and a later re-add does
+    // not snap the cursor to it.
+    let seeded = || {
+        crate::core::session::to_table(&crate::core::session::State {
+            name: Some("europe".into()),
+            sort: None,
+            cursor: Some("NDX".into()),
+        })
+    };
+    let without_ndx = |status: Status| {
+        let mut snap = europe();
+        let list = snap.lists.get_mut("europe").unwrap();
+        list.members.retain(|m| m.name != "NDX");
+        list.status = status;
+        snap
+    };
+    let (h, mut vcx) = open_with(cx, without_ndx(Status::Resolving), Some(seeded()));
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert_eq!(saved["cursor"].as_str(), Some("NDX"), "resolving: waits");
+    vcx.update(|_, cx| publish(cx, without_ndx(Status::Failed("timed out".into()))));
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert_eq!(saved["cursor"].as_str(), Some("NDX"), "failed: waits");
+    vcx.update(|_, cx| publish(cx, without_ndx(Status::Current)));
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert_eq!(saved["cursor"].as_str(), Some("DAX"), "the resting row");
+    vcx.update(|_, cx| publish(cx, europe()));
+    assert_eq!(
+        h.cursor(&vcx).as_deref(),
+        Some("DAX"),
+        "NDX's return is not followed"
+    );
+    // Empty list, current: nothing rests anywhere, and nothing is saved.
+    let (h, mut vcx) = open_with(cx, WatchlistSnapshot::default(), Some(seeded()));
+    vcx.update(|_, cx| {
+        let mut snap = WatchlistSnapshot::default();
+        snap.lists.insert("europe".into(), list(&[]));
+        publish(cx, snap)
+    });
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert!(!saved.contains_key("cursor"), "{saved:?}");
+    vcx.update(|_, cx| publish(cx, europe()));
+    assert_eq!(
+        h.cursor(&vcx).as_deref(),
+        Some("DAX"),
+        "resting on the top row"
+    );
 }
 
 #[gpui::test]

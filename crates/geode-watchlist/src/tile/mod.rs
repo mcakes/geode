@@ -25,7 +25,7 @@ use std::sync::Arc;
 use geode_core::clock::Clock;
 use geode_core::reference::ReferenceData;
 use geode_core::sort::SortOrder;
-use geode_core::watchlist::state::WatchlistSnapshot;
+use geode_core::watchlist::state::{Status, WatchlistSnapshot};
 use geode_shell::actions::ActionId;
 use geode_shell::clock::AppClock;
 use geode_shell::frame::{FrameRef, TileNotice};
@@ -369,7 +369,12 @@ impl WatchlistTile {
     /// first snapshot with lists when nothing is shown, and again when the
     /// shown list goes away, never on a change that leaves a nothing-shown
     /// tile as it was (the trader closed the switcher). An open switcher
-    /// takes the new names; the grid takes the new members.
+    /// takes the new names; the grid takes the new members. A restored
+    /// cursor still waiting once the shown list's resolution is current
+    /// names a member the list no longer holds: the rows that could hold
+    /// it have answered, so it stops waiting (a later re-add must not snap
+    /// the cursor under a trader who has not touched the tile). A
+    /// resolving or failed status is not that answer.
     fn settle(&mut self, cx: &mut Context<Self>) {
         let snapshot = snapshot(cx);
         let shown = self.shown_in(&snapshot);
@@ -378,6 +383,15 @@ impl WatchlistTile {
             self.notices.nothing_to_switch = false;
         }
         self.rebuild_rows(false, cx);
+        let current = self
+            .state
+            .name
+            .as_deref()
+            .and_then(|n| snapshot.lists.get(n))
+            .is_some_and(|s| s.status == Status::Current);
+        if current {
+            self.grid.forget_seed();
+        }
     }
 
     fn settle_menu(&mut self, shown: bool, snapshot: &WatchlistSnapshot) {
@@ -603,7 +617,7 @@ impl WatchlistTile {
         };
         let shown = self.chrome.empty.is_none();
         let listed = if shown { Ok(()) } else { Err(NOTHING_SHOWN) };
-        let targeted = match (shown, self.grid.targets().is_empty()) {
+        let targeted = match (shown, self.grid.cursor().is_none()) {
             (false, _) => Err(NOTHING_SHOWN),
             (true, true) => Err(NO_ROW),
             (true, false) => Ok(()),

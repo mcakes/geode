@@ -23,7 +23,7 @@ pub use crate::core::session::SortCol;
 pub const NAME_COL: usize = 0;
 pub const REFERENCE_COL: usize = 1;
 
-/// Present keys in `dir`'s direction, then absent ones: a row a sort
+/// Present keys in `desc`'s direction, then absent ones: a row a sort
 /// cannot rank (no reference name) never leads.
 fn absent_last<T: Ord>(a: Option<T>, b: Option<T>, desc: bool) -> Ordering {
     match (a, b) {
