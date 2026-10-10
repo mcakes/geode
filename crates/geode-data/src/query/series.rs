@@ -264,14 +264,55 @@ impl Lowering {
         match f.kind() {
             Kind::Fold => Ok((fold_sql(f, &self.fold_rel(first)?), false)),
             Kind::MinMax if args.len() == 1 => Ok((fold_sql(f, &self.fold_rel(first)?), false)),
-            Kind::MinMax | Kind::Pointwise | Kind::Along { .. } | Kind::Rolling => {
-                let _ = g;
-                Err(refuse(format!(
-                    "slot {}: {} is not lowered yet",
-                    self.slot,
-                    f.name()
-                )))
+            Kind::Pointwise => {
+                let (a, w) = self.lower(first, g)?;
+                let sql = match f {
+                    Function::Abs => format!("abs({a})"),
+                    // `exp` overflows the double at about 709.78; past
+                    // it DuckDB answers inf, which a chart would draw.
+                    Function::Exp => format!("(case when ({a}) > 709 then null else exp({a}) end)"),
+                    Function::Log => format!("(case when ({a}) > 0 then ln({a}) else null end)"),
+                    Function::Sqrt => format!("(case when ({a}) < 0 then null else sqrt({a}) end)"),
+                    _ => unreachable!("the pointwise functions are the four above"),
+                };
+                Ok((sql, w))
             }
+            Kind::MinMax => {
+                let mut parts = Vec::new();
+                let mut windowed = false;
+                for x in args {
+                    let (s, w) = self.lower(x, g)?;
+                    parts.push(s);
+                    windowed |= w;
+                }
+                // `least`/`greatest` skip a NULL operand; a bucket one
+                // operand has no value for is a gap, not the other's
+                // value.
+                let nulls = parts
+                    .iter()
+                    .map(|p| format!("({p}) is null"))
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                let list = parts
+                    .iter()
+                    .map(|p| format!("({p})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let fun = if f == Function::Min {
+                    "least"
+                } else {
+                    "greatest"
+                };
+                Ok((
+                    format!("(case when {nulls} then null else {fun}({list}) end)"),
+                    windowed,
+                ))
+            }
+            Kind::Along { .. } | Kind::Rolling => Err(refuse(format!(
+                "slot {}: {} is not lowered yet",
+                self.slot,
+                f.name()
+            ))),
         }
     }
 }
@@ -1270,6 +1311,83 @@ mod tests {
             vals(&r, 3),
             vec![Some(30.0), Some(60.0), None, None, None],
             "B is folded, so it does not narrow A's buckets"
+        );
+    }
+
+    #[test]
+    fn pointwise_functions_guard_their_domains_and_join_their_series() {
+        let (_d, store) = store();
+        daily(&store, "A", &[1.0, -4.0, 0.0, 9.0, f64::NAN]);
+        daily(&store, "B", &[2.0, 2.0, f64::NAN, 2.0, 2.0]);
+        let r = run(
+            &store,
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                source(2, "B", BucketRule::Last),
+                expr(3, "abs(s1)"),
+                expr(4, "log(s1)"),
+                expr(5, "sqrt(s1)"),
+                expr(6, "exp(0 * s1)"),
+                expr(7, "min(s1, s2)"),
+                expr(8, "max(s1, 2)"),
+                expr(9, "max(s1, s2, 5)"),
+                expr(10, "log(mean(s2))"),
+                expr(11, "exp(1000 * s2)"),
+            ]),
+        );
+        assert_eq!(r.buckets.len(), 5);
+        assert_eq!(
+            vals(&r, 2),
+            vec![Some(1.0), Some(4.0), Some(0.0), Some(9.0), None]
+        );
+        assert!(
+            close(
+                &vals(&r, 3),
+                &[Some(0.0), None, None, Some(9f64.ln()), None]
+            ),
+            "log of a non-positive is a gap: {:?}",
+            vals(&r, 3)
+        );
+        assert_eq!(
+            vals(&r, 4),
+            vec![Some(1.0), None, Some(0.0), Some(3.0), None],
+            "sqrt of a negative is a gap"
+        );
+        assert_eq!(
+            vals(&r, 5),
+            vec![Some(1.0), Some(1.0), Some(1.0), Some(1.0), None]
+        );
+        assert_eq!(
+            vals(&r, 6),
+            vec![Some(1.0), Some(-4.0), None, Some(2.0), None],
+            "pointwise min joins its series"
+        );
+        assert_eq!(
+            vals(&r, 7),
+            vec![Some(2.0), Some(2.0), Some(2.0), Some(9.0), None]
+        );
+        assert_eq!(
+            vals(&r, 8),
+            vec![Some(5.0), Some(5.0), None, Some(9.0), None]
+        );
+        assert!(
+            close(
+                &vals(&r, 9),
+                &[
+                    Some(2f64.ln()),
+                    Some(2f64.ln()),
+                    None,
+                    Some(2f64.ln()),
+                    Some(2f64.ln())
+                ]
+            ),
+            "a pointwise function of a scalar is a scalar line over B: {:?}",
+            vals(&r, 9)
+        );
+        assert_eq!(
+            vals(&r, 10),
+            vec![None, None, None, None, None],
+            "beyond the double range is a gap, not an inf the chart draws"
         );
     }
 
