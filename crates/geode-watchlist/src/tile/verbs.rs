@@ -35,11 +35,15 @@ impl WatchlistTile {
         Some((name.to_string(), state))
     }
 
-    /// Whether the member verbs may act now. Always, so far: a queued
-    /// revert will refuse them, since the tile cannot see the lower copy
-    /// the revert will show.
+    /// Whether the member and rules verbs may act now: not while the shown
+    /// list's revert is on its way, since the tile cannot see the lower
+    /// copy the revert will show, and an edit built on the user copy would
+    /// replace the removal in the shell's batch.
     pub(super) fn verbs_allowed(&self) -> Result<(), String> {
-        Ok(())
+        match self.reverting() {
+            Some(name) => Err(Self::reverting_text(name)),
+            None => Ok(()),
+        }
     }
 
     /// A verb refused: say why, as a danger, in place of the last word.

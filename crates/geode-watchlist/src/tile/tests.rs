@@ -429,6 +429,43 @@ impl Harness {
     fn visible_notices(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
         self.tile.read_with(vcx, |t, _| t.visible_notice_texts())
     }
+    /// The open field's label (`clone europe as`).
+    fn label(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+        self.tile
+            .read_with(vcx, |t, _| t.prompt.as_ref().map(|p| p.label.to_string()))
+    }
+    /// Replace the open field's text with `text`, as the trader would by
+    /// clearing it and typing.
+    fn retype(&self, vcx: &mut gpui::VisualTestContext, text: &str) {
+        let input = self
+            .tile
+            .read_with(vcx, |t, _| t.prompt.as_ref().map(|p| p.input.clone()))
+            .expect("the field is open");
+        vcx.update(|window, cx| input.update(cx, |s, cx| s.set_value("", window, cx)));
+        vcx.simulate_input(text);
+    }
+    /// The armed y/n question.
+    fn question(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+        self.tile.read_with(vcx, |t, _| t.question())
+    }
+    /// Whether a create, clone, rename or delete is still awaited.
+    fn awaiting(&self, vcx: &gpui::VisualTestContext) -> bool {
+        self.tile.read_with(vcx, |t, _| t.awaiting.is_some())
+    }
+    /// Show `name` through the switcher's rows.
+    fn switch_to(&self, vcx: &mut gpui::VisualTestContext, name: &str) {
+        self.press(vcx, "g w");
+        let rows = self.switcher(vcx).expect("the switcher is open");
+        let at = rows.iter().position(|(n, _)| n == name).expect("listed");
+        let from = rows.iter().position(|(_, on)| *on).unwrap_or(0);
+        let steps = if at >= from {
+            " j".repeat(at - from)
+        } else {
+            " k".repeat(from - at)
+        };
+        self.press(vcx, &format!("g g{steps} enter"));
+        assert_eq!(self.title(vcx), format!("Watchlist: {name}"));
+    }
     /// Put the cursor on `name` with the grid's own motions.
     fn goto(&self, vcx: &mut gpui::VisualTestContext, name: &str) {
         let at = self
@@ -604,11 +641,13 @@ fn a_snapshot_change_refreshes_the_header(cx: &mut gpui::TestAppContext) {
 /// `.` opens the `⋯` menu with the member verbs, the switcher and the
 /// list's own verbs; a verb not built yet says so as a status notice.
 #[gpui::test]
-fn the_actions_menu_lists_the_verbs_and_a_pick_says_not_yet(cx: &mut gpui::TestAppContext) {
+fn the_actions_menu_lists_the_verbs_with_their_gates(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_with(cx, two(), restored("a"));
     vcx.simulate_keystrokes(".");
     let none = |t: &str| (t.to_string(), None);
     let off = |t: &str, why: &str| (t.to_string(), Some(why.to_string()));
+    // `a` is the desk's: Rename… and Delete… say so in their lane, and
+    // Revert… is not listed (no copy beneath a desk list).
     assert_eq!(
         h.reasons(&vcx),
         Some(vec![
@@ -621,9 +660,14 @@ fn the_actions_menu_lists_the_verbs_and_a_pick_says_not_yet(cx: &mut gpui::TestA
             none("Switch\u{2026}"),
             none("New\u{2026}"),
             none("Clone\u{2026}"),
-            none("Rename\u{2026}"),
-            none("Delete\u{2026}"),
-            none("Revert\u{2026}"),
+            off(
+                "Rename\u{2026}",
+                "a is defined in desk config; Geode cannot rename it"
+            ),
+            off(
+                "Delete\u{2026}",
+                "a is defined in desk config; Geode cannot delete it"
+            ),
         ])
     );
     assert_eq!(h.mode(&vcx).as_deref(), Some("menu"));
@@ -649,10 +693,13 @@ fn the_actions_menu_lists_the_verbs_and_a_pick_says_not_yet(cx: &mut gpui::TestA
         Some(vec![("a".into(), true), ("b".into(), false)])
     );
     h.press(&mut vcx, "escape");
-    // New… picked from the menu: not built yet.
+    // New… picked from the menu opens the name field; escape closes it.
     h.press(&mut vcx, ". j j j j j enter");
     assert_eq!(h.actions(&vcx), None);
-    assert_eq!(h.notices(&vcx), vec![NOT_YET.to_string()]);
+    assert_eq!(h.label(&vcx).as_deref(), Some("New watchlist"));
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.prompt(&vcx), None);
+    assert!(h.edits(&mut vcx).is_empty());
     // An edit enables Undo; undone, Redo.
     h.press(&mut vcx, "x .");
     let reasons = h.reasons(&vcx).unwrap();
@@ -670,6 +717,11 @@ fn the_actions_menu_lists_the_verbs_and_a_pick_says_not_yet(cx: &mut gpui::TestA
     assert_eq!(reasons[0], off("Add name", NOTHING_SHOWN));
     assert_eq!(reasons[1], off("Remove name", NOTHING_SHOWN));
     assert_eq!(reasons[3], off("Resolve now", NOTHING_SHOWN));
+    assert_eq!(reasons[7], none("New\u{2026}"), "New… needs no list");
+    assert_eq!(reasons[8], off("Clone\u{2026}", NOTHING_SHOWN));
+    assert_eq!(reasons[9], off("Rename\u{2026}", NOTHING_SHOWN));
+    assert_eq!(reasons[10], off("Delete\u{2026}", NOTHING_SHOWN));
+    assert_eq!(reasons.len(), 11);
     h.press(&mut vcx, "escape");
     let mut empty = two();
     empty.lists.insert("a".into(), list(&[]));
@@ -2326,4 +2378,375 @@ fn a_press_on_an_inline_rule_row_moves_the_cursor_and_keeps_the_field(
     h.press(&mut vcx, "escape");
     assert_eq!(h.mode(&vcx).as_deref(), Some("rules"));
     assert_eq!(h.rules_cursor(&vcx), Some(1));
+}
+
+/// [`list`] owned by the user layer, over a lower copy when `shadowed`.
+fn user_list(names: &[&str], shadowed: Option<Layer>) -> WatchlistState {
+    WatchlistState {
+        layer: Some(Layer::User),
+        shadowed,
+        ..list(names)
+    }
+}
+
+/// [`two`] plus `mine` from the user layer, over a desk copy when
+/// `shadowed`.
+fn with_mine(shadowed: bool) -> WatchlistSnapshot {
+    let mut snap = two();
+    snap.lists.insert(
+        "mine".into(),
+        user_list(&["HSI", "NKY"], shadowed.then_some(Layer::Desk)),
+    );
+    snap
+}
+
+/// The whole object `list`, written under `name` from this tile.
+fn set_of(name: &str, list: &Watchlist) -> ConfigEdit {
+    ConfigEdit {
+        doc: geode_core::watchlist::WATCHLISTS_DOC,
+        object: name.into(),
+        value: Some(to_toml(list)),
+        origin: Some(TileId(TILE)),
+    }
+}
+
+/// `name`'s user definition, removed, from this tile.
+fn removal_of(name: &str) -> ConfigEdit {
+    ConfigEdit {
+        doc: geode_core::watchlist::WATCHLISTS_DOC,
+        object: name.into(),
+        value: None,
+        origin: Some(TileId(TILE)),
+    }
+}
+
+#[gpui::test]
+fn new_asks_a_name_validates_it_and_writes_an_empty_list_then_shows_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_with(cx, two(), restored("a"));
+    h.act(&mut vcx, "watchlist::new");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    assert_eq!(h.label(&vcx).as_deref(), Some("New watchlist"));
+    let (text, error, options) = h.prompt(&vcx).expect("the field is open");
+    assert_eq!((text.as_str(), error, options.len()), ("", None, 0));
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("watchlist-prompt-7").is_some());
+    assert!(
+        vcx.debug_bounds("watchlist-prompt-list-7").is_none(),
+        "a name field paints no list"
+    );
+    // A clash ignoring case names the other list; the field stays open.
+    vcx.simulate_input("B");
+    h.press(&mut vcx, "enter");
+    let (text, error, _) = h.prompt(&vcx).expect("still open");
+    assert_eq!(text, "B");
+    assert_eq!(error.as_deref(), Some("'B' already exists ('b')"));
+    assert!(h.edits(&mut vcx).is_empty());
+    // A reserved word too.
+    h.retype(&mut vcx, "and");
+    h.press(&mut vcx, "enter");
+    let (_, error, _) = h.prompt(&vcx).expect("still open");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|e| e.contains("reserved word")),
+        "{error:?}"
+    );
+    // A good name, trimmed: one whole-object write of an empty list, and
+    // the tile shows it ahead of the reload.
+    h.retype(&mut vcx, " asia ");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.prompt(&vcx), None);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert_eq!(h.edits(&mut vcx), [set_of("asia", &Watchlist::default())]);
+    assert_eq!(h.title(&mut vcx), "Watchlist: asia");
+    assert_eq!(h.empty(&vcx).as_deref(), Some("saving asia\u{2026}"));
+    assert_eq!(h.switcher(&vcx), None, "nothing went away");
+    assert!(h.awaiting(&vcx));
+    // The reload carrying it.
+    let mut snap = two();
+    snap.lists.insert("asia".into(), user_list(&[], None));
+    vcx.update(|_, cx| publish(cx, snap));
+    assert_eq!(h.empty(&vcx), None);
+    assert!(
+        h.header(&vcx).starts_with("Watchlist: asia"),
+        "{}",
+        h.header(&vcx)
+    );
+    assert!(!h.awaiting(&vcx));
+    // A refused create goes back to what was shown before it.
+    h.act(&mut vcx, "watchlist::new");
+    vcx.simulate_input("pacific");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.edits(&mut vcx).len(), 1);
+    assert_eq!(h.title(&mut vcx), "Watchlist: pacific");
+    let why = "watchlists not written: the user layer is read-only";
+    h.shell_says(&mut vcx, TileNotice::Refused(why.into()));
+    assert_eq!(h.title(&mut vcx), "Watchlist: asia");
+    assert_eq!(h.notices(&vcx), [why]);
+    assert!(!h.awaiting(&vcx));
+}
+
+/// Review Focus 5: a clone of a desk-layer list with a pending edit is one
+/// write of the pending definition under the new name, and nothing for
+/// the list cloned, so the desk list is not forked.
+#[gpui::test]
+fn clone_writes_one_new_user_object_and_no_fork(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    h.goto(&mut vcx, "NDX");
+    h.press(&mut vcx, "x");
+    assert_eq!(h.edits(&mut vcx).len(), 1, "the pending edit");
+    assert!(h.origin(&vcx, "NDX").is_none(), "pending");
+    h.act(&mut vcx, "watchlist::clone");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    assert_eq!(h.label(&vcx).as_deref(), Some("clone europe as"));
+    vcx.simulate_input("Europe");
+    h.press(&mut vcx, "enter");
+    let (_, error, _) = h.prompt(&vcx).expect("refused, still open");
+    assert_eq!(error.as_deref(), Some("'Europe' already exists ('europe')"));
+    h.retype(&mut vcx, "europe2");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.prompt(&vcx), None);
+    let mut pending = europe_def();
+    pending.include.retain(|n| n != "NDX");
+    let edits = h.edits(&mut vcx);
+    assert_eq!(edits, [set_of("europe2", &pending)]);
+    assert!(
+        edits.iter().all(|e| e.object != "europe"),
+        "from is never touched"
+    );
+    assert_eq!(h.title(&mut vcx), "Watchlist: europe2");
+    assert_eq!(h.empty(&vcx).as_deref(), Some("saving europe2\u{2026}"));
+    // The reload carrying it shows the clone.
+    let mut snap = europe();
+    let mut cloned = resolved();
+    cloned.definition = pending.clone();
+    cloned.layer = Some(Layer::User);
+    cloned.members.retain(|m| m.name != "NDX");
+    snap.lists.insert("europe2".into(), cloned);
+    vcx.update(|_, cx| publish(cx, snap));
+    assert_eq!(h.empty(&vcx), None);
+    assert_eq!(h.shown(&vcx), ["DAX", "SPX", "UKX"]);
+    assert!(!h.awaiting(&vcx));
+    // Nothing shown: refused.
+    vcx.update(|_, cx| publish(cx, WatchlistSnapshot::default()));
+    h.act(&mut vcx, "watchlist::clone");
+    assert_eq!(h.prompt(&vcx), None);
+    assert!(h.notices(&vcx).contains(&NOTHING_SHOWN.to_string()));
+}
+
+#[gpui::test]
+fn rename_is_refused_on_a_desk_list_and_confirms_on_a_user_one(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, with_mine(true), restored("a"));
+    h.act(&mut vcx, "watchlist::rename");
+    assert_eq!(h.prompt(&vcx), None);
+    assert_eq!(
+        h.notices(&vcx),
+        ["a is defined in desk config; Geode cannot rename it"]
+    );
+    assert!(h.edits(&mut vcx).is_empty());
+    // A user copy over a desk one: Revert… is the verb.
+    h.switch_to(&mut vcx, "mine");
+    h.act(&mut vcx, "watchlist::rename");
+    assert_eq!(h.prompt(&vcx), None);
+    assert_eq!(
+        h.notices(&vcx),
+        ["mine shadows the desk copy \u{2014} Revert\u{2026} removes it"]
+    );
+    // Owned outright: the name field, seeded with the name, selected.
+    vcx.update(|_, cx| publish(cx, with_mine(false)));
+    h.act(&mut vcx, "watchlist::rename");
+    assert_eq!(h.label(&vcx).as_deref(), Some("rename mine to"));
+    let (text, _, _) = h.prompt(&vcx).expect("open");
+    assert_eq!(text, "mine", "seeded");
+    h.press(&mut vcx, "enter");
+    let (_, error, _) = h.prompt(&vcx).expect("still open");
+    assert_eq!(error.as_deref(), Some("mine is already its name"));
+    vcx.simulate_input("ours");
+    let (text, _, _) = h.prompt(&vcx).expect("open");
+    assert_eq!(text, "ours", "typing replaces the selected seed");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.prompt(&vcx), None);
+    assert_eq!(
+        h.question(&vcx).as_deref(),
+        Some("rename mine \u{2192} ours \u{2014} y renames")
+    );
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    assert!(h.edits(&mut vcx).is_empty(), "nothing before y");
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("watchlist-confirm-7-bar").is_some());
+    h.press(&mut vcx, "y");
+    assert_eq!(h.question(&vcx), None);
+    assert!(!vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    // One batch of two: set `ours`, remove `mine`.
+    let mine = with_mine(false).lists["mine"].definition.clone();
+    assert_eq!(
+        h.edits(&mut vcx),
+        [set_of("ours", &mine), removal_of("mine")]
+    );
+    assert_eq!(h.title(&mut vcx), "Watchlist: ours");
+    assert_eq!(h.empty(&vcx).as_deref(), Some("saving ours\u{2026}"));
+    // The switcher leaves the old name out meanwhile.
+    h.press(&mut vcx, "g w");
+    assert_eq!(h.switcher(&vcx), rows(&["a", "b"]));
+    h.press(&mut vcx, "escape");
+    // The reload carrying both.
+    let mut snap = two();
+    snap.lists
+        .insert("ours".into(), user_list(&["HSI", "NKY"], None));
+    vcx.update(|_, cx| publish(cx, snap));
+    assert_eq!(h.empty(&vcx), None);
+    assert_eq!(h.shown(&vcx), ["HSI", "NKY"]);
+    assert!(!h.awaiting(&vcx));
+}
+
+#[gpui::test]
+fn delete_confirms_and_leaves_the_empty_state_with_the_switcher_open(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_with(cx, with_mine(false), restored("mine"));
+    h.act(&mut vcx, "watchlist::delete");
+    assert_eq!(
+        h.question(&vcx).as_deref(),
+        Some("delete mine \u{2014} y deletes")
+    );
+    assert!(h.edits(&mut vcx).is_empty(), "nothing before y");
+    h.press(&mut vcx, "y");
+    assert_eq!(h.question(&vcx), None);
+    assert_eq!(h.edits(&mut vcx), [removal_of("mine")]);
+    assert_eq!(h.title(&mut vcx), header::NONE_SHOWN);
+    assert_eq!(
+        h.empty(&vcx).as_deref(),
+        Some("no watchlist shown \u{2014} g w switches")
+    );
+    assert_eq!(h.switcher(&vcx), rows(&["a", "b"]), "mine is out");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("menu"));
+    // The reload without it keeps the switcher as it is.
+    vcx.update(|_, cx| publish(cx, two()));
+    assert_eq!(h.switcher(&vcx), rows(&["a", "b"]));
+    assert!(!h.awaiting(&vcx));
+    h.press(&mut vcx, "j enter");
+    assert_eq!(h.title(&mut vcx), "Watchlist: b");
+    // A desk list cannot be deleted.
+    h.act(&mut vcx, "watchlist::delete");
+    assert_eq!(h.question(&vcx), None);
+    assert_eq!(
+        h.notices(&vcx),
+        ["b is defined in desk config; Geode cannot delete it"]
+    );
+    assert!(h.edits(&mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn revert_is_offered_only_over_a_shadowed_user_copy_and_gates_the_verbs(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_with(cx, with_mine(true), restored("a"));
+    let none = |t: &str| (t.to_string(), None);
+    let off = |t: &str, why: &str| (t.to_string(), Some(why.to_string()));
+    h.press(&mut vcx, ".");
+    let reasons = h.reasons(&vcx).unwrap();
+    assert!(
+        !reasons.iter().any(|(t, _)| t == "Revert\u{2026}"),
+        "{reasons:?}"
+    );
+    h.press(&mut vcx, "escape");
+    h.act(&mut vcx, "watchlist::revert");
+    assert_eq!(h.question(&vcx), None);
+    assert_eq!(
+        h.notices(&vcx),
+        ["a has no copy beneath yours to revert to"]
+    );
+    // Over a shadowed user copy the row is listed and the verb asks.
+    h.switch_to(&mut vcx, "mine");
+    h.press(&mut vcx, ".");
+    let reasons = h.reasons(&vcx).unwrap();
+    assert_eq!(reasons.last(), Some(&none("Revert\u{2026}")));
+    h.press(&mut vcx, "escape");
+    h.act(&mut vcx, "watchlist::revert");
+    assert_eq!(
+        h.question(&vcx).as_deref(),
+        Some("revert mine to the desk copy \u{2014} y reverts")
+    );
+    h.press(&mut vcx, "y");
+    assert_eq!(h.edits(&mut vcx), [removal_of("mine")]);
+    assert_eq!(h.title(&mut vcx), "Watchlist: mine", "still shown");
+    assert_eq!(h.shown(&vcx), ["HSI", "NKY"]);
+    // Until the reload shows the desk copy, the member and rules verbs
+    // are refused: nothing written.
+    let reverting = "reverting mine\u{2026}";
+    h.press(&mut vcx, "x");
+    assert_eq!(h.notices(&vcx), [reverting]);
+    assert!(h.edits(&mut vcx).is_empty());
+    h.press(&mut vcx, "o");
+    assert_eq!(h.prompt(&vcx), None);
+    assert_eq!(h.notices(&vcx), [reverting]);
+    h.press(&mut vcx, ".");
+    let reasons = h.reasons(&vcx).unwrap();
+    assert_eq!(reasons[0], off("Add name", reverting));
+    assert_eq!(reasons[1], off("Remove name", reverting));
+    assert_eq!(reasons[2], off("Rules\u{2026}", reverting));
+    assert_eq!(reasons[4], off("Undo", reverting));
+    assert_eq!(reasons[3], none("Resolve now"), "shift+r stays");
+    h.press(&mut vcx, "escape");
+    // The reload: the desk copy wins, nothing beneath it.
+    let mut snap = with_mine(false);
+    snap.lists.get_mut("mine").unwrap().layer = Some(Layer::Desk);
+    vcx.update(|_, cx| publish(cx, snap));
+    h.press(&mut vcx, "x");
+    assert_eq!(h.edits(&mut vcx).len(), 1, "the verbs act again");
+    assert_eq!(h.notices(&vcx), ["removed HSI"]);
+}
+
+#[gpui::test]
+fn n_on_the_confirm_bar_cancels_and_any_other_key_cancels_too(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, with_mine(false), restored("mine"));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("HSI"));
+    h.act(&mut vcx, "watchlist::delete");
+    assert!(h.question(&vcx).is_some());
+    h.press(&mut vcx, "n");
+    assert_eq!(h.question(&vcx), None);
+    assert_eq!(h.notices(&vcx), ["mine not deleted"]);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert!(h.edits(&mut vcx).is_empty());
+    assert!(!vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    // Any other key answers no too, and is the answer alone: `j` moves no
+    // cursor.
+    for key in ["j", "escape", "x"] {
+        h.act(&mut vcx, "watchlist::delete");
+        assert!(h.question(&vcx).is_some(), "{key}");
+        h.press(&mut vcx, key);
+        assert_eq!(h.question(&vcx), None, "{key}");
+        assert_eq!(h.notices(&vcx), ["mine not deleted"], "{key}");
+        assert_eq!(h.cursor(&vcx).as_deref(), Some("HSI"), "{key}");
+        assert!(h.edits(&mut vcx).is_empty(), "{key}");
+    }
+    // A verb from the palette under the question answers no first, then
+    // acts; Cancel from the palette answers no and stops there.
+    h.act(&mut vcx, "watchlist::delete");
+    h.act(&mut vcx, "watchlist::add");
+    assert_eq!(h.question(&vcx), None);
+    assert!(h.prompt(&vcx).is_some(), "the add field opened");
+    h.press(&mut vcx, "escape");
+    h.act(&mut vcx, "watchlist::delete");
+    h.act(&mut vcx, "watchlist::cancel");
+    assert_eq!(h.question(&vcx), None);
+    assert_eq!(
+        h.visible_notices(&vcx),
+        ["mine not deleted"],
+        "not dismissed"
+    );
+    // A press on the Yes button is y.
+    h.act(&mut vcx, "watchlist::delete");
+    h.draw(&mut vcx);
+    let at = vcx
+        .debug_bounds("watchlist-confirm-7-yes")
+        .expect("Yes")
+        .center();
+    vcx.simulate_click(at, gpui::Modifiers::default());
+    h.draw(&mut vcx);
+    assert_eq!(h.question(&vcx), None);
+    assert_eq!(h.edits(&mut vcx), [removal_of("mine")]);
 }

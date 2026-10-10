@@ -1,12 +1,13 @@
 //! The prompt field: a bar under the header asking one thing (a name to
-//! add, or one step of a rule), its text field, the rows hung under it,
-//! and why the last answer was refused. The rows are one of two shapes: a
-//! ranked choice over options (open for the add field, where the typed
-//! text may be a name nothing lists and a highlight is only a guess until
-//! the trader moves it or types it out in full; closed for a rule's
-//! dataset and scope, where the highlight is the answer), or an
-//! expression completion over the rule's dataset, whose rows are written
-//! into the field rather than answering it.
+//! add, one step of a rule, or a list's name for New, Clone and Rename),
+//! its text field, the rows hung under it, and why the last answer was
+//! refused. The rows are one of two shapes: a ranked choice over options
+//! (open for the add field, where the typed text may be a name nothing
+//! lists and a highlight is only a guess until the trader moves it or
+//! types it out in full; closed for a rule's dataset and scope, where the
+//! highlight is the answer; a list's name has no options and paints no
+//! list at all), or an expression completion over the rule's dataset,
+//! whose rows are written into the field rather than answering it.
 //!
 //! The pure parts (the commit rule, the paint) come first; the tile's side
 //! (the field's lifetime, focus and keys, and the commit through the add
@@ -21,6 +22,7 @@ use geode_shell::exprcomplete::{Accept, ExprCompletion, Refresh, Write};
 use geode_shell::shell::chip::{self, chip_paint};
 use geode_shell::shell::scale;
 use geode_shell::vimnav::NavCommand;
+use geode_tile::edit::EditCaret;
 use geode_tile::notice::{self, Notice, Tone};
 use geode_tile::popover::{self, ROW_HEIGHT, ROW_INSET};
 use gpui::prelude::*;
@@ -169,10 +171,10 @@ impl PromptField {
     pub(crate) fn new(input: Entity<InputState>, prompt: Prompt, options: Vec<String>) -> Self {
         let closed = prompt.is_rule();
         let list = ChoiceList::new(options, DEFAULT_CAP);
-        let choice = Rc::new(choice_paint(&list, closed));
+        let choice = Rc::new(choice_paint(&list, closed, !prompt.is_object()));
         PromptField {
             input,
-            label: label(&prompt).into(),
+            label: label(&prompt),
             prompt,
             rows: Rows::Choice(list),
             error: None,
@@ -189,7 +191,7 @@ impl PromptField {
         let choice = Rc::new(expr_paint(&rows));
         PromptField {
             input,
-            label: label(&prompt).into(),
+            label: label(&prompt),
             prompt,
             rows: Rows::Expr(Box::new(rows)),
             error: None,
@@ -201,7 +203,7 @@ impl PromptField {
 
     pub(crate) fn repaint(&mut self) {
         self.choice = Rc::new(match &self.rows {
-            Rows::Choice(list) => choice_paint(list, self.closed),
+            Rows::Choice(list) => choice_paint(list, self.closed, !self.prompt.is_object()),
             Rows::Expr(e) => expr_paint(e),
         });
     }
@@ -316,13 +318,18 @@ pub(crate) fn answer_value(list: &mut ChoiceList, take: bool, text: &str) -> Str
     }
 }
 
-/// The words before the field.
-fn label(prompt: &Prompt) -> &'static str {
+/// The words before the field. A clone's and a rename's name the list
+/// they act on: the answer is written under another name, and the field
+/// must say which list it copies or renames.
+fn label(prompt: &Prompt) -> SharedString {
     match prompt {
-        Prompt::AddName => "Add name",
-        Prompt::RuleDataset => "Rule dataset",
-        Prompt::RuleScope { .. } => "Rule scope",
-        Prompt::RuleExpression { .. } => "Rule expression",
+        Prompt::AddName => SharedString::new_static("Add name"),
+        Prompt::RuleDataset => SharedString::new_static("Rule dataset"),
+        Prompt::RuleScope { .. } => SharedString::new_static("Rule scope"),
+        Prompt::RuleExpression { .. } => SharedString::new_static("Rule expression"),
+        Prompt::NewName => SharedString::new_static("New watchlist"),
+        Prompt::CloneName { from } => format!("clone {from} as").into(),
+        Prompt::Rename { from } => format!("rename {from} to").into(),
     }
 }
 
@@ -333,6 +340,8 @@ pub(crate) fn placeholder(prompt: &Prompt) -> &'static str {
         Prompt::RuleDataset => "dataset",
         Prompt::RuleScope { .. } => "whole dataset, a saved scope or expression\u{2026}",
         Prompt::RuleExpression { .. } => "book = 'BK000' and npv > 0",
+        Prompt::NewName | Prompt::CloneName { .. } => "name",
+        Prompt::Rename { .. } => "new name",
     }
 }
 
@@ -353,7 +362,10 @@ pub(crate) struct ChoicePaint {
     pub hint: Option<(SharedString, bool)>,
 }
 
-fn choice_paint(list: &ChoiceList, closed: bool) -> ChoicePaint {
+/// `listed` is whether the field offers options at all: a list's name
+/// (New, Clone, Rename) has none, and paints no list rather than an empty
+/// row saying no name is known.
+fn choice_paint(list: &ChoiceList, closed: bool, listed: bool) -> ChoicePaint {
     ChoicePaint {
         rows: list
             .painted()
@@ -367,12 +379,14 @@ fn choice_paint(list: &ChoiceList, closed: bool) -> ChoicePaint {
             .collect(),
         highlighted: list.highlighted(),
         offset: 0,
-        empty: Some(if list.options().is_empty() {
-            NO_NAMES
-        } else if closed {
-            NO_CHOICE
-        } else {
-            NEW_NAME
+        empty: listed.then(|| {
+            if list.options().is_empty() {
+                NO_NAMES
+            } else if closed {
+                NO_CHOICE
+            } else {
+                NEW_NAME
+            }
         }),
         hint: None,
     }
@@ -543,7 +557,9 @@ pub(crate) fn render_prompt(
 /// The prompt field's lifetime, focus and keys.
 impl WatchlistTile {
     /// Open the field asking `prompt` over `options`, focused: an open
-    /// typeahead for the add field, a closed choice for a rule step.
+    /// typeahead for the add field, a closed choice for a rule step, no
+    /// list for a list's name. A rename seeds the current name, selected,
+    /// so typing replaces it.
     pub(super) fn open_prompt(
         &mut self,
         prompt: Prompt,
@@ -552,6 +568,10 @@ impl WatchlistTile {
         cx: &mut Context<Self>,
     ) {
         let input = self.new_input(&prompt, window, cx);
+        if let Prompt::Rename { from } = &prompt {
+            let seed = from.clone();
+            input.update(cx, |s, cx| EditCaret::Select.seed(s, seed, window, cx));
+        }
         self.install_prompt(PromptField::new(input, prompt, options), window, cx);
     }
 
@@ -607,12 +627,14 @@ impl WatchlistTile {
 
     /// `enter` in the field. On the expression shape a moved highlight is
     /// a completion to write into the field, not an answer. Otherwise the
-    /// answer goes through `prompt::submit` (the add field) or
-    /// `prompt::submit_rule` (a rule step, over the factory's
-    /// configuration and the shown list as it is now), then the verb. A
-    /// refusal stays on the bar with the field open; a next step reopens
-    /// the field asking it; a name added (or restored, when it was
-    /// excluded) or a rules vector closes it and writes.
+    /// answer goes through `prompt::submit_object` (a list's name, over
+    /// every list defined, with or without one shown), `prompt::submit`
+    /// (the add field) or `prompt::submit_rule` (a rule step, over the
+    /// factory's configuration and the shown list as it is now), then the
+    /// verb. A refusal stays on the bar with the field open; a next step
+    /// reopens the field asking it; a name added (or restored, when it was
+    /// excluded), a rules vector or a list's name closes it and writes (or
+    /// asks y/n, for a rename).
     pub(super) fn commit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = self.prompt.as_mut() else {
             return;
@@ -626,6 +648,32 @@ impl WatchlistTile {
         let answer = p.answer(&text);
         let asked = p.prompt.clone();
         let snapshot = snapshot(cx);
+        if asked.is_object() {
+            match prompt::submit_object(&asked, &answer, &super::objects::defined(&snapshot)) {
+                Step::Refuse(why) => {
+                    if let Some(p) = self.prompt.as_mut() {
+                        p.error = Some(why.into());
+                    }
+                }
+                Step::Create { name } => {
+                    self.close_prompt(window, cx);
+                    self.create(name, cx);
+                }
+                Step::Clone { from, to } => {
+                    self.close_prompt(window, cx);
+                    self.clone_list(from, to, cx);
+                }
+                Step::Rename { from, to } => {
+                    self.close_prompt(window, cx);
+                    self.ask_rename(from, to, window, cx);
+                }
+                Step::Add(_) | Step::Next(_) | Step::Rules(_) => {
+                    unreachable!("a name step leads to a name step's outcome")
+                }
+            }
+            cx.notify();
+            return;
+        }
         let Some((name, state)) = self.shown(&snapshot) else {
             self.close_prompt(window, cx);
             self.refuse(NOTHING_SHOWN, cx);
@@ -675,6 +723,9 @@ impl WatchlistTile {
             Step::Rules(rules) => {
                 self.close_prompt(window, cx);
                 self.write_rules(&name, &config, rules, asked.replace(), cx);
+            }
+            Step::Create { .. } | Step::Clone { .. } | Step::Rename { .. } => {
+                unreachable!("a name step was answered above")
             }
         }
         cx.notify();

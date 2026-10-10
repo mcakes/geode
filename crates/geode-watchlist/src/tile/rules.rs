@@ -324,7 +324,12 @@ impl WatchlistTile {
                 let vocab = ExprVocab::new(&schema, &wc.dims);
                 self.open_expr_prompt(next, vocab, window, cx);
             }
-            Prompt::AddName => unreachable!("open_rule_prompt takes rule prompts only"),
+            Prompt::AddName
+            | Prompt::NewName
+            | Prompt::CloneName { .. }
+            | Prompt::Rename { .. } => {
+                unreachable!("open_rule_prompt takes rule prompts only")
+            }
         }
     }
 

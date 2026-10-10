@@ -3,8 +3,8 @@
 //! (`crate::content::WatchlistContent`) and paints the tile: the header
 //! (`header`), the members grid (`table`), the switcher hung beneath the
 //! name, the `⋯` menu, the rules popup (`rules`) hung beneath the rules
-//! count, the prompt field (`field`) under the header, and an empty state
-//! while there is nothing to show.
+//! count, the prompt field (`field`) and the y/n confirm bar (`objects`)
+//! under the header, and an empty state while there is nothing to show.
 //!
 //! The tile issues no data request: the bridge's cache resolves every list
 //! and replaces the global, which wakes the tile. The factory's
@@ -18,6 +18,7 @@
 
 mod field;
 mod header;
+mod objects;
 mod rules;
 mod table;
 #[cfg(test)]
@@ -41,6 +42,7 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_shell::watchlist::WatchlistGlobal;
+use geode_tile::confirm::{self, Confirm};
 use geode_tile::header::{HEADER_HEIGHT, Mode, link_chips};
 use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, MenuPick, Row};
 use geode_tile::notice::{self, Dismissals, Notice};
@@ -55,11 +57,13 @@ use gpui_component::{ActiveTheme as _, v_flex};
 use crate::content::{Shared, action_title};
 use crate::core::grid::GridModel;
 use crate::core::history::{History, Way};
+use crate::core::prompt::Prompt;
 use crate::core::rows;
 use crate::core::rules::{RuleRow, RulesPopup, rule_rows};
 use crate::core::session::{self, SortCol, State};
 use field::PromptField;
 use header::HeaderModel;
+use objects::{Awaiting, Blocked, Pending, Verb};
 use table::{GridDelegate, Prepared, RowContext, RowPressed, SortClicked};
 
 /// Which menu is up: the switcher, hung under the header's name, or the
@@ -132,9 +136,6 @@ const NOTHING_TO_REMOVE: &str = "nothing to remove";
 
 /// What `shift+r` says on a tile hosted without the bridge's refresh hook.
 const NOT_WIRED: &str = "resolve now is not wired";
-
-/// What a `⋯` row says while its verb is not built yet.
-pub(crate) const NOT_YET: &str = "not yet available";
 
 /// What the standing resolution notices say the remedy is.
 const RETRIES: &str = "\u{2014} shift+r retries";
@@ -276,6 +277,16 @@ pub struct WatchlistTile {
     /// The window the prompt opened in, to blur its field where no window
     /// is at hand (a reload removing the list, a close).
     field_window: Option<AnyWindowHandle>,
+    /// The armed y/n question (a rename, delete or revert); it holds the
+    /// keyboard until answered.
+    confirm: Option<Confirm<Pending>>,
+    /// A create, clone, rename or delete written and shown ahead of the
+    /// reload that carries it.
+    awaiting: Option<Awaiting>,
+    /// A confirmed revert on its way: the list whose user copy was
+    /// removed, until the snapshot no longer shows a user copy of it.
+    /// The member and rules verbs on it are refused meanwhile.
+    reverting: Option<String>,
 }
 
 impl WatchlistTile {
@@ -380,6 +391,9 @@ impl WatchlistTile {
             prompt: None,
             rules: None,
             field_window: None,
+            confirm: None,
+            awaiting: None,
+            reverting: None,
         };
         tile.settle(cx);
         tile
@@ -435,11 +449,37 @@ impl WatchlistTile {
         let shown = self.shown_in(&snapshot);
         if !shown {
             // Its history means nothing now, and its field would write
-            // nowhere: the field goes, its text with it, nothing written;
-            // the rules popup listed its rules.
+            // nowhere: the field goes, its text with it, nothing written
+            // (a new list's name asks about no list, and stays); the rules
+            // popup listed its rules; a question about it asks about
+            // nothing.
             self.history.forget();
-            self.release_prompt(cx);
+            if !self
+                .prompt
+                .as_ref()
+                .is_some_and(|p| p.prompt == Prompt::NewName)
+            {
+                self.release_prompt(cx);
+            }
             self.rules = None;
+            if confirm::withdraw(self, cx).is_some() {
+                self.notices
+                    .outcome(Notice::status("the watchlist asked about is gone"));
+            }
+        }
+        if self
+            .awaiting
+            .as_ref()
+            .is_some_and(|a| Self::landed(a, &snapshot))
+        {
+            self.awaiting = None;
+        }
+        if self
+            .reverting
+            .as_ref()
+            .is_some_and(|n| Self::revert_landed(n, &snapshot))
+        {
+            self.reverting = None;
         }
         self.settle_menu(shown, &snapshot);
         if self.notices.nothing_to_switch && !snapshot.lists.is_empty() {
@@ -500,6 +540,22 @@ impl WatchlistTile {
         if refused {
             self.notices.outcome.clear();
         }
+        // A create, clone, rename or delete that never landed: back to
+        // what was shown before it, ahead of the notices, which showing
+        // another list would clear.
+        if refused
+            && let Some(a) = self.awaiting.take()
+            && self.state.name == a.shows
+        {
+            self.menu = None;
+            match a.restores {
+                Some(name) => self.show(&name, cx),
+                None => {
+                    self.state.name = None;
+                    self.was_shown = false;
+                }
+            }
+        }
         for notice in told {
             match notice {
                 TileNotice::Forked(text) => self.notices.outcome(Notice::status(text)),
@@ -508,6 +564,8 @@ impl WatchlistTile {
         }
         if refused {
             self.history.refused();
+            // A refused revert is over: the user copy stands.
+            self.reverting = None;
             self.rebuild_rows(false, cx);
         } else {
             self.rebuild_chrome(cx);
@@ -643,8 +701,13 @@ impl WatchlistTile {
         let switch = tips::chord_for(&self.chords, SWITCH_ACTION)
             .map(|ks| spell(&ks))
             .unwrap_or_else(|| action_title(SWITCH_ACTION).to_string());
+        let saving = self.awaiting.as_ref().and_then(|a| a.shows.as_deref());
         self.chrome.empty = match (name, state.is_some()) {
             (_, true) => None,
+            // Written, not yet reloaded: the name is on its way.
+            (Some(name), false) if saving == Some(name) => {
+                Some(format!("saving {name}\u{2026}").into())
+            }
             (Some(gone), false) if none_defined => {
                 Some(format!("{gone} no longer exists \u{2014} {new} creates one").into())
             }
@@ -699,11 +762,14 @@ impl WatchlistTile {
             .is_some_and(|n| snapshot.lists.contains_key(n))
     }
 
-    /// One row per watchlist, alphabetical, the shown one ticked.
+    /// One row per watchlist, alphabetical, the shown one ticked. A list
+    /// whose removal is on its way (renamed or deleted) is left out.
     fn switch_rows(&self, snapshot: &WatchlistSnapshot) -> Vec<Row<Pick>> {
+        let removed = self.awaiting.as_ref().and_then(|a| a.removed.as_deref());
         snapshot
             .lists
             .keys()
+            .filter(|name| Some(name.as_str()) != removed)
             .map(|name| {
                 let checked = self.state.name.as_deref() == Some(name.as_str());
                 let label = SharedString::from(name.clone());
@@ -715,46 +781,63 @@ impl WatchlistTile {
     /// The `⋯` menu: the member verbs, the switcher, then the watchlist's
     /// own verbs, each running the palette's action, with its live chord.
     /// A row that cannot act says why in its lane, and in full when
-    /// picked. The switcher's row reads `Switch…`: like `New…`, it opens a
-    /// further pick.
-    fn action_rows(&self) -> Vec<Row<Pick>> {
-        let row = |id: &'static str, title: &str, enabled: Result<(), &'static str>| {
+    /// picked; Revert… is listed only over a user copy with a lower copy
+    /// beneath it. The switcher's row reads `Switch…`: like `New…`, it
+    /// opens a further pick.
+    fn action_rows(&self, cx: &App) -> Vec<Row<Pick>> {
+        let row = |id: &'static str, title: &str, enabled: Result<(), Blocked>| {
             let title = title.strip_prefix("Watchlist: ").unwrap_or(title);
             let row = ActionRow::new(Pick::Action(id), title.to_string()).hint(Hint::chord(id));
             Row::Action(match enabled {
                 Ok(()) => row,
-                Err(why) => row.enabled(Err(why.into())).short_reason(why),
+                Err(b) => row.enabled(Err(b.long.into())).short_reason(b.short),
             })
         };
-        let verb = |id: &'static str, enabled: Result<(), &'static str>| {
-            row(id, action_title(id), enabled)
-        };
+        let verb =
+            |id: &'static str, enabled: Result<(), Blocked>| row(id, action_title(id), enabled);
+        let snapshot = snapshot(cx);
         let shown = self.chrome.empty.is_none();
-        let listed = if shown { Ok(()) } else { Err(NOTHING_SHOWN) };
-        let targeted = match (shown, self.grid.cursor().is_none()) {
-            (false, _) => Err(NOTHING_SHOWN),
-            (true, true) => Err(NO_ROW),
-            (true, false) => Ok(()),
+        // What every member verb needs: a list shown, and no revert of it
+        // on its way.
+        let listed = || match (shown, self.verbs_allowed()) {
+            (false, _) => Err(Blocked::same(NOTHING_SHOWN)),
+            (true, Err(why)) => Err(Blocked {
+                short: "reverting",
+                long: why,
+            }),
+            (true, Ok(())) => Ok(()),
         };
-        vec![
-            verb(ADD_ACTION, listed),
+        let targeted = match (listed(), self.grid.cursor().is_none()) {
+            (Err(b), _) => Err(b),
+            (Ok(()), true) => Err(Blocked::same(NO_ROW)),
+            (Ok(()), false) => Ok(()),
+        };
+        let mut rows = vec![
+            verb(ADD_ACTION, listed()),
             verb(REMOVE_ACTION, targeted),
-            verb(RULES_ACTION, listed),
-            verb(REFRESH_ACTION, listed),
+            verb(RULES_ACTION, listed()),
             verb(
-                UNDO_ACTION,
-                if self.history.can_undo() {
+                REFRESH_ACTION,
+                if shown {
                     Ok(())
                 } else {
-                    Err(NOTHING_TO_UNDO)
+                    Err(Blocked::same(NOTHING_SHOWN))
+                },
+            ),
+            verb(
+                UNDO_ACTION,
+                match (listed(), self.history.can_undo()) {
+                    (Err(b), _) => Err(b),
+                    (Ok(()), false) => Err(Blocked::same(NOTHING_TO_UNDO)),
+                    (Ok(()), true) => Ok(()),
                 },
             ),
             verb(
                 REDO_ACTION,
-                if self.history.can_redo() {
-                    Ok(())
-                } else {
-                    Err(NOTHING_TO_REDO)
+                match (listed(), self.history.can_redo()) {
+                    (Err(b), _) => Err(b),
+                    (Ok(()), false) => Err(Blocked::same(NOTHING_TO_REDO)),
+                    (Ok(()), true) => Ok(()),
                 },
             ),
             Row::Separator,
@@ -765,11 +848,21 @@ impl WatchlistTile {
             ),
             Row::Separator,
             verb(NEW_ACTION, Ok(())),
-            verb(CLONE_ACTION, Ok(())),
-            verb(RENAME_ACTION, Ok(())),
-            verb(DELETE_ACTION, Ok(())),
-            verb(REVERT_ACTION, Ok(())),
-        ]
+            verb(
+                CLONE_ACTION,
+                if shown {
+                    Ok(())
+                } else {
+                    Err(Blocked::same(NOTHING_SHOWN))
+                },
+            ),
+            verb(RENAME_ACTION, self.own(&snapshot, Verb::Rename).map(|_| ())),
+            verb(DELETE_ACTION, self.own(&snapshot, Verb::Delete).map(|_| ())),
+        ];
+        if self.revertible(&snapshot).is_ok() {
+            rows.push(verb(REVERT_ACTION, Ok(())));
+        }
+        rows
     }
 
     fn toggle_menu(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
@@ -779,7 +872,7 @@ impl WatchlistTile {
         } else {
             let rows = match kind {
                 MenuKind::Switch => self.switch_rows(&snapshot(cx)),
-                MenuKind::Actions => self.action_rows(),
+                MenuKind::Actions => self.action_rows(cx),
             };
             if rows.is_empty() {
                 self.menu = None;
@@ -825,15 +918,6 @@ impl WatchlistTile {
         cx.notify();
     }
 
-    /// A `⋯` row whose verb lands in a later task: say so, as a status.
-    fn not_yet(&mut self, cx: &mut Context<Self>) {
-        self.close_menu(cx);
-        self.notices.outcome.clear();
-        self.notices.outcome(Notice::status(NOT_YET));
-        self.rebuild_chrome(cx);
-        cx.notify();
-    }
-
     /// A press on shown row `row`: shift extends a row selection to it, a
     /// plain press moves the cursor there and ends a selection. A
     /// double-click is two presses and nothing more: a members row has no
@@ -867,7 +951,7 @@ impl WatchlistTile {
         self.sync_table(false, cx);
         self.menu = Some((
             MenuKind::Actions,
-            Menu::new(self.action_rows(), &self.chords).open_at(None),
+            Menu::new(self.action_rows(cx), &self.chords).open_at(None),
         ));
         self.menu_at = Some(e.position);
         cx.notify();
@@ -969,12 +1053,12 @@ impl WatchlistTile {
         cx.notify();
     }
 
-    /// `insert` while a field holds the keys, `menu` while a menu is up,
-    /// `rules` while the rules popup is (a rule prompt over it is a field:
-    /// insert wins), `visual` while a row selection is live, `normal`
-    /// otherwise.
+    /// `insert` while a field or the y/n question holds the keys, `menu`
+    /// while a menu is up, `rules` while the rules popup is (a rule prompt
+    /// over it is a field: insert wins), `visual` while a row selection is
+    /// live, `normal` otherwise.
     fn mode(&self) -> &'static str {
-        if self.prompt.is_some() {
+        if self.prompt.is_some() || self.confirm.is_some() {
             "insert"
         } else if self.menu.is_some() {
             "menu"
@@ -1030,6 +1114,13 @@ impl WatchlistTile {
         cx: &mut Context<Self>,
     ) -> bool {
         self.user_acted(cx);
+        // A verb arriving under an armed question (the palette; a key never
+        // gets here, the question takes every key) answers no first. For
+        // `cancel` that answer is the whole of it: the layers beneath wait.
+        let answered = confirm::cancel(self, window, cx);
+        if answered && action.0 == CANCEL_ACTION {
+            return true;
+        }
         // The field's own keys; any other verb closes it unwritten first.
         if self.prompt.is_some() {
             match action.0.as_str() {
@@ -1139,10 +1230,12 @@ impl WatchlistTile {
             RULE_ADD_ACTION => self.rule_add(window, cx),
             RULE_REMOVE_ACTION => self.rule_remove(cx),
             RULE_EDIT_ACTION => self.rule_edit(window, cx),
-            // The watchlist's own verbs: not built yet.
-            NEW_ACTION | CLONE_ACTION | RENAME_ACTION | DELETE_ACTION | REVERT_ACTION => {
-                self.not_yet(cx)
-            }
+            // The watchlist's own verbs, from the palette or the menu.
+            NEW_ACTION => self.open_new(window, cx),
+            CLONE_ACTION => self.open_clone(window, cx),
+            RENAME_ACTION => self.open_rename(window, cx),
+            DELETE_ACTION => self.ask_delete(window, cx),
+            REVERT_ACTION => self.ask_revert(window, cx),
             _ => return false,
         }
         true
@@ -1158,11 +1251,12 @@ impl WatchlistTile {
         }
     }
 
-    /// Whether the open field owns window focus.
+    /// Whether the open field or the armed question owns window focus.
     pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
         self.prompt
             .as_ref()
             .is_some_and(|p| p.input.read(cx).focus_handle(cx).is_focused(window))
+            || self.confirm.as_ref().is_some_and(|c| c.holds_focus(window))
     }
 
     /// The snapshot arrives whether the tile is shown or not, so being
@@ -1178,6 +1272,7 @@ impl WatchlistTile {
         self.menu = None;
         self.rules = None;
         self.release_prompt(cx);
+        let _ = confirm::withdraw(self, cx);
     }
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
@@ -1190,10 +1285,15 @@ impl WatchlistTile {
         cx.notify();
     }
 
+    /// The header's name, or the one written and on its way.
     pub fn title(&self) -> SharedString {
-        match &self.chrome.header.name {
-            Some(name) => format!("Watchlist: {name}").into(),
-            None => SharedString::new_static(header::NONE_SHOWN),
+        let saving = self.awaiting.as_ref().and_then(|a| a.shows.as_deref());
+        match (&self.chrome.header.name, saving) {
+            (Some(name), _) => format!("Watchlist: {name}").into(),
+            (None, Some(name)) if self.state.name.as_deref() == Some(name) => {
+                format!("Watchlist: {name}").into()
+            }
+            (None, _) => SharedString::new_static(header::NONE_SHOWN),
         }
     }
 
@@ -1464,8 +1564,16 @@ impl Render for WatchlistTile {
             },
             theme,
         );
-        // The prompt, on its own bar under the header, whole at any tile
-        // width.
+        // The y/n question or the prompt, on its own bar under the header,
+        // whole at any tile width.
+        let question = self.confirm.as_ref().map(|pending| {
+            confirm::bar(
+                pending,
+                &tile,
+                move || format!("watchlist-confirm-{id}"),
+                theme,
+            )
+        });
         let prompt = self
             .prompt
             .as_ref()
@@ -1489,7 +1597,7 @@ impl Render for WatchlistTile {
                 .min_h_0()
                 .child(table::table_el(&self.table, id)),
         };
-        v_flex()
+        let root = v_flex()
             .size_full()
             .bg(theme.background)
             .child(
@@ -1507,9 +1615,12 @@ impl Render for WatchlistTile {
                         )
                     }),
             )
+            .children(question)
             .children(prompt)
             .children(rules_inline)
             .child(body)
-            .children(row_actions)
+            .children(row_actions);
+        // A pointer press anywhere on the tile answers an armed question no.
+        confirm::cancel_on_press(root, self.confirm.is_some(), &tile)
     }
 }

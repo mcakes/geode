@@ -1,11 +1,13 @@
 //! The tile's one-line prompt: what each step asks for, and what the typed
 //! answer leads to. The add field asks a name to include by hand; a rule
 //! is asked in three steps (its dataset, then its scope, then an
-//! expression when the scope is one). Every answer is checked here ahead
-//! of any write: a rule is folded over a one-rule list against the
-//! factory's configuration, so what the popup lists is what the data
-//! layer will run. A name already a member is refused by the add verb
-//! itself, naming where the name comes from.
+//! expression when the scope is one); New, Clone and Rename ask a list's
+//! name. Every answer is checked here ahead of any write: a rule is folded
+//! over a one-rule list against the factory's configuration, so what the
+//! popup lists is what the data layer will run; a list's name goes through
+//! `watchlist::validate_name` against every list defined, so a name the
+//! reload would refuse never leaves the field. A name already a member is
+//! refused by the add verb itself, naming where the name comes from.
 
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::named::NamedExpressions;
@@ -13,7 +15,7 @@ use geode_core::schema::SchemaSpec;
 use geode_core::scopes::SavedScopes;
 use geode_core::watchlist::fold::{eligible_datasets, fold_rules};
 use geode_core::watchlist::members::Member;
-use geode_core::watchlist::{Rule, Watchlist};
+use geode_core::watchlist::{Rule, Watchlist, Watchlists, validate_name};
 
 pub use super::rules::WHOLE_DATASET;
 
@@ -35,18 +37,41 @@ pub enum Prompt {
         dataset: String,
         replace: Option<usize>,
     },
+    /// A new, empty list's name.
+    NewName,
+    /// The name a copy of `from` (as shown, pending edits included) is
+    /// written under.
+    CloneName { from: String },
+    /// The new name of `from`.
+    Rename { from: String },
 }
 
 impl Prompt {
     /// Whether this is one of the rule steps.
     pub fn is_rule(&self) -> bool {
-        !matches!(self, Prompt::AddName)
+        matches!(
+            self,
+            Prompt::RuleDataset | Prompt::RuleScope { .. } | Prompt::RuleExpression { .. }
+        )
+    }
+
+    /// Whether this asks a list's name (New, Clone, Rename): answered
+    /// through `submit_object`, with or without a list shown.
+    pub fn is_object(&self) -> bool {
+        matches!(
+            self,
+            Prompt::NewName | Prompt::CloneName { .. } | Prompt::Rename { .. }
+        )
     }
 
     /// The rule a scope or expression step is editing in place, if any.
     pub fn replace(&self) -> Option<usize> {
         match self {
-            Prompt::AddName | Prompt::RuleDataset => None,
+            Prompt::AddName
+            | Prompt::RuleDataset
+            | Prompt::NewName
+            | Prompt::CloneName { .. }
+            | Prompt::Rename { .. } => None,
             Prompt::RuleScope { replace, .. } | Prompt::RuleExpression { replace, .. } => *replace,
         }
     }
@@ -61,6 +86,13 @@ pub enum Step {
     Next(Prompt),
     /// Write these as the list's rules, whole.
     Rules(Vec<Rule>),
+    /// Write an empty list under `name` and show it.
+    Create { name: String },
+    /// Write `from` as it is shown under `to` and show it; `from` stays.
+    Clone { from: String, to: String },
+    /// Ask y/n, then write `from` under `to` and remove `from`, in one
+    /// batch.
+    Rename { from: String, to: String },
     /// The answer is refused: the prompt stays open and says why.
     Refuse(String),
 }
@@ -84,6 +116,69 @@ pub fn submit(prompt: &Prompt, text: &str, _members: &[Member]) -> Step {
         Prompt::RuleDataset | Prompt::RuleScope { .. } | Prompt::RuleExpression { .. } => {
             Step::Refuse("a rule step needs its context".into())
         }
+        Prompt::NewName | Prompt::CloneName { .. } | Prompt::Rename { .. } => {
+            Step::Refuse(NEEDS_THE_LISTS.into())
+        }
+    }
+}
+
+/// What a name step answered through another path says.
+const NEEDS_THE_LISTS: &str = "a name step needs the lists defined";
+
+/// The step `text` (trimmed) leads to from a name `prompt`, checked
+/// against `existing`, every list defined: the core's name rules (an
+/// identifier, no reserved word, no clash ignoring case). A rename's own
+/// name is not a clash (so a case change is a rename) but is refused as
+/// no change. The name is kept as typed, never re-cased.
+pub fn submit_object(prompt: &Prompt, text: &str, existing: &Watchlists) -> Step {
+    let text = text.trim();
+    let from = match prompt {
+        Prompt::NewName => None,
+        Prompt::CloneName { from } => Some(from),
+        Prompt::Rename { from } => {
+            if text == from {
+                return Step::Refuse(format!("{from} is already its name"));
+            }
+            Some(from)
+        }
+        Prompt::AddName
+        | Prompt::RuleDataset
+        | Prompt::RuleScope { .. }
+        | Prompt::RuleExpression { .. } => {
+            return Step::Refuse("not a name step".into());
+        }
+    };
+    if text.is_empty() {
+        return Step::Refuse(TYPE_A_NAME.into());
+    }
+    // On a rename the list's own name is left out of the clash check.
+    let others;
+    let existing = match prompt {
+        Prompt::Rename { from } => {
+            let mut kept = Watchlists::default();
+            for (name, list) in existing.iter().filter(|(n, _)| *n != from) {
+                kept.insert(name.clone(), list.clone());
+            }
+            others = kept;
+            &others
+        }
+        _ => existing,
+    };
+    if let Err(why) = validate_name(text, existing) {
+        return Step::Refuse(why);
+    }
+    let to = text.to_string();
+    match (prompt, from) {
+        (Prompt::NewName, _) => Step::Create { name: to },
+        (Prompt::CloneName { .. }, Some(from)) => Step::Clone {
+            from: from.clone(),
+            to,
+        },
+        (Prompt::Rename { .. }, Some(from)) => Step::Rename {
+            from: from.clone(),
+            to,
+        },
+        _ => unreachable!("the other prompts returned above"),
     }
 }
 
@@ -152,7 +247,9 @@ pub fn scope_choices(dataset: &str, ctx: &RuleContext) -> Vec<String> {
 pub fn submit_rule(prompt: &Prompt, text: &str, ctx: &RuleContext) -> Step {
     let text = text.trim();
     match prompt {
-        Prompt::AddName => submit(prompt, text, &[]),
+        Prompt::AddName | Prompt::NewName | Prompt::CloneName { .. } | Prompt::Rename { .. } => {
+            submit(prompt, text, &[])
+        }
         Prompt::RuleDataset => {
             if text.is_empty() {
                 return Step::Refuse(PICK_A_DATASET.into());
@@ -471,5 +568,122 @@ type = "utf8"
             Step::Refuse(_)
         ));
         assert!(Prompt::RuleDataset.is_rule() && !Prompt::AddName.is_rule());
+        assert!(!Prompt::NewName.is_rule());
+    }
+
+    /// `europe` and `asia` defined.
+    fn existing() -> Watchlists {
+        let mut lists = Watchlists::default();
+        lists.insert("europe".into(), Watchlist::default());
+        lists.insert("asia".into(), Watchlist::default());
+        lists
+    }
+
+    #[test]
+    fn a_new_name_is_trimmed_validated_and_clashes_ignoring_case() {
+        let lists = existing();
+        assert_eq!(
+            submit_object(&Prompt::NewName, "  us_tech ", &lists),
+            Step::Create {
+                name: "us_tech".into()
+            }
+        );
+        assert_eq!(
+            submit_object(&Prompt::NewName, "   ", &lists),
+            Step::Refuse(TYPE_A_NAME.into())
+        );
+        // A clash names the list it clashes with, whatever the case.
+        assert_eq!(
+            submit_object(&Prompt::NewName, "Europe", &lists),
+            Step::Refuse("'Europe' already exists ('europe')".into())
+        );
+        // A reserved word and a bad identifier are the core's refusals.
+        let Step::Refuse(why) = submit_object(&Prompt::NewName, "and", &lists) else {
+            panic!("refused");
+        };
+        assert!(why.contains("reserved word"), "{why}");
+        let Step::Refuse(why) = submit_object(&Prompt::NewName, "2fast", &lists) else {
+            panic!("refused");
+        };
+        assert!(why.contains("not a valid name"), "{why}");
+    }
+
+    #[test]
+    fn a_clone_name_is_validated_the_same_and_carries_the_source() {
+        let lists = existing();
+        let clone = Prompt::CloneName {
+            from: "europe".into(),
+        };
+        assert_eq!(
+            submit_object(&clone, "europe_copy", &lists),
+            Step::Clone {
+                from: "europe".into(),
+                to: "europe_copy".into()
+            }
+        );
+        assert_eq!(
+            submit_object(&clone, "ASIA", &lists),
+            Step::Refuse("'ASIA' already exists ('asia')".into())
+        );
+        assert_eq!(
+            submit_object(&clone, "", &lists),
+            Step::Refuse(TYPE_A_NAME.into())
+        );
+    }
+
+    #[test]
+    fn a_rename_refuses_its_own_name_and_clashes_with_the_others_only() {
+        let lists = existing();
+        let rename = Prompt::Rename {
+            from: "europe".into(),
+        };
+        assert_eq!(
+            submit_object(&rename, "emea", &lists),
+            Step::Rename {
+                from: "europe".into(),
+                to: "emea".into()
+            }
+        );
+        assert_eq!(
+            submit_object(&rename, " europe ", &lists),
+            Step::Refuse("europe is already its name".into())
+        );
+        // Its own name is not a clash, so a case change is a rename.
+        assert_eq!(
+            submit_object(&rename, "Europe", &lists),
+            Step::Rename {
+                from: "europe".into(),
+                to: "Europe".into()
+            }
+        );
+        assert_eq!(
+            submit_object(&rename, "Asia", &lists),
+            Step::Refuse("'Asia' already exists ('asia')".into())
+        );
+        assert_eq!(
+            submit_object(&rename, "", &lists),
+            Step::Refuse(TYPE_A_NAME.into())
+        );
+    }
+
+    #[test]
+    fn an_object_step_through_the_other_paths_is_refused() {
+        assert!(matches!(
+            submit(&Prompt::NewName, "x", &[]),
+            Step::Refuse(_)
+        ));
+        let f = Fixture::new(Watchlist::default());
+        assert!(matches!(
+            submit_rule(&Prompt::NewName, "x", &f.ctx()),
+            Step::Refuse(_)
+        ));
+        assert!(matches!(
+            submit_object(&Prompt::AddName, "x", &existing()),
+            Step::Refuse(_)
+        ));
+        assert!(matches!(
+            submit_object(&Prompt::RuleDataset, "risk", &existing()),
+            Step::Refuse(_)
+        ));
     }
 }

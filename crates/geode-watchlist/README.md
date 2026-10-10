@@ -18,9 +18,9 @@ request and never depends on `geode-data`.
   tile's `shift+r` route (the factory's hook is the tile's only route to
   the bridge). Also the tile's `TileContent` door, `ACTIONS` (category
   `Watchlist`) and the `DEFAULT_KEYMAP` fragment (contexts `normal`,
-  `visual`, `insert`, `menu` and `rules`). New, Clone, Rename, Delete,
-  Revert and Rules… have no default chord: the palette and the `⋯` menu
-  reach them.
+  `visual`, `insert`, `menu` and `rules`). New, Clone, Rename, Delete and
+  Revert have no default chord, and Rules… none either: the palette and
+  the `⋯` menu reach them.
 - `core/session.rs`: the session table (`version`, `name`,
   `sort = [column, "asc" | "desc"]` over `name`, `origin` or `reference`,
   `cursor` holding a member name). An unreadable key is dropped with a
@@ -35,10 +35,16 @@ request and never depends on `geode-data`.
   `refused` drops it and remembers the names a refused write would have
   changed, so an undo that skips them says `not saved` rather than
   `changed elsewhere`.
-- `core/prompt.rs`: `Prompt` (what the field asks: `AddName`, or a rule's
-  `RuleDataset`, `RuleScope`, `RuleExpression`) and the typed answer's
-  step: `submit` for a name (trimmed to add, or `type a name` for a
-  blank); `submit_rule` for a rule step over a `RuleContext` (the
+- `core/prompt.rs`: `Prompt` (what the field asks: `AddName`; a rule's
+  `RuleDataset`, `RuleScope`, `RuleExpression`; a list's name for
+  `NewName`, `CloneName { from }` and `Rename { from }`) and the typed
+  answer's step: `submit` for a name (trimmed to add, or `type a name` for
+  a blank); `submit_object` for a list's name over every list defined
+  (`watchlist::validate_name`: an identifier, no reserved word, no clash
+  ignoring case naming the other list; a rename's own name is left out of
+  the clash check, so a case change is a rename, but the unchanged name is
+  refused as `<name> is already its name`); `submit_rule` for a rule step
+  over a `RuleContext` (the
   factory's schema, dimensions, saved scopes and named expressions, and
   the shown list as it is now): the dataset must be one
   `fold::eligible_datasets` names, the scope is `whole dataset`, a saved
@@ -93,15 +99,22 @@ request and never depends on `geode-data`.
   add verb, close with a blur first, release where no window is at hand,
   the highlight keys and the row press). Its rows are one of two shapes:
   a `ChoiceList` (open for the add field, closed for a rule's dataset and
-  scope, where the highlight is the answer whatever is typed) or an
-  `ExprCompletion` over the rule's dataset, whose rows are written into
-  the field. `tile/rules.rs` is the rules popup: its paint (hung from the
+  scope, where the highlight is the answer whatever is typed; a list's
+  name has no options and paints no list) or an `ExprCompletion` over the
+  rule's dataset, whose rows are written into the field. A rename's field
+  is seeded with the name, selected, so typing replaces it.
+  `tile/rules.rs` is the rules popup: its paint (hung from the
   header's `<k> rules` item, or inline under the prompt bar while a rule
   step is open), its keys, the rule verbs and the rules write.
   `tile/verbs.rs` is the member
   verbs: what each acts on, the write gate (`queue_write`, one
   whole-object `ConfigEdit`), `commit` (queue, then hold pending, then
-  say), `replay` (peek, gate, step) and `refresh`. `tile/table.rs` is the
+  say), `replay` (peek, gate, step) and `refresh`; `verbs_allowed` is the
+  gate every member and rules verb passes (refused while the shown list's
+  revert is on its way). `tile/objects.rs` is the watchlist's own verbs:
+  New, Clone, Rename, Delete and Revert, their gates (`own`,
+  `revertible`), `Pending` (what `y` does), `Awaiting` (a write shown
+  ahead of its reload) and the tile's `ConfirmHost`. `tile/table.rs` is the
   grid's `TableDelegate` over rows
   the tile prepares (`Prepared::build`) whenever the snapshot, the
   reference tables, the shown list, the sort or the filter changes; render
@@ -162,9 +175,12 @@ The `⋯` menu (`.`) lists Add name, Remove name (disabled with `no row`
 while no row is under the cursor), Rules…, Resolve now (each disabled with
 `no watchlist shown` while none is), Undo and Redo (disabled with `nothing
 to undo` / `nothing to redo` while the history has nothing that way), then
-Switch…, then New…, Clone…, Rename…, Delete… and Revert…, each with its
-live chord. Rules… and the object verbs are not built yet: a pick, or
-their key, shows `not yet available` as a status notice.
+Switch…, then New…, Clone… (disabled with `no watchlist shown`), Rename…
+and Delete… (disabled with why the list is not the user's to remove, see
+Objects) and, only over a user copy with a lower copy beneath it, Revert…,
+each with its live chord. A disabled row says why in its lane, and in
+full when picked. While a revert is on its way the member verbs' rows and
+Undo and Redo say `reverting <name>…`.
 
 ## Editing members
 
@@ -254,6 +270,69 @@ tile hosted without the hook says `resolve now is not wired`. Showing
 another list forgets the history and closes an open field; a snapshot
 that removes the shown list does the same, and writes nothing.
 
+## Objects
+
+New…, Clone…, Rename…, Delete… and Revert… are registered actions with
+no default chord (the palette and the `⋯` menu reach them), never `:`
+commands. Each name is asked in the prompt field (`New watchlist`,
+`clone <from> as`, `rename <from> to`), checked by
+`prompt::submit_object` before anything is written, and refused under
+the field with the field left open (`'Europe' already exists
+('europe')`, `'and' is a reserved word in scope expressions`, `<name> is
+already its name`); escape closes it unwritten. Rename, Delete and Revert
+then ask y/n on the in-tile confirm bar (`geode_tile::confirm`) under the
+header: `y` or the Yes button confirms; `n`, any other key, the No
+button, a press anywhere else in the tile or focus leaving cancels
+(`<name> not renamed` / `not deleted` / `not reverted`), and the key that
+answered does nothing else. The bar holds the keyboard while armed (the
+tile is in `insert` mode), so it sits above every other layer in the
+escape order: `escape` on the bar answers no and stops there; a verb
+reaching the tile from the palette answers no first and then acts, and
+`Watchlist: Cancel` from the palette answers no and nothing more (the
+field, popup, selection and notices beneath wait for the next escape).
+Every write is a whole-object `ConfigEdit` through the frame's config
+door, and the tile shows the outcome ahead of the reload that carries it
+(`Awaiting`): the title and `saving <name>…` in the body for a list on its
+way; a `Refused` notice from the shell puts back what was shown before.
+
+- **New…** asks a name (with or without a list shown; the field survives
+  a snapshot change) and writes an empty list under it
+  (`to_toml(&Watchlist::default())`), then shows it.
+- **Clone…** (refused with `no watchlist shown`) asks the name a copy of
+  the shown list is written under and writes the list as shown, pending
+  edits included (`history.current`), under the new name. The list cloned
+  is never touched: no edit is queued for it, so a desk-layer list is not
+  forked by its clone.
+- **Rename…** asks the new name (seeded with the current one, selected),
+  then `rename <from> → <to> — y renames`; `y` validates again and queues
+  one batch of two edits, set `to` then remove `from`, so the shell writes
+  both or neither. The object written is the shown one as the tile has it:
+  an edit still on its way to the old name goes with the rename. No
+  reference count is asked about: nothing names a watchlist yet, so there
+  is nothing a rename would leave pointing at the old name. The switcher
+  leaves the old name out until the reload drops it.
+- **Delete…** asks `delete <name> — y deletes` and removes the user
+  definition; the tile shows the empty state and opens the switcher
+  without the deleted name.
+- **Revert…** is offered only over a user copy with a lower copy beneath
+  it (`WatchlistState.shadowed`; otherwise `<name> has no copy beneath
+  yours to revert to`): `revert <name> to the <layer> copy — y reverts`
+  removes the user definition and the name stays defined by the lower
+  copy. The revert is awaited (`reverting`): until the snapshot no longer
+  shows a user copy of the name, the member and rules verbs on that list
+  (`o`, `x`, `u`, `ctrl+r`, the rules popup's verbs, their `⋯` rows) are
+  refused with `reverting <name>…`, since an edit built on the user copy
+  would replace the removal in the shell's batch; `shift+r` and `g w`
+  are not gated. A `Refused` notice ends the wait.
+
+Rename and Delete act only on a list the user layer owns outright
+(`own`): a desk or builtin one is refused with `<name> is defined in
+<layer> config; Geode cannot rename it` (`… delete it`), a user copy over
+a lower layer's with `<name> shadows the <layer> copy — Revert… removes
+it` (removing it would leave that copy standing under the old name), and
+a list with no recorded layer with `can't tell where <name> is defined`.
+The `⋯` rows carry the same refusals in their lane.
+
 Notices, in order of precedence: the verb's own word (or the shell's
 `TileNotice` about its write, taken on every frame notification: `Forked`
 as status, `Refused` as danger), then the standing resolution notices from
@@ -285,8 +364,6 @@ average 35 to 48; the same run read 6.0 and 12.9 ms under load 17 to 78):
 
 ## Known limitations
 
-- The object verbs (new, clone, rename, delete, revert) are not built
-  yet: each says `not yet available`.
 - The add field's typeahead offers names only: the reference table's keys
   and the names any list already holds.
 - The field's rows do not close on a press outside them (a press on the
