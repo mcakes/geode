@@ -161,6 +161,7 @@ mod demo_config_integration {
                         ..Scope::default()
                     },
                     as_of: AsOf::Live,
+                    dataset: None,
                 })
                 .unwrap();
             let values = loop {

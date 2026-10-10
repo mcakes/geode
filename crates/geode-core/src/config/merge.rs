@@ -26,7 +26,8 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         | "sources"
         | "egress"
         | "dimensions"
-        | "expressions" => Some(1),
+        | "expressions"
+        | "watchlists" => Some(1),
         // One complete definition per color name.
         "colors" => Some(1),
         // A dimension's values merge per value; one value's entry (a color
@@ -311,5 +312,27 @@ mod tests {
         );
         assert_eq!(merged.value["keymap"]["mod"].as_str(), Some("ctrl"));
         assert_eq!(merged.provenance.get("keymap"), Some(&Layer::User));
+    }
+
+    #[test]
+    fn a_user_watchlist_replaces_the_desk_one_whole() {
+        let merged = merge_docs(
+            "watchlists",
+            &[
+                doc(
+                    Layer::Desk,
+                    "watchlists",
+                    "[eu]\ninclude = [\"SPX\"]\nexclude = [\"SMI\"]\n",
+                ),
+                doc(Layer::User, "watchlists", "[eu]\ninclude = [\"DAX\"]\n"),
+            ],
+        );
+        let eu = merged.value["eu"].as_table().unwrap();
+        assert_eq!(eu["include"].as_array().unwrap().len(), 1);
+        assert!(
+            eu.get("exclude").is_none(),
+            "a lower layer's exclude must not leak into the user object"
+        );
+        assert_eq!(merged.provenance.get("eu"), Some(&Layer::User));
     }
 }

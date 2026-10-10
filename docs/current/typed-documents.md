@@ -267,6 +267,77 @@ comparisons, membership, boolean operators, and parentheses. Parsing is
 schema-free; statements, comments, functions, and subqueries are outside its
 grammar. Quoted strings escape internal quotes by doubling them.
 
+## Watchlists
+
+[`watchlist`](../../crates/geode-core/src/watchlist/mod.rs) reads
+`watchlists.toml`: named lists of underlyings, each a top-level table that
+replaces whole across layers.
+
+```toml
+[europe]
+include = ["SMI"]            # names by hand
+exclude = ["UKX"]            # names never live, whatever produced them
+[[europe.rules]]             # zero or more
+dataset = "risk_snapshot"
+expression = "region = 'Europe'"   # or scope = "<saved scope>"; at most one
+```
+
+A list is dropped, with an error, only when its object is not a table, when
+its name is refused, or when a name is in both `include` and `exclude`. A
+name must be an identifier (letters, digits and `_`, not starting with a
+digit), not a scope keyword, not `config_version`, and not a clash ignoring
+case with an earlier table in the document; a clash is judged against every
+earlier table, kept or dropped, so fixing an earlier list cannot make a
+later one start clashing. `validate_name` applies the same rules to a new,
+cloned or renamed list. Every other problem warns and keeps the list: name
+arrays are trimmed, blanks dropped, repeats kept once in first order; a
+non-array warns and reads as empty, and a non-string entry warns and is
+dropped. Rules are kept whatever their shape (a non-table rule reads as an
+empty one, a missing or non-string `dataset` as none) so the fold can report
+them by index.
+
+`fold::fold_rules` checks each rule against the schema the data service
+started with, the saved scopes and the named expressions, and answers the
+good rules as `ResolvedRule`s in definition order and the rest as
+`RuleError`s by index. A rule error never drops the list: no dataset named;
+a dataset the schema lacks (one added since launch needs a restart); a
+computed, local, reference or series dataset, or one without an
+`underlying_ref` column (`eligible_datasets` lists what a rule may name:
+stored measures or document datasets, not computed, not local, carrying the
+column); both a scope and an expression; a saved scope that is not defined
+or selects nothing; an expression that does not parse; a named expression
+the scope cannot resolve; or a scope the dataset cannot honour under the
+same validation a saved scope gets.
+
+Members are the set algebra over the names the good rules produce:
+rule results ∪ `include` − `exclude`, sorted by name, each `Member` with its
+`Origin` (`Manual`, `Rules(indices)`, `Both(indices)`, or
+`Excluded { rules, manual }`). An excluded name is never a live member,
+whatever produced it, but it stays in the list as `Excluded` so a consumer
+can show and restore it; an exclusion no rule produces and `include` does
+not hold is still listed, as the exclusion exists and may be worth dropping.
+`WatchlistSnapshot::members_of` reads the live members and `all_names` every
+name, excluded ones included. Resolution itself runs in the data layer and
+is live only, never at the frame's as-of, with each rule's distinct in its
+own read transaction, so a rule the data layer cannot compile or run joins
+the fold's errors by index while the others still answer; see
+[queries and time travel](data-path.md#queries-and-time-travel) and
+[the watchlist cache](shell.md#state-ownership).
+
+The edit verbs (`edit::add`, `remove`, `set_rules`) return the whole next
+object and an `UndoEntry` holding only what changed. `add` includes a new
+name by hand, restores an excluded one (an orphan exclusion, with no rule
+and not manual, is included by hand instead, or clearing it would leave the
+name nowhere), and refuses a name already a live member, naming the rule
+that supplies it; `remove` drops a manual name from `include`, excludes a
+rule-derived one, does both for a name that is both, and restores an
+excluded one; `set_rules` replaces the rules whole as one change. `undo`
+replays an entry backwards over the current object and skips a row whose
+manual state (or rules set) is no longer the entry's `after`: it was changed
+elsewhere, and restoring a stored snapshot would silently revert that edit.
+`to_toml` writes `include`, then `exclude` and `rules` when nonempty, each
+rule `dataset` then its `scope` or `expression`, and reads back equal.
+
 ## Colors and numeric formatting
 
 [`NamedColours`](../../crates/geode-core/src/colour/mod.rs) reads a hue or a

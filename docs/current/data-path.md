@@ -163,6 +163,7 @@ success, and the loop goes on to the next request:
 | Distinct values | `Distinct` error for its key, tag, and column |
 | Series | `Series` error for its key and tag |
 | Catalog | `Catalog` error for its key and tag |
+| Watchlist | `Watchlist` error for its key, tag, and list name |
 | Pricing | `Price` outcome with the error on every submitted line |
 | Upload | `Upload` error for its key, tag, and target |
 | Text file | `TextFile` error for its key and tag: a failed write for a write, a failed read for a read |
@@ -1148,7 +1149,34 @@ the grouping cardinality. The result is an immutable columnar `Snapshot`:
 expanding a tree node works on the prepared result rather than issuing another
 database query. User supplied scope values are bound as parameters. A computed
 dataset has no relation: the compiler refuses a view or join over it, and
-distinct-value requests skip it.
+distinct-value requests skip it. A distinct request naming one dataset reads
+that dataset alone and is refused by name when the dataset is unknown,
+computed, or does not carry the column; without a name it unions every
+dataset carrying the column, which is what the dimension picker asks for.
+A watchlist request (`DataHandle::watchlist`, `WatchlistParams`) runs one
+such single-dataset distinct of `underlying_ref` per rule, each in its own
+read transaction on the query pool: a statement failing inside a DuckDB
+transaction leaves it aborted, so one transaction for every rule would let
+a rule failing at execution take the rules after it down with it. A rule
+that fails to compile or run is therefore reported by its index in
+`rules_failed` inside a successful answer while the other rules still
+answer. The whole answer is an error when the connection itself refuses a
+transaction, or when the request is refused before any rule runs: a drifted
+dataset any rule names refuses the whole list at dispatch, since a
+shortened answer would read as a smaller list, and `dispatch` answers that
+refusal as an `Err` under the request's key, tag and list name rather than
+dropping it (the handle's own `Busy` or `Stopped` refusal returns to the
+caller at submission and sends nothing). The names then union with the
+list's manual includes and drop its excludes (the pure set algebra in
+`geode_core::watchlist`), and the answer is a `DataEvent::Watchlist`
+addressed by the requester's key, tag and list name. The pool coalesces and
+cancels per key, so the app resolves each list
+under its own key from the `WATCHLIST_KEY_BASE` range rather than one
+shared key (see [the watchlist cache](shell.md#state-ownership)). Two rules
+can read either side of a publish landing between them; a live list is
+resolved again on publication, and the next answer agrees with itself. The
+collector holds the same `DataHandle` and could submit the same request; it
+submits none, and logs and ignores any watchlist answer it drains.
 
 A distinct-value answer carries the key it was asked under, and the app
 routes it by that key. The shell's reserved keys (the picker, expression

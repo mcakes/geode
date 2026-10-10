@@ -456,6 +456,25 @@ fn shell_keys_are_recognised_and_tile_keys_are_not() {
     assert!(!is_shell_key(QueryKey(u64::MAX - 6)));
 }
 
+/// The watchlist range holds exactly `WATCHLIST_KEY_COUNT` keys from its
+/// base, and no shell single key or tile key falls in it.
+#[test]
+fn watchlist_keys_are_the_reserved_range_and_nothing_else() {
+    assert!(is_watchlist_key(WATCHLIST_KEY_BASE));
+    assert!(is_watchlist_key(QueryKey(
+        WATCHLIST_KEY_BASE.0 + WATCHLIST_KEY_COUNT - 1
+    )));
+    assert!(!is_watchlist_key(QueryKey(
+        WATCHLIST_KEY_BASE.0 + WATCHLIST_KEY_COUNT
+    )));
+    assert!(!is_watchlist_key(QueryKey(WATCHLIST_KEY_BASE.0 - 1)));
+    // That the range ends below the shell's single reserved keys is a
+    // compile-time check beside `WATCHLIST_KEY_COUNT`.
+    assert!(!is_watchlist_key(REFERENCE_KEY));
+    assert!(!is_watchlist_key(PICKER_KEY));
+    assert!(!is_watchlist_key(QueryKey(1)));
+}
+
 #[gpui::test]
 fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services_with_pickable());

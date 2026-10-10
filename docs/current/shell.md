@@ -29,16 +29,18 @@ State with a narrower owner stays outside `ShellView`:
   presentation.
 - GPUI component state, such as `InputState` and `TableState`, owns reusable
   control behavior.
-- Five GPUI globals carry state that is genuinely app wide and visible to
-  modules: `UiSettings`, `Chords`, `AppClock`, `SeriesSettings`, and
-  `ReferenceGlobal` (live reference tables).
+- Six GPUI globals carry state that is genuinely app wide and visible to
+  modules: `UiSettings`, `Chords`, `AppClock`, `SeriesSettings`,
+  `ReferenceGlobal` (live reference tables), and `WatchlistGlobal`
+  (resolved watchlists).
 
 New state belongs in the narrowest owner that can keep it correct. A global is
 appropriate only when independently hosted modules must observe the same
 application setting.
 
-The shell writes the first four. It installs `ReferenceGlobal` empty, and the
-app's bridge alone replaces it; modules only read and observe it. At attach
+The shell writes the first four. It installs `ReferenceGlobal` and
+`WatchlistGlobal` empty, and the app's bridge alone replaces them; modules
+only read and observe them. At attach
 the bridge reads every reference dataset of the startup schema at
 `AsOf::Live` under the reserved `REFERENCE_KEY`, and it reads a dataset again
 on each of its publishes. Only a dataset's latest-tagged answer
@@ -48,6 +50,40 @@ with nothing published is removed. A failed read keeps the last table and logs
 one warning on `geode::reference` per run of failures; a `Busy` refusal rereads
 after one second, with at most one timer per dataset; `Stopped` drops the
 demand. The tables are always live, never at the frame's as-of.
+
+`WatchlistGlobal` holds a `WatchlistSnapshot`: every list defined in
+`watchlists.toml` with its definition, provenance, rule errors, members with
+their origins, `resolved_at`, and a status of `Resolving`, `Current` or
+`Failed(reason)`. The bridge's `WatchlistCache` replaces it when a list's
+definition, members or status changes, and on every accepted answer, since
+`resolved_at` moves; an observer that wants member changes alone compares
+the members it holds. The cache folds every list against the schema the
+service started with and resolves each through `DataHandle::watchlist`
+under its own key from the `WATCHLIST_KEY_BASE` range (`WATCHLIST_KEY_COUNT`
+keys, recognized by `is_watchlist_key`), handed out on first sight of a name
+and never reused within the run: the query pool and the app's mailbox
+coalesce per key, so a shared key would let one list's refresh cancel
+another's resolution in flight. Answers never reach a tile. Resolution runs
+at attach, on a non-local publish of a dataset a list has a good rule over
+(a list whose only rule over it is bad is left alone, since that rule
+contributes nothing), and on a reload that emits `ConfigReloaded`, which
+one touching `watchlists`, `scopes`, `expressions` or `dimensions` does;
+there, lists no longer defined leave the snapshot; a list is resolved
+again when its definition, its folded rules, or the derived dimensions its
+rules read change (a rule over a classification folds to the same scope
+whatever the classification maps, so the mapping travels with the fold);
+a change of provenance alone keeps the members. Only a list's latest tag
+is applied, and each list keeps a tag
+floor: after its definition is replaced or removed, an in-flight answer for
+the old definition is dropped even while the new definition's refresh waits
+on a refused submission, so a slow old answer cannot stand in for the new
+list. A successful answer sets `Current`, the members and the rule errors
+(the fold's plus the rules the data layer could not compile or run, by
+index), so a list with one bad rule is still `Current` for its good ones; a
+failed resolution keeps the last members, marks the list `Failed` and warns
+once per run of failures on `geode::watchlist`. A `Busy` refusal resolves
+again after one second with at most one timer per list; `Stopped` drops the
+demand. Lists are always live, never at the frame's as-of.
 
 ## Tiles, workspaces, and stacks
 

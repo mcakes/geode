@@ -291,6 +291,15 @@ impl ReferenceData {
     pub fn has(&self, dataset: &str) -> bool {
         self.tables.contains_key(dataset)
     }
+
+    /// Every row key of one dataset, in key order. Empty for an unknown
+    /// dataset. The completion vocabulary for a name field.
+    pub fn keys(&self, dataset: &str) -> impl Iterator<Item = &str> {
+        self.tables
+            .get(dataset)
+            .into_iter()
+            .flat_map(|t| t.rows.keys().map(String::as_str))
+    }
 }
 
 #[cfg(test)]
@@ -316,6 +325,22 @@ mod read_tests {
             .with_table("underlyings", &table(&[("SPX", Some("USD"))]), 1)
             .unwrap();
         assert_eq!(r.lookup("underlyings", "SPX", "currency"), Some("USD"));
+    }
+
+    #[test]
+    fn keys_lists_a_datasets_row_keys_in_order_and_nothing_for_an_unknown_one() {
+        let data = ReferenceData::default()
+            .with_table(
+                "underlyings",
+                &table(&[("SPX", Some("USD")), ("DAX", Some("EUR"))]),
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            data.keys("underlyings").collect::<Vec<_>>(),
+            vec!["DAX", "SPX"]
+        );
+        assert_eq!(data.keys("nope").count(), 0);
     }
 
     #[test]

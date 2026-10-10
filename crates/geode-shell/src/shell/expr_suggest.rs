@@ -141,6 +141,7 @@ fn request_values(view: &mut ShellView, column: String, cx: &mut Context<ShellVi
         column,
         scope,
         as_of,
+        dataset: None,
     }));
 }
 

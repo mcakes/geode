@@ -142,8 +142,9 @@ may still use separately configured `CC`/`CXX` wrappers.
 - Repeated elements use stable domain-derived IDs. Theme tokens and the rem
   scale own application presentation; avoid literal colors, radii, and
   unexplained fixed pixels.
-- The five module-visible GPUI globals are `UiSettings`, `Chords`, `AppClock`,
-  `SeriesSettings`, and `ReferenceGlobal` (live reference tables).
+- The six module-visible GPUI globals are `UiSettings`, `Chords`, `AppClock`,
+  `SeriesSettings`, `ReferenceGlobal` (live reference tables), and
+  `WatchlistGlobal` (resolved watchlists).
   Add a global only for genuinely app-wide state that
   independently hosted modules must observe.
 

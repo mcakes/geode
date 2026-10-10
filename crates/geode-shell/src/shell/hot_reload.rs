@@ -216,7 +216,12 @@ impl ShellView {
                 || changed("dataset_presentation")
                 || changed("dimensions")
                 || changed(geode_core::config::COLORS_DOC)
-                || changed(geode_core::config::VALUE_COLORS_DOC);
+                || changed(geode_core::config::VALUE_COLORS_DOC)
+                // The bridge re-folds watchlist rules on this event: their
+                // saved scopes and named expressions live in these docs.
+                || changed(geode_core::config::WATCHLISTS_DOC)
+                || changed("scopes")
+                || changed(EXPRESSIONS_DOC);
             // `app` settings the bridge hands to module factories.
             let app_changed = changed("app");
             // Dimension picker columns depend on dataset columns and derived dimensions.
