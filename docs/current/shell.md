@@ -68,9 +68,12 @@ at attach, on a non-local publish of a dataset a list has a good rule over
 (a list whose only rule over it is bad is left alone, since that rule
 contributes nothing), and on a reload that emits `ConfigReloaded`, which
 one touching `watchlists`, `scopes`, `expressions` or `dimensions` does;
-there, lists no longer defined leave the snapshot, new and changed
-definitions resolve again, and a change of provenance alone keeps the
-members. Only a list's latest tag is applied, and each list keeps a tag
+there, lists no longer defined leave the snapshot; a list is resolved
+again when its definition, its folded rules, or the derived dimensions its
+rules read change (a rule over a classification folds to the same scope
+whatever the classification maps, so the mapping travels with the fold);
+a change of provenance alone keeps the members. Only a list's latest tag
+is applied, and each list keeps a tag
 floor: after its definition is replaced or removed, an in-flight answer for
 the old definition is dropped even while the new definition's refresh waits
 on a refused submission, so a slow old answer cannot stand in for the new

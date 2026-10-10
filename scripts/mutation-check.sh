@@ -39200,6 +39200,16 @@ run_mutation "watchlist: publish trigger filters by dataset" \
   geode-core \
   a_publish_names_only_lists_with_a_good_rule_over_the_dataset
 
+# A changed classification mapping re-resolves the lists reading it:
+# the rule's scope is the same whatever the mapping, so the mapping itself
+# is part of the comparison.
+run_mutation "watchlist: a changed classification re-resolves" \
+  crates/geode-core/src/watchlist/state.rs \
+  '            o.list == f.list && o.rules == f.rules && o.errors == f.errors && o.dims == f.dims' \
+  '            o.list == f.list && o.rules == f.rules && o.errors == f.errors' \
+  geode-core \
+  a_changed_classification_mapping_resolves_the_list_again
+
 # Undo skips a row changed since.
 run_mutation "watchlist: undo skips a row changed since" \
   crates/geode-core/src/watchlist/edit.rs \

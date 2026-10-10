@@ -9,9 +9,9 @@
 
 use chrono::Utc;
 use geode_core::config::{Config, Diagnostic, EXPRESSIONS_DOC, Layer, Severity, WATCHLISTS_DOC};
-use geode_core::dimensions::DerivedDimensions;
+use geode_core::dimensions::{DerivedDimension, DerivedDimensions};
 use geode_core::named::NamedExpressions;
-use geode_core::query::{QueryKey, WatchlistOutcome, WatchlistParams};
+use geode_core::query::{QueryKey, ResolvedRule, WatchlistOutcome, WatchlistParams};
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::complete::ExprVocab;
 use geode_core::watchlist::fold::{RuleError, fold_rules};
@@ -89,18 +89,37 @@ pub fn fold_watchlists(
                 path: Some(format!("watchlists.{name}.rules[{}]", e.index)),
             });
         }
+        let read_dims = dims_read(&rules, dims);
         out.insert(
             name.clone(),
             Folded {
                 list: list.clone(),
                 rules,
                 errors,
+                dims: read_dims,
                 layer: layers.get(name).copied(),
                 shadowed: shadowed.get(name).copied(),
             },
         );
     }
     (out, diags)
+}
+
+/// The derived dimensions the good rules' scopes name, each once in
+/// first-mention order: a scope reads a classification by its label
+/// column, in a dimension selection or an expression, and
+/// `Scope::columns` lists both, so the mapping behind it travels with
+/// the fold (see `Folded`).
+fn dims_read(rules: &[ResolvedRule], dims: &DerivedDimensions) -> Vec<DerivedDimension> {
+    let mut out: Vec<DerivedDimension> = Vec::new();
+    for column in rules.iter().flat_map(|r| r.scope.columns()) {
+        if let Some(d) = dims.get(&column)
+            && !out.iter().any(|seen| seen.name == d.name)
+        {
+            out.push(d.clone());
+        }
+    }
+    out
 }
 
 /// The resolved lists behind `WatchlistGlobal`, one lane per list, each
@@ -481,6 +500,44 @@ mod tests {
             a.errors[0].reason
         );
         assert_eq!(a.list.include, vec!["SPX"], "the list itself is kept");
+    }
+
+    /// A rule reads a classification by its label column, so the mapping
+    /// behind it is part of what the fold hands the cache.
+    #[test]
+    fn fold_carries_the_classifications_a_rule_reads() {
+        let config = config(&[
+            ("datasets", DATASETS),
+            (
+                "dimensions",
+                "[region]\nfrom = \"underlying_ref\"\n[region.values]\n\
+                 Europe = [\"DAX\", \"UKX\"]\n",
+            ),
+            (
+                "scopes",
+                "[eu_books]\n[eu_books.dimensions]\nregion = [\"Europe\"]\n",
+            ),
+            (
+                WATCHLISTS_DOC,
+                "[eu]\n[[eu.rules]]\ndataset = \"risk\"\nexpression = \"region = 'Europe'\"\n\
+                 [[eu.rules]]\ndataset = \"risk\"\nscope = \"eu_books\"\n\
+                 [plain]\n[[plain.rules]]\ndataset = \"risk\"\nexpression = \"book = 'BK000'\"\n",
+            ),
+        ]);
+        let schema = startup_schema(&config);
+        let (dims, _) = DerivedDimensions::from_doc(config.doc("dimensions").unwrap());
+        let (folded, _) = fold_watchlists(&config, &schema, &dims);
+        let eu = &folded["eu"];
+        assert_eq!(eu.rules.len(), 2, "{:?}", eu.errors);
+        assert_eq!(
+            eu.dims,
+            vec![dims.get("region").unwrap().clone()],
+            "named once though both rules read it"
+        );
+        assert!(
+            folded["plain"].dims.is_empty(),
+            "a plain column is no classification"
+        );
     }
 
     #[test]

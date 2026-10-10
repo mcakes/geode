@@ -10731,6 +10731,7 @@ grain = "underlying"
                         scope: Scope::default(),
                     }],
                     errors: vec![],
+                    dims: vec![],
                     layer: Some(Layer::User),
                     shadowed: None,
                 },
@@ -11184,6 +11185,61 @@ grain = "underlying"
             f.events.try_send(published("other")).unwrap();
             vcx.run_until_parked();
             assert!(next_watchlist(&f).is_none());
+        }
+
+        /// A rule over a classification folds to the same scope whatever
+        /// the classification maps, so a `dimensions` reload that changes
+        /// the mapping it reads resolves the list again; one that changes
+        /// another classification, or touches a list over plain columns,
+        /// does not.
+        #[gpui::test]
+        fn a_dimensions_reload_re_resolves_the_lists_reading_the_changed_classification(
+            cx: &mut gpui::TestAppContext,
+        ) {
+            const LISTS: &str = "[eu]\n[[eu.rules]]\ndataset = \"risk\"\n\
+                expression = \"region = 'Europe'\"\n\
+                [plain]\n[[plain.rules]]\ndataset = \"risk\"\nexpression = \"npv > 1\"\n";
+            fn with_dims(dims: &str) -> ConfigSources {
+                let mut sources = sources(LISTS);
+                sources
+                    .builtin
+                    .push(LayerDoc::builtin("dimensions", dims).unwrap());
+                sources
+            }
+            const EUROPE: &str =
+                "[region]\nfrom = \"underlying_ref\"\n[region.values]\nEurope = [\"DAX\"]\n";
+            let (f, shell) = attached(cx, with_dims(EUROPE));
+            let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+            let first = next_watchlist(&f).expect("the first list");
+            let second = next_watchlist(&f).expect("the second list");
+            let eu = if first.name == "eu" { first } else { second };
+            assert_eq!(eu.rules.len(), 1, "the rule folded against the dimensions");
+            // Another classification, which no rule reads: nothing resolves.
+            let reloaded = Config::load(&with_dims(&format!(
+                "{EUROPE}[desk]\nfrom = \"book\"\n[desk.values]\nFlow = [\"BK000\"]\n"
+            )));
+            vcx.update(|_, cx| {
+                shell.update(cx, |s, cx| s.apply_reload_for_test(reloaded, cx));
+            });
+            vcx.run_until_parked();
+            assert!(
+                next_watchlist(&f).is_none(),
+                "a classification no rule reads changes no list"
+            );
+            // The mapping the rule reads: that list alone resolves again.
+            let reloaded = Config::load(&with_dims(
+                "[region]\nfrom = \"underlying_ref\"\n[region.values]\nEurope = [\"DAX\", \"SMI\"]\n",
+            ));
+            vcx.update(|_, cx| {
+                shell.update(cx, |s, cx| s.apply_reload_for_test(reloaded, cx));
+            });
+            vcx.run_until_parked();
+            let again = next_watchlist(&f).expect("the changed mapping");
+            assert_eq!(
+                (again.name.as_str(), again.key, again.tag),
+                ("eu", eu.key, eu.tag + 1)
+            );
+            assert!(next_watchlist(&f).is_none(), "the plain list is left alone");
         }
 
         #[gpui::test]

@@ -6,6 +6,7 @@ use super::Watchlist;
 use super::fold::RuleError;
 use super::members::Member;
 use crate::config::Layer;
+use crate::dimensions::DerivedDimension;
 use crate::query::ResolvedRule;
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,13 +58,19 @@ impl WatchlistSnapshot {
 }
 
 /// One list as the cache holds it between resolutions: the definition, its
-/// folded rules and errors, and its provenance. Two `Folded` compare equal
-/// when a reload changed nothing that resolution reads.
+/// folded rules and errors, the derived dimensions those rules read, and
+/// its provenance. Two `Folded` compare equal when a reload changed nothing
+/// that resolution reads: a rule's scope names a classification by its
+/// label column, so the mapping behind it has to travel here, or an edit
+/// to it would leave the list `Current` with the old members.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Folded {
     pub list: Watchlist,
     pub rules: Vec<ResolvedRule>,
     pub errors: Vec<RuleError>,
+    /// The derived dimensions the good rules' scopes name, each once, in
+    /// first-mention order.
+    pub dims: Vec<DerivedDimension>,
     pub layer: Option<Layer>,
     pub shadowed: Option<Layer>,
 }
@@ -87,8 +94,9 @@ pub struct DefinitionDiff {
     pub resolve: Vec<String>,
 }
 
-/// What a reload changes. Provenance alone (`layer`, `shadowed`) does not
-/// re-resolve: the members cannot differ.
+/// What a reload changes: the definition, the folded rules and errors, or
+/// the derived dimensions the rules read. Provenance alone (`layer`,
+/// `shadowed`) does not re-resolve: the members cannot differ.
 pub fn diff_definitions(
     old: &BTreeMap<String, Folded>,
     new: &BTreeMap<String, Folded>,
@@ -100,9 +108,9 @@ pub fn diff_definitions(
         }
     }
     for (name, f) in new {
-        let same = old
-            .get(name)
-            .is_some_and(|o| o.list == f.list && o.rules == f.rules && o.errors == f.errors);
+        let same = old.get(name).is_some_and(|o| {
+            o.list == f.list && o.rules == f.rules && o.errors == f.errors && o.dims == f.dims
+        });
         if !same {
             diff.resolve.push(name.clone());
         }
@@ -134,8 +142,20 @@ mod tests {
                     reason: "x".into(),
                 })
                 .collect(),
+            dims: Vec::new(),
             layer: None,
             shadowed: None,
+        }
+    }
+
+    fn region(europe: &[&str]) -> DerivedDimension {
+        DerivedDimension {
+            name: "region".into(),
+            from: "underlying_ref".into(),
+            values: europe
+                .iter()
+                .map(|u| (u.to_string(), "Europe".to_string()))
+                .collect(),
         }
     }
 
@@ -165,6 +185,28 @@ mod tests {
         let diff = diff_definitions(&old, &new);
         assert_eq!(diff.removed, vec!["gone"]);
         assert_eq!(diff.resolve, vec!["changed", "fresh"]);
+    }
+
+    /// A rule over `region = 'Europe'` folds to the same scope whatever
+    /// `region` maps, so the mapping itself decides whether the list is
+    /// resolved again.
+    #[test]
+    fn a_changed_classification_mapping_resolves_the_list_again() {
+        let mut old = BTreeMap::new();
+        let mut with = folded(&["risk"], &[]);
+        with.dims = vec![region(&["DAX", "UKX"])];
+        old.insert("eu".to_string(), with.clone());
+        old.insert("plain".to_string(), folded(&["risk"], &[]));
+        let mut new = old.clone();
+        assert_eq!(
+            diff_definitions(&old, &new),
+            DefinitionDiff::default(),
+            "an unchanged mapping keeps the members"
+        );
+        new.get_mut("eu").unwrap().dims = vec![region(&["DAX", "UKX", "SMI"])];
+        let diff = diff_definitions(&old, &new);
+        assert_eq!(diff.resolve, vec!["eu"]);
+        assert!(diff.removed.is_empty());
     }
 
     #[test]
