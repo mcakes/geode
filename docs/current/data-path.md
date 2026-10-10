@@ -582,6 +582,16 @@ whole file partitions. See [`publish.rs`](../../crates/geode-data/src/store/publ
 [`split.rs`](../../crates/geode-data/src/ingest/split.rs), and
 [`series.rs`](../../crates/geode-data/src/store/series.rs).
 
+A measures dataset's axes extend the key of each grain that holds a measure:
+the DDL places the axis columns after the grain key, and the split groups by
+key and axes, so one stored row holds one key at one set of axis values. A
+grain holding only attributes keeps the plain key. A file whose axis column
+is NULL in any row, including a file that lacks the axis column so that it
+reads as NULL, is refused before a generation is reserved (`axis 'tenor' is
+NULL in N rows`), and the source reports it as a failed load; an axis is a
+key, and a NULL one would merge buckets under one row. The refusal spends no
+generation ID and leaves live data untouched.
+
 Source columns the dataset does not declare are ignored and declared
 optional columns the file lacks read as NULL; the load stays `Ok`. Each
 distinct (source, dataset, extra set, missing set) combination emits one
@@ -1100,6 +1110,12 @@ old book. Moves persist: the demo reuses its `$TMPDIR/geode-demo/<rows>-42`
 directory across `--demo` launches, so delete it to restore the generated
 LHUs.
 
+A move rewrites the risk files only. The scenario files under `scenario/`
+keep the old LHU until the next scenario drop, because scenario data is a
+run made at a point in time, not a view of the positions; the dataset time
+in a scenario tile's header says how old that run is. A real deployment has
+the same lag between a position move and the next scenario run.
+
 ## Text files
 
 A tile that imports or exports a file asks the data service through
@@ -1322,6 +1338,13 @@ and grouping columns are not summable. Document-query and catalog snapshot
 builders mark their columns false; custom builders must supply the flag
 explicitly. Selection totals require this flag and additive contributing
 values. Attribution alone cannot justify a total of maxima or ratios.
+
+Grouping by an axis is grouping by a key column of the measure grain, so an
+axis needs no unanimity rule and no join. Attribution along axes follows the
+bucket/scenario rule: omitting a bucket axis sums its partition and stays
+attributable, while a level whose grouping omits a scenario axis is
+non-attributable and shows NULL (see
+[axes on measures datasets](typed-documents.md#dataset-families-and-validation)).
 
 ### Ungrouped dimension columns
 

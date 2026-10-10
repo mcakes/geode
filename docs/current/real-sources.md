@@ -117,6 +117,52 @@ desk-layer `sources.toml` entry and a `datasets.toml` declaration.
 - Key spellings: `underlying_ref`, `position_ref`, `instrument_ref` values
   are assumed to match the keys every other family uses (below).
 
+#### Scenario files
+
+**For:** bucketed and scenario risk — vega by tenor and moneyness, a vega
+spot ladder, a spot ladder, term sensitivities and rho by curve
+(`vega_buckets`, `vega_spot_ladder`, `spot_ladder`, `term_sensitivities`,
+`rho_curves` in the demo), each a measures dataset with `axes`.
+
+**Simulator:** `geode-demo-data`'s `scenario` module derives the five tables
+from the risk batch and `emit_scenario_directory` writes
+`<dataset>_<date>_<book>.csv` with `.done` sentinels into
+`$TMPDIR/geode-demo/<rows>-42/scenario/`, beside `src/` so the risk glob
+never picks one up. Bucket measures are unjittered shares of the row's own
+risk measure, so a sum over a bucket axis reproduces the blotter's value;
+the vega spot ladder and curvature are jittered. Only the first
+`SCENARIO_COVERAGE` (5,000) distinct (instrument, underlying) rows get
+scenarios, whatever the demo row count, so the scenario store stays bounded.
+The demo layer declares one `csv_dir` source per dataset,
+`demo_scenario_<dataset>`: sentinel readiness, a five-second poll, and
+`batch_pattern = '^<dataset>_\d{4}-\d{2}-\d{2}_(?P<batch>.+)$'`.
+
+**Seam:** the same as risk files: none to write. A real deployment needs a
+desk-layer `sources.toml` entry per dataset and a `datasets.toml`
+declaration with `axes`.
+
+**Lag:** a position move rewrites the risk files only; scenario rows keep
+the old LHU until the next scenario run, and the dataset time in a tile's
+header says how old the run is. The demo shows the same lag (see
+[the demo position system](data-path.md#the-demo-position-system)).
+
+**Guessed — check against the real drop:**
+
+- Header spellings for axes and measures (`SCENARIO_SOURCE_NAMES`, each
+  measure followed by a `_USD` twin) and whether axis values print as the
+  demo writes them (`0`, `-5`, no trailing zeros).
+- Bucket vocabularies: the tenor list (`1M` … `5Y`), the moneyness and
+  spot-shift grids, the curve currencies and types. A tenor label outside
+  `<n>D|W|M|Y` sorts after the parsable ones under `order = "tenor"`.
+- Whether a real run covers the whole book or a subset, and whether every
+  bucket is present for every row. An absent row reads as no value, not
+  zero.
+- Whether spot shifts are joint across underlyings or per underlying. The
+  demo ladders each (instrument, underlying) row on its own underlying; a
+  joint shift changes what a sum across underlyings at one shift means.
+- Any NULL axis value refuses the whole file, so a producer that leaves an
+  axis blank for a total row must be asked to drop that row.
+
 ### Subscribed market-data documents
 
 **For:** CVI parameters (`cvi_params`), dividend schedules

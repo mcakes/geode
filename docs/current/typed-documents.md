@@ -16,10 +16,31 @@ parsed as a dataset. An omitted family defaults to `measures`.
 
 | Family | Shape and validation |
 |---|---|
-| `measures` | Columns declare roles and fixed grains. Measures and grain-bearing attributes create storage grains. Document-only roles and uncarriable dimensions are dropped. Missing grain-key declarations and reserved metadata names warn without removing the dataset. |
+| `measures` | Columns declare roles and fixed grains. Measures and grain-bearing attributes create storage grains. An optional `axes` list names axis columns that extend the key of every grain holding a measure (below). Document-only roles and uncarriable dimensions are dropped. Missing grain-key declarations and reserved metadata names warn without removing the dataset. |
 | `document` | A nonempty ordered key identifies a document; nonempty ordered axes identify its rows. Key columns must be grainless utf8 dimensions. At least one value is required. Invalid identity or row shape removes the dataset. |
 | `series` | Storage implies `source`, `series_id`, `ts`, `received_at`, and `value`. Declared columns are dropped and nonempty key/axes arrays cleared with errors. Invalid retention windows report errors and become unbounded. |
 | `reference` | One keyed table replaced whole per snapshot. A nonempty `key` of grainless utf8 dimensions identifies a row; every other column is a grainless attribute of utf8, f64, i64, date, or bool. `axes`, timestamp columns, and the storage names `batch`, `book`, `source_file_id`, `gen_id`, and `source_time` are refused. Any failure removes the dataset, because a half-understood mapping table would place rows wrongly. Storage order is the key columns, then the rest in declared order. A reference dataset offers no grouping vocabulary and is neither a document-kind nor an egress target. |
+
+**Axes on measures datasets.** A measures dataset may declare `axes = [...]`
+naming columns of `role = "axis"`, each utf8 or f64 with a required
+`axis = "bucket"` or `"scenario"` and, on a utf8 axis, an optional
+`order = "tenor"` (`1M 3M 1Y 18M 2Y` by length, case ignored, labels that do
+not parse last; the default is lexical). The axes extend the storage key of
+every grain that holds a measure, in `axes` order after the grain key; a
+grain holding only attributes keeps the plain key, so an attribute is stored
+once rather than once per bucket. An axis groups and scopes like a
+dimension. A bucket axis partitions a total (tenor buckets of vega sum to
+total vega), so sums along it are attributable; a grouping that omits a
+scenario axis is non-attributable at that level and shows NULL, because a
+sum across alternative states (spot shifts) is not a number that belongs to
+any row. Refusals drop the dataset, because every table would otherwise lack
+or misfile an axis: an axis without a kind, a kind or order outside the
+vocabulary, a `date` (or any non-utf8, non-f64) axis, `order` on a numeric
+axis, `axes` and axis roles that do not mirror (an `axes` entry naming an
+undeclared or non-axis column, or an axis column missing from `axes`), an
+axis named like a grain key column, and axes with no measure to index. See
+[`schema/axis.rs`](../../crates/geode-core/src/schema/axis.rs) for the
+vocabulary and tenor order.
 
 Unknown family strings or malformed key/axes arrays drop a dataset before
 family validation. A columnless measure dataset remains in the schema but

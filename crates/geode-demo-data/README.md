@@ -59,7 +59,9 @@ pairs. A zero row target currently emits one row.
 `generate_scenarios` derives five axis datasets from the first `coverage`
 distinct (instrument, underlying) rows of a risk batch, in batch order.
 Each covered row fans out to as many as 110 rows per table, so
-`SCENARIO_COVERAGE` (5,000), not the batch size, bounds the scenario store.
+`SCENARIO_COVERAGE` (5,000), not the batch size, bounds the scenario store:
+at most about 550,000 rows per table whatever `--demo` row count is asked
+for, so a large demo does not multiply its ingest time by the bucket count.
 Rows carry the risk file's identity columns minus `underlying2_ref`.
 
 Vega buckets, rho curves, and the term table's repo, ATM vol and skew are

@@ -86,7 +86,7 @@ The main configuration documents have distinct owners:
 | Document | Defines |
 |---|---|
 | `app.toml` | Theme, primary modifier, UI settings, logging, time zone, link groups, pricing, vol model, and timeseries settings |
-| `datasets.toml` | Dataset families, columns, roles, types, grains, retention, local publication, and `computed` |
+| `datasets.toml` | Dataset families, columns, roles, types, grains, retention, local publication, `computed`, and a measures dataset's `axes` (each axis column's `axis` kind and `order`) |
 | `views.toml` | Queryable views, joins, columns, expressions, grouping, and sorting |
 | `sources.toml` | File, subscription, fetch, and reference snapshot sources with readiness and adapter settings |
 | `egress.toml` | Upload targets: adapter and a per-document address template |
@@ -230,6 +230,18 @@ a stored dataset's do, while the Sources dialog and the frame's value pickers
 leave it out. `computed` on a document or series dataset is an error and is
 cleared. The line pricer's `pricer` dataset is the one computed dataset every
 build declares.
+
+A measures-family dataset may set `axes`, naming columns of `role = "axis"`
+that extend the key of its measure grains (see
+[axes on measures datasets](typed-documents.md#dataset-families-and-validation)).
+The reader drops the whole dataset, with an error at the offending path, for
+an axis column without `axis = "bucket"` or `"scenario"`, an unknown kind or
+`order`, an axis that is not utf8 or f64, `order` on an f64 axis, an `axes`
+entry naming an undeclared or non-axis column, an axis column not listed in
+`axes`, an axis named like a grain key column, and `axes` on a dataset that
+declares no measure. Dropping the dataset rather than the column is
+deliberate: a table built without a declared axis would merge its buckets
+under one key, and every sum over it would be plausible and wrong.
 
 The `pricer` declaration marks its nine utf8 dimensions `textual = true`:
 `sheet`, `template`, `underlying_ref`, `expiry`, `option_type`, `currency`,

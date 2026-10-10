@@ -2859,3 +2859,12 @@ unset (no `SET memory_limit`, DuckDB's own default, as the app), with
 `[collector] memory_limit` kept as an opt-in until the overnight footprint
 measurement chooses a value.
 
+## Demo scenario ingest (2026-10-10)
+
+Conditions: Apple silicon, debug build, `--demo 2000`, an empty demo
+directory, the background collector loading.
+
+The collector loaded the 75 scenario files (five datasets, 15 files each)
+in about 45 s end to end, from discovery to the last publish. One run, not a
+median. No budget applies to demo ingest; this is a datum for comparison if
+scenario loading is later tuned or a release build is measured.
