@@ -3,16 +3,18 @@
 //! the window, and forward view reloads to the service. Shell and data remain
 //! independent crates. See `docs/current/request-delivery.md`.
 
-use crate::watchlists::{WatchlistCache, fold_watchlists, object_provenance};
+use crate::watchlists::{WatchlistCache, fold_watchlists, object_provenance, scopes_and_named};
 use geode_blotter::BlotterFactory;
 use geode_core::colour::NamedColours;
 use geode_core::config::{Config, DIMENSIONS_DOC, Diagnostic, Layer, Severity, load_views};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::DocumentKind;
 use geode_core::egress_config;
+use geode_core::named::NamedExpressions;
 use geode_core::panel::{KindActionRegistry, PANELS_DOC, PanelSpec, load_panels, refusal};
 use geode_core::query::{AsOf, CatalogParams, DistinctOutcome, ReferenceOutcome, ReferenceParams};
 use geode_core::schema::{ColumnType, SchemaSpec};
+use geode_core::scopes::SavedScopes;
 use geode_core::source_config::{SourceShape, parse_duration};
 use geode_core::view::ViewSpec;
 use geode_data::adapter::AdapterRegistry;
@@ -35,6 +37,7 @@ use geode_shell::shell::{
     DIAGNOSTICS_KEY, REFERENCE_KEY, ShellEvent, ShellView, is_shell_key, is_watchlist_key,
 };
 use geode_shell::vimfind::FindStyle;
+use geode_watchlist::{WatchlistConfig, WatchlistFactory};
 use gpui::{App, AsyncApp, Entity, WindowHandle};
 use gpui_component::Root;
 use std::cell::{Cell, RefCell};
@@ -77,6 +80,11 @@ pub struct DataSetup {
     /// factory's startup snapshot.
     pub classification_layers: BTreeMap<String, Layer>,
     pub classification_shadowed: BTreeMap<String, Layer>,
+    /// The saved scopes and named expressions a watchlist rule may name,
+    /// read against the service's schema as the watchlist fold reads them,
+    /// for the watchlist factory's startup snapshot.
+    pub watchlist_scopes: SavedScopes,
+    pub watchlist_named: NamedExpressions,
 }
 
 /// Tile and page kinds other modules own. A panel of one of these names
@@ -88,6 +96,7 @@ pub(crate) const MODULE_KINDS: &[&str] = &[
     "timeseries",
     "volslice",
     "classifications",
+    "watchlist",
     "pricer",
     "diagnostics",
     "guide",
@@ -253,6 +262,8 @@ pub fn data_setup(
     let dimensions = service.dimensions.clone();
     let (classification_layers, classification_shadowed) =
         classification_provenance(config, &dimensions);
+    let (watchlist_scopes, watchlist_named) =
+        scopes_and_named(config, &service.schema, &dimensions);
     service.views = views.clone();
     service.pricer = pricer;
     service.vol = vol;
@@ -274,6 +285,8 @@ pub fn data_setup(
         panel_diagnostics,
         classification_layers,
         classification_shadowed,
+        watchlist_scopes,
+        watchlist_named,
     })
 }
 
@@ -557,6 +570,11 @@ pub struct Bridge {
     /// The classifications factory, sharing the handle. Retained so every
     /// reload pushes it the dimensions, schema, views and layers it reads.
     pub classifications: Rc<geode_classifications::ClassificationsFactory>,
+    /// The watchlist factory. It holds no handle (the tile issues no
+    /// request); retained so every reload pushes it the schema, dimensions,
+    /// saved scopes and named expressions a rule is validated against, and
+    /// so `attach` can install the cache's refresh as its `shift+r` route.
+    pub watchlist: Rc<WatchlistFactory>,
     /// The line pricer's factory, sharing the handle. Retained so a reload
     /// reaches its views and settings.
     pub pricer: Rc<PricerFactory>,
@@ -703,6 +721,19 @@ pub fn start(
         },
         cx,
     );
+    // The watchlist factory likewise. The lists themselves arrive through
+    // `WatchlistGlobal` once `attach` folds them; this is what a rule is
+    // validated against.
+    let watchlist = Rc::new(WatchlistFactory::new());
+    watchlist.set_config(
+        WatchlistConfig {
+            schema: startup_schema.clone(),
+            dims: setup.dimensions.clone(),
+            saved: setup.watchlist_scopes,
+            named: setup.watchlist_named,
+        },
+        cx,
+    );
     let factory = Rc::new(BlotterFactory::new(
         handle.clone(),
         setup.views,
@@ -744,6 +775,7 @@ pub fn start(
         timeseries,
         volslice,
         classifications,
+        watchlist,
         pricer,
         underlyings,
         handle,
@@ -1213,6 +1245,13 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         });
     }
     watchlist_cache.set_definitions(folded, window, cx);
+    // `watchlist::refresh` on a tile resolves its list now, through the
+    // cache's own lane: the factory's hook is the tile's only route to the
+    // bridge.
+    bridge.watchlist.set_refresh(Rc::new({
+        let cache = watchlist_cache.clone();
+        move |name: &str, cx: &mut App| cache.refresh(name, window, cx)
+    }));
 
     // Reloads: new views to the data thread and to the factory.
     cx.subscribe(&shell, {
@@ -1221,6 +1260,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let panels = panels.clone();
         let timeseries = timeseries.clone();
         let classifications = bridge.classifications.clone();
+        let watchlist = bridge.watchlist.clone();
         let watchlist_cache = watchlist_cache.clone();
         let startup_schema = bridge.schema.clone();
         let diagnostics = diagnostics.clone();
@@ -1283,6 +1323,17 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     layers,
                     shadowed,
                 };
+                // The watchlist snapshot: the same schema and dims, and the
+                // saved scopes and named expressions read as the fold above
+                // reads them, so a rule the tile accepts is one the fold
+                // accepts.
+                let (saved, named) = scopes_and_named(config, &startup_schema, &dims);
+                let watchlist_config = WatchlistConfig {
+                    schema: classification_config.schema.clone(),
+                    dims: dims.clone(),
+                    saved,
+                    named,
+                };
                 // A refused hand-off leaves the service on the old views while
                 // the factory builds tiles against the new ones: say so.
                 let handoff = match handle.replace_views(views, dims) {
@@ -1303,6 +1354,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // The config borrow has ended; the factory's tiles and the
                 // diagnostics can now be updated through cx.
                 classifications.set_config(classification_config, cx);
+                watchlist.set_config(watchlist_config, cx);
                 watchlist_cache.set_definitions(folded, window, cx);
                 let reload_diags: Vec<Diagnostic> = presentation_diags
                     .into_iter()
@@ -2186,6 +2238,7 @@ role = "key"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -2887,6 +2940,78 @@ role = "attribute"
                 .get("region", "US")
                 .map(|c| &**c),
             Some("blue")
+        );
+    }
+
+    /// The `ConfigReloaded` observer hands the watchlist factory the saved
+    /// scopes and named expressions a rule may name, read from the
+    /// reloaded config against the service's schema.
+    #[gpui::test]
+    fn a_config_reload_hands_the_watchlist_factory_the_saved_scopes(cx: &mut gpui::TestAppContext) {
+        const DATASETS: &str = "[risk]\n\
+            [risk.columns.book]\nrole = \"dimension\"\ntype = \"utf8\"\ngrain = \"position\"\n\
+            [risk.columns.npv]\nrole = \"measure\"\ntype = \"f64\"\ngrain = \"position\"\n";
+        let services = test_shell_services_with_sources(ConfigSources {
+            // The observer refreshes factories only when a `views` doc exists.
+            builtin: vec![
+                LayerDoc::builtin("views", SLIM_VIEW).unwrap(),
+                LayerDoc::builtin("datasets", DATASETS).unwrap(),
+                LayerDoc::builtin(
+                    "scopes",
+                    "[eu_books]\n[eu_books.dimensions]\nbook = [\"BK000\"]\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    geode_core::config::EXPRESSIONS_DOC,
+                    "[big]\nexpression = \"npv > 1\"\n",
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let schema = SchemaSpec::from_doc(&geode_core::config::merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", DATASETS).unwrap()],
+        ))
+        .0;
+        let bridge = Bridge {
+            schema: Rc::new(schema),
+            ..test_bridge(handle)
+        };
+        assert!(
+            bridge.watchlist.config().is_none(),
+            "fixture: built with nothing pushed"
+        );
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        let config = bridge.watchlist.config().expect("the reload pushed one");
+        assert!(
+            config.saved.contains_key("eu_books"),
+            "{:?}",
+            config.saved.keys().collect::<Vec<_>>()
+        );
+        assert!(config.named.get("big").is_some());
+        assert_eq!(
+            config
+                .schema
+                .datasets
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["risk"]
         );
     }
 
@@ -6937,6 +7062,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7049,6 +7175,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7153,6 +7280,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7276,6 +7404,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7341,6 +7470,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7412,6 +7542,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7476,6 +7607,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7573,6 +7705,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7649,6 +7782,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7728,6 +7862,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7809,6 +7944,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7913,6 +8049,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8013,6 +8150,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8080,6 +8218,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8226,6 +8365,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8298,6 +8438,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8972,6 +9113,7 @@ grain = "underlying"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
