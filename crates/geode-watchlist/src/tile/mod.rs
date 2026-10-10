@@ -631,7 +631,10 @@ impl WatchlistTile {
         // The counts are what the rows and the popup show: with a pending
         // edit, not what the snapshot last resolved.
         let (live, _) = self.grid.counts();
-        let rules = self.chrome.rules.len();
+        let rules = (
+            self.chrome.rules.len(),
+            self.chrome.rules.iter().any(|r| r.error.is_some()),
+        );
         self.chrome.header = HeaderModel::prepare(name, state, live, rules, &clock);
         let none_defined = snapshot.lists.is_empty();
         let new = action_title(NEW_ACTION);
@@ -1067,24 +1070,18 @@ impl WatchlistTile {
             return true;
         }
         match action.0.as_str() {
-            geode_tile::motion::MENU_DOWN | geode_tile::motion::MENU_UP if self.menu.is_some() => {
-                let delta = if action.0 == geode_tile::motion::MENU_DOWN {
-                    1
-                } else {
-                    -1
-                };
+            // The shared list steps: the menu's rows while one is up (it
+            // is on top), else the rules popup's.
+            geode_tile::motion::MENU_DOWN | geode_tile::motion::MENU_UP
+                if self.menu.is_some() || self.rules.is_some() =>
+            {
+                let down = action.0 == geode_tile::motion::MENU_DOWN;
                 if let Some((_, m)) = self.menu.as_mut() {
-                    m.step(delta);
-                }
-                cx.notify();
-            }
-            geode_tile::motion::MENU_DOWN | geode_tile::motion::MENU_UP if self.rules.is_some() => {
-                let delta = if action.0 == geode_tile::motion::MENU_DOWN {
-                    1
+                    m.step(if down { 1 } else { -1 });
+                    cx.notify();
                 } else {
-                    -1
-                };
-                self.rules_step(delta, cx);
+                    self.rules_step(if down { 1 } else { -1 }, cx);
+                }
             }
             SWITCH_ACTION => self.toggle_menu(MenuKind::Switch, cx),
             MENU_ACTION => self.toggle_menu(MenuKind::Actions, cx),

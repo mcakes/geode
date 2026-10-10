@@ -50,10 +50,94 @@ pub(crate) enum Rows {
     Expr(Box<ExprRows>),
 }
 
-/// The expression shape's parts.
+/// The expression shape's parts: the completion, the vocabulary it is
+/// ranked against, and the painted window into its rows (up to fifty,
+/// more than a popup should stand), which follows the highlight the way
+/// `ChoiceList`'s does: it moves only when the highlight leaves it, so a
+/// hover on a painted row never shifts the rows under the pointer.
 pub(crate) struct ExprRows {
     pub completion: ExprCompletion,
     pub vocab: ExprVocab,
+    /// The first painted row's index among the ranked rows. Kept so that
+    /// `window <= highlighted < window + DEFAULT_CAP` (or there are no
+    /// rows).
+    window: usize,
+    /// The categorical column whose values the completion asked for on
+    /// the last refresh: the tile issues no distinct, so the completion's
+    /// own `loading values…` would never come true, and the hint says so
+    /// instead.
+    unsuggested: Option<String>,
+}
+
+impl ExprRows {
+    fn new(vocab: ExprVocab) -> Self {
+        let mut e = ExprRows {
+            completion: ExprCompletion::default(),
+            vocab,
+            window: 0,
+            unsuggested: None,
+        };
+        e.refresh("", 0);
+        e
+    }
+
+    /// Re-rank at `text` and `caret`; the window starts over at the top,
+    /// where the completion puts the highlight. Whether anything changed.
+    fn refresh(&mut self, text: &str, caret: usize) -> bool {
+        match self.completion.refresh(text, caret, &self.vocab) {
+            Refresh::Unchanged => return false,
+            Refresh::Changed => self.unsuggested = None,
+            Refresh::Request(column) => self.unsuggested = Some(column),
+        }
+        self.window = 0;
+        self.follow();
+        true
+    }
+
+    /// Move the highlight `delta` rows (clamped, as the completion does)
+    /// and bring the window to it.
+    fn step(&mut self, delta: i64) {
+        self.completion.step(delta);
+        self.follow();
+    }
+
+    /// Light painted row `row` (window-relative); the window does not
+    /// move, since the row is already in it (a row past the window is no
+    /// painted row, and is refused). Whether it changed.
+    fn hover(&mut self, row: usize) -> bool {
+        let target = self.window + row;
+        let highlighted = self.completion.highlighted();
+        if row >= DEFAULT_CAP || target == highlighted || target >= self.completion.rows().len() {
+            return false;
+        }
+        self.completion.step(target as i64 - highlighted as i64);
+        self.follow();
+        true
+    }
+
+    /// The window's start: `ChoiceList::follow`'s rule.
+    fn follow(&mut self) {
+        let highlighted = self.completion.highlighted();
+        if highlighted < self.window {
+            self.window = highlighted;
+        } else if highlighted >= self.window + DEFAULT_CAP {
+            self.window = highlighted + 1 - DEFAULT_CAP;
+        }
+        self.window = self
+            .window
+            .min(self.completion.rows().len().saturating_sub(DEFAULT_CAP));
+    }
+
+    /// The ranked row painted row `row` names.
+    fn ranked(&self, row: usize) -> usize {
+        self.window + row
+    }
+
+    /// The painted window's start, for tests.
+    #[cfg(test)]
+    fn window(&self) -> usize {
+        self.window
+    }
 }
 
 /// The open prompt: what it asks, its field, the rows under it, and why
@@ -101,14 +185,13 @@ impl PromptField {
     /// The field asking `prompt` with an expression completion over
     /// `vocab`, empty until the first text arrives (`typed`).
     pub(crate) fn expr(input: Entity<InputState>, prompt: Prompt, vocab: ExprVocab) -> Self {
-        let mut completion = ExprCompletion::default();
-        completion.refresh("", 0, &vocab);
-        let choice = Rc::new(expr_paint(&completion));
+        let rows = ExprRows::new(vocab);
+        let choice = Rc::new(expr_paint(&rows));
         PromptField {
             input,
             label: label(&prompt).into(),
             prompt,
-            rows: Rows::Expr(Box::new(ExprRows { completion, vocab })),
+            rows: Rows::Expr(Box::new(rows)),
             error: None,
             moved: false,
             closed: false,
@@ -119,7 +202,7 @@ impl PromptField {
     pub(crate) fn repaint(&mut self) {
         self.choice = Rc::new(match &self.rows {
             Rows::Choice(list) => choice_paint(list, self.closed),
-            Rows::Expr(e) => expr_paint(&e.completion),
+            Rows::Expr(e) => expr_paint(e),
         });
     }
 
@@ -128,12 +211,9 @@ impl PromptField {
     pub(crate) fn typed(&mut self, text: &str, caret: usize) -> bool {
         let changed = match &mut self.rows {
             Rows::Choice(list) => list.set_query(text),
-            Rows::Expr(e) => match e.completion.refresh(text, caret, &e.vocab) {
-                Refresh::Unchanged => false,
-                // A categorical column's values are not requested: the
-                // tile issues no distinct, so the row list stays as it is.
-                Refresh::Changed | Refresh::Request(_) => true,
-            },
+            // A categorical column's values are not requested: the tile
+            // issues no distinct, and the hint says so.
+            Rows::Expr(e) => e.refresh(text, caret),
         };
         if changed {
             self.moved = false;
@@ -146,7 +226,7 @@ impl PromptField {
     pub(crate) fn step(&mut self, delta: i64) {
         match &mut self.rows {
             Rows::Choice(list) => list.nav(NavCommand::Move(delta)),
-            Rows::Expr(e) => e.completion.step(delta),
+            Rows::Expr(e) => e.step(delta),
         }
         self.moved = true;
         self.repaint();
@@ -158,17 +238,7 @@ impl PromptField {
     pub(crate) fn hover(&mut self, row: usize) -> bool {
         let changed = match &mut self.rows {
             Rows::Choice(list) => list.highlighted() != row && list.set_highlighted(row),
-            Rows::Expr(e) => {
-                let completion = &mut e.completion;
-                let target = self.choice.offset + row;
-                let delta = target as i64 - completion.highlighted() as i64;
-                if delta != 0 && target < completion.rows().len() {
-                    completion.step(delta);
-                    true
-                } else {
-                    false
-                }
-            }
+            Rows::Expr(e) => e.hover(row),
         };
         if changed {
             self.repaint();
@@ -196,7 +266,7 @@ impl PromptField {
         let Rows::Expr(e) = &self.rows else {
             return None;
         };
-        match e.completion.accept(self.choice.offset + row)? {
+        match e.completion.accept(e.ranked(row))? {
             Accept::Write(w) => Some(w),
             // No named offers are set, so no row stages.
             Accept::Stage { .. } => None,
@@ -308,12 +378,22 @@ fn choice_paint(list: &ChoiceList, closed: bool) -> ChoicePaint {
     }
 }
 
-/// A window of `DEFAULT_CAP` rows holding the highlight, as the choice
-/// shows: the completion keeps up to fifty, more than a popup should
-/// stand.
-fn expr_paint(c: &ExprCompletion) -> ChoicePaint {
-    let highlighted = c.highlighted();
-    let offset = highlighted.saturating_sub(DEFAULT_CAP - 1);
+/// What the completion's hint says at a categorical column's value
+/// position, in place of its own `loading values…`.
+pub(crate) const VALUES_NOT_SUGGESTED: &str = "values not suggested here";
+
+/// The window of the completion's rows holding the highlight.
+fn expr_paint(e: &ExprRows) -> ChoicePaint {
+    let c = &e.completion;
+    let offset = e.window;
+    let hint = match (c.warning(), &e.unsuggested) {
+        (Some(w), _) => (w.to_string().into(), true),
+        (None, Some(column)) => (
+            format!("value for {column} \u{b7} {VALUES_NOT_SUGGESTED}").into(),
+            false,
+        ),
+        (None, None) => (c.hint().to_string().into(), false),
+    };
     ChoicePaint {
         rows: c
             .rows()
@@ -322,13 +402,10 @@ fn expr_paint(c: &ExprCompletion) -> ChoicePaint {
             .take(DEFAULT_CAP)
             .map(|r| (r.label.clone().into(), r.detail.clone().into()))
             .collect(),
-        highlighted: highlighted - offset,
+        highlighted: c.highlighted() - offset,
         offset,
         empty: None,
-        hint: match c.warning() {
-            Some(w) => Some((w.to_string().into(), true)),
-            None => Some((c.hint().to_string().into(), false)),
-        },
+        hint: Some(hint),
     }
 }
 
@@ -771,10 +848,8 @@ mod tests {
         );
     }
 
-    /// The completion's paint is a window holding the highlight, and a
-    /// press on a painted row names the ranked one.
-    #[test]
-    fn the_expression_paint_windows_the_rows_around_the_highlight() {
+    /// Twenty columns over a twelve-row window.
+    fn twenty() -> ExprVocab {
         use geode_core::config::{LayerDoc, merge_docs};
         use geode_core::dimensions::DerivedDimensions;
         use geode_core::schema::SchemaSpec;
@@ -788,10 +863,15 @@ mod tests {
             "datasets",
             &[LayerDoc::builtin("datasets", &text).unwrap()],
         ));
-        let vocab = ExprVocab::new(&schema, &DerivedDimensions::default());
-        let mut c = ExprCompletion::default();
-        c.refresh("", 0, &vocab);
-        let p = expr_paint(&c);
+        ExprVocab::new(&schema, &DerivedDimensions::default())
+    }
+
+    /// The completion's paint is a window holding the highlight, and a
+    /// press on a painted row names the ranked one.
+    #[test]
+    fn the_expression_paint_windows_the_rows_around_the_highlight() {
+        let mut e = ExprRows::new(twenty());
+        let p = expr_paint(&e);
         assert_eq!(p.rows.len(), DEFAULT_CAP);
         assert_eq!((p.highlighted, p.offset), (0, 0));
         assert_eq!(p.rows[0].0.as_ref(), "c00");
@@ -801,14 +881,83 @@ mod tests {
             Some(("column", false))
         );
         for _ in 0..15 {
-            c.step(1);
+            e.step(1);
         }
-        let p = expr_paint(&c);
+        let p = expr_paint(&e);
         assert_eq!(
             (p.highlighted, p.offset),
             (DEFAULT_CAP - 1, 15 - (DEFAULT_CAP - 1))
         );
         assert_eq!(p.rows[p.highlighted].0.as_ref(), "c15");
+        assert_eq!(e.ranked(p.highlighted), 15);
         assert_eq!(p.empty, None, "no rows is no list, not an empty one");
+        // Back up: the window follows only once the highlight leaves it.
+        e.step(-1);
+        assert_eq!(e.window(), 4);
+        e.step(-11);
+        assert_eq!((e.completion.highlighted(), e.window()), (3, 3));
+        // A new text starts the window over.
+        assert!(e.refresh("c1", 2));
+        assert_eq!(e.window(), 0);
+    }
+
+    /// A hover on a painted row of a scrolled window lights that row and
+    /// leaves the window where it is: the next pointer move must find the
+    /// same rows under it.
+    #[test]
+    fn a_hover_in_a_scrolled_window_does_not_move_the_window() {
+        let mut e = ExprRows::new(twenty());
+        for _ in 0..15 {
+            e.step(1);
+        }
+        assert_eq!(e.window(), 4);
+        assert!(e.hover(3));
+        assert_eq!(e.window(), 4, "the window stays");
+        assert_eq!(
+            e.completion.highlighted(),
+            7,
+            "the painted row 3 is ranked row 7"
+        );
+        assert_eq!(expr_paint(&e).highlighted, 3);
+        assert!(!e.hover(3), "already lit");
+        assert!(e.hover(0));
+        assert_eq!((e.completion.highlighted(), e.window()), (4, 4));
+        assert!(!e.hover(DEFAULT_CAP), "past the window: no painted row");
+        assert_eq!(e.window(), 4);
+        // At the foot, the window's last rows are the ranked list's last.
+        e.step(50);
+        let len = e.completion.rows().len();
+        assert_eq!(e.window(), len - DEFAULT_CAP);
+        assert!(!e.hover(DEFAULT_CAP - 1), "already lit");
+        assert!(e.hover(0));
+        assert_eq!(e.completion.highlighted(), len - DEFAULT_CAP);
+    }
+
+    /// The tile issues no distinct, so the hint says values are not
+    /// suggested rather than loading.
+    #[test]
+    fn a_categorical_value_position_says_values_are_not_suggested() {
+        use geode_core::config::{LayerDoc, merge_docs};
+        use geode_core::dimensions::DerivedDimensions;
+        use geode_core::schema::SchemaSpec;
+        let text = "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"position\"\ncategorical = true\n";
+        let (schema, _) = SchemaSpec::from_doc(&merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", text).unwrap()],
+        ));
+        let mut e = ExprRows::new(ExprVocab::new(&schema, &DerivedDimensions::default()));
+        assert!(e.refresh("book = ", 7));
+        assert_eq!(
+            expr_paint(&e).hint.map(|(h, w)| (h.to_string(), w)),
+            Some((
+                format!("value for book \u{b7} {VALUES_NOT_SUGGESTED}"),
+                false
+            ))
+        );
+        assert!(e.refresh("book = 'A' and ", 15));
+        assert_eq!(
+            expr_paint(&e).hint.map(|(h, _)| h.to_string()),
+            Some("column".into())
+        );
     }
 }

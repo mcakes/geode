@@ -295,7 +295,8 @@ average 35 to 48; the same run read 6.0 and 12.9 ms under load 17 to 78):
 - The rule expression's completion offers columns, operators and keywords
   only: a categorical column's values are not suggested, since the tile
   issues no distinct query (`mark_loading`/`deliver` are not wired); its
-  hint reads `loading values…` at a value position for such a column.
+  hint reads `value for <column> · values not suggested here` at a value
+  position for such a column.
 - In `rules` mode only the popup's own keys are bound: `u`, `ctrl+r`,
   `shift+r` and the member verbs act once the popup is closed (or from
   the palette, which closes it first).

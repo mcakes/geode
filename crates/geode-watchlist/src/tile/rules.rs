@@ -17,7 +17,10 @@ use geode_shell::shell::scale;
 use geode_tile::notice::{self, Notice, Tone};
 use geode_tile::popover::{self, ROW_INSET, anchor_popup, empty_row, row_shell};
 use gpui::prelude::*;
-use gpui::{Anchor, AnyElement, App, Context, Div, ElementId, Entity, SharedString, Window, div};
+use gpui::{
+    Anchor, AnyElement, App, Context, Div, ElementId, Entity, Focusable as _, SharedString, Window,
+    div,
+};
 use gpui_component::ActiveTheme as _;
 
 use super::{NOTHING_SHOWN, WatchlistTile, snapshot};
@@ -37,12 +40,11 @@ pub(crate) const RULES_UNCHANGED: &str = "rules unchanged";
 /// The popup's surface: one row per rule (`rule <i> · <dataset> · <scope>`,
 /// the fold's error in the warning tone beneath), the cursor row
 /// highlighted, the empty row with none. A row press moves the cursor
-/// there. `closer` is whether an outside press closes it (not while a
-/// rule prompt is open: the field is outside the popup).
+/// there; a press outside is the tile's `rules_outside_press`, which
+/// decides whether it closes.
 fn surface(
     rows: &[RuleRow],
     cursor: usize,
-    closer: bool,
     tile: &Entity<WatchlistTile>,
     tile_id: u64,
     cx: &App,
@@ -54,11 +56,9 @@ fn surface(
         .debug_selector(move || format!("watchlist-rules-popup-{tile_id}"))
         // The grid beneath must not take a press meant for a row.
         .occlude()
-        .when(closer, |el| {
-            el.on_mouse_down_out({
-                let tile = tile.clone();
-                move |_, _, cx| tile.update(cx, |t, cx| t.rules_outside_press(cx))
-            })
+        .on_mouse_down_out({
+            let tile = tile.clone();
+            move |_, _, cx| tile.update(cx, |t, cx| t.rules_outside_press(cx))
         });
     if rows.is_empty() {
         return list.child(
@@ -77,7 +77,7 @@ fn surface(
                 move || format!("watchlist-rule-row-{tile_id}-{i}"),
                 {
                     let tile = tile.clone();
-                    move |_, cx| tile.update(cx, |t, cx| t.rule_pressed(i, cx))
+                    move |window, cx| tile.update(cx, |t, cx| t.rule_pressed(i, window, cx))
                 },
             )
             .child(SharedString::from(row.text())),
@@ -106,11 +106,7 @@ pub(crate) fn render_hung(
     tile_id: u64,
     cx: &App,
 ) -> AnyElement {
-    anchor_popup(
-        surface(rows, cursor, true, tile, tile_id, cx),
-        Anchor::TopLeft,
-    )
-    .into_any_element()
+    anchor_popup(surface(rows, cursor, tile, tile_id, cx), Anchor::TopLeft).into_any_element()
 }
 
 /// The popup painted in the tile's flow under the prompt bar while a rule
@@ -127,7 +123,7 @@ pub(crate) fn render_inline(
         .flex_none()
         .px_2()
         .py_1()
-        .child(surface(rows, cursor, false, tile, tile_id, cx))
+        .child(surface(rows, cursor, tile, tile_id, cx))
         .into_any_element()
 }
 
@@ -159,8 +155,10 @@ impl WatchlistTile {
         was
     }
 
-    /// A press outside the hung popup closes it; while a rule prompt is
-    /// open the popup is inline and the press is the field's business.
+    /// A press outside the popup closes it; while a rule prompt is open
+    /// the popup is inline under the field and the press (on the field, to
+    /// move its caret, or on its rows) is the field's business. The one
+    /// guard: the closer is attached whichever way the popup is painted.
     fn rules_outside_press(&mut self, cx: &mut Context<Self>) {
         if self.prompt.is_none() {
             self.close_rules(cx);
@@ -176,8 +174,10 @@ impl WatchlistTile {
         }
     }
 
-    /// A press on a popup row moves the cursor there.
-    fn rule_pressed(&mut self, row: usize, cx: &mut Context<Self>) {
+    /// A press on a popup row moves the cursor there. An open rule prompt
+    /// keeps the keyboard: the press is on the popup, not the field, and
+    /// must not take the focus from it.
+    fn rule_pressed(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.user_acted(cx);
         let len = self.chrome.rules.len();
         if let Some(p) = self.rules.as_mut() {
@@ -185,11 +185,42 @@ impl WatchlistTile {
             p.clamp(len);
             cx.notify();
         }
+        if let Some(p) = &self.prompt {
+            p.input.read(cx).focus_handle(cx).focus(window, cx);
+        }
     }
 
     /// The rule under the popup's cursor.
     fn cursor_rule(&self) -> Option<&RuleRow> {
         self.rules.as_ref().and_then(|p| p.row(&self.chrome.rules))
+    }
+
+    /// What every rule verb needs first: the shown list's name and
+    /// definition (refused with nothing shown), the verbs allowed (refused
+    /// with why), and the cursor row (refused when `needs_row` and there is
+    /// none). The menu is closed on the way: the verb is acting.
+    fn rule_verb(
+        &mut self,
+        needs_row: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<(String, Watchlist, Option<RuleRow>)> {
+        let snapshot = snapshot(cx);
+        let Some((name, state)) = self.shown(&snapshot) else {
+            self.refuse(NOTHING_SHOWN, cx);
+            return None;
+        };
+        let config = state.definition.clone();
+        if let Err(why) = self.verbs_allowed() {
+            self.refuse(why, cx);
+            return None;
+        }
+        let row = self.cursor_rule().cloned();
+        if needs_row && row.is_none() {
+            self.refuse(NO_RULE, cx);
+            return None;
+        }
+        self.close_menu(cx);
+        Some((name, config, row))
     }
 
     /// The configuration a rule is validated against: the factory's
@@ -202,15 +233,9 @@ impl WatchlistTile {
     /// `o` in the popup (`watchlist::rule_add`): the dataset step over the
     /// eligible datasets, the popup kept open beneath.
     pub(super) fn rule_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.shown(&snapshot(cx)).is_none() {
-            self.refuse(NOTHING_SHOWN, cx);
+        if self.rule_verb(false, cx).is_none() {
             return;
         }
-        if let Err(why) = self.verbs_allowed() {
-            self.refuse(why, cx);
-            return;
-        }
-        self.close_menu(cx);
         if self.rules.is_none() {
             self.rules = Some(RulesPopup::open_at(0, self.chrome.rules.len()));
         }
@@ -220,23 +245,13 @@ impl WatchlistTile {
     /// `enter` in the popup (`watchlist::rule_edit`): the scope step over
     /// the cursor rule's dataset, replacing that rule in place.
     pub(super) fn rule_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.shown(&snapshot(cx)).is_none() {
-            self.refuse(NOTHING_SHOWN, cx);
-            return;
-        }
-        if let Err(why) = self.verbs_allowed() {
-            self.refuse(why, cx);
-            return;
-        }
-        let Some(row) = self.cursor_rule() else {
-            self.refuse(NO_RULE, cx);
+        let Some((_, _, Some(row))) = self.rule_verb(true, cx) else {
             return;
         };
         let next = Prompt::RuleScope {
-            dataset: row.dataset.clone(),
+            dataset: row.dataset,
             replace: Some(row.index),
         };
-        self.close_menu(cx);
         self.open_rule_prompt(next, window, cx);
     }
 
@@ -244,21 +259,10 @@ impl WatchlistTile {
     /// cursor's, written whole; the cursor keeps its index (the next rule
     /// lands under it).
     pub(super) fn rule_remove(&mut self, cx: &mut Context<Self>) {
-        let snapshot = snapshot(cx);
-        let Some((name, state)) = self.shown(&snapshot) else {
-            self.refuse(NOTHING_SHOWN, cx);
+        let Some((name, config, Some(row))) = self.rule_verb(true, cx) else {
             return;
         };
-        if let Err(why) = self.verbs_allowed() {
-            self.refuse(why, cx);
-            return;
-        }
-        let Some(index) = self.cursor_rule().map(|r| r.index) else {
-            self.refuse(NO_RULE, cx);
-            return;
-        };
-        self.close_menu(cx);
-        let config = state.definition.clone();
+        let index = row.index;
         let current = self.history.current(&config).clone();
         let mut rules = current.rules.clone();
         if index >= rules.len() {
@@ -320,7 +324,7 @@ impl WatchlistTile {
                 let vocab = ExprVocab::new(&schema, &wc.dims);
                 self.open_expr_prompt(next, vocab, window, cx);
             }
-            Prompt::AddName => self.open_add(window, cx),
+            Prompt::AddName => unreachable!("open_rule_prompt takes rule prompts only"),
         }
     }
 

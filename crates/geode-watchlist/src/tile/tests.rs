@@ -2291,3 +2291,39 @@ fn expression_completion_offers_only_the_rules_dataset_columns(cx: &mut gpui::Te
     assert_eq!(h.edits(&mut vcx), [edit_of(&next)]);
     assert_eq!(h.notices(&vcx), ["added rule 3"]);
 }
+
+/// A press on a row of the inline popup (a rule prompt open above it)
+/// moves the popup's cursor and leaves the keyboard in the field.
+#[gpui::test]
+fn a_press_on_an_inline_rule_row_moves_the_cursor_and_keeps_the_field(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = rules_shown(cx, europe_rules());
+    h.press(&mut vcx, "r o");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    assert_eq!(h.rules_cursor(&vcx), Some(0));
+    h.draw(&mut vcx);
+    let row = vcx
+        .debug_bounds("watchlist-rule-row-7-1")
+        .expect("the inline popup paints its rows");
+    let field = vcx.debug_bounds("watchlist-prompt-7").unwrap();
+    assert!(
+        row.origin.y >= field.bottom_left().y,
+        "painted beneath the field"
+    );
+    vcx.simulate_mouse_down(
+        row.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(h.rules_cursor(&vcx), Some(1));
+    assert!(h.prompt(&vcx).is_some(), "the field is still open");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    // The field still takes the keys: the dataset step goes on.
+    vcx.simulate_input("cvi");
+    assert_eq!(h.highlight(&vcx).as_deref(), Some("cvi"));
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("rules"));
+    assert_eq!(h.rules_cursor(&vcx), Some(1));
+}

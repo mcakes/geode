@@ -61,20 +61,22 @@ pub(crate) struct HeaderModel {
 impl HeaderModel {
     /// `name` is the list shown; `state` its snapshot entry, `None` while
     /// the snapshot no longer holds it; `live` the grid's live count and
-    /// `rules` the rules count, both as shown (a pending edit included, not
-    /// what the snapshot last resolved).
+    /// `rules` the rules count with whether any of them is bad, all as
+    /// shown (a pending edit included, not what the snapshot last
+    /// resolved: a pending rules edit carries no errors until its reload
+    /// folds it).
     pub(crate) fn prepare(
         name: Option<&str>,
         state: Option<&WatchlistState>,
         live: usize,
-        rules: usize,
+        rules: (usize, bool),
         clock: &Clock,
     ) -> Self {
         let (Some(name), Some(state)) = (name, state) else {
             return HeaderModel::default();
         };
         let n = live;
-        let k = rules;
+        let (k, bad) = rules;
         let as_of = state
             .resolved_at
             .map(|t| SharedString::from(format!("as of {}", clock.hms(t))));
@@ -86,7 +88,7 @@ impl HeaderModel {
         HeaderModel {
             name: Some(name.to_string().into()),
             names: Some(plural(n, "name").into()),
-            rules: Some((plural(k, "rule").into(), !state.rule_errors.is_empty())),
+            rules: Some((plural(k, "rule").into(), bad)),
             resolution,
             as_of,
             failed,
@@ -371,7 +373,7 @@ mod tests {
     #[test]
     fn the_header_shows_counts_state_and_layer() {
         let utc = Clock::utc();
-        let h = HeaderModel::prepare(Some("europe_risk"), Some(&state()), 3, 2, &utc);
+        let h = HeaderModel::prepare(Some("europe_risk"), Some(&state()), 3, (2, true), &utc);
         assert_eq!(
             h.text(),
             "Watchlist: europe_risk \u{00b7} 3 names \u{00b7} 2 rules \u{00b7} as of 14:03:12 \u{00b7} desk"
@@ -384,15 +386,15 @@ mod tests {
         assert!(!h.failed);
         // The time is the display clock's, not UTC's.
         let tokyo = Clock::in_zone_named("Asia/Tokyo");
-        let h = HeaderModel::prepare(Some("europe_risk"), Some(&state()), 3, 2, &tokyo);
+        let h = HeaderModel::prepare(Some("europe_risk"), Some(&state()), 3, (2, true), &tokyo);
         assert_eq!(h.as_of.as_deref(), Some("as of 23:03:12"));
         // Nothing shown, or a list the snapshot no longer holds.
         assert_eq!(
-            HeaderModel::prepare(None, None, 0, 0, &utc).text(),
+            HeaderModel::prepare(None, None, 0, (0, false), &utc).text(),
             NONE_SHOWN
         );
         assert_eq!(
-            HeaderModel::prepare(Some("gone"), None, 0, 0, &utc).text(),
+            HeaderModel::prepare(Some("gone"), None, 0, (0, false), &utc).text(),
             NONE_SHOWN
         );
     }
@@ -402,12 +404,12 @@ mod tests {
         let utc = Clock::utc();
         let mut s = state();
         s.status = Status::Resolving;
-        let h = HeaderModel::prepare(Some("a"), Some(&s), 3, 2, &utc);
+        let h = HeaderModel::prepare(Some("a"), Some(&s), 3, (2, true), &utc);
         assert_eq!(h.resolution.as_deref(), Some(RESOLVING));
         assert_eq!(h.as_of, None, "the time is the old answer's");
         assert!(!h.failed);
         s.status = Status::Failed("timed out".into());
-        let h = HeaderModel::prepare(Some("a"), Some(&s), 3, 2, &utc);
+        let h = HeaderModel::prepare(Some("a"), Some(&s), 3, (2, true), &utc);
         assert_eq!(
             h.text(),
             "Watchlist: a \u{00b7} 3 names \u{00b7} 2 rules \u{00b7} failed \u{00b7} as of 14:03:12 \u{00b7} desk"
@@ -426,7 +428,7 @@ mod tests {
             resolved_at: None,
             status: Status::Current,
         };
-        let h = HeaderModel::prepare(Some("one"), Some(&s), 1, 0, &utc);
+        let h = HeaderModel::prepare(Some("one"), Some(&s), 1, (0, false), &utc);
         assert_eq!(h.text(), "Watchlist: one \u{00b7} 1 name \u{00b7} 0 rules");
         assert_eq!(h.rules.as_ref().map(|(_, bad)| *bad), Some(false));
     }
