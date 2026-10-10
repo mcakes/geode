@@ -89,8 +89,8 @@ finishes its current operation, then runs the queued local writes
 writer as usual, and exits. Every other queued job — feed documents, series,
 reference snapshots, files — is dropped; its source resends it after a
 restart. The local writes are the user's last edits (the pricer saves every
-unsaved sheet at window close and at quit, before the data service is told to stop), which nothing
-would resend. Submission to the runner itself has no shutdown refusal, so
+unsaved sheet at window close and at quit, before the data service is told
+to stop), which nothing would resend. Submission to the runner itself has no shutdown refusal, so
 producer ordering is required. The file worker stops first: it closes its
 queue, so a later request is answered `file worker stopped`, and joins after
 the requests already queued. Egress workers close their queue first

@@ -1233,7 +1233,7 @@ pub fn to_string_pretty(
 /// temporary file. Writer errors are mapped to `std::io::Error::other`.
 ///
 /// This performs blocking I/O. Periodic saves run it on the background executor;
-/// the quit hook calls it synchronously through [`save`]. Session writes bypass
+/// the app's close and quit hooks call it synchronously through [`save`]. Session writes bypass
 /// the config submission queue and directory transaction lock. Concurrent
 /// periodic and shutdown writes have no ordering guarantee: the last rename
 /// wins, potentially replacing a newer session with an older snapshot.
@@ -1251,7 +1251,7 @@ pub fn table_to_string(table: &toml::Table) -> Result<String, String> {
 }
 
 /// Serialize and write synchronously, link group scopes included. Used by
-/// the best-effort quit hook and callers that do not need the UI/background
+/// the best-effort window-close and quit hooks and callers that do not need the UI/background
 /// split of the periodic flush.
 #[allow(clippy::too_many_arguments)]
 pub fn save(

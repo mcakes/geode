@@ -807,10 +807,10 @@ pub fn stop_at_quit(bridge: &Bridge, cx: &mut App) {
 ///
 /// The quit hooks cannot do this for a window close: gpui removes the
 /// window before it quits, so the session hook's walk of `cx.windows()`
-/// finds nothing. They still run afterwards, and repeating the work is
-/// harmless: the session save rewrites the same text, and a flushed sheet
-/// is no longer dirty. On Cmd-Q no should-close runs and the quit hooks
-/// do the work alone.
+/// finds nothing. They still run afterwards: the session hook saves
+/// nothing, and the sheet flush finds no dirty sheet, so nothing is done
+/// twice. On an explicit application quit (Dock Quit, logout) no
+/// should-close runs and the quit hooks do the work alone.
 ///
 /// The platform keeps one should-close callback per window, so this
 /// replaces any earlier one; neither gpui-component's `Root` nor its

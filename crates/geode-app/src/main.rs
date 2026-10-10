@@ -227,7 +227,8 @@ fn main() {
                 }
 
                 // Save the session and unsaved sheets when the window closes,
-                // while it still exists; the quit hooks above cover Cmd-Q.
+                // while it still exists; the quit hooks above cover an
+                // explicit application quit (Dock Quit, logout).
                 cx.update(|cx| bridge::save_on_close(window, bridge.as_ref(), cx));
 
                 // Refresh diagnostic configuration independently of the data bridge.

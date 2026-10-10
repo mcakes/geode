@@ -1551,9 +1551,15 @@ application quits. Closing the window quits Geode on every platform
 the quit hooks, so the quit hook's walk of the open windows would find
 nothing; the app's should-close hook on the main window
 (`bridge::save_on_close`) saves the session while the window still exists,
-then lets the close proceed. On Cmd-Q or a menu quit no should-close runs and
-the quit hook saves alone. After a window close both run; the second save
-writes the same text again.
+then lets the close proceed. On an explicit application quit (Dock Quit,
+logout) no should-close runs and the quit hook saves alone. After a window
+close the quit hook still runs, but finds no window and saves nothing, so the
+session is written once.
+
+Limit: on Linux with client-drawn decorations, gpui-component's `TitleBar`
+close button removes the window directly and never runs should-close, so a
+close there loses session changes since the last periodic snapshot, as it did
+before. Linux is not a target platform.
 Session writes use the shared atomic replacement primitive: a unique sibling
 temporary file, file sync, then rename. Readers see a complete old or new file;
 the directory is not synced, so durability across system failure is best-effort.

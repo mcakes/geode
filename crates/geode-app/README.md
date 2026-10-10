@@ -115,9 +115,13 @@ cargo check -p geode-app --features profiling
   hook, which saves the session and flushes unsaved pricer sheets while the
   window still exists, then lets the close proceed: gpui removes the window
   before the quit hooks run, so the session quit hook would find none. The
-  quit hooks run after it too; repeating either save is harmless. The real
-  close button is not exercised headlessly; tests reach the hook through
-  `VisualTestContext::simulate_close`.
+  quit hooks run after it too: the session hook finds no window and saves
+  nothing, and the sheet flush finds nothing dirty. The real close button is
+  not exercised headlessly; tests reach the hook through
+  `VisualTestContext::simulate_close`, which runs only the handler. Also
+  untestable headlessly: the quit-mode line (gpui exposes no reader and the
+  test platform's quit does nothing), and the order "the close removes the
+  window, then the quit hook finds none".
 - At quit, `stop_at_quit` attempts each pricer tile's unsaved-sheet flush
   before starting data shutdown on a background executor. Admitted writes
   precede `Shutdown` and the writer drains them, but submission/write failures

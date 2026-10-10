@@ -135,8 +135,9 @@ impl ShellView {
 
     /// Synchronously save current state when a session path is configured,
     /// regardless of the dirty flag or periodic-save baselines, the link
-    /// groups' scopes always included. The app's quit
-    /// hook calls this as a final best-effort save; failures are logged.
+    /// groups' scopes always included. The app's window should-close
+    /// hook and its quit hook call this as a final best-effort save;
+    /// failures are logged.
     /// It does not wait for an in-flight periodic write, which may rename last.
     pub fn save_session(&self, cx: &App) {
         let Some(path) = self.services.session_path.as_ref() else {
