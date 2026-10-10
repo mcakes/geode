@@ -3091,6 +3091,20 @@ In-process pricing remains an upstream leaf. A feature submits definitions
 through the data-service request path and receives outcomes through shell
 delivery; it does not call a pricing implementation directly.
 
+## Watchlists
+
+The watchlist model is in place without a tile: `watchlists.toml` (see
+[watchlists](typed-documents.md#watchlists)) defines named lists of
+underlyings from manual names, exclusions and rules over a dataset, the
+data service resolves each list live (see
+[queries and time travel](data-path.md#queries-and-time-travel)), and the
+app's bridge keeps the resolved snapshot in `WatchlistGlobal` for any module
+to read and observe (see [state ownership](shell.md#state-ownership)). The
+demo defines `us_core` and `europe_risk` in
+`examples/demo-config/watchlists.toml`. Nothing paints a list yet; a
+resolution shows only as a `geode::watchlist` debug line naming the list
+and its live member count.
+
 ## Demo and application composition
 
 `geode-demo-data` generates deterministic risk batches and market-data

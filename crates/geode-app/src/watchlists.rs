@@ -340,6 +340,13 @@ impl WatchlistCache {
         match outcome.result {
             Ok(res) => {
                 self.failing.borrow_mut().remove(&outcome.name);
+                tracing::debug!(
+                    target: "geode::watchlist",
+                    "watchlist '{}' resolved: {} live members, {} rules failed",
+                    outcome.name,
+                    res.members.iter().filter(|m| !m.is_excluded()).count(),
+                    res.rules_failed.len()
+                );
                 state.members = res.members;
                 state.resolved_at = Some(Utc::now());
                 state.status = Status::Current;

@@ -114,6 +114,9 @@ desk and user configuration. Its files declare:
   grouping slots.
 - `app.toml`: blotter staleness, the default series source, and pricer
   underlying suggestions matching `demo_underlyings`.
+- `watchlists.toml`: `us_core`, three names by hand, and `europe_risk`, a
+  rule over `risk_snapshot` for `region = 'Europe'` plus `SMI` by hand and
+  minus `UKX`, so its members follow the risk data as it publishes.
 
 `geode --demo [rows]` caches source files and its database under
 `$TMPDIR/geode-demo/<rows>-42/`. Schema changes require clearing that directory;

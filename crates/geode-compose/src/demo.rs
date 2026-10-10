@@ -294,6 +294,10 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
             "views",
             include_str!("../../../examples/demo-config/views.toml").to_string(),
         ),
+        (
+            "watchlists",
+            include_str!("../../../examples/demo-config/watchlists.toml").to_string(),
+        ),
     ];
     docs.into_iter()
         .map(|(name, text)| LayerDoc::builtin(name, &text).expect("demo config is well-formed"))
@@ -356,7 +360,8 @@ mod tests {
                 "groupings",
                 "positions",
                 "sources",
-                "views"
+                "views",
+                "watchlists"
             ]
         );
         let sources = docs.iter().find(|d| d.name == "sources").unwrap();

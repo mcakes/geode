@@ -1287,20 +1287,21 @@ impl ShellView {
         let link_include_tile_filter = crate::linkfilter::from_config(&services.config);
 
         // `[timeseries] default_source` plus the fetch sources it names,
-        // one of the workspace's five globals (see `series`'s module doc). Set
+        // one of the workspace's six globals (see `series`'s module doc). Set
         // here and re-derived on reload; the settings row writes both
         // through `set_default_source`.
         let series = crate::series::SeriesSettings::from_config(&services.config);
         let default_source = series.default_source.clone();
         cx.set_global(series);
         // The app-wide clock (`crate::clock::AppClock`, another of the workspace's
-        // five globals — see its own doc comment).
+        // six globals — see its own doc comment).
         let (clock, clock_diags) = geode_core::clock::Clock::from_config(&services.config);
         cx.set_global(crate::clock::AppClock(clock));
         // Empty until the bridge's first live reference answer: a module
         // reading it before then sees no table rather than a missing global.
         cx.set_global(crate::reference::ReferenceGlobal::default());
-        // Likewise empty until the bridge's first watchlist resolution.
+        // Likewise empty until the bridge's first watchlist resolution
+        // (`crate::watchlist::WatchlistGlobal`, the sixth global).
         cx.set_global(crate::watchlist::WatchlistGlobal::default());
 
         // Publish bindings for module tooltip chord lookup through `tips::Chords`.

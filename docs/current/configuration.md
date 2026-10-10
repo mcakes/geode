@@ -27,8 +27,8 @@ are part of several document contracts.
 
 Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
 `layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`, `dimensions`,
-`colors`, `expressions`, `pricer_templates`, `panels`, and `overrides`
-replace whole named objects.
+`colors`, `expressions`, `pricer_templates`, `panels`, `watchlists`, and
+`overrides` replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
@@ -97,6 +97,7 @@ The main configuration documents have distinct owners:
 | `groupings.toml` | The nine shared grouping slots |
 | `scopes.toml` | Named scopes |
 | `expressions.toml` | Named scope expressions, referenced by name from a saved scope or the frame |
+| `watchlists.toml` | Named lists of underlyings: manual names, exclusions, and rules deriving names from a dataset under a saved scope or expression |
 | `colors.toml` | Named semantic data colors |
 | `value_colors.toml` | A color per value of a text dimension: a colors.toml name or an inline { hue } / { token } table |
 | `dataset_presentation.toml` | Desk-level column presentation between schema and view overrides |
@@ -110,6 +111,14 @@ Session state has its own reader. The generic config loader still reads any
 but it can be included when another watched file changes. See
 [session persistence](shell.md#session-format) for its format, restoration,
 and save guarantees.
+
+`watchlists.toml` reloads without restart: an edit re-folds every list and
+resolves again the ones whose definition changed. Rules are validated
+against the schema the data service started with, not an edited `datasets`
+document awaiting restart, so a rule over a dataset added since launch is a
+rule error naming the restart until then. See
+[watchlists](typed-documents.md#watchlists) for the grammar and the reader's
+rules.
 
 The schema declares meaning rather than storage details. Measure columns name
 their aggregation grain. Document columns distinguish keys, attributes, and
@@ -650,7 +659,7 @@ Accepted candidates update runtime state according to their inputs:
 | `scopes`, `datasets`, or `dimensions` | Rebuild saved scopes |
 | `expressions`, `datasets`, or `dimensions` | Rebuild named expressions; a changed or redefined entry bumps the frame's config version so a tile whose scope references it requeries |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
-| Views, either presentation document, dimensions, colors, or value colors | Emit `ConfigReloaded` for the app bridge |
+| Views, either presentation document, dimensions, colors, value colors, watchlists, scopes, or expressions | Emit `ConfigReloaded` for the app bridge |
 | `app` | Emit `AppSettingsReloaded`; the bridge hands `blotter.stale_after` to the blotter and panel factories |
 | Sources, datasets, egress, positions, panels, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
@@ -672,9 +681,11 @@ data service, so a full request queue cannot permanently lose a configuration
 reload.
 
 The bridge's `ConfigReloaded` handler runs for changes to views, view/dataset
-presentation, dimensions, colors, or value colors. It uses the same
-presentation-aware view loader as startup, updates module factories, and
-offers views/dimensions to the service. The colors it hands the blotter and
+presentation, dimensions, colors, value colors, watchlists, scopes, or
+expressions. It uses the same presentation-aware view loader as startup,
+updates module factories, offers views/dimensions to the service, and
+re-folds the watchlists against the startup schema and the reloaded saved
+scopes and named expressions (see [the watchlist cache](shell.md#state-ownership)). The colors it hands the blotter and
 timeseries factories carry the `value_colors` mapping, checked against those
 definitions and the declared dimensions, as startup's do. This is not an
 atomic update across factories and workers; the handle acknowledges
