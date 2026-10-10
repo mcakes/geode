@@ -39210,6 +39210,14 @@ run_mutation "watchlist: a changed classification re-resolves" \
   geode-core \
   a_changed_classification_mapping_resolves_the_list_again
 
+# A name a rule already supplies is refused, naming the rule.
+run_mutation "watchlist: add refused when a rule supplies" \
+  crates/geode-core/src/watchlist/edit.rs \
+  '                return Err(format!("{name} is already here from {}", rule_label(rules)));' \
+  '                let _ = rule_label(rules);' \
+  geode-core \
+  add_refuses_a_name_a_rule_already_supplies_naming_the_rule
+
 # Undo skips a row changed since.
 run_mutation "watchlist: undo skips a row changed since" \
   crates/geode-core/src/watchlist/edit.rs \
@@ -39253,7 +39261,7 @@ run_mutation "watchlist cache: answer drops a foreign key" \
 
 # The publish trigger sits on the non-local branch: a local publish never
 # re-resolves a list, and a publish of a rule's dataset does.
-run_mutation "watchlist cache: a local publish never triggers" \
+run_mutation "watchlist cache: the publish trigger sits on the non-local branch" \
   crates/geode-app/src/bridge.rs \
   '                        if local_datasets.contains(&dataset) {' \
   '                        if !local_datasets.contains(&dataset) {' \
@@ -39270,7 +39278,7 @@ run_mutation "shell: a watchlists change alone reloads" \
 
 # The range holds exactly WATCHLIST_KEY_COUNT keys and ends below the
 # shell's single reserved keys.
-run_mutation "shell: the watchlist key range ends below the single keys" \
+run_mutation "shell: the watchlist key range's upper edge is exclusive" \
   crates/geode-shell/src/shell/mod.rs \
   '    key.0 >= WATCHLIST_KEY_BASE.0 && key.0 < WATCHLIST_KEY_BASE.0 + WATCHLIST_KEY_COUNT' \
   '    key.0 >= WATCHLIST_KEY_BASE.0 && key.0 <= WATCHLIST_KEY_BASE.0 + WATCHLIST_KEY_COUNT' \

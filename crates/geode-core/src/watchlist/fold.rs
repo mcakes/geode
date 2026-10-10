@@ -90,10 +90,10 @@ fn fold_one(
     };
     let scope = scope.resolve(named)?;
     if scope.impossible {
-        return Err(format!(
-            "saved scope '{}' selects nothing",
-            rule.scope.as_deref().unwrap_or("")
-        ));
+        return Err(match &rule.scope {
+            Some(name) => format!("saved scope '{name}' selects nothing"),
+            None => "the rule's scope selects nothing".to_string(),
+        });
     }
     let diags = scope.validate(ds, dims);
     if let Some(d) = diags.first() {
@@ -363,6 +363,12 @@ grain = "position"
         );
         assert!(rules.is_empty());
         assert!(errors[0].reason.contains("pair"));
-        assert!(errors[1].reason.contains("selects nothing"));
+        assert!(
+            errors[1]
+                .reason
+                .contains("saved scope 'nothing' selects nothing"),
+            "{}",
+            errors[1].reason
+        );
     }
 }

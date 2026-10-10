@@ -1160,13 +1160,17 @@ transaction leaves it aborted, so one transaction for every rule would let
 a rule failing at execution take the rules after it down with it. A rule
 that fails to compile or run is therefore reported by its index in
 `rules_failed` inside a successful answer while the other rules still
-answer; the whole answer is an error only when the connection itself
-refuses a transaction. The names then union with the list's manual includes
-and drop its excludes (the pure set algebra in `geode_core::watchlist`),
-and the answer is a `DataEvent::Watchlist` addressed by the requester's key,
-tag and list name. A drifted dataset any rule names refuses the whole list
-before any rule runs, since a shortened answer would read as a smaller
-list. The pool coalesces and cancels per key, so the app resolves each list
+answer. The whole answer is an error when the connection itself refuses a
+transaction, or when the request is refused before any rule runs: a drifted
+dataset any rule names refuses the whole list at dispatch, since a
+shortened answer would read as a smaller list, and `dispatch` answers that
+refusal as an `Err` under the request's key, tag and list name rather than
+dropping it (the handle's own `Busy` or `Stopped` refusal returns to the
+caller at submission and sends nothing). The names then union with the
+list's manual includes and drop its excludes (the pure set algebra in
+`geode_core::watchlist`), and the answer is a `DataEvent::Watchlist`
+addressed by the requester's key, tag and list name. The pool coalesces and
+cancels per key, so the app resolves each list
 under its own key from the `WATCHLIST_KEY_BASE` range rather than one
 shared key (see [the watchlist cache](shell.md#state-ownership)). Two rules
 can read either side of a publish landing between them; a live list is

@@ -671,6 +671,28 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - Classifications CSV: native open/save dialogs on macOS and Windows, confirm text
   wrapping, rejected-rows notice truncation, the held-plan notice and arm-on-focus.
 
+## Watchlists
+
+### Open work
+
+- `validate_name` does not yet refuse names the watchlist actions will
+  reserve; add that refusal when Part 2 registers the actions.
+- The tile's `shift+r` refresh trigger (spec §4.3) arrives with the tile in
+  Part 2; the cache has no caller for a manual refresh yet.
+- A release-profile median for the publish-triggered watchlist resolution:
+  the recorded 44.8 ms is one dev-profile sample on a loaded machine
+  (`docs/perf.md`, 2026-10-10).
+- Mutation entries for the `scopes` and `expressions` reload triggers: the
+  harness anchors the `watchlists` conjunct of `views_changed` in
+  `hot_reload.rs` and the `dims` term of the fold comparison, not the
+  `scopes` and `expressions` conjuncts.
+
+### Display checks
+
+- The demo lists (`us_core`, `europe_risk`) on first open. Part 1 has no
+  tile; the `geode::watchlist` debug line (resolution time and live member
+  count) is the only check so far.
+
 ## Diagnostics page
 
 ### Open work
