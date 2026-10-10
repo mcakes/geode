@@ -26798,8 +26798,8 @@ run_mutation "modal back: a click is ignored while a confirm is pending" \
 # The expressions document replaces whole objects by name across layers.
 run_mutation "named expr: the user layer replaces an object whole" \
   crates/geode-core/src/config/merge.rs \
-  '        | "expressions" => Some(1),' \
-  '        | "expressions_off" => Some(1),' \
+  '        | "expressions"' \
+  '        | "expressions_off"' \
   geode-core \
   the_user_layer_replaces_a_desk_object_whole
 
@@ -37503,8 +37503,8 @@ run_mutation "value colors: a user none clears the effective color" \
 # A value_colors edit alone reaches the app's reload handler.
 run_mutation "value colors: a change alone emits ConfigReloaded" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                || changed(geode_core::config::VALUE_COLORS_DOC);' \
-  '                ;' \
+  '                || changed(geode_core::config::VALUE_COLORS_DOC)' \
+  '                || false' \
   geode-shell \
   a_value_colors_change_alone_emits_config_reloaded
 
@@ -39153,6 +39153,119 @@ run_mutation "notice dismissal: g c's refusal is transient" \
   '        if false && self.notices.nothing_to_switch && *n == Notice::danger(NOTHING_TO_SWITCH) {' \
   geode-classifications \
   the_switch_refusal_clears_on_a_click_or_escape_and_returns_on_g_c
+
+# ---- Watchlists: seams ----
+#
+# A watchlist is a config object resolved in the data layer. The set
+# algebra, the fold's refusals, the reader's drops and the cache's triggers
+# and answer gates are the contracts.
+
+# An excluded name is never a live member, whatever produced it.
+run_mutation "watchlist: exclude wins" \
+  crates/geode-core/src/watchlist/members.rs \
+  '            let origin = if exclude.iter().any(|e| e == name) {' \
+  '            let origin = if false {' \
+  geode-core \
+  an_excluded_name_is_never_a_live_member_whatever_produced_it
+
+# A name in both include and exclude drops the object.
+run_mutation "watchlist: include and exclude clash drops the object" \
+  crates/geode-core/src/watchlist/mod.rs \
+  '        if let Some(both) = include.iter().find(|n| exclude.contains(n)) {' \
+  '        if let Some(both) = include.iter().find(|n| false && exclude.contains(n)) {' \
+  geode-core \
+  a_name_in_both_include_and_exclude_drops_the_object_with_an_error
+
+# List names clash ignoring case.
+run_mutation "watchlist: names clash ignoring case" \
+  crates/geode-core/src/watchlist/mod.rs \
+  '    if let Some(other) = existing.find(|n| n.to_lowercase() == lower) {' \
+  '    if let Some(other) = existing.find(|n| *n == name) {' \
+  geode-core \
+  a_case_insensitive_clash_keeps_the_first_and_drops_the_second
+
+# A bad rule is reported by index; the others still fold.
+run_mutation "watchlist: a bad rule does not drop the list" \
+  crates/geode-core/src/watchlist/fold.rs \
+  '            Err(reason) => errors.push(RuleError { index, reason }),' \
+  '            Err(reason) => { rules.clear(); errors.push(RuleError { index, reason }) }' \
+  geode-core \
+  an_expression_rule_parses_and_validates_against_its_dataset
+
+# A publish re-resolves only lists with a good rule over that dataset.
+run_mutation "watchlist: publish trigger filters by dataset" \
+  crates/geode-core/src/watchlist/state.rs \
+  '        .filter(|(_, f)| f.rules.iter().any(|r| r.dataset == dataset))' \
+  '        .filter(|(_, f)| !f.rules.is_empty())' \
+  geode-core \
+  a_publish_names_only_lists_with_a_good_rule_over_the_dataset
+
+# Undo skips a row changed since.
+run_mutation "watchlist: undo skips a row changed since" \
+  crates/geode-core/src/watchlist/edit.rs \
+  '                if manual_of(&next, name) != *after {' \
+  '                if false {' \
+  geode-core \
+  undo_replays_over_the_current_object_and_skips_rows_changed_since
+
+# The dataset filter reads one dataset alone.
+run_mutation "distinct: dataset filter narrows" \
+  crates/geode-data/src/query/distinct.rs \
+  '            .is_some_and(|only| only != ds.name)' \
+  '            .is_some_and(|_only| false)' \
+  geode-data \
+  a_dataset_filter_reads_that_dataset_alone
+
+# A failed rule is reported, not swallowed.
+run_mutation "watchlist query: a failed rule is reported by index" \
+  crates/geode-data/src/query/watchlist.rs \
+  '                Err(reason) => rules_failed.push((rule.index, reason)),' \
+  '                Err(_) => {}' \
+  geode-data \
+  two_rules_union_include_adds_exclude_drops_and_a_bad_rule_is_reported
+
+# An answer to a definition since replaced is beneath the list's tag floor,
+# even while it is still the latest tag because the refresh was refused.
+run_mutation "watchlist cache: answer drops a tag at or below the floor" \
+  crates/geode-app/src/watchlists.rs \
+  '            || outcome.tag <= self.floor.borrow().get(&outcome.name).copied().unwrap_or(0)' \
+  '            || outcome.tag < self.floor.borrow().get(&outcome.name).copied().unwrap_or(0)' \
+  geode-app \
+  a_definition_change_followed_by_busy_drops_the_old_answer
+
+# An answer under another key than the list's own is not its answer.
+run_mutation "watchlist cache: answer drops a foreign key" \
+  crates/geode-app/src/watchlists.rs \
+  '        if self.keys.borrow().get(&outcome.name) != Some(&outcome.key)' \
+  '        if false' \
+  geode-app \
+  only_the_latest_tag_is_applied
+
+# The publish trigger sits on the non-local branch: a local publish never
+# re-resolves a list, and a publish of a rule's dataset does.
+run_mutation "watchlist cache: a local publish never triggers" \
+  crates/geode-app/src/bridge.rs \
+  '                        if local_datasets.contains(&dataset) {' \
+  '                        if !local_datasets.contains(&dataset) {' \
+  geode-app \
+  a_publish_of_a_rules_dataset_re_resolves_unless_local
+
+# A watchlists.toml edit alone reaches the bridge as ConfigReloaded.
+run_mutation "shell: a watchlists change alone reloads" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                || changed(geode_core::config::WATCHLISTS_DOC)' \
+  '                || false' \
+  geode-shell \
+  a_watchlists_change_alone_emits_config_reloaded
+
+# The range holds exactly WATCHLIST_KEY_COUNT keys and ends below the
+# shell's single reserved keys.
+run_mutation "shell: the watchlist key range ends below the single keys" \
+  crates/geode-shell/src/shell/mod.rs \
+  '    key.0 >= WATCHLIST_KEY_BASE.0 && key.0 < WATCHLIST_KEY_BASE.0 + WATCHLIST_KEY_COUNT' \
+  '    key.0 >= WATCHLIST_KEY_BASE.0 && key.0 <= WATCHLIST_KEY_BASE.0 + WATCHLIST_KEY_COUNT' \
+  geode-shell \
+  watchlist_keys_are_the_reserved_range_and_nothing_else
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
