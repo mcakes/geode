@@ -10,15 +10,16 @@
 //! named-color wheel instead of deriving them for each slot or each paint.
 //! Theme and named-color changes invalidate the prepared colors.
 
+use geode_core::colour::readable_on;
 use geode_core::series::SlotKind;
 use geode_shell::actions::ActionId;
 use geode_shell::fonts;
 use geode_shell::keymap::{Keystroke, Modifiers, parse_binding};
 use geode_shell::module::{CloseHandle, StackHandle};
 use geode_shell::shell::chip::{Tone, chip_paint};
+use geode_shell::shell::colours::{to_hsla, to_rgb};
 use geode_shell::shell::control::{self, PointerStates};
 use geode_shell::shell::kbd;
-use geode_shell::shell::listrow::row_paint;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
@@ -528,7 +529,8 @@ pub(crate) fn render_notice(
 /// moves as its content comes and goes, carries a parse or reference
 /// error (danger text; the draft stays open), else the prepared help
 /// line (`ExprField::help`: the signature's parts in muted text with the
-/// active argument in the list's match accent, then ` · ` and the tail),
+/// active argument in `primary` floored to read on the strip's
+/// background, then ` · ` and the tail),
 /// else nothing. Model refusals after resolution close the editor and use
 /// the tile's notice.
 ///
@@ -550,6 +552,14 @@ pub(crate) fn render_expr_field(
     // whether it is blank, an error or help; truncation keeps a long
     // tail from wrapping into a second.
     let one_line = |el: Div| el.text_xs().line_height(rems(1.)).min_h_4().truncate();
+    // The active argument's emphasis: `primary` floored to the readable
+    // ratio on the strip's own background (the list's accent is floored
+    // on the popover's active row, a different ground).
+    let active = to_hsla(readable_on(
+        to_rgb(theme.primary),
+        to_rgb(theme.background),
+        to_rgb(theme.foreground),
+    ));
     let slot = match (&f.error, &f.help) {
         (Some(error), _) => one_line(div())
             .text_color(paint.text)
@@ -566,7 +576,7 @@ pub(crate) fn render_expr_field(
                 el.child(
                     div()
                         .flex_shrink_0()
-                        .text_color(row_paint(theme).accent)
+                        .text_color(active)
                         .debug_selector(move || format!("ts-expr-help-active-{tile_id}"))
                         .child(help.active.clone()),
                 )

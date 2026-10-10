@@ -1136,7 +1136,7 @@ the last edit. A change of the desk's default source relabels an open list.
 One help line sits under the field, in the slot the inline error uses. While
 a name is being typed it describes the lit row: a function row shows its
 signature, result shape and one-line meaning (`sma(series, n) · series · mean
-of the last n points, blank until n points`), a series row its name and
+of the last n points; blank unless all n have a value`), a series row its name and
 `series`. Otherwise it describes the innermost call the caret is inside, with
 the argument the caret is in marked (`sma(series, n)` with `n` marked after
 `sma(VIX, `), or `A[k]` inside index brackets; a bare parenthesis inside an

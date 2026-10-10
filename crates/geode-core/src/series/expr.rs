@@ -188,42 +188,52 @@ impl Function {
     /// One sentence, under 72 characters, stating what the function
     /// computes and when it is blank, true of the lowering in
     /// `geode-data` (`query/series.rs`: `fold_sql`, `Lowering::call`,
-    /// `window` and `ema`), which this copy is a claim about. A fold and
-    /// a window skip blank points; a rolling value is blank unless each
-    /// of the last `n` points has a value.
+    /// `window` and `ema`), which this copy is a claim about. A fold
+    /// skips blank points, as do `cum` (a sum) and `ema` (a filtered
+    /// list); every other window reads its rows as they are, so `diff`,
+    /// `pct` and `lag` are blank wherever the point they read back to has
+    /// no value, and a rolling value is blank unless each of the last `n`
+    /// points has one, after a gap as much as at the start.
     pub fn describe(self) -> &'static str {
         match self {
             Function::First => "the first point in the range that has a value",
             Function::Last => "the last point in the range that has a value",
             Function::Min => "the smallest: over the range alone, per point with more arguments",
             Function::Max => "the largest: over the range alone, per point with more arguments",
-            Function::Mean => "the mean over the range; blank when it has no points",
+            Function::Mean => "the mean over the range; blank with no valued points",
             Function::Median => "the median over the range, halfway between the middle two",
             Function::Std => "sample deviation over the range, blank under two points",
-            Function::Sum => "the sum over the range; blank when it has no points",
+            Function::Sum => "the sum over the range; blank with no valued points",
             Function::Count => "how many points with a value the range holds",
             Function::Abs => "the absolute value, per point",
             Function::Log => "natural log; blank at or below zero",
             Function::Exp => "e to the power; blank above 709",
             Function::Sqrt => "square root; blank below zero",
-            Function::Diff => "change from the previous point, blank at the first",
-            Function::Pct => "change over the previous point, blank when it is zero",
+            Function::Diff => "change from the previous point; blank at the first or after a gap",
+            Function::Pct => "change over the previous point; blank when it is zero or a gap",
             Function::Cum => "running sum of the points so far",
-            Function::Lag => "the value n points back, blank for the first n",
-            Function::Sma => "mean of the last n points, blank until n points",
-            Function::Ema => "span-n exponential mean of the last 5n points, blank until n",
-            Function::Rmin => "smallest of the last n points, blank until n points",
-            Function::Rmax => "largest of the last n points, blank until n points",
-            Function::Rstd => "sample deviation of the last n points, blank until n points",
-            Function::Z => "(value − sma) / rstd over the last n points, blank at zero spread",
+            Function::Lag => "the value n points back; blank for the first n or if it has no value",
+            Function::Sma => "mean of the last n points; blank unless all n have a value",
+            Function::Ema => {
+                "span-n exponential mean of 5n points; blank unless last n have a value"
+            }
+            Function::Rmin => "smallest of the last n points; blank unless all n have a value",
+            Function::Rmax => "largest of the last n points; blank unless all n have a value",
+            Function::Rstd => {
+                "sample deviation of the last n points; blank unless all n have a value"
+            }
+            Function::Z => {
+                "(value − sma) / rstd of the last n; blank unless all n valued, rstd > 0"
+            }
         }
     }
 }
 
-/// The help line for a caret inside `[…]`: `index_sql` reads the k-th
-/// point that has a value from the start for `k >= 0` and from the end
-/// otherwise (`[-1]` is the last), NULL past either end.
-pub const INDEX_HELP: &str = "A[k] · number · the k-th point, from the end when k is negative";
+/// The help line for a caret inside `[…]`: `index_sql` reads the point
+/// that has a value at offset `k` (0-based) from the start for `k >= 0`
+/// and from the end otherwise (`[-1]` is the last), NULL past either end.
+pub const INDEX_HELP: &str =
+    "A[k] · number · the point at offset k, 0 the first, from the end when k is negative";
 
 /// The tree, generic over how a reference is spelled: `RefName` as
 /// parsed, `u8` once resolved.

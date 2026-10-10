@@ -799,7 +799,7 @@ mod tests {
         })
     }
 
-    const SMA_TAIL: &str = "series · mean of the last n points, blank until n points";
+    const SMA_TAIL: &str = "series · mean of the last n points; blank unless all n have a value";
 
     #[test]
     fn help_marks_the_active_argument_of_the_enclosing_call() {
@@ -833,7 +833,7 @@ mod tests {
                 "A[k]",
                 "",
                 "",
-                "number · the k-th point, from the end when k is negative"
+                "number · the point at offset k, 0 the first, from the end when k is negative"
             )
         );
         assert_eq!(help_for(&none, "A + 2", 5), None, "top level, in a number");

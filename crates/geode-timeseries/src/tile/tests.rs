@@ -2309,13 +2309,13 @@ fn help(before: &str, active: &str, after: &str, tail: &str) -> Option<Help> {
     })
 }
 
-const SMA_TAIL: &str = "series · mean of the last n points, blank until n points";
+const SMA_TAIL: &str = "series · mean of the last n points; blank unless all n have a value";
 
 /// The help line under the field follows typing: inside a call it shows
 /// the call's signature with the argument the caret is in marked, while
 /// a name is typed it describes the lit row, and an arrow key that moves
-/// the caret (no Change event) still moves the mark through the deferred
-/// refresh. Closing the field drops it.
+/// the caret (no Change event) still moves the mark through the input
+/// observer. Closing the field drops it.
 #[gpui::test]
 fn the_help_line_marks_the_argument_at_the_caret_and_follows_arrow_keys(
     cx: &mut gpui::TestAppContext,
@@ -2386,7 +2386,7 @@ fn an_error_takes_the_help_lines_slot_until_typing_clears_it(cx: &mut gpui::Test
             "A[k]",
             "",
             "",
-            "number · the k-th point, from the end when k is negative"
+            "number · the point at offset k, 0 the first, from the end when k is negative"
         )
     );
     assert!(h.is_painted(&mut vcx, &format!("ts-expr-help-{TILE}")));
