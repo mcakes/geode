@@ -2,7 +2,9 @@
 //! snapshot in `WatchlistGlobal`, answers the shell's door
 //! (`crate::content::WatchlistContent`) and paints the tile: the header
 //! (`header`), the members grid (`table`), the switcher hung beneath the
-//! name, the `⋯` menu, and an empty state while there is nothing to show.
+//! name, the `⋯` menu, the rules popup (`rules`) hung beneath the rules
+//! count, the prompt field (`field`) under the header, and an empty state
+//! while there is nothing to show.
 //!
 //! The tile issues no data request: the bridge's cache resolves every list
 //! and replaces the global, which wakes the tile. The factory's
@@ -16,6 +18,7 @@
 
 mod field;
 mod header;
+mod rules;
 mod table;
 #[cfg(test)]
 mod tests;
@@ -53,6 +56,7 @@ use crate::content::{Shared, action_title};
 use crate::core::grid::GridModel;
 use crate::core::history::{History, Way};
 use crate::core::rows;
+use crate::core::rules::{RuleRow, RulesPopup, rule_rows};
 use crate::core::session::{self, SortCol, State};
 use field::PromptField;
 use header::HeaderModel;
@@ -92,6 +96,9 @@ const UNDO_ACTION: &str = "watchlist::undo";
 const REDO_ACTION: &str = "watchlist::redo";
 const REFRESH_ACTION: &str = "watchlist::refresh";
 const RULES_ACTION: &str = "watchlist::rules";
+const RULE_ADD_ACTION: &str = "watchlist::rule_add";
+const RULE_REMOVE_ACTION: &str = "watchlist::rule_remove";
+const RULE_EDIT_ACTION: &str = "watchlist::rule_edit";
 const SWITCH_ACTION: &str = "watchlist::switch";
 const MENU_ACTION: &str = "watchlist::menu";
 const COMMIT_ACTION: &str = "watchlist::commit";
@@ -163,6 +170,10 @@ struct Chrome {
     /// The body's empty state, `None` while a watchlist is shown.
     empty: Option<SharedString>,
     notices: Vec<Notice>,
+    /// The rules popup's rows: the shown list's rules as they are now
+    /// (the pending object while an edit awaits its reload), with the
+    /// snapshot's errors while those rules are the snapshot's.
+    rules: Vec<RuleRow>,
 }
 
 /// The resolved lists, as the bridge last published them; empty for a
@@ -256,9 +267,12 @@ pub struct WatchlistTile {
     shared: Rc<Shared>,
     /// The shown list's edit history and its optimistic pending object.
     history: History,
-    /// The open prompt field (the add field); the tile is in insert mode
-    /// while it is.
+    /// The open prompt field (the add field, or a rule step); the tile is
+    /// in insert mode while it is.
     prompt: Option<PromptField>,
+    /// The open rules popup; the tile is in `rules` mode while it is and
+    /// no field is open.
+    rules: Option<RulesPopup>,
     /// The window the prompt opened in, to blur its field where no window
     /// is at hand (a reload removing the list, a close).
     field_window: Option<AnyWindowHandle>,
@@ -364,6 +378,7 @@ impl WatchlistTile {
             shared,
             history: History::default(),
             prompt: None,
+            rules: None,
             field_window: None,
         };
         tile.settle(cx);
@@ -420,9 +435,11 @@ impl WatchlistTile {
         let shown = self.shown_in(&snapshot);
         if !shown {
             // Its history means nothing now, and its field would write
-            // nowhere: the field goes, its text with it, nothing written.
+            // nowhere: the field goes, its text with it, nothing written;
+            // the rules popup listed its rules.
             self.history.forget();
             self.release_prompt(cx);
+            self.rules = None;
         }
         self.settle_menu(shown, &snapshot);
         if self.notices.nothing_to_switch && !snapshot.lists.is_empty() {
@@ -594,10 +611,28 @@ impl WatchlistTile {
         let clock = clock(cx);
         let name = self.state.name.as_deref();
         let state = name.and_then(|n| snapshot.lists.get(n));
-        // The live count is the grid's: with a pending edit it is what the
-        // rows show, not what the snapshot last resolved.
+        // The rules as they are now; the snapshot's errors apply to the
+        // snapshot's rules, not to a pending edit awaiting its fold.
+        self.chrome.rules = match state {
+            Some(s) => {
+                let current = self.history.current(&s.definition);
+                let errors: &[_] = if current.rules == s.definition.rules {
+                    &s.rule_errors
+                } else {
+                    &[]
+                };
+                rule_rows(current, errors)
+            }
+            None => Vec::new(),
+        };
+        if let Some(p) = self.rules.as_mut() {
+            p.clamp(self.chrome.rules.len());
+        }
+        // The counts are what the rows and the popup show: with a pending
+        // edit, not what the snapshot last resolved.
         let (live, _) = self.grid.counts();
-        self.chrome.header = HeaderModel::prepare(name, state, live, &clock);
+        let rules = self.chrome.rules.len();
+        self.chrome.header = HeaderModel::prepare(name, state, live, rules, &clock);
         let none_defined = snapshot.lists.is_empty();
         let new = action_title(NEW_ACTION);
         // The switch chord as the keymap binds it now; the palette's title
@@ -776,9 +811,11 @@ impl WatchlistTile {
             self.grid.set_sort(self.state.sort);
             self.find_entry = None;
             self.notices.outcome.clear();
-            // The history and an open field were the previous list's.
+            // The history, an open field and the rules popup were the
+            // previous list's.
             self.history.forget();
             self.release_prompt(cx);
+            self.rules = None;
         }
         self.was_shown = self.shown_in(&snapshot(cx));
         self.rebuild_rows(false, cx);
@@ -798,10 +835,11 @@ impl WatchlistTile {
     /// plain press moves the cursor there and ends a selection. A
     /// double-click is two presses and nothing more: a members row has no
     /// field to open. A press on the grid leaves an open field unwritten,
-    /// as escape would.
+    /// as escape would, and closes the rules popup (it is outside it).
     fn row_pressed(&mut self, e: RowPressed, window: &mut Window, cx: &mut Context<Self>) {
         self.user_acted(cx);
         self.close_prompt(window, cx);
+        self.close_rules(cx);
         self.grid.click(e.row, e.shift);
         self.sync_table(false, cx);
         cx.notify();
@@ -814,6 +852,7 @@ impl WatchlistTile {
     fn row_context(&mut self, e: RowContext, window: &mut Window, cx: &mut Context<Self>) {
         self.user_acted(cx);
         self.close_prompt(window, cx);
+        self.close_rules(cx);
         let in_selection = self.grid.selected().is_some_and(|s| s.contains(&e.row));
         if !in_selection {
             self.grid.click(e.row, false);
@@ -928,12 +967,16 @@ impl WatchlistTile {
     }
 
     /// `insert` while a field holds the keys, `menu` while a menu is up,
-    /// `visual` while a row selection is live, `normal` otherwise.
+    /// `rules` while the rules popup is (a rule prompt over it is a field:
+    /// insert wins), `visual` while a row selection is live, `normal`
+    /// otherwise.
     fn mode(&self) -> &'static str {
         if self.prompt.is_some() {
             "insert"
         } else if self.menu.is_some() {
             "menu"
+        } else if self.rules.is_some() {
+            "rules"
         } else if self.grid.selecting() {
             "visual"
         } else {
@@ -942,18 +985,35 @@ impl WatchlistTile {
     }
 
     /// `grid` in every mode (the shell's motions bind only in normal and
-    /// visual), with counts; `tilelist` only while a menu is up, so the
-    /// shell's shared `j`/`k` and arrows step its rows instead.
+    /// visual), with counts; `tilelist` only while a menu or the rules
+    /// popup is up and no field is (a field's bare keys are its text), so
+    /// the shell's shared `j`/`k` and arrows step the rows instead.
     pub fn key_context(&self) -> KeyContext {
         let ctx = KeyContext::new(crate::KIND)
             .grid()
             .pair("mode", self.mode())
             .counts();
-        if self.menu.is_some() {
+        if self.prompt.is_none() && (self.menu.is_some() || self.rules.is_some()) {
             ctx.tilelist()
         } else {
             ctx
         }
+    }
+
+    /// Whether `action` is the rules popup's own, so the popup stays open
+    /// for it; any other verb closes the popup first.
+    fn keeps_rules(action: &str) -> bool {
+        matches!(
+            action,
+            geode_tile::motion::MENU_DOWN
+                | geode_tile::motion::MENU_UP
+                | RULES_ACTION
+                | RULE_ADD_ACTION
+                | RULE_REMOVE_ACTION
+                | RULE_EDIT_ACTION
+                | COMMIT_ACTION
+                | CANCEL_ACTION
+        )
     }
 
     /// `true` for the actions this tile carries out and, while a menu is
@@ -989,9 +1049,14 @@ impl WatchlistTile {
                 _ => self.close_prompt(window, cx),
             }
         }
-        // The grid's motions, while no menu holds the keys. A column
-        // motion has no column to move in this rows-only grid.
+        // The popup's own keys keep it; a verb that leaves it closes it.
+        if self.rules.is_some() && !Self::keeps_rules(&action.0) {
+            self.close_rules(cx);
+        }
+        // The grid's motions, while no menu or popup holds the keys. A
+        // column motion has no column to move in this rows-only grid.
         if self.menu.is_none()
+            && self.rules.is_none()
             && let Some(m) = geode_tile::motion::parse(action, count)
         {
             if m.moves_rows() {
@@ -1013,18 +1078,31 @@ impl WatchlistTile {
                 }
                 cx.notify();
             }
+            geode_tile::motion::MENU_DOWN | geode_tile::motion::MENU_UP if self.rules.is_some() => {
+                let delta = if action.0 == geode_tile::motion::MENU_DOWN {
+                    1
+                } else {
+                    -1
+                };
+                self.rules_step(delta, cx);
+            }
             SWITCH_ACTION => self.toggle_menu(MenuKind::Switch, cx),
             MENU_ACTION => self.toggle_menu(MenuKind::Actions, cx),
-            COMMIT_ACTION => {
+            COMMIT_ACTION if self.menu.is_some() => {
                 let Some(at) = self.menu.as_ref().and_then(|(_, m)| m.highlighted()) else {
                     return false;
                 };
                 self.menu_pick(at, window, cx);
             }
+            COMMIT_ACTION if self.rules.is_some() => self.rule_edit(window, cx),
+            COMMIT_ACTION => return false,
             // `escape` peels one layer at a time: the menu (the surface on
-            // top, which may be acting on the selection), then a live
-            // selection, then the notices.
+            // top, which may be acting on the selection), then the rules
+            // popup, then a live selection, then the notices.
             CANCEL_ACTION if self.menu.is_some() => self.close_menu(cx),
+            CANCEL_ACTION if self.rules.is_some() => {
+                self.close_rules(cx);
+            }
             CANCEL_ACTION if self.grid.selecting() => {
                 self.grid.clear_selection();
                 self.sync_table(false, cx);
@@ -1059,9 +1137,15 @@ impl WatchlistTile {
             UNDO_ACTION => self.replay(Way::Undo, cx),
             REDO_ACTION => self.replay(Way::Redo, cx),
             REFRESH_ACTION => self.refresh(cx),
-            // The rules popup and the watchlist's own verbs: not built yet.
-            RULES_ACTION | NEW_ACTION | CLONE_ACTION | RENAME_ACTION | DELETE_ACTION
-            | REVERT_ACTION => self.not_yet(cx),
+            // The rules popup and its verbs.
+            RULES_ACTION => self.toggle_rules(cx),
+            RULE_ADD_ACTION => self.rule_add(window, cx),
+            RULE_REMOVE_ACTION => self.rule_remove(cx),
+            RULE_EDIT_ACTION => self.rule_edit(window, cx),
+            // The watchlist's own verbs: not built yet.
+            NEW_ACTION | CLONE_ACTION | RENAME_ACTION | DELETE_ACTION | REVERT_ACTION => {
+                self.not_yet(cx)
+            }
             _ => return false,
         }
         true
@@ -1095,6 +1179,7 @@ impl WatchlistTile {
 
     pub fn closed(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
+        self.rules = None;
         self.release_prompt(cx);
     }
 
@@ -1333,6 +1418,32 @@ impl Render for WatchlistTile {
             ),
             None => (actions, None),
         };
+        // The rules popup hangs from the header's rules item; while a rule
+        // prompt is open it sits inline under the prompt bar instead, so
+        // the field is not covered.
+        let (rules_hung, rules_inline) = match (self.rules, self.prompt.is_some()) {
+            (None, _) => (None, None),
+            (Some(p), false) => (
+                Some(rules::render_hung(
+                    &self.chrome.rules,
+                    p.cursor,
+                    &tile,
+                    id,
+                    cx,
+                )),
+                None,
+            ),
+            (Some(p), true) => (
+                None,
+                Some(rules::render_inline(
+                    &self.chrome.rules,
+                    p.cursor,
+                    &tile,
+                    id,
+                    cx,
+                )),
+            ),
+        };
         let theme = cx.theme();
         let header = header::render(
             &self.chrome.header,
@@ -1349,6 +1460,7 @@ impl Render for WatchlistTile {
                 }),
                 actions_open: actions.is_some() || row_actions.is_some(),
                 switcher,
+                rules_popup: rules_hung,
                 menu_selector: self.menu_selector.clone(),
                 menu_tip: self.menu_tip.clone(),
                 switch_tip: self.switch_tip.clone(),
@@ -1399,6 +1511,7 @@ impl Render for WatchlistTile {
                     }),
             )
             .children(prompt)
+            .children(rules_inline)
             .child(body)
             .children(row_actions)
     }

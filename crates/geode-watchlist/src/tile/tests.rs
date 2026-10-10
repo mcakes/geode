@@ -166,11 +166,11 @@ impl gpui::Render for ShellStandIn {
                 else {
                     return;
                 };
-                // `menu` is a fieldless list popup and `visual` a live row
-                // selection: the shell routes both as normal mode, over the
-                // whole stack.
+                // `menu` and `rules` are fieldless list popups and `visual`
+                // a live row selection: the shell routes them all as normal
+                // mode, over the whole stack.
                 let stack = match context.get("mode") {
-                    Some("normal") | Some("visual") | Some("menu") => vec![
+                    Some("normal") | Some("visual") | Some("menu") | Some("rules") => vec![
                         KeyContext::new("workspace"),
                         KeyContext::new("tile"),
                         context,
@@ -1722,4 +1722,572 @@ fn a_moved_highlight_or_a_row_press_adds_the_listed_name(cx: &mut gpui::TestAppC
         Some("manual \u{b7} pending")
     );
     assert!(!vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+}
+
+// ---- the rules popup and the rule prompt ----------------------------------
+
+use crate::core::prompt::{EXPRESSION, WHOLE_DATASET};
+use crate::core::rules::RuleRow;
+use crate::tile::rules::{NO_RULE, NO_RULE_DATASET, RULES_UNCHANGED};
+
+fn rule(dataset: &str, scope: Option<&str>, expression: Option<&str>) -> Rule {
+    Rule {
+        dataset: dataset.into(),
+        scope: scope.map(str::to_string),
+        expression: expression.map(str::to_string),
+    }
+}
+
+/// [`europe`] with real rules: rule 1 over the whole of `risk`, rule 2
+/// `risk` under the saved scope `eu`.
+fn europe_rules() -> WatchlistSnapshot {
+    let mut snap = europe();
+    snap.lists.get_mut("europe").unwrap().definition.rules =
+        vec![rule("risk", None, None), rule("risk", Some("eu"), None)];
+    snap
+}
+
+/// `europe`'s definition as [`europe_rules`] holds it.
+fn europe_def_with_rules() -> Watchlist {
+    with_rules(vec![
+        rule("risk", None, None),
+        rule("risk", Some("eu"), None),
+    ])
+}
+
+/// `europe`'s definition with `rules`.
+fn with_rules(rules: Vec<Rule>) -> Watchlist {
+    Watchlist {
+        rules,
+        ..europe_def()
+    }
+}
+
+/// The factory's configuration: the prompt tests' schema (`risk`, `cvi`
+/// eligible; `fx`, `underlyings` not) and saved scopes (`eu` over `book`,
+/// `fx_only` over `pair`, `nothing` impossible).
+fn config() -> WatchlistConfig {
+    WatchlistConfig {
+        schema: Rc::new(crate::core::prompt::tests::schema()),
+        dims: Default::default(),
+        saved: crate::core::prompt::tests::saved(),
+        named: Default::default(),
+    }
+}
+
+/// A tile on `snap`'s `europe` with the reference table and the
+/// configuration pushed.
+fn rules_shown(
+    cx: &mut gpui::TestAppContext,
+    snap: WatchlistSnapshot,
+) -> (Harness, gpui::VisualTestContext) {
+    cx.update(|cx| publish_reference(cx, reference()));
+    let (h, mut vcx) = open_with(cx, snap, restored("europe"));
+    vcx.update(|_, cx| h.factory.set_config(config(), cx));
+    (h, vcx)
+}
+
+impl Harness {
+    /// The open popup's cursor and rows; `None` while it is closed.
+    fn rules(&self, vcx: &gpui::VisualTestContext) -> Option<(usize, Vec<RuleRow>)> {
+        self.tile.read_with(vcx, |t, _| t.rules_state())
+    }
+    /// The popup's rows as `(index, dataset, scope text, error)`.
+    fn rule_rows(
+        &self,
+        vcx: &gpui::VisualTestContext,
+    ) -> Vec<(usize, String, String, Option<String>)> {
+        self.rules(vcx)
+            .map(|(_, rows)| {
+                rows.into_iter()
+                    .map(|r| (r.index, r.dataset, r.scope_text, r.error))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn rules_cursor(&self, vcx: &gpui::VisualTestContext) -> Option<usize> {
+        self.rules(vcx).map(|(c, _)| c)
+    }
+    /// The open field's hint line and whether it is a warning.
+    fn hint(&self, vcx: &gpui::VisualTestContext) -> Option<(String, bool)> {
+        self.tile.read_with(vcx, |t, _| t.prompt_hint())
+    }
+}
+
+#[gpui::test]
+fn r_opens_the_rules_popup_on_the_first_rule_and_j_k_step(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = rules_shown(cx, europe_rules());
+    assert_eq!(h.rules(&vcx), None);
+    h.press(&mut vcx, "r");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("rules"));
+    assert_eq!(h.rules_cursor(&vcx), Some(0));
+    let row = |i: usize, scope: &str| (i, "risk".to_string(), scope.to_string(), None);
+    assert_eq!(
+        h.rule_rows(&vcx),
+        [row(0, WHOLE_DATASET), row(1, "scope eu")]
+    );
+    // Painted hung from the header's rules item, one row per rule.
+    h.draw(&mut vcx);
+    let item = vcx
+        .debug_bounds("watchlist-rules-7")
+        .expect("the rules item is painted");
+    let popup = vcx
+        .debug_bounds("watchlist-rules-popup-7")
+        .expect("the popup is painted");
+    assert!(
+        (popup.origin.x - item.origin.x).abs() <= gpui::px(1.0)
+            && (popup.origin.y - item.bottom_left().y).abs() <= gpui::px(1.0),
+        "{popup:?} hangs under {item:?}"
+    );
+    assert!(vcx.debug_bounds("watchlist-rule-row-7-1").is_some());
+    assert!(vcx.debug_bounds("watchlist-rules-empty-7").is_none());
+    // `j`/`k` step, clamped at either end.
+    h.press(&mut vcx, "j");
+    assert_eq!(h.rules_cursor(&vcx), Some(1));
+    h.press(&mut vcx, "j");
+    assert_eq!(h.rules_cursor(&vcx), Some(1), "clamped");
+    h.press(&mut vcx, "k k");
+    assert_eq!(h.rules_cursor(&vcx), Some(0));
+    assert_eq!(
+        h.cursor(&vcx).as_deref(),
+        Some("DAX"),
+        "the grid's cursor did not move"
+    );
+    // `r` again closes it; so does `escape`.
+    h.press(&mut vcx, "r");
+    assert_eq!(h.rules(&vcx), None);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    h.press(&mut vcx, "r escape");
+    assert_eq!(h.rules(&vcx), None);
+    // The `⋯` menu's Rules… row and the palette open it too.
+    h.press(&mut vcx, ". j j enter");
+    assert_eq!(h.actions(&vcx), None);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("rules"));
+    h.press(&mut vcx, "escape");
+    h.act(&mut vcx, "watchlist::rules");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("rules"));
+    // A verb that leaves the popup closes it (the refresh, from the
+    // palette: the popup's own context binds no `shift+r`).
+    h.act(&mut vcx, "watchlist::refresh");
+    assert_eq!(h.rules(&vcx), None);
+    // A press on the grid closes it.
+    h.press(&mut vcx, "r");
+    h.draw(&mut vcx);
+    let spx = vcx.debug_bounds("watchlist-row-SPX").unwrap();
+    vcx.simulate_mouse_down(
+        spx.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(h.rules(&vcx), None);
+    // With no rules the popup says so.
+    let mut snap = europe();
+    snap.lists
+        .get_mut("europe")
+        .unwrap()
+        .definition
+        .rules
+        .clear();
+    vcx.update(|_, cx| publish(cx, snap));
+    h.press(&mut vcx, "r");
+    assert_eq!(h.rule_rows(&vcx), []);
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("watchlist-rules-empty-7").is_some());
+    h.press(&mut vcx, "x");
+    assert_eq!(h.notices(&vcx), [NO_RULE]);
+    assert!(h.edits(&mut vcx).is_empty());
+    // Nothing shown: refused.
+    vcx.update(|_, cx| publish(cx, WatchlistSnapshot::default()));
+    assert_eq!(h.rules(&vcx), None, "the list went: the popup with it");
+    h.press(&mut vcx, "escape");
+    h.act(&mut vcx, "watchlist::rules");
+    assert!(h.notices(&vcx).contains(&NOTHING_SHOWN.to_string()));
+}
+
+#[gpui::test]
+fn o_dataset_then_whole_dataset_queues_a_rules_write(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = rules_shown(cx, europe_rules());
+    h.press(&mut vcx, "r o");
+    // The dataset step: a closed choice over the eligible datasets, the
+    // popup still painted beneath the field.
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    let (text, error, rows) = h.prompt(&vcx).expect("the dataset field is open");
+    assert_eq!((text.as_str(), error), ("", None));
+    assert_eq!(rows, ["risk", "cvi"], "fx and underlyings are not eligible");
+    assert_eq!(h.highlight(&vcx).as_deref(), Some("risk"));
+    assert!(h.rules(&vcx).is_some(), "the popup stays open");
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("watchlist-prompt-7").is_some());
+    assert!(vcx.debug_bounds("watchlist-rules-popup-7").is_some());
+    // A closed list: enter takes the highlight with nothing typed.
+    h.press(&mut vcx, "enter");
+    let (_, error, rows) = h.prompt(&vcx).expect("the scope field is open");
+    assert_eq!(error, None);
+    assert_eq!(rows, [WHOLE_DATASET, "eu", EXPRESSION]);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    assert!(h.edits(&mut vcx).is_empty(), "nothing written yet");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.prompt(&vcx), None);
+    let next = with_rules(vec![
+        rule("risk", None, None),
+        rule("risk", Some("eu"), None),
+        rule("risk", None, None),
+    ]);
+    let edits = h.edits(&mut vcx);
+    assert_eq!(edits, [edit_of(&next)]);
+    let rules = edits[0].value.as_ref().unwrap()["rules"]
+        .as_array()
+        .unwrap();
+    assert_eq!(rules.len(), 3, "the whole object");
+    let added = rules[2].as_table().unwrap();
+    assert_eq!(added.keys().collect::<Vec<_>>(), ["dataset"]);
+    assert_eq!(added["dataset"].as_str(), Some("risk"));
+    assert_eq!(h.notices(&vcx), ["added rule 3"]);
+    // The popup stays, on the new rule, listing the pending rules; the
+    // header counts them.
+    assert_eq!(h.mode(&vcx).as_deref(), Some("rules"));
+    assert_eq!(h.rules_cursor(&vcx), Some(2));
+    assert_eq!(h.rule_rows(&vcx).len(), 3);
+    assert!(h.header(&vcx).contains("3 rules"), "{}", h.header(&vcx));
+    // Escape peels the field first, then the popup.
+    h.press(&mut vcx, "o");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.prompt(&vcx), None);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("rules"));
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert!(h.edits(&mut vcx).is_empty());
+    // A dataset that is not eligible is refused under the field: typed
+    // text that matches nothing is the answer as typed.
+    h.press(&mut vcx, "r o");
+    vcx.simulate_input("fx");
+    h.press(&mut vcx, "enter");
+    let (text, error, _) = h.prompt(&vcx).unwrap();
+    assert_eq!(text, "fx");
+    assert_eq!(
+        error.as_deref(),
+        Some("'fx' is not a dataset a rule may read")
+    );
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    assert!(h.edits(&mut vcx).is_empty());
+    // With no eligible dataset `o` is refused outright.
+    vcx.update(|_, cx| h.factory.set_config(WatchlistConfig::default(), cx));
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "o");
+    assert_eq!(h.prompt(&vcx), None);
+    assert_eq!(h.notices(&vcx), [NO_RULE_DATASET]);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("rules"));
+}
+
+#[gpui::test]
+fn o_dataset_then_saved_scope_writes_scope(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = rules_shown(cx, europe_rules());
+    h.press(&mut vcx, "r o enter");
+    // Typed out, the saved scope is the highlight; enter takes it.
+    vcx.simulate_input("eu");
+    assert_eq!(h.highlight(&vcx).as_deref(), Some("eu"));
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.prompt(&vcx), None);
+    let next = with_rules(vec![
+        rule("risk", None, None),
+        rule("risk", Some("eu"), None),
+        rule("risk", Some("eu"), None),
+    ]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&next)]);
+    assert_eq!(h.notices(&vcx), ["added rule 3"]);
+    assert_eq!(h.rule_rows(&vcx)[2].2, "scope eu");
+    // A saved scope the dataset cannot honour is not offered: typed, it
+    // matches nothing, and is refused with the fold's reason; a name that
+    // is no saved scope with the step's.
+    h.press(&mut vcx, "o enter");
+    vcx.simulate_input("fx_only");
+    let (_, _, rows) = h.prompt(&vcx).unwrap();
+    assert!(rows.is_empty(), "{rows:?}");
+    h.press(&mut vcx, "enter");
+    let (_, error, _) = h.prompt(&vcx).unwrap();
+    assert!(
+        error.as_deref().is_some_and(|e| e.contains("pair")),
+        "{error:?}"
+    );
+    assert!(h.edits(&mut vcx).is_empty());
+    h.press(&mut vcx, "backspace ".repeat(7).trim_end());
+    vcx.simulate_input("whatever");
+    h.press(&mut vcx, "enter");
+    let (_, error, _) = h.prompt(&vcx).unwrap();
+    assert_eq!(
+        error.as_deref(),
+        Some("'whatever' is not whole dataset, a saved scope or expression\u{2026}")
+    );
+    assert!(h.edits(&mut vcx).is_empty());
+    // `cvi` has no `book`: `eu` is not offered over it.
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "o");
+    vcx.simulate_input("cvi");
+    h.press(&mut vcx, "enter");
+    let (_, _, rows) = h.prompt(&vcx).unwrap();
+    assert_eq!(rows, [WHOLE_DATASET, EXPRESSION]);
+    h.press(&mut vcx, "escape");
+}
+
+#[gpui::test]
+fn o_dataset_then_expression_validated_against_that_dataset(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = rules_shown(cx, europe_rules());
+    h.press(&mut vcx, "r o enter down down");
+    assert_eq!(h.highlight(&vcx).as_deref(), Some(EXPRESSION));
+    h.press(&mut vcx, "enter");
+    // The expression step: the completion over risk's columns alone.
+    let (text, error, rows) = h.prompt(&vcx).expect("the expression field is open");
+    assert_eq!((text.as_str(), error), ("", None));
+    assert_eq!(rows, ["book", "underlying_ref", "npv", "not", "("]);
+    assert_eq!(h.hint(&vcx), Some(("column".into(), false)));
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    // A column the dataset lacks is refused under the field, by the fold.
+    vcx.simulate_input("pair = 'EURUSD'");
+    assert_eq!(
+        h.hint(&vcx),
+        Some(("unknown column 'pair'".into(), true)),
+        "the completion warns as it is typed"
+    );
+    h.press(&mut vcx, "enter");
+    let (text, error, _) = h.prompt(&vcx).unwrap();
+    assert_eq!(text, "pair = 'EURUSD'");
+    assert!(
+        error.as_deref().is_some_and(|e| e.contains("pair")),
+        "{error:?}"
+    );
+    assert!(h.edits(&mut vcx).is_empty());
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("watchlist-prompt-error-7").is_some());
+    assert!(vcx.debug_bounds("watchlist-prompt-hint-7").is_some());
+    // A valid one writes `expression`.
+    h.press(&mut vcx, "backspace ".repeat(15).trim_end());
+    vcx.simulate_input("book = 'BK000'");
+    assert_eq!(
+        h.hint(&vcx),
+        Some(("and / or, or enter to apply".into(), false))
+    );
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.prompt(&vcx), None);
+    let next = with_rules(vec![
+        rule("risk", None, None),
+        rule("risk", Some("eu"), None),
+        rule("risk", None, Some("book = 'BK000'")),
+    ]);
+    let edits = h.edits(&mut vcx);
+    assert_eq!(edits, [edit_of(&next)]);
+    let added = edits[0].value.as_ref().unwrap()["rules"][2]
+        .as_table()
+        .unwrap();
+    assert_eq!(added.keys().collect::<Vec<_>>(), ["dataset", "expression"]);
+    assert_eq!(h.rule_rows(&vcx)[2].2, "book = 'BK000'");
+    // A blank expression is refused.
+    h.press(&mut vcx, "o enter down down enter enter");
+    let (_, error, _) = h.prompt(&vcx).unwrap();
+    assert_eq!(
+        error.as_deref(),
+        Some(crate::core::prompt::TYPE_AN_EXPRESSION)
+    );
+    h.press(&mut vcx, "escape");
+}
+
+#[gpui::test]
+fn enter_on_a_rule_replaces_its_scope_in_place(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = rules_shown(cx, europe_rules());
+    h.press(&mut vcx, "r j enter");
+    // The scope step over the rule's own dataset; no dataset step.
+    let (_, _, rows) = h.prompt(&vcx).expect("the scope field is open");
+    assert_eq!(rows, [WHOLE_DATASET, "eu", EXPRESSION]);
+    assert!(h.rules(&vcx).is_some());
+    h.press(&mut vcx, "enter");
+    let next = with_rules(vec![rule("risk", None, None), rule("risk", None, None)]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&next)], "rule 2 in place");
+    assert_eq!(h.notices(&vcx), ["changed rule 2"]);
+    assert_eq!(h.rules_cursor(&vcx), Some(1));
+    assert_eq!(h.rule_rows(&vcx)[1].2, WHOLE_DATASET);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("rules"));
+    // The same scope again changes nothing and writes nothing.
+    h.press(&mut vcx, "enter enter");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(h.notices(&vcx), [RULES_UNCHANGED]);
+    // An expression in place, over the pending object.
+    h.press(&mut vcx, "k enter down down enter");
+    vcx.simulate_input("npv > 1");
+    h.press(&mut vcx, "enter");
+    let next = with_rules(vec![
+        rule("risk", None, Some("npv > 1")),
+        rule("risk", None, None),
+    ]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&next)]);
+    assert_eq!(h.notices(&vcx), ["changed rule 1"]);
+    assert_eq!(h.rules_cursor(&vcx), Some(0));
+    // Edit from the palette, with the popup closed, acts on nothing.
+    h.press(&mut vcx, "escape");
+    h.act(&mut vcx, "watchlist::rule_edit");
+    assert_eq!(h.prompt(&vcx), None);
+    assert_eq!(h.notices(&vcx), [NO_RULE]);
+}
+
+#[gpui::test]
+fn x_removes_the_cursor_rule_and_undo_restores_the_whole_rules_vector(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = rules_shown(cx, europe_rules());
+    h.press(&mut vcx, "r j x");
+    let removed = with_rules(vec![rule("risk", None, None)]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&removed)]);
+    assert_eq!(h.notices(&vcx), ["removed rule 2"]);
+    assert_eq!(h.rules_cursor(&vcx), Some(0));
+    assert_eq!(h.rule_rows(&vcx).len(), 1);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("rules"));
+    assert!(
+        h.header(&vcx).contains("1 rule \u{b7}"),
+        "{}",
+        h.header(&vcx)
+    );
+    // Undo restores the rules whole, in their order (`u` leaves the
+    // popup first).
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "u");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&europe_def_with_rules())]);
+    assert_eq!(h.notices(&vcx), ["undid 1 change"]);
+    h.press(&mut vcx, "r");
+    assert_eq!(h.rule_rows(&vcx).len(), 2);
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "ctrl-r");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&removed)]);
+    // The last rule removed leaves the empty row; x then has no rule.
+    h.press(&mut vcx, "r x");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&with_rules(vec![]))]);
+    assert_eq!(h.rule_rows(&vcx), []);
+    h.press(&mut vcx, "x");
+    assert_eq!(h.notices(&vcx), [NO_RULE]);
+    assert!(h.edits(&mut vcx).is_empty());
+    // A reload changing the rules elsewhere (not the object the edits
+    // started from, which the in-flight chain keeps): undo skips the whole
+    // change.
+    let mut foreign = europe();
+    foreign.lists.get_mut("europe").unwrap().definition.rules = vec![rule("cvi", None, None)];
+    vcx.update(|_, cx| publish(cx, foreign));
+    assert_eq!(
+        h.rule_rows(&vcx).len(),
+        1,
+        "the foreign rules are the truth"
+    );
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "u");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["undid 0 changes \u{2014} 1 changed elsewhere"]
+    );
+}
+
+/// Review focus: a rule over a dataset the startup schema lacks is listed
+/// with its error and removable; `o` never offers that dataset.
+#[gpui::test]
+fn an_ineligible_rule_is_shown_with_its_error_and_removable(cx: &mut gpui::TestAppContext) {
+    let mut snap = europe();
+    let s = snap.lists.get_mut("europe").unwrap();
+    s.definition.rules = vec![rule("risk", None, None), rule("gone", None, None)];
+    let why = "no dataset 'gone' (a dataset added since launch needs a restart)";
+    s.rule_errors = vec![RuleError {
+        index: 1,
+        reason: why.into(),
+    }];
+    let (h, mut vcx) = rules_shown(cx, snap);
+    h.press(&mut vcx, "r");
+    assert_eq!(
+        h.rule_rows(&vcx),
+        [
+            (0, "risk".into(), WHOLE_DATASET.into(), None),
+            (1, "gone".into(), WHOLE_DATASET.into(), Some(why.into())),
+        ]
+    );
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("watchlist-rule-error-7-1").is_some());
+    assert!(vcx.debug_bounds("watchlist-rule-error-7-0").is_none());
+    // `o` offers the eligible datasets only.
+    h.press(&mut vcx, "o");
+    let (_, _, rows) = h.prompt(&vcx).unwrap();
+    assert_eq!(rows, ["risk", "cvi"]);
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("rules"));
+    // `x` writes the rules without it.
+    h.press(&mut vcx, "j x");
+    let next = with_rules(vec![rule("risk", None, None)]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&next)]);
+    // The standing notice about rule 2 stays until the reload folds the
+    // rules without it.
+    assert_eq!(h.notices(&vcx)[0], "removed rule 2");
+    assert_eq!(h.rule_rows(&vcx).len(), 1);
+    // The pending rules are not the snapshot's: its errors do not apply
+    // to them until the reload folds them.
+    assert_eq!(h.rule_rows(&vcx)[0].3, None);
+    assert!(
+        h.header(&vcx).contains("1 rule \u{b7}"),
+        "{}",
+        h.header(&vcx)
+    );
+}
+
+#[gpui::test]
+fn expression_completion_offers_only_the_rules_dataset_columns(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = rules_shown(cx, europe_rules());
+    h.press(&mut vcx, "r o");
+    vcx.simulate_input("cvi");
+    assert_eq!(h.highlight(&vcx).as_deref(), Some("cvi"));
+    // cvi has no saved scope to offer: one step down is the expression.
+    h.press(&mut vcx, "enter down enter");
+    let (_, _, rows) = h.prompt(&vcx).expect("the expression field is open");
+    assert_eq!(
+        rows,
+        ["underlying_ref", "term", "atm", "not", "("],
+        "cvi's columns, not risk's"
+    );
+    // Typing ranks; a moved highlight is a completion enter writes into
+    // the field, which stays open at the next position.
+    vcx.simulate_input("te");
+    let (_, _, rows) = h.prompt(&vcx).unwrap();
+    assert_eq!(rows, ["term"]);
+    h.press(&mut vcx, "down enter");
+    let (text, error, rows) = h.prompt(&vcx).unwrap();
+    assert_eq!(text, "term ");
+    assert_eq!(error, None);
+    assert_eq!(
+        rows,
+        ["=", "!=", "<", "<=", ">", ">=", "in"],
+        "a number's operators"
+    );
+    assert_eq!(h.hint(&vcx), Some(("operator for term".into(), false)));
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    // A press on a completion row writes it too, and keeps the field.
+    h.draw(&mut vcx);
+    let row = vcx
+        .debug_bounds("watchlist-prompt-row->")
+        .expect("the operator row is painted");
+    vcx.simulate_mouse_down(
+        row.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    let (text, _, _) = h.prompt(&vcx).unwrap();
+    assert_eq!(text, "term > ");
+    assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    assert_eq!(
+        h.hint(&vcx),
+        Some(("value for term \u{b7} a number, e.g. 1000".into(), false))
+    );
+    // Enter with an unmoved highlight is the answer.
+    vcx.simulate_input("1");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.prompt(&vcx), None);
+    let next = with_rules(vec![
+        rule("risk", None, None),
+        rule("risk", Some("eu"), None),
+        rule("cvi", None, Some("term > 1")),
+    ]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&next)]);
+    assert_eq!(h.notices(&vcx), ["added rule 3"]);
 }

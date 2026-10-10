@@ -38,7 +38,7 @@ impl WatchlistTile {
     /// Whether the member verbs may act now. Always, so far: a queued
     /// revert will refuse them, since the tile cannot see the lower copy
     /// the revert will show.
-    fn verbs_allowed(&self) -> Result<(), String> {
+    pub(super) fn verbs_allowed(&self) -> Result<(), String> {
         Ok(())
     }
 

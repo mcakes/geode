@@ -35,9 +35,21 @@ request and never depends on `geode-data`.
   `refused` drops it and remembers the names a refused write would have
   changed, so an undo that skips them says `not saved` rather than
   `changed elsewhere`.
-- `core/prompt.rs`: `Prompt` (what the field asks: `AddName`) and
-  `submit`, the typed answer's step: a trimmed name to add, or a refusal
-  (`type a name` for a blank).
+- `core/prompt.rs`: `Prompt` (what the field asks: `AddName`, or a rule's
+  `RuleDataset`, `RuleScope`, `RuleExpression`) and the typed answer's
+  step: `submit` for a name (trimmed to add, or `type a name` for a
+  blank); `submit_rule` for a rule step over a `RuleContext` (the
+  factory's schema, dimensions, saved scopes and named expressions, and
+  the shown list as it is now): the dataset must be one
+  `fold::eligible_datasets` names, the scope is `whole dataset`, a saved
+  scope or `expression…`, and a scope or expression is folded over a
+  one-rule list (`fold_rules`) before it is written, the fold's reason
+  being the refusal. `scope_choices` lists the saved scopes that fold
+  clean over a dataset.
+- `core/rules.rs`: `RuleRow` (one per rule: its index, dataset, scope text
+  `whole dataset` | `scope <name>` | the expression as written, and the
+  snapshot's `rule_errors` reason by index) and `RulesPopup`, the popup's
+  cursor, clamped to the rows.
 - `core/rows.rs`: `WatchRow`, `members(state, pending)` and
   `rows(state, pending, reference)`, the members and the grid's rows: the
   snapshot's members, or, with a pending definition (an edit awaiting its
@@ -79,7 +91,14 @@ request and never depends on `geode-data`.
   typed out in full ignoring case, else the text as typed), its paint, and
   the tile's side of it (open, commit through `prompt::submit` and the
   add verb, close with a blur first, release where no window is at hand,
-  the highlight keys and the row press). `tile/verbs.rs` is the member
+  the highlight keys and the row press). Its rows are one of two shapes:
+  a `ChoiceList` (open for the add field, closed for a rule's dataset and
+  scope, where the highlight is the answer whatever is typed) or an
+  `ExprCompletion` over the rule's dataset, whose rows are written into
+  the field. `tile/rules.rs` is the rules popup: its paint (hung from the
+  header's `<k> rules` item, or inline under the prompt bar while a rule
+  step is open), its keys, the rule verbs and the rules write.
+  `tile/verbs.rs` is the member
   verbs: what each acts on, the write gate (`queue_write`, one
   whole-object `ConfigEdit`), `commit` (queue, then hold pending, then
   say), `replay` (peek, gate, step) and `refresh`. `tile/table.rs` is the
@@ -186,6 +205,49 @@ write is `— 1 not saved`; a replay that skipped everything writes nothing.
 Undo puts a name back by hand, so it lands at the end of `include`: the
 object is restored, not the file's order.
 
+## Rules
+
+`r`, `Watchlist: Rules…` and the `⋯` menu's Rules… row open the rules
+popup, hung from the header's `<k> rules` item: one row per rule,
+`rule <i> · <dataset> · <scope>` (`whole dataset`, `scope <name>`, or
+the expression as written), with the fold's reason in the warning tone
+beneath a rule the startup schema refuses (one over a dataset it lacks,
+a saved scope it cannot honour); `no rules — o adds one` with none. The
+tile is in `rules` mode while it is open and no field is: `j`/`k` (the
+shared list steps) move the cursor, clamped; `o` (`watchlist::rule_add`)
+adds a rule; `enter` (`watchlist::rule_edit`) edits the cursor rule's
+scope; `x` (`watchlist::rule_remove`) removes it (`removed rule 2`; `no
+rule under the cursor` with none); `escape` and `r` close it. A press on
+a row moves the cursor there; a press outside the popup, a press on the
+grid, or any verb that is not the popup's (a member verb, the refresh,
+showing another list) closes it. The list going away closes it too.
+
+A rule is asked in steps, each a closed choice in the prompt field with
+the popup kept painted beneath it (the field owns the keys: `insert`
+mode; `escape` closes the field first, then the popup): the dataset
+(`fold::eligible_datasets`, in schema order; `o` is refused with `no
+dataset carries underlying_ref` when there is none; `'<x>' is not a
+dataset a rule may read` for any other answer), then the scope: `whole
+dataset`, each saved scope that folds clean over that dataset, then
+`expression…`, which opens the expression step. The expression field
+completes over the rule's dataset alone (its columns and the derived
+dimensions, then operators, values for bool and derived columns, and
+connectives), the completion's hint or warning on a line under the
+field; `up`/`down` move the highlight and `enter` then writes it over
+the word at the caret (a row press does the same) with the field kept
+open; `enter` with an unmoved highlight is the answer. Every answer is
+folded over a one-rule list against the factory's schema, dimensions,
+saved scopes and named expressions, and refused under the field with
+the fold's reason (`scope references unknown column 'pair'`, `expression:
+<what is wrong> at column <n>`), so a rule the popup lists is one the
+data layer will run. Editing replaces the rule in place (`changed rule
+2`); adding appends (`added rule 3`); the same rule again says `rules
+unchanged` and writes nothing. A rules write is the whole object
+through the config door like any member edit, shown at once (the popup
+lists the pending rules; the header counts them; the snapshot's rule
+errors apply only while the rules are the snapshot's) and undone whole
+(`Change::Rules`).
+
 `shift+r` (`watchlist::refresh`) calls the factory's refresh hook with
 the shown name; the header reads `resolving…` with the next snapshot. A
 tile hosted without the hook says `resolve now is not wired`. Showing
@@ -203,9 +265,9 @@ until the next resolution changes them, and dismissed they hide until
 their text changes; session-restore notices until the trader's first key
 or press in the tile. `escape` (`watchlist::cancel`) peels one layer at a
 time: an open field first (it owns the keys), then a menu (the surface on
-top, which may be acting on the selection), then a live selection, then
-the warning and danger notices showing, each as a click on one would;
-with nothing to dismiss it is unhandled.
+top, which may be acting on the selection), then the rules popup, then a
+live selection, then the warning and danger notices showing, each as a
+click on one would; with nothing to dismiss it is unhandled.
 
 ## Performance
 
@@ -223,13 +285,20 @@ average 35 to 48; the same run read 6.0 and 12.9 ms under load 17 to 78):
 
 ## Known limitations
 
-- Rules… and the object verbs (new, clone, rename, delete, revert) are
-  not built yet: each says `not yet available`.
+- The object verbs (new, clone, rename, delete, revert) are not built
+  yet: each says `not yet available`.
 - The add field's typeahead offers names only: the reference table's keys
   and the names any list already holds.
-- The add field's choice list does not close on a press outside it (a
-  press on the field itself is outside the list); a press on the grid, or
-  any verb, closes the field.
+- The field's rows do not close on a press outside them (a press on the
+  field itself is outside the list); a press on the grid, or any verb,
+  closes the field.
+- The rule expression's completion offers columns, operators and keywords
+  only: a categorical column's values are not suggested, since the tile
+  issues no distinct query (`mark_loading`/`deliver` are not wired); its
+  hint reads `loading values…` at a value position for such a column.
+- In `rules` mode only the popup's own keys are bound: `u`, `ctrl+r`,
+  `shift+r` and the member verbs act once the popup is closed (or from
+  the palette, which closes it first).
 
 The behavior as the trader sees it is in
 [features](../../docs/current/features.md#watchlists).

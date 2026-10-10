@@ -4,4 +4,5 @@ pub mod grid;
 pub mod history;
 pub mod prompt;
 pub mod rows;
+pub mod rules;
 pub mod session;

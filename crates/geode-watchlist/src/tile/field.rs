@@ -1,21 +1,27 @@
 //! The prompt field: a bar under the header asking one thing (a name to
-//! add, for now), its text field, the ranked choices hung under it, and why
-//! the last answer was refused. The typed text may be a name nothing
-//! lists: a highlight is only a guess until the trader moves it (`up`,
-//! `down`, a row click) or types it out in full.
+//! add, or one step of a rule), its text field, the rows hung under it,
+//! and why the last answer was refused. The rows are one of two shapes: a
+//! ranked choice over options (open for the add field, where the typed
+//! text may be a name nothing lists and a highlight is only a guess until
+//! the trader moves it or types it out in full; closed for a rule's
+//! dataset and scope, where the highlight is the answer), or an
+//! expression completion over the rule's dataset, whose rows are written
+//! into the field rather than answering it.
 //!
 //! The pure parts (the commit rule, the paint) come first; the tile's side
-//! (the field's lifetime, focus and keys, and the add verb's commit) is the
-//! `impl WatchlistTile` beneath them.
+//! (the field's lifetime, focus and keys, and the commit through the add
+//! verb or the rule steps) is the `impl WatchlistTile` beneath them.
 
 use std::rc::Rc;
 
+use geode_core::scope::complete::ExprVocab;
 use geode_core::watchlist::edit;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
+use geode_shell::exprcomplete::{Accept, ExprCompletion, Refresh, Write};
 use geode_shell::shell::chip::{self, chip_paint};
 use geode_shell::shell::scale;
 use geode_shell::vimnav::NavCommand;
-use geode_tile::notice::Notice;
+use geode_tile::notice::{self, Notice, Tone};
 use geode_tile::popover::{self, ROW_HEIGHT, ROW_INSET};
 use gpui::prelude::*;
 use gpui::{Anchor, App, Context, Entity, Focusable as _, MouseButton, SharedString, Window, div};
@@ -23,18 +29,31 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use super::{NOTHING_SHOWN, WatchlistTile, snapshot};
-use crate::core::prompt::{self, Prompt, Step};
+use crate::core::prompt::{self, Prompt, RuleContext, Step};
 use crate::core::rows;
 
 /// What the list says while it has nothing to rank.
 pub(crate) const NO_NAMES: &str = "no names known: type one";
 /// What it says while the typed text matches no name.
 pub(crate) const NEW_NAME: &str = "no name matches: enter adds it as typed";
+/// What a closed list says while the typed text matches no choice.
+pub(crate) const NO_CHOICE: &str = "nothing matches";
 
-/// What hangs under the field: a ranked choice over known names. (A rule
-/// expression's completion is a later shape.)
+/// What hangs under the field.
 pub(crate) enum Rows {
+    /// A ranked choice over known options.
     Choice(ChoiceList),
+    /// A scope expression's completion over one dataset's vocabulary:
+    /// columns, operators and keywords (no categorical values: the tile
+    /// issues no distinct). Boxed: the completion is the larger shape by
+    /// far, and the field is one of the two.
+    Expr(Box<ExprRows>),
+}
+
+/// The expression shape's parts.
+pub(crate) struct ExprRows {
+    pub completion: ExprCompletion,
+    pub vocab: ExprVocab,
 }
 
 /// The open prompt: what it asks, its field, the rows under it, and why
@@ -48,20 +67,25 @@ pub(crate) struct PromptField {
     /// The last answer's refusal; the field stays open under it.
     pub error: Option<SharedString>,
     /// The trader moved the highlight (a key or a row click): it is a
-    /// choice, not a guess, and enter takes it whatever is typed.
+    /// choice, not a guess, and enter takes it whatever is typed. On the
+    /// expression shape, enter writes it into the field instead.
     pub moved: bool,
+    /// A closed list: the highlight is the answer whatever is typed, and
+    /// the typed text alone answers only when nothing is highlighted.
+    pub closed: bool,
     /// The rows as painted: derived from `rows`, never read back into it,
     /// and repainted (`repaint`) after every `step`, `typed` and `hover`,
-    /// so render ranks nothing. Any later shape of `rows` keeps the same
-    /// discipline.
+    /// so render ranks nothing. Both shapes keep the same discipline.
     pub choice: Rc<ChoicePaint>,
 }
 
 impl PromptField {
-    /// The field asking `prompt`, with `options` to rank.
+    /// The field asking `prompt`, with `options` to rank: an open typeahead
+    /// for the add field, a closed choice for a rule step.
     pub(crate) fn new(input: Entity<InputState>, prompt: Prompt, options: Vec<String>) -> Self {
+        let closed = prompt.is_rule();
         let list = ChoiceList::new(options, DEFAULT_CAP);
-        let choice = Rc::new(choice_paint(&list));
+        let choice = Rc::new(choice_paint(&list, closed));
         PromptField {
             input,
             label: label(&prompt).into(),
@@ -69,26 +93,48 @@ impl PromptField {
             rows: Rows::Choice(list),
             error: None,
             moved: false,
+            closed,
             choice,
         }
     }
 
-    fn list_mut(&mut self) -> &mut ChoiceList {
-        match &mut self.rows {
-            Rows::Choice(list) => list,
+    /// The field asking `prompt` with an expression completion over
+    /// `vocab`, empty until the first text arrives (`typed`).
+    pub(crate) fn expr(input: Entity<InputState>, prompt: Prompt, vocab: ExprVocab) -> Self {
+        let mut completion = ExprCompletion::default();
+        completion.refresh("", 0, &vocab);
+        let choice = Rc::new(expr_paint(&completion));
+        PromptField {
+            input,
+            label: label(&prompt).into(),
+            prompt,
+            rows: Rows::Expr(Box::new(ExprRows { completion, vocab })),
+            error: None,
+            moved: false,
+            closed: false,
+            choice,
         }
     }
 
     pub(crate) fn repaint(&mut self) {
         self.choice = Rc::new(match &self.rows {
-            Rows::Choice(list) => choice_paint(list),
+            Rows::Choice(list) => choice_paint(list, self.closed),
+            Rows::Expr(e) => expr_paint(&e.completion),
         });
     }
 
-    /// The typed text changed: re-rank. Typing after a moved highlight
-    /// makes it a guess again. Whether the rows changed.
-    pub(crate) fn typed(&mut self, text: &str) -> bool {
-        let changed = self.list_mut().set_query(text);
+    /// The typed text (or the caret) changed: re-rank. Typing after a
+    /// moved highlight makes it a guess again. Whether the rows changed.
+    pub(crate) fn typed(&mut self, text: &str, caret: usize) -> bool {
+        let changed = match &mut self.rows {
+            Rows::Choice(list) => list.set_query(text),
+            Rows::Expr(e) => match e.completion.refresh(text, caret, &e.vocab) {
+                Refresh::Unchanged => false,
+                // A categorical column's values are not requested: the
+                // tile issues no distinct, so the row list stays as it is.
+                Refresh::Changed | Refresh::Request(_) => true,
+            },
+        };
         if changed {
             self.moved = false;
             self.repaint();
@@ -98,26 +144,45 @@ impl PromptField {
 
     /// `up`/`down`: the highlight moves, and is a choice now.
     pub(crate) fn step(&mut self, delta: i64) {
-        self.list_mut().nav(NavCommand::Move(delta));
+        match &mut self.rows {
+            Rows::Choice(list) => list.nav(NavCommand::Move(delta)),
+            Rows::Expr(e) => e.completion.step(delta),
+        }
         self.moved = true;
         self.repaint();
     }
 
-    /// Hover lights a row without making it a choice: a pointer passing
-    /// over the list must not change what `enter` writes. Whether it
-    /// changed.
+    /// Hover lights painted row `row` without making it a choice: a
+    /// pointer passing over the list must not change what `enter` writes.
+    /// Whether it changed.
     pub(crate) fn hover(&mut self, row: usize) -> bool {
-        let list = self.list_mut();
-        let changed = list.highlighted() != row && list.set_highlighted(row);
+        let changed = match &mut self.rows {
+            Rows::Choice(list) => list.highlighted() != row && list.set_highlighted(row),
+            Rows::Expr(e) => {
+                let completion = &mut e.completion;
+                let target = self.choice.offset + row;
+                let delta = target as i64 - completion.highlighted() as i64;
+                if delta != 0 && target < completion.rows().len() {
+                    completion.step(delta);
+                    true
+                } else {
+                    false
+                }
+            }
+        };
         if changed {
             self.repaint();
         }
         changed
     }
 
-    /// A press on row `row`: its text, chosen.
+    /// A press on painted row `row` of a choice: its text, chosen. `None`
+    /// on the expression shape, whose rows are accepted (`accept`), not
+    /// answered.
     pub(crate) fn pick(&mut self, row: usize) -> Option<String> {
-        let list = self.list_mut();
+        let Rows::Choice(list) = &mut self.rows else {
+            return None;
+        };
         let text = list
             .set_highlighted(row)
             .then(|| list.highlighted_text().unwrap_or_default().to_string())?;
@@ -125,22 +190,53 @@ impl PromptField {
         Some(text)
     }
 
-    /// The answer `enter` gives for `text` (see [`answer_value`]).
+    /// What accepting painted row `row` of the completion writes into the
+    /// field; `None` on a choice, or with no such row.
+    pub(crate) fn accept(&self, row: usize) -> Option<Write> {
+        let Rows::Expr(e) = &self.rows else {
+            return None;
+        };
+        match e.completion.accept(self.choice.offset + row)? {
+            Accept::Write(w) => Some(w),
+            // No named offers are set, so no row stages.
+            Accept::Stage { .. } => None,
+        }
+    }
+
+    /// The answer `enter` gives for `text` (see [`answer_value`]); the
+    /// text as typed on the expression shape.
     pub(crate) fn answer(&mut self, text: &str) -> String {
-        let moved = self.moved;
-        answer_value(self.list_mut(), moved, text)
+        let take = self.moved || self.closed;
+        match &mut self.rows {
+            Rows::Choice(list) => answer_value(list, take, text),
+            Rows::Expr(_) => text.trim().to_string(),
+        }
+    }
+
+    /// The highlighted row's text, whichever shape.
+    #[cfg(test)]
+    pub(crate) fn highlighted_text(&self) -> Option<String> {
+        match &self.rows {
+            Rows::Choice(list) => list.highlighted_text().map(str::to_string),
+            Rows::Expr(e) => e
+                .completion
+                .rows()
+                .get(e.completion.highlighted())
+                .map(|r| r.label.clone()),
+        }
     }
 }
 
 /// The answer `enter` gives for `text`: the highlighted option when the
-/// trader moved the highlight or typed it out in full (any case, by
-/// Unicode lowercasing: the listed spelling wins, so `spx` never makes a
-/// second `SPX`); else the typed text trimmed, as typed, never re-cased.
-pub(crate) fn answer_value(list: &mut ChoiceList, moved: bool, text: &str) -> String {
+/// trader moved the highlight (or the list is closed) or typed it out in
+/// full (any case, by Unicode lowercasing: the listed spelling wins, so
+/// `spx` never makes a second `SPX`); else the typed text trimmed, as
+/// typed, never re-cased.
+pub(crate) fn answer_value(list: &mut ChoiceList, take: bool, text: &str) -> String {
     list.set_query(text);
     let typed = text.trim();
     let highlighted = list.highlighted_text().map(str::to_string);
-    let take = moved
+    let take = take
         || highlighted
             .as_deref()
             .is_some_and(|h| h.to_lowercase() == typed.to_lowercase());
@@ -154,6 +250,9 @@ pub(crate) fn answer_value(list: &mut ChoiceList, moved: bool, text: &str) -> St
 fn label(prompt: &Prompt) -> &'static str {
     match prompt {
         Prompt::AddName => "Add name",
+        Prompt::RuleDataset => "Rule dataset",
+        Prompt::RuleScope { .. } => "Rule scope",
+        Prompt::RuleExpression { .. } => "Rule expression",
     }
 }
 
@@ -161,58 +260,102 @@ fn label(prompt: &Prompt) -> &'static str {
 pub(crate) fn placeholder(prompt: &Prompt) -> &'static str {
     match prompt {
         Prompt::AddName => "underlying",
+        Prompt::RuleDataset => "dataset",
+        Prompt::RuleScope { .. } => "whole dataset, a saved scope or expression\u{2026}",
+        Prompt::RuleExpression { .. } => "book = 'BK000' and npv > 0",
     }
 }
 
-/// What the choice paints, prepared when the list changes.
+/// What the rows paint, prepared when they change.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ChoicePaint {
-    pub rows: Vec<SharedString>,
+    /// Each row's text and its muted detail (empty on a choice).
+    pub rows: Vec<(SharedString, SharedString)>,
     /// Window-relative, as `ChoiceList::highlighted` answers it.
     pub highlighted: usize,
-    /// Shown in place of rows when there are none.
-    pub empty: &'static str,
+    /// The first painted row's index among the ranked rows: a press on a
+    /// painted row names the ranked one.
+    pub offset: usize,
+    /// Shown in place of rows when there are none; `None` paints no list
+    /// at all (the hint says what is wanted).
+    pub empty: Option<&'static str>,
+    /// Under the field: the completion's warning (`true`) or its hint.
+    pub hint: Option<(SharedString, bool)>,
 }
 
-fn choice_paint(list: &ChoiceList) -> ChoicePaint {
+fn choice_paint(list: &ChoiceList, closed: bool) -> ChoicePaint {
     ChoicePaint {
         rows: list
             .painted()
             .iter()
-            .map(|r| list.options()[r.row].clone().into())
+            .map(|r| {
+                (
+                    list.options()[r.row].clone().into(),
+                    SharedString::default(),
+                )
+            })
             .collect(),
         highlighted: list.highlighted(),
-        empty: if list.options().is_empty() {
+        offset: 0,
+        empty: Some(if list.options().is_empty() {
             NO_NAMES
+        } else if closed {
+            NO_CHOICE
         } else {
             NEW_NAME
+        }),
+        hint: None,
+    }
+}
+
+/// A window of `DEFAULT_CAP` rows holding the highlight, as the choice
+/// shows: the completion keeps up to fifty, more than a popup should
+/// stand.
+fn expr_paint(c: &ExprCompletion) -> ChoicePaint {
+    let highlighted = c.highlighted();
+    let offset = highlighted.saturating_sub(DEFAULT_CAP - 1);
+    ChoicePaint {
+        rows: c
+            .rows()
+            .iter()
+            .skip(offset)
+            .take(DEFAULT_CAP)
+            .map(|r| (r.label.clone().into(), r.detail.clone().into()))
+            .collect(),
+        highlighted: highlighted - offset,
+        offset,
+        empty: None,
+        hint: match c.warning() {
+            Some(w) => Some((w.to_string().into(), true)),
+            None => Some((c.hint().to_string().into(), false)),
         },
     }
 }
 
-/// The ranked options hung from the bar's bottom-left, over the grid.
+/// The ranked rows hung from the bar's bottom-left, over the grid.
 /// `deferred` (via `anchor_popup`) escapes the table's clip. A row press
 /// picks it and stops there, so the grid under the list does not also take
 /// the press and close the field. No outside-press closer here: a press on
-/// the field itself is outside the list.
+/// the field itself is outside the list. `None` with nothing to list.
 fn render_choice(
     p: &ChoicePaint,
     tile: &Entity<WatchlistTile>,
     tile_id: u64,
     cx: &App,
-) -> impl IntoElement {
+) -> Option<impl IntoElement> {
     let theme = cx.theme();
     let mut list = popover::surface(cx)
         .debug_selector(move || format!("watchlist-prompt-list-{tile_id}"))
         .occlude();
     if p.rows.is_empty() {
-        list = list.child(popover::empty_row(theme, p.empty));
+        list = list.child(popover::empty_row(theme, p.empty?));
     }
-    for (i, text) in p.rows.iter().enumerate() {
+    for (i, (text, detail)) in p.rows.iter().enumerate() {
         list = list.child(
             h_flex()
                 .h(scale::design(ROW_HEIGHT))
                 .px(scale::design(ROW_INSET))
+                .gap_2()
                 .rounded(theme.radius)
                 .items_center()
                 .when(i == p.highlighted, |d| {
@@ -237,16 +380,24 @@ fn render_choice(
                     let tile = tile.clone();
                     move |_, _, cx| tile.update(cx, |t, cx| t.choice_hover(i, cx))
                 })
-                .child(text.clone()),
+                .child(div().flex_1().child(text.clone()))
+                .when(!detail.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .text_xs()
+                            .when(i != p.highlighted, |d| d.text_color(theme.muted_foreground))
+                            .child(detail.clone()),
+                    )
+                }),
         );
     }
-    popover::anchor_popup(list, Anchor::TopLeft)
+    Some(popover::anchor_popup(list, Anchor::TopLeft))
 }
 
 /// The prompt bar: under the header, full width, its label then the field;
 /// a refusal on its own line beneath, in the danger color, so the trader
-/// reads why next to what they typed. The choice hangs from the bar's
-/// bottom-left over the grid.
+/// reads why next to what they typed; the completion's hint or warning
+/// under that. The rows hang from the bar's bottom-left over the grid.
 pub(crate) fn render_prompt(
     p: &PromptField,
     tile: &Entity<WatchlistTile>,
@@ -295,13 +446,27 @@ pub(crate) fn render_prompt(
                     .child(why),
             )
         })
-        .child(div().absolute().left_0().bottom_0().child(list))
+        .when_some(p.choice.hint.clone(), |el, (hint, warning)| {
+            let tone = if warning { Tone::Warning } else { Tone::Status };
+            el.child(
+                div()
+                    .text_xs()
+                    .whitespace_normal()
+                    .text_color(notice::color(tone, theme))
+                    .debug_selector(move || format!("watchlist-prompt-hint-{tile_id}"))
+                    .child(hint),
+            )
+        })
+        .when_some(list, |el, list| {
+            el.child(div().absolute().left_0().bottom_0().child(list))
+        })
         .into_any_element()
 }
 
 /// The prompt field's lifetime, focus and keys.
 impl WatchlistTile {
-    /// Open the field asking `prompt` over `options`, focused.
+    /// Open the field asking `prompt` over `options`, focused: an open
+    /// typeahead for the add field, a closed choice for a rule step.
     pub(super) fn open_prompt(
         &mut self,
         prompt: Prompt,
@@ -309,35 +474,77 @@ impl WatchlistTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_prompt(window, cx);
-        let placeholder = placeholder(&prompt);
+        let input = self.new_input(&prompt, window, cx);
+        self.install_prompt(PromptField::new(input, prompt, options), window, cx);
+    }
+
+    /// Open the field asking `prompt` with an expression completion over
+    /// `vocab`, focused.
+    pub(super) fn open_expr_prompt(
+        &mut self,
+        prompt: Prompt,
+        vocab: ExprVocab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = self.new_input(&prompt, window, cx);
+        self.install_prompt(PromptField::expr(input, prompt, vocab), window, cx);
+    }
+
+    /// A fresh input for `prompt`, with every keystroke re-ranking the rows
+    /// (at the live caret: the completion reads it). The subscription dies
+    /// with the field.
+    fn new_input(
+        &mut self,
+        prompt: &Prompt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        let placeholder = placeholder(prompt);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-        // Every keystroke re-ranks the choice. The subscription dies with
-        // the field.
         cx.subscribe_in(&input, window, |this, input, event: &InputEvent, _, cx| {
             if let InputEvent::Change = event {
-                let query = input.read(cx).value().to_string();
+                let (query, caret) = {
+                    let s = input.read(cx);
+                    (s.value().to_string(), s.cursor())
+                };
                 if let Some(p) = this.prompt.as_mut().filter(|p| &p.input == input)
-                    && p.typed(&query)
+                    && p.typed(&query, caret)
                 {
                     cx.notify();
                 }
             }
         })
         .detach();
-        input.read(cx).focus_handle(cx).focus(window, cx);
-        self.prompt = Some(PromptField::new(input, prompt, options));
+        input
+    }
+
+    /// Replace any open field with `field`, focused.
+    fn install_prompt(&mut self, field: PromptField, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_prompt(window, cx);
+        field.input.read(cx).focus_handle(cx).focus(window, cx);
+        self.prompt = Some(field);
         self.field_window = Some(window.window_handle());
         cx.notify();
     }
 
-    /// `enter` in the field: the answer through `prompt::submit`, then the
-    /// verb. A refusal stays on the bar with the field open; a name added
-    /// (or restored, when it was excluded) closes it and writes.
+    /// `enter` in the field. On the expression shape a moved highlight is
+    /// a completion to write into the field, not an answer. Otherwise the
+    /// answer goes through `prompt::submit` (the add field) or
+    /// `prompt::submit_rule` (a rule step, over the factory's
+    /// configuration and the shown list as it is now), then the verb. A
+    /// refusal stays on the bar with the field open; a next step reopens
+    /// the field asking it; a name added (or restored, when it was
+    /// excluded) or a rules vector closes it and writes.
     pub(super) fn commit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = self.prompt.as_mut() else {
             return;
         };
+        if p.moved && matches!(p.rows, Rows::Expr(_)) {
+            let at = p.choice.highlighted;
+            self.accept_completion(at, window, cx);
+            return;
+        }
         let text = p.input.read(cx).value().to_string();
         let answer = p.answer(&text);
         let asked = p.prompt.clone();
@@ -347,30 +554,50 @@ impl WatchlistTile {
             self.refuse(NOTHING_SHOWN, cx);
             return;
         };
+        let config = state.definition.clone();
         let members = rows::members(state, self.history.pending());
-        let outcome = match prompt::submit(&asked, &answer, &members) {
-            Step::Refuse(why) => Err(why),
-            Step::Add(names) => {
-                let config = state.definition.clone();
-                let current = self.history.current(&config).clone();
-                edit::add(&current, &members, &names).map(|(next, entry)| {
-                    let restored = names
-                        .iter()
-                        .any(|n| members.iter().any(|m| &m.name == n && m.is_excluded()));
-                    let verb = if restored { "restored" } else { "added" };
-                    (config, next, entry, format!("{verb} {}", names.join(", ")))
-                })
-            }
+        let step = if asked.is_rule() {
+            let wc = self.rule_config();
+            let ctx = RuleContext {
+                schema: &wc.schema,
+                dims: &wc.dims,
+                saved: &wc.saved,
+                named: &wc.named,
+                current: self.history.current(&config),
+            };
+            prompt::submit_rule(&asked, &answer, &ctx)
+        } else {
+            prompt::submit(&asked, &answer, &members)
         };
-        match outcome {
-            Err(why) => {
+        match step {
+            Step::Refuse(why) => {
                 if let Some(p) = self.prompt.as_mut() {
                     p.error = Some(why.into());
                 }
             }
-            Ok((config, next, entry, said)) => {
+            Step::Add(names) => {
+                let current = self.history.current(&config).clone();
+                match edit::add(&current, &members, &names) {
+                    Err(why) => {
+                        if let Some(p) = self.prompt.as_mut() {
+                            p.error = Some(why.into());
+                        }
+                    }
+                    Ok((next, entry)) => {
+                        let restored = names
+                            .iter()
+                            .any(|n| members.iter().any(|m| &m.name == n && m.is_excluded()));
+                        let verb = if restored { "restored" } else { "added" };
+                        let said = format!("{verb} {}", names.join(", "));
+                        self.close_prompt(window, cx);
+                        self.commit(&name, &config, next, entry, Notice::status(said), cx);
+                    }
+                }
+            }
+            Step::Next(next) => self.open_rule_prompt(next, window, cx),
+            Step::Rules(rules) => {
                 self.close_prompt(window, cx);
-                self.commit(&name, &config, next, entry, Notice::status(said), cx);
+                self.write_rules(&name, &config, rules, asked.replace(), cx);
             }
         }
         cx.notify();
@@ -426,8 +653,17 @@ impl WatchlistTile {
         }
     }
 
-    /// A press on a list row: that name, committed at once.
+    /// A press on a list row: that name, committed at once; on the
+    /// expression shape, that completion written into the field.
     fn choice_pick(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .prompt
+            .as_ref()
+            .is_some_and(|p| matches!(p.rows, Rows::Expr(_)))
+        {
+            self.accept_completion(row, window, cx);
+            return;
+        }
         let picked = self
             .prompt
             .as_mut()
@@ -438,26 +674,70 @@ impl WatchlistTile {
         }
     }
 
-    /// The open field: its text, its refusal and its ranked options.
+    /// Write painted completion row `row` over its token, as one range
+    /// replace (so the input's undo takes it back), the caret after it,
+    /// the keyboard kept in the field (a row press must not take it), and
+    /// the rows re-ranked at the new caret. The field stays open.
+    fn accept_completion(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.prompt.as_mut() else {
+            return;
+        };
+        let Some(write) = p.accept(row) else {
+            return;
+        };
+        let input = p.input.clone();
+        let (text, caret) = input.update(cx, |s, cx| {
+            s.set_selected_range(write.range.clone(), cx);
+            s.replace(write.text.clone(), window, cx);
+            s.focus(window, cx);
+            (s.value().to_string(), s.cursor())
+        });
+        if let Some(p) = self.prompt.as_mut() {
+            p.error = None;
+            p.typed(&text, caret);
+        }
+        cx.notify();
+    }
+
+    /// The open field: its text, its refusal and its ranked rows.
     #[cfg(test)]
     pub(super) fn prompt_state(&self, cx: &App) -> Option<(String, Option<String>, Vec<String>)> {
         let p = self.prompt.as_ref()?;
-        let Rows::Choice(list) = &p.rows;
-        Some((
-            p.input.read(cx).value().to_string(),
-            p.error.as_ref().map(|e| e.to_string()),
-            list.ranked()
+        let rows = match &p.rows {
+            Rows::Choice(list) => list
+                .ranked()
                 .iter()
                 .map(|r| list.options()[r.row].clone())
                 .collect(),
+            Rows::Expr(e) => e
+                .completion
+                .rows()
+                .iter()
+                .map(|r| r.label.clone())
+                .collect(),
+        };
+        Some((
+            p.input.read(cx).value().to_string(),
+            p.error.as_ref().map(|e| e.to_string()),
+            rows,
         ))
     }
 
     /// The open field's highlighted option.
     #[cfg(test)]
     pub(super) fn prompt_highlight(&self) -> Option<String> {
-        let Rows::Choice(list) = &self.prompt.as_ref()?.rows;
-        list.highlighted_text().map(str::to_string)
+        self.prompt.as_ref()?.highlighted_text()
+    }
+
+    /// The open field's hint line and whether it is a warning.
+    #[cfg(test)]
+    pub(super) fn prompt_hint(&self) -> Option<(String, bool)> {
+        self.prompt
+            .as_ref()?
+            .choice
+            .hint
+            .as_ref()
+            .map(|(h, w)| (h.to_string(), *w))
     }
 }
 
@@ -489,5 +769,46 @@ mod tests {
             answer_value(&mut list(&["\u{c9}NERGIE"]), false, "\u{e9}nergie"),
             "\u{c9}NERGIE"
         );
+    }
+
+    /// The completion's paint is a window holding the highlight, and a
+    /// press on a painted row names the ranked one.
+    #[test]
+    fn the_expression_paint_windows_the_rows_around_the_highlight() {
+        use geode_core::config::{LayerDoc, merge_docs};
+        use geode_core::dimensions::DerivedDimensions;
+        use geode_core::schema::SchemaSpec;
+        let mut text = String::new();
+        for i in 0..20 {
+            text.push_str(&format!(
+                "[risk.columns.c{i:02}]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"position\"\n"
+            ));
+        }
+        let (schema, _) = SchemaSpec::from_doc(&merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", &text).unwrap()],
+        ));
+        let vocab = ExprVocab::new(&schema, &DerivedDimensions::default());
+        let mut c = ExprCompletion::default();
+        c.refresh("", 0, &vocab);
+        let p = expr_paint(&c);
+        assert_eq!(p.rows.len(), DEFAULT_CAP);
+        assert_eq!((p.highlighted, p.offset), (0, 0));
+        assert_eq!(p.rows[0].0.as_ref(), "c00");
+        assert_eq!(p.rows[0].1.as_ref(), "dimension \u{b7} text");
+        assert_eq!(
+            p.hint.as_ref().map(|(h, w)| (h.as_ref(), *w)),
+            Some(("column", false))
+        );
+        for _ in 0..15 {
+            c.step(1);
+        }
+        let p = expr_paint(&c);
+        assert_eq!(
+            (p.highlighted, p.offset),
+            (DEFAULT_CAP - 1, 15 - (DEFAULT_CAP - 1))
+        );
+        assert_eq!(p.rows[p.highlighted].0.as_ref(), "c15");
+        assert_eq!(p.empty, None, "no rows is no list, not an empty one");
     }
 }
