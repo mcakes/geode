@@ -200,25 +200,42 @@ pub fn demo_dir(rows: usize) -> PathBuf {
         .join(format!("{rows}-{SEED}"))
 }
 
-/// Returns `dir/src`, generating source files when it has no directory entries.
-/// Any existing entry suppresses generation; existing contents are reused
-/// without checking completeness so repeated launches can use a warm store.
-/// Directory creation and emission errors propagate to the caller.
+/// Returns `dir/src`, generating risk source files when it has no directory
+/// entries, and fills `dir/scenario` with the scenario files the same way.
+/// Any existing entry suppresses generation of that directory; existing
+/// contents are reused without checking completeness so repeated launches
+/// can use a warm store. Directory creation and emission errors propagate
+/// to the caller.
 pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
+    let populated = |path: &Path| {
+        std::fs::read_dir(path)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false)
+    };
     let src = dir.join("src");
-    let populated = std::fs::read_dir(&src)
-        .map(|mut d| d.next().is_some())
-        .unwrap_or(false);
-    if !populated {
+    // Scenario files live beside `src`, not under it: the risk source's
+    // `<src>/*.csv` glob must never pick one up.
+    let scenario = dir.join("scenario");
+    let src_populated = populated(&src);
+    let scenario_populated = populated(&scenario);
+    if src_populated && scenario_populated {
+        return Ok(src);
+    }
+    let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+        rows,
+        seed: SEED,
+        business_dates: 1,
+    });
+    if !src_populated {
         std::fs::create_dir_all(&src)?;
-        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
-            rows,
-            seed: SEED,
-            business_dates: 1,
-        });
         let mut opts = geode_demo_data::EmitOptions::new(&src);
         opts.leave_one_pending = false;
         geode_demo_data::emit_directory(&batch, &opts)?;
+    }
+    if !scenario_populated {
+        let set =
+            geode_demo_data::generate_scenarios(&batch, geode_demo_data::SCENARIO_COVERAGE, SEED);
+        geode_demo_data::emit_scenario_directory(&set, &scenario)?;
     }
     Ok(src)
 }
@@ -236,8 +253,22 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
 /// catalogue and the latter requires entered identities. The position
 /// service is `demo_positions`, which rewrites the risk CSVs in place.
 /// `refdb` polls the `underlyings` reference table from `demo_refdb` every
-/// 30 s.
+/// 30 s. Each scenario dataset has a `demo_scenario_<dataset>` directory
+/// source over `scenario/` beside `source_dir`, polled every five seconds.
 pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
+    let scenario_dir = source_dir
+        .parent()
+        .map(|p| p.join("scenario"))
+        .unwrap_or_else(|| source_dir.join("scenario"));
+    let mut scenario_sources = String::new();
+    for ds in geode_demo_data::SCENARIO_DATASETS {
+        scenario_sources.push_str(&format!(
+            "[demo_scenario_{ds}]\ndataset = \"{ds}\"\npaths = [{:?}]\n\
+             readiness = \"sentinel\"\npriority = \"latest_other\"\npoll_interval = \"5s\"\n\
+             pending_timeout = \"1m\"\nbatch_pattern = '^{ds}_\\d{{4}}-\\d{{2}}-\\d{{2}}_(?P<batch>.+)$'\n",
+            scenario_dir.join(format!("{ds}_*.csv")).to_string_lossy()
+        ));
+    }
     let sources = format!(
         "config_version = 1\n[demo]\ndataset = \"risk_snapshot\"\npaths = [{:?}]\n\
          readiness = \"sentinel\"\npriority = \"latest_risk\"\npoll_interval = \"2s\"\n\
@@ -254,8 +285,9 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          [demo_kdb]\nadapter = \"demo_kdb\"\ndataset = \"series\"\n\
          [demo_rest]\nadapter = \"demo_rest\"\ndataset = \"series\"\n\
          [refdb]\nadapter = \"demo_refdb\"\ndataset = \"underlyings\"\n\
-         table = \"underlyings\"\npoll_interval = \"30s\"\n",
-        source_dir.join("*.csv").to_string_lossy()
+         table = \"underlyings\"\npoll_interval = \"30s\"\n{}",
+        source_dir.join("*.csv").to_string_lossy(),
+        scenario_sources
     );
     // The `sophis` target publishes both document kinds through the same
     // adapter as their subscribed sources. Per-key NOTIFY addresses route
@@ -481,7 +513,11 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
-        assert_eq!(sources.len(), 7);
+        assert_eq!(
+            sources.len(),
+            12,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario sources"
+        );
     }
 
     /// The dividend source declares its document kind, topic, coalescing,
@@ -512,8 +548,8 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            7,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb"
+            12,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario sources"
         );
         assert!(sources.iter().any(|s| s.name == "dividend"));
     }
@@ -546,8 +582,8 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            7,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb"
+            12,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario sources"
         );
         assert!(sources.iter().any(|s| s.name == "opra_sim"));
     }
@@ -588,7 +624,11 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
-        assert_eq!(sources.len(), 7);
+        assert_eq!(
+            sources.len(),
+            12,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario sources"
+        );
         let kdb = sources.iter().find(|s| s.name == "demo_kdb").unwrap();
         let rest = sources.iter().find(|s| s.name == "demo_rest").unwrap();
         assert_eq!(
@@ -640,6 +680,139 @@ mod tests {
             count,
             "not emitted twice"
         );
+    }
+
+    /// The demo schema and sources at `/tmp/geode-demo/100-42/src`.
+    fn demo_schema_and_sources() -> (
+        geode_core::schema::SchemaSpec,
+        Vec<geode_data::source::SourceSpec>,
+    ) {
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: layer(std::path::Path::new("/tmp/geode-demo/100-42/src")),
+            ..geode_core::config::ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let (schema, d) = geode_core::schema::SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        assert!(d.is_empty(), "{d:?}");
+        let (sources, d) =
+            geode_data::source::SourceSpec::from_doc(config.doc("sources").unwrap(), &schema);
+        assert!(d.is_empty(), "{d:?}");
+        (schema, sources)
+    }
+
+    #[test]
+    fn the_demo_layer_declares_the_five_scenario_sources() {
+        let (schema, sources) = demo_schema_and_sources();
+        for ds in geode_demo_data::SCENARIO_DATASETS {
+            let spec = schema
+                .dataset(ds)
+                .unwrap_or_else(|| panic!("{ds} declared"));
+            assert!(spec.has_axes(), "{ds} has axes");
+            assert!(
+                spec.column("underlying_ref").is_some() && spec.column("currency").is_some(),
+                "{ds} keeps the risk dimensions"
+            );
+            let src = sources
+                .iter()
+                .find(|s| s.name == format!("demo_scenario_{ds}"))
+                .unwrap_or_else(|| panic!("source for {ds}"));
+            assert_eq!(src.dataset, ds);
+            assert_eq!(
+                src.paths,
+                [format!("/tmp/geode-demo/100-42/scenario/{ds}_*.csv")]
+            );
+            assert_eq!(
+                src.priority,
+                geode_core::source_config::Priority::LatestOther
+            );
+            assert!(
+                src.batch_pattern
+                    .as_deref()
+                    .unwrap()
+                    .starts_with(&format!("^{ds}_")),
+                "{:?}",
+                src.batch_pattern
+            );
+        }
+        assert_eq!(
+            sources.len(),
+            12,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario sources"
+        );
+    }
+
+    /// `[demo]` reads `<src>/*.csv`; the scenario files live beside, not
+    /// under, `src`, so a scenario CSV never loads as risk.
+    #[test]
+    fn the_risk_glob_does_not_match_scenario_files() {
+        let (_, sources) = demo_schema_and_sources();
+        let risk = sources.iter().find(|s| s.name == "demo").unwrap();
+        assert_eq!(risk.paths, ["/tmp/geode-demo/100-42/src/*.csv"]);
+        let risk_dir = Path::new(&risk.paths[0]).parent().unwrap();
+        for ds in geode_demo_data::SCENARIO_DATASETS {
+            let src = sources
+                .iter()
+                .find(|s| s.name == format!("demo_scenario_{ds}"))
+                .unwrap();
+            let dir = Path::new(&src.paths[0]).parent().unwrap();
+            assert_ne!(dir, risk_dir, "{ds}");
+            assert_eq!(dir, Path::new("/tmp/geode-demo/100-42/scenario"), "{ds}");
+        }
+    }
+
+    #[test]
+    fn ensure_emitted_fills_the_scenario_directory_too() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_emitted(dir.path(), 300).unwrap();
+        let scenario = dir.path().join("scenario");
+        let n = std::fs::read_dir(&scenario).unwrap().count();
+        assert!(n > 0, "scenario files emitted");
+        assert!(std::fs::read_dir(&scenario).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".csv.done")
+        }));
+        // A warm scenario directory is reused, like src.
+        ensure_emitted(dir.path(), 300).unwrap();
+        assert_eq!(std::fs::read_dir(&scenario).unwrap().count(), n);
+    }
+
+    /// Every scenario column's `source_name` is a header the emitter writes,
+    /// so a misspelling on either side fails here rather than as a
+    /// missing-column health condition at runtime.
+    #[test]
+    fn every_scenario_source_name_is_a_header_the_emitter_writes() {
+        let (schema, _) = demo_schema_and_sources();
+        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+            rows: 300,
+            seed: SEED,
+            business_dates: 1,
+        });
+        let set = geode_demo_data::generate_scenarios(&batch, 20, SEED);
+        let dir = tempfile::tempdir().unwrap();
+        geode_demo_data::emit_scenario_directory(&set, dir.path()).unwrap();
+        for ds in geode_demo_data::SCENARIO_DATASETS {
+            let csv = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| {
+                    let name = p.file_name().unwrap().to_string_lossy();
+                    name.starts_with(&format!("{ds}_")) && name.ends_with(".csv")
+                })
+                .unwrap_or_else(|| panic!("a CSV for {ds}"));
+            let text = std::fs::read_to_string(&csv).unwrap();
+            let header: Vec<&str> = text.lines().next().unwrap().split(',').collect();
+            let spec = schema.dataset(ds).unwrap();
+            for column in &spec.columns {
+                assert!(
+                    header.contains(&column.source_name()),
+                    "{ds}.{} reads {:?}, absent from {header:?}",
+                    column.name,
+                    column.source_name()
+                );
+            }
+        }
     }
 }
 

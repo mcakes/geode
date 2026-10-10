@@ -599,6 +599,22 @@ fn a_handoff_keeps_the_documents_the_collector_received() {
             .all(|u| done.contains_key(&("cvi_params".to_string(), u.clone())))
             .then_some(())
     });
+    // The directory sources' startup loads, the scenario files last,
+    // publish back to back for several seconds in a debug build, with no
+    // quiet second between them; wait for every scenario file first.
+    let scenario = world.db.parent().unwrap().join("scenario");
+    let expected = scenario_batches(&scenario);
+    assert!(!expected.is_empty(), "the demo emitted scenario files");
+    wait_until("every scenario file published", WAIT, || {
+        if let Some(status) = collector.exited() {
+            panic!("{}", world.exited_message(status));
+        }
+        let done = published(&world.log());
+        expected
+            .iter()
+            .all(|key| done.contains_key(key))
+            .then_some(())
+    });
     wait_quiet(&world, Duration::from_secs(1), WAIT);
 
     let (lease, store, _, _) = take_store(&world.db);
@@ -970,6 +986,26 @@ fn handoff_once(world: &World, collector: &mut Proc, marker: &str) -> Sample {
         drained,
         release_ms,
     }
+}
+
+/// The (dataset, batch) of every scenario CSV under `dir`, as the
+/// collector's publish lines name them: `<dataset>_<date>_<batch>.csv`.
+fn scenario_batches(dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".csv") else {
+            continue;
+        };
+        for ds in geode_demo_data::SCENARIO_DATASETS {
+            if let Some(rest) = stem.strip_prefix(&format!("{ds}_"))
+                && let Some((_date, batch)) = rest.split_once('_')
+            {
+                out.push((ds.to_string(), batch.to_string()));
+            }
+        }
+    }
+    out
 }
 
 /// Wait until no publish has been logged for `quiet`.

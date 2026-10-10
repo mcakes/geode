@@ -92,10 +92,10 @@ mod demo_config_integration {
     #[test]
     fn a_move_is_ingested_as_the_new_lhu() {
         use geode_core::positions::MoveLhuParams;
-        use geode_core::query::{DistinctParams, QueryKey};
+        use geode_core::query::QueryKey;
         use geode_core::scope::{DimensionSelection, Scope};
         use geode_data::query::as_of::AsOf;
-        use geode_data::{DataEvent, DataService};
+        use geode_data::{DataEvent, DataService, QueryParams};
         use std::sync::mpsc::Receiver;
         use std::time::{Duration, Instant};
 
@@ -139,7 +139,10 @@ mod demo_config_integration {
         let target = "BK007_LHU2".to_string();
         assert_ne!(first[at("LHU")], target);
 
-        // The LHU values ingested for `p`, polled until `done` holds.
+        // The LHU values ingested for `p` in `risk_snapshot`, polled until
+        // `done` holds. Read through the risk view, not a distinct over
+        // every dataset carrying `lhu`: scenario files are a run, and a
+        // move does not rewrite them.
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut tag = 0;
         let mut lhus_until = |rx: &Receiver<DataEvent>, done: &dyn Fn(&[String]) -> bool| loop {
@@ -149,10 +152,12 @@ mod demo_config_integration {
             );
             tag += 1;
             handle
-                .distinct(DistinctParams {
+                .query(QueryParams {
                     key: QueryKey(1),
                     tag,
-                    column: "lhu".into(),
+                    submitted: Instant::now(),
+                    view: "tree".into(),
+                    grouping: Some(vec!["lhu".into()]),
                     scope: Scope {
                         dimensions: vec![DimensionSelection {
                             column: "position_ref".into(),
@@ -161,16 +166,21 @@ mod demo_config_integration {
                         ..Scope::default()
                     },
                     as_of: AsOf::Live,
+                    max_depth: 1,
                 })
                 .unwrap();
-            let values = loop {
+            let snap = loop {
                 match rx.recv_timeout(Duration::from_secs(10)) {
-                    Ok(DataEvent::Distinct(o)) if o.tag == tag => break o.values.unwrap(),
+                    Ok(DataEvent::Query(o)) if o.tag == tag => break o.snapshot.unwrap(),
                     Ok(_) => continue,
-                    Err(e) => panic!("no distinct answer: {e}"),
+                    Err(e) => panic!("no query answer: {e}"),
                 }
             };
-            let values: Vec<String> = values.into_iter().map(|(v, _)| v).collect();
+            let mut values: Vec<String> = (0..snap.rows())
+                .filter_map(|i| snap.text_value("lhu", i).map(str::to_string))
+                .collect();
+            values.sort();
+            values.dedup();
             if done(&values) {
                 break values;
             }
@@ -299,10 +309,10 @@ mod demo_config_integration {
         assert_eq!(names, vec!["tree", "wide"]);
         let wide = setup.views.iter().find(|v| v.name == "wide").unwrap();
         assert_eq!(wide.columns.len(), 100, "the wide view has 100 columns");
-        // All seven source definitions survive setup: risk CSVs, the CVI,
+        // All twelve source definitions survive setup: risk CSVs, the CVI,
         // dividend and option-chain subscriptions, the two timeseries fetch
-        // adapters, and the reference snapshot.
-        assert_eq!(setup.config.sources.len(), 7);
+        // adapters, the reference snapshot, and the five scenario directories.
+        assert_eq!(setup.config.sources.len(), 12);
         // Setup must carry the resolved egress target into the service config.
         assert_eq!(setup.config.egress.len(), 1);
         assert_eq!(setup.config.egress[0].name, "sophis");
