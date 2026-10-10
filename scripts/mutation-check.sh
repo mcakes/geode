@@ -37512,6 +37512,97 @@ run_mutation "demo scenario: the sources point beside src" \
   '        .map(|p| p.join("scenario"))' \
   '        .map(|p| p.join("src"))' \
   geode-compose the_demo_layer_declares_the_five_scenario_sources
+
+# ---- scenario shapes (scenarios.toml) and the pivot ----
+
+run_mutation "scenario: an axis laid out nowhere is refused" \
+  crates/geode-core/src/scenario/check.rs \
+  '    if let Some(unlaid) = ds.axes.iter().find(|a| !laid.contains(&a.as_str())) {' \
+  '    if let Some(unlaid) = ds.axes.iter().find(|a| false && !laid.contains(&a.as_str())) {' \
+  geode-core schema_refusals_name_their_field
+
+run_mutation "scenario: a measure's twin is its _usd column" \
+  crates/geode-core/src/scenario/check.rs \
+  '    let twin = format!("{}_usd", m.column);' \
+  '    let twin = format!("{}_eur", m.column);' \
+  geode-core a_checked_ladder_fills_twins_where_declared_and_leaves_the_rest
+
+# A column named m_usd that is not a measure (a dimension, say) must not be
+# offered as m's currency alternate: the toggle would paint a label column.
+run_mutation "scenario: only a measure is a _usd twin" \
+  crates/geode-core/src/scenario/check.rs \
+  '        .filter(|c| matches!(c.role, ColumnRole::Measure { .. }))' \
+  '        .filter(|_| true)' \
+  geode-core a_usd_named_column_that_is_not_a_measure_is_no_twin
+
+run_mutation "scenario: a diff base must fit the rows axis type" \
+  crates/geode-core/src/scenario/check.rs \
+  '            DiffBase::Number(_) => rows.is_numeric(),' \
+  '            DiffBase::Number(_) => true,' \
+  geode-core a_diff_base_must_match_the_rows_axis_type
+
+run_mutation "scenario: a Σ across the columns needs every columns axis to be a bucket" \
+  crates/geode-core/src/scenario/mod.rs \
+  '                .all(|c| self.axis(c).is_some_and(|a| a.kind == AxisKind::Bucket))' \
+  '                .all(|c| self.axis(c).is_some())' \
+  geode-core a_matrix_over_a_scenario_columns_axis_has_no_column_sum
+
+run_mutation "scenario: a user override replaces the builtin whole" \
+  crates/geode-core/src/config/merge.rs \
+  '        "scenarios" => Some(1),' \
+  '        "scenarios" => None,' \
+  geode-core a_user_shape_replaces_the_builtin_one_whole_and_a_refused_one_takes_it_down
+
+run_mutation "scenario scale: cells under the floor take no fill" \
+  crates/geode-core/src/colour/scale.rs \
+  '        if value == 0.0 || ratio < FLOOR {' \
+  '        if value == 0.0 {' \
+  geode-core cells_under_the_floor_take_no_fill_and_the_largest_takes_the_cap
+
+run_mutation "scenario scale: magnitude beyond the domain clamps at the cap" \
+  crates/geode-core/src/colour/scale.rs \
+  '        let t = FLOOR + (CAP - FLOOR) * ratio.min(1.0);' \
+  '        let t = FLOOR + (CAP - FLOOR) * ratio;' \
+  geode-core cells_under_the_floor_take_no_fill_and_the_largest_takes_the_cap
+
+run_mutation "scenario pivot: numeric axis labels order by value" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '            (Some(x), Some(y)) => x
+                .partial_cmp(&y)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.text.cmp(&b.text)),' \
+  '            (Some(_), Some(_)) => a.text.cmp(&b.text),' \
+  geode-scenario numeric_axis_labels_order_numerically
+
+run_mutation "scenario pivot: the row Σ is the subtotal row, not the cells" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                    sums[*row] = main.f64_at(value_idx, r);' \
+  '                    sums[*row] = main.f64_at(value_idx, r).map(|v| v - 1.0);' \
+  geode-scenario row_sums_come_from_the_subtotal_rows_not_the_cells
+
+run_mutation "scenario pivot: disagreeing generations withhold the Σ row" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                        (Some(a), Some(b)) if a != b' \
+  '                        (Some(a), Some(b)) if a != b && false' \
+  geode-scenario column_sums_blank_while_the_pairs_generations_disagree
+
+run_mutation "scenario pivot: a missing diff base is reported" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                None => diff_base_missing = true,' \
+  '                None => diff_base_missing = false,' \
+  geode-scenario a_missing_base_row_paints_absolutes_and_says_so
+
+run_mutation "scenario pivot: the heat domain skips the base row's diffed cells" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                if Some(row) == base_row && column.diffed {' \
+  '                if false && Some(row) == base_row && column.diffed {' \
+  geode-scenario the_heat_domain_excludes_the_base_rows_absolute_cells_in_diff_mode
+
+run_mutation "scenario pivot: the domain never drops a present label" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                && !row_labels.iter().any(|l| l == label)' \
+  '                && !row_labels.iter().any(|l| l == label) && false' \
+  geode-scenario the_domain_adds_labels_the_scope_lacks_and_never_drops_present_ones
 # value_colors replaces one value's entry whole (depth 2). At depth 1 a user
 # entry would drop the desk's other values of the dimension.
 run_mutation "value colors: a dimension merges per value" \

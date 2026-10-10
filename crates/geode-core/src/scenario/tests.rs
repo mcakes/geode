@@ -790,3 +790,26 @@ fn a_structural_refusal_is_reported_once_and_the_rest_still_check() {
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].path.as_deref(), Some("scenarios.vega_kt.paint"));
 }
+
+#[test]
+fn a_usd_named_column_that_is_not_a_measure_is_no_twin() {
+    let datasets = format!(
+        "{DATASETS}\n[spot_ladder.columns.theta_usd]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"instrument\"\n"
+    );
+    let doc = merge_docs(
+        "datasets",
+        &[LayerDoc::builtin("datasets", &datasets).expect("well-formed test TOML")],
+    );
+    let (schema, diags) = SchemaSpec::from_doc(&doc);
+    assert!(diags.is_empty(), "{diags:?}");
+    let (shapes, diags) = load_scenarios(&builtin_doc(SPOT_LADDER), &schema);
+    assert!(diags.is_empty(), "{diags:?}");
+    let Columns::Measures(cols) = &shapes[0].columns else {
+        unreachable!()
+    };
+    assert_eq!(cols[1].usd_twin.as_deref(), Some("delta_usd"));
+    assert_eq!(
+        cols[2].usd_twin, None,
+        "a dimension named theta_usd is no twin"
+    );
+}

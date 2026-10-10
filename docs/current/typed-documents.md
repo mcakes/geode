@@ -207,6 +207,28 @@ grid. Accepted panels keep document order, and `config_version` is skipped.
 `geode-app` additionally refuses a panel named after another module's kind
 and builds one tile kind per accepted panel.
 
+## Scenario shapes
+
+The `scenarios` reader has two halves, both pure, shaped like the panels
+reader. [`read_scenarios`](../../crates/geode-core/src/scenario/read.rs)
+judges each shape alone: its name, required keys, exactly one `columns` form,
+the `value`, `diff` and `paint` rules, formats, and labels named once.
+[`load_scenarios`](../../crates/geode-core/src/scenario/check.rs) runs it,
+then checks each surviving shape against the schema — the dataset is a
+measures dataset with `axes`, every dataset axis is `rows` or in `columns`,
+every named measure is one, the diff base fits the rows axis's type — and
+fills in what only the schema knows: the dataset's axes (kind, order, type,
+in dataset order) and each measure's `_usd` twin. The pivot reads a shape
+only after this half has run; one straight out of `read_scenarios` has no
+axes and refuses to pivot. The full refusal list is in
+[configuration](configuration.md#scenario-shapes).
+
+Nothing here only warns. The first problem refuses the whole shape with one
+Error at `scenarios.<name>` or `scenarios.<name>.<field>` (for example
+`scenarios.rho.columns.axis.1` or `scenarios.spot_ladder.diff.base`),
+attributed to the layer that supplied it; its neighbours still load.
+Accepted shapes keep document order, and `config_version` is skipped.
+
 ## Grouping slots and saved scopes
 
 [`GroupingSlots`](../../crates/geode-core/src/groupings.rs) reads slots 1–9.

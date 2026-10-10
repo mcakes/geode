@@ -27,8 +27,8 @@ are part of several document contracts.
 
 Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
 `layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`, `dimensions`,
-`colors`, `expressions`, `pricer_templates`, `panels`, and `overrides`
-replace whole named objects.
+`colors`, `expressions`, `pricer_templates`, `panels`, `scenarios`, and
+`overrides` replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
@@ -92,6 +92,7 @@ The main configuration documents have distinct owners:
 | `egress.toml` | Upload targets: adapter and a per-document address template |
 | `positions.toml` | The one position service: the adapter that takes position commands such as Move LHU |
 | `panels.toml` | Market-data panels: the dataset, document kind, layout, formats, and kind actions of each panel tile kind |
+| `scenarios.toml` | Scenario tile shapes: the axis dataset, the rows axis, the columns (axes or measures), the painted measure, diff and starting paint of each scenario tile kind |
 | `pricer_templates.toml` | Named option-package templates used by the pricer's shorthand |
 | `dimensions.toml` | Derived dimensions used for grouping and scope; each entry is what the interface calls a classification |
 | `groupings.toml` | The nine shared grouping slots |
@@ -569,6 +570,87 @@ registered action by id. The builtin set is CVI's
 `marketdata::cvi_reanchor` and `marketdata::cvi_recalc_forward`, both
 unbuilt: their menu rows are disabled and the tile answers `not built yet`.
 Adding an action means adding its handler and registration.
+
+## Scenario shapes
+
+`scenarios.toml` defines the scenario tile kinds. Each top-level table is one
+shape and its name is the tile kind: `[vega_kt]` is the `vega_kt` kind, its
+add-tile action `tile::add_vega_kt`, its session tiles `module = "vega_kt"`.
+The builtin layer ships five
+([`builtin_scenarios.toml`](../../crates/geode-scenario/src/core/builtin_scenarios.toml)):
+`vega_kt`, `vega_spot`, `spot_ladder`, `by_maturity` and `rho`. A desk or
+user shape with a new name adds a kind; one with an existing name replaces
+that shape whole, so a `[vega_kt]` override giving only a `title` inherits
+nothing and is refused for its missing keys — and the builtin it replaced is
+gone with it.
+
+```toml
+[vega_kt]
+title = "Vega K/T"
+dataset = "vega_buckets"
+rows = "tenor"
+columns = { axis = "moneyness" }
+value = "vega"
+paint = "heat"
+
+[spot_ladder]
+title = "Spot ladder"
+dataset = "spot_ladder"
+rows = "spot_shift"
+columns = { measures = [
+  { column = "npv", label = "P&L vs base" },
+  { column = "delta", label = "Δ01", format = { precision = 0, scale = "k" } },
+  { column = "theta", label = "Θ", unit = "per day" },
+] }
+diff = { base = 0, measures = ["npv"] }
+paint = "heat"
+```
+
+| Key | Required | Meaning |
+|---|---|---|
+| `title` | yes | The palette and header name (`{title}: Split` in the palette) |
+| `dataset` | yes | A measures dataset that declares `axes` |
+| `rows` | yes | The axis down the side |
+| `columns` | yes | Exactly one of `axis = "x"` or `axis = ["x", "y"]` (a matrix; two axes make a two-level header, outer first) or `measures = [ … ]` (a ladder: one column per measure) |
+| `value` | with an axis `columns` | The measure a matrix paints; refused with a measures `columns` |
+| `format`, `unit` | no, with `value` only | The painted measure's format and the text under its header |
+| `diff` | no, with a measures `columns` only | `{ base, measures }`: the listed measures paint value minus the base row's value, the base row stays absolute and is highlighted |
+| `paint` | yes | `heat` or `plain`, the fill a tile starts with |
+
+Each ladder measure is `{ column, label?, format?, unit? }`; `label` defaults
+to the column name. A `format` table takes the view format keys `precision`,
+`thousands`, `negative`, `scale` and `color` over the measure default (two
+places, grouping, minus signs, sign color). A measure `m` whose dataset also
+declares `m_usd` as a measure has a currency alternate the tile toggles with
+`c`; one without has none.
+
+### Refusals
+
+The name must be a usable tile kind (lower-case ASCII letters, digits and
+`_`, starting with a letter) and must not end in a placement suffix
+(`_horizontal`, `_vertical`, `_stacked`). Beyond that a shape is refused with
+one Error at `scenarios.<name>[.<field>]`, attributed to the layer that
+supplied it, when:
+
+- a key is unknown, a required key is missing, or a value has the wrong
+  shape, including a malformed `format`;
+- `columns` gives both or neither of `axis` and `measures`, more than two
+  axes, the same axis twice, or the `rows` axis;
+- `value` is missing with an axis `columns`, or present with a measures
+  `columns`; `format` or `unit` sits at the top level of a ladder;
+- a ladder lists a measure twice or two measures share a label;
+- `diff` accompanies an axis `columns`, lacks `base` or `measures`, lists a
+  measure not in `columns`, or its `base` is neither a number nor a string;
+- `paint` is anything but `heat` or `plain`;
+- `dataset` is not declared, or is not a measures dataset with `axes`;
+- `rows` or a `columns` axis is not an axis of the dataset, or an axis of
+  the dataset is laid out nowhere (it would be summed across silently);
+- `value` or a ladder measure is not a measure of the dataset;
+- `diff.base` is a number on a text axis, or text on a numeric axis.
+
+Datasets are checked against the assembled schema, so a desk shape over a
+desk dataset is accepted when both documents agree. A refused shape never
+becomes a tile kind.
 
 ## Runtime edits
 
