@@ -263,6 +263,24 @@ pub fn is_shell_key(key: QueryKey) -> bool {
 /// whose tag is not its dataset's latest.
 pub const REFERENCE_KEY: QueryKey = QueryKey(u64::MAX - 6);
 
+/// The bridge's watchlist resolutions (`WatchlistGlobal`) submit under one
+/// key PER LIST from this range, `WATCHLIST_KEY_BASE + n`, handed out by
+/// the bridge on first sight of a list name and never reused within a run.
+/// One key per list because the query pool and the app's mailbox both
+/// coalesce per key: under a shared key, one list's refresh would cancel
+/// another's resolution in flight. The range sits below the shell's single
+/// reserved keys (`REFERENCE_KEY` is `u64::MAX - 6`) and far above any
+/// `TileId`-derived key. Answers never reach a tile: the bridge keeps them.
+pub const WATCHLIST_KEY_BASE: QueryKey = QueryKey(u64::MAX - 0x1_0000);
+/// How many keys the range holds; the top 16 values stay free for the
+/// shell's single keys.
+pub const WATCHLIST_KEY_COUNT: u64 = 0x1_0000 - 16;
+
+/// Whether `key` is a watchlist lane's key.
+pub fn is_watchlist_key(key: QueryKey) -> bool {
+    key.0 >= WATCHLIST_KEY_BASE.0 && key.0 < WATCHLIST_KEY_BASE.0 + WATCHLIST_KEY_COUNT
+}
+
 /// One column a dimension picker can open: every categorical
 /// column of every dataset, plus every derived dimension. `role` is
 /// `"dimension"` for a real `ColumnRole::Dimension` column, `"attribute"`
@@ -1282,6 +1300,8 @@ impl ShellView {
         // Empty until the bridge's first live reference answer: a module
         // reading it before then sees no table rather than a missing global.
         cx.set_global(crate::reference::ReferenceGlobal::default());
+        // Likewise empty until the bridge's first watchlist resolution.
+        cx.set_global(crate::watchlist::WatchlistGlobal::default());
 
         // Publish bindings for module tooltip chord lookup through `tips::Chords`.
         cx.set_global(crate::tips::Chords(Arc::new(
