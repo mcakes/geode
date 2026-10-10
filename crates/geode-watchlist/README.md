@@ -25,12 +25,27 @@ request and never depends on `geode-data`.
   `sort = [column, "asc" | "desc"]` over `name`, `origin` or `reference`,
   `cursor` holding a member name). An unreadable key is dropped with a
   notice and the rest kept.
-- `core/rows.rs`: `WatchRow` and `rows(state, pending, reference)`, the
-  grid's rows: the snapshot's members, or, with a pending definition (an
-  edit awaiting its reload), `resolve_members` re-run over the snapshot's
-  rule names with the pending `include` and `exclude`, so a manual change
-  shows at once and survives a snapshot that moved on under the same
-  definition. Each row carries the reference table's `name` cell
+- `core/history.rs`: `History`, the shown list's undo and redo stacks over
+  `geode_core::watchlist::edit` entries and its optimistic pending object:
+  every verb works over `current` (the pending object while one awaits
+  its reload, else the snapshot's definition), so two quick edits compose;
+  `reloaded` applies the in-flight chain rule (a reload equal to the
+  pending object or carrying another surface's change drops it; one equal
+  to the base or to an earlier in-flight object keeps the later edits);
+  `refused` drops it and remembers the names a refused write would have
+  changed, so an undo that skips them says `not saved` rather than
+  `changed elsewhere`.
+- `core/prompt.rs`: `Prompt` (what the field asks: `AddName`) and
+  `submit`, the typed answer's step: a trimmed name to add, or a refusal
+  (`type a name` for a blank).
+- `core/rows.rs`: `WatchRow`, `members(state, pending)` and
+  `rows(state, pending, reference)`, the members and the grid's rows: the
+  snapshot's members, or, with a pending definition (an edit awaiting its
+  reload), `resolve_members` re-run over the snapshot's rule names with
+  the pending `include` and `exclude`, so a manual change shows at once
+  and survives a snapshot that moved on under the same definition; the
+  verbs read the same origins (`x` on a name added a moment ago sees it as
+  manual). Each row carries the reference table's `name` cell
   (`underlyings`, `None` when absent or NULL), whether the table holds the
   key at all (`in_reference`), and `pending` when its manual state differs
   between the two definitions. `origin_text` spells the origin column:
@@ -58,7 +73,12 @@ request and never depends on `geode-data`.
   warning tone after a failed resolution, with the last good time), the
   winning layer's badge, then the shared cluster with `⋯` and ×. The
   switcher hangs under the name and lists every list alphabetically, the
-  shown one ticked. `tile/table.rs` is the grid's `TableDelegate` over rows
+  shown one ticked. `tile/field.rs` is the prompt field: a bar under
+  the header with the typeahead hung from it, its commit rule
+  (`answer_value`: the highlighted name when the highlight was moved or
+  typed out in full ignoring case, else the text as typed) and its paint;
+  the tile owns its lifetime, focus and writes. `tile/table.rs` is the
+  grid's `TableDelegate` over rows
   the tile prepares (`Prepared::build`) whenever the snapshot, the
   reference tables, the shown list, the sort or the filter changes; render
   reads it only. It reports a row press, a right press and a header sort
@@ -117,19 +137,70 @@ for the snapshot that holds its row.
 The `⋯` menu (`.`) lists Add name, Remove name (disabled with `no row`
 while no row is under the cursor), Rules…, Resolve now (each disabled with
 `no watchlist shown` while none is), Undo and Redo (disabled with `nothing
-to undo` / `nothing to redo` until the history lands), then Switch…, then
-New…, Clone…, Rename…, Delete… and Revert…, each with its live chord. The
-member and object verbs are not built yet: a pick, or their key, shows
-`not yet available` as a status notice.
+to undo` / `nothing to redo` while the history has nothing that way), then
+Switch…, then New…, Clone…, Rename…, Delete… and Revert…, each with its
+live chord. Rules… and the object verbs are not built yet: a pick, or
+their key, shows `not yet available` as a status notice.
 
-Notices: the shell's `TileNotice`s are taken on every frame notification;
-`Forked` shows as status, `Refused` as danger. A verb's notices last until
-the next verb or another list is shown; session-restore notices until the
-trader's first key or press in the tile. `escape` (`watchlist::cancel`)
-peels one layer at a time: a menu first (the surface on top, which may be
-acting on the selection), then a live selection, then the warning and
-danger notices showing, each as a click on one would; with nothing to
-dismiss it is unhandled.
+## Editing members
+
+Every edit is the whole object written through the frame's config door
+(`ConfigEdit { doc: watchlists, object: <name>, value: to_toml(next) }`;
+the frame stamps the tile as its origin) and shown at once: the history
+holds the next object as pending, `rows()` re-derives the grid over it (a
+pending manual add paints `manual · pending`, a pending exclusion muted),
+and the snapshot carrying the write drops the copy. A reload carrying the
+tile's own earlier write keeps the later ones (the in-flight chain); a
+reload carrying any other change is the truth and drops them; the shell's
+`Refused` notice drops the pending object and replaces the verb's word.
+
+`o`/`enter` (`watchlist::add`) opens the add field, a free typeahead over
+the reference table's keys and every list's names, sorted; a name already
+a member is not hidden but refused at commit, naming where it comes from
+(`DAX is already here from rule 1`), with the field left open under the
+reason. `up`/`down` move the highlight; `enter` commits (the highlighted
+name when the highlight was moved or equals the typed text ignoring case,
+else the text as typed); `escape`, a press on the grid or any other verb
+closes it unwritten; the field is the keyboard owner (`insert` mode)
+while open and is blurred before it is dropped. The verb says `added
+<name>`, or `restored <name>` when the name was excluded.
+
+`x` (`watchlist::remove`) acts on the selection, else the cursor's row,
+by origin: a manual name leaves `include` (`removed <name>`), a
+rule-supplied one is excluded (`excluded <name> — rule <i> still supplies
+it; x again restores`), one that is both does both in one write (`removed
+and excluded <name>`), an excluded one is restored (`restored <name>`); a
+selection is counted (`removed 2 names, excluded 1 name`); with nothing to
+change it says `nothing to remove`. The cursor keeps its shown index and a
+selection ends.
+
+`u`/`ctrl+r` replay the history one step over the current object (`undid
+1 change`, `redid 2 changes`). A change another surface made since is
+skipped (`— 1 changed elsewhere`); one left by the tile's own refused
+write is `— 1 not saved`; a replay that skipped everything writes nothing.
+Undo puts a name back by hand, so it lands at the end of `include`: the
+object is restored, not the file's order.
+
+`shift+r` (`watchlist::refresh`) calls the factory's refresh hook with
+the shown name; the header reads `resolving…` with the next snapshot. A
+tile hosted without the hook says `resolve now is not wired`. Showing
+another list forgets the history and closes an open field; a snapshot
+that removes the shown list does the same, and writes nothing.
+
+Notices, in order of precedence: the verb's own word (or the shell's
+`TileNotice` about its write, taken on every frame notification: `Forked`
+as status, `Refused` as danger), then the standing resolution notices from
+the snapshot (`not resolved: <error> — shift+r retries` as danger after a
+failed resolution; `rule <i> failed: <reason> — shift+r retries` as a
+warning per bad rule), then the session-restore notices. A verb's notices
+last until the next verb or another list is shown; the standing ones
+until the next resolution changes them, and dismissed they hide until
+their text changes; session-restore notices until the trader's first key
+or press in the tile. `escape` (`watchlist::cancel`) peels one layer at a
+time: an open field first (it owns the keys), then a menu (the surface on
+top, which may be acting on the selection), then a live selection, then
+the warning and danger notices showing, each as a click on one would;
+with nothing to dismiss it is unhandled.
 
 ## Performance
 
@@ -147,10 +218,13 @@ average 35 to 48; the same run read 6.0 and 12.9 ms under load 17 to 78):
 
 ## Known limitations
 
-- The member verbs (add, remove, undo, redo, refresh, rules) and the
-  object verbs are not built yet: each says `not yet available`.
-- The pending definition is not wired: `rows()` takes it, the tile passes
-  `None` until the history lands.
+- Rules… and the object verbs (new, clone, rename, delete, revert) are
+  not built yet: each says `not yet available`.
+- The add field's typeahead offers names only: the reference table's keys
+  and the names any list already holds.
+- The add field's choice list does not close on a press outside it (a
+  press on the field itself is outside the list); a press on the grid, or
+  any verb, closes the field.
 
 The behavior as the trader sees it is in
 [features](../../docs/current/features.md#watchlists).

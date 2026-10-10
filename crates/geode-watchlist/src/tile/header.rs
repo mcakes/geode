@@ -110,7 +110,7 @@ impl HeaderModel {
     }
 }
 
-fn plural(n: usize, noun: &str) -> String {
+pub(crate) fn plural(n: usize, noun: &str) -> String {
     if n == 1 {
         format!("1 {noun}")
     } else {

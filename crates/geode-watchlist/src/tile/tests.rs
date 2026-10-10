@@ -6,12 +6,13 @@ use geode_core::log::LogLevels;
 use geode_core::query::ReferenceTable;
 use geode_core::reference::ReferenceData;
 use geode_core::scopes::SavedScopes;
+use geode_core::watchlist::fold::RuleError;
 use geode_core::watchlist::members::{Member, Origin};
 use geode_core::watchlist::state::{Status, WatchlistState};
-use geode_core::watchlist::{Rule, Watchlist};
-use geode_shell::actions::ActionRegistry;
+use geode_core::watchlist::{Rule, Watchlist, to_toml};
+use geode_shell::actions::{ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::{Frame, FrameRef};
+use geode_shell::frame::{ConfigEdit, Frame, FrameRef, TileNotice};
 use geode_shell::keymap::{KeyContext, Keymap, MatchResult, Matcher, build_keymap};
 use geode_shell::module::{ModuleFactory, ModuleRoster, TileContent};
 use geode_shell::tiling::{TileId, WorkspaceIx};
@@ -62,7 +63,7 @@ fn publish(cx: &mut gpui::App, snap: WatchlistSnapshot) {
 }
 
 /// `europe`: two rules, rule 1 supplying DAX and SPX, rule 2 SPX and UKX;
-/// NDX included by hand, UKX excluded by hand.
+/// NDX and SPX included by hand, UKX excluded by hand.
 fn resolved() -> WatchlistState {
     let member = |name: &str, origin: Origin| Member {
         name: name.into(),
@@ -70,7 +71,7 @@ fn resolved() -> WatchlistState {
     };
     WatchlistState {
         definition: Watchlist {
-            include: vec!["NDX".into()],
+            include: vec!["NDX".into(), "SPX".into()],
             exclude: vec!["UKX".into()],
             rules: vec![Rule::default(), Rule::default()],
         },
@@ -199,6 +200,7 @@ struct Built {
     content: Rc<dyn TileContent>,
     tile: Entity<WatchlistTile>,
     shell_focus: gpui::FocusHandle,
+    frame: Entity<Frame>,
 }
 
 struct Harness {
@@ -210,6 +212,12 @@ struct Harness {
     /// The keymap the stand-in resolves keys through and the `Chords`
     /// global is published from.
     keymap: Rc<Keymap>,
+    /// The frame the tile's config writes are queued on and its notices
+    /// posted to.
+    frame: Entity<Frame>,
+    /// The shell root's focus, where the keyboard goes back to once a
+    /// field is gone.
+    shell_focus: gpui::FocusHandle,
 }
 
 /// A tile built by the factory after `snap` was published and a default
@@ -264,6 +272,7 @@ fn open_with(
                     content,
                     tile,
                     shell_focus,
+                    frame,
                 });
                 cx.new(|cx| gpui_component::Root::new(host, window, cx))
             })
@@ -284,6 +293,8 @@ fn open_with(
             content: built.content,
             factory,
             keymap,
+            frame: built.frame,
+            shell_focus: built.shell_focus,
         },
         vcx,
     )
@@ -354,6 +365,83 @@ impl Harness {
     fn command(&self, vcx: &mut gpui::VisualTestContext, line: &str) -> Result<(), String> {
         vcx.update(|window, cx| self.content.command(line, window, cx))
     }
+}
+
+impl Harness {
+    /// Keys as the trader types them. A committed or cancelled field
+    /// blurs itself, and the shell then puts the keyboard back on its
+    /// root; the stand-in has no such path, so the test does it.
+    fn press(&self, vcx: &mut gpui::VisualTestContext, keys: &str) {
+        vcx.update(|window, cx| {
+            if window.focused(cx).is_none() {
+                self.shell_focus.focus(window, cx);
+            }
+        });
+        vcx.simulate_keystrokes(keys);
+    }
+    /// A registered action, the way the palette reaches the tile: through
+    /// its door.
+    fn act(&self, vcx: &mut gpui::VisualTestContext, id: &str) {
+        let id = ActionId(id.to_string());
+        vcx.update(|window, cx| {
+            self.content.dispatch(&id, None, window, cx);
+        });
+        self.draw(vcx);
+    }
+    /// What reached the frame's config door since the last call: the
+    /// shell's drain takes exactly this.
+    fn edits(&self, vcx: &mut gpui::VisualTestContext) -> Vec<ConfigEdit> {
+        self.frame.update(vcx, |f, _| f.take_pending_config_edits())
+    }
+    /// Post a notice for this tile the way the shell's drain does: on the
+    /// frame, then one notify.
+    fn shell_says(&self, vcx: &mut gpui::VisualTestContext, notice: TileNotice) {
+        self.frame.update(vcx, |f, cx| {
+            f.post_tile_notice_for_test(TileId(TILE), notice);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+    }
+    /// The open field: its text, its refusal and its ranked options.
+    fn prompt(
+        &self,
+        vcx: &gpui::VisualTestContext,
+    ) -> Option<(String, Option<String>, Vec<String>)> {
+        self.tile.read_with(vcx, |t, cx| t.prompt_state(cx))
+    }
+    /// The origin column of the shown row `name`.
+    fn origin(&self, vcx: &gpui::VisualTestContext, name: &str) -> Option<String> {
+        self.tile.read_with(vcx, |t, _| t.origin_of(name))
+    }
+    /// The header notices not dismissed.
+    fn visible_notices(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
+        self.tile.read_with(vcx, |t, _| t.visible_notice_texts())
+    }
+    /// Put the cursor on `name` with the grid's own motions.
+    fn goto(&self, vcx: &mut gpui::VisualTestContext, name: &str) {
+        let at = self
+            .shown(vcx)
+            .iter()
+            .position(|s| s == name)
+            .expect("the row is shown");
+        self.press(vcx, &format!("g g{}", " j".repeat(at)));
+        assert_eq!(self.cursor(vcx).as_deref(), Some(name));
+    }
+}
+
+/// The edit the tile queues for `europe`: the whole object, from this tile.
+fn edit_of(next: &Watchlist) -> ConfigEdit {
+    ConfigEdit {
+        doc: geode_core::watchlist::WATCHLISTS_DOC,
+        object: "europe".into(),
+        value: Some(to_toml(next)),
+        origin: Some(TileId(TILE)),
+    }
+}
+
+/// `europe`'s definition as the snapshot holds it.
+fn europe_def() -> Watchlist {
+    resolved().definition
 }
 
 fn rows(names: &[&str]) -> Option<Vec<(String, bool)>> {
@@ -532,34 +620,49 @@ fn the_actions_menu_lists_the_verbs_and_a_pick_says_not_yet(cx: &mut gpui::TestA
     assert_eq!(h.actions(&vcx), None);
     vcx.simulate_keystrokes(". escape");
     assert_eq!(h.actions(&vcx), None);
-    // Add name picked from the menu: not built yet.
-    vcx.simulate_keystrokes(". enter");
+    // Add name picked from the menu opens the add field; escape closes it
+    // unwritten.
+    h.press(&mut vcx, ". enter");
     assert_eq!(h.actions(&vcx), None);
-    assert_eq!(h.notices(&vcx), vec![NOT_YET.to_string()]);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    assert!(h.prompt(&vcx).is_some());
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert!(h.edits(&mut vcx).is_empty());
     // The disabled Undo and Redo rows are stepped over: four steps reach
     // Switch…, which opens the switcher.
-    vcx.simulate_keystrokes(". j j j j enter");
+    h.press(&mut vcx, ". j j j j enter");
     assert_eq!(
         h.switcher(&vcx),
         Some(vec![("a".into(), true), ("b".into(), false)])
     );
-    vcx.simulate_keystrokes("escape");
-    // New… picked from the menu.
-    vcx.simulate_keystrokes(". j j j j j enter");
+    h.press(&mut vcx, "escape");
+    // New… picked from the menu: not built yet.
+    h.press(&mut vcx, ". j j j j j enter");
     assert_eq!(h.actions(&vcx), None);
     assert_eq!(h.notices(&vcx), vec![NOT_YET.to_string()]);
+    // An edit enables Undo; undone, Redo.
+    h.press(&mut vcx, "x .");
+    let reasons = h.reasons(&vcx).unwrap();
+    assert_eq!(reasons[4], none("Undo"));
+    assert_eq!(reasons[5], off("Redo", NOTHING_TO_REDO));
+    h.press(&mut vcx, "escape u .");
+    let reasons = h.reasons(&vcx).unwrap();
+    assert_eq!(reasons[4], off("Undo", NOTHING_TO_UNDO));
+    assert_eq!(reasons[5], none("Redo"));
+    h.edits(&mut vcx);
     // With nothing shown the member verbs say so; Remove with no row too.
     vcx.update(|_, cx| publish(cx, WatchlistSnapshot::default()));
-    vcx.simulate_keystrokes("escape .");
+    h.press(&mut vcx, "escape .");
     let reasons = h.reasons(&vcx).unwrap();
     assert_eq!(reasons[0], off("Add name", NOTHING_SHOWN));
     assert_eq!(reasons[1], off("Remove name", NOTHING_SHOWN));
     assert_eq!(reasons[3], off("Resolve now", NOTHING_SHOWN));
-    vcx.simulate_keystrokes("escape");
+    h.press(&mut vcx, "escape");
     let mut empty = two();
     empty.lists.insert("a".into(), list(&[]));
     vcx.update(|_, cx| publish(cx, empty));
-    vcx.simulate_keystrokes(".");
+    h.press(&mut vcx, ".");
     let reasons = h.reasons(&vcx).unwrap();
     assert_eq!(reasons[0], none("Add name"));
     assert_eq!(reasons[1], off("Remove name", NO_ROW));
@@ -1090,4 +1193,459 @@ fn a_filter_hiding_the_cursor_rests_it_on_the_nearest_shown_row(cx: &mut gpui::T
     assert_eq!(h.title(&mut vcx), "Watchlist: a");
     assert_eq!(h.shown(&vcx), ["NDX", "SPX"]);
     assert_eq!(h.cursor(&vcx).as_deref(), Some("NDX"));
+}
+
+#[gpui::test]
+fn o_then_enter_queues_one_write_with_the_name_in_include(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    h.press(&mut vcx, "o");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    let (text, error, options) = h.prompt(&vcx).expect("the field is open");
+    assert_eq!(text, "");
+    assert_eq!(error, None);
+    // The typeahead: the reference table's keys and every list's names,
+    // once each, sorted; a name already here is not hidden.
+    assert_eq!(options, ["DAX", "NDX", "SPX", "UKX"]);
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("watchlist-prompt-7").is_some());
+    assert!(vcx.debug_bounds("watchlist-prompt-list-7").is_some());
+    assert!(vcx.debug_bounds("watchlist-prompt-row-DAX").is_some());
+    vcx.simulate_input("HSI");
+    let (text, _, options) = h.prompt(&vcx).unwrap();
+    assert_eq!(text, "HSI");
+    assert!(
+        options.is_empty(),
+        "nothing matches: enter adds it as typed"
+    );
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert_eq!(h.prompt(&vcx), None);
+    assert!(!vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    let edits = h.edits(&mut vcx);
+    let mut next = europe_def();
+    next.include.push("HSI".into());
+    assert_eq!(edits, [edit_of(&next)]);
+    let value = edits[0].value.as_ref().unwrap();
+    assert_eq!(
+        value["include"].as_array().unwrap().len(),
+        3,
+        "the whole object: NDX, SPX and the new name"
+    );
+    assert_eq!(value["include"][2].as_str(), Some("HSI"));
+    // Shown at once, marked pending, counted.
+    assert_eq!(
+        h.origin(&vcx, "HSI").as_deref(),
+        Some("manual \u{b7} pending")
+    );
+    assert_eq!(h.notices(&vcx), ["added HSI"]);
+    assert!(h.header(&vcx).contains("4 names"), "{}", h.header(&vcx));
+    // The reload carrying it drops the mark.
+    let mut snap = europe();
+    let s = snap.lists.get_mut("europe").unwrap();
+    s.definition = next.clone();
+    s.members.push(Member {
+        name: "HSI".into(),
+        origin: Origin::Manual,
+    });
+    vcx.update(|_, cx| publish(cx, snap));
+    assert_eq!(h.origin(&vcx, "HSI").as_deref(), Some("manual"));
+    // A case variant of a listed name takes the listed spelling: UKX is
+    // excluded, so adding it restores it, and `exclude` empties.
+    h.press(&mut vcx, "o");
+    vcx.simulate_input("ukx");
+    h.press(&mut vcx, "enter");
+    let mut restored = next.clone();
+    restored.exclude.clear();
+    assert_eq!(h.edits(&mut vcx), [edit_of(&restored)]);
+    assert_eq!(h.notices(&vcx), ["restored UKX"]);
+    assert_eq!(
+        h.origin(&vcx, "UKX").as_deref(),
+        Some("rule 2 \u{b7} pending")
+    );
+}
+
+#[gpui::test]
+fn add_of_a_rule_supplied_name_is_refused_under_the_field(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    h.press(&mut vcx, "o");
+    vcx.simulate_input("DAX");
+    h.press(&mut vcx, "enter");
+    let (text, error, _) = h.prompt(&vcx).expect("the field stays open");
+    assert_eq!(text, "DAX");
+    assert_eq!(error.as_deref(), Some("DAX is already here from rule 1"));
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    assert!(h.edits(&mut vcx).is_empty());
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("watchlist-prompt-error-7").is_some());
+    // A manual name, and a blank, are refused too.
+    h.press(&mut vcx, "backspace backspace backspace");
+    vcx.simulate_input("spx");
+    h.press(&mut vcx, "enter");
+    let (_, error, _) = h.prompt(&vcx).unwrap();
+    assert_eq!(error.as_deref(), Some("SPX is already here"));
+    h.press(&mut vcx, "backspace backspace backspace enter");
+    let (text, error, _) = h.prompt(&vcx).unwrap();
+    assert_eq!(text, "");
+    assert_eq!(error.as_deref(), Some(crate::core::prompt::TYPE_A_NAME));
+    // Escape closes it with nothing written.
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.prompt(&vcx), None);
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert!(!vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    assert!(h.edits(&mut vcx).is_empty());
+    assert!(h.notices(&vcx).is_empty());
+}
+
+#[gpui::test]
+fn x_on_each_origin_kind_writes_the_right_object(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    // No row under the cursor (the filter hides every row): nothing to
+    // remove.
+    h.find(&mut vcx, FindEvent::Changed("zzz".into()));
+    assert!(h.targets(&vcx).is_empty());
+    h.press(&mut vcx, "x");
+    assert_eq!(h.notices(&vcx), [NOTHING_TO_REMOVE]);
+    assert!(h.edits(&mut vcx).is_empty());
+    h.find(&mut vcx, FindEvent::Cancelled);
+    // DAX: rule 1 supplies it, so it is excluded.
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    h.press(&mut vcx, "x");
+    let mut e1 = europe_def();
+    e1.exclude.push("DAX".into());
+    assert_eq!(h.edits(&mut vcx), [edit_of(&e1)]);
+    assert_eq!(
+        h.notices(&vcx),
+        ["excluded DAX \u{2014} rule 1 still supplies it; x again restores"]
+    );
+    assert_eq!(
+        h.origin(&vcx, "DAX").as_deref(),
+        Some("excluded (rule 1) \u{b7} pending")
+    );
+    // The cursor keeps its shown index: DAX sorts last now, NDX is under it.
+    assert_eq!(h.shown(&vcx), ["NDX", "SPX", "DAX", "UKX"]);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NDX"));
+    // NDX: manual, so it leaves `include`; the write builds on the first.
+    h.press(&mut vcx, "x");
+    let mut e2 = e1.clone();
+    e2.include.retain(|n| n != "NDX");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&e2)]);
+    assert_eq!(h.notices(&vcx), ["removed NDX"]);
+    assert!(h.origin(&vcx, "NDX").is_none(), "gone at once");
+    // UKX: excluded, so it is restored.
+    h.goto(&mut vcx, "UKX");
+    h.press(&mut vcx, "x");
+    let mut e3 = e2.clone();
+    e3.exclude.retain(|n| n != "UKX");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&e3)]);
+    assert_eq!(h.notices(&vcx), ["restored UKX"]);
+    assert_eq!(
+        h.origin(&vcx, "UKX").as_deref(),
+        Some("rule 2 \u{b7} pending")
+    );
+    // DAX again: the verb sees the pending exclusion and restores it,
+    // back to the snapshot's state, so the row is no longer pending.
+    h.goto(&mut vcx, "DAX");
+    h.press(&mut vcx, "x");
+    let mut e4 = e3.clone();
+    e4.exclude.clear();
+    assert_eq!(h.edits(&mut vcx), [edit_of(&e4)]);
+    assert_eq!(h.notices(&vcx), ["restored DAX"]);
+    assert_eq!(h.origin(&vcx, "DAX").as_deref(), Some("rule 1"));
+    // A selection: one write, counted.
+    h.press(&mut vcx, "g g v j");
+    assert_eq!(h.targets(&vcx), ["DAX", "SPX"]);
+    h.press(&mut vcx, "x");
+    let mut e5 = e4.clone();
+    e5.include.retain(|n| n != "SPX");
+    e5.exclude.extend(["DAX".to_string(), "SPX".to_string()]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&e5)]);
+    assert_eq!(
+        h.notices(&vcx),
+        ["excluded 1 name, removed and excluded 1 name"]
+    );
+    assert_eq!(
+        h.mode(&vcx).as_deref(),
+        Some("normal"),
+        "the selection ended"
+    );
+}
+
+/// Review focus: a `manual + rule` row is one write, and one undo step.
+#[gpui::test]
+fn remove_of_a_manual_and_rule_name_writes_once_and_undoes_whole(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    h.goto(&mut vcx, "SPX");
+    assert_eq!(
+        h.origin(&vcx, "SPX").as_deref(),
+        Some("manual + rules 1, 2")
+    );
+    h.press(&mut vcx, "x");
+    let mut next = europe_def();
+    next.include.retain(|n| n != "SPX");
+    next.exclude.push("SPX".into());
+    assert_eq!(h.edits(&mut vcx), [edit_of(&next)], "one write does both");
+    assert_eq!(h.notices(&vcx), ["removed and excluded SPX"]);
+    assert_eq!(
+        h.origin(&vcx, "SPX").as_deref(),
+        Some("excluded (rules 1, 2) \u{b7} pending")
+    );
+    h.press(&mut vcx, "u");
+    assert_eq!(
+        h.edits(&mut vcx),
+        [edit_of(&europe_def())],
+        "one undo restores both"
+    );
+    assert_eq!(h.notices(&vcx), ["undid 1 change"]);
+    assert_eq!(
+        h.origin(&vcx, "SPX").as_deref(),
+        Some("manual + rules 1, 2")
+    );
+    h.press(&mut vcx, "ctrl-r");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&next)]);
+    assert_eq!(h.notices(&vcx), ["redid 1 change"]);
+}
+
+/// Review focus: a resolution answering under the same definition is not
+/// the reload the edit waits for.
+#[gpui::test]
+fn a_members_answer_keeps_a_pending_manual_add_painted(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    h.press(&mut vcx, "o");
+    vcx.simulate_input("HSI");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.edits(&mut vcx).len(), 1);
+    assert_eq!(
+        h.origin(&vcx, "HSI").as_deref(),
+        Some("manual \u{b7} pending")
+    );
+    // Rule 1 now also supplies CAC; the definition is as it was.
+    let mut snap = europe();
+    snap.lists.get_mut("europe").unwrap().members.push(Member {
+        name: "CAC".into(),
+        origin: Origin::Rules(vec![0]),
+    });
+    vcx.update(|_, cx| publish(cx, snap));
+    assert_eq!(
+        h.origin(&vcx, "HSI").as_deref(),
+        Some("manual \u{b7} pending"),
+        "the edit is still in flight"
+    );
+    assert_eq!(h.origin(&vcx, "CAC").as_deref(), Some("rule 1"));
+    assert_eq!(h.shown(&vcx), ["CAC", "DAX", "HSI", "NDX", "SPX", "UKX"]);
+    // The next edit builds on the pending one.
+    h.goto(&mut vcx, "CAC");
+    h.press(&mut vcx, "x");
+    let mut next = europe_def();
+    next.include.push("HSI".into());
+    next.exclude.push("CAC".into());
+    assert_eq!(h.edits(&mut vcx), [edit_of(&next)]);
+    // Another surface's write to the list is the truth: the pending edits go.
+    let mut snap = europe();
+    snap.lists
+        .get_mut("europe")
+        .unwrap()
+        .definition
+        .include
+        .push("FTSE".into());
+    vcx.update(|_, cx| publish(cx, snap));
+    assert!(h.origin(&vcx, "HSI").is_none());
+    assert_eq!(h.shown(&vcx), ["DAX", "NDX", "SPX", "UKX"]);
+}
+
+/// Review focus: the field goes with its list, blurred, nothing written.
+#[gpui::test]
+fn a_reload_removing_the_shown_list_closes_an_open_field_and_writes_nothing(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = europe_shown(cx);
+    h.press(&mut vcx, "o");
+    vcx.simulate_input("HSI");
+    assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    vcx.update(|_, cx| publish(cx, WatchlistSnapshot::default()));
+    vcx.run_until_parked();
+    assert_eq!(h.prompt(&vcx), None);
+    assert_ne!(h.mode(&vcx).as_deref(), Some("insert"));
+    assert!(!vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    assert!(
+        vcx.update(|window, cx| window.focused(cx).is_none()),
+        "blurred before it was dropped"
+    );
+    assert!(h.edits(&mut vcx).is_empty());
+    assert!(
+        h.empty(&vcx)
+            .is_some_and(|t| t.starts_with("europe no longer exists"))
+    );
+    // `enter` now asks to add to nothing: refused, still nothing written.
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.prompt(&vcx), None);
+    assert!(h.notices(&vcx).contains(&NOTHING_SHOWN.to_string()));
+    assert!(h.edits(&mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn u_and_ctrl_r_replay_and_report_skipped_rows(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    h.press(&mut vcx, "u");
+    assert_eq!(h.notices(&vcx), [NOTHING_TO_UNDO]);
+    h.press(&mut vcx, "ctrl-r");
+    assert_eq!(h.notices(&vcx), [NOTHING_TO_REDO]);
+    h.goto(&mut vcx, "NDX");
+    h.press(&mut vcx, "x");
+    let mut removed = europe_def();
+    removed.include.retain(|n| n != "NDX");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&removed)]);
+    h.press(&mut vcx, "u");
+    // Undo puts NDX back by hand, so it lands at the end of `include`:
+    // the object is restored, not the file's order.
+    let mut restored = removed.clone();
+    restored.include.push("NDX".into());
+    assert_eq!(h.edits(&mut vcx), [edit_of(&restored)]);
+    assert_eq!(h.notices(&vcx), ["undid 1 change"]);
+    assert_eq!(h.origin(&vcx, "NDX").as_deref(), Some("manual"));
+    h.press(&mut vcx, "ctrl-r");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&removed)]);
+    assert_eq!(h.notices(&vcx), ["redid 1 change"]);
+    assert!(h.origin(&vcx, "NDX").is_none());
+    // Another surface excluded DAX and left NDX in meanwhile: that reload
+    // is the truth, and undo finds NDX no longer as the entry left it.
+    let mut snap = europe();
+    let s = snap.lists.get_mut("europe").unwrap();
+    s.definition.exclude.push("DAX".into());
+    s.members[0].origin = Origin::Excluded {
+        rules: vec![0],
+        manual: false,
+    };
+    vcx.update(|_, cx| publish(cx, snap));
+    assert_eq!(h.origin(&vcx, "NDX").as_deref(), Some("manual"));
+    h.press(&mut vcx, "u");
+    assert!(h.edits(&mut vcx).is_empty(), "nothing to write");
+    assert_eq!(
+        h.notices(&vcx),
+        ["undid 0 changes \u{2014} 1 changed elsewhere"]
+    );
+    // The tile's own refused write is said as not saved, not blamed on
+    // another surface.
+    h.goto(&mut vcx, "DAX");
+    h.press(&mut vcx, "x");
+    assert_eq!(h.notices(&vcx), ["restored DAX"]);
+    assert_eq!(h.edits(&mut vcx).len(), 1);
+    h.shell_says(
+        &mut vcx,
+        TileNotice::Refused("watchlists not written".into()),
+    );
+    h.press(&mut vcx, "u");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(h.notices(&vcx), ["undid 0 changes \u{2014} 1 not saved"]);
+}
+
+#[gpui::test]
+fn a_refused_write_drops_the_pending_object_and_says_so(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    h.goto(&mut vcx, "NDX");
+    h.press(&mut vcx, "x");
+    assert!(h.origin(&vcx, "NDX").is_none(), "optimistic");
+    assert_eq!(h.edits(&mut vcx).len(), 1);
+    let why = "watchlists not written: the user layer is read-only";
+    h.shell_says(&mut vcx, TileNotice::Refused(why.into()));
+    assert_eq!(h.notices(&vcx), [why]);
+    assert_eq!(
+        h.origin(&vcx, "NDX").as_deref(),
+        Some("manual"),
+        "back to the snapshot's object"
+    );
+    assert!(h.edits(&mut vcx).is_empty(), "nothing was re-queued");
+    // The cursor kept its shown index when NDX went, and the rows coming
+    // back kept it on its row: SPX. A fork is news, nothing more: the
+    // pending edit stands.
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SPX"));
+    h.goto(&mut vcx, "NDX");
+    h.press(&mut vcx, "x");
+    assert_eq!(h.edits(&mut vcx).len(), 1);
+    let forked = "copied 'europe' to your config";
+    h.shell_says(&mut vcx, TileNotice::Forked(forked.into()));
+    assert_eq!(h.notices(&vcx), ["removed NDX", forked]);
+    assert!(h.origin(&vcx, "NDX").is_none(), "still pending");
+    // A notice for another tile is not this tile's.
+    h.frame.update(&mut vcx, |f, cx| {
+        f.post_tile_notice_for_test(TileId(TILE + 1), TileNotice::Refused("other".into()));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert!(h.origin(&vcx, "NDX").is_none());
+}
+
+#[gpui::test]
+fn shift_r_calls_the_factory_hook_with_the_shown_name(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    h.press(&mut vcx, "shift-r");
+    assert_eq!(h.notices(&vcx), [NOT_WIRED]);
+    let asked: Rc<RefCell<Vec<String>>> = Rc::default();
+    let seen = asked.clone();
+    h.factory.set_refresh(Rc::new(move |name, _| {
+        seen.borrow_mut().push(name.to_string())
+    }));
+    h.press(&mut vcx, "shift-r");
+    assert_eq!(*asked.borrow(), ["europe"]);
+    assert!(h.notices(&vcx).is_empty());
+    // Resolve now from the `⋯` menu, the fourth row.
+    h.press(&mut vcx, ". j j j enter");
+    assert_eq!(h.actions(&vcx), None);
+    assert_eq!(*asked.borrow(), ["europe", "europe"]);
+    // Nothing shown: refused, the hook not called.
+    vcx.update(|_, cx| publish(cx, WatchlistSnapshot::default()));
+    h.press(&mut vcx, "shift-r");
+    assert_eq!(asked.borrow().len(), 2);
+    assert!(h.notices(&vcx).contains(&NOTHING_SHOWN.to_string()));
+}
+
+#[gpui::test]
+fn escape_peels_selection_then_field_then_notices(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = europe_shown(cx);
+    // A failed resolution and a bad rule stand in the header.
+    let mut snap = europe();
+    let s = snap.lists.get_mut("europe").unwrap();
+    s.status = Status::Failed("timed out".into());
+    s.rule_errors.push(RuleError {
+        index: 1,
+        reason: "no such dataset".into(),
+    });
+    vcx.update(|_, cx| publish(cx, snap));
+    let failed = "not resolved: timed out \u{2014} shift+r retries";
+    let bad = "rule 2 failed: no such dataset \u{2014} shift+r retries";
+    assert_eq!(h.notices(&vcx), [failed, bad]);
+    // A selection, then the add field over it (from the palette: no bare
+    // letter opens it in visual mode).
+    h.press(&mut vcx, "v j");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("visual"));
+    h.act(&mut vcx, "watchlist::add");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    vcx.simulate_input("HSI");
+    // The field owns the keys: escape closes it, unwritten, and the
+    // selection stands.
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.prompt(&vcx), None);
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(h.mode(&vcx).as_deref(), Some("visual"));
+    assert_eq!(h.targets(&vcx), ["DAX", "NDX"]);
+    // Then the selection.
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    assert_eq!(h.visible_notices(&vcx), [failed, bad], "not touched yet");
+    // Then the standing notices, as a click on each would: hidden, still
+    // reported, until their text changes.
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.visible_notices(&vcx), Vec::<String>::new());
+    assert_eq!(h.notices(&vcx), [failed, bad]);
+    let mut snap = europe();
+    snap.lists.get_mut("europe").unwrap().status = Status::Failed("refused".into());
+    vcx.update(|_, cx| publish(cx, snap));
+    let refused = "not resolved: refused \u{2014} shift+r retries";
+    assert_eq!(h.visible_notices(&vcx), [refused]);
+    // A verb's own word comes first, the standing notice after it.
+    h.press(&mut vcx, "u");
+    assert_eq!(h.visible_notices(&vcx), [NOTHING_TO_UNDO, refused]);
+    // A current resolution clears it.
+    vcx.update(|_, cx| publish(cx, europe()));
+    assert_eq!(h.visible_notices(&vcx), [NOTHING_TO_UNDO]);
 }

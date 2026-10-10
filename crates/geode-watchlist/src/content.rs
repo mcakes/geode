@@ -320,7 +320,8 @@ impl ModuleFactory for WatchlistFactory {
         window: &mut Window,
         cx: &mut App,
     ) -> TileOccupant {
-        let entity = cx.new(|cx| WatchlistTile::new(tile, restored, frame, window, cx));
+        let shared = self.shared.clone();
+        let entity = cx.new(|cx| WatchlistTile::new(tile, restored, frame, shared, window, cx));
         self.shared.tiles.borrow_mut().push(entity.downgrade());
         TileOccupant {
             kind: KIND,

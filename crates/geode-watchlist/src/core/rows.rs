@@ -40,19 +40,15 @@ impl WatchRow {
     }
 }
 
-/// The grid's rows: the snapshot's members, re-derived over the pending
-/// definition when the tile has one, with the reference name beside each.
-/// The rule-supplied names are the snapshot's (each member's `rules()`),
-/// so a pending manual change shows at once without a resolution:
-/// `resolve_members` is re-run over those names with the pending
-/// `include` and `exclude`. A row is `pending` when its manual state in
-/// the pending definition differs from the snapshot's definition.
-pub fn rows(
-    state: &WatchlistState,
-    pending: Option<&Watchlist>,
-    reference: &ReferenceData,
-) -> Vec<WatchRow> {
-    let members: Vec<Member> = match pending {
+/// The members the tile shows and its verbs act on: the snapshot's, or,
+/// with a pending definition (an edit awaiting its reload), re-derived
+/// over it. The rule-supplied names are the snapshot's (each member's
+/// `rules()`), so a pending manual change shows at once without a
+/// resolution: `resolve_members` is re-run over those names with the
+/// pending `include` and `exclude`. A verb reads the same origins the grid
+/// paints: `x` on a name added a moment ago sees it as manual.
+pub fn members(state: &WatchlistState, pending: Option<&Watchlist>) -> Vec<Member> {
+    match pending {
         None => state.members.clone(),
         Some(p) => {
             // Rebuild each rule's name list from the snapshot's members.
@@ -65,7 +61,18 @@ pub fn rows(
             let rule_names: Vec<(usize, Vec<String>)> = by_rule.into_iter().collect();
             resolve_members(&rule_names, &p.include, &p.exclude)
         }
-    };
+    }
+}
+
+/// The grid's rows: [`members`] with the reference name beside each. A
+/// row is `pending` when its manual state in the pending definition
+/// differs from the snapshot's definition.
+pub fn rows(
+    state: &WatchlistState,
+    pending: Option<&Watchlist>,
+    reference: &ReferenceData,
+) -> Vec<WatchRow> {
+    let members = members(state, pending);
     // The keys once, so a name the table does not hold costs one probe
     // rather than a walk of every key; likewise each definition's manual
     // names, read once rather than scanned per row (`manual_of`'s answer,
@@ -120,7 +127,7 @@ impl<'a> ManualNames<'a> {
 
 /// `rule 1`, `rules 1, 3`: rules are numbered from 1, as the rules popup
 /// lists them.
-fn rules_text(rules: &[usize]) -> String {
+pub(crate) fn rules_text(rules: &[usize]) -> String {
     let numbers: Vec<String> = rules.iter().map(|i| (i + 1).to_string()).collect();
     let noun = if rules.len() == 1 { "rule" } else { "rules" };
     format!("{noun} {}", numbers.join(", "))
