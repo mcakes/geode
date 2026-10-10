@@ -16,7 +16,7 @@ use crate::store::series::{coverage_table, from_micros, micros, series_table};
 use duckdb::types::Value;
 use geode_core::query::AsOf;
 use geode_core::schema::SchemaSpec;
-use geode_core::series::expr::{Ast, Expr, Function, Op};
+use geode_core::series::expr::{Ast, Expr, Function, Kind, Op};
 use geode_core::series::{
     BucketRule, MAX_BINS, MIN_BINS, SeriesParams, SeriesResult, SlotKind, SlotProvenance,
     SlotResult,
@@ -88,6 +88,24 @@ struct Grid {
 fn index_sql(rel: &str, k: i64) -> String {
     let (order, offset) = if k >= 0 { ("", k) } else { (" desc", -k - 1) };
     format!("(select v from {rel} where v is not null order by b{order} offset {offset} limit 1)")
+}
+
+/// A fold as a scalar subquery over `rel`'s `v`. Every aggregate skips
+/// NULL; `count` is cast because the points reader binds every value
+/// column as a DOUBLE.
+fn fold_sql(f: Function, rel: &str) -> String {
+    match f {
+        Function::First => index_sql(rel, 0),
+        Function::Last => index_sql(rel, -1),
+        Function::Min => format!("(select min(v) from {rel})"),
+        Function::Max => format!("(select max(v) from {rel})"),
+        Function::Mean => format!("(select avg(v) from {rel})"),
+        Function::Median => format!("(select quantile_cont(v, 0.5) from {rel})"),
+        Function::Std => format!("(select stddev_samp(v) from {rel})"),
+        Function::Sum => format!("(select sum(v) from {rel})"),
+        Function::Count => format!("(select cast(count(v) as double) from {rel})"),
+        _ => unreachable!("fold_sql is called for folds only"),
+    }
 }
 
 /// Lower one expression slot. `validate` has already run the shape
@@ -233,14 +251,28 @@ impl Lowering {
     fn call(
         &mut self,
         f: Function,
-        _args: &[Expr],
-        _g: &mut Grid,
+        args: &[Expr],
+        g: &mut Grid,
     ) -> Result<(String, bool), StoreError> {
-        Err(refuse(format!(
-            "slot {}: {} is not lowered yet",
-            self.slot,
-            f.name()
-        )))
+        let Some(first) = args.first() else {
+            return Err(refuse(format!(
+                "slot {}: {} has no argument",
+                self.slot,
+                f.name()
+            )));
+        };
+        match f.kind() {
+            Kind::Fold => Ok((fold_sql(f, &self.fold_rel(first)?), false)),
+            Kind::MinMax if args.len() == 1 => Ok((fold_sql(f, &self.fold_rel(first)?), false)),
+            Kind::MinMax | Kind::Pointwise | Kind::Along { .. } | Kind::Rolling => {
+                let _ = g;
+                Err(refuse(format!(
+                    "slot {}: {} is not lowered yet",
+                    self.slot,
+                    f.name()
+                )))
+            }
+        }
     }
 }
 
@@ -1105,6 +1137,140 @@ mod tests {
 
     fn nan_or(v: f64) -> Option<f64> {
         if v.is_nan() { None } else { Some(v) }
+    }
+
+    /// One point per day from Jan 5 for `identity`: `values[i]` on
+    /// Jan 5 + i, a NaN being a day with no point (a gap, not a NULL).
+    fn daily(store: &Store, identity: &str, values: &[f64]) {
+        for (i, v) in values.iter().enumerate() {
+            if v.is_nan() {
+                continue;
+            }
+            let day = ts("2026-01-05T14:30:00Z") + chrono::Duration::days(i as i64);
+            append(
+                store,
+                identity,
+                &day.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                &[*v],
+                "2026-01-20T09:00:00Z",
+            );
+        }
+    }
+
+    /// Slot `i` of the result as `Some(value)` per bucket, `None` for a gap.
+    fn vals(r: &SeriesResult, i: usize) -> Vec<Option<f64>> {
+        r.slots[i].values.iter().map(|v| nan_or(*v)).collect()
+    }
+
+    fn close(a: &[Option<f64>], b: &[Option<f64>]) -> bool {
+        a.len() == b.len()
+            && a.iter().zip(b).all(|(x, y)| match (x, y) {
+                (None, None) => true,
+                (Some(x), Some(y)) => (x - y).abs() < 1e-9,
+                _ => false,
+            })
+    }
+
+    #[test]
+    fn folds_and_indexes_read_the_whole_range_and_skip_gaps() {
+        let (_d, store) = store();
+        // Points on Jan 5, 6, 8, 9; Jan 7 is a gap.
+        daily(&store, "A", &[2.0, 4.0, f64::NAN, 8.0, 6.0]);
+        let r = run(
+            &store,
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                expr(2, "s1 / s1[0]"),
+                expr(3, "s1 / s1[-1]"),
+                expr(4, "mean(s1)"),
+                expr(5, "s1[2] + s1[-3]"),
+                expr(6, "s1[4]"),
+                expr(7, "s1[999999] + s1[-999999]"),
+                expr(
+                    8,
+                    "first(s1) + last(s1) + min(s1) + max(s1) + sum(s1) + count(s1) + median(s1)",
+                ),
+                expr(9, "std(s1)"),
+                expr(10, "count(s1)"),
+            ]),
+        );
+        assert_eq!(
+            r.buckets.len(),
+            4,
+            "A's four buckets; a scalar line never widens them"
+        );
+        let line = |v: f64| vec![Some(v); 4];
+        assert!(
+            close(&vals(&r, 1), &[Some(1.0), Some(2.0), Some(4.0), Some(3.0)]),
+            "{:?}",
+            vals(&r, 1)
+        );
+        assert!(
+            close(
+                &vals(&r, 2),
+                &[Some(1.0 / 3.0), Some(2.0 / 3.0), Some(4.0 / 3.0), Some(1.0)]
+            ),
+            "{:?}",
+            vals(&r, 2)
+        );
+        assert!(
+            close(&vals(&r, 3), &line(5.0)),
+            "a flat line over A's buckets: {:?}",
+            vals(&r, 3)
+        );
+        assert!(
+            close(&vals(&r, 4), &line(12.0)),
+            "[2] from the start is 8, [-3] from the end is 4: {:?}",
+            vals(&r, 4)
+        );
+        assert_eq!(vals(&r, 5), vec![None; 4], "past the end is a gap");
+        assert_eq!(
+            vals(&r, 6),
+            vec![None; 4],
+            "far past either end is a gap, not an error"
+        );
+        assert!(
+            close(&vals(&r, 7), &line(47.0)),
+            "2 + 6 + 2 + 8 + 20 + 4 + 5: {:?}",
+            vals(&r, 7)
+        );
+        assert!(
+            close(&vals(&r, 8), &line((20.0f64 / 3.0).sqrt())),
+            "sample deviation of 2, 4, 8, 6: {:?}",
+            vals(&r, 8)
+        );
+        assert!(
+            close(&vals(&r, 9), &line(4.0)),
+            "a count reaches the reader as a double: {:?}",
+            vals(&r, 9)
+        );
+    }
+
+    #[test]
+    fn a_scalar_line_spans_the_union_of_the_series_it_folds_and_a_fold_never_narrows() {
+        let (_d, store) = store();
+        daily(&store, "A", &[1.0, 2.0, f64::NAN, f64::NAN, f64::NAN]);
+        daily(&store, "B", &[f64::NAN, f64::NAN, 10.0, 20.0, 30.0]);
+        let r = run(
+            &store,
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                source(2, "B", BucketRule::Last),
+                expr(3, "mean(s1) + mean(s2)"),
+                expr(4, "s1 * last(s2)"),
+            ]),
+        );
+        assert_eq!(r.buckets.len(), 5);
+        assert!(
+            close(&vals(&r, 2), &[Some(21.5); 5]),
+            "over A's and B's buckets: {:?}",
+            vals(&r, 2)
+        );
+        assert_eq!(
+            vals(&r, 3),
+            vec![Some(30.0), Some(60.0), None, None, None],
+            "B is folded, so it does not narrow A's buckets"
+        );
     }
 
     #[test]
