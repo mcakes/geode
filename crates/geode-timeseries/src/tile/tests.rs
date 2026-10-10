@@ -2183,7 +2183,7 @@ fn x_opens_the_expression_field_and_enter_adds_or_reports_inline(cx: &mut gpui::
         vcx.update(|w, cx| h.content.holds_focus(w, cx)),
         "and keeps the keyboard, so the text can be corrected in place"
     );
-    assert!(h.expr_error(&vcx).unwrap().contains("arithmetic only"));
+    assert!(h.expr_error(&vcx).unwrap().contains("only + - * /"));
     assert_eq!(h.model(&vcx).slots().len(), 2);
     h.set_input_text(&mut vcx, "SPX.close / VIX");
     h.dispatch(&mut vcx, "commit", None);
@@ -2231,9 +2231,9 @@ fn the_expression_field_lists_loaded_names_ranked_at_the_caret(cx: &mut gpui::Te
     h.dispatch(&mut vcx, "expr", None);
     h.draw(&mut vcx);
     assert_eq!(
-        h.expr_candidates(&vcx),
-        vec!["SPX.close", "VIX", "VIX@demo_rest"],
-        "an empty field offers every loaded name"
+        &h.expr_candidates(&vcx)[..3],
+        ["SPX.close", "VIX", "VIX@demo_rest"],
+        "an empty field offers every loaded name first, then the functions"
     );
     vcx.simulate_input("SPX.close / V");
     assert_eq!(h.expr_candidates(&vcx), vec!["VIX", "VIX@demo_rest"]);
@@ -2249,6 +2249,42 @@ fn the_expression_field_lists_loaded_names_ranked_at_the_caret(cx: &mut gpui::Te
     h.dispatch(&mut vcx, "commit", None);
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(h.expr_candidates(&vcx)[0], "VIX", "ranked on open");
+}
+
+/// A shape error (a fold of a number) is refused at Enter like a parse
+/// error, naming the function; a well-shaped expression with a call and
+/// an index commits as typed.
+#[gpui::test]
+fn enter_refuses_a_shape_error_inline_and_commits_a_function_expression(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("mean(2) + VIX");
+    assert!(!h.dispatch_handled(&mut vcx, "commit", None));
+    assert!(h.popup_is_expr(&vcx));
+    assert_eq!(h.expr_error(&vcx).as_deref(), Some("mean needs a series"));
+    let text = "SPX.close / SPX.close[0] + sma(VIX, 20)";
+    h.set_input_text(&mut vcx, text);
+    h.dispatch(&mut vcx, "commit", None);
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.model(&vcx).slots()[2].text.as_deref(), Some(text));
+}
+
+/// The list offers functions beside series names, each with its `(`.
+#[gpui::test]
+fn the_expression_field_offers_functions_with_their_paren(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.close / sm");
+    assert_eq!(h.expr_candidates(&vcx)[0], "sma(");
+    assert_eq!(h.expr_lit(&vcx).as_deref(), Some("sma("));
+    assert!(h.is_painted(&mut vcx, &format!("ts-expr-row-{TILE}-sma(")));
 }
 
 /// With nothing loaded there is nothing an expression may reference:
@@ -2482,7 +2518,7 @@ fn a_default_source_change_relabels_the_open_list(cx: &mut gpui::TestAppContext)
     h.command(&mut vcx, "add VIX").unwrap();
     h.dispatch(&mut vcx, "expr", None);
     h.draw(&mut vcx);
-    assert_eq!(h.expr_candidates(&vcx), vec!["VIX"]);
+    assert_eq!(h.expr_candidates(&vcx)[0], "VIX");
     vcx.update(|_, cx| {
         cx.set_global(SeriesSettings {
             default_source: Some("demo_rest".into()),
@@ -2490,7 +2526,7 @@ fn a_default_source_change_relabels_the_open_list(cx: &mut gpui::TestAppContext)
         })
     });
     h.draw(&mut vcx);
-    assert_eq!(h.expr_candidates(&vcx), vec!["VIX@demo_kdb"]);
+    assert_eq!(h.expr_candidates(&vcx)[0], "VIX@demo_kdb");
 }
 
 /// The palette can dispatch any action over an open field (`ctrl+k`

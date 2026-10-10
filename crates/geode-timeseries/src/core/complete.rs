@@ -2,15 +2,17 @@
 //! is in, which loaded names rank against it, and what Tab, Shift+Tab, a
 //! click and Enter write. Pure; the tile owns the input and the focus.
 //!
-//! An expression may reference only a loaded source series, so the
-//! candidates are [`crate::core::Model::series_names`], ranked with the
-//! `:` line's matcher. Word boundaries come from the expression
+//! An expression may reference only a loaded source series and call only
+//! a grammar function, so the candidates are the loaded series names
+//! ([`crate::core::Model::series_names`]) and the function names, each
+//! with its `(`, ranked with the `:` line's matcher; series names rank
+//! first on ties. Word boundaries come from the expression
 //! tokenizer's own character classes, so the completer never offers to
 //! replace text the parser would read as an operator or a number.
 
 use std::ops::Range;
 
-use geode_core::series::expr::{is_ident_char, is_ident_start, is_source_char};
+use geode_core::series::expr::{Function, is_ident_char, is_ident_start, is_source_char};
 use geode_shell::commandline::{accept, rank_candidates};
 use geode_shell::listfilter::Ranked;
 use gpui::SharedString;
@@ -18,6 +20,12 @@ use gpui::SharedString;
 /// Rows the list paints at once. Cycling reaches every candidate; the
 /// painted window follows the lit row.
 pub const MAX_ROWS: usize = 8;
+
+/// Every function as the list offers it: its name with the `(` a call
+/// needs, so writing one lands the caret inside the call.
+pub fn function_names() -> impl Iterator<Item = String> {
+    Function::ALL.iter().map(|f| format!("{}(", f.name()))
+}
 
 /// The byte range of the series name at `caret`, or `None` when the
 /// caret is in a number, where no name can go.
@@ -83,6 +91,8 @@ pub fn name_at(line: &str, caret: usize) -> Option<Range<usize>> {
 #[derive(Debug, Default)]
 pub struct Completion {
     names: Vec<String>,
+    /// How many of `names` are series names; the rest are functions.
+    series: usize,
     labels: Vec<SharedString>,
     candidates: Vec<Ranked>,
     /// The candidate lit in the list: the first until a Tab writes one,
@@ -129,9 +139,12 @@ fn fits(line: &str, range: &Range<usize>) -> bool {
 }
 
 impl Completion {
-    /// Re-rank `names` against the name at `caret`, lighting the first
-    /// candidate.
+    /// Re-rank the series `names` and the function names against the
+    /// name at `caret`, lighting the first candidate.
     pub fn refresh(&mut self, line: &str, caret: usize, names: Vec<String>) {
+        let series = names.len();
+        let mut names = names;
+        names.extend(function_names());
         self.token = name_at(line, caret);
         self.candidates = match &self.token {
             Some(token) => rank_candidates(&names, &line[token.clone()]),
@@ -139,6 +152,7 @@ impl Completion {
         };
         self.labels = names.iter().map(|n| n.clone().into()).collect();
         self.names = names;
+        self.series = series;
         self.highlighted = 0;
         self.written = None;
         self.caret = None;
@@ -155,7 +169,7 @@ impl Completion {
     /// No unambiguous source names were supplied. This can also happen when
     /// loaded source pairs are duplicated and cannot be named uniquely.
     pub fn nothing_loaded(&self) -> bool {
-        self.names.is_empty()
+        self.series == 0
     }
 
     pub fn candidate_count(&self) -> usize {
@@ -247,6 +261,7 @@ pub fn expand_unique(line: &str, caret: usize, names: &[String]) -> Option<Write
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geode_core::series::expr::Function;
 
     fn names(n: &[&str]) -> Vec<String> {
         n.iter().map(|s| s.to_string()).collect()
@@ -316,14 +331,16 @@ mod tests {
     fn the_list_ranks_loaded_names_and_an_empty_name_offers_all() {
         let all = names(&["SPX.close", "VIX", "VIX@demo_rest", "V2X"]);
         let mut c = Completion::default();
+        let every = all.len() + Function::ALL.len();
         c.refresh("", 0, all.clone());
         assert_eq!(
-            c.candidates().collect::<Vec<_>>(),
+            c.candidates().take(all.len()).collect::<Vec<_>>(),
             all,
-            "empty field: every name"
+            "empty field: every series name first"
         );
+        assert_eq!(c.candidate_count(), every, "then every function");
         c.refresh("SPX.close / ", 12, all.clone());
-        assert_eq!(c.candidate_count(), 4, "after an operator: every name");
+        assert_eq!(c.candidate_count(), every, "after an operator: every name");
         c.refresh("SPX.close / VI", 14, all.clone());
         assert_eq!(
             c.candidates().collect::<Vec<_>>(),
@@ -419,7 +436,11 @@ mod tests {
             ("SPX.close / VIX".to_string(), 15)
         );
         assert_eq!(c.highlighted(), 1);
-        assert_eq!(c.pick("SPX.close / VIX", 5), None, "out of range");
+        assert_eq!(
+            c.pick("SPX.close / VIX", 2 + Function::ALL.len()),
+            None,
+            "out of range"
+        );
     }
 
     /// A range cached against other text is refused, never sliced: its
@@ -432,6 +453,40 @@ mod tests {
         let mut c = Completion::default();
         c.refresh("xx AB", 5, names(&["ABC"]));
         assert_eq!(c.pick("xx", 0), None, "past the end");
+    }
+
+    #[test]
+    fn functions_complete_beside_series_names_with_their_paren() {
+        let all = names(&["SPX.close", "VIX"]);
+        let mut c = Completion::default();
+        c.refresh("", 0, all.clone());
+        let cands: Vec<&str> = c.candidates().collect();
+        assert_eq!(&cands[..2], &["SPX.close", "VIX"], "series first");
+        assert_eq!(cands.len(), 2 + Function::ALL.len());
+        assert!(cands.contains(&"sma("));
+        c.refresh("VIX / sm", 8, all.clone());
+        assert_eq!(c.candidates().next(), Some("sma("));
+        assert!(
+            c.candidates().all(|n| n.ends_with('(')),
+            "no series fits `sm`"
+        );
+        let w = c.cycle("VIX / sm", true).unwrap();
+        assert_eq!(
+            w.apply("VIX / sm"),
+            ("VIX / sma(".to_string(), 10),
+            "the caret lands inside the call"
+        );
+        assert!(!c.nothing_loaded());
+        c.refresh("", 0, vec![]);
+        assert!(
+            c.nothing_loaded(),
+            "functions alone are nothing to reference"
+        );
+        assert_eq!(
+            expand_unique("VIX / sm", 8, &all),
+            None,
+            "Enter's expansion is over series names only"
+        );
     }
 
     #[test]
