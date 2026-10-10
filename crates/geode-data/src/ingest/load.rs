@@ -178,7 +178,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         let nulls: i64 =
             conn.query_row(&sql, [], |r| r.get(0))
                 .map_err(|source| StoreError::Sql {
-                    statement: sql.clone(),
+                    statement: sql,
                     source,
                 })?;
         if nulls > 0 {

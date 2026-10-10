@@ -584,4 +584,110 @@ grain = "instrument"
             .unwrap();
         assert_eq!(v, 20.0);
     }
+
+    /// The demo spot ladder's shape: NPV and theta are per instrument and
+    /// repeat identically on each underlying row of a shift, delta is per
+    /// underlying. A generator that derived the instrument-grain NPV from a
+    /// per-underlying input would make the repeats disagree, and the split
+    /// would keep one underlying's value under a conflict.
+    #[test]
+    fn an_instrument_grain_measure_repeated_per_underlying_splits_without_conflict() {
+        use geode_core::config::{LayerDoc, merge_docs};
+        let text = r#"
+[spot_ladder]
+axes = ["spot_shift"]
+[spot_ladder.columns.book]
+type = "utf8"
+role = "dimension"
+[spot_ladder.columns.lhu]
+type = "utf8"
+role = "dimension"
+[spot_ladder.columns.position_ref]
+type = "utf8"
+role = "key"
+[spot_ladder.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[spot_ladder.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[spot_ladder.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[spot_ladder.columns.spot_shift]
+type = "f64"
+role = "axis"
+axis = "scenario"
+[spot_ladder.columns.npv]
+type = "f64"
+role = "measure"
+grain = "instrument"
+[spot_ladder.columns.theta]
+type = "f64"
+role = "measure"
+grain = "instrument"
+[spot_ladder.columns.delta]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        let (schema, diags) = geode_core::schema::SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("spot_ladder").unwrap().clone();
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table raw as select * from (values
+               ('BK0','L0','P1','C','I1','SPX', 0.0, 100.0, -3.0, 10.0),
+               ('BK0','L0','P1','C','I1','RUT', 0.0, 100.0, -3.0, 20.0),
+               ('BK0','L0','P1','C','I1','SPX', 5.0, 250.0, -2.88, 12.0),
+               ('BK0','L0','P1','C','I1','RUT', 5.0, 250.0, -2.88, 22.0))
+             t(book, lhu, position_ref, counterparty, instrument_ref, underlying_ref,
+               spot_shift, npv, theta, delta)",
+        )
+        .unwrap();
+        let out = split_by_grain(
+            &conn,
+            &SplitRequest {
+                dataset: &ds,
+                raw_table: "raw",
+                batch: "b",
+                file_id: 1,
+            },
+        )
+        .unwrap();
+        assert!(out.conflicts.is_empty(), "{:?}", out.conflicts);
+        let per_shift = |table: &str| -> Vec<(f64, i64)> {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "select spot_shift, count(*) from {table} group by spot_shift order by spot_shift"
+                ))
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(
+            per_shift(&staging_table(Grain::Instrument)),
+            [(0.0, 1), (5.0, 1)],
+            "one instrument row per (instrument, shift)"
+        );
+        assert_eq!(
+            per_shift(&staging_table(Grain::Underlying)),
+            [(0.0, 2), (5.0, 2)],
+            "one underlying row per (underlying, shift)"
+        );
+        let npv: f64 = conn
+            .query_row(
+                &format!(
+                    "select npv from {} where spot_shift = 5.0",
+                    staging_table(Grain::Instrument)
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(npv, 250.0);
+    }
 }
