@@ -1729,6 +1729,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             s.deliver(Delivery::VolSlices(outcome), window, cx)
                         });
                     }
+                    // The watchlist bridge cache consumes this in a later change.
+                    DataEvent::Watchlist(_) => {}
                     // The live lane keeps `ReferenceGlobal`; see `ReferenceCache`.
                     DataEvent::Reference(outcome) if outcome.key == REFERENCE_KEY => {
                         reference_cache.answer(outcome, cx);

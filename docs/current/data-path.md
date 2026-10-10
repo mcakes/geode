@@ -163,6 +163,7 @@ success, and the loop goes on to the next request:
 | Distinct values | `Distinct` error for its key, tag, and column |
 | Series | `Series` error for its key and tag |
 | Catalog | `Catalog` error for its key and tag |
+| Watchlist | `Watchlist` error for its key, tag, and list name |
 | Pricing | `Price` outcome with the error on every submitted line |
 | Upload | `Upload` error for its key, tag, and target |
 | Text file | `TextFile` error for its key and tag: a failed write for a write, a failed read for a read |
@@ -1152,6 +1153,12 @@ distinct-value requests skip it. A distinct request naming one dataset reads
 that dataset alone and is refused by name when the dataset is unknown,
 computed, or does not carry the column; without a name it unions every
 dataset carrying the column, which is what the dimension picker asks for.
+A watchlist request runs one such single-dataset distinct of
+`underlying_ref` per rule, each in its own read transaction so a rule that
+fails to compile or run is reported by its index while the other rules
+still answer, then unions the names with the list's manual includes and
+drops its excludes. A drifted dataset any rule names refuses the whole
+list before any rule runs.
 
 A distinct-value answer carries the key it was asked under, and the app
 routes it by that key. The shell's reserved keys (the picker, expression

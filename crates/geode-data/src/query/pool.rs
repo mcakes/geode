@@ -11,8 +11,9 @@
 
 use crate::query::compile::CompiledQuery;
 use crate::query::series::{SeriesPlan, run_series};
+use crate::query::watchlist::WatchlistQuery;
 use crate::store::Store;
-use geode_core::query::QueryKey;
+use geode_core::query::{QueryKey, WatchlistResult};
 use geode_core::series::SeriesResult;
 use geode_core::snapshot::{ColumnMeta, Provenance, Snapshot};
 use std::collections::HashMap;
@@ -38,9 +39,10 @@ pub type QueryId = u64;
 pub type ResultSink = Arc<dyn Fn(QueryResult) -> bool + Send + Sync>;
 
 /// What a worker produced: a view or document
-/// query's `Snapshot`, or a series query's struct-of-arrays result. Two
-/// kinds rather than a series `Snapshot` because the chart wants arrays
-/// and a series has no tree, grouping or attribution to put in one.
+/// query's `Snapshot`, a series query's struct-of-arrays result, or a
+/// watchlist's members. Separate kinds rather than a `Snapshot` for each
+/// because the chart wants arrays and a series has no tree, grouping or
+/// attribution to put in one, and a watchlist is names with origins.
 ///
 /// Not boxed (`clippy::large_enum_variant`): the big variant is the
 /// common one — every view and document query answers with a `Snapshot`
@@ -51,18 +53,22 @@ pub type ResultSink = Arc<dyn Fn(QueryResult) -> bool + Send + Sync>;
 pub enum Payload {
     Snapshot(Snapshot),
     Series(SeriesResult),
+    Watchlist(WatchlistResult),
 }
 
-/// Work yielding a snapshot or a series result. Snapshot work can be a
-/// compiled statement or a request whose database-dependent compilation runs
-/// inside the worker's read transaction. Coalescing, interruption and panic
-/// containment apply to every variant.
+/// Work yielding a snapshot, a series result or a watchlist. Snapshot work
+/// can be a compiled statement or a request whose database-dependent
+/// compilation runs inside the worker's read transaction. Coalescing,
+/// interruption and panic containment apply to every variant.
 #[derive(Debug)]
 pub enum Work {
     Query(CompiledQuery),
     Series(Box<SeriesPlan>),
     /// Database-dependent compilation and execution share one read transaction.
     Read(Box<super::read::ReadQuery>),
+    /// One list resolved, each rule in its own transaction; coalescing and
+    /// cancellation apply as to any key.
+    Watchlist(Box<WatchlistQuery>),
 }
 
 /// What kind of request this is, carried through to the result so the
@@ -79,6 +85,9 @@ pub enum RequestKind {
         /// through so the service's sink can attach each pair's
         /// load-lane health without re-reading the plan.
         pairs: Vec<(u8, String, String)>,
+    },
+    Watchlist {
+        name: String,
     },
 }
 
@@ -443,6 +452,10 @@ pub(crate) fn run_one(
             run_snapshot(conn, compiled, &req.grouping, req.provenance.clone())
                 .map(Payload::Snapshot)
         }
+        Work::Watchlist(query) => query
+            .run(conn)
+            .map(Payload::Watchlist)
+            .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string())),
     }
 }
 
@@ -537,6 +550,7 @@ mod tests {
         r.payload.map(|p| match p {
             Payload::Snapshot(s) => s,
             Payload::Series(_) => panic!("a view query answered with a series"),
+            Payload::Watchlist(_) => panic!("a view query answered with a watchlist"),
         })
     }
 
@@ -1209,6 +1223,69 @@ mod tests {
                 assert_eq!(res.buckets.len(), 1);
             }
             Payload::Snapshot(_) => panic!("a series request answered with a snapshot"),
+            Payload::Watchlist(_) => panic!("a series request answered with a watchlist"),
+        }
+        pool.shutdown();
+    }
+
+    #[test]
+    fn a_watchlist_request_rides_the_pool_and_delivers_its_members() {
+        use crate::query::read::ReadConfig;
+        use crate::query::watchlist::WatchlistQuery;
+        use geode_core::query::{WatchlistParams, WatchlistResult};
+        use geode_core::schema::SchemaSpec;
+        use geode_core::watchlist::members::{Member, Origin};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        let config = Arc::new(ReadConfig {
+            schema: Arc::new(SchemaSpec::default()),
+            dimensions: Default::default(),
+        });
+        let params = WatchlistParams {
+            key: QueryKey(4),
+            tag: 2,
+            name: "manual".into(),
+            rules: vec![],
+            include: vec!["SPX".into()],
+            exclude: vec![],
+        };
+        let (pool, rx) = QueryPool::spawn(&store, 1).unwrap();
+        pool.submit(QueryRequest {
+            key: QueryKey(4),
+            tag: 2,
+            submitted: Instant::now(),
+            view: ViewId("watchlist:manual".into()),
+            work: Work::Watchlist(Box::new(WatchlistQuery::new(config, params))),
+            grouping: Vec::new(),
+            provenance: Provenance::default(),
+            kind: RequestKind::Watchlist {
+                name: "manual".into(),
+            },
+        });
+        let r = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+        assert_eq!((r.key, r.tag), (QueryKey(4), 2));
+        assert_eq!(
+            r.kind,
+            RequestKind::Watchlist {
+                name: "manual".into()
+            }
+        );
+        match r.payload.unwrap() {
+            Payload::Watchlist(res) => assert_eq!(
+                res,
+                WatchlistResult {
+                    members: vec![Member {
+                        name: "SPX".into(),
+                        origin: Origin::Manual
+                    }],
+                    rules_failed: vec![],
+                }
+            ),
+            other => panic!("a watchlist request answered with {other:?}"),
         }
         pool.shutdown();
     }

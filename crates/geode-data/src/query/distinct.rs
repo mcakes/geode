@@ -337,7 +337,7 @@ fn meta(name: &str) -> CompiledColumn {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::query::pool::{Payload, QueryRequest, RequestKind, ViewId, Work, run_one};
     use crate::store::ddl::tests_support::ts;
@@ -408,16 +408,16 @@ grain = "instrument"
         SchemaSpec::from_doc(&doc).0
     }
 
-    struct Fixture {
+    pub(crate) struct Fixture {
         _dir: tempfile::TempDir,
         store: crate::store::Store,
-        schema: SchemaSpec,
-        dims: DerivedDimensions,
+        pub(crate) schema: SchemaSpec,
+        pub(crate) dims: DerivedDimensions,
         between: DateTime<Utc>,
     }
 
     impl Fixture {
-        fn conn(&self) -> &Connection {
+        pub(crate) fn conn(&self) -> &Connection {
             self.store.writer()
         }
 
@@ -437,6 +437,7 @@ grain = "instrument"
             let snap = match run_one(self.conn(), &req).unwrap() {
                 Payload::Snapshot(s) => s,
                 Payload::Series(_) => panic!("a distinct query answered with a series"),
+                Payload::Watchlist(_) => panic!("a distinct query answered with a watchlist"),
             };
             let v = snap.column_index("value").expect("distinct selects value");
             let n = snap.column_index("n").expect("distinct selects n");
@@ -1014,7 +1015,7 @@ role = "attribute"
     /// column no grain carries: an expression naming a document-only column
     /// would fail the measure arm, and with it the whole union, before the
     /// document arm was ever reached.
-    fn document_fixture() -> Fixture {
+    pub(crate) fn document_fixture() -> Fixture {
         let doc = merge_docs(
             "datasets",
             &[LayerDoc::builtin("datasets", DOC_SCHEMA).unwrap()],
