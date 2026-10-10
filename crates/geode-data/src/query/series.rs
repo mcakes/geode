@@ -360,14 +360,34 @@ impl Lowering {
                 }
             }
             Function::Ema => {
-                let _ = (need(n)?, g);
-                return Err(refuse(format!(
-                    "slot {}: ema is not lowered yet",
-                    self.slot
-                )));
+                let n = need(n)?;
+                self.ema(a, n, g)
             }
             _ => unreachable!("window is called for along and rolling functions only"),
         })
+    }
+
+    /// `ema(a, n)`: the span-n exponentially weighted mean in its
+    /// adjusted form over the last `5n` points, NULL points skipped
+    /// (pandas `ewm(span=n, adjust=True, ignore_na=True)` up to a weight
+    /// tail under 0.005%). The window's values, the count of the last
+    /// `n`, and the weight list each live in a stage column because the
+    /// result reads them more than once.
+    fn ema(&mut self, a: &str, n: u32, g: &mut Grid) -> String {
+        let k = self.stages;
+        let name = self.stage_name();
+        let span = 5 * n;
+        let q = 1.0 - 2.0 / (f64::from(n) + 1.0);
+        self.ctes.push(format!(
+            "{name} as (\n  select p.*, list({a}) filter (where ({a}) is not null) over (order by b rows between {} preceding and current row) as l{k}, count({a}) over (order by b rows between {} preceding and current row) as d{k}, w.ws as w{k}\n  from {} p, (select list(pow({q:?}, i) order by i) as ws from range({span}) t(i)) w\n)",
+            span - 1,
+            n - 1,
+            g.name
+        ));
+        g.name = name;
+        format!(
+            "(case when d{k} = {n} then list_dot_product(list_reverse(l{k}), w{k}[1:len(l{k})]) / list_sum(w{k}[1:len(l{k})]) end)"
+        )
     }
 }
 
@@ -1617,6 +1637,78 @@ mod tests {
             "a window of NULLs has no percentile"
         );
         assert_eq!(r.slots[2].bins, vec![], "and no bins");
+    }
+
+    /// The list vocabulary `ema` lowers to, on the pinned DuckDB: a
+    /// window `list` with FILTER, `list_reverse`, a sliced list,
+    /// `list_dot_product` and `list_sum`.
+    #[test]
+    fn duckdb_has_the_list_vocabulary_ema_needs() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let v: f64 = conn
+            .query_row(
+                "select list_dot_product(list_reverse([1.0, 2.0, 3.0]), [1.0, 0.5, 0.25][1:3]) / list_sum([1.0, 0.5, 0.25][1:3])",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!((v - (3.0 + 1.0 + 0.25) / 1.75).abs() < 1e-12, "{v}");
+        let lists: Vec<String> = conn
+            .prepare(
+                "select cast(list(v) filter (where v is not null) over (order by i rows between 1 preceding and current row) as varchar) from (values (1, 1.0), (2, null), (3, 3.0)) t(i, v) order by i",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(lists, vec!["[1.0]", "[1.0]", "[3.0]"]);
+        let ws: String = conn
+            .query_row(
+                "select cast((select list(pow(0.5, i) order by i) from range(3) t(i)) as varchar)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ws, "[1.0, 0.5, 0.25]");
+    }
+
+    #[test]
+    fn ema_is_the_adjusted_weighted_mean_and_skips_null_points() {
+        let (_d, store) = store();
+        daily(&store, "A", &[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let r = run(
+            &store,
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                expr(2, "ema(s1, 2)"),
+                expr(3, "ema(diff(s1), 2)"),
+            ]),
+        );
+        // pandas `Series([1,2,3,4,5]).ewm(span=2, adjust=True).mean()`:
+        // 1, 1.75, 2.6153…, 3.55, 4.5206…; the first is NULL here because
+        // n = 2 points must exist.
+        assert!(
+            close(
+                &vals(&r, 1),
+                &[
+                    None,
+                    Some(1.75),
+                    Some(34.0 / 13.0),
+                    Some(3.55),
+                    Some(547.0 / 121.0)
+                ]
+            ),
+            "{:?}",
+            vals(&r, 1)
+        );
+        // diff is NULL on Jan 5; the weighted mean of the later 1s is 1,
+        // and the Jan 6 window holds one point, not two.
+        assert!(
+            close(&vals(&r, 2), &[None, None, Some(1.0), Some(1.0), Some(1.0)]),
+            "{:?}",
+            vals(&r, 2)
+        );
     }
 
     #[test]
