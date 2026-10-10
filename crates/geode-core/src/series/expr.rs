@@ -141,7 +141,89 @@ impl Function {
             | Function::Z => Kind::Rolling,
         }
     }
+
+    /// The call as the help line spells it: the name and its argument
+    /// names, `series` for a series argument and `n` for a count. `min`
+    /// and `max` show their variadic form.
+    pub fn signature(self) -> &'static str {
+        match self {
+            Function::First => "first(series)",
+            Function::Last => "last(series)",
+            Function::Min => "min(series, …)",
+            Function::Max => "max(series, …)",
+            Function::Mean => "mean(series)",
+            Function::Median => "median(series)",
+            Function::Std => "std(series)",
+            Function::Sum => "sum(series)",
+            Function::Count => "count(series)",
+            Function::Abs => "abs(x)",
+            Function::Log => "log(x)",
+            Function::Exp => "exp(x)",
+            Function::Sqrt => "sqrt(x)",
+            Function::Diff => "diff(series)",
+            Function::Pct => "pct(series)",
+            Function::Cum => "cum(series)",
+            Function::Lag => "lag(series, n)",
+            Function::Sma => "sma(series, n)",
+            Function::Ema => "ema(series, n)",
+            Function::Rmin => "rmin(series, n)",
+            Function::Rmax => "rmax(series, n)",
+            Function::Rstd => "rstd(series, n)",
+            Function::Z => "z(series, n)",
+        }
+    }
+
+    /// What a call evaluates to, from its kind: a fold gives `number`, a
+    /// pointwise function `same as its argument`, `min`/`max` `number or
+    /// series`, an along or rolling function `series`.
+    pub fn result(self) -> &'static str {
+        match self.kind() {
+            Kind::Fold => "number",
+            Kind::Pointwise => "same as its argument",
+            Kind::MinMax => "number or series",
+            Kind::Along { .. } | Kind::Rolling => "series",
+        }
+    }
+
+    /// One sentence, under 72 characters, stating what the function
+    /// computes and when it is blank, true of the lowering in
+    /// `geode-data` (`query/series.rs`: `fold_sql`, `Lowering::call`,
+    /// `window` and `ema`), which this copy is a claim about. A fold and
+    /// a window skip blank points; a rolling value is blank unless each
+    /// of the last `n` points has a value.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Function::First => "the first point in the range that has a value",
+            Function::Last => "the last point in the range that has a value",
+            Function::Min => "the smallest: over the range alone, per point with more arguments",
+            Function::Max => "the largest: over the range alone, per point with more arguments",
+            Function::Mean => "the mean over the range; blank when it has no points",
+            Function::Median => "the median over the range, halfway between the middle two",
+            Function::Std => "sample deviation over the range, blank under two points",
+            Function::Sum => "the sum over the range; blank when it has no points",
+            Function::Count => "how many points with a value the range holds",
+            Function::Abs => "the absolute value, per point",
+            Function::Log => "natural log; blank at or below zero",
+            Function::Exp => "e to the power; blank above 709",
+            Function::Sqrt => "square root; blank below zero",
+            Function::Diff => "change from the previous point, blank at the first",
+            Function::Pct => "change over the previous point, blank when it is zero",
+            Function::Cum => "running sum of the points so far",
+            Function::Lag => "the value n points back, blank for the first n",
+            Function::Sma => "mean of the last n points, blank until n points",
+            Function::Ema => "span-n exponential mean of the last 5n points, blank until n",
+            Function::Rmin => "smallest of the last n points, blank until n points",
+            Function::Rmax => "largest of the last n points, blank until n points",
+            Function::Rstd => "sample deviation of the last n points, blank until n points",
+            Function::Z => "(value − sma) / rstd over the last n points, blank at zero spread",
+        }
+    }
 }
+
+/// The help line for a caret inside `[…]`: `index_sql` reads the k-th
+/// point that has a value from the start for `k >= 0` and from the end
+/// otherwise (`[-1]` is the last), NULL past either end.
+pub const INDEX_HELP: &str = "A[k] · number · the k-th point, from the end when k is negative";
 
 /// The tree, generic over how a reference is spelled: `RefName` as
 /// parsed, `u8` once resolved.
@@ -1185,5 +1267,45 @@ mod tests {
         assert_eq!(count_arg(&args("diff(A)")), None);
         assert_eq!(count_arg(&args("sma(A, 0)")), None);
         assert_eq!(count_arg(&args("sma(A, B)")), None);
+    }
+
+    /// The help line's copy for every function: a signature spelled from
+    /// its name with the arity its kind takes, a result shape, and one
+    /// short sentence without a trailing period, so the line stays one
+    /// line.
+    #[test]
+    fn every_function_has_a_signature_result_and_short_description() {
+        for f in Function::ALL {
+            let sig = f.signature();
+            assert!(
+                sig.starts_with(&format!("{}(", f.name())) && sig.ends_with(')'),
+                "{sig}"
+            );
+            assert!(!f.result().is_empty(), "{}", f.name());
+            let d = f.describe();
+            assert!(!d.is_empty(), "{}", f.name());
+            assert!(d.chars().count() <= 72, "{}: {d}", f.name());
+            assert!(!d.ends_with('.'), "{}: {d}", f.name());
+            let commas = sig.matches(',').count();
+            match f.kind() {
+                Kind::Fold | Kind::Pointwise | Kind::Along { count: false } => {
+                    assert_eq!(commas, 0, "{sig}")
+                }
+                Kind::Along { count: true } | Kind::Rolling => assert_eq!(commas, 1, "{sig}"),
+                Kind::MinMax => {
+                    assert_eq!(commas, 1, "{sig}");
+                    assert!(sig.contains('…'), "{sig}");
+                }
+            }
+        }
+        assert_eq!(Function::Sma.signature(), "sma(series, n)");
+        assert_eq!(Function::Abs.signature(), "abs(x)");
+        assert_eq!(Function::Min.signature(), "min(series, …)");
+        assert_eq!(Function::Diff.signature(), "diff(series)");
+        assert_eq!(Function::Mean.result(), "number");
+        assert_eq!(Function::Abs.result(), "same as its argument");
+        assert_eq!(Function::Max.result(), "number or series");
+        assert_eq!(Function::Lag.result(), "series");
+        assert!(INDEX_HELP.starts_with("A[k] · number · "));
     }
 }

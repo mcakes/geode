@@ -39,7 +39,7 @@ use gpui_component::color_picker::ColorPickerState;
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Theme, h_flex};
 
-use crate::core::complete::Completion;
+use crate::core::complete::{Completion, Help};
 use crate::core::menu::{MenuKind, Pick};
 use crate::core::model::{Color, Model, SlotState};
 use crate::tile::TimeseriesTile;
@@ -415,6 +415,15 @@ pub(crate) struct ExprField {
     /// already placed the list, and a refusal shown after an Enter
     /// expansion must survive its echo.
     pub echo: Option<String>,
+    /// The help line under the field: the lit row or the enclosing call
+    /// at the caret ([`crate::core::complete::help_for`]). Rebuilt with
+    /// the list, on every Change (an echo too: the caret moved), after a
+    /// completion write and whenever the input notifies (an arrow key or
+    /// a click moved the caret), never in render.
+    pub help: Option<Help>,
+    /// The text and caret `help` was computed for, so an input notify
+    /// that moved neither rebuilds nothing.
+    pub help_at: Option<(String, usize)>,
 }
 
 /// Split each option into the two columns a picker row paints. The
