@@ -161,14 +161,19 @@ fn read_rule(value: &toml::Value, path: &str, diags: &mut Vec<Diagnostic>) -> Ru
     }
 }
 
-/// Read the merged document. A list is dropped only when its object is not
-/// a table, a name is in both `include` and `exclude`, or its name clashes
-/// (ignoring Unicode case) with an earlier list; every other problem warns
-/// and keeps the list. Rules are kept whatever their shape so the fold can
-/// report them by index.
+/// Read the merged document. A list is dropped when its object is not a
+/// table (a warning), when `validate_name` refuses its name (an error: not
+/// an identifier, a scope keyword, the version stamp, or a clash ignoring
+/// case with an earlier list), or when a name is in both `include` and
+/// `exclude` (an error); every other problem warns and keeps the list. A
+/// clash is judged against every earlier table in the document, kept or
+/// dropped, so fixing an earlier list cannot make a later one start
+/// clashing. Rules are kept whatever their shape so the fold can report
+/// them by index.
 pub fn from_doc(doc: &MergedDoc) -> (Watchlists, Vec<Diagnostic>) {
     let mut out = Watchlists::default();
     let mut diags = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
     for (name, value) in &doc.value {
         if name == "config_version" {
             continue;
@@ -181,7 +186,9 @@ pub fn from_doc(doc: &MergedDoc) -> (Watchlists, Vec<Diagnostic>) {
             ));
             continue;
         };
-        if let Err(reason) = validate_name(name, &out) {
+        let checked = check_name(name, seen.iter().copied());
+        seen.push(name);
+        if let Err(reason) = checked {
             diags.push(error(
                 path,
                 format!("watchlists: {reason}; '{name}' dropped"),
@@ -235,6 +242,12 @@ fn is_identifier(name: &str) -> bool {
 /// A new, cloned or renamed list's name: an identifier, not a scope
 /// keyword, not the version stamp, and not an existing list ignoring case.
 pub fn validate_name(name: &str, existing: &Watchlists) -> Result<(), String> {
+    check_name(name, existing.names())
+}
+
+/// The name rules against an explicit set of taken names; `from_doc` passes
+/// every earlier table in the document, not only the kept lists.
+fn check_name<'a>(name: &str, mut existing: impl Iterator<Item = &'a str>) -> Result<(), String> {
     if !is_identifier(name) {
         return Err(format!(
             "'{name}' is not a valid name: use letters, digits and _, not starting with a digit"
@@ -246,10 +259,8 @@ pub fn validate_name(name: &str, existing: &Watchlists) -> Result<(), String> {
     if name.eq_ignore_ascii_case("config_version") {
         return Err(format!("'{name}' is reserved ('config_version')"));
     }
-    if let Some(other) = existing
-        .names()
-        .find(|n| n.to_lowercase() == name.to_lowercase())
-    {
+    let lower = name.to_lowercase();
+    if let Some(other) = existing.find(|n| n.to_lowercase() == lower) {
         return Err(format!("'{name}' already exists ('{other}')"));
     }
     Ok(())
@@ -354,6 +365,34 @@ mod tests {
         assert!(diags.iter().any(|d| d.severity == Severity::Error
             && d.message.contains("'EU'")
             && d.message.contains("'eu'")));
+    }
+
+    #[test]
+    fn a_clash_with_a_dropped_list_still_drops_the_second() {
+        // `eu` is dropped for its overlap; `EU` must still clash with it, so
+        // fixing `eu` later cannot produce a clash out of nowhere.
+        let (lists, diags) = from_doc(&doc(
+            "[eu]\ninclude = [\"SPX\"]\nexclude = [\"SPX\"]\n[EU]\ninclude = [\"NDX\"]\n",
+        ));
+        assert!(lists.is_empty(), "{:?}", lists.names().collect::<Vec<_>>());
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert_eq!(errors.len(), 2, "{diags:?}");
+        assert!(
+            errors
+                .iter()
+                .any(|d| d.path.as_deref() == Some("watchlists.eu")
+                    && d.message.contains("both include and exclude"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|d| d.path.as_deref() == Some("watchlists.EU")
+                    && d.message.contains("'EU'")
+                    && d.message.contains("'eu'"))
+        );
     }
 
     #[test]
