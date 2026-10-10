@@ -645,7 +645,20 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
         .filter(|c| matches!(c.role, ColumnRole::Axis { .. }))
         .map(|c| c.name.clone())
         .collect();
-    for a in &ds.axes {
+    for (i, a) in ds.axes.iter().enumerate() {
+        // Storage DDL emits one column per axis; a repeat is a duplicate
+        // column, and the failed CREATE TABLE would close the whole store.
+        if ds.axes[..i].contains(a) {
+            diags.push(err(
+                format!(
+                    "dataset '{}': axes names '{a}' twice; dataset dropped",
+                    ds.name
+                ),
+                format!("datasets.{}.axes", ds.name),
+            ));
+            keep = false;
+            continue;
+        }
         // A grain key named in `axes` is refused as such, whatever its role:
         // that is the mistake to name, not the role mismatch it implies.
         if is_grain_key(a) {
@@ -2374,6 +2387,22 @@ grain = "underlying"
         assert!(
             d.message
                 .contains("axes index measures, and none is declared"),
+            "{}",
+            d.message
+        );
+        assert!(schema.dataset("vega_buckets").is_none());
+    }
+
+    #[test]
+    fn axes_may_not_name_a_column_twice() {
+        let (schema, diags) = vega_with(
+            "axes = [\"tenor\", \"moneyness\"]",
+            "axes = [\"tenor\", \"tenor\"]",
+        );
+        let d = error_with_path(&diags, "datasets.vega_buckets.axes");
+        assert!(
+            d.message
+                .contains("dataset 'vega_buckets': axes names 'tenor' twice; dataset dropped"),
             "{}",
             d.message
         );
