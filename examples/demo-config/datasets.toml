@@ -505,6 +505,8 @@ role = "measure"
 grain = "underlying"
 source_name = "Vega_USD"
 
+# NPV and theta are per instrument and repeat identically on each of the
+# instrument's underlying rows; delta, gamma and vega are per underlying.
 [spot_ladder]
 axes = ["spot_shift"]
 [spot_ladder.columns.business_date]
@@ -613,12 +615,12 @@ source_name = "Vega_USD"
 [spot_ladder.columns.theta]
 type = "f64"
 role = "measure"
-grain = "underlying"
+grain = "instrument"
 source_name = "Theta"
 [spot_ladder.columns.theta_usd]
 type = "f64"
 role = "measure"
-grain = "underlying"
+grain = "instrument"
 source_name = "Theta_USD"
 
 [term_sensitivities]
@@ -728,6 +730,8 @@ role = "measure"
 grain = "underlying"
 source_name = "Curvature_USD"
 
+# Rho keys at underlying grain, matching the risk file's per-underlying rho;
+# the curve's currency is the `curve_ccy` axis.
 [rho_curves]
 axes = ["tenor", "curve_ccy", "curve_type"]
 [rho_curves.columns.business_date]
@@ -807,12 +811,12 @@ source_name = "CurveType"
 [rho_curves.columns.rho]
 type = "f64"
 role = "measure"
-grain = "instrument"
+grain = "underlying"
 source_name = "Rho"
 [rho_curves.columns.rho_usd]
 type = "f64"
 role = "measure"
-grain = "instrument"
+grain = "underlying"
 source_name = "Rho_USD"
 
 # ---- CVI parameter documents. ----

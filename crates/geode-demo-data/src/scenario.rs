@@ -8,7 +8,7 @@
 use crate::model::RiskBatch;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Distinct (instrument, underlying) rows the demo derives scenarios for.
 /// Each row fans out to as many as 110 scenario rows per table, so this
@@ -133,6 +133,26 @@ pub fn generate_scenarios(batch: &RiskBatch, coverage: usize, seed: u64) -> Scen
             rows.push(i);
         }
     }
+    // Instrument-level spot sensitivities for the instrument-grain NPV
+    // ladder: Σ delta01 and Σ gamma01 over every distinct underlying of the
+    // instrument in the whole batch (pair rows repeat a per-underlying value,
+    // so each (instrument, underlying) counts once). Computed once per
+    // instrument so every row of the instrument carries the identical NPV and
+    // the split sees agreeing repeats instead of a conflict.
+    let mut counted: BTreeSet<(&str, &str)> = BTreeSet::new();
+    let mut spot_greeks: BTreeMap<&str, (f64, f64)> = BTreeMap::new();
+    for i in 0..batch.len() {
+        if counted.insert((
+            batch.instrument_ref[i].as_str(),
+            batch.underlying_ref[i].as_str(),
+        )) {
+            let e = spot_greeks
+                .entry(batch.instrument_ref[i].as_str())
+                .or_insert((0.0, 0.0));
+            e.0 += batch.delta01[i];
+            e.1 += batch.gamma01[i];
+        }
+    }
     let identity = |i: usize| -> Vec<String> {
         vec![
             batch.business_date[i].clone(),
@@ -243,7 +263,8 @@ pub fn generate_scenarios(batch: &RiskBatch, coverage: usize, seed: u64) -> Scen
             let s = shift; // percent units: delta01 is per 1 % move
             let mut text = id.clone();
             text.push(f(shift));
-            let npv = batch.npv[i] + batch.delta01[i] * s + 0.5 * batch.gamma01[i] * s * s;
+            let (sum_delta, sum_gamma) = spot_greeks[batch.instrument_ref[i].as_str()];
+            let npv = batch.npv[i] + sum_delta * s + 0.5 * sum_gamma * s * s;
             let delta = batch.delta01[i] + batch.gamma01[i] * s;
             let gamma = batch.gamma01[i] * (1.0 - 0.9 * (s / 100.0).powi(2) * 4.0);
             let vega_s = vega * (1.0 - 0.6 * (s / 100.0).abs());
@@ -381,6 +402,105 @@ mod tests {
         );
         for r in &rho.rows {
             assert_eq!(r.text[cc], r.text[ccy], "{}", r.text[ci]);
+        }
+    }
+
+    fn measure(t: &ScenarioTable, r: &ScenarioRow, name: &str) -> f64 {
+        r.measures[col(t, name) - r.text.len()]
+    }
+
+    #[test]
+    fn instrument_grain_measures_agree_across_an_instruments_underlyings() {
+        let batch = generate(&GeneratorConfig {
+            rows: 500,
+            seed: 42,
+            business_dates: 1,
+        });
+        let s = generate_scenarios(&batch, 50, 42);
+        let sl = table(&s, "spot_ladder");
+        let (ci, cs) = (col(sl, "instrument_ref"), col(sl, "spot_shift"));
+        let mut groups: BTreeMap<(String, String), Vec<(f64, f64)>> = BTreeMap::new();
+        for r in &sl.rows {
+            groups
+                .entry((r.text[ci].clone(), r.text[cs].clone()))
+                .or_default()
+                .push((measure(sl, r, "npv"), measure(sl, r, "theta")));
+        }
+        for ((inst, shift), values) in &groups {
+            assert!(
+                values.iter().all(|v| *v == values[0]),
+                "npv/theta disagree within ({inst}, {shift}): {values:?}"
+            );
+        }
+        // Not vacuous: some covered instrument has two or more underlyings,
+        // and its group at a nonzero shift has a row per underlying.
+        let multi = groups
+            .iter()
+            .find(|((_, shift), v)| shift == "5" && v.len() >= 2);
+        assert!(multi.is_some(), "no covered instrument with 2+ underlyings");
+    }
+
+    #[test]
+    fn spot_ladder_base_row_sums_match_the_risk_batch() {
+        let batch = generate(&GeneratorConfig {
+            rows: 500,
+            seed: 42,
+            business_dates: 1,
+        });
+        let s = generate_scenarios(&batch, 50, 42);
+        let mut first_row: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+        for i in 0..batch.len() {
+            first_row
+                .entry((
+                    batch.instrument_ref[i].as_str(),
+                    batch.underlying_ref[i].as_str(),
+                ))
+                .or_insert(i);
+        }
+        let sl = table(&s, "spot_ladder");
+        let (ci, cu, cs) = (
+            col(sl, "instrument_ref"),
+            col(sl, "underlying_ref"),
+            col(sl, "spot_shift"),
+        );
+        let mut base_rows = 0;
+        for r in sl.rows.iter().filter(|r| r.text[cs] == "0") {
+            let i = first_row[&(r.text[ci].as_str(), r.text[cu].as_str())];
+            assert_eq!(measure(sl, r, "npv"), batch.npv[i], "{}", r.text[ci]);
+            assert_eq!(
+                measure(sl, r, "theta"),
+                batch.clean_theta_business_day[i],
+                "{}",
+                r.text[ci]
+            );
+            base_rows += 1;
+        }
+        assert_eq!(base_rows, 50);
+
+        let rho = table(&s, "rho_curves");
+        let (ri, ru, rt) = (
+            col(rho, "instrument_ref"),
+            col(rho, "underlying_ref"),
+            col(rho, "curve_type"),
+        );
+        let mut sums: BTreeMap<(String, String, String), f64> = BTreeMap::new();
+        for r in &rho.rows {
+            *sums
+                .entry((r.text[ri].clone(), r.text[ru].clone(), r.text[rt].clone()))
+                .or_default() += measure(rho, r, "rho");
+        }
+        assert_eq!(sums.len(), 50 * CURVE_TYPES.len());
+        for ((inst, und, curve), total) in &sums {
+            let i = first_row[&(inst.as_str(), und.as_str())];
+            let expected = if curve == CURVE_TYPES[0] {
+                batch.rho_ois010[i]
+            } else {
+                batch.rho_rfr010[i]
+            };
+            assert!(
+                (total - expected).abs() < 1e-6,
+                "{inst}/{und}/{curve}: {total} vs {expected}"
+            );
         }
     }
 
