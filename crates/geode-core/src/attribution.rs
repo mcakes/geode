@@ -134,6 +134,14 @@ pub fn attribution_of(
         .map(|c| dims.base_column(c.as_str()))
         .collect();
 
+    // A scenario axis enumerates alternative states. A level whose grouping
+    // omits it would sum across states, which is not a number that belongs
+    // to any row: the pair-grain rule applied to an axis. Bucket axes
+    // partition a total and need no rule: omitting one sums the partition.
+    if ds.scenario_axes().iter().any(|a| !base.contains(a)) {
+        return Attribution::NonAttributable;
+    }
+
     // A = determined by the measure's key, E = everything else.
     let has_extra = base.iter().any(|c| !key.contains(c));
     if !has_extra {
@@ -468,6 +476,137 @@ grain = "underlying"
                 &dims()
             ),
             Attribution::DeterminedNonAdditive
+        );
+    }
+
+    const LADDER: &str = r#"
+[vega_spot_ladder]
+axes = ["tenor", "spot_shift"]
+[vega_spot_ladder.columns.book]
+type = "utf8"
+role = "dimension"
+[vega_spot_ladder.columns.lhu]
+type = "utf8"
+role = "dimension"
+[vega_spot_ladder.columns.position_ref]
+type = "utf8"
+role = "key"
+[vega_spot_ladder.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[vega_spot_ladder.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[vega_spot_ladder.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[vega_spot_ladder.columns.tenor]
+type = "utf8"
+role = "axis"
+axis = "bucket"
+order = "tenor"
+[vega_spot_ladder.columns.spot_shift]
+type = "f64"
+role = "axis"
+axis = "scenario"
+[vega_spot_ladder.columns.vega]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+
+    fn ladder() -> DatasetSpec {
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", LADDER).unwrap()],
+        );
+        let (schema, diags) = crate::schema::SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema.dataset("vega_spot_ladder").unwrap().clone()
+    }
+
+    fn g(cols: &[&str]) -> Vec<String> {
+        cols.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn grouping_by_both_axes_is_additive() {
+        let ds = ladder();
+        let dims = DerivedDimensions::default();
+        assert_eq!(
+            attribution_of(&ds, Grain::Underlying, &g(&["tenor", "spot_shift"]), &dims),
+            Attribution::Additive
+        );
+        assert_eq!(
+            attribution_of(
+                &ds,
+                Grain::Underlying,
+                &g(&["lhu", "tenor", "spot_shift"]),
+                &dims
+            ),
+            Attribution::Additive
+        );
+    }
+
+    #[test]
+    fn a_prefix_that_omits_a_scenario_axis_is_non_attributable() {
+        let ds = ladder();
+        let dims = DerivedDimensions::default();
+        // The total row, the tenor subtotal, and a plain lhu rollup: each
+        // would sum vega across spot shifts, which is not a number.
+        assert_eq!(
+            attribution_of(&ds, Grain::Underlying, &g(&[]), &dims),
+            Attribution::NonAttributable
+        );
+        assert_eq!(
+            attribution_of(&ds, Grain::Underlying, &g(&["tenor"]), &dims),
+            Attribution::NonAttributable
+        );
+        assert_eq!(
+            attribution_of(
+                &ds,
+                Grain::Underlying,
+                &g(&["lhu", "underlying_ref"]),
+                &dims
+            ),
+            Attribution::NonAttributable
+        );
+    }
+
+    #[test]
+    fn omitting_a_bucket_axis_leaves_the_sum_additive() {
+        let ds = ladder();
+        let dims = DerivedDimensions::default();
+        // Tenor buckets partition vega: summing them is total vega at the shift.
+        assert_eq!(
+            attribution_of(&ds, Grain::Underlying, &g(&["spot_shift"]), &dims),
+            Attribution::Additive
+        );
+        assert_eq!(
+            attribution_of(&ds, Grain::Underlying, &g(&["spot_shift", "lhu"]), &dims),
+            Attribution::Additive
+        );
+    }
+
+    #[test]
+    fn a_derived_dimension_over_a_scenario_axis_counts_as_the_axis() {
+        // `shift` derives from `spot_shift`; grouping by it keeps the axis.
+        let ds = ladder();
+        let text = r#"
+[shift]
+from = "spot_shift"
+[shift.values]
+DOWN = ["-0.1"]
+"#;
+        let doc = merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin("dimensions", text).unwrap()],
+        );
+        let dims = DerivedDimensions::from_doc(&doc).0;
+        assert_eq!(dims.base_column("shift"), "spot_shift");
+        assert_eq!(
+            attribution_of(&ds, Grain::Underlying, &g(&["shift"]), &dims),
+            Attribution::Additive
         );
     }
 }
