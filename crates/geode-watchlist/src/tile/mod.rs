@@ -19,21 +19,18 @@ mod header;
 mod table;
 #[cfg(test)]
 mod tests;
+mod verbs;
 
-use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use geode_core::clock::Clock;
 use geode_core::reference::ReferenceData;
 use geode_core::sort::SortOrder;
-use geode_core::watchlist::edit::{self, UndoEntry};
-use geode_core::watchlist::members::{Member, Origin};
-use geode_core::watchlist::state::{Status, WatchlistSnapshot, WatchlistState};
-use geode_core::watchlist::{self as watchlist, WATCHLISTS_DOC, Watchlist};
+use geode_core::watchlist::state::{Status, WatchlistSnapshot};
 use geode_shell::actions::ActionId;
 use geode_shell::clock::AppClock;
-use geode_shell::frame::{ConfigEdit, FrameRef, TileNotice};
+use geode_shell::frame::{FrameRef, TileNotice};
 use geode_shell::keymap::{Binding, KeyContext, Keystroke};
 use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
 use geode_shell::reference::ReferenceGlobal;
@@ -49,14 +46,12 @@ use gpui::{
     AnchoredPositionMode, AnyWindowHandle, App, Context, Entity, Focusable as _, Pixels, Point,
     SharedString, Window, anchored, div,
 };
-use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, v_flex};
 
 use crate::content::{Shared, action_title};
 use crate::core::grid::GridModel;
 use crate::core::history::{History, Way};
-use crate::core::prompt::{self, Prompt, Step};
 use crate::core::rows;
 use crate::core::session::{self, SortCol, State};
 use field::PromptField;
@@ -1154,6 +1149,17 @@ impl WatchlistTile {
             .collect()
     }
 
+    /// The origin column of the shown row `name`, as painted.
+    #[cfg(test)]
+    fn origin_of(&self, name: &str) -> Option<String> {
+        self.grid
+            .visible()
+            .iter()
+            .map(|&i| self.grid.row(i))
+            .find(|r| r.name == name)
+            .map(|r| rows::origin_text(&r.origin, r.pending))
+    }
+
     /// The notices showing: reported and not dismissed.
     #[cfg(test)]
     fn visible_notice_texts(&self) -> Vec<String> {
@@ -1224,448 +1230,6 @@ impl WatchlistTile {
     fn empty_text(&self) -> Option<String> {
         self.chrome.empty.as_ref().map(|s| s.to_string())
     }
-}
-
-/// The member verbs: what each acts on, what it writes, and what it says.
-impl WatchlistTile {
-    /// The shown list and its snapshot entry, for a verb; `None` with
-    /// nothing shown.
-    fn shown<'a>(&self, snapshot: &'a WatchlistSnapshot) -> Option<(String, &'a WatchlistState)> {
-        let name = self.state.name.as_deref()?;
-        let state = snapshot.lists.get(name)?;
-        Some((name.to_string(), state))
-    }
-
-    /// Whether the member verbs may act now. Always, so far: a queued
-    /// revert will refuse them, since the tile cannot see the lower copy
-    /// the revert will show.
-    fn verbs_allowed(&self) -> Result<(), String> {
-        Ok(())
-    }
-
-    /// A verb refused: say why, as a danger, in place of the last word.
-    fn refuse(&mut self, why: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.close_menu(cx);
-        self.say(Notice::danger(why), cx);
-    }
-
-    /// Say `notice` in place of the last verb's word, writing nothing.
-    fn say(&mut self, notice: Notice, cx: &mut Context<Self>) {
-        self.notices.outcome.clear();
-        self.notices.outcome(notice);
-        self.rebuild_chrome(cx);
-        cx.notify();
-    }
-
-    /// `o`/`enter`: open the add field, a free typeahead over every name
-    /// the reference table and any list knows. A name already a member is
-    /// refused at commit, naming where it comes from, not hidden here.
-    fn open_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let snapshot = snapshot(cx);
-        if self.shown(&snapshot).is_none() {
-            self.refuse(NOTHING_SHOWN, cx);
-            return;
-        }
-        if let Err(why) = self.verbs_allowed() {
-            self.refuse(why, cx);
-            return;
-        }
-        self.close_menu(cx);
-        let reference = reference(cx);
-        let options: BTreeSet<String> = reference
-            .keys(rows::REFERENCE_DATASET)
-            .chain(snapshot.all_names())
-            .map(str::to_string)
-            .collect();
-        self.open_prompt(Prompt::AddName, options.into_iter().collect(), window, cx);
-    }
-
-    /// `x`: remove the selection, else the cursor's row. A manual name
-    /// leaves `include`, a rule-supplied one is excluded, one that is both
-    /// does both in one write, an excluded one is restored
-    /// (`edit::remove`). The cursor keeps its shown index: the next row
-    /// lands under it.
-    fn remove(&mut self, cx: &mut Context<Self>) {
-        let snapshot = snapshot(cx);
-        let Some((name, state)) = self.shown(&snapshot) else {
-            self.refuse(NOTHING_SHOWN, cx);
-            return;
-        };
-        if let Err(why) = self.verbs_allowed() {
-            self.refuse(why, cx);
-            return;
-        }
-        self.close_menu(cx);
-        let targets = self.grid.targets();
-        let members = rows::members(state, self.history.pending());
-        let config = state.definition.clone();
-        let current = self.history.current(&config).clone();
-        let (next, entry) = edit::remove(&current, &members, &targets);
-        if entry.is_empty() {
-            self.say(Notice::status(NOTHING_TO_REMOVE), cx);
-            return;
-        }
-        let said = remove_notice(&targets, &members);
-        self.commit(&name, &config, next, entry, Notice::status(said), cx);
-    }
-
-    /// `u`/`ctrl+r`: replay the history one step over the current object
-    /// and write the result. A change another surface made since is
-    /// skipped and said so; one the tile's own refused write left is said
-    /// as not saved, not blamed on another surface.
-    fn replay(&mut self, way: Way, cx: &mut Context<Self>) {
-        let snapshot = snapshot(cx);
-        let Some((name, state)) = self.shown(&snapshot) else {
-            self.refuse(NOTHING_SHOWN, cx);
-            return;
-        };
-        if let Err(why) = self.verbs_allowed() {
-            self.refuse(why, cx);
-            return;
-        }
-        self.close_menu(cx);
-        let config = state.definition.clone();
-        let Some(replay) = self.history.peek(&config, way) else {
-            let why = match way {
-                Way::Undo => NOTHING_TO_UNDO,
-                Way::Redo => NOTHING_TO_REDO,
-            };
-            self.say(Notice::status(why), cx);
-            return;
-        };
-        let unsaved = self.history.unsaved(&replay.skipped.names)
-            + usize::from(replay.skipped.rules && self.history.rules_unsaved());
-        let elsewhere = replay.skipped.count() - unsaved;
-        let verb = match way {
-            Way::Undo => "undid",
-            Way::Redo => "redid",
-        };
-        let mut text = format!("{verb} {}", header::plural(replay.applied, "change"));
-        let mut tails = Vec::new();
-        if elsewhere > 0 {
-            tails.push(format!("{elsewhere} changed elsewhere"));
-        }
-        if unsaved > 0 {
-            tails.push(format!("{unsaved} not saved"));
-        }
-        let notice = if tails.is_empty() {
-            Notice::status(text)
-        } else {
-            text = format!("{text} \u{2014} {}", tails.join(", "));
-            Notice::warning(text)
-        };
-        // Nothing applied: the entry is spent (the history drops it) and
-        // there is nothing to write.
-        if replay.applied == 0 {
-            self.history.step(&config, way);
-            self.say(notice, cx);
-            return;
-        }
-        // The gate before the stacks move: a refused write leaves the
-        // history as it was.
-        if let Err(why) = self.queue_write(&name, &replay.next, cx) {
-            self.say(Notice::danger(why), cx);
-            return;
-        }
-        let stepped = self.history.step(&config, way);
-        debug_assert_eq!(
-            stepped.as_ref(),
-            Some(&replay),
-            "the step is what was peeked"
-        );
-        self.notices.outcome.clear();
-        self.notices.outcome(notice);
-        self.rebuild_rows(true, cx);
-        cx.notify();
-    }
-
-    /// `shift+r`: ask the bridge to resolve the shown list now, through
-    /// the factory's hook; the header shows `resolving…` with the next
-    /// snapshot. A tile hosted without the hook says so.
-    fn refresh(&mut self, cx: &mut Context<Self>) {
-        let snapshot = snapshot(cx);
-        let Some((name, _)) = self.shown(&snapshot) else {
-            self.refuse(NOTHING_SHOWN, cx);
-            return;
-        };
-        self.close_menu(cx);
-        self.notices.outcome.clear();
-        let hook = self.shared.refresh.borrow().clone();
-        match hook {
-            Some(hook) => hook(&name, cx),
-            None => self.notices.outcome(Notice::status(NOT_WIRED)),
-        }
-        self.rebuild_chrome(cx);
-        cx.notify();
-    }
-
-    /// Record `entry` and write `next` for `name` through the config door:
-    /// checked, queued whole-object, held pending (shown at once, ahead of
-    /// the reload that carries it), and said.
-    fn commit(
-        &mut self,
-        name: &str,
-        config: &Watchlist,
-        next: Watchlist,
-        entry: UndoEntry,
-        notice: Notice,
-        cx: &mut Context<Self>,
-    ) {
-        self.notices.outcome.clear();
-        if let Err(why) = self.queue_write(name, &next, cx) {
-            self.notices.outcome(Notice::danger(why));
-            self.rebuild_chrome(cx);
-            cx.notify();
-            return;
-        }
-        self.history.push(config, next, entry);
-        self.notices.outcome(notice);
-        self.rebuild_rows(true, cx);
-        cx.notify();
-    }
-
-    /// Queue the whole object through the frame's config door, which
-    /// stamps this tile as the origin. Checked first: no name may be both
-    /// included and excluded. No verb produces one (each moves a name to
-    /// one manual state), so this is a last gate rather than a path; the
-    /// door would write it even when the reload then rejected it.
-    fn queue_write(
-        &mut self,
-        name: &str,
-        next: &Watchlist,
-        cx: &mut Context<Self>,
-    ) -> Result<(), String> {
-        debug_assert!(
-            next.include.iter().all(|n| !next.exclude.contains(n)),
-            "no verb includes and excludes one name"
-        );
-        if let Some(both) = next.include.iter().find(|n| next.exclude.contains(n)) {
-            return Err(format!("not saved: {both} is both included and excluded"));
-        }
-        self.frame.queue_config_edits(
-            vec![ConfigEdit {
-                doc: WATCHLISTS_DOC,
-                object: name.to_string(),
-                value: Some(watchlist::to_toml(next)),
-                origin: None,
-            }],
-            cx,
-        );
-        Ok(())
-    }
-}
-
-/// The prompt field's lifetime, focus and keys.
-impl WatchlistTile {
-    /// Open the field asking `prompt` over `options`, focused.
-    fn open_prompt(
-        &mut self,
-        prompt: Prompt,
-        options: Vec<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.close_prompt(window, cx);
-        let placeholder = field::placeholder(&prompt);
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-        // Every keystroke re-ranks the choice. The subscription dies with
-        // the field.
-        cx.subscribe_in(&input, window, |this, input, event: &InputEvent, _, cx| {
-            if let InputEvent::Change = event {
-                let query = input.read(cx).value().to_string();
-                if let Some(p) = this.prompt.as_mut().filter(|p| &p.input == input)
-                    && p.typed(&query)
-                {
-                    cx.notify();
-                }
-            }
-        })
-        .detach();
-        input.read(cx).focus_handle(cx).focus(window, cx);
-        self.prompt = Some(PromptField::new(input, prompt, options));
-        self.field_window = Some(window.window_handle());
-        cx.notify();
-    }
-
-    /// `enter` in the field: the answer through `prompt::submit`, then the
-    /// verb. A refusal stays on the bar with the field open; a name added
-    /// (or restored, when it was excluded) closes it and writes.
-    fn commit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(p) = self.prompt.as_mut() else {
-            return;
-        };
-        let text = p.input.read(cx).value().to_string();
-        let answer = p.answer(&text);
-        let asked = p.prompt.clone();
-        let snapshot = snapshot(cx);
-        let Some((name, state)) = self.shown(&snapshot) else {
-            self.close_prompt(window, cx);
-            self.refuse(NOTHING_SHOWN, cx);
-            return;
-        };
-        let members = rows::members(state, self.history.pending());
-        let outcome = match prompt::submit(&asked, &answer, &members) {
-            Step::Refuse(why) => Err(why),
-            Step::Add(names) => {
-                let config = state.definition.clone();
-                let current = self.history.current(&config).clone();
-                edit::add(&current, &members, &names).map(|(next, entry)| {
-                    let restored = names
-                        .iter()
-                        .any(|n| members.iter().any(|m| &m.name == n && m.is_excluded()));
-                    let verb = if restored { "restored" } else { "added" };
-                    (config, next, entry, format!("{verb} {}", names.join(", ")))
-                })
-            }
-        };
-        match outcome {
-            Err(why) => {
-                if let Some(p) = self.prompt.as_mut() {
-                    p.error = Some(why.into());
-                }
-            }
-            Ok((config, next, entry, said)) => {
-                self.close_prompt(window, cx);
-                self.commit(&name, &config, next, entry, Notice::status(said), cx);
-            }
-        }
-        cx.notify();
-    }
-
-    /// Close the field with nothing written: `escape`, a press on the
-    /// grid, any other verb. Blurred first if it owns focus: otherwise the
-    /// shell cannot restore focus once the field is gone.
-    fn close_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(p) = self.prompt.take() else {
-            return;
-        };
-        if p.input.read(cx).focus_handle(cx).is_focused(window) {
-            window.blur(cx);
-        }
-        cx.notify();
-    }
-
-    /// Drop the field where no window is at hand (a reload removing the
-    /// list, another list shown, a close), blurring it later through the
-    /// window it opened in if it still owns focus (a newer field is never
-    /// blurred).
-    fn release_prompt(&mut self, cx: &mut App) {
-        let Some(p) = self.prompt.take() else {
-            return;
-        };
-        let focus = p.input.read(cx).focus_handle(cx);
-        drop(p);
-        if let Some(handle) = self.field_window {
-            App::defer(cx, move |cx| {
-                let _ = handle.update(cx, |_, window, cx| {
-                    if focus.is_focused(window) {
-                        window.blur(cx);
-                    }
-                });
-            });
-        }
-    }
-
-    /// `up`/`down` in the field move the highlight: a choice now, which
-    /// `enter` takes whatever is typed.
-    fn choice_step(&mut self, delta: i64, cx: &mut Context<Self>) {
-        if let Some(p) = self.prompt.as_mut() {
-            p.step(delta);
-            cx.notify();
-        }
-    }
-
-    /// Hover lights a list row without making it a choice.
-    pub(crate) fn choice_hover(&mut self, row: usize, cx: &mut Context<Self>) {
-        if self.prompt.as_mut().is_some_and(|p| p.hover(row)) {
-            cx.notify();
-        }
-    }
-
-    /// A press on a list row: that name, committed at once.
-    pub(crate) fn choice_pick(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let picked = self
-            .prompt
-            .as_mut()
-            .and_then(|p| p.pick(row).map(|text| (p.input.clone(), text)));
-        if let Some((input, text)) = picked {
-            input.update(cx, |s, cx| s.set_value(text, window, cx));
-            self.commit_prompt(window, cx);
-        }
-    }
-
-    /// The open field: its text, its refusal and its ranked options.
-    #[cfg(test)]
-    fn prompt_state(&self, cx: &App) -> Option<(String, Option<String>, Vec<String>)> {
-        let p = self.prompt.as_ref()?;
-        let field::Rows::Choice(list) = &p.rows;
-        Some((
-            p.input.read(cx).value().to_string(),
-            p.error.as_ref().map(|e| e.to_string()),
-            list.ranked()
-                .iter()
-                .map(|r| list.options()[r.row].clone())
-                .collect(),
-        ))
-    }
-
-    /// The open field's highlighted option.
-    #[cfg(test)]
-    fn prompt_highlight(&self) -> Option<String> {
-        let field::Rows::Choice(list) = &self.prompt.as_ref()?.rows;
-        list.highlighted_text().map(str::to_string)
-    }
-
-    /// The origin column of the shown row `name`, as painted.
-    #[cfg(test)]
-    fn origin_of(&self, name: &str) -> Option<String> {
-        self.grid
-            .visible()
-            .iter()
-            .map(|&i| self.grid.row(i))
-            .find(|r| r.name == name)
-            .map(|r| rows::origin_text(&r.origin, r.pending))
-    }
-}
-
-/// What `x` says of `targets`, by their origins among `members`: one name
-/// by what happened to it, a selection by counts.
-fn remove_notice(targets: &[String], members: &[Member]) -> String {
-    let origin = |t: &str| members.iter().find(|m| m.name == t).map(|m| &m.origin);
-    if let [one] = targets
-        && let Some(o) = origin(one)
-    {
-        return match o {
-            Origin::Manual => format!("removed {one}"),
-            Origin::Rules(rules) => format!(
-                "excluded {one} \u{2014} {} still supplies it; x again restores",
-                rows::rules_text(rules)
-            ),
-            Origin::Both(_) => format!("removed and excluded {one}"),
-            Origin::Excluded { .. } => format!("restored {one}"),
-        };
-    }
-    let (mut removed, mut excluded, mut both, mut restored) = (0, 0, 0, 0);
-    for t in targets {
-        match origin(t) {
-            Some(Origin::Manual) => removed += 1,
-            Some(Origin::Rules(_)) => excluded += 1,
-            Some(Origin::Both(_)) => both += 1,
-            Some(Origin::Excluded { .. }) => restored += 1,
-            None => {}
-        }
-    }
-    [
-        ("removed", removed),
-        ("excluded", excluded),
-        ("removed and excluded", both),
-        ("restored", restored),
-    ]
-    .into_iter()
-    .filter(|(_, n)| *n > 0)
-    .map(|(verb, n)| format!("{verb} {}", header::plural(n, "name")))
-    .collect::<Vec<_>>()
-    .join(", ")
 }
 
 impl MenuHost for WatchlistTile {

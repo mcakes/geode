@@ -76,8 +76,13 @@ request and never depends on `geode-data`.
   shown one ticked. `tile/field.rs` is the prompt field: a bar under
   the header with the typeahead hung from it, its commit rule
   (`answer_value`: the highlighted name when the highlight was moved or
-  typed out in full ignoring case, else the text as typed) and its paint;
-  the tile owns its lifetime, focus and writes. `tile/table.rs` is the
+  typed out in full ignoring case, else the text as typed), its paint, and
+  the tile's side of it (open, commit through `prompt::submit` and the
+  add verb, close with a blur first, release where no window is at hand,
+  the highlight keys and the row press). `tile/verbs.rs` is the member
+  verbs: what each acts on, the write gate (`queue_write`, one
+  whole-object `ConfigEdit`), `commit` (queue, then hold pending, then
+  say), `replay` (peek, gate, step) and `refresh`. `tile/table.rs` is the
   grid's `TableDelegate` over rows
   the tile prepares (`Prepared::build`) whenever the snapshot, the
   reference tables, the shown list, the sort or the filter changes; render

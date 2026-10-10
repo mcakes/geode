@@ -4,23 +4,27 @@
 //! lists: a highlight is only a guess until the trader moves it (`up`,
 //! `down`, a row click) or types it out in full.
 //!
-//! The pure parts here (the commit rule, the paint) are the field's; the
-//! tile owns the field's lifetime, focus and writes.
+//! The pure parts (the commit rule, the paint) come first; the tile's side
+//! (the field's lifetime, focus and keys, and the add verb's commit) is the
+//! `impl WatchlistTile` beneath them.
 
 use std::rc::Rc;
 
+use geode_core::watchlist::edit;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::shell::chip::{self, chip_paint};
 use geode_shell::shell::scale;
 use geode_shell::vimnav::NavCommand;
+use geode_tile::notice::Notice;
 use geode_tile::popover::{self, ROW_HEIGHT, ROW_INSET};
 use gpui::prelude::*;
-use gpui::{Anchor, App, Entity, MouseButton, SharedString, div};
-use gpui_component::input::{Input, InputState};
+use gpui::{Anchor, App, Context, Entity, Focusable as _, MouseButton, SharedString, Window, div};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
-use crate::core::prompt::Prompt;
-use crate::tile::WatchlistTile;
+use super::{NOTHING_SHOWN, WatchlistTile, snapshot};
+use crate::core::prompt::{self, Prompt, Step};
+use crate::core::rows;
 
 /// What the list says while it has nothing to rank.
 pub(crate) const NO_NAMES: &str = "no names known: type one";
@@ -293,6 +297,168 @@ pub(crate) fn render_prompt(
         })
         .child(div().absolute().left_0().bottom_0().child(list))
         .into_any_element()
+}
+
+/// The prompt field's lifetime, focus and keys.
+impl WatchlistTile {
+    /// Open the field asking `prompt` over `options`, focused.
+    pub(super) fn open_prompt(
+        &mut self,
+        prompt: Prompt,
+        options: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_prompt(window, cx);
+        let placeholder = placeholder(&prompt);
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        // Every keystroke re-ranks the choice. The subscription dies with
+        // the field.
+        cx.subscribe_in(&input, window, |this, input, event: &InputEvent, _, cx| {
+            if let InputEvent::Change = event {
+                let query = input.read(cx).value().to_string();
+                if let Some(p) = this.prompt.as_mut().filter(|p| &p.input == input)
+                    && p.typed(&query)
+                {
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        self.prompt = Some(PromptField::new(input, prompt, options));
+        self.field_window = Some(window.window_handle());
+        cx.notify();
+    }
+
+    /// `enter` in the field: the answer through `prompt::submit`, then the
+    /// verb. A refusal stays on the bar with the field open; a name added
+    /// (or restored, when it was excluded) closes it and writes.
+    pub(super) fn commit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.prompt.as_mut() else {
+            return;
+        };
+        let text = p.input.read(cx).value().to_string();
+        let answer = p.answer(&text);
+        let asked = p.prompt.clone();
+        let snapshot = snapshot(cx);
+        let Some((name, state)) = self.shown(&snapshot) else {
+            self.close_prompt(window, cx);
+            self.refuse(NOTHING_SHOWN, cx);
+            return;
+        };
+        let members = rows::members(state, self.history.pending());
+        let outcome = match prompt::submit(&asked, &answer, &members) {
+            Step::Refuse(why) => Err(why),
+            Step::Add(names) => {
+                let config = state.definition.clone();
+                let current = self.history.current(&config).clone();
+                edit::add(&current, &members, &names).map(|(next, entry)| {
+                    let restored = names
+                        .iter()
+                        .any(|n| members.iter().any(|m| &m.name == n && m.is_excluded()));
+                    let verb = if restored { "restored" } else { "added" };
+                    (config, next, entry, format!("{verb} {}", names.join(", ")))
+                })
+            }
+        };
+        match outcome {
+            Err(why) => {
+                if let Some(p) = self.prompt.as_mut() {
+                    p.error = Some(why.into());
+                }
+            }
+            Ok((config, next, entry, said)) => {
+                self.close_prompt(window, cx);
+                self.commit(&name, &config, next, entry, Notice::status(said), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Close the field with nothing written: `escape`, a press on the
+    /// grid, any other verb. Blurred first if it owns focus: otherwise the
+    /// shell cannot restore focus once the field is gone.
+    pub(super) fn close_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(p) = self.prompt.take() else {
+            return;
+        };
+        if p.input.read(cx).focus_handle(cx).is_focused(window) {
+            window.blur(cx);
+        }
+        cx.notify();
+    }
+
+    /// Drop the field where no window is at hand (a reload removing the
+    /// list, another list shown, a close), blurring it later through the
+    /// window it opened in if it still owns focus (a newer field is never
+    /// blurred).
+    pub(super) fn release_prompt(&mut self, cx: &mut App) {
+        let Some(p) = self.prompt.take() else {
+            return;
+        };
+        let focus = p.input.read(cx).focus_handle(cx);
+        drop(p);
+        if let Some(handle) = self.field_window {
+            App::defer(cx, move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    if focus.is_focused(window) {
+                        window.blur(cx);
+                    }
+                });
+            });
+        }
+    }
+
+    /// `up`/`down` in the field move the highlight: a choice now, which
+    /// `enter` takes whatever is typed.
+    pub(super) fn choice_step(&mut self, delta: i64, cx: &mut Context<Self>) {
+        if let Some(p) = self.prompt.as_mut() {
+            p.step(delta);
+            cx.notify();
+        }
+    }
+
+    /// Hover lights a list row without making it a choice.
+    fn choice_hover(&mut self, row: usize, cx: &mut Context<Self>) {
+        if self.prompt.as_mut().is_some_and(|p| p.hover(row)) {
+            cx.notify();
+        }
+    }
+
+    /// A press on a list row: that name, committed at once.
+    fn choice_pick(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = self
+            .prompt
+            .as_mut()
+            .and_then(|p| p.pick(row).map(|text| (p.input.clone(), text)));
+        if let Some((input, text)) = picked {
+            input.update(cx, |s, cx| s.set_value(text, window, cx));
+            self.commit_prompt(window, cx);
+        }
+    }
+
+    /// The open field: its text, its refusal and its ranked options.
+    #[cfg(test)]
+    pub(super) fn prompt_state(&self, cx: &App) -> Option<(String, Option<String>, Vec<String>)> {
+        let p = self.prompt.as_ref()?;
+        let Rows::Choice(list) = &p.rows;
+        Some((
+            p.input.read(cx).value().to_string(),
+            p.error.as_ref().map(|e| e.to_string()),
+            list.ranked()
+                .iter()
+                .map(|r| list.options()[r.row].clone())
+                .collect(),
+        ))
+    }
+
+    /// The open field's highlighted option.
+    #[cfg(test)]
+    pub(super) fn prompt_highlight(&self) -> Option<String> {
+        let Rows::Choice(list) = &self.prompt.as_ref()?.rows;
+        list.highlighted_text().map(str::to_string)
+    }
 }
 
 #[cfg(test)]
