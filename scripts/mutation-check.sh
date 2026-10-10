@@ -10894,14 +10894,15 @@ run_mutation "schema: an unknown family drops the dataset rather than defaulting
   geode-core \
   an_unknown_family_is_an_error_and_the_dataset_is_dropped
 
-# Measure datasets clear `key` and `axes` after warning. Leaving them in
-# place passes document-only metadata to downstream consumers.
-run_mutation "schema: key/axes on the measure family are cleared, not left in place" \
+# Measure datasets clear `key` after warning; their identity is the grain
+# key, so a declared `key` left in place would claim an identity nothing
+# stores. `axes` are kept: on a measures dataset they extend the grain key.
+run_mutation "schema: key on the measure family is cleared, not left in place" \
   crates/geode-core/src/schema/mod.rs \
-  'if family == Family::Measures {' \
-  'if false {' \
+  '            if family == Family::Measures && !key.is_empty() {' \
+  '            if false {' \
   geode-core \
-  a_measure_family_key_and_axes_are_cleared_with_a_warning
+  a_measure_family_key_is_cleared_with_a_warning_and_axes_are_kept
 
 # Measure-grain table creation excludes document-level attributes, axes,
 # and values, along with keys and bare dimensions. The schema reader
@@ -10909,9 +10910,9 @@ run_mutation "schema: key/axes on the measure family are cleared, not left in pl
 # dataset directly to exercise the exclusion.
 run_mutation "ddl: create_table_sql never selects an axis, value, or document-level attribute" \
   crates/geode-data/src/store/ddl.rs \
-  '            | ColumnRole::Axis
+  '            | ColumnRole::Axis { .. }
             | ColumnRole::Value => false,' \
-  '            | ColumnRole::Axis
+  '            | ColumnRole::Axis { .. }
             | ColumnRole::Value => true,' \
   geode-data \
   create_table_never_selects_a_document_shaped_column
@@ -10972,8 +10973,8 @@ run_mutation "schema/document: a key column must be a dimension" \
 
 run_mutation "schema/document: an axis role not listed in axes is refused" \
   crates/geode-core/src/schema/mod.rs \
-  '        .filter(|c| c.role == ColumnRole::Axis && !ds.axes.contains(&c.name))' \
-  '        .filter(|c| false && c.role == ColumnRole::Axis && !ds.axes.contains(&c.name))' \
+  '        .filter(|c| matches!(c.role, ColumnRole::Axis { .. }) && !ds.axes.contains(&c.name))' \
+  '        .filter(|c| false && matches!(c.role, ColumnRole::Axis { .. }) && !ds.axes.contains(&c.name))' \
   geode-core axes_and_axis_roles_must_agree_both_ways
 
 run_mutation "schema/document: measure vocabulary is dropped per column" \
@@ -10992,22 +10993,22 @@ run_mutation "schema/measures: document vocabulary is dropped per column" \
   crates/geode-core/src/schema/mod.rs \
   '    ds.columns.retain(|c| !foreign.contains(&c.name));
 
-    // Every grain in use groups by its key columns' \
+    // Axes: `axes` and the axis columns mirror each other' \
   '    let _ = &foreign;
 
-    // Every grain in use groups by its key columns' \
+    // Axes: `axes` and the axis columns mirror each other' \
   geode-core document_vocabulary_on_a_measure_dataset_is_the_mirror_error
 
 run_mutation "schema/document: a refused dataset is not pushed" \
   crates/geode-core/src/schema/mod.rs \
-  '            if (dataset.is_document() || dataset.is_reference()) && dataset.columns.is_empty() {' \
-  '            if dataset.is_reference() && dataset.columns.is_empty() {' \
+  '            if (dataset.is_document() || dataset.is_reference() || declared_axes)' \
+  '            if (dataset.is_reference() || declared_axes)' \
   geode-core a_document_dataset_declares_at_least_one_value
 
 run_mutation "schema/reference: a refused dataset is not pushed" \
   crates/geode-core/src/schema/mod.rs \
-  '            if (dataset.is_document() || dataset.is_reference()) && dataset.columns.is_empty() {' \
-  '            if dataset.is_document() && dataset.columns.is_empty() {' \
+  '            if (dataset.is_document() || dataset.is_reference() || declared_axes)' \
+  '            if (dataset.is_document() || declared_axes)' \
   geode-core a_reference_dataset_without_a_key_is_dropped
 
 # Document validation retains reserved-column diagnostics. Returning
@@ -11442,8 +11443,14 @@ run_mutation "schema/document: textual is cleared on a non-dimension, not set" \
 # and staging sources.
 run_mutation "schema/document: a listed axis whose role is not axis is refused" \
   crates/geode-core/src/schema/mod.rs \
-  '            Some(c) if c.role != ColumnRole::Axis => {' \
-  '            Some(c) if c.role != ColumnRole::Axis && false => {' \
+  '            Some(c) if !matches!(c.role, ColumnRole::Axis { .. }) => {
+                diags.push(err(
+                    format!(
+                        "dataset '"'"'{name}'"'"': axis' \
+  '            Some(c) if !matches!(c.role, ColumnRole::Axis { .. }) && false => {
+                diags.push(err(
+                    format!(
+                        "dataset '"'"'{name}'"'"': axis' \
   geode-core axes_and_axis_roles_must_agree_both_ways
 
 # Every key column must be declared. Otherwise `document_columns()`
@@ -37433,6 +37440,64 @@ run_mutation "demo recovery: dividend egress addresses the NOTIFY topic" \
   '         dividend_schedule = \"marketdata/dividend/{key}/NOTIFY\"\n"' \
   '         dividend_schedule = \"marketdata/dividend/{key}\"\n"' \
   geode-app an_uploaded_dividend_document_echoes_through_the_real_data_service
+# A scenario axis enumerates alternative states: a level whose grouping omits
+# one would sum across states and show a plausible wrong total.
+run_mutation "axis: a prefix omitting a scenario axis is non-attributable" \
+  crates/geode-core/src/attribution.rs \
+  '    if ds.scenario_axes().iter().any(|a| !base.contains(a)) {' \
+  '    if false {' \
+  geode-core a_prefix_that_omits_a_scenario_axis_is_non_attributable
+# An attribute-only grain keeps the plain key; extending it would store the
+# attribute once per bucket.
+run_mutation "axis: axes extend only the measure grains" \
+  crates/geode-core/src/schema/mod.rs \
+  '        if self.has_axes() && self.holds_measures_at(grain) {' \
+  '        if self.has_axes() {' \
+  geode-core axes_extend_the_key_of_measure_grains_only
+# A measure grain's table without its axis columns merges every bucket under
+# one key.
+run_mutation "axis: the DDL puts the axes after the key" \
+  crates/geode-data/src/store/ddl.rs \
+  '    for a in ds.axes_at(grain) {' \
+  '    for a in ds.axes_at(grain).iter().filter(|_| false) {' \
+  geode-data axis_columns_extend_the_key_of_every_measure_grain_and_no_other
+# The split must group by the axes too, or buckets collapse into one row.
+run_mutation "axis: the split groups by the axes" \
+  crates/geode-data/src/ingest/split.rs \
+  '            .map(|a| (a.clone(), format!("\"{a}\""))),' \
+  '            .filter(|_| false).map(|a| (a.clone(), format!("\"{a}\""))),' \
+  geode-data the_split_groups_by_key_and_axes_and_dedups_attributes_once
+# A NULL axis value is a NULL key: the file is refused before an id is spent.
+run_mutation "axis: a NULL axis refuses the file" \
+  crates/geode-data/src/ingest/load.rs \
+  '        if nulls > 0 {' \
+  '        if nulls > i64::MAX - 1 {' \
+  geode-data a_file_without_its_axis_column_is_refused_before_a_generation_is_reserved
+# An axis with no kind would be silently summed as a bucket; the reader must
+# refuse rather than default it.
+run_mutation "axis: an axis needs a kind" \
+  crates/geode-core/src/schema/mod.rs \
+  '                let kind = match table.get("axis").and_then(|v| v.as_str()) {' \
+  '                let kind = match table.get("axis").and_then(|v| v.as_str()).or(Some("bucket")) {' \
+  geode-core an_axis_needs_a_kind
+# Tenor order sorts by length, so 18M lands between 1Y and 2Y, not lexically.
+run_mutation "axis: tenor order puts 18M between 1Y and 2Y" \
+  crates/geode-core/src/schema/axis.rs \
+  '            (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.cmp(b)),' \
+  '            (Some(_), Some(_)) => a.cmp(b),' \
+  geode-core tenor_order_ignores_case_and_puts_unparsable_values_last
+# Coverage, not the risk batch size, bounds the scenario store.
+run_mutation "demo scenario: coverage bounds the rows" \
+  crates/geode-demo-data/src/scenario.rs \
+  '        if rows.len() == coverage {' \
+  '        if rows.len() == usize::MAX {' \
+  geode-demo-data coverage_bounds_the_underlying_rows_and_every_bucket_is_present
+# Scenario files live beside src; under it the risk glob would read them.
+run_mutation "demo scenario: the sources point beside src" \
+  crates/geode-compose/src/demo.rs \
+  '        .map(|p| p.join("scenario"))' \
+  '        .map(|p| p.join("src"))' \
+  geode-compose the_demo_layer_declares_the_five_scenario_sources
 # value_colors replaces one value's entry whole (depth 2). At depth 1 a user
 # entry would drop the desk's other values of the dimension.
 run_mutation "value colors: a dimension merges per value" \
