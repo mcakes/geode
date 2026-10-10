@@ -725,8 +725,8 @@ is refused or has nothing to ask, through
 `geode_tile::following::DeferredDoor`: the arrival and its notify land after
 the draw, and the other tiles promote at once. Frame observers, deliveries and
 key handlers keep `FrameDoor`, which notifies in the same pass. `closed` fires
-only for removal while the window lives; quitting the application calls it
-for no occupant. A tile with its own error and no query
+only for removal while the window lives; closing the window or quitting the
+application calls it for no occupant. A tile with its own error and no query
 to send (a blotter whose view is no longer configured, or whose scope names an
 undefined expression) answers the barrier at once, as a failed query does.
 The pricer submits no frame query and answers every barrier at once.
@@ -1046,7 +1046,7 @@ Moving a group's scope advances the frame generation the session writer
 treats as dirt, but the writer compares its snapshot without the groups'
 scopes, so a group's scope alone writes nothing: an emitting tile's cursor
 does not rewrite `session.toml`. Every snapshot the writer does write, and
-the quit-time save, carry each group's scope as it is then. After a crash a
+the close- and quit-time saves, carry each group's scope as it is then. After a crash a
 group's scope is therefore the one in the last session write, which may be
 older than the last one the group held.
 
@@ -1544,13 +1544,21 @@ but does not retry unchanged state on the next tick. A serialization failure
 leaves comparison baselines unchanged, but a layout-only change can lose its
 dirty flag. These baselines track extracted snapshots, not confirmed saves.
 
-The quit hook saves current state synchronously regardless of dirty flags,
-the link groups' scopes included.
+The session is saved synchronously, regardless of dirty flags and with the
+link groups' scopes included, both when the window closes and when the
+application quits. Closing the window quits Geode on every platform
+(`QuitMode::LastWindowClosed`). gpui removes a closing window before it runs
+the quit hooks, so the quit hook's walk of the open windows would find
+nothing; the app's should-close hook on the main window
+(`bridge::save_on_close`) saves the session while the window still exists,
+then lets the close proceed. On Cmd-Q or a menu quit no should-close runs and
+the quit hook saves alone. After a window close both run; the second save
+writes the same text again.
 Session writes use the shared atomic replacement primitive: a unique sibling
 temporary file, file sync, then rename. Readers see a complete old or new file;
 the directory is not synced, so durability across system failure is best-effort.
 Errors can leave temporary files. Session writes bypass the configuration
-submission queue and transaction lock. The quit hook does not join an in-flight
+submission queue and transaction lock. Neither the close nor the quit save joins an in-flight
 periodic save, so the last rename can leave an older snapshot on disk. Separate
 processes writing the same session path likewise have no ordering guarantee.
 

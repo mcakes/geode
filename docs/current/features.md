@@ -3024,8 +3024,8 @@ life, across `:e`: later edits, the idle timer, `:name`, and the close do not
 call the store again, and each keeps that notice showing. The stopped save state and the stopped pricing state are
 separate; each is set by its own first `Stopped` refusal.
 
-Quitting the app attempts to queue every unsaved sheet before stopping the data
-service. The writer drains queued local saves and removals, subject to the
+Closing the window or quitting the app attempts to queue every unsaved sheet
+before stopping the data service. The writer drains queued local saves and removals, subject to the
 request-capacity and quit-time limits below.
 
 If a sheet's document fails to load (its rows do not decode, or the store

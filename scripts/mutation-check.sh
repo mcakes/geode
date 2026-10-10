@@ -25298,6 +25298,32 @@ run_mutation "quit: the data hook stops the service without flushing sheets" \
   '        let _ = &pricer;' \
   geode-app quitting_saves_every_unsaved_sheet_before_the_data_service_stops
 
+# Closing the window saves the session while the window still exists: the
+# quit hook's walk of the open windows finds none after a close.
+run_mutation "close: the should-close hook saves no session" \
+  crates/geode-app/src/bridge.rs \
+  '                shell.read(cx).save_session(cx);' \
+  '                let _ = &shell;' \
+  geode-app closing_the_window_saves_the_session_and_lets_the_close_proceed
+
+# Closing the window queues every unsaved sheet ahead of the service's stop.
+run_mutation "close: the should-close hook flushes no sheet" \
+  crates/geode-app/src/bridge.rs \
+  '                factory.flush_all(cx);' \
+  '                let _ = factory;' \
+  geode-app closing_the_window_saves_every_unsaved_sheet
+
+# The should-close hook lets the close proceed; false would keep the window.
+run_mutation "close: the should-close hook refuses the close" \
+  crates/geode-app/src/bridge.rs \
+  '                factory.flush_all(cx);
+            }
+            true' \
+  '                factory.flush_all(cx);
+            }
+            false' \
+  geode-app closing_the_window_saves_the_session_and_lets_the_close_proceed
+
 run_mutation "pricer: flush_all flushes no tile" \
   crates/geode-pricer/src/content.rs \
   $'                if t.flush_save(cx) {\n                    t.rebuild(cx);\n                }' \

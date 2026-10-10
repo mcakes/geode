@@ -109,6 +109,15 @@ cargo check -p geode-app --features profiling
   `the_app_and_the_collector_build_the_same_schema_and_sources` compares the
   app's `builtin_layer` through `bridge::data_setup` with
   `geode_compose::builtin_data_layer` through `engine_setup`.
+- Closing the window quits the app on every platform: `main` sets
+  `QuitMode::LastWindowClosed` (gpui's default keeps a macOS process alive
+  with no window). `save_on_close` registers the main window's should-close
+  hook, which saves the session and flushes unsaved pricer sheets while the
+  window still exists, then lets the close proceed: gpui removes the window
+  before the quit hooks run, so the session quit hook would find none. The
+  quit hooks run after it too; repeating either save is harmless. The real
+  close button is not exercised headlessly; tests reach the hook through
+  `VisualTestContext::simulate_close`.
 - At quit, `stop_at_quit` attempts each pricer tile's unsaved-sheet flush
   before starting data shutdown on a background executor. Admitted writes
   precede `Shutdown` and the writer drains them, but submission/write failures

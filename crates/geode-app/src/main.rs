@@ -71,7 +71,11 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Quit when the window closes, on every platform. gpui's default keeps
+    // a macOS process running with no window, its timers and data service
+    // still live and the store's app lock still held.
     gpui_platform::application()
+        .with_quit_mode(gpui::QuitMode::LastWindowClosed)
         .with_assets(assets::AppAssets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx); // must run before any component use
@@ -167,6 +171,8 @@ fn main() {
             // Save current session state synchronously at quit, including changes
             // since the last periodic snapshot. This is best-effort and does not
             // join any in-flight periodic session write; their renames may race.
+            // A window close has already removed the window by the time this
+            // runs, so `bridge::save_on_close` saves for that route.
             cx.on_app_quit(|cx| {
                 for window in cx.windows() {
                     if let Some(handle) = window.downcast::<Root>() {
@@ -219,6 +225,10 @@ fn main() {
                 if let Some(bridge) = &bridge {
                     cx.update(|cx| bridge::attach(bridge, window, cx));
                 }
+
+                // Save the session and unsaved sheets when the window closes,
+                // while it still exists; the quit hooks above cover Cmd-Q.
+                cx.update(|cx| bridge::save_on_close(window, bridge.as_ref(), cx));
 
                 // Refresh diagnostic configuration independently of the data bridge.
                 // The frame's config counter changes on every applied reload, including

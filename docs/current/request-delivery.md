@@ -164,8 +164,10 @@ timers end, once the window has closed; demand queued at closure stays
 unserved. Module-owned timers and the `ShellEvent` lanes do not check. A
 pricer tile's periodic refresh and its refusal retry keep submitting price
 requests after closure, and the diagnostics page's ages tick and tile stale
-timers keep waking. On macOS the process outlives its window, so this lasts
-until quit.
+timers keep waking. In the app this window is short: closing the window quits
+the process on every platform, so module timers end with it. The checks above
+still matter between the close and process exit, and in tests, where a
+closed window's shell stays alive.
 
 Keyed query, series, pricing, vol-slice, upload, and text file results go to
 the matching shell occupant;

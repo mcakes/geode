@@ -800,6 +800,41 @@ pub fn stop_at_quit(bridge: &Bridge, cx: &mut App) {
     .detach();
 }
 
+/// Save what the window holds when the user closes it, while it still
+/// exists: the session first, then unsaved pricer sheets, in the order the
+/// quit hooks run them. The close then proceeds; with
+/// `QuitMode::LastWindowClosed` the app quits after it.
+///
+/// The quit hooks cannot do this for a window close: gpui removes the
+/// window before it quits, so the session hook's walk of `cx.windows()`
+/// finds nothing. They still run afterwards, and repeating the work is
+/// harmless: the session save rewrites the same text, and a flushed sheet
+/// is no longer dirty. On Cmd-Q no should-close runs and the quit hooks
+/// do the work alone.
+///
+/// The platform keeps one should-close callback per window, so this
+/// replaces any earlier one; neither gpui-component's `Root` nor its
+/// `TitleBar` registers one.
+pub fn save_on_close(window: WindowHandle<Root>, bridge: Option<&Bridge>, cx: &mut App) {
+    let shell = window
+        .read(cx)
+        .ok()
+        .and_then(|root| root.view().clone().downcast::<ShellView>().ok())
+        .map(|shell| shell.downgrade());
+    let pricer = bridge.map(|bridge| Rc::clone(&bridge.pricer));
+    let _ = window.update(cx, |_, window, cx| {
+        window.on_window_should_close(cx, move |_window, cx| {
+            if let Some(shell) = shell.as_ref().and_then(|shell| shell.upgrade()) {
+                shell.read(cx).save_session(cx);
+            }
+            if let Some(factory) = &pricer {
+                factory.flush_all(cx);
+            }
+            true
+        });
+    });
+}
+
 /// Window-local request lifecycle. The diagnostics entity owns the single
 /// pending refresh bit; only the bridge owns submissions and their replies.
 #[derive(Default)]
@@ -6402,7 +6437,17 @@ grain = "underlying"
         drop(tiles);
         drop(bridge);
 
-        let config = Config::load(&sources());
+        assert_eq!(
+            stored_sheet_rows(sources(), db, "book"),
+            1,
+            "the line typed before quit was stored"
+        );
+    }
+
+    /// The rows of `sheet` a fresh data service reads back from `db` after
+    /// the app that wrote it has stopped.
+    fn stored_sheet_rows(sources: ConfigSources, db: PathBuf, sheet: &str) -> usize {
+        let config = Config::load(&sources);
         let setup = data_setup(
             &config,
             db,
@@ -6420,7 +6465,7 @@ grain = "underlying"
                     tag: 1,
                     submitted: std::time::Instant::now(),
                     dataset: PRICER_SHEETS_DATASET.into(),
-                    document_key: vec!["book".into()],
+                    document_key: vec![sheet.into()],
                     as_of: AsOf::Live,
                 })
                 .is_ok()
@@ -6430,8 +6475,87 @@ grain = "underlying"
                 break o.snapshot.unwrap().rows();
             }
         };
-        assert_eq!(rows, 1, "the line typed before quit was stored");
         handle.shutdown();
+        rows
+    }
+
+    /// Closing the window runs the should-close hook `main` registers
+    /// (`save_on_close`): an unsaved sheet is queued while the window still
+    /// exists, ahead of the data service's shutdown, and the close
+    /// proceeds. The tile is held past the close so its own release-time
+    /// flush cannot be what saved the line.
+    #[gpui::test]
+    fn closing_the_window_saves_every_unsaved_sheet(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let sources = || ConfigSources {
+            builtin: crate::builtin_layer(Some(dir.path())),
+            desk: None,
+            user: None,
+        };
+        let db = dir.path().join("geode.duckdb");
+        let (bridge, window, tiles) =
+            open_app_with_a_pricer_tile(cx, sources(), db.clone(), "book");
+        cx.update(|cx| save_on_close(window, Some(&bridge), cx));
+        {
+            let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let tile = tiles.borrow()[0].clone();
+            wait_until(&mut vcx, "the empty sheet has loaded", |vcx| {
+                tile.read_with(vcx, |t, _| !t.is_loading())
+            });
+            type_a_line(&mut vcx, "-5 SPX Z26 5000 C");
+            assert!(vcx.simulate_close(), "the close was refused");
+        }
+        // Shutdown drains the writes admitted before it.
+        bridge.handle.shutdown();
+        drop(tiles);
+        drop(bridge);
+
+        assert_eq!(
+            stored_sheet_rows(sources(), db, "book"),
+            1,
+            "the line typed before the window closed was stored"
+        );
+    }
+
+    /// Closing the window saves the session through the should-close hook,
+    /// while the window is still among the app's windows, and lets the
+    /// close proceed. Without it the quit hook, which walks `cx.windows()`,
+    /// would find no window: gpui removes it before quitting.
+    #[gpui::test]
+    fn closing_the_window_saves_the_session_and_lets_the_close_proceed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        let (mut services, _log) = test_shell_services_with_rec_roster();
+        services.session_path = Some(path.clone());
+        let window = open_test_window(cx, services);
+        cx.update(|cx| save_on_close(window, None, cx));
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|window, cx| {
+            shell.update(cx, |s, cx| s.open_module("rec", window, cx));
+        });
+        vcx.run_until_parked();
+        let saved = || std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            !saved().contains("\"rec\""),
+            "the session was written before the close: {}",
+            saved()
+        );
+
+        assert!(vcx.simulate_close(), "the close was refused");
+        assert!(
+            saved().contains("module = \"rec\""),
+            "the layout opened before the close was not saved: {}",
+            saved()
+        );
     }
 
     /// Sheets persist in DuckDB: a line typed into one tile is saved by
