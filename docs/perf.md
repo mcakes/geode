@@ -2859,3 +2859,43 @@ unset (no `SET memory_limit`, DuckDB's own default, as the app), with
 `[collector] memory_limit` kept as an opt-in until the overnight footprint
 measurement chooses a value.
 
+## Series expressions: rolling and `ema` over a month of minutes (2026-10-10)
+
+The two function shapes the expression language gained, measured as the
+existing series bench measures its ratio case: `DataService::series` plus
+the wait for its `DataEvent::Series`, the whole trip a tile pays. Same
+fixture as the "Timeseries series query" entry above: one temporary store of four
+identities × 250 sessions × 1,000 one-minute bars (1,000,000 rows),
+`[series] family = "series"` with no retention or history, `AsOf::Live`,
+`window` equal to the range. Each new case reads one source slot (`A`)
+and one expression slot over it at `1m` across a 31-day range from
+2025-01-06 (44,640 buckets, about 23,000 carrying a bar).
+
+Command: `cargo bench -p geode-data --bench series_query -- --warm-up-time 1
+--measurement-time 5`. Conditions: Apple M5 Pro (arm64, 18 cores, 48 GB),
+rustc 1.96.0, DuckDB crate 1.10505.0, bench profile, Gnuplot absent
+(plotters backend). The machine was otherwise loaded: load averages 65 /
+69 / 43 before the run, 16 / 45 / 38 after it (other builds and test
+binaries running), so the pre-existing three cases came out 8 to 12%
+slower than their reference values in the same run. Criterion
+medians, one run of 100 samples each.
+
+| Benchmark | Result |
+|---|---|
+| `series_query/1_slot_1d_1y` (reference 3.64 ms) | 3.94 ms |
+| `series_query/4_slots_plus_ratio_1d_1y` (reference 9.56 ms) | 10.6 ms |
+| `series_query/1_slot_plus_sma_diff_1m_1mo` (new: `sma(diff(s1), 20) / s1[0]`, a rolling mean over a difference, divided by the window's first point) | 7.76 ms |
+| `series_query/1_slot_plus_ema_1m_1mo` (new: `ema(s1, 20)`, the adjusted span-20 weighted mean over the last 100 points) | 14.3 ms |
+| `series_query/2_slots_1m_1mo_with_stats` (reference 14.5 ms) | 16.3 ms |
+
+Both new cases are inside the 50 ms requery target, `ema` by a factor of
+three and the rolling case by six. `ema` costs about twice the rolling
+case over the same month because its stage materialises a `5n`-element
+list per point (`list(...) over (rows between 5n−1 preceding and current
+row)`) and a per-row copy of the `5n` weights, then a dot product and a
+sum per point: rows × `5n` work, where `sma`/`diff` are plain window
+aggregates. The cost therefore scales with the span: a four-digit `n`
+over a long range would be slow, and the UI never waits for it (the
+request is bounded submission, answered on the pool). Not tuned here; the
+lever, if a desk asks for such spans, is a recursive or `ewm`-style
+running form that keeps one accumulator per row instead of a list.
