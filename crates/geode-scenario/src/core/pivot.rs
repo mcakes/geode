@@ -156,6 +156,11 @@ impl Pivot {
                 grouping.join(", ")
             ));
         }
+        if !main.has_depth_column() {
+            return Err(
+                "snapshot lacks 'row_depth': its Σ come from the subtotal rows".to_string(),
+            );
+        }
         let rows_axis = shape
             .axis(&shape.rows)
             .ok_or_else(|| "the shape has not been checked against the schema".to_string())?;
@@ -189,6 +194,9 @@ impl Pivot {
                 Ok((m, name, idx))
             })
             .collect::<Result<_, String>>()?;
+        if reads.is_empty() {
+            return Err("the shape paints no measure".to_string());
+        }
 
         // Pass 1: which rows are leaves, subtotals and the total, and which
         // labels are present.
@@ -280,26 +288,170 @@ impl Pivot {
             }
         }
 
+        // Σ, from the snapshot's own rows and never from the cells.
+        let value_idx = reads[0].2;
+        let row_sums = if shape.sums_columns() {
+            let mut sums = vec![None; rows.len()];
+            for r in 0..main.rows() {
+                if main.depth_of_row(r) != Some(1) {
+                    continue;
+                }
+                if let Some(row) = main.text_at(axis_idx[0], r).and_then(|l| row_of.get(l)) {
+                    sums[*row] = main.f64_at(value_idx, r);
+                }
+            }
+            Some(sums)
+        } else {
+            None
+        };
+        let mut totals_disagree = false;
+        let column_sums = match (&shape.columns, shape.sums_rows()) {
+            (Columns::Measures(_), true) => total_row.map(|r| {
+                reads
+                    .iter()
+                    .map(|(_, _, idx)| main.f64_at(*idx, r))
+                    .collect()
+            }),
+            (Columns::Axes(_), true) => match totals {
+                None => None,
+                Some(t) => {
+                    let wanted = shape.totals_grouping().expect("sums_rows and axis columns");
+                    if t.grouping() != wanted.as_slice() {
+                        return Err(format!(
+                            "totals snapshot grouped by [{}]; the shape needs [{}]",
+                            t.grouping().join(", "),
+                            wanted.join(", ")
+                        ));
+                    }
+                    totals_disagree = matches!(
+                        (generation(main, &shape.dataset), generation(t, &shape.dataset)),
+                        (Some(a), Some(b)) if a != b
+                    );
+                    if totals_disagree {
+                        None
+                    } else {
+                        Some(column_totals(t, &wanted, &reads[0].1, &col_of, ncols)?)
+                    }
+                }
+            },
+            (_, false) => None,
+        };
+        let grand_sum = match (&shape.columns, row_sums.is_some() && shape.sums_rows()) {
+            (Columns::Axes(_), true) => Some(total_row.and_then(|r| main.f64_at(value_idx, r))),
+            _ => None,
+        };
+
+        // Diff: the configured measures against the base row.
+        let mut columns = columns;
+        let mut base_row = None;
+        let mut diff_base_missing = false;
+        if let (true, Some(diff), Columns::Measures(_)) = (mode.diff, &shape.diff, &shape.columns) {
+            base_row = rows.iter().position(|l| l.matches(&diff.base));
+            match base_row {
+                None => diff_base_missing = true,
+                Some(base) => {
+                    for (col, column) in columns.iter_mut().enumerate() {
+                        let (m, _, _) = &reads[col];
+                        if !diff.measures.contains(&m.column) {
+                            continue;
+                        }
+                        column.diffed = true;
+                        let base_value = cells[base * ncols + col];
+                        for row in 0..rows.len() {
+                            if row == base {
+                                continue;
+                            }
+                            let at = row * ncols + col;
+                            cells[at] = match (cells[at], base_value) {
+                                (Some(v), Some(b)) => Some(v - b),
+                                _ => None,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
         let currency_mixed = match (main.column_index("currency"), total_row) {
             (Some(idx), Some(r)) => main.is_mixed_at(idx, r),
             _ => false,
         };
-        let heat_domain = cells.iter().flatten().fold(0.0_f64, |d, v| d.max(v.abs()));
-        let _ = totals;
+        let mut heat_domain = 0.0_f64;
+        for row in 0..rows.len() {
+            for (col, column) in columns.iter().enumerate() {
+                if Some(row) == base_row && column.diffed {
+                    continue;
+                }
+                if let Some(v) = cells[row * ncols + col]
+                    && v.is_finite()
+                {
+                    heat_domain = heat_domain.max(v.abs());
+                }
+            }
+        }
         Ok(Pivot {
             rows,
             columns,
             cells,
-            row_sums: None,
-            column_sums: None,
-            grand_sum: None,
-            totals_disagree: false,
-            base_row: None,
-            diff_base_missing: false,
+            row_sums,
+            column_sums,
+            grand_sum,
+            totals_disagree,
+            base_row,
+            diff_base_missing,
             currency_mixed,
             heat_domain,
         })
     }
+}
+
+/// The dataset's generation a snapshot was read at; `None` when unknown.
+fn generation(s: &Snapshot, dataset: &str) -> Option<i64> {
+    s.provenance()
+        .datasets
+        .iter()
+        .find(|f| f.dataset == dataset)
+        .and_then(|f| f.generation)
+}
+
+/// The Σ row of a matrix: the second query's leaves (every columns axis
+/// present), one per column key; a key the main query never showed is
+/// ignored, a column the companion lacks stays blank.
+fn column_totals(
+    totals: &Snapshot,
+    grouping: &[String],
+    measure: &str,
+    col_of: &HashMap<Vec<String>, usize>,
+    ncols: usize,
+) -> Result<Vec<Option<f64>>, String> {
+    if !totals.has_depth_column() {
+        return Err("totals snapshot lacks 'row_depth': its Σ come from the leaf rows".to_string());
+    }
+    let axis_idx: Vec<usize> = grouping
+        .iter()
+        .map(|g| {
+            totals
+                .column_index(g)
+                .ok_or_else(|| format!("totals snapshot lacks '{g}'"))
+        })
+        .collect::<Result<_, _>>()?;
+    let value_idx = totals
+        .column_index(measure)
+        .ok_or_else(|| format!("totals snapshot lacks '{measure}'"))?;
+    let mut sums = vec![None; ncols];
+    for r in 0..totals.rows() {
+        if totals.depth_of_row(r).unwrap_or(grouping.len()) != grouping.len() {
+            continue;
+        }
+        let key: Option<Vec<String>> = axis_idx
+            .iter()
+            .map(|&i| totals.text_at(i, r).map(str::to_string))
+            .collect();
+        if let Some(col) = key.and_then(|k| col_of.get(&k)) {
+            sums[*col] = totals.f64_at(value_idx, r);
+        }
+    }
+    Ok(sums)
 }
 
 /// The snapshot column a measure reads under `currency`: its twin in USD
@@ -450,7 +602,6 @@ pub(crate) mod fixtures {
     }
 
     /// Vega by maturity: tenor down, spot shift (scenario) across.
-    #[allow(dead_code)] // the Σ tests of a scenario columns axis read it
     pub fn vega_spot() -> ShapeSpec {
         ShapeSpec {
             kind: "vega_spot".into(),
@@ -506,7 +657,6 @@ pub(crate) mod fixtures {
     }
 
     /// By maturity: tenor (bucket) down, two measures across, no diff.
-    #[allow(dead_code)] // the Σ tests of a measures ladder without diff read it
     pub fn by_maturity() -> ShapeSpec {
         ShapeSpec {
             kind: "by_maturity".into(),
@@ -1025,5 +1175,400 @@ mod tests {
         assert!(p.currency_mixed);
         let plain = build(&vega_kt(), &vega_main(), native());
         assert!(!plain.currency_mixed, "no currency column: never mixed");
+    }
+
+    fn build_with_totals(
+        shape: &ShapeSpec,
+        main: &Rows,
+        totals: Option<(&Rows, Option<i64>)>,
+        main_gen: Option<i64>,
+        mode: Mode,
+    ) -> Pivot {
+        let main = main.snapshot(&shape.dataset, main_gen);
+        let totals = totals.map(|(t, g)| t.snapshot(&shape.dataset, g));
+        Pivot::build(&main, totals.as_ref(), shape, mode, &AxisDomains::default()).expect("builds")
+    }
+
+    #[test]
+    fn row_sums_come_from_the_subtotal_rows_not_the_cells() {
+        let p = build(&vega_kt(), &vega_main(), native());
+        let sums = p.row_sums.as_ref().expect("both axes are buckets");
+        // 1Y's leaves sum to 30; the subtotal row says 31, and the subtotal
+        // row is what the engine's attribution rules vouch for.
+        assert_eq!(sums[0], Some(31.0));
+        assert_eq!(sums[1], Some(5.0));
+        assert_eq!(sums[2], Some(30.0));
+    }
+
+    #[test]
+    fn the_grand_sum_is_the_total_row() {
+        let p = build_with_totals(
+            &vega_kt(),
+            &vega_main(),
+            Some((&vega_totals(), Some(1))),
+            Some(1),
+            native(),
+        );
+        assert_eq!(
+            p.grand_sum,
+            Some(Some(66.0)),
+            "66, not the 65 the companion's total says and not the cells' 65"
+        );
+    }
+
+    #[test]
+    fn column_sums_come_from_the_totals_snapshot() {
+        let p = build_with_totals(
+            &vega_kt(),
+            &vega_main(),
+            Some((&vega_totals(), Some(1))),
+            Some(1),
+            native(),
+        );
+        assert_eq!(p.column_sums, Some(vec![Some(40.0), Some(25.0)]));
+        assert!(!p.totals_disagree);
+        let usd_p = build_with_totals(
+            &vega_kt(),
+            &vega_main(),
+            Some((&vega_totals(), Some(1))),
+            Some(1),
+            usd(),
+        );
+        assert_eq!(
+            usd_p.column_sums,
+            Some(vec![Some(48.0), Some(30.0)]),
+            "the twin's Σ in USD mode"
+        );
+    }
+
+    #[test]
+    fn column_sums_blank_until_the_totals_snapshot_arrives() {
+        let p = build(&vega_kt(), &vega_main(), native());
+        assert_eq!(p.column_sums, None);
+        assert_eq!(
+            p.grand_sum,
+            Some(Some(66.0)),
+            "the corner is the main query's and stays"
+        );
+        assert!(!p.totals_disagree);
+    }
+
+    #[test]
+    fn column_sums_blank_while_the_pairs_generations_disagree() {
+        let stale = build_with_totals(
+            &vega_kt(),
+            &vega_main(),
+            Some((&vega_totals(), Some(2))),
+            Some(1),
+            native(),
+        );
+        assert!(stale.totals_disagree);
+        assert_eq!(stale.column_sums, None);
+        assert!(
+            stale.row_sums.is_some(),
+            "the main query's Σ are unaffected"
+        );
+        let unknown = build_with_totals(
+            &vega_kt(),
+            &vega_main(),
+            Some((&vega_totals(), None)),
+            Some(1),
+            native(),
+        );
+        assert!(
+            !unknown.totals_disagree,
+            "an unknown generation is not a disagreement"
+        );
+        assert!(unknown.column_sums.is_some());
+    }
+
+    #[test]
+    fn a_totals_snapshot_grouped_differently_is_refused() {
+        let main = vega_main().snapshot("vega_buckets", Some(1));
+        let wrong = vega_main().snapshot("vega_buckets", Some(1));
+        let err = Pivot::build(
+            &main,
+            Some(&wrong),
+            &vega_kt(),
+            native(),
+            &AxisDomains::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("totals"), "{err}");
+    }
+
+    #[test]
+    fn no_sums_along_a_scenario_axis() {
+        // vega by spot shift: Σ over tenors per shift (bucket) exists; Σ
+        // across shifts and the corner do not.
+        let main = Rows {
+            grouping: vec!["tenor", "spot_shift"],
+            measures: vec!["vega", "vega_usd"],
+            rows: vec![
+                (
+                    vec![Some("1Y"), Some("-5.0")],
+                    2,
+                    vec![Some(1.0), Some(1.0)],
+                ),
+                (vec![Some("1Y"), Some("0.0")], 2, vec![Some(2.0), Some(2.0)]),
+                (vec![Some("1Y"), None], 1, vec![None, None]),
+                (vec![None, None], 0, vec![None, None]),
+            ],
+        };
+        let totals = Rows {
+            grouping: vec!["spot_shift"],
+            measures: vec!["vega", "vega_usd"],
+            rows: vec![
+                (vec![Some("-5.0")], 1, vec![Some(1.0), Some(1.0)]),
+                (vec![Some("0.0")], 1, vec![Some(2.0), Some(2.0)]),
+                (vec![None], 0, vec![None, None]),
+            ],
+        };
+        let p = build_with_totals(
+            &vega_spot(),
+            &main,
+            Some((&totals, Some(1))),
+            Some(1),
+            native(),
+        );
+        assert_eq!(p.row_sums, None, "no Σ across spot shifts");
+        assert_eq!(p.column_sums, Some(vec![Some(1.0), Some(2.0)]));
+        assert_eq!(p.grand_sum, None);
+
+        // The spot ladder: nothing sums at all.
+        let p = build(&spot_ladder(), &ladder_main(), native());
+        assert_eq!((p.row_sums, p.column_sums, p.grand_sum), (None, None, None));
+    }
+
+    #[test]
+    fn a_ladders_sum_row_is_the_total_row_per_measure() {
+        let main = Rows {
+            grouping: vec!["tenor"],
+            measures: vec!["repo", "skew"],
+            rows: vec![
+                (vec![Some("1Y")], 1, vec![Some(1.0), Some(10.0)]),
+                (vec![Some("2Y")], 1, vec![Some(2.0), Some(20.0)]),
+                (vec![None], 0, vec![Some(3.5), None]),
+            ],
+        };
+        let p = build(&by_maturity(), &main, native());
+        assert_eq!(
+            p.column_sums,
+            Some(vec![Some(3.5), None]),
+            "the total row, as it stands — a NULL stays blank"
+        );
+        assert_eq!(p.row_sums, None, "never across measures");
+        assert_eq!(p.grand_sum, None);
+    }
+
+    #[test]
+    fn diff_subtracts_the_base_row_for_the_configured_measures_only() {
+        let p = build(
+            &spot_ladder(),
+            &ladder_main(),
+            Mode {
+                currency: Currency::Native,
+                diff: true,
+            },
+        );
+        assert_eq!(p.base_row, Some(1));
+        assert!(p.columns[0].diffed && !p.columns[1].diffed && !p.columns[2].diffed);
+        assert_eq!(p.cell(0, 0), Some(-10.0));
+        assert_eq!(p.cell(1, 0), Some(100.0), "the base row stays absolute");
+        assert_eq!(p.cell(2, 0), Some(15.0));
+        assert_eq!(p.cell(0, 1), Some(1.0), "delta is not a diff measure");
+        assert!(!p.diff_base_missing);
+    }
+
+    #[test]
+    fn diff_off_leaves_absolutes_and_no_base_row() {
+        let p = build(&spot_ladder(), &ladder_main(), native());
+        assert_eq!(p.base_row, None);
+        assert!(!p.columns[0].diffed);
+        assert_eq!(p.cell(0, 0), Some(90.0));
+        assert!(!p.diff_base_missing);
+    }
+
+    #[test]
+    fn a_numeric_diff_base_matches_the_label_by_value() {
+        for spelling in ["0", "-0.0", "0.00"] {
+            let main = Rows {
+                rows: ladder_main()
+                    .rows
+                    .into_iter()
+                    .map(|(l, d, v)| {
+                        (
+                            l.into_iter()
+                                .map(|t| t.map(|t| if t == "0.0" { spelling } else { t }))
+                                .collect(),
+                            d,
+                            v,
+                        )
+                    })
+                    .collect(),
+                ..ladder_main()
+            };
+            let p = build(
+                &spot_ladder(),
+                &main,
+                Mode {
+                    currency: Currency::Native,
+                    diff: true,
+                },
+            );
+            assert_eq!(p.base_row, Some(1), "{spelling}");
+            assert_eq!(p.cell(2, 0), Some(15.0), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn a_missing_base_row_paints_absolutes_and_says_so() {
+        let main = Rows {
+            rows: ladder_main()
+                .rows
+                .into_iter()
+                .filter(|(l, _, _)| l[0] != Some("0.0"))
+                .collect(),
+            ..ladder_main()
+        };
+        let p = build(
+            &spot_ladder(),
+            &main,
+            Mode {
+                currency: Currency::Native,
+                diff: true,
+            },
+        );
+        assert!(p.diff_base_missing);
+        assert_eq!(p.base_row, None);
+        assert_eq!(p.cell(0, 0), Some(90.0), "absolute");
+        assert_eq!(p.cell(1, 0), Some(115.0));
+        assert!(!p.columns[0].diffed, "nothing is diffed without a base");
+    }
+
+    #[test]
+    fn a_shape_without_diff_ignores_diff_mode() {
+        let p = build(
+            &vega_kt(),
+            &vega_main(),
+            Mode {
+                currency: Currency::Native,
+                diff: true,
+            },
+        );
+        assert_eq!(p.base_row, None);
+        assert!(!p.diff_base_missing, "there is no diff to miss a base for");
+        assert_eq!(p.cell(0, 0), Some(10.0));
+    }
+
+    #[test]
+    fn the_heat_domain_excludes_the_base_rows_absolute_cells_in_diff_mode() {
+        let p = build(
+            &spot_ladder(),
+            &ladder_main(),
+            Mode {
+                currency: Currency::Native,
+                diff: true,
+            },
+        );
+        // Deltas are -10 and 15; the base row's npv (100) and its untouched
+        // delta/theta cells (2, -2) stay in; the largest is 15.
+        assert_eq!(p.heat_domain, 15.0);
+        let absolute = build(&spot_ladder(), &ladder_main(), native());
+        assert_eq!(absolute.heat_domain, 115.0);
+    }
+
+    #[test]
+    fn a_non_attributable_subtotal_stays_blank() {
+        // Attribution NULLs arrive as NULL cells; the pivot never fills them in.
+        let main = Rows {
+            rows: vega_main()
+                .rows
+                .into_iter()
+                .map(|(l, d, v)| {
+                    if d == 1 {
+                        (l, d, vec![None, None])
+                    } else {
+                        (l, d, v)
+                    }
+                })
+                .collect(),
+            ..vega_main()
+        };
+        let p = build(&vega_kt(), &main, native());
+        assert_eq!(p.row_sums, Some(vec![None, None, None]));
+    }
+
+    /// `rows` as a snapshot without its `row_depth` column: flat.
+    fn without_depths(rows: &Rows, dataset: &str) -> Snapshot {
+        let depth = rows.grouping.len();
+        let mut columns: Vec<(ColumnMeta, TestColumn)> = Vec::new();
+        for (i, g) in rows.grouping.iter().enumerate() {
+            let values = rows.rows.iter().map(|(labels, _, _)| labels[i]).collect();
+            columns.push((dim(g, depth), TestColumn::Str(values)));
+        }
+        for (i, m) in rows.measures.iter().enumerate() {
+            let values = rows.rows.iter().map(|(_, _, v)| v[i]).collect();
+            columns.push((sum(m, depth), TestColumn::F64(values)));
+        }
+        Snapshot::for_tests_with_provenance(columns, depth, provenance(dataset, Some(1)))
+    }
+
+    #[test]
+    fn a_snapshot_without_depths_is_refused_not_read_as_leaves() {
+        let flat = without_depths(&vega_main(), "vega_buckets");
+        assert!(!flat.has_depth_column());
+        let err =
+            Pivot::build(&flat, None, &vega_kt(), native(), &AxisDomains::default()).unwrap_err();
+        assert!(err.contains("row_depth"), "{err}");
+
+        let main = vega_main().snapshot("vega_buckets", Some(1));
+        let flat_totals = without_depths(&vega_totals(), "vega_buckets");
+        let err = Pivot::build(
+            &main,
+            Some(&flat_totals),
+            &vega_kt(),
+            native(),
+            &AxisDomains::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("totals") && err.contains("row_depth"), "{err}");
+    }
+
+    #[test]
+    fn a_shape_painting_no_measure_is_refused_not_a_panic() {
+        let shape = ShapeSpec {
+            value: None,
+            ..vega_kt()
+        };
+        let err = Pivot::build(
+            &vega_main().snapshot("vega_buckets", Some(1)),
+            None,
+            &shape,
+            native(),
+            &AxisDomains::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("measure"), "{err}");
+    }
+
+    #[test]
+    fn the_heat_domain_ignores_non_finite_cells() {
+        let main = Rows {
+            rows: vega_main()
+                .rows
+                .into_iter()
+                .map(|(l, d, v)| {
+                    if l == [Some("1Y"), Some("90.0")] {
+                        (l, d, vec![Some(f64::INFINITY), Some(f64::NEG_INFINITY)])
+                    } else {
+                        (l, d, v)
+                    }
+                })
+                .collect(),
+            ..vega_main()
+        };
+        assert_eq!(build(&vega_kt(), &main, native()).heat_domain, 30.0);
+        assert_eq!(build(&vega_kt(), &main, usd()).heat_domain, 36.0);
     }
 }
