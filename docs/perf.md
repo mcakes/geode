@@ -2868,3 +2868,20 @@ The collector loaded the 75 scenario files (five datasets, 15 files each)
 in about 45 s end to end, from discovery to the last publish. One run, not a
 median. No budget applies to demo ingest; this is a datum for comparison if
 scenario loading is later tuned or a release build is measured.
+
+## Scenario pivot build (2026-10-10)
+
+Conditions: Apple M5 Pro (18 cores), bench profile, other sessions on the
+machine (one-minute load average 4.45 before the run, 4.25 after).
+`cargo bench -p geode-scenario --bench pivot -- --warm-up-time 1
+--measurement-time 3`, one run.
+
+Fixture: a 40-tenor × 40-bucket `vega_kt` shape in USD mode, no diff. The
+main snapshot carries 1,600 leaves at depth two, 40 tenor subtotals at depth
+one and one total; the Σ companion carries 40 bucket rows and a total. Both
+snapshots and the axis domains are built once outside the timed loop; only
+`Pivot::build` is measured, so table preparation and paint are excluded.
+
+`pivot_build_40x40`: median 261.2 µs (95% CI 259.8 to 263.0), median
+absolute deviation 6.2 µs, mean 262.8 µs, standard deviation 6.4 µs; one
+mild high outlier in 100 samples. Well under the 8 ms pure-UI budget.
