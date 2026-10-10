@@ -4307,6 +4307,7 @@ mod tests {
                 column: "book".into(),
                 scope: Scope::default(),
                 as_of: AsOf::Live,
+                dataset: None,
             })
             .unwrap_err()
             .to_string();
@@ -5614,6 +5615,7 @@ mod tests {
             column: "book".into(),
             scope: Scope::default(),
             as_of: AsOf::Live,
+            dataset: None,
         };
         svc.distinct(&params).unwrap();
         loop {

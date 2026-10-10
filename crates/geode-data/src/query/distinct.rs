@@ -592,6 +592,7 @@ grain = "instrument"
             column: "currency".into(),
             scope: Scope::default(),
             as_of: AsOf::Live,
+            dataset: None,
         }
     }
 
@@ -604,6 +605,7 @@ grain = "instrument"
             column: "currency".into(),
             scope: book_scope("BK000"),
             as_of: AsOf::Live,
+            dataset: None,
         };
         let compiled = compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap();
         let rows = f.run(&compiled); // Vec<(String, u64)> via run_one + text_at/i64_at
@@ -646,6 +648,7 @@ grain = "instrument"
                 ..Scope::default()
             },
             as_of: AsOf::Live,
+            dataset: None,
         };
         let compiled = compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap();
         assert!(
@@ -673,6 +676,7 @@ grain = "instrument"
                 ..Scope::default()
             },
             as_of: AsOf::Live,
+            dataset: None,
         };
 
         // The public wrapper and an explicit cache must yield the same counts.
@@ -1275,6 +1279,7 @@ role = "attribute"
             column: "book".into(),
             scope: Scope::default(),
             as_of: AsOf::Live,
+            dataset: None,
         };
         let book_rows = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &base).unwrap());
         let book_total: u64 = book_rows.iter().map(|(_, n)| n).sum();
