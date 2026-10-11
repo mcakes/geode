@@ -6,15 +6,19 @@ use crate::adapter::{AdapterRegistry, ConnectionState, HealthSink};
 use crate::documents::DocumentRegistry;
 use crate::egress::{EgressWorkers, UploadOutcome, UploadParams};
 use crate::health::{Health, severity_rank};
+use crate::history_dispatch::HistoryDispatch;
 use crate::ingest::fetch::{FetchOutcome, FetchOutcomeSink, FetchWork, FetchWorker};
+use crate::ingest::history::{
+    HistoryWork, HistoryWorkOutcome, HistoryWorkOutcomeSink, HistoryWorker,
+};
 use crate::ingest::scheduler::{Scheduler, SchedulerEvent, SchedulerSink};
 use crate::ingest::snapshot::{
     PolledSink, SnapshotOutcome, SnapshotPlan, SnapshotSink, SnapshotWorker,
 };
 use crate::ingest::subscribe::{LoadReportSink, SubscriptionWorker};
 use crate::ingest::{
-    DocumentJob, ForgetJob, IngestEvent, IngestHandle, IngestRunner, IngestSink, ReferenceJob,
-    SeriesJob,
+    DocumentJob, ForgetJob, HistoryJob, IngestEvent, IngestHandle, IngestRunner, IngestSink,
+    ReferenceJob, SeriesJob,
 };
 use crate::positions::PositionWorker;
 use crate::pricing::{PriceSink, PricerConfig, PricingWorker};
@@ -38,8 +42,9 @@ use geode_core::egress_config::EgressSpec;
 use geode_core::positions::{CommandOutcome, MoveLhuParams};
 use geode_core::pricing::{LOCAL_SOURCE, LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
-    CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
-    QueryOutcome, ReferenceOutcome, ReferenceParams, WatchlistOutcome, WatchlistParams,
+    CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, HistoryOutcome,
+    HistoryParams, QueryKey, QueryOutcome, ReferenceOutcome, ReferenceParams, Span,
+    WatchlistOutcome, WatchlistParams,
 };
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
@@ -59,6 +64,9 @@ use std::time::{Duration, Instant, SystemTime};
 /// startup, read per query, and a request would need its own arm in every
 /// request match.
 pub type ContextColumns = Arc<Mutex<Vec<String>>>;
+
+/// `(dataset, key column)` -> the values a history source enumerated.
+type HistoryKeys = Arc<Mutex<std::collections::HashMap<(String, String), Vec<String>>>>;
 
 /// How long the app waits for the background collector to release the
 /// store before its open fails, naming the holder.
@@ -130,6 +138,9 @@ pub enum DataEvent {
     Reference(ReferenceOutcome),
     /// One watchlist resolved, addressed by the requester's key and tag.
     Watchlist(WatchlistOutcome),
+    /// One history request answered, addressed by the requester's key and
+    /// tag.
+    History(HistoryOutcome),
     /// Pricing result, addressed by the requesting tile's key.
     Price(PriceOutcome),
     /// Vol slice batch result, addressed by the requesting tile's key.
@@ -305,6 +316,7 @@ fn view_snapshot(payload: Payload) -> Result<geode_core::snapshot::Snapshot, Str
         Payload::Watchlist(_) => {
             Err("internal: a view query answered with a watchlist".to_string())
         }
+        Payload::History(_) => Err("internal: a view query answered with history".to_string()),
     }
 }
 
@@ -356,6 +368,9 @@ fn result_event(r: QueryResult, health_tracker: &HealthTracker) -> DataEvent {
                 Ok(Payload::Watchlist(_)) => {
                     Err("internal: a series request answered with a watchlist".to_string())
                 }
+                Ok(Payload::History(_)) => {
+                    Err("internal: a series request answered with history".to_string())
+                }
                 Err(e) => Err(e),
             };
             DataEvent::Series(SeriesOutcome {
@@ -374,6 +389,18 @@ fn result_event(r: QueryResult, health_tracker: &HealthTracker) -> DataEvent {
                 Ok(_) => {
                     Err("internal: a watchlist request answered with another payload".to_string())
                 }
+                Err(e) => Err(e),
+            },
+        }),
+        RequestKind::History { dataset, span } => DataEvent::History(HistoryOutcome {
+            key: r.key,
+            tag: r.tag,
+            submitted: r.submitted,
+            dataset,
+            span,
+            result: match r.payload {
+                Ok(Payload::History(table)) => Ok(table),
+                Ok(_) => Err("internal: a history request answered with another payload".into()),
                 Err(e) => Err(e),
             },
         }),
@@ -420,6 +447,14 @@ fn contained_result_event(
                     key,
                     tag,
                     name,
+                    result: Err(reason),
+                }),
+                RequestKind::History { dataset, span } => DataEvent::History(HistoryOutcome {
+                    key,
+                    tag,
+                    submitted,
+                    dataset,
+                    span,
                     result: Err(reason),
                 }),
             }
@@ -674,6 +709,85 @@ fn snapshot_outcome_sink(
             let _ = sink(DataEvent::Diagnostics(vec![Diagnostic {
                 path: Some(format!("sources.{source}")),
                 ..load_note_warning(message)
+            }]));
+        }
+    })
+}
+
+/// A history worker's outcome: rows go to the runner with the coverage the
+/// answer establishes (its append finishes the ticket); a failed call is the
+/// `<dataset>@<source>` load lane plus that call's part of the ticket; an
+/// enumerated key column is remembered in the column's order.
+fn history_outcome_sink(
+    spec: &SourceSpec,
+    dataset: &geode_core::schema::DatasetSpec,
+    ingest: &Arc<IngestHandle>,
+    history: &Arc<HistoryDispatch>,
+    history_keys: &HistoryKeys,
+    report_load: LoadReportSink,
+    sink: &EventSink,
+) -> HistoryWorkOutcomeSink {
+    let ingest = Arc::clone(ingest);
+    let history = Arc::clone(history);
+    let history_keys = Arc::clone(history_keys);
+    let sink = Arc::clone(sink);
+    let source = spec.name.clone();
+    let name = dataset.name.clone();
+    let orders: std::collections::HashMap<String, geode_core::schema::TextOrder> = dataset
+        .history_key()
+        .iter()
+        .map(|c| (c.name.clone(), c.order))
+        .collect();
+    Arc::new(move |outcome| match outcome {
+        HistoryWorkOutcome::Fetched {
+            ticket,
+            request,
+            rows,
+            ..
+        } => {
+            let covered = crate::history_dispatch::covered_by(&request, &rows);
+            ingest.submit_history(HistoryJob {
+                source: source.clone(),
+                dataset: name.clone(),
+                ticket,
+                rows,
+                covered,
+                received_at: Utc::now(),
+            });
+        }
+        HistoryWorkOutcome::Failed { ticket, reason } => {
+            let pair = format!("{name}@{source}");
+            report_load(
+                &pair,
+                Health::Failed {
+                    reason: reason.clone(),
+                },
+                format!("{pair}: {reason}"),
+            );
+            history.finish(ticket, Err(reason));
+        }
+        HistoryWorkOutcome::Keys {
+            column,
+            values: Some(mut values),
+        } => {
+            let order = orders.get(&column).copied().unwrap_or_default();
+            geode_core::schema::sort_text(&mut values, order);
+            values.dedup();
+            history_keys
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert((name.clone(), column), values);
+        }
+        // A source that cannot enumerate is not a failure: the key column
+        // simply has no typeahead.
+        HistoryWorkOutcome::Keys { values: None, .. } => {}
+        HistoryWorkOutcome::KeysPanicked { column, payload } => {
+            let _ = sink(DataEvent::Diagnostics(vec![Diagnostic {
+                severity: Severity::Error,
+                layer: None,
+                file: None,
+                message: format!("key listing of {name}.{column} for {source} panicked: {payload}"),
+                path: None,
             }]));
         }
     })
@@ -987,6 +1101,9 @@ pub struct DataService {
     /// subscriptions can submit to ingest; they must stop before the writer.
     /// Explicit shutdown follows the same producer-before-consumer order.
     fetchers: std::sync::Mutex<Vec<FetchWorker>>,
+    /// One worker per history source. Each one's outcome sink submits
+    /// history jobs to ingest, so they stop with the fetchers.
+    historians: std::sync::Mutex<Vec<HistoryWorker>>,
     /// One polling worker per snapshot source; each submits its snapshots
     /// to ingest, so it stops with the fetchers, before the writer. Joining
     /// one waits for a poll in flight, which has no deadline, so they are
@@ -1004,10 +1121,21 @@ pub struct DataService {
     /// that makes "is this a fetch source" a lookup rather than a
     /// re-derivation from the schema.
     fetch_datasets: std::collections::HashMap<String, String>,
+    /// History dataset -> the `(source, table)` that answers it: the
+    /// membership test `history` refuses on, and the worker it queues to.
+    history_sources: std::collections::HashMap<String, (String, String)>,
+    /// What each history source last answered `HistoryQuery::keys` with,
+    /// per `(dataset, column)`, sorted in the column's own order.
+    history_keys: HistoryKeys,
+    /// Tickets for history requests in flight; shared with the history
+    /// workers' and the runner's sinks, which finish them.
+    history: Arc<HistoryDispatch>,
     /// Copied onto every query's view as `ViewSpec::context`; see
     /// [`ContextColumns`].
     context_columns: ContextColumns,
-    pool: QueryPool,
+    /// Shared with the history dispatch, which submits a ticket's read
+    /// from the ingest thread once its last append lands.
+    pool: Arc<QueryPool>,
     pricing: PricingWorker,
     vol: VolWorker,
     scheduler: Scheduler,
@@ -1273,12 +1401,18 @@ impl DataService {
                 }))
             })
         };
-        let pool = QueryPool::spawn_with_sink(
+        let pool = Arc::new(QueryPool::spawn_with_sink(
             &store,
             config.query_workers.max(1),
             result_sink,
             Arc::clone(&sink),
-        )?;
+        )?);
+        // Before the runner's sink, which finishes tickets on append.
+        let history = Arc::new(HistoryDispatch::new(
+            Arc::clone(&pool),
+            Arc::new(config.schema.clone()),
+            Arc::clone(&sink),
+        ));
 
         let price_sink: PriceSink = {
             let sink = Arc::clone(&sink);
@@ -1295,6 +1429,7 @@ impl DataService {
         let ingest_sink: IngestSink = {
             let sink = Arc::clone(&sink);
             let health_tracker = Arc::clone(&health_tracker);
+            let history = Arc::clone(&history);
             let load_notes = std::sync::Mutex::new(LoadNoteLog::default());
             Arc::new(move |e: IngestEvent| match e {
                 IngestEvent::Started {
@@ -1598,9 +1733,70 @@ impl DataService {
                         }
                     })
                 }
-                // No history request is dispatched yet, so no ticket waits
-                // on these.
-                IngestEvent::HistoryAppended { .. } | IngestEvent::HistoryFailed { .. } => true,
+                // The load lane first, then the ticket, then `LoadEnded`:
+                // the order the series arms above report in.
+                IngestEvent::HistoryAppended {
+                    source,
+                    dataset,
+                    ticket,
+                    appended,
+                    swept,
+                } => {
+                    tracing::info!(
+                        target: "geode::ingest",
+                        "appended history ticket {} into {dataset} from {source}: {appended} row(s), {swept} swept",
+                        ticket.0,
+                    );
+                    let pair = format!("{dataset}@{source}");
+                    let health_delivered = health_tracker.report_load_and_emit(
+                        &source,
+                        &pair,
+                        Health::Ok,
+                        String::new(),
+                        |reported| match reported {
+                            Some((worst, detail)) => {
+                                log_health_event(&source, &worst, &detail);
+                                sink(DataEvent::Health {
+                                    source: source.clone(),
+                                    worst,
+                                    detail,
+                                })
+                            }
+                            None => true,
+                        },
+                    );
+                    history.finish(ticket, Ok(()));
+                    let _ = sink(DataEvent::LoadEnded);
+                    health_delivered
+                }
+                IngestEvent::HistoryFailed {
+                    source,
+                    dataset,
+                    ticket,
+                    reason,
+                } => {
+                    let pair = format!("{dataset}@{source}");
+                    log_ingest_failure(&dataset, &pair, &reason);
+                    let health_delivered = health_tracker.report_load_and_emit(
+                        &source,
+                        &pair,
+                        Health::Failed {
+                            reason: reason.clone(),
+                        },
+                        format!("{pair}: {reason}"),
+                        |reported| match reported {
+                            Some((worst, detail)) => sink(DataEvent::Health {
+                                source: source.clone(),
+                                worst,
+                                detail,
+                            }),
+                            None => true,
+                        },
+                    );
+                    history.finish(ticket, Err(reason));
+                    let _ = sink(DataEvent::LoadEnded);
+                    health_delivered
+                }
                 // A drained runner also ends progress. The runner does not retry refused
                 // events; the app mailbox coalesces progress state.
                 IngestEvent::PlanComplete => sink(DataEvent::LoadEnded),
@@ -1623,6 +1819,10 @@ impl DataService {
         let mut snapshots: Vec<SnapshotWorker> = Vec::new();
         let mut fetch_datasets: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        let mut historians: Vec<HistoryWorker> = Vec::new();
+        let mut history_sources: std::collections::HashMap<String, (String, String)> =
+            std::collections::HashMap::new();
+        let history_keys: HistoryKeys = Default::default();
         let identities: Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<String>>>> =
             Default::default();
         for spec in &config.sources {
@@ -1664,10 +1864,88 @@ impl DataService {
                     continue;
                 }
                 SourceShape::Subscribed => {}
-                // Reported rather than dropped: a configured source with no
-                // worker must show as unservable, not as a quiet healthy one.
                 SourceShape::History => {
-                    report_unservable("history sources are not served yet".into());
+                    let Some(adapter) = config.adapters.get(&spec.adapter) else {
+                        report_unservable(format!(
+                            "adapter '{}' is not in this build",
+                            spec.adapter
+                        ));
+                        continue;
+                    };
+                    // Asked for per source, never cached, for the reason
+                    // the subscribed arm's `subscription()` call records.
+                    let Some(query) = adapter.history() else {
+                        report_unservable(format!(
+                            "adapter '{}' has no history side",
+                            spec.adapter
+                        ));
+                        continue;
+                    };
+                    let Some(dataset) = config.schema.dataset(&spec.dataset) else {
+                        report_unservable(format!("dataset '{}' is not declared", spec.dataset));
+                        continue;
+                    };
+                    let Some(table) = spec.table.clone() else {
+                        report_unservable("a history source needs a table".to_string());
+                        continue;
+                    };
+                    // One source answers a dataset: `history` queues every
+                    // request for it to that source's worker.
+                    if let Some((other, _)) = history_sources.get(&spec.dataset) {
+                        report_unservable(format!(
+                            "'{}' is already answered by history source '{other}'",
+                            spec.dataset
+                        ));
+                        continue;
+                    }
+                    let outcome_sink = history_outcome_sink(
+                        spec,
+                        dataset,
+                        &ingest,
+                        &history,
+                        &history_keys,
+                        load_report_sink(spec, &sink, &health_tracker),
+                        &sink,
+                    );
+                    let key_types = dataset.history_key().iter().map(|c| c.ty).collect();
+                    match HistoryWorker::spawn(
+                        &spec.name,
+                        &table,
+                        key_types,
+                        query,
+                        outcome_sink,
+                        Arc::clone(&sink),
+                    ) {
+                        Ok(worker) => {
+                            let source = spec.name.clone();
+                            let sink = Arc::clone(&sink);
+                            health_tracker.report_discovery_and_emit(
+                                &spec.name,
+                                Health::Ok,
+                                String::new(),
+                                |reported| match reported {
+                                    Some((worst, detail)) => {
+                                        log_health_event(&source, &worst, &detail);
+                                        sink(DataEvent::Health {
+                                            source: source.clone(),
+                                            worst,
+                                            detail,
+                                        })
+                                    }
+                                    None => true,
+                                },
+                            );
+                            for column in &dataset.key {
+                                worker.request(HistoryWork::Keys {
+                                    column: column.clone(),
+                                });
+                            }
+                            history_sources
+                                .insert(spec.dataset.clone(), (spec.name.clone(), table));
+                            historians.push(worker);
+                        }
+                        Err(e) => report_unservable(e.message),
+                    }
                     continue;
                 }
                 SourceShape::Snapshot => {
@@ -2028,9 +2306,13 @@ impl DataService {
             positions,
             subscriptions: std::sync::Mutex::new(subscriptions),
             fetchers: std::sync::Mutex::new(fetchers),
+            historians: std::sync::Mutex::new(historians),
             snapshots: std::sync::Mutex::new(snapshots),
             identities,
             fetch_datasets,
+            history_sources,
+            history_keys,
+            history,
             context_columns: Arc::default(),
             pool,
             pricing,
@@ -2516,6 +2798,7 @@ impl DataService {
     }
 
     pub fn cancel(&self, key: QueryKey) {
+        self.history.cancel(key);
         self.pool.cancel(key);
         self.pricing.cancel(key);
         self.vol.cancel(key);
@@ -2656,6 +2939,115 @@ impl DataService {
             .iter()
             .find(|w| w.source() == source)
             .is_some_and(|w| w.request(FetchWork::Identities))
+    }
+
+    /// Queue a history request. Every outcome arrives as one
+    /// `DataEvent::History` for the key and tag, except that a request
+    /// superseded by a newer one for its key (or cancelled) before it is
+    /// answered answers nothing; refusals decided here answer at once.
+    ///
+    /// The asked keys are normalized first, then what the coverage table
+    /// lacks is asked of the dataset's history source (see
+    /// `history_dispatch::plan_calls`); once every call's append lands, the
+    /// cache is read on the pool. Coverage is read through `self.conn`:
+    /// `append_history` commits rows and coverage in one transaction, so a
+    /// span seen as covered is a span whose rows are readable.
+    pub fn history(&self, params: HistoryParams) {
+        let refuse = |params: &HistoryParams, reason: String| {
+            tracing::warn!(
+                target: "geode::query",
+                "history request for '{}' refused: {reason}",
+                params.dataset
+            );
+            self.history.refuse(params, reason);
+        };
+        if let Err(e) = self.refuse_drifted([params.dataset.as_str()]) {
+            return refuse(&params, e.to_string());
+        }
+        let found = self
+            .config
+            .schema
+            .dataset(&params.dataset)
+            .filter(|d| d.is_history())
+            .zip(self.history_sources.get(&params.dataset));
+        let Some((ds, (source, table))) = found else {
+            let reason = format!(
+                "'{}' is not a history dataset with a source",
+                params.dataset
+            );
+            return refuse(&params, reason);
+        };
+        if let Err(e) = params.keys.validate(ds.key.len()) {
+            return refuse(&params, e);
+        }
+        if let Span::Between {
+            step: Some(step), ..
+        } = params.span
+            && step.is_zero()
+        {
+            return refuse(&params, "a history step is longer than zero".to_string());
+        }
+        let keys = match crate::history_dispatch::normalize_keys(ds, &params.keys) {
+            Ok(keys) => keys,
+            Err(e) => return refuse(&params, e),
+        };
+        let params = HistoryParams { keys, ..params };
+        let calls = match crate::history_dispatch::plan_calls(
+            &self.conn,
+            ds,
+            table,
+            &params.keys,
+            params.span,
+            Utc::now(),
+        ) {
+            Ok(calls) => calls,
+            Err(e) => return refuse(&params, format!("reading coverage: {e}")),
+        };
+        if calls.is_empty() {
+            self.history.read_now(params);
+            return;
+        }
+        let historians = self.historians.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(worker) = historians.iter().find(|w| w.source() == source) else {
+            let reason = format!(
+                "'{}' is not a history dataset with a source",
+                params.dataset
+            );
+            return refuse(&params, reason);
+        };
+        let value_arity = ds.history_values().len();
+        let total = calls.len();
+        let ticket = self.history.open(params, total);
+        for (queued, request) in calls.into_iter().enumerate() {
+            if !worker.request(HistoryWork::Query {
+                ticket,
+                request,
+                value_arity,
+            }) {
+                tracing::warn!(
+                    target: "geode::query",
+                    "the history queue for '{source}' is full; ticket {} refused",
+                    ticket.0
+                );
+                self.history.refuse_ticket(
+                    ticket,
+                    total - queued,
+                    format!("the history queue for '{source}' is full"),
+                );
+                return;
+            }
+        }
+    }
+
+    /// What the source last answered `HistoryQuery::keys` with for
+    /// `column`, in the column's order; `None` before it answered or when
+    /// it cannot enumerate.
+    pub fn history_keys(&self, dataset: &str, column: &str) -> Option<Vec<String>> {
+        self.history_keys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(dataset.to_string(), column.to_string()))
+            .cloned()
     }
 
     /// Poll the snapshot source filling `dataset` now; the source reader
@@ -2831,6 +3223,16 @@ impl DataService {
         {
             worker.shutdown();
         }
+        // History workers for the same reason: each one's outcome sink
+        // submits history jobs. Each waits for a query in flight.
+        for worker in self
+            .historians
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter_mut()
+        {
+            worker.shutdown();
+        }
         // Snapshot workers for the same reason: each submits its polls to
         // the runner. Each waits for a poll in flight to finish.
         for worker in self
@@ -2884,6 +3286,7 @@ mod tests {
     use crate::store::ddl::tests_support::{
         FakeKind, cvi_dataset, cvi_doc, local_dataset, sheet_rows, ts,
     };
+    use geode_core::query::KeySet;
     use geode_core::scope::{DimensionSelection, Scope};
     use std::time::Duration;
 
@@ -4704,6 +5107,583 @@ mod tests {
         })
         .unwrap();
         (dir, calls, service, rx)
+    }
+
+    /// A history adapter for the service tests: `FakeHistory` from
+    /// `ingest::history`'s tests, wrapped as an `Adapter` named
+    /// `fake_hanweck`.
+    struct FakeHistoryAdapter {
+        calls: Arc<std::sync::Mutex<Vec<crate::adapter::HistoryRequest>>>,
+        days: usize,
+        keys: Option<Vec<String>>,
+        fail_once: bool,
+        hold: Option<Arc<crate::ingest::history::tests::Hold>>,
+    }
+
+    impl crate::adapter::Adapter for FakeHistoryAdapter {
+        fn name(&self) -> &'static str {
+            "fake_hanweck"
+        }
+        fn subscription(&self) -> Option<Box<dyn crate::adapter::Subscription>> {
+            None
+        }
+        fn egress(&self) -> Option<Box<dyn crate::adapter::Egress>> {
+            None
+        }
+        fn history(&self) -> Option<Box<dyn crate::adapter::HistoryQuery>> {
+            Some(Box::new(crate::ingest::history::tests::FakeHistory {
+                calls: self.calls.clone(),
+                days: self.days,
+                keys: self.keys.clone(),
+                fail_once: self.fail_once,
+                hold: self.hold.clone(),
+                ..Default::default()
+            }))
+        }
+    }
+
+    type HistoryCalls = Arc<std::sync::Mutex<Vec<crate::adapter::HistoryRequest>>>;
+
+    /// The fixture history dataset without its history window, so the
+    /// fixed 2026-01 dates below never age out of it.
+    fn unwindowed_history_dataset() -> geode_core::schema::DatasetSpec {
+        let mut ds = crate::store::ddl::tests_support::history_dataset();
+        ds.series_retention = ds
+            .series_retention
+            .map(|r| geode_core::schema::SeriesRetention { history: None, ..r });
+        ds
+    }
+
+    /// A service with one HISTORY source `hanweck` over `ds` (table
+    /// `surface`).
+    fn history_service_over(
+        dir: tempfile::TempDir,
+        ds: geode_core::schema::DatasetSpec,
+        days: usize,
+        keys: Option<Vec<String>>,
+        fail_once: bool,
+        hold: Option<Arc<crate::ingest::history::tests::Hold>>,
+    ) -> (
+        tempfile::TempDir,
+        HistoryCalls,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        let calls: HistoryCalls = Arc::default();
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(Arc::new(FakeHistoryAdapter {
+            calls: calls.clone(),
+            days,
+            keys,
+            fail_once,
+            hold,
+        }));
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let spec = crate::source::SourceSpec {
+            adapter: "fake_hanweck".to_string(),
+            table: Some("surface".to_string()),
+            ..crate::source::SourceSpec::directory("hanweck", "vol_surface", Vec::new())
+        };
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: dir.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 2,
+            sources: vec![spec],
+            adapters,
+            documents: Default::default(),
+            egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+            positions: None,
+        })
+        .unwrap();
+        (dir, calls, service, rx)
+    }
+
+    fn history_service(
+        days: usize,
+        keys: Option<Vec<String>>,
+        fail_once: bool,
+    ) -> (
+        tempfile::TempDir,
+        HistoryCalls,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        history_service_over(
+            tempfile::tempdir().unwrap(),
+            unwindowed_history_dataset(),
+            days,
+            keys,
+            fail_once,
+            None,
+        )
+    }
+
+    fn held_history_service(
+        hold: &Arc<crate::ingest::history::tests::Hold>,
+    ) -> (
+        tempfile::TempDir,
+        HistoryCalls,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        history_service_over(
+            tempfile::tempdir().unwrap(),
+            unwindowed_history_dataset(),
+            5,
+            None,
+            false,
+            Some(Arc::clone(hold)),
+        )
+    }
+
+    fn tuple(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    fn history_ask(key: u64, tag: u64, keys: KeySet, span: Span) -> HistoryParams {
+        HistoryParams {
+            key: QueryKey(key),
+            tag,
+            submitted: Instant::now(),
+            dataset: "vol_surface".into(),
+            keys,
+            span,
+        }
+    }
+
+    fn jan(from: &str, to: &str) -> Span {
+        Span::Between {
+            from: ts(&format!("2026-01-{from}T00:00:00Z")),
+            to: ts(&format!("2026-01-{to}T00:00:00Z")),
+            step: None,
+        }
+    }
+
+    fn spx() -> KeySet {
+        KeySet::Prefix(vec![tuple(&["SPX"])])
+    }
+
+    /// The `History` answer for `tag`, within thirty seconds.
+    fn history_answer(rx: &std::sync::mpsc::Receiver<DataEvent>, tag: u64) -> HistoryOutcome {
+        until_within(rx, Duration::from_secs(30), |e| match e {
+            DataEvent::History(o) if o.tag == tag => Some(o),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no history answer for tag {tag}"))
+    }
+
+    fn wait_for_calls(calls: &HistoryCalls, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while calls.lock().unwrap().len() < n {
+            assert!(
+                Instant::now() < deadline,
+                "the adapter was never called {n} time(s)"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_latest_request_asks_the_source_appends_and_answers_the_key_and_tag() {
+        let (_dir, calls, service, rx) =
+            history_service(3, Some(vec!["1M".into(), "3M".into()]), false);
+        service.history(history_ask(
+            9,
+            4,
+            KeySet::Prefix(vec![tuple(&["SPX"]), tuple(&["NDX"])]),
+            Span::Latest,
+        ));
+        let out = history_answer(&rx, 4);
+        assert_eq!((out.key, out.tag), (QueryKey(9), 4));
+        assert_eq!(
+            (out.dataset.as_str(), out.span),
+            ("vol_surface", Span::Latest)
+        );
+        let table = out.result.unwrap();
+        assert_eq!(
+            table.rows.len(),
+            2,
+            "one latest row per asked prefix (the fake answers one tuple per prefix)"
+        );
+        assert_eq!(table.rows[0].ts, ts("2026-01-07T21:00:00Z"));
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(calls.lock().unwrap()[0].table, "surface");
+        assert_eq!(
+            service.history_keys("vol_surface", "tenor"),
+            Some(vec!["1M".into(), "3M".into()]),
+            "keys were asked at open"
+        );
+        service.shutdown();
+    }
+
+    #[test]
+    fn a_between_request_fetches_only_the_gaps_and_a_repeat_fetches_nothing() {
+        let (_dir, calls, service, rx) = history_service(5, None, false);
+        service.history(history_ask(9, 1, spx(), jan("05", "10")));
+        assert_eq!(history_answer(&rx, 1).result.unwrap().rows.len(), 5);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        service.history(history_ask(9, 2, spx(), jan("05", "10")));
+        assert_eq!(history_answer(&rx, 2).result.unwrap().rows.len(), 5);
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "covered: no second adapter call"
+        );
+        // Widened by two days: only the new gap is asked for.
+        service.history(history_ask(9, 3, spx(), jan("05", "12")));
+        assert_eq!(history_answer(&rx, 3).result.unwrap().rows.len(), 7);
+        let asked = calls.lock().unwrap().clone();
+        assert_eq!(asked.len(), 2);
+        assert_eq!(asked[1].span, jan("10", "12"));
+        assert_eq!(asked[1].keys, spx());
+        service.shutdown();
+    }
+
+    #[test]
+    fn a_between_before_the_history_window_is_clipped_and_an_expired_span_calls_no_adapter() {
+        // The fixture's own 400-day window, with dates relative to now.
+        let (_dir, calls, service, rx) = history_service_over(
+            tempfile::tempdir().unwrap(),
+            crate::store::ddl::tests_support::history_dataset(),
+            1,
+            None,
+            false,
+            None,
+        );
+        let now = Utc::now();
+        let days = |n: i64| chrono::Duration::days(n);
+        let expired = Span::Between {
+            from: now - days(800),
+            to: now - days(500),
+            step: None,
+        };
+        service.history(history_ask(9, 1, spx(), expired));
+        let out = history_answer(&rx, 1);
+        assert_eq!(out.span, expired, "the answer names the span asked");
+        assert!(out.result.unwrap().rows.is_empty());
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "a wholly expired span asks the source nothing"
+        );
+        let before = Utc::now();
+        let (from, to) = (now - days(500), now - days(390));
+        service.history(history_ask(
+            9,
+            2,
+            spx(),
+            Span::Between {
+                from,
+                to,
+                step: None,
+            },
+        ));
+        history_answer(&rx, 2).result.unwrap();
+        let asked = calls.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1);
+        match asked[0].span {
+            Span::Between {
+                from: asked_from,
+                to: asked_to,
+                ..
+            } => {
+                assert!(
+                    asked_from >= before - days(400) && asked_from > from,
+                    "from clipped to the window: {asked_from} for {from}"
+                );
+                assert_eq!(asked_to, to);
+            }
+            other => panic!("{other:?}"),
+        }
+        service.shutdown();
+    }
+
+    #[test]
+    fn an_at_request_is_served_from_coverage_once_the_instant_is_covered() {
+        let (_dir, calls, service, rx) = history_service(5, None, false);
+        service.history(history_ask(9, 1, spx(), jan("05", "10")));
+        history_answer(&rx, 1).result.unwrap();
+        let exact = KeySet::Exact(vec![tuple(&["SPX", "3M", "0.5"])]);
+        let at = ts("2026-01-07T21:00:00Z");
+        service.history(history_ask(9, 2, exact, Span::At(at)));
+        let rows = history_answer(&rx, 2).result.unwrap().rows;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].ts, at);
+        assert_eq!(rows[0].values, vec![17.0, 7650.0]);
+        assert_eq!(calls.lock().unwrap().len(), 1, "served from coverage");
+        service.shutdown();
+    }
+
+    #[test]
+    fn an_uncovered_at_asks_once_for_every_tuple_and_its_answer_covers_the_instant() {
+        let (_dir, calls, service, rx) = history_service(5, None, false);
+        let exact = KeySet::Exact(vec![
+            tuple(&["SPX", "3M", "0.5"]),
+            tuple(&["NDX", "3M", "0.5"]),
+        ]);
+        let at = ts("2026-01-07T22:00:00Z");
+        service.history(history_ask(9, 1, exact.clone(), Span::At(at)));
+        let rows = history_answer(&rx, 1).result.unwrap().rows;
+        assert_eq!(rows.len(), 2, "one as-of row per tuple: {rows:?}");
+        assert!(rows.iter().all(|r| r.ts == ts("2026-01-07T21:00:00Z")));
+        {
+            let asked = calls.lock().unwrap();
+            assert_eq!(asked.len(), 1);
+            assert_eq!(
+                (asked[0].keys.clone(), asked[0].span),
+                (exact.clone(), Span::At(at))
+            );
+        }
+        service.history(history_ask(9, 2, exact, Span::At(at)));
+        assert_eq!(history_answer(&rx, 2).result.unwrap().rows.len(), 2);
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "the first answer covered the instant"
+        );
+        service.shutdown();
+    }
+
+    #[test]
+    fn an_asked_key_is_normalized_so_two_spellings_are_one_key() {
+        let (_dir, calls, service, rx) = history_service(5, None, false);
+        let spelled = |delta: &str| KeySet::Exact(vec![tuple(&["SPX", "3M", delta])]);
+        service.history(history_ask(9, 1, spelled("0.50"), jan("05", "10")));
+        let rows = history_answer(&rx, 1).result.unwrap().rows;
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].key, tuple(&["SPX", "3M", "0.5"]));
+        assert_eq!(calls.lock().unwrap()[0].keys, spelled("0.5"));
+        service.history(history_ask(9, 2, spelled("0.5"), jan("05", "10")));
+        assert_eq!(history_answer(&rx, 2).result.unwrap().rows.len(), 5);
+        assert_eq!(calls.lock().unwrap().len(), 1, "one key, already covered");
+        service.history(history_ask(9, 3, spelled("half"), jan("05", "10")));
+        let refused = history_answer(&rx, 3).result.unwrap_err();
+        assert!(refused.contains("not an f64 key"), "{refused}");
+        service.shutdown();
+    }
+
+    #[test]
+    fn a_stepped_between_is_fetched_again_and_a_zero_step_is_refused() {
+        let (_dir, calls, service, rx) = history_service(5, None, false);
+        let stepped = |step| Span::Between {
+            from: ts("2026-01-05T00:00:00Z"),
+            to: ts("2026-01-10T00:00:00Z"),
+            step: Some(step),
+        };
+        let day = Duration::from_secs(86_400);
+        service.history(history_ask(9, 1, spx(), stepped(day)));
+        assert_eq!(history_answer(&rx, 1).result.unwrap().rows.len(), 5);
+        service.history(history_ask(9, 2, spx(), stepped(day)));
+        history_answer(&rx, 2).result.unwrap();
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            2,
+            "a thinned answer recorded no coverage, so it is asked again"
+        );
+        service.history(history_ask(9, 3, spx(), stepped(Duration::ZERO)));
+        assert!(history_answer(&rx, 3).result.is_err());
+        assert_eq!(calls.lock().unwrap().len(), 2);
+        service.shutdown();
+    }
+
+    #[test]
+    fn a_history_request_for_an_unserved_or_malformed_ask_is_refused_at_once() {
+        let (_dir, calls, service, rx) = history_service(5, None, false);
+        service.history(HistoryParams {
+            dataset: "nope".into(),
+            ..history_ask(9, 1, spx(), Span::Latest)
+        });
+        let refused = history_answer(&rx, 1).result.unwrap_err();
+        assert!(refused.contains("not a history dataset"), "{refused}");
+        service.history(history_ask(
+            9,
+            2,
+            KeySet::Exact(vec![tuple(&["SPX"])]),
+            Span::Latest,
+        ));
+        let refused = history_answer(&rx, 2).result.unwrap_err();
+        assert!(refused.contains("exact key has 3 columns"), "{refused}");
+        assert!(calls.lock().unwrap().is_empty());
+        service.shutdown();
+    }
+
+    #[test]
+    fn a_tenor_key_column_is_enumerated_in_tenor_order() {
+        let (_dir, _calls, service, _rx) = history_service(
+            1,
+            Some(vec!["1Y".into(), "3M".into(), "1M".into(), "3M".into()]),
+            false,
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let tenors = loop {
+            let both = (
+                service.history_keys("vol_surface", "tenor"),
+                service.history_keys("vol_surface", "underlying_ref"),
+            );
+            if let (Some(t), Some(u)) = both {
+                break (t, u);
+            }
+            assert!(Instant::now() < deadline, "the keys were never answered");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(
+            tenors.0,
+            tuple(&["1M", "3M", "1Y"]),
+            "tenor order, deduplicated"
+        );
+        assert_eq!(
+            tenors.1,
+            tuple(&["1M", "1Y", "3M"]),
+            "a lexical column stays lexical"
+        );
+        service.shutdown();
+    }
+
+    /// The answer for `tag`, with every health report for `hanweck` drained
+    /// on the way to it.
+    fn history_answer_with_health(
+        rx: &std::sync::mpsc::Receiver<DataEvent>,
+        tag: u64,
+    ) -> (HistoryOutcome, Vec<(Health, String)>) {
+        let mut health = Vec::new();
+        let out = until_within(rx, Duration::from_secs(30), |e| match e {
+            DataEvent::History(o) if o.tag == tag => Some(o),
+            DataEvent::Health {
+                source,
+                worst,
+                detail,
+            } if source == "hanweck" => {
+                health.push((worst, detail));
+                None
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no history answer for tag {tag}"));
+        (out, health)
+    }
+
+    #[test]
+    fn a_failing_source_answers_err_degrades_the_load_lane_and_a_later_success_clears_it() {
+        let (_dir, _calls, service, rx) = history_service(1, None, true);
+        let broken = KeySet::Prefix(vec![tuple(&["broken"])]);
+        service.history(history_ask(9, 1, broken.clone(), Span::Latest));
+        let (out, health) = history_answer_with_health(&rx, 1);
+        assert_eq!(out.result.unwrap_err(), "no such symbol");
+        let (worst, detail) = health.last().expect("the load lane reported").clone();
+        assert!(matches!(worst, Health::Failed { .. }), "{worst:?}");
+        assert!(detail.contains("vol_surface@hanweck"), "{detail}");
+        service.history(history_ask(9, 2, broken, Span::Latest));
+        let (out, health) = history_answer_with_health(&rx, 2);
+        assert_eq!(out.result.unwrap().rows.len(), 1);
+        assert_eq!(
+            health.last().map(|(w, _)| w.clone()),
+            Some(Health::Ok),
+            "the success cleared the pair's failure"
+        );
+        service.shutdown();
+    }
+
+    #[test]
+    fn a_ticket_finishing_after_a_newer_request_for_its_key_is_dropped() {
+        let hold = Arc::new(crate::ingest::history::tests::Hold::default());
+        let (_dir, calls, service, rx) = held_history_service(&hold);
+        // Tag 1 is held in the source; tag 2 queues behind it.
+        service.history(history_ask(9, 1, spx(), Span::Latest));
+        wait_for_calls(&calls, 1);
+        service.history(history_ask(9, 2, spx(), Span::Latest));
+        hold.set(true);
+        let mut seen = Vec::new();
+        let _ = until_within(&rx, Duration::from_secs(30), |e| match e {
+            DataEvent::History(o) => {
+                seen.push(o.tag);
+                (o.tag == 2).then_some(())
+            }
+            _ => None,
+        });
+        let _ = until_within(&rx, Duration::from_secs(1), |e| match e {
+            DataEvent::History(o) => {
+                seen.push(o.tag);
+                None::<()>
+            }
+            _ => None,
+        });
+        assert_eq!(seen, vec![2], "the superseded ticket answers nothing");
+        assert_eq!(calls.lock().unwrap().len(), 2, "both calls were made");
+        service.shutdown();
+    }
+
+    #[test]
+    fn a_held_ticket_superseded_by_a_read_from_coverage_never_answers() {
+        let hold = Arc::new(crate::ingest::history::tests::Hold::default());
+        hold.set(true);
+        let (_dir, calls, service, rx) = held_history_service(&hold);
+        service.history(history_ask(5, 1, spx(), jan("05", "10")));
+        history_answer(&rx, 1).result.unwrap();
+        hold.set(false);
+        // Tag 2 is held in the source; tag 3 (same key) is answered from
+        // coverage while it waits.
+        service.history(history_ask(9, 2, spx(), Span::Latest));
+        wait_for_calls(&calls, 2);
+        service.history(history_ask(9, 3, spx(), jan("05", "10")));
+        assert_eq!(history_answer(&rx, 3).result.unwrap().rows.len(), 5);
+        hold.set(true);
+        let late = until_within(&rx, Duration::from_secs(3), |e| match e {
+            DataEvent::History(o) if o.key == QueryKey(9) => Some(o.tag),
+            _ => None,
+        });
+        assert_eq!(late, None, "tag 2 finished after tag 3 and answers nothing");
+        service.shutdown();
+    }
+
+    #[test]
+    fn a_full_history_queue_is_answered_as_a_refusal_not_a_lost_request() {
+        let hold = Arc::new(crate::ingest::history::tests::Hold::default());
+        let (_dir, _calls, service, rx) = held_history_service(&hold);
+        let n = crate::ingest::history::HISTORY_BOUND as u64 + 2;
+        for i in 0..n {
+            let keys = KeySet::Prefix(vec![tuple(&[&format!("S{i}")])]);
+            service.history(history_ask(100 + i, i, keys, jan("05", "10")));
+        }
+        let mut answered: std::collections::BTreeMap<u64, usize> = Default::default();
+        // Still held: the refusal cannot be waiting on any call.
+        let refused = until_within(&rx, Duration::from_secs(30), |e| match e {
+            DataEvent::History(o) => {
+                *answered.entry(o.tag).or_default() += 1;
+                o.result.err()
+            }
+            _ => None,
+        })
+        .expect("a refusal while the source is held");
+        assert!(
+            refused.contains("the history queue for 'hanweck' is full"),
+            "{refused}"
+        );
+        hold.set(true);
+        let _ = until_within(&rx, Duration::from_secs(60), |e| match e {
+            DataEvent::History(o) => {
+                *answered.entry(o.tag).or_default() += 1;
+                (answered.len() as u64 == n).then_some(())
+            }
+            _ => None,
+        });
+        let _ = until_within(&rx, Duration::from_secs(1), |e| match e {
+            DataEvent::History(o) => {
+                *answered.entry(o.tag).or_default() += 1;
+                None::<()>
+            }
+            _ => None,
+        });
+        assert_eq!(answered.len() as u64, n, "every tag answered: {answered:?}");
+        assert!(
+            answered.values().all(|&c| c == 1),
+            "exactly once each: {answered:?}"
+        );
+        service.shutdown();
     }
 
     struct PanickingCatalogueAdapter;

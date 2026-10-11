@@ -37,7 +37,10 @@ pub mod series;
 
 pub use series::{SeriesPlan, Statement, compile_series, run_series};
 
+pub mod history;
 pub mod read;
 pub mod watchlist;
+
+pub use history::HistoryRead;
 
 pub use watchlist::WatchlistQuery;

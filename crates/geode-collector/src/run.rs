@@ -729,6 +729,10 @@ impl Events {
             DataEvent::Watchlist(outcome) => {
                 tracing::debug!(target: TARGET, "watchlist '{}' resolved; ignored", outcome.name);
             }
+            // Nor for history: the variant has no consumer here.
+            DataEvent::History(outcome) => {
+                tracing::debug!(target: TARGET, "history for '{}' answered; ignored", outcome.dataset);
+            }
             // Logged by the loop once it knows whether an app explains it.
             DataEvent::ThreadStopped { thread, reason } => {
                 self.stops

@@ -1,0 +1,466 @@
+//! The history request's bookkeeping between the service, the source's
+//! history worker, the ingest runner and the query pool.
+//!
+//! A request either reads the cache at once or opens a ticket for the
+//! adapter calls its coverage lacks; each call's append (or failure)
+//! finishes one part of the ticket, and the last one answers it: any
+//! failure as the request's error, otherwise a read on the pool under the
+//! requester's key and tag.
+//!
+//! Every request is recorded as the newest for its key, whatever path it
+//! takes. A ticket whose request has been superseded answers nothing when
+//! it finishes: submitting its read would replace the newer request's read
+//! at the pool, which coalesces latest-submitted-wins, and an answer for an
+//! older tag would land after the newer one. The newest check and the
+//! pool submission happen under one lock for the same reason.
+
+use crate::adapter::{HistoryRequest, HistoryRows};
+use crate::ingest::history::Ticket;
+use crate::query::history::HistoryRead;
+use crate::query::pool::{QueryPool, QueryRequest, RequestKind, ViewId, Work};
+use crate::service::{DataEvent, EventSink};
+use crate::store::StoreError;
+use crate::store::history::{CoverSpan, Covered, covers_instant, missing_by_key};
+use chrono::{DateTime, Utc};
+use geode_core::query::{HistoryOutcome, HistoryParams, KeySet, QueryKey, Span, normalize_key};
+use geode_core::schema::{DatasetSpec, SchemaSpec};
+use geode_core::snapshot::Provenance;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
+
+pub(crate) struct HistoryDispatch {
+    state: Mutex<State>,
+    pool: Arc<QueryPool>,
+    schema: Arc<SchemaSpec>,
+    sink: EventSink,
+}
+
+#[derive(Default)]
+struct State {
+    /// The last request number handed out; a ticket is its request's
+    /// number.
+    next: u64,
+    /// The newest request number per requester key.
+    newest: HashMap<QueryKey, u64>,
+    pending: HashMap<Ticket, Pending>,
+}
+
+struct Pending {
+    params: HistoryParams,
+    /// Adapter calls (each with its append) not yet finished.
+    outstanding: usize,
+    failures: Vec<String>,
+    /// Already answered (a full queue refused it): the calls that were
+    /// queued still append, but their finish answers nothing more.
+    answered: bool,
+}
+
+impl HistoryDispatch {
+    pub(crate) fn new(pool: Arc<QueryPool>, schema: Arc<SchemaSpec>, sink: EventSink) -> Self {
+        HistoryDispatch {
+            state: Mutex::new(State::default()),
+            pool,
+            schema,
+            sink,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn supersede(state: &mut State, key: QueryKey) -> u64 {
+        state.next += 1;
+        state.newest.insert(key, state.next);
+        state.next
+    }
+
+    /// Answer a request refused before any work: the newest for its key.
+    pub(crate) fn refuse(&self, params: &HistoryParams, reason: String) {
+        let mut state = self.lock();
+        Self::supersede(&mut state, params.key);
+        self.answer_err(params, reason);
+    }
+
+    /// Read now, no fetch needed.
+    pub(crate) fn read_now(&self, params: HistoryParams) {
+        let mut state = self.lock();
+        Self::supersede(&mut state, params.key);
+        self.submit_read(params);
+    }
+
+    /// A requester's cancel: nothing in flight for `key` answers any more.
+    pub(crate) fn cancel(&self, key: QueryKey) {
+        let mut state = self.lock();
+        if state.newest.contains_key(&key) {
+            Self::supersede(&mut state, key);
+        }
+    }
+
+    /// Open a ticket for `calls` adapter calls (at least one: a ticket with
+    /// none would never be finished, and so never answered).
+    pub(crate) fn open(&self, params: HistoryParams, calls: usize) -> Ticket {
+        debug_assert!(calls > 0, "a ticket waits on at least one call");
+        let mut state = self.lock();
+        let ticket = Ticket(Self::supersede(&mut state, params.key));
+        state.pending.insert(
+            ticket,
+            Pending {
+                params,
+                outstanding: calls,
+                failures: Vec::new(),
+                answered: false,
+            },
+        );
+        ticket
+    }
+
+    /// Answer `ticket` with `reason` now: `unqueued` of its calls were never
+    /// made and so will never finish. The calls already queued still finish
+    /// (filling the cache) but answer nothing more. Waiting for them instead
+    /// would leave the request unanswered while the queue stays full.
+    pub(crate) fn refuse_ticket(&self, ticket: Ticket, unqueued: usize, reason: String) {
+        let mut state = self.lock();
+        let Some(p) = state.pending.get_mut(&ticket) else {
+            return;
+        };
+        p.outstanding = p.outstanding.saturating_sub(unqueued);
+        let first = !p.answered;
+        p.answered = true;
+        let params = p.params.clone();
+        if p.outstanding == 0 {
+            state.pending.remove(&ticket);
+        }
+        if first && state.newest.get(&params.key) == Some(&ticket.0) {
+            self.answer_err(&params, reason);
+        }
+    }
+
+    /// One adapter call (with its append) finished. On the last one: any
+    /// failure answers `Err(joined)`; otherwise the read is submitted to
+    /// the pool under the request's key and tag. A superseded or already
+    /// answered ticket answers nothing.
+    pub(crate) fn finish(&self, ticket: Ticket, result: Result<(), String>) {
+        let mut state = self.lock();
+        let Some(p) = state.pending.get_mut(&ticket) else {
+            return;
+        };
+        p.outstanding = p.outstanding.saturating_sub(1);
+        if let Err(reason) = result
+            && !p.failures.contains(&reason)
+        {
+            p.failures.push(reason);
+        }
+        if p.outstanding > 0 {
+            return;
+        }
+        let Some(p) = state.pending.remove(&ticket) else {
+            return;
+        };
+        if p.answered || state.newest.get(&p.params.key) != Some(&ticket.0) {
+            return;
+        }
+        if p.failures.is_empty() {
+            self.submit_read(p.params);
+        } else {
+            self.answer_err(&p.params, p.failures.join("; "));
+        }
+    }
+
+    /// Called under the state lock. Anything for this key still in the
+    /// pool belongs to an older request; cancelling it keeps its answer
+    /// from arriving after this one.
+    fn answer_err(&self, params: &HistoryParams, reason: String) {
+        self.pool.cancel(params.key);
+        let _ = (self.sink)(DataEvent::History(HistoryOutcome {
+            key: params.key,
+            tag: params.tag,
+            submitted: params.submitted,
+            dataset: params.dataset.clone(),
+            span: params.span,
+            result: Err(reason),
+        }));
+    }
+
+    /// Called under the state lock.
+    fn submit_read(&self, params: HistoryParams) {
+        let kind = RequestKind::History {
+            dataset: params.dataset.clone(),
+            span: params.span,
+        };
+        self.pool.submit(QueryRequest {
+            key: params.key,
+            tag: params.tag,
+            submitted: params.submitted,
+            view: ViewId(format!("history:{}", params.dataset)),
+            grouping: Vec::new(),
+            provenance: Provenance::default(),
+            work: Work::History(Box::new(HistoryRead::new(Arc::clone(&self.schema), params))),
+            kind,
+        });
+    }
+}
+
+/// The asked keys in one spelling per value (each column's declared type),
+/// repeats removed in order, so coverage, the adapter call and the read all
+/// see `0.5` whether `0.5` or `0.50` was asked. Assumes a validated set.
+pub(crate) fn normalize_keys(ds: &DatasetSpec, keys: &KeySet) -> Result<KeySet, String> {
+    let columns = ds.history_key();
+    let mut out: Vec<Vec<String>> = Vec::with_capacity(keys.tuples().len());
+    for tuple in keys.tuples() {
+        let normalized = tuple
+            .iter()
+            .zip(&columns)
+            .map(|(v, c)| {
+                normalize_key(v, c.ty).map_err(|e| format!("key column '{}': {e}", c.name))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !out.contains(&normalized) {
+            out.push(normalized);
+        }
+    }
+    Ok(same_kind(keys, out))
+}
+
+fn same_kind(like: &KeySet, tuples: Vec<Vec<String>>) -> KeySet {
+    match like {
+        KeySet::Prefix(_) => KeySet::Prefix(tuples),
+        KeySet::Exact(_) => KeySet::Exact(tuples),
+    }
+}
+
+/// The adapter calls a request needs before the cache can answer it; empty
+/// means read now.
+///
+/// - `Latest` always asks the source: only it knows whether a newer
+///   observation exists.
+/// - `At(t)` reads the cache only when `covers_instant` holds for every
+///   tuple; otherwise one call for every asked tuple.
+/// - `Between` is clipped to the dataset's history window first (retention
+///   would delete what an older span fetched, and the next ask would fetch
+///   it again forever; a wholly expired span asks nothing), then one call
+///   per distinct gap for the tuples sharing that gap list.
+pub(crate) fn plan_calls(
+    conn: &duckdb::Connection,
+    ds: &DatasetSpec,
+    table: &str,
+    keys: &KeySet,
+    span: Span,
+    now: DateTime<Utc>,
+) -> Result<Vec<HistoryRequest>, StoreError> {
+    let call = |keys: KeySet, span: Span| HistoryRequest {
+        table: table.to_string(),
+        keys,
+        span,
+    };
+    match span {
+        Span::Latest => Ok(vec![call(keys.clone(), span)]),
+        Span::At(t) => {
+            if covers_instant(conn, ds, keys.tuples(), t)? {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![call(keys.clone(), span)])
+            }
+        }
+        Span::Between { from, to, step } => {
+            let from = match history_cutoff(ds, now) {
+                Some(cutoff) => from.max(cutoff),
+                None => from,
+            };
+            if from >= to {
+                return Ok(Vec::new());
+            }
+            let mut by_gaps: BTreeMap<Vec<CoverSpan>, Vec<Vec<String>>> = BTreeMap::new();
+            for (tuple, gaps) in missing_by_key(conn, ds, keys.tuples(), (from, to))? {
+                if !gaps.is_empty() {
+                    by_gaps.entry(gaps).or_default().push(tuple);
+                }
+            }
+            Ok(by_gaps
+                .into_iter()
+                .flat_map(|(gaps, tuples)| {
+                    gaps.into_iter().map(move |(from, to)| {
+                        call(
+                            same_kind(keys, tuples.clone()),
+                            Span::Between { from, to, step },
+                        )
+                    })
+                })
+                .collect())
+        }
+    }
+}
+
+/// `now` less the dataset's history window, or `None` when it has none
+/// (or the subtraction overflows: append still applies its retention).
+fn history_cutoff(ds: &DatasetSpec, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let window = ds.series_retention?.history?;
+    now.checked_sub_signed(chrono::Duration::from_std(window).ok()?)
+}
+
+/// What a source's answer to `request` establishes, per asked tuple:
+///
+/// - `Between` without a step: the call's whole span.
+/// - `Between` with a step: nothing. The answer is thinned and must never
+///   stand in for a full one later.
+/// - `At(t)`: from the tuple's latest answered row to just past `t` for an
+///   exact tuple with rows (the source asserts nothing lies between), else
+///   just `t` itself.
+/// - `Latest`: just the latest answered instant, for a tuple with rows.
+pub(crate) fn covered_by(request: &HistoryRequest, rows: &HistoryRows) -> Vec<Covered> {
+    let tick = chrono::Duration::microseconds(1);
+    let latest_of = |tuple: &[String]| {
+        (0..rows.ts.len())
+            .filter(|&i| {
+                tuple
+                    .iter()
+                    .zip(&rows.keys)
+                    .all(|(v, column)| column.get(i) == Some(v))
+            })
+            .map(|i| rows.ts[i])
+            .max()
+    };
+    let tuples = request.keys.tuples();
+    let instant = |asked: &Vec<String>, at: DateTime<Utc>, start: DateTime<Utc>| {
+        at.checked_add_signed(tick).map(|end| Covered {
+            asked: asked.clone(),
+            span: (start, end),
+        })
+    };
+    match request.span {
+        Span::Between {
+            from,
+            to,
+            step: None,
+        } => tuples
+            .iter()
+            .map(|asked| Covered {
+                asked: asked.clone(),
+                span: (from, to),
+            })
+            .collect(),
+        Span::Between { step: Some(_), .. } => Vec::new(),
+        Span::At(t) => tuples
+            .iter()
+            .filter_map(|asked| {
+                let start = match request.keys {
+                    KeySet::Exact(_) => latest_of(asked).map_or(t, |m| m.min(t)),
+                    KeySet::Prefix(_) => t,
+                };
+                instant(asked, t, start)
+            })
+            .collect(),
+        Span::Latest => tuples
+            .iter()
+            .filter_map(|asked| {
+                let m = latest_of(asked)?;
+                instant(asked, m, m)
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::ddl::tests_support::{history_dataset, ts};
+
+    fn rows(ts_: &[&str], keys: &[&[&str]]) -> HistoryRows {
+        HistoryRows {
+            ts: ts_.iter().map(|s| ts(s)).collect(),
+            keys: keys
+                .iter()
+                .map(|c| c.iter().map(|s| s.to_string()).collect())
+                .collect(),
+            values: vec![vec![1.0; ts_.len()]],
+        }
+    }
+
+    fn exact(t: &[&str]) -> Vec<String> {
+        t.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_stepped_between_records_no_coverage_and_a_full_one_records_its_span() {
+        let (from, to) = (ts("2026-01-05T00:00:00Z"), ts("2026-01-10T00:00:00Z"));
+        let r = rows(&["2026-01-05T21:00:00Z"], &[&["SPX"], &["3M"], &["0.5"]]);
+        let ask = |step| HistoryRequest {
+            table: "surface".into(),
+            keys: KeySet::Prefix(vec![exact(&["SPX"])]),
+            span: Span::Between { from, to, step },
+        };
+        assert_eq!(
+            covered_by(&ask(None), &r),
+            vec![Covered {
+                asked: exact(&["SPX"]),
+                span: (from, to)
+            }]
+        );
+        assert!(
+            covered_by(&ask(Some(std::time::Duration::from_secs(86_400))), &r).is_empty(),
+            "a thinned answer is not coverage"
+        );
+    }
+
+    #[test]
+    fn an_at_answer_covers_from_the_exact_tuples_last_row_and_latest_only_where_rows_exist() {
+        let t = ts("2026-01-07T22:00:00Z");
+        let tick = chrono::Duration::microseconds(1);
+        let r = rows(
+            &["2026-01-05T21:00:00Z", "2026-01-06T21:00:00Z"],
+            &[&["SPX", "SPX"], &["3M", "3M"], &["0.5", "0.5"]],
+        );
+        let spx = exact(&["SPX", "3M", "0.5"]);
+        let ndx = exact(&["NDX", "3M", "0.5"]);
+        let at = HistoryRequest {
+            table: String::new(),
+            keys: KeySet::Exact(vec![spx.clone(), ndx.clone()]),
+            span: Span::At(t),
+        };
+        assert_eq!(
+            covered_by(&at, &r),
+            vec![
+                Covered {
+                    asked: spx.clone(),
+                    span: (ts("2026-01-06T21:00:00Z"), t + tick)
+                },
+                Covered {
+                    asked: ndx.clone(),
+                    span: (t, t + tick)
+                },
+            ]
+        );
+        let latest = HistoryRequest {
+            span: Span::Latest,
+            ..at
+        };
+        let last = ts("2026-01-06T21:00:00Z");
+        assert_eq!(
+            covered_by(&latest, &r),
+            vec![Covered {
+                asked: spx,
+                span: (last, last + tick)
+            }],
+            "a tuple with no row records nothing"
+        );
+    }
+
+    #[test]
+    fn asked_keys_are_normalized_per_column_type_and_repeats_removed() {
+        let ds = history_dataset();
+        let keys = KeySet::Exact(vec![
+            exact(&[" SPX", "3M", "0.50"]),
+            exact(&["SPX", "3M", "0.5"]),
+        ]);
+        assert_eq!(
+            normalize_keys(&ds, &keys).unwrap(),
+            KeySet::Exact(vec![exact(&["SPX", "3M", "0.5"])])
+        );
+        let bad = KeySet::Exact(vec![exact(&["SPX", "3M", "half"])]);
+        assert!(
+            normalize_keys(&ds, &bad)
+                .unwrap_err()
+                .contains("not an f64 key")
+        );
+    }
+}

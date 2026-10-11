@@ -1757,6 +1757,16 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     }
                     // No other requester submits a watchlist resolution yet.
                     DataEvent::Watchlist(_) => {}
+                    // No tile asks for history yet, so the variant has no
+                    // consumer: an answer is noted and dropped.
+                    DataEvent::History(outcome) => {
+                        tracing::debug!(
+                            target: "geode::query",
+                            "history answer for key {} tag {} dropped: no consumer",
+                            outcome.key.0,
+                            outcome.tag
+                        );
+                    }
                     // The live lane keeps `ReferenceGlobal`; see `ReferenceCache`.
                     DataEvent::Reference(outcome) if outcome.key == REFERENCE_KEY => {
                         reference_cache.answer(outcome, cx);

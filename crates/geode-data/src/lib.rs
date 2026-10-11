@@ -9,6 +9,7 @@ pub mod egress;
 pub mod files;
 pub mod handle;
 pub mod health;
+pub(crate) mod history_dispatch;
 pub mod ingest;
 pub mod lease;
 pub mod positions;

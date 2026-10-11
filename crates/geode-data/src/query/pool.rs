@@ -13,7 +13,7 @@ use crate::query::compile::CompiledQuery;
 use crate::query::series::{SeriesPlan, run_series};
 use crate::query::watchlist::WatchlistQuery;
 use crate::store::Store;
-use geode_core::query::{QueryKey, WatchlistResult};
+use geode_core::query::{HistoryTable, QueryKey, Span, WatchlistResult};
 use geode_core::series::SeriesResult;
 use geode_core::snapshot::{ColumnMeta, Provenance, Snapshot};
 use std::collections::HashMap;
@@ -54,6 +54,8 @@ pub enum Payload {
     Snapshot(Snapshot),
     Series(SeriesResult),
     Watchlist(WatchlistResult),
+    /// One history request's cached rows.
+    History(HistoryTable),
 }
 
 /// Work yielding a snapshot, a series result or a watchlist. Snapshot work
@@ -71,6 +73,9 @@ pub enum Work {
     /// submits each under its own key: a shared key would let one list's
     /// refresh cancel another's resolution in flight.
     Watchlist(Box<WatchlistQuery>),
+    /// One history request read from the cache, after the service fetched
+    /// what its coverage lacked.
+    History(Box<super::history::HistoryRead>),
 }
 
 /// What kind of request this is, carried through to the result so the
@@ -90,6 +95,12 @@ pub enum RequestKind {
     },
     Watchlist {
         name: String,
+    },
+    /// The dataset and the span as the requester asked, so the answer
+    /// names them.
+    History {
+        dataset: String,
+        span: Span,
     },
 }
 
@@ -458,6 +469,10 @@ pub(crate) fn run_one(
             .run(conn)
             .map(Payload::Watchlist)
             .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string())),
+        Work::History(read) => read
+            .run(conn)
+            .map(Payload::History)
+            .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string())),
     }
 }
 
@@ -553,6 +568,7 @@ mod tests {
             Payload::Snapshot(s) => s,
             Payload::Series(_) => panic!("a view query answered with a series"),
             Payload::Watchlist(_) => panic!("a view query answered with a watchlist"),
+            Payload::History(_) => panic!("a view query answered with history"),
         })
     }
 
@@ -1226,6 +1242,7 @@ mod tests {
             }
             Payload::Snapshot(_) => panic!("a series request answered with a snapshot"),
             Payload::Watchlist(_) => panic!("a series request answered with a watchlist"),
+            Payload::History(_) => panic!("a series request answered with history"),
         }
         pool.shutdown();
     }

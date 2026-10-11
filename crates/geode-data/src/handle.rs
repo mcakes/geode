@@ -20,8 +20,9 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::positions::{CommandOutcome, MoveLhuParams};
 use geode_core::pricing::{LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
-    AsOf, CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
-    QueryOutcome, ReferenceOutcome, ReferenceParams, WatchlistOutcome, WatchlistParams,
+    AsOf, CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams,
+    HistoryOutcome, HistoryParams, QueryKey, QueryOutcome, ReferenceOutcome, ReferenceParams, Span,
+    WatchlistOutcome, WatchlistParams,
 };
 use geode_core::series::{SeriesOutcome, SeriesParams};
 use geode_core::textfile::{TextFileOp, TextFileOutcome, TextFileParams, TextFileResult};
@@ -74,6 +75,8 @@ pub enum Request {
     Reference(ReferenceParams),
     /// Resolve one watchlist live, answered with DataEvent::Watchlist.
     Watchlist(WatchlistParams),
+    /// Keyed history, answered with DataEvent::History.
+    History(HistoryParams),
     /// Poll the snapshot source filling `dataset` now. No answer: the
     /// poll reports through Polled, Health and Published like any other.
     Poll {
@@ -383,6 +386,15 @@ impl DataHandle {
         self.send(Request::Fetch(params))
     }
 
+    /// Queue a history request. `Err(Busy)` means the queue was full and a
+    /// later submission can succeed; `Err(Stopped)` means the service can no
+    /// longer serve and no outcome is owed. An admitted request is answered
+    /// by one keyed/tagged DataEvent::History, refusals included, unless a
+    /// newer request or a cancel for its key supersedes it first.
+    pub fn history(&self, params: HistoryParams) -> Result<(), Refusal> {
+        self.send(Request::History(params))
+    }
+
     /// Queue an identity refresh. `Err(Busy)` means the queue was full and a
     /// later submission can succeed; `Err(Stopped)` means the service can no
     /// longer serve and no outcome is owed.
@@ -679,6 +691,13 @@ enum PanicAnswer {
         tag: u64,
         name: String,
     },
+    History {
+        key: QueryKey,
+        tag: u64,
+        submitted: Instant,
+        dataset: String,
+        span: Span,
+    },
     Price {
         key: QueryKey,
         tag: u64,
@@ -781,6 +800,16 @@ impl PanicAnswer {
                     key: p.key,
                     tag: p.tag,
                     name: p.name.clone(),
+                },
+            ),
+            Request::History(p) => (
+                "history",
+                PanicAnswer::History {
+                    key: p.key,
+                    tag: p.tag,
+                    submitted: p.submitted,
+                    dataset: p.dataset.clone(),
+                    span: p.span,
                 },
             ),
             Request::Price(p) => (
@@ -915,6 +944,22 @@ impl PanicAnswer {
                     key,
                     tag,
                     name,
+                    result: Err(reason),
+                }));
+            }
+            PanicAnswer::History {
+                key,
+                tag,
+                submitted,
+                dataset,
+                span,
+            } => {
+                let _ = sink(DataEvent::History(HistoryOutcome {
+                    key,
+                    tag,
+                    submitted,
+                    dataset,
+                    span,
                     result: Err(reason),
                 }));
             }
@@ -1234,6 +1279,7 @@ fn dispatch(service: &DataService, sink: &EventSink, req: Request) {
                 }));
             }
         }
+        Request::History(params) => service.history(params),
         Request::Poll { dataset } => service.poll(&dataset),
         Request::Price(params) => service.price(params),
         Request::VolSlices(params) => service.vol_slices(params),
@@ -2438,6 +2484,7 @@ mod tests {
             Request::Catalog(p) => p.key == MARKED,
             Request::Reference(p) => p.key == MARKED,
             Request::Watchlist(p) => p.key == MARKED,
+            Request::History(p) => p.key == MARKED,
             Request::Poll { dataset } => dataset == "marked",
             Request::Price(p) => p.key == MARKED,
             Request::VolSlices(p) => p.key == MARKED,
@@ -2600,6 +2647,48 @@ mod tests {
             seen.iter().any(|e| matches!(e, DataEvent::Watchlist(o)
             if o.key == MARKED && o.tag == 8 && o.name == "eu"
                 && o.result.as_ref().is_err_and(|r| panicked(r, "watchlist")))),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_history_request_is_answered_on_its_key_tag_and_span() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.history(HistoryParams {
+            key: MARKED,
+            tag: 9,
+            submitted: Instant::now(),
+            dataset: "vol_surface".into(),
+            keys: geode_core::query::KeySet::Prefix(vec![vec!["SPX".into()]]),
+            span: Span::Latest,
+        })
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::History(o)
+            if o.key == MARKED && o.tag == 9 && o.dataset == "vol_surface" && o.span == Span::Latest
+                && o.result.as_ref().is_err_and(|r| panicked(r, "history")))),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_history_request_through_the_handle_is_answered_on_its_key_and_tag() {
+        let (_d, h, rx) = probed(|_| {});
+        h.history(HistoryParams {
+            key: QueryKey(12),
+            tag: 3,
+            submitted: Instant::now(),
+            dataset: "cvi_params".into(),
+            keys: geode_core::query::KeySet::Prefix(vec![vec!["SPX".into()]]),
+            span: Span::Latest,
+        })
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::History(o)
+            if o.key == QueryKey(12) && o.tag == 3
+                && o.result.as_ref().is_err_and(|r| r.contains("not a history dataset")))),
             "{seen:?}"
         );
     }

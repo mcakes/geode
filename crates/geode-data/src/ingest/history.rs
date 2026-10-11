@@ -256,7 +256,9 @@ pub(crate) mod tests {
     /// time that key set is asked for. `stray` adds one row under a key
     /// nobody asked for. `keys` answers `self.keys` for any column. The call
     /// count lives in the shared `calls` log, so a copy handed to a worker
-    /// still reports.
+    /// still reports. With `hold`, each query is logged and then waits until
+    /// the hold is released (or a bounded wait passes, so a test that never
+    /// releases still ends).
     #[derive(Default)]
     pub(crate) struct FakeHistory {
         pub calls: Arc<Mutex<Vec<HistoryRequest>>>,
@@ -266,6 +268,28 @@ pub(crate) mod tests {
         pub nan_day: Option<usize>,
         pub delta_text: Option<String>,
         pub stray: Option<Vec<String>>,
+        pub hold: Option<Arc<Hold>>,
+    }
+
+    /// A gate a held `FakeHistory` waits on: `true` once released.
+    #[derive(Default)]
+    pub(crate) struct Hold {
+        released: Mutex<bool>,
+        cvar: std::sync::Condvar,
+    }
+
+    impl Hold {
+        pub(crate) fn set(&self, released: bool) {
+            *self.released.lock().unwrap_or_else(|e| e.into_inner()) = released;
+            self.cvar.notify_all();
+        }
+
+        fn wait(&self) {
+            let released = self.released.lock().unwrap_or_else(|e| e.into_inner());
+            let _ =
+                self.cvar
+                    .wait_timeout_while(released, std::time::Duration::from_secs(30), |r| !*r);
+        }
     }
 
     impl HistoryQuery for FakeHistory {
@@ -281,6 +305,9 @@ pub(crate) mod tests {
                 calls.push(req.clone());
                 asked_before
             };
+            if let Some(hold) = &self.hold {
+                hold.wait();
+            }
             if broken && !(self.fail_once && asked_before > 0) {
                 return Err(AdapterError {
                     message: "no such symbol".into(),
@@ -530,6 +557,50 @@ pub(crate) mod tests {
             }),
             "a stopped worker refuses"
         );
+    }
+
+    #[test]
+    fn behind_a_held_query_the_bound_is_accepted_and_the_next_refused_without_blocking() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let hold = Arc::new(Hold::default());
+        let (mut w, rx) = spawn(Box::new(FakeHistory {
+            calls: calls.clone(),
+            days: 1,
+            hold: Some(hold.clone()),
+            ..Default::default()
+        }));
+        let query = |n: u64| HistoryWork::Query {
+            ticket: Ticket(n),
+            request: between(spx()),
+            value_arity: 2,
+        };
+        assert!(w.request(query(0)));
+        // The held query has left the queue once the fake logged it.
+        let deadline = std::time::Instant::now() + WAIT;
+        while calls.lock().unwrap().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker never took the query"
+            );
+            std::thread::yield_now();
+        }
+        for n in 1..=HISTORY_BOUND as u64 {
+            assert!(w.request(query(n)), "queued item {n} of {HISTORY_BOUND}");
+        }
+        let started = std::time::Instant::now();
+        assert!(!w.request(query(99)), "one past the bound is refused");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "without blocking"
+        );
+        hold.set(true);
+        for _ in 0..=HISTORY_BOUND {
+            assert!(matches!(
+                rx.recv_timeout(WAIT).unwrap(),
+                HistoryWorkOutcome::Fetched { .. }
+            ));
+        }
+        w.shutdown();
     }
 
     struct PanickingHistory;

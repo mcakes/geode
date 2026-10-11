@@ -39793,6 +39793,70 @@ run_mutation "expr help: help paints over an error" \
   geode-timeseries \
   an_error_takes_the_help_lines_slot_until_typing_clears_it
 
+# A history ticket finishing after a newer request for its key must answer
+# nothing: its read would replace the newer one's at the pool, and its
+# answer would land after the newer tag's.
+run_mutation "history dispatch: a superseded ticket still answers" \
+  crates/geode-data/src/history_dispatch.rs \
+  '        if p.answered || state.newest.get(&p.params.key) != Some(&ticket.0) {' \
+  '        if p.answered {' \
+  geode-data \
+  a_held_ticket_superseded_by_a_read_from_coverage_never_answers
+
+# A Between reaching before the history window is clipped before coverage
+# is subtracted: retention would sweep what the old span fetched, and the
+# next ask would fetch it again forever.
+run_mutation "history dispatch: a Between is not clipped to the window" \
+  crates/geode-data/src/history_dispatch.rs \
+  '                Some(cutoff) => from.max(cutoff),' \
+  '                Some(_) => from,' \
+  geode-data \
+  a_between_before_the_history_window_is_clipped_and_an_expired_span_calls_no_adapter
+
+# Only the gaps in coverage are fetched; asking the whole span again would
+# repeat every adapter call a covered request needs none of.
+run_mutation "history dispatch: the whole span is fetched, not its gaps" \
+  crates/geode-data/src/history_dispatch.rs \
+  '            for (tuple, gaps) in missing_by_key(conn, ds, keys.tuples(), (from, to))? {' \
+  '            for (tuple, gaps) in missing_by_key(conn, ds, keys.tuples(), (from, to))?.into_iter().map(|(t, _)| (t, vec![(from, to)])) {' \
+  geode-data \
+  a_between_request_fetches_only_the_gaps_and_a_repeat_fetches_nothing
+
+# A stepped (thinned) answer records no coverage: recorded, it would later
+# answer a full request with the thinned rows.
+run_mutation "history dispatch: a stepped answer records coverage" \
+  crates/geode-data/src/history_dispatch.rs \
+  '        Span::Between { step: Some(_), .. } => Vec::new(),' \
+  '        Span::Between { from, to, step: Some(_) } => tuples.iter().map(|asked| Covered { asked: asked.clone(), span: (from, to) }).collect(),' \
+  geode-data \
+  a_stepped_between_is_fetched_again_and_a_zero_step_is_refused
+
+# A full history queue answers the request at once; waiting for its queued
+# calls would leave it unanswered while the queue stays full.
+run_mutation "history dispatch: a full queue does not answer" \
+  crates/geode-data/src/history_dispatch.rs \
+  '        if first && state.newest.get(&params.key) == Some(&ticket.0) {' \
+  '        if false && first && state.newest.get(&params.key) == Some(&ticket.0) {' \
+  geode-data \
+  a_full_history_queue_is_answered_as_a_refusal_not_a_lost_request
+
+# The asked keys are normalized before coverage and the call, so `0.50`
+# and `0.5` are one key with one coverage.
+run_mutation "history service: asked keys are not normalized" \
+  crates/geode-data/src/service.rs \
+  '        let params = HistoryParams { keys, ..params };' \
+  '        let params = HistoryParams { ..params };' \
+  geode-data \
+  an_asked_key_is_normalized_so_two_spellings_are_one_key
+
+# An enumerated key column is sorted in its own order (tenor: 1M < 3M < 1Y).
+run_mutation "history service: enumerated keys sorted lexically" \
+  crates/geode-data/src/service.rs \
+  '            geode_core::schema::sort_text(&mut values, order);' \
+  '            values.sort();' \
+  geode-data \
+  a_tenor_key_column_is_enumerated_in_tenor_order
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
