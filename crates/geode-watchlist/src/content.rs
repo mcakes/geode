@@ -222,6 +222,36 @@ impl TileContent for WatchlistContent {
         self.tile.update(cx, |t, cx| t.set_focused(focused, cx))
     }
 
+    /// A list reads no scope: its members are the definition's, whatever
+    /// the frame selects.
+    fn follows(&self) -> bool {
+        false
+    }
+
+    /// The tile can always emit: the answer is the kind's capability, not
+    /// whether a list is shown or a row is under the cursor. The shell
+    /// drops a restored membership for a tile that answers `false` right
+    /// after create, before the first snapshot can have arrived.
+    fn emits(&self) -> bool {
+        true
+    }
+
+    /// The cursor row's name as a one-value `underlying_ref` path, or
+    /// nothing while no row is under the cursor.
+    fn emission(&self, cx: &App) -> geode_core::link::Emission {
+        self.tile.read(cx).emission(cx)
+    }
+
+    /// Every route that moves the cursor or rebuilds the rows notifies the
+    /// tile, so observing it covers each way the emission can change.
+    fn watch_emission(
+        &self,
+        changed: Rc<dyn Fn(&mut App)>,
+        cx: &mut App,
+    ) -> Option<gpui::Subscription> {
+        Some(cx.observe(&self.tile, move |_, cx| changed(cx)))
+    }
+
     fn closed(&self, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.closed(cx))
     }

@@ -29,6 +29,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use geode_core::clock::Clock;
+use geode_core::link::{CursorScope, Emission, underlying_scope};
 use geode_core::reference::ReferenceData;
 use geode_core::sort::SortOrder;
 use geode_core::watchlist::state::{Status, WatchlistSnapshot};
@@ -1331,6 +1332,28 @@ impl WatchlistTile {
             cursor: self.grid.saved_cursor().map(str::to_string),
             ..self.state.clone()
         })
+    }
+
+    /// What the shell pulls for the link group this tile emits into: the
+    /// name under the cursor as a one-value `underlying_ref` path, so a
+    /// follower (a market-data panel, a vol slice) shows that name. Only
+    /// the cursor row is read, never the selection; an excluded row is
+    /// still the name the cursor rests on. `Nothing` while no row is under
+    /// the cursor (no list shown, an empty list, a filter keeping nothing):
+    /// the group's scope is left as it is. The tile has no `:filter` layer,
+    /// no `:unscoped` flag and no board.
+    pub(crate) fn emission(&self, _cx: &App) -> Emission {
+        let cursor = self
+            .grid
+            .cursor()
+            .map(|at| self.grid.row(self.grid.visible()[at]).name.as_str());
+        Emission {
+            cursor: match cursor {
+                Some(name) => CursorScope::Path(underlying_scope(name)),
+                None => CursorScope::Nothing,
+            },
+            ..Emission::default()
+        }
     }
 
     /// The names a member verb acts on.

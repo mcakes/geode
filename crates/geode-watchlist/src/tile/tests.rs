@@ -2865,3 +2865,82 @@ fn a_refusal_after_switching_away_keeps_the_shown_list(cx: &mut gpui::TestAppCon
         "mine is back"
     );
 }
+
+// ---- Link-group emission ---------------------------------------------
+
+/// What the shell would pull: asked of the `TileContent` door.
+fn emission_of(h: &Harness, vcx: &mut gpui::VisualTestContext) -> geode_core::link::Emission {
+    vcx.update(|_, cx| h.content.emission(cx))
+}
+
+fn on(underlying: &str) -> geode_core::link::CursorScope {
+    geode_core::link::CursorScope::Path(geode_core::link::underlying_scope(underlying))
+}
+
+/// The tile emits where its cursor rests, as a one-value `underlying_ref`
+/// path, and never follows; a cursor move wakes the shell's watch.
+#[gpui::test]
+fn the_cursor_row_is_emitted_as_a_one_value_underlying_path(cx: &mut gpui::TestAppContext) {
+    use geode_core::link::{CursorScope, Emission};
+    let (h, mut vcx) = europe_shown(cx);
+    assert!(h.content.emits(), "the capability is the kind's");
+    assert!(!h.content.follows(), "a list reads no scope");
+    let calls = Rc::new(RefCell::new(0u32));
+    let subscription = vcx
+        .update(|_, cx| {
+            let calls = calls.clone();
+            h.content
+                .watch_emission(Rc::new(move |_| *calls.borrow_mut() += 1), cx)
+        })
+        .expect("an emitter hands the shell a subscription");
+    vcx.run_until_parked();
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"), "sanity");
+    assert_eq!(
+        emission_of(&h, &mut vcx),
+        Emission {
+            cursor: on("DAX"),
+            ..Emission::default()
+        },
+        "no layer, no unscoped flag, no board"
+    );
+    let before = *calls.borrow();
+    h.press(&mut vcx, "j");
+    vcx.run_until_parked();
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NDX"));
+    assert_eq!(emission_of(&h, &mut vcx).cursor, on("NDX"));
+    assert!(*calls.borrow() > before, "a cursor move wakes the watch");
+    // An excluded row is still the name under the cursor.
+    h.press(&mut vcx, "shift-g");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("UKX"));
+    assert_eq!(emission_of(&h, &mut vcx).cursor, on("UKX"));
+    // Only the cursor row is read, never the selection.
+    h.press(&mut vcx, "v k");
+    assert_eq!(h.targets(&vcx), ["SPX", "UKX"]);
+    assert_eq!(emission_of(&h, &mut vcx).cursor, on("SPX"));
+    assert_ne!(emission_of(&h, &mut vcx).cursor, CursorScope::Nothing);
+    drop(subscription);
+}
+
+/// No row under the cursor (a filter keeping nothing, an empty list, no
+/// list shown) leaves the group's scope as it is.
+#[gpui::test]
+fn no_cursor_emits_nothing(cx: &mut gpui::TestAppContext) {
+    use geode_core::link::CursorScope;
+    let (h, mut vcx) = europe_shown(cx);
+    assert_eq!(emission_of(&h, &mut vcx).cursor, on("DAX"), "sanity");
+    h.find(&mut vcx, FindEvent::Changed("zzz".into()));
+    assert!(h.shown(&vcx).is_empty(), "the filter keeps nothing");
+    assert_eq!(emission_of(&h, &mut vcx).cursor, CursorScope::Nothing);
+    h.find(&mut vcx, FindEvent::Cancelled);
+    assert_eq!(emission_of(&h, &mut vcx).cursor, on("DAX"), "back");
+    // An empty list has no cursor row.
+    let mut snap = europe();
+    snap.lists.insert("europe".into(), list(&[]));
+    vcx.update(|_, cx| publish(cx, snap));
+    assert_eq!(h.shown(&vcx), Vec::<String>::new());
+    assert_eq!(emission_of(&h, &mut vcx).cursor, CursorScope::Nothing);
+    // The shown list gone: nothing shown, nothing posted.
+    vcx.update(|_, cx| publish(cx, two()));
+    assert_eq!(h.title(&mut vcx), "Watchlists");
+    assert_eq!(emission_of(&h, &mut vcx).cursor, CursorScope::Nothing);
+}
