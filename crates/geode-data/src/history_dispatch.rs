@@ -40,10 +40,6 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub(crate) enum Answer {
     History(HistoryParams),
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the service's vol_board() constructs it")
-    )]
     Board(Box<BoardPlan>),
 }
 
@@ -54,14 +50,6 @@ impl Answer {
         match self {
             Answer::History(p) => p.key,
             Answer::Board(b) => b.params.key,
-        }
-    }
-
-    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it yet"))]
-    pub(crate) fn tag(&self) -> u64 {
-        match self {
-            Answer::History(p) => p.tag,
-            Answer::Board(b) => b.params.tag,
         }
     }
 }
@@ -683,8 +671,7 @@ mod tests {
             keys: KeySet::Prefix(vec![exact(&["SPX"])]),
             span: Span::Latest,
         };
-        assert_eq!(Answer::History(params.clone()).key(), QueryKey(5));
-        assert_eq!(Answer::History(params).tag(), 2);
+        assert_eq!(Answer::History(params).key(), QueryKey(5));
         let plan = crate::query::volboard::BoardPlan {
             params: geode_core::volboard::VolBoardParams {
                 key: QueryKey(6),
@@ -705,6 +692,5 @@ mod tests {
         };
         let board = Answer::Board(Box::new(plan));
         assert_eq!(board.key(), QueryKey(6));
-        assert_eq!(board.tag(), 3);
     }
 }

@@ -2,7 +2,7 @@
 //! requests without owning connections, transports, or table names. See
 //! `docs/current/data-path.md` for ownership and delivery contracts.
 
-use crate::adapter::{AdapterRegistry, ConnectionState, HealthSink};
+use crate::adapter::{AdapterRegistry, ConnectionState, HealthSink, HistoryRequest};
 use crate::documents::DocumentRegistry;
 use crate::egress::{EgressWorkers, UploadOutcome, UploadParams};
 use crate::health::{Health, severity_rank};
@@ -29,6 +29,7 @@ use crate::query::pool::{
 };
 use crate::query::read::{ReadConfig, ReadQuery};
 use crate::query::series::compile_series;
+use crate::query::volboard::BoardPlan;
 use crate::query::watchlist::WatchlistQuery;
 use crate::source::SourceSpec;
 use crate::store::catalog::BookFreshness;
@@ -43,17 +44,17 @@ use geode_core::positions::{CommandOutcome, MoveLhuParams};
 use geode_core::pricing::{LOCAL_SOURCE, LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
     CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams,
-    HistoryKeysOutcome, HistoryKeysParams, HistoryOutcome, HistoryParams, QueryKey, QueryOutcome,
-    ReferenceOutcome, ReferenceParams, Span, WatchlistOutcome, WatchlistParams,
+    HistoryKeysOutcome, HistoryKeysParams, HistoryOutcome, HistoryParams, KeySet, QueryKey,
+    QueryOutcome, ReferenceOutcome, ReferenceParams, Span, WatchlistOutcome, WatchlistParams,
 };
-use geode_core::schema::SchemaSpec;
+use geode_core::schema::{DatasetSpec, SchemaSpec};
 use geode_core::scope::Scope;
 use geode_core::series::{SERIES_POINT_CAP, SeriesOutcome, SeriesParams, SlotKind, cap_message};
 use geode_core::snapshot::Provenance;
 use geode_core::source_config::SourceShape;
 use geode_core::view::ViewSpec;
 use geode_core::vol::{VolSliceOutcome, VolSliceParams};
-use geode_core::volboard::VolBoardOutcome;
+use geode_core::volboard::{Role, VolBoardOutcome, VolBoardParams};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -3159,6 +3160,161 @@ impl DataService {
         }
     }
 
+    /// Queue a board request. Every outcome arrives as one
+    /// `DataEvent::VolBoard` for the key and tag; refusals decided here
+    /// answer at once; a request superseded by a newer one for its key
+    /// (or cancelled) while its calls run answers nothing, as `history`.
+    ///
+    /// The asks: one `Latest` over `Prefix(members)` per dataset the
+    /// measures touch, an exact-key `At` at each lookback instant
+    /// (`volboard::plan::lookback_instant`), and one exact-key `Between`
+    /// over the longer of the window and the sparkline span, `step: None`
+    /// so coverage records it. The calls coverage lacks run under one
+    /// ticket; the last append submits the board read on the pool under
+    /// `board_pool_key(key)`.
+    pub fn vol_board(&self, params: VolBoardParams) {
+        use geode_core::volboard::plan;
+        let params = params.normalized();
+        let refuse = |params: &VolBoardParams, reason: String| {
+            tracing::warn!(target: "geode::query", "board request for key {} refused: {reason}", params.key.0);
+            let plan = BoardPlan {
+                params: params.clone(),
+                now: Utc::now(),
+                instants: Vec::new(),
+                dataset_errors: Vec::new(),
+            };
+            self.history.refuse(&Answer::Board(Box::new(plan)), reason);
+        };
+        if let Err(e) = params.validate() {
+            return refuse(&params, e);
+        }
+        let mut datasets: Vec<(Role, &DatasetSpec, &(String, String))> = Vec::new();
+        for role in Role::ALL {
+            let Some(name) = params.dataset(role) else {
+                continue;
+            };
+            let ds = match crate::query::volboard::check_dataset(&self.config.schema, name, role) {
+                Ok(ds) => ds,
+                Err(e) => return refuse(&params, e),
+            };
+            if let Err(e) = self.refuse_drifted([name]) {
+                return refuse(&params, e.to_string());
+            }
+            let Some(source) = self.history_sources.get(name) else {
+                return refuse(
+                    &params,
+                    format!("'{name}' is not a history dataset with a source"),
+                );
+            };
+            datasets.push((role, ds, source));
+        }
+        let now = Utc::now();
+        let instants = match params
+            .lookbacks
+            .iter()
+            .map(|lb| plan::lookback_instant(&self.config.clock, now, *lb))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(i) => i,
+            Err(e) => return refuse(&params, format!("lookback instant: {e}")),
+        };
+        let daily = match plan::daily_span(&params)
+            .map(chrono::Duration::from_std)
+            .transpose()
+        {
+            Ok(span) => span
+                .and_then(|s| now.checked_sub_signed(s))
+                .map(|from| (from, now)),
+            Err(e) => return refuse(&params, format!("daily span: {e}")),
+        };
+        let suffixes = plan::suffixes(&params);
+        let mut calls: Vec<(String, HistoryRequest, usize)> = Vec::new();
+        for (role, ds, (source, table)) in &datasets {
+            let Some(suffixes) = suffixes.get(role) else {
+                continue;
+            };
+            let members: Vec<Vec<String>> =
+                params.members.iter().map(|m| vec![m.clone()]).collect();
+            let exact: Vec<Vec<String>> = params
+                .members
+                .iter()
+                .flat_map(|m| {
+                    suffixes.iter().map(move |s| {
+                        std::iter::once(m.clone())
+                            .chain(s.iter().cloned())
+                            .collect()
+                    })
+                })
+                .collect();
+            let mut asks = vec![(KeySet::Prefix(members), Span::Latest)];
+            asks.extend(
+                instants
+                    .iter()
+                    .map(|t| (KeySet::Exact(exact.clone()), Span::At(*t))),
+            );
+            if let Some((from, to)) = daily {
+                asks.push((
+                    KeySet::Exact(exact.clone()),
+                    Span::Between {
+                        from,
+                        to,
+                        step: None,
+                    },
+                ));
+            }
+            for (keys, span) in asks {
+                let keys = match crate::history_dispatch::normalize_keys(ds, &keys) {
+                    Ok(k) => k,
+                    Err(e) => return refuse(&params, e),
+                };
+                match crate::history_dispatch::plan_calls(&self.conn, ds, table, &keys, span, now) {
+                    Ok(planned) => calls.extend(
+                        planned
+                            .into_iter()
+                            .map(|r| (source.clone(), r, ds.history_values().len())),
+                    ),
+                    Err(e) => return refuse(&params, format!("reading coverage: {e}")),
+                }
+            }
+        }
+        let plan = BoardPlan {
+            params,
+            now,
+            instants,
+            dataset_errors: Vec::new(),
+        };
+        if calls.is_empty() {
+            self.history.read_now(Answer::Board(Box::new(plan)));
+            return;
+        }
+        let historians = self.historians.lock().unwrap_or_else(|e| e.into_inner());
+        let total = calls.len();
+        let ticket = self.history.open(Answer::Board(Box::new(plan)), total);
+        for (queued, (source, request, value_arity)) in calls.into_iter().enumerate() {
+            let Some(worker) = historians.iter().find(|w| w.source() == source) else {
+                self.history.refuse_ticket(
+                    ticket,
+                    total - queued,
+                    format!("'{source}' has no history worker"),
+                );
+                return;
+            };
+            if !worker.request(HistoryWork::Query {
+                ticket,
+                request,
+                value_arity,
+            }) {
+                tracing::warn!(target: "geode::query", "the history queue for '{source}' is full; board ticket {} refused", ticket.0);
+                self.history.refuse_ticket(
+                    ticket,
+                    total - queued,
+                    format!("the history queue for '{source}' is full"),
+                );
+                return;
+            }
+        }
+    }
+
     /// What the source last answered `HistoryQuery::keys` with for
     /// `column`, in the column's order; `None` before it answered or when
     /// it cannot enumerate.
@@ -3415,11 +3571,15 @@ impl DataService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::Adapter;
     use crate::store::ddl::tests_support::{
         FakeKind, cvi_dataset, cvi_doc, local_dataset, sheet_rows, ts,
     };
+    use chrono::TimeZone;
+    use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::query::KeySet;
     use geode_core::scope::{DimensionSelection, Scope};
+    use geode_core::volboard::{Lookback, Measure, Role, VolBoardOutcome, VolBoardParams};
     use std::time::Duration;
 
     fn service() -> (
@@ -5425,6 +5585,812 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    // ---- The board over a three-table fake ----
+
+    /// Weekday closes at 21:00 UTC from `start`; every value is a pure
+    /// function of (table, key, business-day ordinal), so the test can
+    /// compute what the board must show. `ZZZ` is unknown to every table.
+    const FAKE_TENORS: [&str; 4] = ["1M", "3M", "1Y", "3Y"];
+    const FAKE_DELTAS: [&str; 3] = ["0.25", "0.5", "0.75"];
+    const FAKE_WINDOWS: [&str; 2] = ["5D", "20D"];
+
+    /// Business-day ordinal of `day` from `start` (0 on `start`), `None`
+    /// on a weekend or before `start`.
+    fn fake_ordinal(start: chrono::NaiveDate, day: chrono::NaiveDate) -> Option<u32> {
+        use chrono::Datelike;
+        if day < start || matches!(day.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun) {
+            return None;
+        }
+        let mut n = 0u32;
+        let mut d = start;
+        while d < day {
+            d = d.succ_opt().unwrap();
+            if !matches!(d.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun) {
+                n += 1;
+            }
+        }
+        Some(n)
+    }
+
+    fn fake_value(table: &str, suffix: &[String], ordinal: u32) -> Vec<f64> {
+        let o = ordinal as f64;
+        match table {
+            "surface" => {
+                let tenor = FAKE_TENORS.iter().position(|t| *t == suffix[0]).unwrap() as f64;
+                let delta: f64 = suffix[1].parse().unwrap();
+                vec![
+                    0.20 + 0.01 * tenor + 0.1 * (0.5 - delta) + 0.001 * o,
+                    100.0 + o,
+                ]
+            }
+            "realized" => vec![0.15 + 0.001 * o],
+            "varswap" => vec![0.22 + 0.001 * o],
+            _ => unreachable!(),
+        }
+    }
+
+    /// The last fake close at or before `t`: its time and ordinal.
+    fn fake_close_at_or_before(
+        start: chrono::NaiveDate,
+        t: DateTime<Utc>,
+    ) -> Option<(DateTime<Utc>, u32)> {
+        let close = chrono::NaiveTime::from_hms_opt(21, 0, 0).unwrap();
+        let mut day = t.date_naive();
+        if t.time() < close {
+            day = day.pred_opt().unwrap();
+        }
+        loop {
+            if day < start {
+                return None;
+            }
+            if let Some(o) = fake_ordinal(start, day) {
+                return Some((Utc.from_utc_datetime(&day.and_time(close)), o));
+            }
+            day = day.pred_opt().unwrap();
+        }
+    }
+
+    struct FakeBoardAdapter {
+        calls: HistoryCalls,
+        start: chrono::NaiveDate,
+        fail_tables: Vec<&'static str>,
+        fail_once: bool,
+        hold: Option<Arc<crate::ingest::history::tests::Hold>>,
+        failed: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Adapter for FakeBoardAdapter {
+        fn name(&self) -> &'static str {
+            "fake_board"
+        }
+        fn subscription(&self) -> Option<Box<dyn crate::adapter::Subscription>> {
+            None
+        }
+        fn egress(&self) -> Option<Box<dyn crate::adapter::Egress>> {
+            None
+        }
+        fn history(&self) -> Option<Box<dyn crate::adapter::HistoryQuery>> {
+            Some(Box::new(FakeBoard {
+                calls: self.calls.clone(),
+                start: self.start,
+                fail_tables: self.fail_tables.clone(),
+                fail_once: self.fail_once,
+                hold: self.hold.clone(),
+                failed: Arc::clone(&self.failed),
+            }))
+        }
+    }
+
+    struct FakeBoard {
+        calls: HistoryCalls,
+        start: chrono::NaiveDate,
+        fail_tables: Vec<&'static str>,
+        fail_once: bool,
+        hold: Option<Arc<crate::ingest::history::tests::Hold>>,
+        failed: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    fn fake_suffixes(table: &str) -> Vec<Vec<String>> {
+        match table {
+            "surface" => FAKE_TENORS
+                .iter()
+                .flat_map(|t| {
+                    FAKE_DELTAS
+                        .iter()
+                        .map(move |d| vec![t.to_string(), d.to_string()])
+                })
+                .collect(),
+            "realized" => FAKE_WINDOWS.iter().map(|w| vec![w.to_string()]).collect(),
+            "varswap" => FAKE_TENORS.iter().map(|t| vec![t.to_string()]).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    impl crate::adapter::HistoryQuery for FakeBoard {
+        fn query(
+            &mut self,
+            req: &crate::adapter::HistoryRequest,
+        ) -> Result<crate::adapter::HistoryRows, crate::adapter::AdapterError> {
+            self.calls.lock().unwrap().push(req.clone());
+            if let Some(hold) = &self.hold {
+                hold.wait();
+            }
+            let table = req.table.as_str();
+            if self.fail_tables.contains(&table) {
+                let mut failed = self.failed.lock().unwrap();
+                if !(self.fail_once && failed.iter().any(|t| t == table)) {
+                    failed.push(table.to_string());
+                    return Err(crate::adapter::AdapterError {
+                        message: format!("{table} unavailable"),
+                    });
+                }
+            }
+            // Expand the ask to full tuples; an unknown member answers nothing.
+            let all = fake_suffixes(table);
+            let tuples: Vec<Vec<String>> = req
+                .keys
+                .tuples()
+                .iter()
+                .filter(|t| t[0] != "ZZZ")
+                .flat_map(|t| match &req.keys {
+                    KeySet::Exact(_) => vec![t.clone()],
+                    KeySet::Prefix(_) => all
+                        .iter()
+                        .filter(|s| s.starts_with(&t[1..]))
+                        .map(|s| {
+                            std::iter::once(t[0].clone())
+                                .chain(s.iter().cloned())
+                                .collect()
+                        })
+                        .collect(),
+                })
+                .collect();
+            let now = Utc::now();
+            let close = chrono::NaiveTime::from_hms_opt(21, 0, 0).unwrap();
+            let mut rows = crate::adapter::HistoryRows::default();
+            let n_values = fake_value(table, &all[0], 0).len();
+            // Sized by the table's key, not by the answer: an ask naming
+            // only an unknown member answers an empty, well-shaped table.
+            rows.keys.resize(all[0].len() + 1, Vec::new());
+            rows.values.resize(n_values, Vec::new());
+            let mut push = |tuple: &[String], day: chrono::NaiveDate, o: u32| {
+                rows.ts.push(Utc.from_utc_datetime(&day.and_time(close)));
+                for (c, v) in tuple.iter().enumerate() {
+                    rows.keys[c].push(v.clone());
+                }
+                for (c, v) in fake_value(table, &tuple[1..], o).into_iter().enumerate() {
+                    rows.values[c].push(v);
+                }
+            };
+            for tuple in &tuples {
+                match req.span {
+                    Span::Latest => {
+                        if let Some((t, o)) = fake_close_at_or_before(self.start, now) {
+                            push(tuple, t.date_naive(), o);
+                        }
+                    }
+                    Span::At(at) => {
+                        if let Some((t, o)) = fake_close_at_or_before(self.start, at.min(now)) {
+                            push(tuple, t.date_naive(), o);
+                        }
+                    }
+                    Span::Between { from, to, .. } => {
+                        let mut day = from.date_naive();
+                        while day <= to.min(now).date_naive() {
+                            let at = Utc.from_utc_datetime(&day.and_time(close));
+                            if from <= at
+                                && at < to
+                                && at <= now
+                                && let Some(o) = fake_ordinal(self.start, day)
+                            {
+                                push(tuple, day, o);
+                            }
+                            day = day.succ_opt().unwrap();
+                        }
+                    }
+                }
+            }
+            Ok(rows)
+        }
+
+        fn keys(&mut self, table: &str, column: &str) -> Option<Vec<String>> {
+            match (table, column) {
+                ("surface", "tenor") | ("varswap", "tenor") => {
+                    Some(FAKE_TENORS.iter().map(|s| s.to_string()).collect())
+                }
+                ("surface", "delta") => Some(FAKE_DELTAS.iter().map(|s| s.to_string()).collect()),
+                ("realized", "window") => {
+                    Some(FAKE_WINDOWS.iter().map(|s| s.to_string()).collect())
+                }
+                _ => None,
+            }
+        }
+    }
+
+    /// The demo's three history declarations, without history windows so
+    /// a fake starting a year ago is never swept.
+    fn board_schema() -> SchemaSpec {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/demo-config/datasets.toml"
+        ))
+        .unwrap();
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", &text).unwrap()]);
+        let (schema, _) = SchemaSpec::from_doc(&doc);
+        let mut out = SchemaSpec::default();
+        for name in ["vol_surface", "realized_vol", "varswap"] {
+            let mut ds = schema.dataset(name).unwrap().clone();
+            ds.series_retention = ds
+                .series_retention
+                .map(|r| geode_core::schema::SeriesRetention { history: None, ..r });
+            out.datasets.push(ds);
+        }
+        out
+    }
+
+    fn board_service(
+        adapter: FakeBoardAdapter,
+    ) -> (
+        tempfile::TempDir,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(Arc::new(adapter));
+        let source = |name: &str, dataset: &str, table: &str| crate::source::SourceSpec {
+            adapter: "fake_board".to_string(),
+            table: Some(table.to_string()),
+            ..crate::source::SourceSpec::directory(name, dataset, Vec::new())
+        };
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: dir.path().join("geode.duckdb"),
+            schema: board_schema(),
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 2,
+            sources: vec![
+                source("hanweck_surface", "vol_surface", "surface"),
+                source("hanweck_realized", "realized_vol", "realized"),
+                source("hanweck_varswap", "varswap", "varswap"),
+            ],
+            adapters,
+            documents: Default::default(),
+            egress: Vec::new(),
+            clock: geode_core::clock::Clock::utc(),
+            pricer: PricerConfig::default(),
+            vol: crate::vol::VolConfig::default(),
+            positions: None,
+        })
+        .unwrap();
+        (dir, service, rx)
+    }
+
+    fn fake(start_weekdays_ago: u32) -> (FakeBoardAdapter, HistoryCalls) {
+        let calls: HistoryCalls = Arc::default();
+        let start =
+            geode_core::clock::business_days_back(Utc::now().date_naive(), start_weekdays_ago);
+        (
+            FakeBoardAdapter {
+                calls: calls.clone(),
+                start,
+                fail_tables: vec![],
+                fail_once: false,
+                hold: None,
+                failed: Arc::default(),
+            },
+            calls,
+        )
+    }
+
+    fn board_ask(
+        key: u64,
+        tag: u64,
+        members: &[&str],
+        measures: Vec<Measure>,
+        lookbacks: Vec<Lookback>,
+        window_days: Option<u64>,
+    ) -> VolBoardParams {
+        VolBoardParams {
+            key: QueryKey(key),
+            tag,
+            submitted: std::time::Instant::now(),
+            surface: "vol_surface".into(),
+            realized: Some("realized_vol".into()),
+            varswap: Some("varswap".into()),
+            members: members.iter().map(|m| m.to_string()).collect(),
+            measures,
+            lookbacks,
+            window: window_days.map(|d| std::time::Duration::from_secs(d * 86_400)),
+            sparkline: None,
+        }
+    }
+
+    fn board_answer(rx: &std::sync::mpsc::Receiver<DataEvent>, tag: u64) -> VolBoardOutcome {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(left).expect("no board answer") {
+                DataEvent::VolBoard(o) if o.tag == tag => return o,
+                _ => continue,
+            }
+        }
+    }
+
+    fn no_board_within(
+        rx: &std::sync::mpsc::Receiver<DataEvent>,
+        wait: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + wait;
+        while let Ok(e) =
+            rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        {
+            if matches!(e, DataEvent::VolBoard(_)) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn changes_measures() -> Vec<Measure> {
+        vec![
+            Measure::atfm("3M"),
+            Measure::Skew { tenor: "3M".into() },
+            Measure::Forward { tenor: "1M".into() },
+            Measure::Realized {
+                window: "20D".into(),
+            },
+            Measure::IvRv {
+                tenor: "3M".into(),
+                window: "20D".into(),
+            },
+            Measure::Varswap { tenor: "3M".into() },
+        ]
+    }
+
+    fn expect(
+        start: chrono::NaiveDate,
+        now: DateTime<Utc>,
+        measure: &Measure,
+        at: Option<DateTime<Utc>>,
+    ) -> Option<f64> {
+        let (_, o) = fake_close_at_or_before(start, at.unwrap_or(now))?;
+        let values: Vec<f64> = measure
+            .inputs()
+            .iter()
+            .map(|i| {
+                let table = match i.role {
+                    Role::Surface => "surface",
+                    Role::Realized => "realized",
+                    Role::Varswap => "varswap",
+                };
+                let v = fake_value(table, &i.suffix, o);
+                match i.column {
+                    "forward" => v[1],
+                    _ => v[0],
+                }
+            })
+            .collect();
+        Some(measure.combine(&values))
+    }
+
+    #[test]
+    fn a_two_member_board_answers_every_cell_from_the_three_tables() {
+        let (f, calls) = fake(300);
+        let start = f.start;
+        let (_dir, service, rx) = board_service(f);
+        let now = Utc::now();
+        service.vol_board(board_ask(
+            1,
+            1,
+            &["SPX", "SX5E"],
+            changes_measures(),
+            vec![Lookback::D1, Lookback::W1],
+            None,
+        ));
+        let out = board_answer(&rx, 1);
+        let board = out.result.expect("the board answered");
+        assert_eq!(board.rows.len(), 2);
+        assert!(board.missing.is_empty());
+        assert!(board.dataset_errors.is_empty());
+        let clock = geode_core::clock::Clock::utc();
+        for row in &board.rows {
+            assert_eq!(
+                row.as_of,
+                fake_close_at_or_before(start, now).map(|(t, _)| t)
+            );
+            for (cell, measure) in row.cells.iter().zip(changes_measures()) {
+                let current = expect(start, now, &measure, None).unwrap();
+                assert!(
+                    (cell.current.unwrap() - current).abs() < 1e-9,
+                    "{}",
+                    measure.name()
+                );
+                for (i, lb) in [Lookback::D1, Lookback::W1].iter().enumerate() {
+                    let instant =
+                        geode_core::volboard::plan::lookback_instant(&clock, now, *lb).unwrap();
+                    let from = expect(start, now, &measure, Some(instant)).unwrap();
+                    let change = cell.changes[i].as_ref().unwrap();
+                    assert!(
+                        (change.from - from).abs() < 1e-9,
+                        "{} {}",
+                        measure.name(),
+                        lb.label()
+                    );
+                    assert!((change.value - (current - from)).abs() < 1e-9);
+                    assert_eq!(
+                        Some(change.at),
+                        fake_close_at_or_before(start, instant).map(|(t, _)| t)
+                    );
+                }
+                assert_eq!(cell.pctl, None, "no window asked");
+            }
+        }
+        // One Latest prefix call per table, one exact At per lookback per table.
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.span == Span::Latest && c.keys.is_prefix())
+                .count(),
+            3
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| matches!(c.span, Span::At(_)) && !c.keys.is_prefix())
+                .count(),
+            6
+        );
+        assert_eq!(calls.len(), 9);
+    }
+
+    #[test]
+    fn a_second_board_serves_its_lookbacks_from_coverage() {
+        let (f, calls) = fake(300);
+        let (_dir, service, rx) = board_service(f);
+        // W1, not D1: a D1 `At` answered between 00:00 and 00:30 UTC records
+        // nothing (its span ends past the settle bound, P23), so it would
+        // fetch again and the test would depend on the wall clock.
+        service.vol_board(board_ask(
+            1,
+            1,
+            &["SPX"],
+            changes_measures(),
+            vec![Lookback::W1],
+            None,
+        ));
+        board_answer(&rx, 1).result.unwrap();
+        let before = calls.lock().unwrap().len();
+        service.vol_board(board_ask(
+            1,
+            2,
+            &["SPX"],
+            changes_measures(),
+            vec![Lookback::W1],
+            None,
+        ));
+        board_answer(&rx, 2).result.unwrap();
+        let after: Vec<_> = calls.lock().unwrap()[before..].to_vec();
+        assert_eq!(after.len(), 3, "only the three Latest calls: {after:?}");
+        assert!(after.iter().all(|c| c.span == Span::Latest));
+    }
+
+    #[test]
+    fn a_failing_realized_blanks_its_cells_and_names_itself_once() {
+        let (mut f, _calls) = fake(300);
+        f.fail_tables = vec!["realized"];
+        f.fail_once = true;
+        let (_dir, service, rx) = board_service(f);
+        service.vol_board(board_ask(
+            1,
+            1,
+            &["SPX"],
+            changes_measures(),
+            vec![Lookback::D1],
+            None,
+        ));
+        let board = board_answer(&rx, 1).result.unwrap();
+        assert_eq!(
+            board.dataset_errors,
+            vec![(
+                "realized_vol".to_string(),
+                "realized unavailable".to_string()
+            )]
+        );
+        let cells = &board.rows[0].cells;
+        assert!(cells[0].current.is_some(), "surface cells are current");
+        assert_eq!(cells[3].current, None, "realized blank");
+        assert_eq!(cells[4].current, None, "iv-rv blank");
+        assert!(cells[5].current.is_some(), "varswap unaffected");
+        // The next refresh succeeds: a dataset error is per request.
+        service.vol_board(board_ask(
+            1,
+            2,
+            &["SPX"],
+            changes_measures(),
+            vec![Lookback::D1],
+            None,
+        ));
+        let board = board_answer(&rx, 2).result.unwrap();
+        assert!(board.dataset_errors.is_empty());
+        assert!(board.rows[0].cells[3].current.is_some());
+    }
+
+    #[test]
+    fn a_failing_surface_is_the_boards_error() {
+        let (mut f, _calls) = fake(300);
+        f.fail_tables = vec!["surface"];
+        let (_dir, service, rx) = board_service(f);
+        service.vol_board(board_ask(
+            1,
+            1,
+            &["SPX"],
+            changes_measures(),
+            vec![Lookback::D1],
+            None,
+        ));
+        let out = board_answer(&rx, 1);
+        assert_eq!(out.key, QueryKey(1));
+        assert!(out.result.unwrap_err().contains("surface unavailable"));
+    }
+
+    #[test]
+    fn a_member_the_surface_lacks_keeps_its_row_and_is_listed() {
+        let (f, _calls) = fake(300);
+        let (_dir, service, rx) = board_service(f);
+        service.vol_board(board_ask(
+            1,
+            1,
+            &["SPX", "ZZZ"],
+            changes_measures(),
+            vec![Lookback::D1],
+            None,
+        ));
+        let board = board_answer(&rx, 1).result.unwrap();
+        assert_eq!(
+            board
+                .rows
+                .iter()
+                .map(|r| r.underlying.as_str())
+                .collect::<Vec<_>>(),
+            vec!["SPX", "ZZZ"]
+        );
+        assert_eq!(board.missing, vec!["ZZZ"]);
+        assert!(board.rows[1].cells.iter().all(|c| c.current.is_none()));
+        assert_eq!(board.rows[1].as_of, None);
+    }
+
+    #[test]
+    fn a_lookback_before_history_blanks_the_change_and_notes_where_history_starts() {
+        let (f, _calls) = fake(3);
+        let start = f.start;
+        let (_dir, service, rx) = board_service(f);
+        service.vol_board(board_ask(
+            1,
+            1,
+            &["SPX"],
+            vec![Measure::atfm("3M")],
+            vec![Lookback::D1, Lookback::M1],
+            None,
+        ));
+        let board = board_answer(&rx, 1).result.unwrap();
+        let cell = &board.rows[0].cells[0];
+        assert!(cell.changes[0].is_some(), "D1 inside the fake's history");
+        assert_eq!(cell.changes[1], None, "M1 before it");
+        // No window: the cache holds point rows only, so the note names
+        // the failing instant rather than claiming a history start.
+        let m1 = geode_core::volboard::plan::lookback_instant(
+            &geode_core::clock::Clock::utc(),
+            Utc::now(),
+            Lookback::M1,
+        )
+        .unwrap();
+        assert_eq!(
+            board.notes,
+            vec![format!(
+                "vol_surface: no observation at or before {}",
+                m1.format("%Y-%m-%d")
+            )]
+        );
+        let _ = start;
+    }
+
+    #[test]
+    fn with_a_window_the_note_names_where_history_starts() {
+        let (f, _calls) = fake(3);
+        let start = f.start;
+        let (_dir, service, rx) = board_service(f);
+        service.vol_board(board_ask(
+            1,
+            1,
+            &["SPX"],
+            vec![Measure::atfm("3M")],
+            vec![Lookback::D1, Lookback::M1],
+            Some(365),
+        ));
+        let board = board_answer(&rx, 1).result.unwrap();
+        assert_eq!(board.rows[0].cells[0].changes[1], None);
+        assert_eq!(
+            board.notes,
+            vec![format!(
+                "vol_surface: history starts {}",
+                start.format("%Y-%m-%d")
+            )]
+        );
+    }
+
+    #[test]
+    fn a_percentile_carries_the_rank_and_count_over_the_window() {
+        let (f, _calls) = fake(10);
+        let start = f.start;
+        let (_dir, service, rx) = board_service(f);
+        let now = Utc::now();
+        service.vol_board(board_ask(
+            1,
+            1,
+            &["SPX"],
+            vec![Measure::atfm("3M")],
+            vec![],
+            Some(365),
+        ));
+        let board = board_answer(&rx, 1).result.unwrap();
+        let (pctl, n) = board.rows[0].cells[0].pctl.unwrap();
+        // Every fake close since `start` lies inside the window; values
+        // rise with the ordinal, so the current is the maximum and only
+        // itself is not below it.
+        let expected_n = fake_close_at_or_before(start, now)
+            .map(|(_, o)| o + 1)
+            .unwrap() as usize;
+        assert_eq!(n, expected_n);
+        assert!((pctl - (n as f64 - 1.0) / n as f64).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_full_history_queue_refuses_the_board_at_once() {
+        let hold = Arc::new(crate::ingest::history::tests::Hold::default());
+        let (mut f, calls) = fake(300);
+        f.hold = Some(Arc::clone(&hold));
+        let (_dir, service, rx) = board_service(f);
+        let _release = hold.release_on_drop();
+        // One call runs (held), then 64 wait: the board's first call is
+        // the 66th and is refused. Wait for the worker to take the first
+        // call before filling the queue, or the count is off by one.
+        service.history(history_ask(
+            100,
+            1,
+            KeySet::Prefix(vec![tuple(&["SPX"])]),
+            Span::Latest,
+        ));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while calls.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "the worker holds the first call"
+        );
+        for i in 1..=64u64 {
+            service.history(history_ask(
+                100 + i,
+                1,
+                KeySet::Prefix(vec![tuple(&["SPX"])]),
+                Span::Latest,
+            ));
+        }
+        service.vol_board(board_ask(
+            1,
+            1,
+            &["SPX"],
+            vec![Measure::atfm("3M")],
+            vec![],
+            None,
+        ));
+        let out = board_answer(&rx, 1);
+        assert_eq!(
+            out.result.unwrap_err(),
+            "the history queue for 'hanweck_surface' is full"
+        );
+    }
+
+    #[test]
+    fn a_newer_board_for_the_key_supersedes_the_older() {
+        let hold = Arc::new(crate::ingest::history::tests::Hold::default());
+        let (mut f, _calls) = fake(300);
+        f.hold = Some(Arc::clone(&hold));
+        let (_dir, service, rx) = board_service(f);
+        let release = hold.release_on_drop();
+        service.vol_board(board_ask(
+            1,
+            1,
+            &["SPX"],
+            vec![Measure::atfm("3M")],
+            vec![],
+            None,
+        ));
+        service.vol_board(board_ask(
+            1,
+            2,
+            &["SPX"],
+            vec![Measure::atfm("3M")],
+            vec![],
+            None,
+        ));
+        drop(release);
+        let first = loop {
+            match rx
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("no answer")
+            {
+                DataEvent::VolBoard(o) => break o,
+                _ => continue,
+            }
+        };
+        assert_eq!(first.tag, 2, "the older board answers nothing");
+        assert!(no_board_within(&rx, std::time::Duration::from_millis(300)));
+    }
+
+    #[test]
+    fn cancel_silences_a_board_in_flight() {
+        let hold = Arc::new(crate::ingest::history::tests::Hold::default());
+        let (mut f, _calls) = fake(300);
+        f.hold = Some(Arc::clone(&hold));
+        let (_dir, service, rx) = board_service(f);
+        let release = hold.release_on_drop();
+        service.vol_board(board_ask(
+            1,
+            1,
+            &["SPX"],
+            vec![Measure::atfm("3M")],
+            vec![],
+            None,
+        ));
+        service.cancel(QueryKey(1));
+        drop(release);
+        assert!(no_board_within(&rx, std::time::Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn board_refusals_name_their_rule() {
+        let (f, _calls) = fake(300);
+        let (_dir, service, rx) = board_service(f);
+        let refused = |tag: u64, mutate: &dyn Fn(&mut VolBoardParams)| {
+            let mut p = board_ask(
+                1,
+                tag,
+                &["SPX"],
+                vec![
+                    Measure::atfm("3M"),
+                    Measure::Realized {
+                        window: "5D".into(),
+                    },
+                ],
+                vec![Lookback::D1],
+                None,
+            );
+            mutate(&mut p);
+            service.vol_board(p);
+            board_answer(&rx, tag).result.unwrap_err()
+        };
+        assert_eq!(
+            refused(1, &|p| p.members.clear()),
+            "a board names at least one member"
+        );
+        assert_eq!(
+            refused(2, &|p| p.realized = Some("nope".into())),
+            "'nope' is not a declared history dataset"
+        );
+        assert_eq!(
+            refused(3, &|p| p.surface = "realized_vol".into()),
+            "'realized_vol' has a 2-column key; the board needs 3"
+        );
+        assert_eq!(
+            refused(4, &|p| p.realized = None),
+            "realized 5D needs a realized dataset"
+        );
     }
 
     #[test]

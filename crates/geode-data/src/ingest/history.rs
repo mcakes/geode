@@ -305,7 +305,7 @@ pub(crate) mod tests {
             ReleaseOnDrop(Arc::clone(self))
         }
 
-        fn wait(&self) {
+        pub(crate) fn wait(&self) {
             let released = self.released.lock().unwrap_or_else(|e| e.into_inner());
             let _ =
                 self.cvar

@@ -28,6 +28,7 @@ use geode_core::series::{SeriesOutcome, SeriesParams};
 use geode_core::textfile::{TextFileOp, TextFileOutcome, TextFileParams, TextFileResult};
 use geode_core::view::ViewSpec;
 use geode_core::vol::{VolSliceOutcome, VolSliceParams};
+use geode_core::volboard::{VolBoardOutcome, VolBoardParams};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
@@ -80,6 +81,8 @@ pub enum Request {
     /// A history key column's listed values, answered at once from the
     /// service thread with DataEvent::HistoryKeys.
     HistoryKeys(HistoryKeysParams),
+    /// One board, answered with DataEvent::VolBoard.
+    VolBoard(VolBoardParams),
     /// Poll the snapshot source filling `dataset` now. No answer: the
     /// poll reports through Polled, Health and Published like any other.
     Poll {
@@ -416,6 +419,18 @@ impl DataHandle {
         self.send(Request::HistoryKeys(params))
     }
 
+    /// Queue a board request. `Err(Busy)` means the queue was full and a
+    /// later submission can succeed; `Err(Stopped)` means the service can
+    /// no longer serve and no outcome is owed. An admitted request is
+    /// answered by one keyed/tagged DataEvent::VolBoard, refusals
+    /// included, unless a newer request or a cancel for its key supersedes
+    /// it first. The board's own pool read runs under
+    /// `query::volboard::board_pool_key(key)`, so the tile's key stays free
+    /// for its view queries.
+    pub fn vol_board(&self, params: VolBoardParams) -> Result<(), Refusal> {
+        self.send(Request::VolBoard(params))
+    }
+
     /// Queue an identity refresh. `Err(Busy)` means the queue was full and a
     /// later submission can succeed; `Err(Stopped)` means the service can no
     /// longer serve and no outcome is owed.
@@ -725,6 +740,11 @@ enum PanicAnswer {
         dataset: String,
         column: String,
     },
+    VolBoard {
+        key: QueryKey,
+        tag: u64,
+        submitted: Instant,
+    },
     Price {
         key: QueryKey,
         tag: u64,
@@ -846,6 +866,14 @@ impl PanicAnswer {
                     tag: p.tag,
                     dataset: p.dataset.clone(),
                     column: p.column.clone(),
+                },
+            ),
+            Request::VolBoard(p) => (
+                "vol board",
+                PanicAnswer::VolBoard {
+                    key: p.key,
+                    tag: p.tag,
+                    submitted: p.submitted,
                 },
             ),
             Request::Price(p) => (
@@ -1012,6 +1040,18 @@ impl PanicAnswer {
                     dataset,
                     column,
                     values: None,
+                }));
+            }
+            PanicAnswer::VolBoard {
+                key,
+                tag,
+                submitted,
+            } => {
+                let _ = sink(DataEvent::VolBoard(VolBoardOutcome {
+                    key,
+                    tag,
+                    submitted,
+                    result: Err(reason),
                 }));
             }
             PanicAnswer::Price {
@@ -1331,6 +1371,7 @@ fn dispatch(service: &DataService, sink: &EventSink, req: Request) {
             }
         }
         Request::History(params) => service.history(params),
+        Request::VolBoard(params) => service.vol_board(params),
         Request::HistoryKeys(params) => {
             let _ = sink(DataEvent::HistoryKeys(
                 service.history_keys_outcome(&params),
@@ -2542,6 +2583,7 @@ mod tests {
             Request::Watchlist(p) => p.key == MARKED,
             Request::History(p) => p.key == MARKED,
             Request::HistoryKeys(p) => p.key == MARKED,
+            Request::VolBoard(p) => p.key == MARKED,
             Request::Poll { dataset } => dataset == "marked",
             Request::Price(p) => p.key == MARKED,
             Request::VolSlices(p) => p.key == MARKED,
@@ -2788,6 +2830,32 @@ mod tests {
             seen.iter().any(|e| matches!(e, DataEvent::HistoryKeys(o)
             if o.key == MARKED && o.tag == 5 && o.dataset == "vol_surface"
                 && o.column == "tenor" && o.values.is_none())),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_vol_board_request_is_answered_on_its_key_and_tag() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.vol_board(geode_core::volboard::VolBoardParams {
+            key: MARKED,
+            tag: 7,
+            submitted: Instant::now(),
+            surface: "vol_surface".into(),
+            realized: None,
+            varswap: None,
+            members: vec!["SPX".into()],
+            measures: vec![geode_core::volboard::Measure::atfm("3M")],
+            lookbacks: vec![],
+            window: None,
+            sparkline: None,
+        })
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::VolBoard(o)
+            if o.key == MARKED && o.tag == 7
+                && o.result.as_ref().is_err_and(|r| panicked(r, "vol board")))),
             "{seen:?}"
         );
     }
