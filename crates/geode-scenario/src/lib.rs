@@ -3,7 +3,7 @@
 //! frame or a followed link group selects. [`core`] is the pure half (the
 //! builtin `scenarios` shapes, the pivot, the `:` grammar, the session table
 //! and cell preparation), tested without gpui; [`tile`] holds the entity,
-//! [`delegate`] its table, [`header`] its chrome, and [`content`] the
+//! `delegate` its table, `header` its chrome, and [`content`] the
 //! factory the app registers once per accepted shape.
 
 pub mod content;

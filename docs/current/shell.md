@@ -172,8 +172,13 @@ header carries the matching chip (`geode_tile::header::link_chips`): the
 group's letter with a down arrow for follow and an up arrow for emit. See
 [link groups](#link-groups) for what following and emitting do.
 
-Tile occupants are created through the app-supplied `ModuleRoster`. A new
-occupant begins hidden and receives an explicit visibility value during the
+Tile occupants are created through the app-supplied `ModuleRoster`. Each
+factory names its kind and its title, `ModuleFactory::title` (the
+capitalized kind unless the factory says otherwise: a market-data panel its
+panel title, a scenario shape its shape title). `ModuleRoster::titled_kinds`
+pairs them, and every place that names a kind to the trader reads the title:
+the palette's add rows (`Vega K/T: Split`), the tile picker's rows and the
+row menu's `Open {title}`. A new occupant begins hidden and receives an explicit visibility value during the
 next reconciliation. Hidden occupants may release live subscriptions and
 must requery when shown if their followed versions changed. Removing an
 occupant (closing its tile, or filling a placeholder in place) calls
@@ -853,7 +858,8 @@ needs to.)
 
 Only a tile whose content the frame's scope decides can follow: its module
 answers `TileContent::follows()` true, which the blotter and the pricer do
-(they query under it), and the vol slice viewer and the market-data panel do
+(they query under it), the scenario tiles do (they query under it too), and
+the vol slice viewer and the market-data panel do
 (each takes its underlying from it, the scope's one `underlying_ref`; see
 [features](features.md#link-groups)). A timeseries tile never reads the scope
 and answers false, so the chooser offers it no follow row and `set_follow`

@@ -160,7 +160,8 @@ the measurement log for fixture and hardware details.
 | Market-data window fill | 40 × five values | 17.7 µs |
 | Market-data cell patch | 10,000 × five values: one-cell window refill | 105 ns |
 | Market-data `/` open cells | 10,000 × five values: the find table's first window (64 rows) then its 40 shown rows, into a `RowCache` | 53 µs |
-| Scenario pivot build (`pivot_build_40x40`) | 40 × 40 matrix with its Σ companion, USD: `Pivot::build` only | 261 µs |
+| Scenario pivot build (`pivot_build_40x40`) | 40 × 40 matrix with its Σ companion, USD: `Pivot::build` only | 411 µs |
+| Scenario window prepare (`prepare_window_40x40`) | 40 rows × 42 table columns of a 40 × 40 USD matrix with Σ edges: text, sign, fill, color | 9.87 ms (over budget; see Known gaps) |
 | Line-pricer sheet shift + undo | 1,000 entries / 1,200 sheet rows | 1.52 ms |
 | Line-pricer single cell edit + undo | 1,000 entries / 1,200 sheet rows | 6.66 µs |
 | Line-pricer grid build | 1,000 entries / 1,200 sheet rows, every package open: the `GridIndex`, no measure text | 271 µs |
@@ -328,6 +329,16 @@ joined on the unique source value, if the idle figure stays over budget.
 - Large module tables use virtualization or prepared visible rows.
 
 ## Known gaps
+
+- A scenario tile's window prepare after a new picture
+  (`prepare_window_40x40`, 40 rows of a 40 × 40 matrix with heat on) takes
+  9.9 ms, over the 8 ms budget. Almost all of it is
+  `geode_core::colour::readable_text_on` choosing a readable text color over
+  each heat fill: a lightness bisection whose every step runs a chroma
+  bisection for the gamut. With heat off the window costs 0.27 ms. A shorter
+  window (the rows a tile actually shows) costs proportionally less. The fix
+  is open; see the scenario tiles entry in
+  [open items](../open-items.md#scenario-tiles).
 
 - The Diagnostics Log's fuzzy narrowing over a full tail exceeds the 8 ms UI
   budget for phrase queries (6 to 12 ms on the reference machine, loaded, and

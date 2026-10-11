@@ -92,7 +92,7 @@ The main configuration documents have distinct owners:
 | `egress.toml` | Upload targets: adapter and a per-document address template |
 | `positions.toml` | The one position service: the adapter that takes position commands such as Move LHU |
 | `panels.toml` | Market-data panels: the dataset, document kind, layout, formats, and kind actions of each panel tile kind |
-| `scenarios.toml` | Scenario tile shapes: the axis dataset, the rows axis, the columns (axes or measures), the painted measure, diff and starting paint of each scenario tile kind |
+| `scenarios.toml` | Scenario tile shapes: dataset, axes down and across, the painted measure, diff and starting paint of each scenario tile kind (restart-required) |
 | `pricer_templates.toml` | Named option-package templates used by the pricer's shorthand |
 | `dimensions.toml` | Derived dimensions used for grouping and scope; each entry is what the interface calls a classification |
 | `groupings.toml` | The nine shared grouping slots |
@@ -584,14 +584,23 @@ Adding an action means adding its handler and registration.
 
 `scenarios.toml` defines the scenario tile kinds. Each top-level table is one
 shape and its name is the tile kind: `[vega_kt]` is the `vega_kt` kind, its
-add-tile action `tile::add_vega_kt`, its session tiles `module = "vega_kt"`.
-The builtin layer ships five
+add-tile actions `tile::add_vega_kt` and the placement variants, its palette
+rows `Vega K/T: Split` and so on (the shape's `title`), its picker row
+`Vega K/T`, and its session tiles carry `module = "vega_kt"`. The builtin
+layer ships five
 ([`builtin_scenarios.toml`](../../crates/geode-scenario/src/core/builtin_scenarios.toml)):
 `vega_kt`, `vega_spot`, `spot_ladder`, `by_maturity` and `rho`. A desk or
 user shape with a new name adds a kind; one with an existing name replaces
 that shape whole, so a `[vega_kt]` override giving only a `title` inherits
 nothing and is refused for its missing keys — and the builtin it replaced is
-gone with it.
+gone with it. The document is restart-required: a reload reports
+`scenarios changed — restart to apply` in the status bar and the running
+kinds stay. Each accepted shape also registers one grouped view
+`scenario:<kind>` with the data service (never with the blotter's view
+list); a configured view of that name refuses the shape at startup, and one
+added by a later reload is dropped with a Warning (see
+[Hot reload](#hot-reload)). [Scenario tiles](features.md#scenario-tiles)
+describes the tile itself.
 
 ```toml
 [vega_kt]
@@ -617,7 +626,7 @@ paint = "heat"
 
 | Key | Required | Meaning |
 |---|---|---|
-| `title` | yes | The palette and header name (`{title}: Split` in the palette) |
+| `title` | yes | The palette and header name (`{title}: Split` in the palette, `{title}` in the picker, the tile header and the row menu's `Open {title}`) |
 | `dataset` | yes | A measures dataset that declares `axes` |
 | `rows` | yes | The axis down the side |
 | `columns` | yes | Exactly one of `axis = "x"` or `axis = ["x", "y"]` (a matrix; two axes make a two-level header, outer first) or `measures = [ … ]` (a ladder: one column per measure) |
@@ -631,7 +640,11 @@ to the column name. A `format` table takes the view format keys `precision`,
 `thousands`, `negative`, `scale` and `color` over the measure default (two
 places, grouping, minus signs, sign color). A measure `m` whose dataset also
 declares `m_usd` as a measure has a currency alternate the tile toggles with
-`c`; one without has none.
+`c`; one without has none. The tile starts in USD when any painted measure
+has a twin and `c` toggles; a shape with no twin starts native and `c`
+refuses with `no USD twin for <measure>`. `p` cycles the paint, `m` toggles
+diff on a shape that has one, `:scale k|m|1` overrides every column's scale
+or restores each column's own.
 
 ### Refusals
 
@@ -662,7 +675,11 @@ supplied it, when:
   the dataset is laid out nowhere (it would be summed across silently);
 - `value` or a ladder measure is not a measure of the dataset;
 - `diff.base` is a number on a text axis, or text on a numeric axis;
-- a measure's `_usd` twin sits at another grain than the measure.
+- a measure's `_usd` twin sits at another grain than the measure;
+- the name is another module's tile kind or an accepted panel's (panels load
+  first);
+- the view `scenario:<name>` is already configured (the message asks to
+  remove it and restart).
 
 Datasets are checked against the assembled schema, so a desk shape over a
 desk dataset is accepted when both documents agree. A refused shape never
@@ -761,8 +778,8 @@ Accepted candidates update runtime state according to their inputs:
 | `expressions`, `datasets`, or `dimensions` | Rebuild named expressions; a changed or redefined entry bumps the frame's config version so a tile whose scope references it requeries |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, colors, value colors, watchlists, scopes, or expressions | Emit `ConfigReloaded` for the app bridge |
-| `app` | Emit `AppSettingsReloaded`; the bridge hands `blotter.stale_after` to the blotter and panel factories |
-| Sources, datasets, egress, positions, panels, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
+| `app` | Emit `AppSettingsReloaded`; the bridge hands `blotter.stale_after` to the blotter, panel and scenario factories |
+| Sources, datasets, egress, positions, panels, scenarios, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
 their paths, rather than just merged values. Source and dataset changes can
@@ -788,7 +805,13 @@ updates module factories, offers views/dimensions to the service, and
 re-folds the watchlists against the startup schema and the reloaded saved
 scopes and named expressions (see [the watchlist cache](shell.md#state-ownership)). The colors it hands the blotter and
 timeseries factories carry the `value_colors` mapping, checked against those
-definitions and the declared dimensions, as startup's do. This is not an
+definitions and the declared dimensions, as startup's do. The scenario
+factories share one schema, dimensions and colors cell the handler rewrites,
+so a reloaded color reaches an open scenario tile with its next picture (the
+requery the reload's config revision triggers). A reloaded view named like a
+running shape's `scenario:<kind>` view is dropped before any consumer sees
+it, with one Warning at `views.<name>`: the derived view keeps answering
+until a restart, which refuses the shape instead. This is not an
 atomic update across factories and workers; the handle acknowledges
 retention, not application. See
 [view replacement](request-delivery.md#view-replacement-and-shutdown).
@@ -796,8 +819,8 @@ retention, not application. See
 That handler also rereads the factory validation schema. Dataset edits
 require restart, so a later eligible reload can update the factory schema
 before the running service is rebuilt. The stale threshold lives in `app` and
-reaches the blotter and panel factories through `AppSettingsReloaded`, on its
-own; the pricer reads it in its own revision observer. That observer's key
+reaches the blotter, panel and scenario factories through
+`AppSettingsReloaded`, on its own; the pricer reads it in its own revision observer. That observer's key
 also covers `colors` and `value_colors`, so an edit to either alone re-runs
 the pricer's reload and hands its factory colors carrying the mapping; their
 diagnostics are the `ConfigReloaded` handler's to report. Presentation and

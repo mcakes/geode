@@ -2920,6 +2920,51 @@ snapshots and the axis domains are built once outside the timed loop; only
 absolute deviation 6.2 µs, mean 262.8 µs, standard deviation 6.4 µs; one
 mild high outlier in 100 samples. Well under the 8 ms pure-UI budget.
 
+## Scenario pivot build and window prepare (2026-10-11)
+
+Conditions: Apple M5 Pro (18 cores, 48 GiB), bench profile, other sessions
+on the machine (one-minute load average 3.90 before the run, 10.64 after;
+both benches are single-threaded). `cargo bench -p geode-scenario --bench
+pivot -- --warm-up-time 1 --measurement-time 3`, two runs, the second
+recorded (the first agreed within 1%).
+
+Fixture: the 2026-10-10 entry's 40-tenor × 40-bucket `vega_kt` shape in
+USD mode, no diff: 1,600 leaves, 40 tenor subtotals and a total, plus the Σ
+companion's 40 bucket rows and total. Snapshots and axis domains are built
+outside the timed loop. `prepare_window_40x40` also builds its pivot
+outside the loop and times a fresh `WindowCache` filled with rows 0..40 of
+the 41 × 42 table (label column, 40 data columns, Σ column) through
+`prepare::cell`, heat on, `:scale` unset: text, sign, heat fill and
+readable text color for each cell, the delegate's `fill_window` after a new
+picture. The palette is a fixed dark one (background grey 0.1, foreground
+0.95, bullish (0.1, 0.8, 0.3), bearish (0.9, 0.2, 0.2)). Excluded: the
+`Rgb` to `Hsla` conversion and element building at paint, the query and the
+gpui table's own layout.
+
+- `pivot_build_40x40`: median 411.5 µs (95% CI 408.8 to 414.0). This is
+  up from 261 µs on 2026-10-10; that run was on the Part 2 pivot, before
+  the per-column heat domains and the currency handling, so the two are not
+  the same code.
+- `prepare_window_40x40`: median 9.87 ms (95% CI 9.87 to 9.88). This is
+  over the 8 ms pure-UI budget.
+
+Probes taken on the same fixture and then removed from the bench:
+
+- With heat off, the window costs 0.27 ms.
+- The 1,532 heat fills alone (`Diverging::fill`) cost 0.20 ms.
+- `readable_text_on` over those fills costs 1.5 ms for the bullish text
+  color and 16.8 ms for the bearish and foreground colors together.
+
+The cost is therefore the readable-text search:
+
+- It is a 16-step bisection on OKLCH lightness.
+- Every step maps back into the sRGB gamut with a 16-step chroma
+  bisection.
+- A saturated text color over a mid fill pays both nests, roughly 11 µs a
+  cell.
+
+Open in `open-items.md` under Scenario tiles.
+
 ## Series expressions: rolling and `ema` over a month of minutes (2026-10-10)
 
 The two function shapes the expression language gained, measured as the

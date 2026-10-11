@@ -104,8 +104,55 @@ builtin five, the pivot and the tile.
 - `lib.rs`: `CONTEXT` (`scenario`, the keymap context and action prefix)
   and `init`, which binds the keys gpui-component's DataTable would
   otherwise swallow.
-- `benches/pivot.rs`: build for a 40 × 40 matrix.
+- `benches/pivot.rs`: one delivery's pure-UI cost for a 40 × 40 matrix
+  with its Σ edges: `pivot_build_40x40` (`Pivot::build`) and
+  `prepare_window_40x40` (a 40-row `WindowCache` of prepared cells, the
+  delegate's `fill_window`). Figures are in
+  [performance.md](../../docs/current/performance.md).
+
+## Keys
+
+Normal and visual mode (`scenario` context):
+
+| Key | Action |
+|---|---|
+| `h` `j` `k` `l`, arrows, `^` `$` `home` `end`, `g g` / `G` | the shell's grid motions, with counts |
+| `shift+v` / `v` | row / block selection |
+| `y`, `ctrl+c` | yank the cursor cell or the selection as TSV (Σ never included) |
+| `c` | USD / native (no requery); refused without a twin |
+| `p` | heat / plain |
+| `m` | diff on / off; refused on a shape without `diff` |
+| `escape` | clear the selection and a live refusal, else dismiss the standing notices |
+| `.` | the action menu (also `⋯`); in the menu `enter` picks, `escape` or `.` closes |
+
+`:` commands: `filter <expr>`, `filter text <words>`, `filter clear`,
+`unscoped` (a toggle), `asof <time>` / `asof live` / `asof clear`, and
+`scale k|m|1` (`1` restores each column's own). `scope`, `live` and
+`asof undo` are refused by name. `filter` completes over the dataset's
+groupable columns, the derived dimensions and the shape's measures.
+
+## Session
+
+`currency`, `paint`, `scale`, `diff` (only on a shape with one),
+`unscoped`, `as_of`, `[filter]` (`expr`, `text`, `dimensions`) and
+`column_widths`. An unreadable key drops with a notice naming it.
+
+## Limitations
+
+- No emission, no `/` find and no sort.
+- `:filter <expr>` and `:asof <time>` have no menu rows.
+- `…` shows for the whole flight of a chain, with no delay threshold.
+
+## Commands
+
+```sh
+cargo test -p geode-scenario
+cargo bench -p geode-scenario --bench pivot
+```
 
 Dependencies: `geode-core`, `geode-shell`, `geode-tile`, `geode-data`,
 gpui and gpui-component. The `test-support` feature turns on geode-core's
-own, which the fixtures' snapshot builders need.
+own, which the fixtures' snapshot builders need. Nothing gpui-free depends
+on this crate: `cargo tree -p geode-compose -e normal | grep -c gpui` and
+`cargo tree -p geode-collector -e normal | grep -c gpui` (and `-e dev`)
+stay 0.

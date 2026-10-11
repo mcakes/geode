@@ -741,6 +741,66 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   Rename… and Delete… the copy, reading the `geode::watchlist` log line
   for each re-resolution.
 
+## Scenario tiles
+
+### Open work
+
+- `prepare_window_40x40` measures 9.9 ms against the 8 ms pure-UI budget
+  (`docs/perf.md`, 2026-10-11). Nearly all of it is
+  `geode_core::colour::readable_text_on` over heat fills: a bisection on
+  lightness whose every step runs a chroma bisection for the gamut, about
+  11 µs a cell for a saturated bearish token. Decision: speed up the
+  readable-text search in `geode-core` (all color users gain), cache it per
+  fill in the tile, or accept the cost for a window this tall.
+- Within-file `MEASURE` conflicts in a scenario source file are not
+  surfaced by the ingest runner.
+- The document family's axes lack a duplicate-name refusal.
+- The demo scope picker keeps a stale LHU after a demo move (the scenario
+  files are not re-dropped; see the data path's demo position system).
+- A builtin shape withheld over an undeclared dataset shows only as an
+  info log line: `Severity` has no Info, so the diagnostics page cannot
+  show it.
+- The withholding retain in `bridge.rs` matches `scenarios.<kind>` by
+  prefix; a quoted kind containing a dot could over-match (no builtin is
+  spelled so).
+- The in-flight `…` has no delay threshold, so a fast chain may flicker it
+  (the blotter waits 50 ms); lifting the threshold into
+  `geode_tile::following` would serve both.
+- The chip tooltips spell `c` and `m` literally beside the live chord
+  `tip_with` already renders, so they read twice and go wrong after a
+  rebind.
+- The header readout is formatted every frame; it could be prepared with
+  the chips. `prepare_chips` runs on every verb, motions included.
+- `rebuild_pivot`'s error arm keeps the old pivot painted under the new
+  mode, on the assumption that a mode cannot unfit an installed picture.
+
+### Display checks
+
+- Heat fills on the light themes (Default Light, Solarized Light, Rosé Pine
+  Dawn): fills darken toward the token, and text stays readable at the cap.
+- The `rho` group header row: its height, alignment over the leaf heads at
+  rest and under horizontal scroll, the hairline per group and over the
+  pinned label column.
+- The `native` chip's warning tone and tooltip over a mixed-currency scope.
+- The base-row highlight on the spot ladder in diff mode, and its
+  disappearance under `m`.
+- The Σ column on a narrow tile: does the pinned label column plus Σ leave
+  the cells legible?
+- The palette rows `Vega K/T: Split`, the picker rows, the row menu's
+  `Open Vega K/T`, and the panel rows now titled (`CVI: Split`).
+- The cursor readout and aggregates strip in the footer at the XSmall table
+  size.
+- `g m` from a blotter row onto each of the five kinds: the `filtered` chip
+  and the readout `… · SPX`.
+- A matrix painted in `--demo`.
+- The chips: spacing after the readout, the warning fill on `unscoped` and
+  mixed `native`, hover and pressed states on the currency and diff chips,
+  and a long readout truncating before the chips.
+- The `.` menu hung under `⋯` at the header's right edge: the corner, the
+  overlap with the table, the hint lane (chords and `:` lines).
+- `…` while a chain is out (see the flicker item above).
+- The `nothing` readout in the danger tone.
+
 ## Diagnostics page
 
 ### Open work

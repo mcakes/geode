@@ -1202,6 +1202,20 @@ only the picker's key feeds the picker; any other key is a tile's, delivered
 to that tile as `Delivery::Distinct`. A tile's tag counter can equal the
 picker's, so routing by tag alone could fill the picker with a tile's values.
 
+A scenario tile asks a chain of reads under one key and one following tag:
+the axis domains (one distinct per axis, unscoped and restricted to the
+shape's dataset, read again only when the data counter or the effective
+as-of moved since the last read), the main query on the derived view
+`scenario:<kind>` at full depth so the subtotal and total rows ride along,
+and, for a matrix with a Σ row, the totals query. The pool keeps one request
+per key and the flip barrier one entry per key, so the reads run in
+sequence and the trio reaches the barrier as one arrival; concurrent reads
+would supersede one another. A step refused at submission mid-chain answers
+the barrier and forgets the versions it asked under, so the next frame
+notification asks again rather than leaving the refusal standing. A
+snapshot that does not fit the shape keeps the last picture. Hiding the
+tile keeps the chain in flight; closing it cancels by key.
+
 A scope reaching compilation still carrying a named-expression reference
 (`Scope.named` nonempty) is refused outright, with `StoreError::Scope("scope
 carries unresolved named expressions")`, rather than compiled with that
