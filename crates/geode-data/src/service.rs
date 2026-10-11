@@ -6,7 +6,7 @@ use crate::adapter::{AdapterRegistry, ConnectionState, HealthSink};
 use crate::documents::DocumentRegistry;
 use crate::egress::{EgressWorkers, UploadOutcome, UploadParams};
 use crate::health::{Health, severity_rank};
-use crate::history_dispatch::HistoryDispatch;
+use crate::history_dispatch::{Answer, HistoryDispatch};
 use crate::ingest::fetch::{FetchOutcome, FetchOutcomeSink, FetchWork, FetchWorker};
 use crate::ingest::history::{
     HistoryWork, HistoryWorkOutcome, HistoryWorkOutcomeSink, HistoryWorker,
@@ -856,7 +856,7 @@ fn history_outcome_sink(
                 },
                 format!("{pair}: {reason}"),
             );
-            history.finish(ticket, Err(reason));
+            history.finish(ticket, &name, Err(reason));
         }
         HistoryWorkOutcome::Keys {
             column,
@@ -1860,7 +1860,7 @@ impl DataService {
                             None => true,
                         },
                     );
-                    history.finish(ticket, Ok(()));
+                    history.finish(ticket, &dataset, Ok(()));
                     let _ = sink(DataEvent::LoadEnded);
                     health_delivered
                 }
@@ -1888,7 +1888,7 @@ impl DataService {
                             None => true,
                         },
                     );
-                    history.finish(ticket, Err(reason));
+                    history.finish(ticket, &dataset, Err(reason));
                     let _ = sink(DataEvent::LoadEnded);
                     health_delivered
                 }
@@ -2896,6 +2896,8 @@ impl DataService {
     pub fn cancel(&self, key: QueryKey) {
         self.history.cancel(key);
         self.pool.cancel(key);
+        self.pool
+            .cancel(crate::query::volboard::board_pool_key(key));
         self.pricing.cancel(key);
         self.vol.cancel(key);
     }
@@ -3063,7 +3065,8 @@ impl DataService {
                 "history request for '{}' refused: {reason}",
                 params.dataset
             );
-            self.history.refuse(params, reason);
+            self.history
+                .refuse(&Answer::History(params.clone()), reason);
         };
         if let Err(e) = self.refuse_drifted([params.dataset.as_str()]) {
             return refuse(&params, e.to_string());
@@ -3121,7 +3124,7 @@ impl DataService {
             Err(e) => return refuse(&params, format!("reading coverage: {e}")),
         };
         if calls.is_empty() {
-            self.history.read_now(params);
+            self.history.read_now(Answer::History(params));
             return;
         }
         let historians = self.historians.lock().unwrap_or_else(|e| e.into_inner());
@@ -3134,7 +3137,7 @@ impl DataService {
         };
         let value_arity = ds.history_values().len();
         let total = calls.len();
-        let ticket = self.history.open(params, total);
+        let ticket = self.history.open(Answer::History(params), total);
         for (queued, request) in calls.into_iter().enumerate() {
             if !worker.request(HistoryWork::Query {
                 ticket,

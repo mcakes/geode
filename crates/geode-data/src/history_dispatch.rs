@@ -1,11 +1,14 @@
 //! The history request's bookkeeping between the service, the source's
 //! history worker, the ingest runner and the query pool.
 //!
-//! A request either reads the cache at once or opens a ticket for the
-//! adapter calls its coverage lacks; each call's append (or failure)
-//! finishes one part of the ticket, and the last one answers it: any
-//! failure as the request's error, otherwise a read on the pool under the
-//! requester's key and tag.
+//! A request (a history read or a board) either reads the cache at once or
+//! opens a ticket for the adapter calls its coverage lacks; each call's
+//! append (or failure) finishes one part of the ticket, and the last one
+//! answers it. A history request answers any failure as its error; a board
+//! answers a failure of its surface as its error and carries any other
+//! dataset's failure in `dataset_errors`. Otherwise the read goes to the
+//! pool under the request's tag: a history read under the requester's key,
+//! a board read under `board_pool_key` of it.
 //!
 //! Every request is recorded as the newest for its key, whatever path it
 //! takes. A ticket whose request has been superseded answers nothing when
@@ -18,6 +21,7 @@ use crate::adapter::{HistoryRequest, HistoryRows};
 use crate::ingest::history::Ticket;
 use crate::query::history::HistoryRead;
 use crate::query::pool::{QueryPool, QueryRequest, RequestKind, ViewId, Work};
+use crate::query::volboard::{BoardPlan, BoardRead, board_pool_key};
 use crate::service::{DataEvent, EventSink};
 use crate::store::StoreError;
 use crate::store::history::{CoverSpan, Covered, covers_instant, missing_by_key};
@@ -25,8 +29,42 @@ use chrono::{DateTime, Utc};
 use geode_core::query::{HistoryOutcome, HistoryParams, KeySet, QueryKey, Span, normalize_key};
 use geode_core::schema::{DatasetSpec, SchemaSpec};
 use geode_core::snapshot::Provenance;
+use geode_core::volboard::VolBoardOutcome;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
+
+/// What a ticket answers when its calls finish: a history read, or a
+/// board read over the datasets whose calls succeeded.
+///
+/// `Clone`: `refuse_ticket` answers from a clone of the pending answer.
+#[derive(Clone)]
+pub(crate) enum Answer {
+    History(HistoryParams),
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the service's vol_board() constructs it")
+    )]
+    Board(Box<BoardPlan>),
+}
+
+impl Answer {
+    /// The requester's key: what the answer is addressed to, and what
+    /// supersession is keyed by.
+    pub(crate) fn key(&self) -> QueryKey {
+        match self {
+            Answer::History(p) => p.key,
+            Answer::Board(b) => b.params.key,
+        }
+    }
+
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it yet"))]
+    pub(crate) fn tag(&self) -> u64 {
+        match self {
+            Answer::History(p) => p.tag,
+            Answer::Board(b) => b.params.tag,
+        }
+    }
+}
 
 pub(crate) struct HistoryDispatch {
     state: Mutex<State>,
@@ -46,10 +84,11 @@ struct State {
 }
 
 struct Pending {
-    params: HistoryParams,
+    answer: Answer,
     /// Adapter calls (each with its append) not yet finished.
     outstanding: usize,
-    failures: Vec<String>,
+    /// `(dataset, reason)` per failed call, repeats dropped.
+    failures: Vec<(String, String)>,
     /// Already answered (a full queue refused it): the calls that were
     /// queued still append, but their finish answers nothing more.
     answered: bool,
@@ -76,17 +115,17 @@ impl HistoryDispatch {
     }
 
     /// Answer a request refused before any work: the newest for its key.
-    pub(crate) fn refuse(&self, params: &HistoryParams, reason: String) {
+    pub(crate) fn refuse(&self, answer: &Answer, reason: String) {
         let mut state = self.lock();
-        Self::supersede(&mut state, params.key);
-        self.answer_err(params, reason);
+        Self::supersede(&mut state, answer.key());
+        self.answer_err(answer, reason);
     }
 
     /// Read now, no fetch needed.
-    pub(crate) fn read_now(&self, params: HistoryParams) {
+    pub(crate) fn read_now(&self, answer: Answer) {
         let mut state = self.lock();
-        Self::supersede(&mut state, params.key);
-        self.submit_read(params);
+        Self::supersede(&mut state, answer.key());
+        self.submit(answer);
     }
 
     /// A requester's cancel: nothing in flight for `key` answers any more.
@@ -99,14 +138,18 @@ impl HistoryDispatch {
 
     /// Open a ticket for `calls` adapter calls (at least one: a ticket with
     /// none would never be finished, and so never answered).
-    pub(crate) fn open(&self, params: HistoryParams, calls: usize) -> Ticket {
+    ///
+    /// The newest request is tracked per requester key whatever the answer
+    /// kind: a board and a history request under one key supersede each
+    /// other, so a requester asking both must use two keys.
+    pub(crate) fn open(&self, answer: Answer, calls: usize) -> Ticket {
         debug_assert!(calls > 0, "a ticket waits on at least one call");
         let mut state = self.lock();
-        let ticket = Ticket(Self::supersede(&mut state, params.key));
+        let ticket = Ticket(Self::supersede(&mut state, answer.key()));
         state.pending.insert(
             ticket,
             Pending {
-                params,
+                answer,
                 outstanding: calls,
                 failures: Vec::new(),
                 answered: false,
@@ -127,29 +170,32 @@ impl HistoryDispatch {
         p.outstanding = p.outstanding.saturating_sub(unqueued);
         let first = !p.answered;
         p.answered = true;
-        let params = p.params.clone();
+        let answer = p.answer.clone();
         if p.outstanding == 0 {
             state.pending.remove(&ticket);
         }
-        if first && state.newest.get(&params.key) == Some(&ticket.0) {
-            self.answer_err(&params, reason);
+        if first && state.newest.get(&answer.key()) == Some(&ticket.0) {
+            self.answer_err(&answer, reason);
         }
     }
 
-    /// One adapter call (with its append) finished. On the last one: any
-    /// failure answers `Err(joined)`; otherwise the read is submitted to
-    /// the pool under the request's key and tag. A superseded or already
-    /// answered ticket answers nothing.
-    pub(crate) fn finish(&self, ticket: Ticket, result: Result<(), String>) {
+    /// One adapter call (with its append) for `dataset` finished. On the
+    /// last one a history answer refuses with every failure joined, else
+    /// reads; a board refuses with its surface's failures, else blanks and
+    /// names each other failed dataset and reads. A read is submitted to
+    /// the pool under the request's tag. A superseded or already answered
+    /// ticket answers nothing.
+    pub(crate) fn finish(&self, ticket: Ticket, dataset: &str, result: Result<(), String>) {
         let mut state = self.lock();
         let Some(p) = state.pending.get_mut(&ticket) else {
             return;
         };
         p.outstanding = p.outstanding.saturating_sub(1);
-        if let Err(reason) = result
-            && !p.failures.contains(&reason)
-        {
-            p.failures.push(reason);
+        if let Err(reason) = result {
+            let entry = (dataset.to_string(), reason);
+            if !p.failures.contains(&entry) {
+                p.failures.push(entry);
+            }
         }
         if p.outstanding > 0 {
             return;
@@ -157,47 +203,113 @@ impl HistoryDispatch {
         let Some(p) = state.pending.remove(&ticket) else {
             return;
         };
-        if p.answered || state.newest.get(&p.params.key) != Some(&ticket.0) {
+        if p.answered || state.newest.get(&p.answer.key()) != Some(&ticket.0) {
             return;
         }
-        if p.failures.is_empty() {
-            self.submit_read(p.params);
-        } else {
-            self.answer_err(&p.params, p.failures.join("; "));
+        match p.answer {
+            Answer::History(params) => {
+                if p.failures.is_empty() {
+                    self.submit(Answer::History(params));
+                } else {
+                    let reasons: Vec<String> = p.failures.into_iter().map(|(_, r)| r).collect();
+                    self.answer_err(&Answer::History(params), reasons.join("; "));
+                }
+            }
+            Answer::Board(mut plan) => {
+                // The surface is the board: its failure is the request's.
+                // Any other dataset's failure blanks its cells and names
+                // itself; the board is otherwise current. Kept on one line
+                // (a mutation entry anchors on it).
+                #[rustfmt::skip]
+                let (surface, others): (Vec<_>, Vec<_>) =
+                    p.failures.into_iter().partition(|(ds, _)| *ds == plan.params.surface);
+                if !surface.is_empty() {
+                    let reasons: Vec<String> = surface.into_iter().map(|(_, r)| r).collect();
+                    self.answer_err(&Answer::Board(plan), reasons.join("; "));
+                    return;
+                }
+                for (ds, reason) in others {
+                    match plan.dataset_errors.iter_mut().find(|(d, _)| *d == ds) {
+                        Some((_, r)) => {
+                            r.push_str("; ");
+                            r.push_str(&reason);
+                        }
+                        None => plan.dataset_errors.push((ds, reason)),
+                    }
+                }
+                self.submit(Answer::Board(plan));
+            }
         }
     }
 
-    /// Called under the state lock. Anything for this key still in the
-    /// pool belongs to an older request; cancelling it keeps its answer
-    /// from arriving after this one.
-    fn answer_err(&self, params: &HistoryParams, reason: String) {
-        self.pool.cancel(params.key);
-        let _ = (self.sink)(DataEvent::History(HistoryOutcome {
-            key: params.key,
-            tag: params.tag,
-            submitted: params.submitted,
-            dataset: params.dataset.clone(),
-            span: params.span,
-            result: Err(reason),
-        }));
+    /// Called under the state lock. Anything for this request's pool key
+    /// still in the pool belongs to an older request; cancelling it keeps
+    /// its answer from arriving after this one.
+    fn answer_err(&self, answer: &Answer, reason: String) {
+        match answer {
+            Answer::History(params) => {
+                self.pool.cancel(params.key);
+                let _ = (self.sink)(DataEvent::History(HistoryOutcome {
+                    key: params.key,
+                    tag: params.tag,
+                    submitted: params.submitted,
+                    dataset: params.dataset.clone(),
+                    span: params.span,
+                    result: Err(reason),
+                }));
+            }
+            Answer::Board(plan) => {
+                self.pool.cancel(board_pool_key(plan.params.key));
+                let _ = (self.sink)(DataEvent::VolBoard(VolBoardOutcome {
+                    key: plan.params.key,
+                    tag: plan.params.tag,
+                    submitted: plan.params.submitted,
+                    result: Err(reason),
+                }));
+            }
+        }
     }
 
-    /// Called under the state lock.
-    fn submit_read(&self, params: HistoryParams) {
-        let kind = RequestKind::History {
-            dataset: params.dataset.clone(),
-            span: params.span,
-        };
-        self.pool.submit(QueryRequest {
-            key: params.key,
-            tag: params.tag,
-            submitted: params.submitted,
-            view: ViewId(format!("history:{}", params.dataset)),
-            grouping: Vec::new(),
-            provenance: Provenance::default(),
-            work: Work::History(Box::new(HistoryRead::new(Arc::clone(&self.schema), params))),
-            kind,
-        });
+    /// Called under the state lock. A history read runs under the
+    /// requester's key; a board read under `board_pool_key` of it, so the
+    /// requester's own view queries neither replace nor cancel it.
+    fn submit(&self, answer: Answer) {
+        match answer {
+            Answer::History(params) => {
+                let kind = RequestKind::History {
+                    dataset: params.dataset.clone(),
+                    span: params.span,
+                };
+                self.pool.submit(QueryRequest {
+                    key: params.key,
+                    tag: params.tag,
+                    submitted: params.submitted,
+                    view: ViewId(format!("history:{}", params.dataset)),
+                    grouping: Vec::new(),
+                    provenance: Provenance::default(),
+                    work: Work::History(Box::new(HistoryRead::new(
+                        Arc::clone(&self.schema),
+                        params,
+                    ))),
+                    kind,
+                });
+            }
+            Answer::Board(plan) => {
+                let (key, tag, submitted) =
+                    (plan.params.key, plan.params.tag, plan.params.submitted);
+                let view = ViewId(format!("volboard:{}", plan.params.surface));
+                self.pool.submit(QueryRequest {
+                    key: board_pool_key(key),
+                    tag,
+                    submitted,
+                    view,
+                    grouping: Vec::new(),
+                    provenance: Provenance::default(),
+                    kind: RequestKind::VolBoard { requester: key },
+                    work: Work::VolBoard(Box::new(BoardRead::new(Arc::clone(&self.schema), *plan))),
+                });
+            }
+        }
     }
 }
 
@@ -559,5 +671,40 @@ mod tests {
                 .unwrap_err()
                 .contains("not an f64 key")
         );
+    }
+
+    #[test]
+    fn an_answer_names_its_requester() {
+        let params = HistoryParams {
+            key: QueryKey(5),
+            tag: 2,
+            submitted: std::time::Instant::now(),
+            dataset: "vol_surface".into(),
+            keys: KeySet::Prefix(vec![exact(&["SPX"])]),
+            span: Span::Latest,
+        };
+        assert_eq!(Answer::History(params.clone()).key(), QueryKey(5));
+        assert_eq!(Answer::History(params).tag(), 2);
+        let plan = crate::query::volboard::BoardPlan {
+            params: geode_core::volboard::VolBoardParams {
+                key: QueryKey(6),
+                tag: 3,
+                submitted: std::time::Instant::now(),
+                surface: "vol_surface".into(),
+                realized: None,
+                varswap: None,
+                members: vec!["SPX".into()],
+                measures: vec![geode_core::volboard::Measure::atfm("3M")],
+                lookbacks: vec![],
+                window: None,
+                sparkline: None,
+            },
+            now: settled(),
+            instants: vec![],
+            dataset_errors: vec![],
+        };
+        let board = Answer::Board(Box::new(plan));
+        assert_eq!(board.key(), QueryKey(6));
+        assert_eq!(board.tag(), 3);
     }
 }
