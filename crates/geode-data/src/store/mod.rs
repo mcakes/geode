@@ -8,6 +8,7 @@ pub(crate) mod compare;
 pub mod ddl;
 pub mod document;
 pub mod drift;
+pub mod history;
 pub mod publish;
 pub mod reference;
 pub mod retention;
@@ -44,6 +45,9 @@ pub enum StoreError {
     Document(String),
     /// Series rows failed `SeriesRows::validate` before any SQL was issued.
     Series(String),
+    /// History rows or a covered key could not be read against the dataset's
+    /// key before any SQL was issued (an unparsable f64 key, a wrong arity).
+    History(String),
     /// A scope was refused before it reached SQL at all — a variant of its
     /// own for the same reason `Document` and `Series` are: there is no
     /// statement to report.
@@ -78,6 +82,7 @@ impl std::fmt::Display for StoreError {
             }
             StoreError::Document(reason) => write!(f, "document: {reason}"),
             StoreError::Series(reason) => write!(f, "series: {reason}"),
+            StoreError::History(reason) => write!(f, "history: {reason}"),
             StoreError::Scope(reason) => write!(f, "scope: {reason}"),
             StoreError::Drift(reason) => write!(f, "{reason}"),
             StoreError::FormatMismatch { found, expected } => write!(
@@ -163,8 +168,8 @@ impl Store {
     }
 
     /// Create missing tables for a dataset: one live/archive pair per declared
-    /// measure grain, one pair per document dataset, or one series table and its
-    /// coverage table. Repeated calls leave existing tables unchanged.
+    /// measure grain, one pair per document dataset, or one series or history
+    /// table and its coverage table. Repeated calls leave existing tables unchanged.
     ///
     /// This does not migrate payload schemas. `check_drift` compares an
     /// existing table with the declaration; `DataService::open` refuses a
@@ -206,6 +211,16 @@ impl Store {
 /// statement, in creation order. The drift check builds its probe from the
 /// same statements, so the two can never disagree about a table's shape.
 pub(crate) fn managed_tables(ds: &DatasetSpec) -> Vec<(String, String)> {
+    if ds.is_history() {
+        let names = [
+            history::history_table(&ds.name),
+            history::history_coverage_table(&ds.name),
+        ];
+        return names
+            .into_iter()
+            .zip(history::create_history_tables_sql(ds))
+            .collect();
+    }
     if ds.is_series() {
         let names = [
             series::series_table(&ds.name),

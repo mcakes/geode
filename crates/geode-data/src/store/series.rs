@@ -194,7 +194,7 @@ fn append_in_transaction(
 ///
 /// Schema loading rejects oversized windows, but callers can construct
 /// `DatasetSpec` directly. Storage therefore checks them independently.
-fn cutoff(now: DateTime<Utc>, window: std::time::Duration) -> Option<i64> {
+pub(crate) fn cutoff(now: DateTime<Utc>, window: std::time::Duration) -> Option<i64> {
     i64::try_from(window.as_micros())
         .ok()
         .and_then(|w| micros(now).checked_sub(w))

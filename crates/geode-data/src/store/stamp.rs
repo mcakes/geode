@@ -4,7 +4,7 @@
 //! app and the background collector). A process that writes with a layout
 //! the file was not created with would publish positionally into the wrong
 //! columns, so the layout carries a number, `STORE_FORMAT`, kept in
-//! `geode_meta`. Any change to the catalog, series, document or reference DDL
+//! `geode_meta`. Any change to the catalog, series, history, document or reference DDL
 //! bumps it. Staging tables are exempt: each is created or replaced before
 //! every use, so a leftover from another build is never read.
 //!
@@ -20,7 +20,7 @@ use duckdb::{AccessMode, Connection, OptionalExt};
 use super::StoreError;
 
 /// The on-disk layout version this build reads and writes.
-pub const STORE_FORMAT: u32 = 1;
+pub const STORE_FORMAT: u32 = 2;
 
 /// The build that last stamped the store, `<version>+<GEODE_GIT_HASH>` or
 /// `<version>+dev` when the build sets no hash. For diagnosis only; never
@@ -153,6 +153,14 @@ mod tests {
             )
             .ok()
             .map(|v| v.parse().unwrap())
+    }
+
+    #[test]
+    fn the_format_counts_the_history_tables() {
+        // Format 2 added the history payload and coverage tables; a build
+        // that loses the bump would let an older collector write a store it
+        // cannot lay out.
+        assert_eq!(STORE_FORMAT, 2);
     }
 
     #[test]

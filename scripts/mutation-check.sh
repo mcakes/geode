@@ -19867,6 +19867,93 @@ run_mutation "series: missing_spans ignores loaded spans" \
   geode-data \
   missing_spans_subtracts_loaded_spans
 
+# History dedupe: a staged row equal to the live version of its (key, ts)
+# is dropped. Mutated to never match, an overlapping refetch doubles rows.
+run_mutation "history: an unchanged row is appended again" \
+  crates/geode-data/src/store/history.rs \
+  'where {key_match} and live.ts = make_timestamp(s.ts_us) and {value_match}' \
+  'where false and {key_match} and live.ts = make_timestamp(s.ts_us) and {value_match}' \
+  geode-data \
+  an_overlapping_refetch_with_equal_values_appends_nothing_but_records_coverage
+
+# The dedupe matches the whole key. Mutated to ignore it, an equal value
+# under another key is dropped as already live.
+run_mutation "history: dedupe ignores the key" \
+  crates/geode-data/src/store/history.rs \
+  'where {key_match} and live.ts = make_timestamp(s.ts_us) and {value_match}' \
+  'where ({key_match} or true) and live.ts = make_timestamp(s.ts_us) and {value_match}' \
+  geode-data \
+  an_equal_value_under_another_key_still_lands
+
+# Every value column takes part in the dedupe. Mutated to compare none, a
+# correction to `forward` alone is dropped.
+run_mutation "history: dedupe ignores a value column" \
+  crates/geode-data/src/store/history.rs \
+  '        |c| format!("live.{0} = s.{0}", quote(&c.name)),' \
+  '        |c| format!("(live.{0} = s.{0} or true)", quote(&c.name)),' \
+  geode-data \
+  a_changed_value_in_any_column_is_a_new_version_and_the_old_survives
+
+# Live is the GREATEST received_at per (key, ts). Mutated to arg_min, the
+# original values offered again after a correction are taken as live.
+run_mutation "history: dedupe compares against the oldest version" \
+  crates/geode-data/src/store/history.rs \
+  '        |c| format!("arg_max({0}, received_at) as {0}", quote(&c.name)),' \
+  '        |c| format!("arg_min({0}, received_at) as {0}", quote(&c.name)),' \
+  geode-data \
+  a_third_append_of_the_original_values_re_appends_because_live_is_the_correction
+
+# Row keys are read by their declared type before any SQL. Mutated to pass
+# text through, an unparsable f64 key fails inside the transaction as SQL.
+run_mutation "history: an unparsable key reaches SQL" \
+  crates/geode-data/src/store/history.rs \
+  '                    normalize_key(v, spec.ty)
+                        .map_err(|e| err(format!("row {i}, key' \
+  '                    Ok::<String, String>(v.to_string())
+                        .map_err(|e| err(format!("row {i}, key' \
+  geode-data \
+  an_unparsable_f64_key_refuses_the_whole_append_before_any_sql
+
+# Retention removes only superseded versions. Mutated to `>=`, every row
+# matches itself and a lone live version older than the window goes.
+run_mutation "history: retention deletes the live version too" \
+  crates/geode-data/src/store/history.rs \
+  'and n.ts = t.ts and n.received_at > t.received_at)' \
+  'and n.ts = t.ts and n.received_at >= t.received_at)' \
+  geode-data \
+  the_live_version_survives_retention_whatever_its_age
+
+run_mutation "history: the history window keeps the rows it should drop" \
+  crates/geode-data/src/store/history.rs \
+  '        let sql = format!("delete from {table} where epoch_us(ts) < ?");' \
+  '        let sql = format!("delete from {table} where false and epoch_us(ts) < ?");' \
+  geode-data \
+  the_history_window_sweeps_old_rows_and_coverage_and_retention_sweeps_superseded_versions
+
+run_mutation "history: the history window keeps the coverage it should drop" \
+  crates/geode-data/src/store/history.rs \
+  '            "delete from {} where epoch_us(to_ts) <= ?",' \
+  '            "delete from {} where false and epoch_us(to_ts) <= ?",' \
+  geode-data \
+  the_history_window_sweeps_old_rows_and_coverage_and_retention_sweeps_superseded_versions
+
+run_mutation "history: an append does not sweep" \
+  crates/geode-data/src/store/history.rs \
+  '    let swept = sweep_history(conn, req.dataset, req.received_at)?;' \
+  '    let swept = 0;' \
+  geode-data \
+  the_history_window_sweeps_old_rows_and_coverage_and_retention_sweeps_superseded_versions
+
+# A history dataset owns its two tables and no live/archive pair.
+run_mutation "history: managed_tables omits the history tables" \
+  crates/geode-data/src/store/mod.rs \
+  '    if ds.is_history() {
+        let names = [' \
+  '    if false {
+        let names = [' \
+  geode-data \
+  a_history_dataset_has_no_live_archive_pair_and_two_managed_tables
+
 # `DataService::fetch` answers a fully covered span itself. Mutated to
 # ask for the requested span whole, a second look at the same range is a
 # round trip to the vendor.

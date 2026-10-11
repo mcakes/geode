@@ -461,8 +461,9 @@ therefore carries `geode_data::STORE_FORMAT` in `geode_meta(key, value)`
 
 Any change to the store's DDL bumps `STORE_FORMAT` by hand: its own tables
 (catalog, generations summary, provenance, `subscription_topics`,
-`geode_meta`) or the payload table builders in `store/ddl.rs` and
-`store/series.rs` (series payload and coverage). A comment at each DDL site
+`geode_meta`) or the payload table builders in `store/ddl.rs`,
+`store/series.rs` (series payload and coverage) and `store/history.rs`
+(history payload and coverage). A comment at each DDL site
 says so. The builders bump even though their tables are drift-checked,
 because the drift check compares only column names, types and order (not
 keys or constraints, such as the series primary key) and blames the

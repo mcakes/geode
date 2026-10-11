@@ -89,12 +89,14 @@ impl TablePair {
 }
 
 /// Every live/archive pair a dataset owns: one per declared measure grain or
-/// one per document or reference dataset. Series datasets return no pairs; [`super::series`]
-/// names their payload and coverage tables. History and retention share this
+/// one per document or reference dataset. Series and history datasets return no
+/// pairs; [`super::series`] and [`super::history`] name their payload and
+/// coverage tables. History and retention share this
 /// mapping so they cover the same tables as schema creation.
 pub fn table_pairs(ds: &DatasetSpec) -> Vec<TablePair> {
-    if ds.is_series() {
-        // Series history uses received-at timestamps, not generation-based table pairs.
+    if ds.is_series() || ds.is_history() {
+        // Series and history datasets keep versions by received_at, not
+        // generations.
         return Vec::new();
     }
     if ds.is_reference() {
@@ -292,7 +294,8 @@ fn payload_table_sql(ds: &DatasetSpec, table: &str) -> String {
 /// and rebuilding must include every pair: a partition may occur at only one
 /// grain, and its current generation may exist only in live.
 ///
-/// `dataset` must equal `ds.name`. Series datasets return an empty list.
+/// `dataset` must equal `ds.name`. Series and history datasets return an empty
+/// list.
 pub fn history_of(dataset: &str, ds: &DatasetSpec) -> Vec<String> {
     debug_assert_eq!(
         dataset, ds.name,
@@ -612,6 +615,40 @@ role = "value"
             .dataset("series")
             .unwrap()
             .clone()
+    }
+
+    /// A history dataset parsed through the schema reader: key
+    /// `(underlying_ref, tenor, delta)` (utf8, utf8, f64), values `vol` and
+    /// `forward`, history 400d, retention 7d.
+    pub(crate) fn history_dataset() -> DatasetSpec {
+        let text = r#"
+[vol_surface]
+family = "history"
+key = ["underlying_ref", "tenor", "delta"]
+history = "400d"
+retention = "7d"
+[vol_surface.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[vol_surface.columns.tenor]
+type = "utf8"
+role = "dimension"
+order = "tenor"
+[vol_surface.columns.delta]
+type = "f64"
+role = "dimension"
+[vol_surface.columns.vol]
+type = "f64"
+role = "value"
+[vol_surface.columns.forward]
+type = "f64"
+role = "value"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema.dataset("vol_surface").unwrap().clone()
     }
 
     /// `minutes` one-minute bars from `start`, values `first`, `first + 1`, …
