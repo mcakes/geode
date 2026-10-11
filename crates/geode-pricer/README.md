@@ -103,8 +103,16 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   paints. A group row's cell edit, alone or in a selection, writes the shown
   lines beneath it instead (`edit_targets`: `legs_under` its node, each line
   once), so a scope-hidden line is never written; a quantity skips a package
-  the group holds only part of. The editor attaches by `EditOn::Group(path)`,
-  and `follow_editor` drops it (`MOVED`) when that path stops painting. A group row's measures fold every leg
+  the group holds only part of. The editor attaches by `EditOn::Group`: the
+  path it sits on and `FrozenTargets`, the line ids (selected rows, the
+  group's lines, its hidden lines) taken at open, which every commit and
+  live step write (`edit_targets` reads them, not the path). Its own
+  writes rebuild under `as_own_write`, so when they move the lines out of
+  the path (a grouped column, a `status` grouping) `follow_editor` moves the
+  editor and the cursor to the group now holding a written line; a path
+  gone for any other reason drops it (`MOVED`, or `SCOPE_DROPPED_EDIT` when
+  every frozen line is hidden). `close_editor` takes the cursor home with
+  the lines after an `escape` rollback. A group row's measures fold every leg
   beneath it and its dimensions read unanimity, never one leg's value; a
   split row folds only its node's legs, so a total over both rows of a
   calendar counts each leg once.

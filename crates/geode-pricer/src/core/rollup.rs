@@ -283,7 +283,7 @@ fn keys(
 /// segment per value level, spelled as a group's path spells it. A hidden
 /// line has one too, which is how an edit through a group row tells the
 /// hidden lines that group would hold.
-pub fn path_of(
+fn path_of(
     sheet: &Sheet,
     row: usize,
     chain: &EffectiveChain,
@@ -313,14 +313,10 @@ pub fn hidden_under(
     if groups.is_empty() {
         return Vec::new();
     }
-    let (values, _) = levels(chain, dims);
     (0..sheet.len())
         .filter(|&row| sheet.is_line(row) && !vis.is_shown(row))
         .filter(|&row| {
-            let path: Path = keys(sheet, row, &values, clock)
-                .iter()
-                .map(|k| k.as_ref().map(text))
-                .collect();
+            let path = path_of(sheet, row, chain, dims, clock);
             groups.iter().any(|g| path.starts_with(g))
         })
         .collect()

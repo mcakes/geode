@@ -364,7 +364,29 @@ pub(crate) const HIDDEN_IN_RANGE: &str = "a line in that range is hidden by the 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EditOn {
     Line(LineId),
-    Group(Path),
+    /// `path` is the group row the editor sits on now: it moves with the
+    /// lines when the editor's own write re-tags them (`follow_editor`).
+    /// `frozen` is what every commit and step of this editor writes.
+    Group {
+        path: Path,
+        frozen: Rc<FrozenTargets>,
+    },
+}
+
+/// A grouping-row editor's targets, taken when it opens: the commit and
+/// every live step write these lines whatever the group's path holds
+/// afterwards. A step on the grouped column (or under a `status`
+/// grouping, where any edit sends a line to `pricing…`) moves the lines
+/// out of the path, and a delivery can bring other lines into it; read
+/// live, the next press would write a different set than the first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FrozenTargets {
+    /// The selected line and package rows, under a live selection.
+    pub(crate) direct: Vec<LineId>,
+    /// The shown lines the selected or cursor grouping rows stood for.
+    pub(crate) grouped: Vec<LineId>,
+    /// The scope-hidden lines those groups would hold.
+    pub(crate) hidden: Vec<LineId>,
 }
 
 /// Cell editor attached to a row (`EditOn`) and column kind. Rebuilds follow the
@@ -512,6 +534,17 @@ impl Editor {
         match self {
             Editor::Text { col, .. } | Editor::Choice { col, .. } | Editor::Date { col, .. } => {
                 *col = to
+            }
+        }
+    }
+
+    /// Move a grouping-row editor onto the group row at `to`.
+    fn set_group_path(&mut self, to: Path) {
+        match self {
+            Editor::Text { on, .. } | Editor::Choice { on, .. } | Editor::Date { on, .. } => {
+                if let EditOn::Group { path, .. } = on {
+                    *path = to;
+                }
             }
         }
     }
@@ -788,6 +821,13 @@ pub struct PricerTile {
     /// Counts recorded sheet changes, so an open step editor can tell
     /// whether its steps are still the sheet's last change.
     pub(crate) edit_seq: u64,
+    /// Set only while a grouping-row editor's own write (a commit, a live
+    /// step or its rollback) rebuilds: a line it wrote. A group path that
+    /// stops painting then means the write moved the lines (a grouped
+    /// column, a `status` grouping), and `follow_editor` moves the editor
+    /// and the cursor to the group now holding this line instead of
+    /// dropping the editor as moved.
+    pub(crate) own_write: Option<LineId>,
 }
 
 /// The scope a tile follows: the frame's effective scope for its lane
@@ -1209,6 +1249,7 @@ impl PricerTile {
             selection_extent: None,
             totals: Vec::new(),
             edit_seq: 0,
+            own_write: None,
             sort: None,
             held_order: None,
             #[cfg(test)]
@@ -2193,7 +2234,12 @@ impl PricerTile {
                 let lines = self.group_lines(path);
                 let opening =
                     crate::core::select::group_editor(&self.sheet, &lines, kind, &planned.format);
-                (EditOn::Group(path.clone()), None, opening)
+                let frozen = Rc::new(self.freeze_targets());
+                let on = EditOn::Group {
+                    path: path.clone(),
+                    frozen,
+                };
+                (on, None, opening)
             }
             _ => {
                 let Some(row) = self.cursor_sheet_row() else {
@@ -2208,7 +2254,7 @@ impl PricerTile {
             }
         };
         // Arrows step every target live: a selection's, or a group's lines.
-        let live = self.selection.is_some() || matches!(on, EditOn::Group(_));
+        let live = self.selection.is_some() || matches!(on, EditOn::Group { .. });
         let editor = match opening {
             Err(why) => {
                 self.footer = Some(why.into());
@@ -2422,7 +2468,7 @@ impl PricerTile {
             (value, target, opened, unchanged)
         };
         // A selection's targets, or a grouping row's lines.
-        let bulk = self.selection.is_some() || matches!(on, EditOn::Group(_));
+        let bulk = self.selection.is_some() || matches!(on, EditOn::Group { .. });
         // Over a selection or a group an unchanged cell writes nothing: its
         // own value filled across every target would be a plausible wrong
         // block from a no-op gesture (a group's `mixed` opens empty). No
@@ -2556,7 +2602,7 @@ impl PricerTile {
         let col_kind = self.plan.columns.get(self.cursor.col).map(|c| c.def.kind);
         let same_row = match on {
             EditOn::Line(line) => self.cursor_sheet_row().map(|r| self.sheet.id(r)) == Some(*line),
-            EditOn::Group(path) => {
+            EditOn::Group { path, .. } => {
                 self.cursor_on_group() && matches!(&self.cursor.at, Some(At::Group(p)) if p == path)
             }
         };
@@ -2568,7 +2614,7 @@ impl PricerTile {
     fn editor_grid_row(&self, on: &EditOn) -> Option<usize> {
         match on {
             EditOn::Line(line) => self.model.grid_row_of(*line),
-            EditOn::Group(path) => self.group_row(path),
+            EditOn::Group { path, .. } => self.group_row(path),
         }
     }
 
@@ -2631,7 +2677,7 @@ impl PricerTile {
         // date to every target line. The opening date untyped writes
         // nothing: filled across the targets it would replace their
         // expiries (a tenor's with today) from a no-op gesture.
-        if self.selection.is_some() || matches!(on, EditOn::Group(_)) {
+        if self.selection.is_some() || matches!(on, EditOn::Group { .. }) {
             if date == initial && !typed {
                 self.close_ending_selection(window, cx);
                 return;
@@ -2800,8 +2846,26 @@ impl PricerTile {
             window.blur(cx);
         }
         self.sync_editor(cx);
+        // A grouping-row editor's steps may have carried its lines (and
+        // the cursor) to another group; taking them back carries them
+        // home, and the cursor goes with them rather than to a neighbour.
+        let home = match editor.target().0 {
+            EditOn::Group { path, frozen } => frozen.grouped.first().map(|&id| (path, id)),
+            EditOn::Line(_) => None,
+        };
         if let Some(bulk) = bulk {
             self.settle_bulk(bulk, false, cx);
+            if let Some((path, id)) = home
+                && self.group_row(&path).is_none()
+                && let Some(dest) = self
+                    .sheet
+                    .index_of(id)
+                    .and_then(|row| self.group_holding(row, path.len()))
+                && self.group_row(&dest).is_some()
+            {
+                self.cursor.at = Some(At::Group(dest));
+                self.sync_cursor(cx);
+            }
         }
         cx.notify();
     }
@@ -5502,12 +5566,36 @@ impl PricerTile {
     /// Update its plan index and the cursor column together. If either target leaves
     /// the visible grid or plan, close the editor and show MOVED, or
     /// SCOPE_DROPPED_EDIT when the frame's scope hid its line.
+    ///
+    /// A grouping-row editor whose own write moved its lines out of its
+    /// path ([`PricerTile::own_write`]) is not dropped: it and the cursor
+    /// move to the group row at the same depth now holding the written
+    /// line, and stay open for the next step. A path gone for any other
+    /// reason (a regroup, the scope, another writer) drops it as before.
     fn follow_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.as_ref() else {
             return;
         };
-        let (on, _, kind) = editor.target();
+        let (mut on, _, kind) = editor.target();
         let col = self.plan.columns.iter().position(|c| c.def.kind == kind);
+        if let EditOn::Group { path, .. } = &on
+            && self.group_row(path).is_none()
+            && let Some(row) = self.own_write.and_then(|id| self.sheet.index_of(id))
+            && let Some(dest) = self.group_holding(row, path.len())
+        {
+            if self.group_row(&dest).is_none() {
+                // The lines went under a closed group: there is no row
+                // to keep the field on.
+                return self.drop_orphaned_editor(REGROUPED_EDIT, cx);
+            }
+            if let Some(editor) = self.editor.as_mut() {
+                editor.set_group_path(dest.clone());
+            }
+            self.cursor.at = Some(At::Group(dest.clone()));
+            if let EditOn::Group { path, .. } = &mut on {
+                *path = dest;
+            }
+        }
         match col.filter(|_| self.editor_grid_row(&on).is_some()) {
             Some(c) => {
                 if let Some(editor) = self.editor.as_mut() {
@@ -5516,11 +5604,22 @@ impl PricerTile {
                 self.cursor.col = c;
             }
             None => {
-                // A grouping row whose path no longer paints (a regroup,
-                // its lines all leaving it) has nothing to say beyond that.
-                let line = match on {
-                    EditOn::Line(line) => self.sheet.index_of(line),
-                    EditOn::Group(_) => None,
+                // A grouping row whose path no longer paints: the scope
+                // hid its lines when every one still there is hidden; a
+                // regroup or another writer otherwise.
+                let line = match &on {
+                    EditOn::Line(line) => self.sheet.index_of(*line),
+                    EditOn::Group { frozen, .. } => {
+                        let rows: Vec<usize> = frozen
+                            .grouped
+                            .iter()
+                            .filter_map(|&id| self.sheet.index_of(id))
+                            .collect();
+                        rows.iter()
+                            .all(|&r| !self.visibility.is_shown(r))
+                            .then(|| rows.first().copied())
+                            .flatten()
+                    }
                 };
                 let why = match line {
                     Some(r) if !self.visibility.is_shown(r) => SCOPE_DROPPED_EDIT,
@@ -9347,11 +9446,12 @@ pub(crate) mod tests {
         click(&mut vcx, value, 1);
         click(&mut vcx, value, 2);
         assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "a value cell toggles nothing");
-        assert_eq!(
-            h.tile
-                .read_with(&vcx, |t, _| t.editor.as_ref().map(|e| e.target().0)),
-            Some(EditOn::Group(vec![Some("SPX".into())])),
-            "the editor opens on the group row"
+        let on = h
+            .tile
+            .read_with(&vcx, |t, _| t.editor.as_ref().map(|e| e.target().0));
+        assert!(
+            matches!(&on, Some(EditOn::Group { path, .. }) if *path == vec![Some("SPX".to_string())]),
+            "the editor opens on the group row: {on:?}"
         );
     }
 

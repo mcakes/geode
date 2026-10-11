@@ -28445,8 +28445,8 @@ run_mutation "pricer select: a package qty step steps each leg by one" \
 # Every cancel of a live step's editor takes the steps back.
 run_mutation "pricer select: escape keeps the live steps" \
   crates/geode-pricer/src/tile.rs \
-  $'        if let Some(bulk) = bulk {\n            self.settle_bulk(bulk, false, cx);\n        }\n        cx.notify();' \
-  $'        if let Some(bulk) = bulk {\n            self.settle_bulk(bulk, true, cx);\n        }\n        cx.notify();' \
+  $'        if let Some(bulk) = bulk {\n            self.settle_bulk(bulk, false, cx);\n            if let Some((path, id)) = home' \
+  $'        if let Some(bulk) = bulk {\n            self.settle_bulk(bulk, true, cx);\n            if let Some((path, id)) = home' \
   geode-pricer escape_rolls_every_step_back
 
 # A rollback runs only while the steps are the sheet's last change: a
@@ -28628,8 +28628,8 @@ run_mutation "pricer select: a block step builds each column on the sheet (instr
 # columns span every column.
 run_mutation "pricer select: a V step moves every column of the rows" \
   crates/geode-pricer/src/tile/select.rs \
-  '            SelectKind::Rows => vec![self.cursor.col],' \
-  '            SelectKind::Rows => r.cols.clone().collect(),' \
+  '            (_, Some(r)) if r.kind == SelectKind::Block => r.cols.clone().collect(),' \
+  '            (_, Some(r)) => r.cols.clone().collect(),' \
   geode-pricer a_rows_step_moves_only_the_cursor_column
 
 # The table's click inside the open editor's cell is the editor's.
@@ -30772,20 +30772,62 @@ run_mutation "pricer group edit: shown lines count as hidden" \
   geode-pricer a_group_row_edit_leaves_a_scope_hidden_line_and_counts_it
 
 run_mutation "pricer group edit: the cursor is lost after a re-tag" \
-  crates/geode-pricer/src/tile/select.rs \
-  $'            self.cursor.at = Some(At::Group(dest));\n' \
-  $'            let _ = dest;\n' \
+  crates/geode-pricer/src/tile.rs \
+  '            self.cursor.at = Some(At::Group(dest.clone()));' \
+  '' \
   geode-pricer a_group_row_retag_lands_the_cursor_on_the_merged_group
+
+# A grouping-row editor writes the lines it froze at open, not what its
+# path holds at commit: a delivery bringing a line in must not add it.
+run_mutation "pricer group edit: targets are read live, not frozen" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        if let Some(EditOn::Group { frozen, .. }) = self.editor.as_ref().map(|e| e.target().0) {' \
+  '        if let Some(EditOn::Group { frozen, .. }) = None::<EditOn> {' \
+  geode-pricer a_line_joining_the_group_mid_edit_is_not_written
+
+# The editor survives its own write moving its lines out of the path.
+run_mutation "pricer group edit: the editor's own write drops it as moved" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        self.own_write = line.filter(|_| grouped);' \
+  '        self.own_write = line.filter(|_| grouped && false);' \
+  geode-pricer a_live_step_on_the_grouped_column_follows_its_lines
+
+run_mutation "pricer group edit: a typed re-tag reads as the cell moving" \
+  crates/geode-pricer/src/tile/select.rs \
+  '            && let Err(e) = self.as_own_write(written, |this| this.apply_edits(edits, cx))' \
+  '            && let Err(e) = self.apply_edits(edits, cx)' \
+  geode-pricer a_group_row_retag_lands_the_cursor_on_the_merged_group
+
+# The step path follows its lines too: each press re-anchors the editor
+# and the cursor.
+run_mutation "pricer group edit: a step does not follow its lines" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        let total = bulk.steps;\n        self.as_own_write(written, |this| this.after_edit(cx));' \
+  $'        let total = bulk.steps;\n        self.after_edit(cx);' \
+  geode-pricer a_live_step_on_the_grouped_column_follows_its_lines
+
+run_mutation "pricer group edit: escape leaves the cursor where the steps took it" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.cursor.at = Some(At::Group(dest));' \
+  '' \
+  geode-pricer a_qty_step_under_a_qty_grouping_keeps_its_lines
+
+# A hidden leg of a package a quantity skips as split counts once.
+run_mutation "pricer group edit: a hidden leg of a skipped package counts twice" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                !(qty' \
+  '                !(false' \
+  geode-pricer a_hidden_leg_of_a_skipped_package_counts_once
 
 run_mutation "pricer group edit: a group row's arrows step its text alone" \
   crates/geode-pricer/src/tile/select.rs \
-  '        if self.selection.is_none() && !matches!(on, EditOn::Group(_)) {' \
+  '        if self.selection.is_none() && !matches!(on, EditOn::Group { .. }) {' \
   '        if self.selection.is_none() {' \
   geode-pricer arrows_step_a_group_rows_lines_live
 
 run_mutation "pricer group edit: a group row's editor has no live step" \
   crates/geode-pricer/src/tile.rs \
-  '        let live = self.selection.is_some() || matches!(on, EditOn::Group(_));' \
+  '        let live = self.selection.is_some() || matches!(on, EditOn::Group { .. });' \
   '        let live = self.selection.is_some();' \
   geode-pricer arrows_step_a_group_rows_lines_live
 

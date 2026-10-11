@@ -2714,14 +2714,23 @@ double-click on its label opens or closes it, as on a package's name), on
 the value its lines share and empty where the cell paints `mixed` or blank;
 the editor's kind is the column's (a typeahead for a type, a date field for
 an expiry). The column must edit on at least one of its lines, or the
-editor refuses with that line's reason. `enter` writes the value to every
+editor refuses with that line's reason (a group holding only an empty
+package refuses `read-only`). The lines are fixed when the editor opens:
+the commit and every live step write those lines, even after a step has
+moved them out of the group or a delivery has brought other lines into it.
+`enter` writes the value to every
 line, as one undo entry, and the header counts what it set and skipped
 (`set 3 cells, skipped 2 (1 n/a, 1 hidden)`); an untouched `enter` writes
-nothing, and when no line accepts the value the editor stays open with `no
-grouped cell accepts '<text>'`. A quantity sets each root to the number: a bare line, or a package
+nothing (an empty field on a `mixed` cell is untouched), and when no line
+accepts the value the editor stays open with `no grouped cell accepts
+'<text>'`. A quantity sets each root to the number: a bare line, or a package
 the group holds whole, as a package quantity through its template's weights;
 a package the group holds only part of (a calendar split across expiry
-groups) and a package in list form are skipped and counted `refused`. Any
+groups, or one with a leg the scope hides) and a package in list form are
+skipped and counted `refused` once each. Selecting a package's leg rows
+writes the number to each leg, while a group, or a group plus a selected
+leg, that holds the whole package sets its package quantity through the
+weights. Any
 other column writes the one value to each line; a barrier on a vanilla line
 counts `n/a`. Lines the scope hides are never written; the ones the group
 would hold were they shown count as `hidden`. On a qty, strike, barrier or
@@ -2729,12 +2738,21 @@ shift cell the arrows step every line live, as over a selection: `escape`
 takes the steps back and `enter` keeps them as one undo entry. Editing the
 group's own grouped column, or an enclosing group's shown on a nested row,
 moves its lines: the cursor lands on the group row they moved into (one they
-merged with, if it already existed).
+merged with, if it already existed). A live step that moves them (stepping
+the grouped column, or any step under a `status` grouping, which sends the
+lines to `pricing…`) carries the open editor and the cursor along to that
+row, press by press; `escape` brings both back with the lines. Undoing a
+re-tag moves the lines back but leaves the cursor on the group they had
+moved into. A group path that stops painting for any other reason (a
+regroup, the scope hiding the lines, another write) closes the editor with
+`the cell moved; edit refused`, or `the line is hidden by the scope; edit
+dropped` when the scope hid them.
 
 A selection's typed commit and live step treat each selected group row the
 same way: the targets are the selected line rows and every selected group's
 lines, each line written once. `i` on a group row under a selection opens
-the editor there and commits over the selection's targets.
+the editor there and commits over the selection's targets, fixed when it
+opens as on a group alone.
 `y y` on a group row copies the shorthand of its lines, and a `V` selection
 over a group row totals and yanks its lines once, whether or not their rows
 are selected too. `y y` or `V y` on a split package row yanks that row's

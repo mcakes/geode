@@ -1159,6 +1159,8 @@ fn a_group_row_retag_lands_the_cursor_on_the_merged_group(cx: &mut gpui::TestApp
     );
     // The row the cursor last sat on (2) would fall back to 4000.
     assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("3000"));
+    assert_eq!(h.footer(&vcx), None, "the write landed: nothing refused");
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("set 2 cells"));
 }
 
 /// An enclosing group's column edited on a nested group row moves its
@@ -1190,6 +1192,207 @@ fn a_nested_group_row_retag_follows_its_lines(cx: &mut gpui::TestAppContext) {
         at,
         Some(At::Group(vec![Some("NDX".into()), Some("5000".into())])),
         "on the 5000 row under NDX"
+    );
+    assert_eq!(h.footer(&vcx), None, "the write landed: nothing refused");
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("set 1 cell"));
+}
+
+/// The cursor's group path, when it rests on a grouping row.
+fn cursor_group(h: &Harness, vcx: &VisualTestContext) -> Option<Path> {
+    h.tile.read_with(vcx, |t, _| match &t.cursor.at {
+        Some(At::Group(p)) if t.cursor_on_group() => Some(p.clone()),
+        _ => None,
+    })
+}
+
+/// Put the cursor on the depth-1 grouping row holding sheet row `row`.
+fn cursor_to_group_of(h: &Harness, vcx: &mut VisualTestContext, row: usize) {
+    let g = h.tile.read_with(vcx, |t, _| {
+        t.group_holding(row, 1)
+            .and_then(|p| t.group_row(&p))
+            .expect("a painted group holds the row")
+    });
+    cursor_to_row(h, vcx, g);
+}
+
+fn editor_open(h: &Harness, vcx: &VisualTestContext) -> bool {
+    h.tile.read_with(vcx, |t, _| t.editor.is_some())
+}
+
+/// A NULL group (`—`, no own spot shift) re-tagged to a value and back to
+/// blank: each write lands, nothing is refused, and the cursor follows
+/// the lines to their new group both times.
+#[gpui::test]
+fn a_null_group_row_retag_and_back_lands_without_a_refusal(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group spot_shift").unwrap();
+    assert_eq!(h.tree(&vcx).len(), 1, "every line in the NULL group");
+    cursor_to_row(&h, &mut vcx, 0);
+    assert_eq!(cursor_group(&h, &vcx), Some(vec![None]));
+    goto_column(&h, &mut vcx, "spot_shift");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "2");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None, "the write landed");
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("set 4 cells"));
+    assert_eq!(spots(&h, &vcx), [Some(2.0); 4]);
+    let moved = cursor_group(&h, &vcx).expect("on a group row");
+    assert_ne!(moved, vec![None], "on the lines' new group");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None, "the clear landed");
+    assert_eq!(spots(&h, &vcx), [None; 4]);
+    assert_eq!(
+        cursor_group(&h, &vcx),
+        Some(vec![None]),
+        "back on the NULL group"
+    );
+}
+
+/// A live step on the grouped column moves the lines out of their group
+/// on every press: the editor follows them (and the cursor with it),
+/// stays open for the next press, and enter keeps the steps as ONE undo.
+#[gpui::test]
+fn a_live_step_on_the_grouped_column_follows_its_lines(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &STRIKES);
+    h.command(&mut vcx, "group strike").unwrap();
+    cursor_to(&h, &mut vcx, "5000");
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert_eq!(h.footer(&vcx), None, "nothing refused");
+    assert!(editor_open(&h, &vcx), "the editor stays open");
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("stepped 2 cells +1"));
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("5001"));
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("stepped 2 cells +2"));
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("5002"));
+    assert_eq!(
+        line_texts(&h, &vcx),
+        ["SPX Z26 5002 C", "SPX Z26 5002 P", "SPX Z26 4000 P"]
+    );
+    h.dispatch(&mut vcx, "commit", None);
+    assert!(!editor_open(&h, &vcx));
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(line_texts(&h, &vcx), STRIKES, "one undo");
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+}
+
+/// Grouped by quantity, every press re-tags the group: several presses
+/// write the same lines each time; escape takes all of them back, and
+/// enter keeps them as ONE undo entry.
+#[gpui::test]
+fn a_qty_step_under_a_qty_grouping_keeps_its_lines(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group qty").unwrap();
+    // The bare lines (qty 1) share a group; the CS legs sit apart.
+    cursor_to_group_of(&h, &mut vcx, 0);
+    goto_column(&h, &mut vcx, "qty");
+    let before = line_texts(&h, &vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", Some(3));
+    assert_eq!(h.footer(&vcx), None);
+    assert!(editor_open(&h, &vcx));
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("stepped 2 cells +3"));
+    assert_eq!((qty(&h, &vcx, 0), qty(&h, &vcx, 1)), (4, 4));
+    assert_eq!(leg_qtys(&h, &vcx, 2), [-5, 5], "the CS untouched");
+    let home = h.tile.read_with(&vcx, |t, _| t.group_holding(0, 1));
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(
+        line_texts(&h, &vcx),
+        before,
+        "escape takes every press back"
+    );
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+    assert_eq!(
+        cursor_group(&h, &vcx),
+        h.tile.read_with(&vcx, |t, _| t.group_holding(0, 1)),
+        "the cursor goes home with the lines"
+    );
+    assert_ne!(
+        cursor_group(&h, &vcx),
+        home,
+        "fixture: the steps had moved it"
+    );
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!((qty(&h, &vcx, 0), qty(&h, &vcx, 1)), (3, 3));
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(line_texts(&h, &vcx), before, "one undo");
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+}
+
+/// Grouped by status, any step sends its lines to `pricing…`: the editor
+/// follows them and keeps stepping the same lines.
+#[gpui::test]
+fn a_step_under_a_status_grouping_keeps_stepping(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &STRIKES);
+    price_distinctly(&h, &mut vcx);
+    h.command(&mut vcx, "group status").unwrap();
+    assert_eq!(h.tree(&vcx).len(), 1, "fixture: every line fresh");
+    cursor_to_row(&h, &mut vcx, 0);
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert!(editor_open(&h, &vcx));
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("stepped 3 cells +2"));
+    assert_eq!(
+        line_texts(&h, &vcx),
+        ["SPX Z26 5002 C", "SPX Z26 5002 P", "SPX Z26 4002 P"]
+    );
+}
+
+/// A hidden leg of a package a group holds only part of is counted once,
+/// as that package's refusal, never again as hidden.
+#[gpui::test]
+fn a_hidden_leg_of_a_skipped_package_counts_once(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    set_scope(&h, &mut vcx, "strike != 4800"); // hides one CS leg
+    cursor_to(&h, &mut vcx, "SPX");
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "3");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(
+        edit_notice(&h, &vcx).as_deref(),
+        Some("set 1 cell, skipped 1 (1 refused)")
+    );
+    assert_eq!(leg_qtys(&h, &vcx, 2), [-5, 5], "the CS untouched");
+}
+
+/// A group editor's targets are the lines the group held when it opened:
+/// a delivery that brings another line into the group mid-edit does not
+/// add it to the write.
+#[gpui::test]
+fn a_line_joining_the_group_mid_edit_is_not_written(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &STRIKES);
+    price_distinctly(&h, &mut vcx);
+    // The 4000 P to `pricing…` through an ordinary edit of its own.
+    cursor_to_row(&h, &mut vcx, 2);
+    goto_column(&h, &mut vcx, "spot_shift");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "1");
+    h.dispatch(&mut vcx, "commit", None);
+    h.command(&mut vcx, "group status").unwrap();
+    assert_eq!(h.tree(&vcx).len(), 2, "fixture: fresh and pricing");
+    cursor_to_group_of(&h, &mut vcx, 0); // the fresh group: the 5000s
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "4500");
+    price_distinctly(&h, &mut vcx); // the 4000 P turns fresh, joining
+    assert!(editor_open(&h, &vcx), "the group still paints");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("set 2 cells"));
+    assert_eq!(
+        line_texts(&h, &vcx),
+        ["SPX Z26 4500 C", "SPX Z26 4500 P", "SPX Z26 4000 P"],
+        "only the lines the group held at open"
     );
 }
 
