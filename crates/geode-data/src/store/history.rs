@@ -20,7 +20,7 @@ use crate::store::{Store, StoreError};
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
 use duckdb::types::Value;
-use geode_core::query::normalize_key;
+use geode_core::query::{HistoryRow, HistoryTable, KeySet, Span, normalize_key};
 use geode_core::schema::{ColumnSpec, ColumnType, DatasetSpec};
 
 pub const STAGING_TABLE: &str = "staging_history";
@@ -299,6 +299,119 @@ pub fn covers_instant(
         }
     }
     Ok(true)
+}
+
+/// Live read of the cached rows for `keys` under `span`: the greatest
+/// `received_at` per (key, ts); `Latest` = the greatest ts per key;
+/// `At(t)` = the greatest ts <= t per key; `Between` = every ts in
+/// `[from, to)`. Rows ordered by key columns then ts. Keys are matched by
+/// prefix or exactly as the set says.
+///
+/// Serves what the cache holds: whether that is enough to answer a request
+/// is the caller's decision. `Between`'s `step` is a hint to the source and
+/// does not thin cached rows.
+pub fn read_history(
+    conn: &Connection,
+    ds: &DatasetSpec,
+    keys: &KeySet,
+    span: Span,
+) -> Result<HistoryTable, StoreError> {
+    let key_cols = ds.history_key();
+    let values = ds.history_values();
+    // A wrong arity would bind values to the wrong key columns.
+    keys.validate(key_cols.len()).map_err(StoreError::History)?;
+    // Asked values in canonical spelling, so `0.50` reads the `0.5` key.
+    let tuples = keys
+        .tuples()
+        .iter()
+        .map(|t| normalized_tuple(&key_cols, t, "asked"))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut params: Vec<Value> = Vec::new();
+    let predicate = tuples
+        .iter()
+        .map(|tuple| {
+            let matched = key_cols
+                .iter()
+                .zip(tuple)
+                .filter_map(|(c, v)| {
+                    let v = v.as_ref()?;
+                    params.push(Value::Text(v.clone()));
+                    Some(format!("{} = CAST(? AS {})", quote(&c.name), c.ty.sql()))
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            format!("({matched})")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let window = match span {
+        Span::Latest => String::new(),
+        Span::At(t) => {
+            params.push(Value::BigInt(micros(t)));
+            " and ts <= make_timestamp(?)".to_string()
+        }
+        Span::Between { from, to, .. } => {
+            params.extend([Value::BigInt(micros(from)), Value::BigInt(micros(to))]);
+            " and ts >= make_timestamp(?) and ts < make_timestamp(?)".to_string()
+        }
+    };
+
+    let key_list = joined(&key_cols, |c| quote(&c.name), ", ");
+    let value_list = joined(&values, |c| quote(&c.name), ", ");
+    let live_values = joined(
+        &values,
+        |c| format!("arg_max({0}, received_at) as {0}", quote(&c.name)),
+        ", ",
+    );
+    let projection = format!("{key_list}, epoch_us(ts), {value_list}");
+    let answer = match span {
+        Span::Between { .. } => format!("select {projection} from live"),
+        Span::Latest | Span::At(_) => format!(
+            "select {projection} from (
+                 select *, row_number() over (partition by {key_list} order by ts desc) as rn
+                 from live
+             ) where rn = 1"
+        ),
+    };
+    let sql = format!(
+        "with live as (
+             select {key_list}, ts, {live_values} from {}
+             where ({predicate}){window}
+             group by {key_list}, ts
+         )
+         {answer} order by {key_list}, ts",
+        history_table(&ds.name)
+    );
+
+    let n_keys = key_cols.len();
+    let n_values = values.len();
+    let mut stmt = conn.prepare(&sql).map_err(sql_err(&sql))?;
+    let rows = stmt
+        .query_map(duckdb::params_from_iter(params), |r| {
+            let key = key_cols
+                .iter()
+                .enumerate()
+                .map(|(i, c)| match c.ty {
+                    // Read back in the spelling `normalize_key` writes.
+                    ColumnType::F64 => r.get::<_, f64>(i).map(|f| format!("{f}")),
+                    _ => r.get::<_, String>(i),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let ts = from_micros(r.get(n_keys)?);
+            let values = (0..n_values)
+                .map(|v| r.get::<_, f64>(n_keys + 1 + v))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(HistoryRow { key, ts, values })
+        })
+        .map_err(sql_err(&sql))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_err(&sql))?;
+    Ok(HistoryTable {
+        key_columns: ds.key.clone(),
+        value_columns: values.iter().map(|c| c.name.clone()).collect(),
+        rows,
+    })
 }
 
 pub fn append_history(
@@ -1301,6 +1414,155 @@ mod tests {
             covers_instant(w, &ds, &[exact("SPX")], t).unwrap(),
             "the exact tuple under it is held"
         );
+    }
+
+    /// SPX 3M at deltas 0.5 and 0.25, three days each; NDX 3M 0.5 one day.
+    fn seeded() -> (tempfile::TempDir, Store, DatasetSpec) {
+        let (d, store, ds) = fixture();
+        let mut rows = HistoryRows::default();
+        for (u, delta, days, base) in [
+            ("SPX", "0.5", 3, 15.0),
+            ("SPX", "0.25", 3, 18.0),
+            ("NDX", "0.5", 1, 19.0),
+        ] {
+            for i in 0..days {
+                rows.ts.push(ts(&format!("2026-01-0{}T21:00:00Z", 5 + i)));
+                rows.values.resize(2, Vec::new());
+                rows.values[0].push(base + i as f64);
+                rows.values[1].push(7650.0);
+                rows.keys.resize(3, Vec::new());
+                rows.keys[0].push(u.into());
+                rows.keys[1].push("3M".into());
+                rows.keys[2].push(delta.into());
+            }
+        }
+        append_history(
+            &store,
+            &HistoryAppendRequest {
+                dataset: &ds,
+                source: "hanweck",
+                rows: &rows,
+                covered: vec![],
+                received_at: ts("2026-01-08T09:00:00Z"),
+            },
+        )
+        .unwrap();
+        // A correction of SPX 0.5 on the 6th, received later: live must read 99.
+        let mut fix = HistoryRows::default();
+        fix.ts.push(ts("2026-01-06T21:00:00Z"));
+        fix.keys = vec![vec!["SPX".into()], vec!["3M".into()], vec!["0.5".into()]];
+        fix.values = vec![vec![99.0], vec![7650.0]];
+        append_history(
+            &store,
+            &HistoryAppendRequest {
+                dataset: &ds,
+                source: "hanweck",
+                rows: &fix,
+                covered: vec![],
+                received_at: ts("2026-01-09T09:00:00Z"),
+            },
+        )
+        .unwrap();
+        (d, store, ds)
+    }
+
+    #[test]
+    fn latest_answers_the_greatest_ts_per_key_under_a_prefix() {
+        let (_d, store, ds) = seeded();
+        let t = read_history(
+            store.writer(),
+            &ds,
+            &KeySet::Prefix(vec![vec!["SPX".into()]]),
+            Span::Latest,
+        )
+        .unwrap();
+        assert_eq!(t.key_columns, ["underlying_ref", "tenor", "delta"]);
+        assert_eq!(t.value_columns, ["vol", "forward"]);
+        assert_eq!(t.rows.len(), 2, "one per SPX key");
+        assert_eq!(t.rows[0].key, ["SPX", "3M", "0.25"]);
+        assert_eq!(t.rows[1].key, ["SPX", "3M", "0.5"]);
+        assert_eq!(t.rows[1].ts, ts("2026-01-07T21:00:00Z"));
+        assert_eq!(t.rows[1].values, [17.0, 7650.0]);
+    }
+
+    #[test]
+    fn at_answers_the_last_observation_at_or_before_t_with_the_live_version() {
+        let (_d, store, ds) = seeded();
+        let exact = KeySet::Exact(vec![vec!["SPX".into(), "3M".into(), "0.50".into()]]);
+        let t = read_history(
+            store.writer(),
+            &ds,
+            &exact,
+            Span::At(ts("2026-01-06T21:00:00Z")),
+        )
+        .unwrap();
+        assert_eq!(t.rows.len(), 1);
+        assert_eq!(
+            t.rows[0].ts,
+            ts("2026-01-06T21:00:00Z"),
+            "at or before: the 6th's own point"
+        );
+        assert_eq!(t.rows[0].values[0], 99.0, "the correction is live");
+        assert_eq!(
+            t.rows[0].key[2], "0.5",
+            "asked as 0.50, answered as the one key"
+        );
+        let before = read_history(
+            store.writer(),
+            &ds,
+            &exact,
+            Span::At(ts("2026-01-05T00:00:00Z")),
+        )
+        .unwrap();
+        assert!(
+            before.rows.is_empty(),
+            "nothing at or before the first point"
+        );
+    }
+
+    #[test]
+    fn between_is_half_open_and_ordered_by_key_then_ts() {
+        let (_d, store, ds) = seeded();
+        let t = read_history(
+            store.writer(),
+            &ds,
+            &KeySet::Prefix(vec![vec!["SPX".into()], vec!["NDX".into()]]),
+            Span::Between {
+                from: ts("2026-01-06T21:00:00Z"),
+                to: ts("2026-01-07T21:00:00Z"),
+                step: None,
+            },
+        )
+        .unwrap();
+        let got: Vec<(Vec<String>, DateTime<Utc>)> =
+            t.rows.iter().map(|r| (r.key.clone(), r.ts)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    vec!["SPX".into(), "3M".into(), "0.25".into()],
+                    ts("2026-01-06T21:00:00Z")
+                ),
+                (
+                    vec!["SPX".into(), "3M".into(), "0.5".into()],
+                    ts("2026-01-06T21:00:00Z")
+                ),
+            ],
+            "the 7th is excluded, NDX has no point in range"
+        );
+    }
+
+    #[test]
+    fn a_key_set_of_the_wrong_arity_is_refused_before_sql() {
+        let (_d, store, ds) = seeded();
+        let err = read_history(
+            store.writer(),
+            &ds,
+            &KeySet::Exact(vec![vec!["SPX".into()]]),
+            Span::Latest,
+        )
+        .unwrap_err();
+        assert!(matches!(err, StoreError::History(_)));
     }
 
     proptest! {
