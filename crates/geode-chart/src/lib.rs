@@ -13,6 +13,7 @@
 
 pub mod core;
 pub mod paint;
+pub mod spark;
 pub mod timeseries;
 pub mod xy;
 
